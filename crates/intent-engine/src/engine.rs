@@ -474,6 +474,7 @@ async fn execute_locate(
                     plan_summary,
                     candidates: near_misses,
                     verification: "targetNotFound",
+                    fill_payload: None,
                 },
                 page_id,
                 browser,
@@ -490,6 +491,7 @@ async fn execute_locate(
                     plan_summary,
                     candidates,
                     verification: "targetAmbiguous",
+                    fill_payload: None,
                 },
                 page_id,
                 browser,
@@ -634,6 +636,13 @@ async fn execute_fill(
         _ => None,
     };
     let plan_summary = format!("{} value={}", summarize_target(&target), fill_kind(&value));
+    let fill_payload = match &value {
+        FillValue::Text { text, clear_first } => Some(VisionFillPayload {
+            text: text.clone(),
+            clear_first: *clear_first,
+        }),
+        _ => None,
+    };
     let candidates = match browser.collect_candidates(page_id, &target).await {
         Ok(candidates) => candidates,
         Err(error) => {
@@ -688,6 +697,7 @@ async fn execute_fill(
                     plan_summary,
                     candidates: Vec::new(),
                     verification: "targetNotFound",
+                    fill_payload: fill_payload.clone(),
                 },
                 page_id,
                 browser,
@@ -704,6 +714,7 @@ async fn execute_fill(
                     plan_summary,
                     candidates,
                     verification: "targetAmbiguous",
+                    fill_payload,
                 },
                 page_id,
                 browser,
@@ -1030,6 +1041,7 @@ async fn execute_submit_and_verify(
                     plan_summary,
                     candidates: Vec::new(),
                     verification: "targetNotFound",
+                    fill_payload: None,
                 },
                 page_id,
                 browser,
@@ -1046,6 +1058,7 @@ async fn execute_submit_and_verify(
                     plan_summary,
                     candidates,
                     verification: "targetAmbiguous",
+                    fill_payload: None,
                 },
                 page_id,
                 browser,
@@ -1293,6 +1306,7 @@ async fn execute_follow(
                     plan_summary,
                     candidates: Vec::new(),
                     verification: "targetNotFound",
+                    fill_payload: None,
                 },
                 page_id,
                 browser,
@@ -1309,6 +1323,7 @@ async fn execute_follow(
                     plan_summary,
                     candidates,
                     verification: "targetAmbiguous",
+                    fill_payload: None,
                 },
                 page_id,
                 browser,
@@ -1465,6 +1480,7 @@ async fn execute_dismiss_obstruction(
                     plan_summary,
                     candidates: Vec::new(),
                     verification: "targetNotFound",
+                    fill_payload: None,
                 },
                 page_id,
                 browser,
@@ -1481,6 +1497,7 @@ async fn execute_dismiss_obstruction(
                     plan_summary,
                     candidates,
                     verification: "targetAmbiguous",
+                    fill_payload: None,
                 },
                 page_id,
                 browser,
@@ -1539,6 +1556,7 @@ async fn execute_dismiss_obstruction(
                 plan_summary,
                 candidates: vec![candidate_evidence],
                 verification: "obstructionPersisted",
+                fill_payload: None,
             },
             page_id,
             browser,
@@ -1889,6 +1907,12 @@ fn non_escalating_failure(error: CommandError, evidence: Evidence) -> IntentOutc
 
 /// The deterministic-path facts a stuck report carries into failure evidence and
 /// into any vision escalation.
+#[derive(Debug, Clone)]
+struct VisionFillPayload {
+    text: String,
+    clear_first: bool,
+}
+
 struct StuckReport<'a> {
     intent_kind: &'a str,
     kind: StuckKind,
@@ -1896,6 +1920,7 @@ struct StuckReport<'a> {
     plan_summary: String,
     candidates: Vec<types::CandidateEvidence>,
     verification: &'a str,
+    fill_payload: Option<VisionFillPayload>,
 }
 
 async fn stuck_outcome(
@@ -1994,6 +2019,7 @@ async fn stuck_outcome_with_prior_evidence(
                     y: cached.y,
                 },
                 &[],
+                None,
             )
             .await
             {
@@ -2089,6 +2115,7 @@ async fn escalate_with_vision(
         plan_summary,
         candidates,
         verification,
+        fill_payload,
     } = report;
     tracing::info!(intent = intent_kind, trigger = "stuck", "vision.escalation");
     // `stuck_evidence` is prefixed onto failure evidence only, never onto a Completed one.
@@ -2247,48 +2274,55 @@ async fn escalate_with_vision(
         .filter(|candidate| candidate.role.is_some() && candidate.name.is_some())
         .cloned()
         .collect();
-    let mut act_evidence =
-        match execute_vision_action(page_id, browser, &proposal.action, &prompt_candidates).await {
-            Ok(evidence) => evidence,
-            Err(error) => {
-                record_escalation(
-                    &corpus,
-                    corpus_inputs.as_ref(),
-                    &purpose,
-                    intent_kind,
-                    kind,
-                    &proposal,
-                    false,
-                    "visionActFailed",
-                    Some(format!("vision act failed: {}", error.message)),
-                    None,
-                );
-                let mut evidence = base_evidence;
-                evidence.append(&mut screenshot_evidence);
-                evidence.push(intent_evidence(execution_record_with_path(
-                    intent_kind,
-                    purpose,
-                    plan_summary,
-                    candidates,
-                    None,
-                    format!("visionActFailed:{verification}"),
-                    ResolutionDetails {
-                        path: IntentResolutionPath::VisionFallback,
-                        vision_proposal_sha256: Some(proposal_hash),
-                        artifact_ids: artifact_ids_from(&screenshot_evidence),
-                    },
-                )));
-                return IntentOutcome::Failed {
-                    error: CommandError {
-                        code: ErrorCode::VisionAssistFailed,
-                        message: format!("vision act failed: {}", error.message),
-                        layer: ErrorLayer::Page,
-                        retryable: false,
-                    },
-                    evidence,
-                };
-            }
-        };
+    let mut act_evidence = match execute_vision_action(
+        page_id,
+        browser,
+        &proposal.action,
+        &prompt_candidates,
+        fill_payload.as_ref(),
+    )
+    .await
+    {
+        Ok(evidence) => evidence,
+        Err(error) => {
+            record_escalation(
+                &corpus,
+                corpus_inputs.as_ref(),
+                &purpose,
+                intent_kind,
+                kind,
+                &proposal,
+                false,
+                "visionActFailed",
+                Some(format!("vision act failed: {}", error.message)),
+                None,
+            );
+            let mut evidence = base_evidence;
+            evidence.append(&mut screenshot_evidence);
+            evidence.push(intent_evidence(execution_record_with_path(
+                intent_kind,
+                purpose,
+                plan_summary,
+                candidates,
+                None,
+                format!("visionActFailed:{verification}"),
+                ResolutionDetails {
+                    path: IntentResolutionPath::VisionFallback,
+                    vision_proposal_sha256: Some(proposal_hash),
+                    artifact_ids: artifact_ids_from(&screenshot_evidence),
+                },
+            )));
+            return IntentOutcome::Failed {
+                error: CommandError {
+                    code: ErrorCode::VisionAssistFailed,
+                    message: format!("vision act failed: {}", error.message),
+                    layer: ErrorLayer::Page,
+                    retryable: false,
+                },
+                evidence,
+            };
+        }
+    };
 
     let mut evidence = prior_evidence;
     evidence.append(&mut screenshot_evidence);
@@ -2401,6 +2435,7 @@ async fn execute_vision_action(
     browser: &dyn IntentBrowser,
     action: &VisionAction,
     prompt_candidates: &[types::CandidateEvidence],
+    fill_payload: Option<&VisionFillPayload>,
 ) -> Result<Vec<Evidence>, CommandError> {
     match action {
         VisionAction::Click { x, y } => browser.click_xy(page_id, *x, *y).await,
@@ -2408,44 +2443,53 @@ async fn execute_vision_action(
             // The runtime owns spatial grounding: resolve the index against
             // the exact candidate list the model saw, then click the element
             // through the DOM path rather than by pixel.
-            let candidate = prompt_candidates
-                .get(*index as usize)
-                .ok_or_else(|| CommandError {
-                    code: ErrorCode::VisionAssistFailed,
-                    message: format!(
-                        "clickCandidate index {index} out of range ({} candidates)",
-                        prompt_candidates.len()
-                    ),
-                    layer: ErrorLayer::Page,
-                    retryable: false,
-                })?;
-            let role = candidate.role.clone().ok_or_else(|| CommandError {
-                code: ErrorCode::VisionAssistFailed,
-                message: format!("clickCandidate index {index} has no role"),
-                layer: ErrorLayer::Page,
-                retryable: false,
-            })?;
-            let name = candidate.name.clone().ok_or_else(|| CommandError {
-                code: ErrorCode::VisionAssistFailed,
-                message: format!("clickCandidate index {index} has no name"),
-                layer: ErrorLayer::Page,
-                retryable: false,
-            })?;
             browser
                 .click(
                     page_id,
                     &ClickCommand {
                         selector: String::new(),
-                        target: Some(TargetSpec {
-                            role: Some(role),
-                            accessible_name: Some(name),
-                            ..TargetSpec::default()
-                        }),
+                        target: Some(prompt_candidate_target(
+                            "clickCandidate",
+                            *index,
+                            prompt_candidates,
+                        )?),
                         boundary: false,
                         expected_url: None,
                     },
                 )
                 .await
+        }
+        VisionAction::TypeIntoCandidate { index } => {
+            let payload = fill_payload.ok_or_else(|| CommandError {
+                code: ErrorCode::VisionAssistFailed,
+                message: "typeIntoCandidate requires a runtime text fill payload".into(),
+                layer: ErrorLayer::Page,
+                retryable: false,
+            })?;
+            let target = prompt_candidate_target("typeIntoCandidate", *index, prompt_candidates)?;
+            let evidence = browser
+                .type_text(
+                    page_id,
+                    &TypeTextCommand {
+                        selector: String::new(),
+                        target: Some(target),
+                        value: payload.text.clone(),
+                        clear_first: payload.clear_first,
+                        expected_url: None,
+                    },
+                )
+                .await?;
+            let value = FillValue::Text {
+                text: payload.text.clone(),
+                clear_first: payload.clear_first,
+            };
+            verify_fill(&value, &evidence).map_err(|message| CommandError {
+                code: ErrorCode::VerificationFailed,
+                message,
+                layer: ErrorLayer::Page,
+                retryable: false,
+            })?;
+            Ok(evidence)
         }
         VisionAction::TypeText { text } => {
             browser
@@ -2469,16 +2513,49 @@ async fn execute_vision_action(
             layer: ErrorLayer::Page,
             retryable: false,
         }),
-        VisionAction::TypeIntoCandidate { .. } | VisionAction::ExtractFromCandidate { .. } => {
-            Err(CommandError {
-                code: ErrorCode::VisionAssistFailed,
-                message: "candidate-grounded vision action is not executable in this workflow"
-                    .into(),
-                layer: ErrorLayer::Page,
-                retryable: false,
-            })
-        }
+        VisionAction::ExtractFromCandidate { .. } => Err(CommandError {
+            code: ErrorCode::VisionAssistFailed,
+            message: "extractFromCandidate vision action is not an actionable page operation"
+                .into(),
+            layer: ErrorLayer::Page,
+            retryable: false,
+        }),
     }
+}
+
+fn prompt_candidate_target(
+    action: &str,
+    index: u32,
+    prompt_candidates: &[types::CandidateEvidence],
+) -> Result<TargetSpec, CommandError> {
+    let candidate = prompt_candidates
+        .get(index as usize)
+        .ok_or_else(|| CommandError {
+            code: ErrorCode::VisionAssistFailed,
+            message: format!(
+                "{action} index {index} out of range ({} candidates)",
+                prompt_candidates.len()
+            ),
+            layer: ErrorLayer::Page,
+            retryable: false,
+        })?;
+    let role = candidate.role.clone().ok_or_else(|| CommandError {
+        code: ErrorCode::VisionAssistFailed,
+        message: format!("{action} index {index} has no role"),
+        layer: ErrorLayer::Page,
+        retryable: false,
+    })?;
+    let name = candidate.name.clone().ok_or_else(|| CommandError {
+        code: ErrorCode::VisionAssistFailed,
+        message: format!("{action} index {index} has no name"),
+        layer: ErrorLayer::Page,
+        retryable: false,
+    })?;
+    Ok(TargetSpec {
+        role: Some(role),
+        accessible_name: Some(name),
+        ..TargetSpec::default()
+    })
 }
 
 fn artifact_ids_from(evidence: &[Evidence]) -> Vec<String> {

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -7,9 +8,9 @@ use intent_engine::{
     VisionProposal, VisionProposeRequest, VISION_CONFIDENCE_FLOOR,
 };
 use types::{
-    CaptureScreenshotCommand, ClickCommand, CommandError, ErrorCode, Evidence, IntentCommand,
-    IntentHints, IntentResolutionPath, LocateIntent, PageId, TargetSpec, TypeTextCommand,
-    UploadFilesCommand, WaitForCommand,
+    CaptureScreenshotCommand, ClickCommand, CommandError, ErrorCode, Evidence, FillIntent,
+    FillValue, IntentCommand, IntentHints, IntentResolutionPath, LocateIntent, PageId, TargetSpec,
+    TypeTextCommand, UploadFilesCommand, WaitForCommand,
 };
 
 struct FakeVision {
@@ -34,6 +35,8 @@ struct FakeBrowser {
     gather_error: Option<CommandError>,
     click_xy_calls: Arc<AtomicUsize>,
     click_targets: Arc<std::sync::Mutex<Vec<Option<types::TargetSpec>>>>,
+    type_text_calls: Arc<std::sync::Mutex<Vec<TypeTextCommand>>>,
+    type_text_evidence: Vec<Evidence>,
     screenshot_png: Vec<u8>,
 }
 
@@ -81,9 +84,13 @@ impl IntentBrowser for FakeBrowser {
     async fn type_text(
         &self,
         _page_id: &PageId,
-        _command: &TypeTextCommand,
+        command: &TypeTextCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported("type_text"))
+        self.type_text_calls
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(command.clone());
+        Ok(self.type_text_evidence.clone())
     }
 
     async fn upload_files(
@@ -145,6 +152,236 @@ fn click_proposal(confidence: f32) -> VisionProposal {
         confidence,
         action: VisionAction::Click { x: 12.0, y: 34.0 },
     }
+}
+
+struct RecordingVision {
+    proposal: VisionProposal,
+    request_debug: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl VisionAssist for RecordingVision {
+    async fn propose(&self, request: VisionProposeRequest) -> Result<VisionProposal, CommandError> {
+        self.request_debug
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(format!("{request:?}"));
+        Ok(self.proposal.clone())
+    }
+}
+
+fn form_candidate(id: &str, role: &str, name: &str) -> dom_engine::Candidate {
+    dom_engine::Candidate {
+        id: id.into(),
+        css: Some(format!("#{id}")),
+        test_id: None,
+        role: Some(role.into()),
+        name: Some(name.into()),
+        label: None,
+        text: name.into(),
+        attributes: BTreeMap::new(),
+        state: dom_engine::CandidateState {
+            attached: true,
+            visible: true,
+            enabled: true,
+        },
+        frame_path: Vec::new(),
+    }
+}
+
+fn fill(purpose: &str, role: &str, value: FillValue) -> IntentCommand {
+    IntentCommand::Fill(FillIntent {
+        purpose: purpose.into(),
+        hints: IntentHints {
+            role: Some(role.into()),
+            ..IntentHints::default()
+        },
+        value,
+    })
+}
+
+#[tokio::test]
+async fn type_into_candidate_uses_runtime_text_without_disclosing_it_to_the_provider() {
+    let request_debug = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let type_text_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let click_xy_calls = Arc::new(AtomicUsize::new(0));
+    let assist = Arc::new(RecordingVision {
+        proposal: VisionProposal {
+            confidence: 0.95,
+            action: VisionAction::TypeIntoCandidate { index: 1 },
+        },
+        request_debug: request_debug.clone(),
+    });
+    let browser = FakeBrowser {
+        candidates: vec![
+            form_candidate("primary-email", "textbox", "Contact field"),
+            form_candidate("work-email", "textbox", "Contact field"),
+        ],
+        click_xy_calls: click_xy_calls.clone(),
+        type_text_calls: type_text_calls.clone(),
+        type_text_evidence: vec![Evidence::Element {
+            selector: "#work-email".into(),
+            text: Some("runtime secret".into()),
+        }],
+        screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
+    };
+
+    let outcome = IntentEngine::execute(
+        &fill(
+            "Contact field",
+            "textbox",
+            FillValue::Text {
+                text: "runtime secret".into(),
+                clear_first: true,
+            },
+        ),
+        &PageId::new(),
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(assist),
+            proposals: None,
+            defer_escalation: false,
+            prompt_context: None,
+            corpus: None,
+        },
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, IntentOutcome::Completed { .. }),
+        "expected completed fill, got {outcome:?}"
+    );
+    let requests = request_debug.lock().unwrap_or_else(|p| p.into_inner());
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].contains("Contact field"));
+    assert!(!requests[0].contains("runtime secret"));
+    let calls = type_text_calls.lock().unwrap_or_else(|p| p.into_inner());
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0]
+            .target
+            .as_ref()
+            .and_then(|target| target.role.as_deref()),
+        Some("textbox")
+    );
+    assert_eq!(
+        calls[0]
+            .target
+            .as_ref()
+            .and_then(|target| target.accessible_name.as_deref()),
+        Some("Contact field")
+    );
+    assert_eq!(calls[0].value, "runtime secret");
+    assert!(calls[0].clear_first);
+    assert_eq!(click_xy_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn type_into_candidate_out_of_range_fails_closed_without_mutation() {
+    let type_text_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let assist = Arc::new(FakeVision {
+        called: Arc::new(AtomicBool::new(false)),
+        proposal: VisionProposal {
+            confidence: 0.95,
+            action: VisionAction::TypeIntoCandidate { index: 7 },
+        },
+    });
+    let browser = FakeBrowser {
+        candidates: vec![
+            form_candidate("primary-email", "textbox", "Contact field"),
+            form_candidate("work-email", "textbox", "Contact field"),
+        ],
+        type_text_calls: type_text_calls.clone(),
+        screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
+    };
+
+    let outcome = IntentEngine::execute(
+        &fill(
+            "Contact field",
+            "textbox",
+            FillValue::Text {
+                text: "runtime secret".into(),
+                clear_first: true,
+            },
+        ),
+        &PageId::new(),
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(assist),
+            proposals: None,
+            defer_escalation: false,
+            prompt_context: None,
+            corpus: None,
+        },
+    )
+    .await;
+
+    assert!(matches!(
+        outcome,
+        IntentOutcome::Failed { error, .. } if error.code == ErrorCode::VisionAssistFailed
+    ));
+    assert!(type_text_calls
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .is_empty());
+}
+
+#[tokio::test]
+async fn type_into_candidate_rejects_non_text_fill_without_mutation() {
+    let type_text_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let assist = Arc::new(FakeVision {
+        called: Arc::new(AtomicBool::new(false)),
+        proposal: VisionProposal {
+            confidence: 0.95,
+            action: VisionAction::TypeIntoCandidate { index: 0 },
+        },
+    });
+    let browser = FakeBrowser {
+        candidates: vec![
+            form_candidate("home-state", "combobox", "State field"),
+            form_candidate("work-state", "combobox", "State field"),
+        ],
+        type_text_calls: type_text_calls.clone(),
+        screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
+    };
+
+    let outcome = IntentEngine::execute(
+        &fill(
+            "State field",
+            "combobox",
+            FillValue::Select {
+                option: "CA".into(),
+            },
+        ),
+        &PageId::new(),
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(assist),
+            proposals: None,
+            defer_escalation: false,
+            prompt_context: None,
+            corpus: None,
+        },
+    )
+    .await;
+
+    assert!(matches!(
+        outcome,
+        IntentOutcome::Failed { error, .. } if error.code == ErrorCode::VisionAssistFailed
+    ));
+    assert!(type_text_calls
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .is_empty());
 }
 
 #[tokio::test]
