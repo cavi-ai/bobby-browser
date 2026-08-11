@@ -1,4 +1,10 @@
+import json
+import pathlib
+import sys
 import unittest
+
+
+sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 from evaluate_adapter import (
     element_accuracy,
@@ -6,9 +12,49 @@ from evaluate_adapter import (
     parse_v1_response,
     v1_metrics,
 )
+from mlx_finetune import build_completion
 
 
 class MixedActionEvaluationTests(unittest.TestCase):
+    def test_candidate_typing_scores_the_selected_target_without_content(self):
+        predictions = [
+            {"prediction": {"action": {"kind": "typeIntoCandidate", "index": 1}}}
+        ]
+        examples = [
+            {
+                "target_index": 1,
+                "context_candidates": [{}, {}],
+                "model_response": {
+                    "action": {"kind": "typeText", "text": "runtime secret"}
+                },
+            }
+        ]
+
+        result = element_accuracy(predictions, examples)
+
+        self.assertEqual(result["correct"], 1)
+        self.assertEqual(result["content_scored"], 0)
+        self.assertEqual(result["content_correct"], 0)
+
+    def test_candidate_completion_omits_runtime_owned_text(self):
+        completion = json.loads(
+            build_completion(
+                {
+                    "target_index": 1,
+                    "model_response": {
+                        "confidence": 0.9,
+                        "action": {"kind": "typeText", "text": "runtime secret"},
+                    },
+                },
+                schema="candidate",
+            )
+        )
+
+        self.assertEqual(
+            completion["action"], {"kind": "typeIntoCandidate", "index": 1}
+        )
+        self.assertNotIn("runtime secret", json.dumps(completion))
+
     def test_wrong_action_kind_cannot_receive_element_credit(self):
         predictions = [{"prediction": {"action": {"kind": "typeText", "text": "Save"}}}]
         examples = [

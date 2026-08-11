@@ -9,6 +9,9 @@ Action kinds match `crates/vision-proxy/src/wire.rs`:
     - {"kind": "click", "x": f64, "y": f64}        CSS pixels in the screenshot
     - {"kind": "typeText", "text": str}
     - {"kind": "extractValue", "value": str}
+    - {"kind": "clickCandidate", "index": int}
+    - {"kind": "typeIntoCandidate", "index": int}
+    - {"kind": "extractFromCandidate", "index": int}
 
 Providers are swappable via `create_provider()`: mlx-vlm (direct local
 inference), ollama, lmstudio, or openai — same interface, different backend.
@@ -93,16 +96,23 @@ class ProposeResponse:
         if not (0.0 <= self.confidence <= 1.0):
             raise ValueError(f"confidence out of range: {self.confidence}")
         kind = self.action.get("kind")
-        if kind not in ("click", "typeText", "extractValue", "clickCandidate"):
+        candidate_kinds = (
+            "clickCandidate",
+            "typeIntoCandidate",
+            "extractFromCandidate",
+        )
+        if kind not in ("click", "typeText", "extractValue", *candidate_kinds):
             raise ValueError(f"invalid action kind: {kind}")
         if kind == "click":
             x, y = self.action.get("x"), self.action.get("y")
             if not (isinstance(x, (int, float)) and isinstance(y, (int, float))):
                 raise ValueError(f"click coordinates not finite: x={x}, y={y}")
-        if kind == "clickCandidate":
+        if kind in candidate_kinds:
+            if set(self.action) != {"kind", "index"}:
+                raise ValueError(f"{kind} must contain only kind and index")
             index = self.action.get("index")
-            if not isinstance(index, int) or index < 0:
-                raise ValueError(f"clickCandidate index invalid: {index}")
+            if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+                raise ValueError(f"{kind} index invalid: {index}")
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +143,9 @@ class VisionProvider(ABC):
         '{"confidence": 0.0..1.0, "action": {"kind": "click", "x": number, "y": number}}\n'
         '{"confidence": 0.0..1.0, "action": {"kind": "typeText", "text": string}}\n'
         '{"confidence": 0.0..1.0, "action": {"kind": "extractValue", "value": string}}\n'
+        '{"confidence": 0.0..1.0, "action": {"kind": "clickCandidate", "index": integer}}\n'
+        '{"confidence": 0.0..1.0, "action": {"kind": "typeIntoCandidate", "index": integer}}\n'
+        '{"confidence": 0.0..1.0, "action": {"kind": "extractFromCandidate", "index": integer}}\n'
         "Click coordinates are CSS pixels relative to the screenshot image. "
         "Do not include markdown fences, comments, or any text outside the JSON object."
     )
@@ -258,6 +271,8 @@ class VisionProvider(ABC):
             normalized["y"] = float(y if y is not None else 0.0)
         elif kind == "typeText":
             normalized["text"] = str(action.get("text", action.get("value", "")))
+        elif kind in ("clickCandidate", "typeIntoCandidate", "extractFromCandidate"):
+            normalized["index"] = action.get("index")
         else:
             normalized["value"] = str(action.get("value", action.get("text", "")))
         return normalized
@@ -273,7 +288,7 @@ class VisionProvider(ABC):
         if isinstance(action, str):
             action = {
                 "kind": action,
-                **{k: raw[k] for k in ("x", "y", "coordinate", "coordinates", "position", "clickX", "clickY", "text", "value") if k in raw},
+                **{k: raw[k] for k in ("x", "y", "coordinate", "coordinates", "position", "clickX", "clickY", "text", "value", "index") if k in raw},
             }
 
         abstained = (

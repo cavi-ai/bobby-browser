@@ -60,7 +60,7 @@ CANDIDATE_SYSTEM_PROMPT = (
     "You are a vision assistant for a browser automation agent called Bobby. "
     "Analyze the screenshot and return ONLY valid JSON matching this schema: "
     '{"confidence": 0.0..1.0, "action": {"kind": "clickCandidate", "index": N} | '
-    '{"kind": "typeIntoCandidate", "index": N, "text": "..."} | '
+    '{"kind": "typeIntoCandidate", "index": N} | '
     '{"kind": "extractFromCandidate", "index": N}}. '
     "The index refers to the numbered candidate list in the prompt."
 )
@@ -118,7 +118,7 @@ def build_completion(example: dict, schema: str = "coords") -> str:
         action = example.get("model_response", {}).get("action", {})
         kind = action.get("kind", "click")
         if kind == "typeText":
-            out_action = {"kind": "typeIntoCandidate", "index": index, "text": action.get("text", "")}
+            out_action = {"kind": "typeIntoCandidate", "index": index}
         elif kind == "extractValue":
             out_action = {"kind": "extractFromCandidate", "index": index}
         else:

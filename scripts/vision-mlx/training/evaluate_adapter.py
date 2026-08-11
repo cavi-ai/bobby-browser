@@ -191,9 +191,6 @@ def element_accuracy(predictions: list, examples: list) -> dict:
                 continue
             scored += 1
             target_correct = action.get("index") == target
-            if kind == "typeIntoCandidate":
-                payload_required = True
-                payload_correct = action.get("text") == target_action.get("text")
         elif kind == "click":
             bbox = target_bbox(e)
             if bbox is None:

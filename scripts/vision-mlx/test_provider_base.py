@@ -5,7 +5,7 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
-from providers.base import VisionProvider
+from providers.base import ProposeResponse, VisionProvider
 
 
 class VisionProviderNormalizationTests(unittest.TestCase):
@@ -20,6 +20,29 @@ class VisionProviderNormalizationTests(unittest.TestCase):
                 self.assertEqual(
                     response.action,
                     {"kind": "click", "x": 0.0, "y": 0.0},
+                )
+
+    def test_candidate_grounded_actions_require_only_a_non_negative_integer_index(self):
+        for kind in ("clickCandidate", "typeIntoCandidate", "extractFromCandidate"):
+            with self.subTest(kind=kind):
+                ProposeResponse(0.9, {"kind": kind, "index": 1}).validate()
+
+                for index in (True, 1.5, -1, None):
+                    with self.subTest(index=index):
+                        with self.assertRaises(ValueError):
+                            ProposeResponse(0.9, {"kind": kind, "index": index}).validate()
+
+                with self.assertRaises(ValueError):
+                    ProposeResponse(0.9, {"kind": kind, "index": 1, "text": "secret"}).validate()
+
+    def test_candidate_grounded_normalization_preserves_only_the_index(self):
+        for kind in ("clickCandidate", "typeIntoCandidate", "extractFromCandidate"):
+            with self.subTest(kind=kind):
+                self.assertEqual(
+                    VisionProvider.normalize_action(
+                        {"kind": kind, "index": 1, "text": "secret", "value": "secret"}
+                    ),
+                    {"kind": kind, "index": 1},
                 )
 
 
