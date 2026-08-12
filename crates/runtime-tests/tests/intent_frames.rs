@@ -1173,6 +1173,25 @@ async fn a11y_snapshot_scopes_to_a_target_subtree() {
             .any(|node| node.name.as_deref() == Some("Upload document")),
         "in-frame scoped snapshot leaked the outer page: {flat:?}"
     );
+
+    // Scoping to the iframe element itself returns the frame's content, not
+    // the empty main-frame iframe node, and its targets carry the hop.
+    let flat = nodes_of(
+        snapshot(TargetSpec {
+            css: Some("#document-preview".into()),
+            ..TargetSpec::default()
+        })
+        .await,
+    );
+    let confirm = flat
+        .iter()
+        .find(|node| node.name.as_deref() == Some("Confirm document preview"))
+        .expect("iframe-scoped snapshot must return the frame's content");
+    let target = confirm.target.as_ref().expect("in-frame target");
+    assert!(
+        !target.frame_path.is_empty(),
+        "iframe-scoped targets must carry the frame hop: {target:?}"
+    );
     probe
         .runtime
         .sessions

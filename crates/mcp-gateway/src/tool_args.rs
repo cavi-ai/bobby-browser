@@ -55,6 +55,10 @@ pub(crate) struct WorkflowObserveArgs {
     pub(crate) include_forms: bool,
     #[serde(default)]
     pub(crate) max_controls: Option<u32>,
+    /// Scope the observation to one region's subtree (same shape as
+    /// `a11y_snapshot.target`) instead of the whole page's chrome.
+    #[serde(default)]
+    pub(crate) target: Option<types::TargetSpec>,
 }
 
 impl WorkflowObserveArgs {
