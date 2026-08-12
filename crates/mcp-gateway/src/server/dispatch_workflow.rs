@@ -196,7 +196,7 @@ impl Server {
                                 "interfaceError": {
                                     "code":"deadlineExceeded",
                                     "layer":"interface",
-                                    "message":"runtime interface request failed",
+                                    "message":"request deadline exceeded while waiting for the workflow to finish",
                                     "correlationId":context.correlation_id,
                                     "commandId":null,
                                     "retryable":false,
