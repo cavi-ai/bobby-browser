@@ -237,7 +237,7 @@ impl Server {
             Some(binding.workflow_id.clone()),
             types::PrimitiveCommand::AccessibilitySnapshot(types::AccessibilitySnapshotCommand {
                 max_nodes: Some(max_nodes),
-                target: None,
+                target: input.target,
             }),
         );
         let observation_outcome = match self.submit_envelope(submit_context, envelope).await {

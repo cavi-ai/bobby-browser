@@ -1725,6 +1725,52 @@ impl BrowserWorker for ChromiumWorker {
                     .await?
             };
             let backend_id = resolved.backend_node_id(&page).await?;
+            // Scoping to the iframe element itself must return the frame's
+            // content — the main-frame AX subtree of an iframe node is empty,
+            // and the agent asked for what is inside.
+            let owner_frame = page
+                .execute(
+                    chromiumoxide::cdp::browser_protocol::dom::DescribeNodeParams::builder()
+                        .backend_node_id(backend_id)
+                        .build(),
+                )
+                .await
+                .map_err(command_failed)?
+                .result
+                .node
+                .frame_id;
+            if let Some(content_frame) = owner_frame {
+                let result = page
+                    .execute(
+                        chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::builder()
+                            .frame_id(content_frame)
+                            .build(),
+                    )
+                    .await
+                    .map_err(command_failed)?
+                    .result;
+                let (mut nodes, truncated) = compact_ax_tree(&result.nodes, max_nodes);
+                // Stamp targets with the hop that re-resolves the iframe
+                // element, so in-frame targets pass to control_action
+                // verbatim like the full-tree descent's do.
+                let hop_name = match &resolved.evidence {
+                    Evidence::Resolution { fingerprint, .. } => fingerprint.name.clone(),
+                    _ => None,
+                };
+                if let Some(name) = hop_name {
+                    let segment = types::SemanticTargetSegment {
+                        role: "iframe".into(),
+                        accessible_name: name,
+                        ordinal: None,
+                    };
+                    stamp_a11y_frame_path(&mut nodes, &segment);
+                }
+                return Ok(vec![Evidence::AccessibilitySnapshot {
+                    page_id: page_id.clone(),
+                    nodes,
+                    truncated,
+                }]);
+            }
             let params = match resolved.frame_id() {
                 Some(frame_id) => {
                     chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::builder()

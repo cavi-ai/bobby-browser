@@ -77,7 +77,8 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                 "goal": string(0, MAX_WORKFLOW_GOAL_SCALARS * 4),
                 "maxNodes": {"type":"integer","minimum":1,"maximum":2048},
                 "includeForms": {"type":"boolean"},
-                "maxControls": {"type":"integer","minimum":1,"maximum":512}
+                "maxControls": {"type":"integer","minimum":1,"maximum":512},
+                "target": {"type":"object","description":"Scope the observation to one region's subtree (same shape as a11y_snapshot.target) instead of the whole page"}
             }),
             vec!["workflowHandle"],
         ),
