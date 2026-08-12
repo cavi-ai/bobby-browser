@@ -237,6 +237,19 @@ impl WorkerFactory for ConfiguredFirefoxFactory {
         *live_server = Some(server);
         Ok(worker)
     }
+
+    async fn shutdown(&self) {
+        let client = self.bidi.lock().await.take();
+        if let Some(client) = client {
+            // End the WebDriver session explicitly: Firefox's RemoteAgent
+            // keeps it alive past connection loss, and with its one-session
+            // limit a leaked session bricks every later `session.new` until
+            // the browser restarts.
+            if let Err(error) = client.end_session().await {
+                tracing::warn!(error = %error.message, "firefox BiDi session end on shutdown failed");
+            }
+        }
+    }
 }
 
 impl ConfiguredFirefoxFactory {
@@ -387,12 +400,14 @@ async fn start_bootstrap_attempt(
     Ok(FirefoxBootstrapAttempt {
         server: Some(server),
         publication: Some(publication),
+        pairing_code_ttl,
     })
 }
 
 struct FirefoxBootstrapAttempt {
     server: Option<Arc<CompanionServerHandle>>,
     publication: Option<PublishedDescriptor>,
+    pairing_code_ttl: Duration,
 }
 
 impl FirefoxBootstrapAttempt {
@@ -416,6 +431,54 @@ impl FirefoxBootstrapAttempt {
         // Leak the publication into the server's lifetime: dropping the
         // attempt would unpublish, so forget it deliberately.
         std::mem::forget(self);
+        Ok(server)
+    }
+
+    /// Complete and keep the descriptor fresh: the pairing code in the
+    /// descriptor has a TTL (default 5 minutes), so the warm path re-issues
+    /// it and rewrites the descriptor before expiry. Without this the warm
+    /// companion goes stale and every extension connection gets a 401.
+    fn complete_warm(mut self) -> std::io::Result<Arc<CompanionServerHandle>> {
+        let server = self.server.take().expect("bootstrap server must exist");
+        let publication = self.publication.take().expect("publication must exist");
+        let registry = server.registry().clone();
+        let descriptor_path = publication.path().to_path_buf();
+        let ownership_id = publication.ownership_id().to_string();
+        let pairing_code_ttl = self.pairing_code_ttl;
+        let server_for_refresh = server.clone();
+        std::mem::forget(self);
+        tokio::spawn(async move {
+            // Hold the initial publication for the task's lifetime: dropping
+            // it would remove the descriptor while the warm server is live.
+            let _initial = publication;
+            loop {
+                tokio::time::sleep(pairing_code_ttl / 2).await;
+                let code = registry.issue_pairing_code().await;
+                let descriptor = NativeHostDescriptor {
+                    endpoint: format!("ws://{}/v1/companion", server_for_refresh.local_addr()),
+                    pairing_code: code,
+                    ownership_id: ownership_id.clone(),
+                };
+                // The write path uses create_new, so the prior descriptor
+                // must be removed first — otherwise every refresh fails
+                // and the pairing code goes stale.
+                if let Err(error) = remove_stale_descriptor(&descriptor_path) {
+                    tracing::warn!(%error, "firefox companion descriptor refresh: remove failed");
+                    continue;
+                }
+                match write_descriptor(&descriptor_path, &descriptor) {
+                    Ok(refreshed) => {
+                        // Forget rather than drop: dropping would remove the
+                        // file just written (the non-unix fallback matches on
+                        // the shared ownership_id).
+                        std::mem::forget(refreshed);
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "firefox companion descriptor refresh failed");
+                    }
+                }
+            }
+        });
         Ok(server)
     }
 }
@@ -505,9 +568,19 @@ impl OwnedDescriptorFile {
 struct PublishedDescriptor {
     final_file: Option<OwnedDescriptorFile>,
     pending_file: Option<OwnedDescriptorFile>,
+    path: PathBuf,
+    ownership_id: String,
 }
 
 impl PublishedDescriptor {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn ownership_id(&self) -> &str {
+        &self.ownership_id
+    }
+
     fn cleanup(&mut self) -> std::io::Result<()> {
         if let Some(final_file) = self.final_file.take() {
             final_file.remove_if_owned()?;
@@ -584,6 +657,8 @@ fn write_descriptor_with_pending_remove(
                 identity: pending_file.identity,
             }),
             pending_file: Some(pending_file),
+            path: path.to_path_buf(),
+            ownership_id: descriptor.ownership_id.clone(),
         };
         if remove_pending(&pending).is_ok() {
             publication.pending_file = None;
@@ -735,7 +810,7 @@ fn compose_worker_factory_inner(
                 )
                 .await;
                 match attempt {
-                    Ok(attempt) => match attempt.complete_keeping_publication() {
+                    Ok(attempt) => match attempt.complete_warm() {
                         Ok(server) => {
                             *factory.server.lock().await = Some(server);
                             tracing::info!(

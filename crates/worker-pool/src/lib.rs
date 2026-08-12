@@ -455,6 +455,12 @@ pub trait WorkerFactory: Send + Sync {
 
     async fn release_session(&self, _session_id: &SessionId) {}
 
+    /// Graceful teardown on server shutdown: factories holding shared browser
+    /// resources (e.g. the single Firefox BiDi WebDriver session) must end
+    /// them here — process exit without this leaks the session in the
+    /// browser, which then refuses every later `session.new`.
+    async fn shutdown(&self) {}
+
     fn can_select(&self, _preference: &EnginePreference) -> bool {
         false
     }
