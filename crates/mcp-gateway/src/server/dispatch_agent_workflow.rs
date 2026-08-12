@@ -1040,11 +1040,14 @@ fn interface_failure_outcome(
             // Job outcomes surface over MCP, so the message follows the same
             // redaction rule as interface_error_response: only allowlisted
             // operator diagnostics cross verbatim.
-            message: error
+            message: if error
                 .message
                 .starts_with(super::BROWSER_LAUNCH_DIAGNOSTIC_PREFIX)
-                .then_some(error.message)
-                .unwrap_or_else(|| "runtime interface request failed".into()),
+            {
+                error.message
+            } else {
+                "runtime interface request failed".into()
+            },
             layer: types::ErrorLayer::Interface,
             retryable: error.retryable,
         },

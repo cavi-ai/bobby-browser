@@ -1,3 +1,9 @@
+// Two test targets include this module and each uses a different subset:
+// modern_gauntlet_scorecard calls from_journal, modern_gauntlet_e2e builds every
+// journal through from_journal_with_environment and reads the environment labels.
+// Under `-D warnings` each target rejects the half it does not call.
+#![allow(dead_code)]
+
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::path::Path;
