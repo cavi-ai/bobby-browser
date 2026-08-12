@@ -48,6 +48,10 @@ mod dispatch_workflow;
 mod tool_dispatch;
 
 const MAX_RESOURCE_ENCODED_BYTES: usize = 768 * 1024;
+/// Only error messages with this prefix may cross the MCP boundary verbatim:
+/// they are written by the runtime as operator-actionable diagnostics and
+/// contain no secrets. Everything else is redacted to the canonical code.
+pub(crate) const BROWSER_LAUNCH_DIAGNOSTIC_PREFIX: &str = "browser launch failed:";
 const MAX_PENDING_CANCELLATIONS: usize = 1024;
 /// How many notification frames `serve` may have queued for the writer before it
 /// stops pulling more off the subscription. See the comment at its use site.
@@ -1325,10 +1329,10 @@ fn bounded_parse<T: DeserializeOwned>(value: Value) -> Result<T, ()> {
 }
 
 fn to_json<T: serde::Serialize>(value: T) -> interface_core::InterfaceResult<Value> {
-    serde_json::to_value(value).map_err(|_| types::InterfaceError {
+    serde_json::to_value(value).map_err(|error| types::InterfaceError {
         code: types::InterfaceErrorCode::Internal,
         layer: types::ErrorLayer::Interface,
-        message: "runtime interface request failed".to_owned(),
+        message: format!("failed to serialize runtime response: {error}"),
         correlation_id: types::CorrelationId::new(),
         command_id: None,
         retryable: false,
@@ -1406,9 +1410,11 @@ fn interface_error_response(id: Value, mut interface_error: types::InterfaceErro
         ),
         None => format!("Runtime interface error: {code}"),
     };
+    // MCP clients are external agents: the message may carry secrets, so only
+    // an allowlisted, operator-actionable diagnostic crosses this boundary.
     let safe_diagnostic = interface_error
         .message
-        .starts_with("browser launch failed:")
+        .starts_with(BROWSER_LAUNCH_DIAGNOSTIC_PREFIX)
         .then(|| interface_error.message.clone());
     interface_error.message = "runtime interface request failed".to_owned();
     let repair = if safe_diagnostic.is_some() {
@@ -1583,7 +1589,7 @@ fn not_found_error(context: &types::RequestContext) -> types::InterfaceError {
     types::InterfaceError {
         code: types::InterfaceErrorCode::NotFound,
         layer: types::ErrorLayer::Interface,
-        message: "runtime interface request failed".to_owned(),
+        message: "requested resource was not found".to_owned(),
         correlation_id: context.correlation_id.clone(),
         command_id: None,
         retryable: false,

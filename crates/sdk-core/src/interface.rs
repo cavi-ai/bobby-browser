@@ -744,23 +744,24 @@ fn command_extra_capabilities(command: &RuntimeCommand) -> Vec<Capability> {
 }
 
 fn map_runtime_error(ctx: &RequestContext, error: RuntimeError) -> InterfaceError {
-    if let RuntimeError::InvalidRequest(message) = &error {
-        if message.starts_with("browser launch failed:") {
-            return error_with(ctx, InterfaceErrorCode::InvalidRequest, message);
-        }
-    }
-    let (code, message) = match error {
-        RuntimeError::NotFound(_) => (
+    // The canonical code classifies the failure; the message must carry the
+    // runtime's detail so operators see the actual cause (e.g. "paired
+    // profile has no browser target discovery") instead of a generic label.
+    let (code, message) = match &error {
+        RuntimeError::NotFound(detail) => (
             InterfaceErrorCode::NotFound,
-            "runtime resource was not found",
+            format!("runtime resource was not found: {detail}"),
         ),
-        RuntimeError::InvalidRequest(_) => (
+        RuntimeError::InvalidRequest(detail) => (
             InterfaceErrorCode::InvalidRequest,
-            "runtime request is invalid",
+            format!("runtime request is invalid: {detail}"),
         ),
-        RuntimeError::Internal(_) => (InterfaceErrorCode::Internal, "runtime operation failed"),
+        RuntimeError::Internal(detail) => (
+            InterfaceErrorCode::Internal,
+            format!("runtime operation failed: {detail}"),
+        ),
     };
-    error_with(ctx, code, message)
+    error_with(ctx, code, &message)
 }
 
 fn internal_error(ctx: &RequestContext) -> InterfaceError {
