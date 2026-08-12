@@ -171,10 +171,7 @@ impl RecoveryCoordinator {
         }
     }
 
-    pub fn with_operational_metrics(
-        mut self,
-        metrics: observability::OperationalMetrics,
-    ) -> Self {
+    pub fn with_operational_metrics(mut self, metrics: observability::OperationalMetrics) -> Self {
         self.operational_metrics = Some(metrics);
         self
     }
@@ -281,9 +278,7 @@ impl RecoveryCoordinator {
         .await;
         if result.is_err() {
             if let Some(metrics) = &self.operational_metrics {
-                metrics.record_reconciliation(
-                    observability::ReconciliationMetricOutcome::Failed,
-                );
+                metrics.record_reconciliation(observability::ReconciliationMetricOutcome::Failed);
             }
         }
         result

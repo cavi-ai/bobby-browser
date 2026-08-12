@@ -9,9 +9,8 @@ pub use types::{
     VerificationMetricsSnapshot, VisionMetricsSnapshot, WorkflowCallMetricsSnapshot,
 };
 
-const LATENCY_UPPER_BOUNDS_MS: [u64; 10] = [
-    25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 15_000,
-];
+const LATENCY_UPPER_BOUNDS_MS: [u64; 10] =
+    [25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 15_000];
 const CONFIDENCE_ACCEPTANCE_THRESHOLD: f64 = 0.75;
 const CONFIDENCE_HIGH_THRESHOLD: f64 = 0.90;
 

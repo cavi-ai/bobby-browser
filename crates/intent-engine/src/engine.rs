@@ -2,16 +2,16 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
 use dom_engine::{resolve_candidates, Candidate, ResolutionDecision, ResolutionPolicy};
+use observability::{
+    OperationalMetrics, ProviderMode, VerificationMetricResult, VisionProposalMetric,
+    VisionProposalOutcome,
+};
 use types::{
     CaptureScreenshotCommand, ClickCommand, CommandError, ControlAction, ControlActionCommand,
     ErrorCode, ErrorLayer, Evidence, ExecutionRecord, ExtractValueKind, FillValue,
     FormControlTarget, IntentCommand, IntentResolutionPath, PageId, ScreenshotMode,
     SemanticTargetSegment, TargetFingerprint, TargetSpec, TypeTextCommand, UploadFilesCommand,
     WaitCondition, WaitForCommand,
-};
-use observability::{
-    OperationalMetrics, ProviderMode, VerificationMetricResult, VisionProposalMetric,
-    VisionProposalOutcome,
 };
 
 use crate::compiler::{compile_intent, CompleteFormFieldPlan, ExtractFieldPlan, IntentPlan};

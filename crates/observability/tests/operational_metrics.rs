@@ -44,8 +44,8 @@ fn snapshot_records_bounded_operational_outcomes() {
 fn latency_histogram_has_exact_inclusive_boundaries_and_overflow() {
     let metrics = OperationalMetrics::default();
     let samples = [
-        0, 25, 26, 50, 51, 100, 101, 250, 251, 500, 501, 1_000, 1_001, 2_500,
-        2_501, 5_000, 5_001, 10_000, 10_001, 15_000, 15_001,
+        0, 25, 26, 50, 51, 100, 101, 250, 251, 500, 501, 1_000, 1_001, 2_500, 2_501, 5_000, 5_001,
+        10_000, 10_001, 15_000, 15_001,
     ];
     for latency_ms in samples {
         metrics.record_vision_proposal(VisionProposalMetric {
@@ -141,7 +141,10 @@ fn serialized_snapshot_cannot_retain_sensitive_canaries() {
     let serialized = serde_json::to_string(&metrics.snapshot()).unwrap();
 
     for canary in canaries {
-        assert!(!serialized.contains(canary), "metric snapshot leaked {canary}");
+        assert!(
+            !serialized.contains(canary),
+            "metric snapshot leaked {canary}"
+        );
     }
     assert!(serialized.contains("timedOut"));
     assert!(serialized.contains("observationWindowMs"));

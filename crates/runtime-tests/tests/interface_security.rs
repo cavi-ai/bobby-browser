@@ -1403,10 +1403,14 @@ async fn unsupported_protocols(fixture: &BoundaryFixture) -> SecurityResult {
         "unsupported HTTP version returned {}",
         response.status()
     );
+    // An unknown MCP revision is negotiated, not rejected: the gateway answers with the
+    // newest revision it speaks and leaves the client to accept or drop. Refusing it made
+    // the gateway unreachable from hosts pinned to an older revision.
     let mcp = McpServer::new(fixture.runtime.clone());
     let response = mcp.handle_message(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1900-01-01","capabilities":{},"clientInfo":{"name":"old","version":"1"}}})).await.unwrap();
     require!(
-        response["error"]["code"] == -32602,
+        response.get("error").is_none()
+            && response["result"]["protocolVersion"] == MCP_PROTOCOL_VERSION,
         "unsupported MCP version returned {response}"
     );
     let cdp = CdpConnection::new(

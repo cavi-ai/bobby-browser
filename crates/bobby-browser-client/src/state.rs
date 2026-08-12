@@ -56,30 +56,70 @@ macro_rules! metric_snapshot {
 }
 
 metric_snapshot!(IntentMetricsSnapshot {
-    total, locate, fill, complete_form, extract, submit, wait_for_state, follow, dismiss,
-    deterministic, context, vision_prefill, vision_fallback,
+    total,
+    locate,
+    fill,
+    complete_form,
+    extract,
+    submit,
+    wait_for_state,
+    follow,
+    dismiss,
+    deterministic,
+    context,
+    vision_prefill,
+    vision_fallback,
 });
 metric_snapshot!(ContextMetricsSnapshot {
-    hit, miss, ambiguous_refusal, stale_rejection, error,
+    hit,
+    miss,
+    ambiguous_refusal,
+    stale_rejection,
+    error,
 });
 metric_snapshot!(PrefillMetricsSnapshot {
-    hit, miss, dropped_entry, policy_denied, provider_failure,
+    hit,
+    miss,
+    dropped_entry,
+    policy_denied,
+    provider_failure,
 });
 metric_snapshot!(ConfidenceMetricsSnapshot {
-    below_acceptance, accepted, high, unreported,
+    below_acceptance,
+    accepted,
+    high,
+    unreported,
 });
 metric_snapshot!(VerificationMetricsSnapshot {
-    accepted, target_not_found, target_ambiguous, obstruction_persisted,
-    value_mismatch, other_rejected,
+    accepted,
+    target_not_found,
+    target_ambiguous,
+    obstruction_persisted,
+    value_mismatch,
+    other_rejected,
 });
 metric_snapshot!(RetryMetricsSnapshot {
-    transport, timeout, target_detached, state_conflict, other,
+    transport,
+    timeout,
+    target_detached,
+    state_conflict,
+    other,
 });
 metric_snapshot!(ReconciliationMetricsSnapshot {
-    resumed, restarted, needs_reconciliation, failed,
+    resumed,
+    restarted,
+    needs_reconciliation,
+    failed,
 });
 metric_snapshot!(WorkflowCallMetricsSnapshot {
-    lifecycle, discovery, read, mutation, composite_workflow, recovery, artifact, job,
+    lifecycle,
+    discovery,
+    read,
+    mutation,
+    composite_workflow,
+    recovery,
+    artifact,
+    job,
 });
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

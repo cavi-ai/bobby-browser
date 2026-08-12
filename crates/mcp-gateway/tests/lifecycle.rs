@@ -446,7 +446,10 @@ async fn initialize_negotiates_an_older_supported_revision() {
             .handle_message(request(json!(2), "tools/list", json!({})))
             .await
             .unwrap();
-        assert!(tools["result"]["tools"].is_array(), "{requested} lost tools");
+        assert!(
+            tools["result"]["tools"].is_array(),
+            "{requested} lost tools"
+        );
     }
 }
 

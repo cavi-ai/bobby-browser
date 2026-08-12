@@ -935,14 +935,17 @@ async fn accepted_reinitialize_invalidates_handles_but_rejected_reinitialize_doe
         .as_str()
         .unwrap();
 
+    // Unbounded capabilities, not an unknown protocol revision: a revision the gateway
+    // does not speak is negotiated down to the newest one it does, so it is an accepted
+    // re-initialize and would invalidate the handle.
     let rejected = live
         .server
         .handle_message(request(
             71,
             "initialize",
             json!({
-                "protocolVersion":"invalid",
-                "capabilities":{},
+                "protocolVersion":"2025-11-25",
+                "capabilities":{"roots":"not-an-object"},
                 "clientInfo":{"name":"harness","version":"1"}
             }),
         ))

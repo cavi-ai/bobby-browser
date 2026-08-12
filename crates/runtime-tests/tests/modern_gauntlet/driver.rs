@@ -690,9 +690,8 @@ impl ModernRuntime {
         let provider_mode = ProviderMode::from_label(
             &std::env::var("BOBBY_GAUNTLET_PROVIDER_MODE").unwrap_or_default(),
         );
-        let model_tier = ModelTier::from_label(
-            &std::env::var("BOBBY_GAUNTLET_MODEL_TIER").unwrap_or_default(),
-        );
+        let model_tier =
+            ModelTier::from_label(&std::env::var("BOBBY_GAUNTLET_MODEL_TIER").unwrap_or_default());
         Ok(Scorecard::from_journal_with_environment(
             &self.journey,
             engine,

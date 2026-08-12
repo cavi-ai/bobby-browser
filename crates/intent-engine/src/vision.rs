@@ -16,7 +16,10 @@ pub trait VisionAssist: Send + Sync {
     /// that are not attached to a runtime registry preserve legacy behavior.
     fn operational_metrics(
         &self,
-    ) -> Option<(observability::OperationalMetrics, observability::ProviderMode)> {
+    ) -> Option<(
+        observability::OperationalMetrics,
+        observability::ProviderMode,
+    )> {
         None
     }
 
@@ -38,7 +41,10 @@ impl VisionAssist for InstrumentedVisionAssist {
 
     fn operational_metrics(
         &self,
-    ) -> Option<(observability::OperationalMetrics, observability::ProviderMode)> {
+    ) -> Option<(
+        observability::OperationalMetrics,
+        observability::ProviderMode,
+    )> {
         Some((self.metrics.clone(), self.inner.provider_mode()))
     }
 

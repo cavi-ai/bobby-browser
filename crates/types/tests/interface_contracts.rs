@@ -115,10 +115,8 @@ fn runtime_info_accepts_older_payloads_without_operational_metrics() {
     .unwrap();
 
     assert!(info.operational_metrics.is_none());
-    assert!(
-        serde_json::to_value(info)
-            .unwrap()
-            .get("operationalMetrics")
-            .is_none()
-    );
+    assert!(serde_json::to_value(info)
+        .unwrap()
+        .get("operationalMetrics")
+        .is_none());
 }

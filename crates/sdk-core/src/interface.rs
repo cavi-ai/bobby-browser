@@ -444,11 +444,13 @@ impl RuntimeInterface for AuthenticatedRuntime {
             .ok()
             .and_then(|page| page.url);
         let answer = promotion.ask(url.as_deref(), &description).await;
-        self.inner.operational_metrics().record_context_lookup(if answer.is_some() {
-            observability::ContextLookupOutcome::Hit
-        } else {
-            observability::ContextLookupOutcome::Miss
-        });
+        self.inner
+            .operational_metrics()
+            .record_context_lookup(if answer.is_some() {
+                observability::ContextLookupOutcome::Hit
+            } else {
+                observability::ContextLookupOutcome::Miss
+            });
         Ok(answer)
     }
 

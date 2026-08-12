@@ -778,10 +778,7 @@ impl AdaptivePageEngine {
         }
     }
 
-    pub fn with_operational_metrics(
-        mut self,
-        metrics: observability::OperationalMetrics,
-    ) -> Self {
+    pub fn with_operational_metrics(mut self, metrics: observability::OperationalMetrics) -> Self {
         self.operational_metrics = Some(metrics);
         self
     }
@@ -952,7 +949,9 @@ impl AdaptivePageEngine {
                 .vision_node
                 .provider(self.vision_assist.clone())
                 .map(|assist| match &self.operational_metrics {
-                    Some(metrics) => intent_engine::instrument_vision_assist(assist, metrics.clone()),
+                    Some(metrics) => {
+                        intent_engine::instrument_vision_assist(assist, metrics.clone())
+                    }
                     None => assist,
                 });
             return execute_intent(
@@ -1350,7 +1349,9 @@ fn record_intent_metrics(
     };
     let mut source = observability::ResolutionSource::Deterministic;
     for item in evidence {
-        let Evidence::IntentExecution { record } = item else { continue };
+        let Evidence::IntentExecution { record } = item else {
+            continue;
+        };
         source = match record.resolution_path {
             types::IntentResolutionPath::VisionFallback => {
                 observability::ResolutionSource::VisionFallback
