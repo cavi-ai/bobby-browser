@@ -173,6 +173,10 @@ impl AcpVisionAssist {
 
 #[async_trait::async_trait]
 impl intent_engine::VisionAssist for AcpVisionAssist {
+    fn provider_mode(&self) -> observability::ProviderMode {
+        observability::ProviderMode::Acp
+    }
+
     async fn propose(
         &self,
         request: intent_engine::VisionProposeRequest,

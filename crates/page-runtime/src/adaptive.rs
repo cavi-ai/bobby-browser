@@ -737,6 +737,7 @@ pub struct AdaptivePageEngine {
     context_graph: Option<Arc<crate::ContextGraph>>,
     /// Escalation corpus sink (`[vision].corpus_dir`). `None` writes nothing.
     corpus: Option<intent_engine::VisionCorpus>,
+    operational_metrics: Option<observability::OperationalMetrics>,
 }
 
 #[derive(Clone)]
@@ -773,6 +774,18 @@ impl AdaptivePageEngine {
             proposals: None,
             context_graph: None,
             corpus: None,
+            operational_metrics: None,
+        }
+    }
+
+    pub fn with_operational_metrics(mut self, metrics: observability::OperationalMetrics) -> Self {
+        self.operational_metrics = Some(metrics);
+        self
+    }
+
+    pub(crate) fn record_retry(&self, class: observability::RetryClass) {
+        if let Some(metrics) = &self.operational_metrics {
+            metrics.record_retry(class);
         }
     }
 
@@ -932,16 +945,26 @@ impl AdaptivePageEngine {
     ) -> Result<AdaptiveExecution, AdaptiveFailure> {
         let vision_gate = gate.vision;
         if let RuntimeCommand::Intent(intent) = &envelope.command {
+            let assist = gate
+                .vision_node
+                .provider(self.vision_assist.clone())
+                .map(|assist| match &self.operational_metrics {
+                    Some(metrics) => {
+                        intent_engine::instrument_vision_assist(assist, metrics.clone())
+                    }
+                    None => assist,
+                });
             return execute_intent(
                 envelope,
                 lease,
                 intent,
                 vision_gate,
-                gate.vision_node.provider(self.vision_assist.clone()),
+                assist,
                 self.proposals.clone(),
                 page.as_ref().and_then(|page| page.url.clone()),
                 self.context_graph.clone(),
                 self.corpus.clone(),
+                self.operational_metrics.clone(),
             )
             .await;
         }
@@ -1263,6 +1286,7 @@ async fn execute_intent(
     page_url: Option<String>,
     context_graph: Option<Arc<crate::ContextGraph>>,
     corpus: Option<intent_engine::VisionCorpus>,
+    operational_metrics: Option<observability::OperationalMetrics>,
 ) -> Result<AdaptiveExecution, AdaptiveFailure> {
     let page_id = envelope.page_id.as_ref().expect("validated page id");
     let browser = WorkerIntentBrowser { lease };
@@ -1292,7 +1316,9 @@ async fn execute_intent(
         prompt_context,
         corpus,
     };
-    match IntentEngine::execute(intent, page_id, &browser, &vision).await {
+    let outcome = IntentEngine::execute(intent, page_id, &browser, &vision).await;
+    record_intent_metrics(operational_metrics.as_ref(), intent, &outcome);
+    match outcome {
         IntentOutcome::Completed { evidence } => Ok(AdaptiveExecution {
             evidence,
             used_browser: true,
@@ -1300,6 +1326,46 @@ async fn execute_intent(
         }),
         IntentOutcome::Failed { error, evidence } => Err(AdaptiveFailure { error, evidence }),
     }
+}
+
+fn record_intent_metrics(
+    metrics: Option<&observability::OperationalMetrics>,
+    intent: &types::IntentCommand,
+    outcome: &IntentOutcome,
+) {
+    let Some(metrics) = metrics else { return };
+    let kind = match intent {
+        types::IntentCommand::Locate(_) => observability::IntentMetricKind::Locate,
+        types::IntentCommand::Fill(_) => observability::IntentMetricKind::Fill,
+        types::IntentCommand::CompleteForm(_) => observability::IntentMetricKind::CompleteForm,
+        types::IntentCommand::SubmitAndVerify(_) => observability::IntentMetricKind::Submit,
+        types::IntentCommand::WaitForState(_) => observability::IntentMetricKind::WaitForState,
+        types::IntentCommand::Follow(_) => observability::IntentMetricKind::Follow,
+        types::IntentCommand::DismissObstruction(_) => observability::IntentMetricKind::Dismiss,
+        types::IntentCommand::Extract(_) => observability::IntentMetricKind::Extract,
+    };
+    let evidence = match outcome {
+        IntentOutcome::Completed { evidence } | IntentOutcome::Failed { evidence, .. } => evidence,
+    };
+    let mut source = observability::ResolutionSource::Deterministic;
+    for item in evidence {
+        let Evidence::IntentExecution { record } = item else {
+            continue;
+        };
+        source = match record.resolution_path {
+            types::IntentResolutionPath::VisionFallback => {
+                observability::ResolutionSource::VisionFallback
+            }
+            types::IntentResolutionPath::VisionPrefill
+                if source != observability::ResolutionSource::VisionFallback =>
+            {
+                observability::ResolutionSource::VisionPrefill
+            }
+            types::IntentResolutionPath::Deterministic => source,
+            types::IntentResolutionPath::VisionPrefill => source,
+        };
+    }
+    metrics.record_intent_resolution(kind, source);
 }
 
 fn execution_evidence(

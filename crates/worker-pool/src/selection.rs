@@ -121,6 +121,13 @@ impl BrowserWorkerSelector {
         }
     }
 
+    /// Fan graceful teardown out to every registered factory.
+    pub async fn shutdown(&self) {
+        for registration in &self.registrations {
+            registration.factory.shutdown().await;
+        }
+    }
+
     pub async fn select(
         &self,
         session_id: &SessionId,
@@ -382,6 +389,10 @@ impl WorkerFactory for SelectedWorkerFactory {
 
     async fn release_session(&self, session_id: &SessionId) {
         self.selector.release_session(session_id).await;
+    }
+
+    async fn shutdown(&self) {
+        self.selector.shutdown().await;
     }
 
     fn can_select(&self, preference: &EnginePreference) -> bool {

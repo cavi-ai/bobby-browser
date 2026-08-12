@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Runtime operational metrics expose bounded intent, context, prefill, vision-provider, verification, retry, recovery, and admitted MCP-call counters through `runtime_info` without request content or typed values. `bobby doctor` reports the configured vision timeout, and modern-gauntlet scorecards add provider/model/source dimensions, action counts, fixed failure categories, and engine/provider-separated output.
 - Candidate-grounded fill and extraction actions are index-only: typed values remain inside the runtime, and extraction reads the value from the selected DOM candidate.
 
 ## 0.8.0 - 2026-08-10

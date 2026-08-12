@@ -332,6 +332,8 @@ impl PageRuntime {
                                     .await;
                             }
                             if envelope.command.class() == types::CommandClass::Replayable {
+                                self.adaptive
+                                    .record_retry(observability::RetryClass::Transport);
                                 let remaining = (envelope.deadline - Utc::now())
                                     .to_std()
                                     .unwrap_or(StdDuration::ZERO);

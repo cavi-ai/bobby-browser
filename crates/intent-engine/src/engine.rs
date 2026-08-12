@@ -2,6 +2,10 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
 use dom_engine::{resolve_candidates, Candidate, ResolutionDecision, ResolutionPolicy};
+use observability::{
+    OperationalMetrics, ProviderMode, VerificationMetricResult, VisionProposalMetric,
+    VisionProposalOutcome,
+};
 use types::{
     CaptureScreenshotCommand, ClickCommand, CommandError, ControlAction, ControlActionCommand,
     ErrorCode, ErrorLayer, Evidence, ExecutionRecord, ExtractValueKind, FillValue,
@@ -323,8 +327,10 @@ async fn batch_prefill(
         return;
     };
     let mut batch = Vec::new();
+    let metric_context = assist.operational_metrics();
     for purpose in purposes {
-        let Ok(proposal) = assist
+        let propose_started = std::time::Instant::now();
+        let proposal = match assist
             .propose(VisionProposeRequest {
                 purpose: purpose.clone(),
                 intent_kind: "fill".to_owned(),
@@ -333,15 +339,40 @@ async fn batch_prefill(
                 context: vision.prompt_context.clone(),
             })
             .await
-        else {
-            continue;
+        {
+            Ok(proposal) => proposal,
+            Err(_) => {
+                record_vision_metric(
+                    metric_context.as_ref(),
+                    propose_started.elapsed().as_millis() as u64,
+                    None,
+                    VisionProposalOutcome::Failed,
+                    None,
+                );
+                continue;
+            }
         };
+        let latency_ms = propose_started.elapsed().as_millis() as u64;
         if proposal.confidence < VISION_CONFIDENCE_FLOOR {
+            record_vision_metric(
+                metric_context.as_ref(),
+                latency_ms,
+                Some(proposal.confidence),
+                VisionProposalOutcome::Rejected,
+                Some(VerificationMetricResult::OtherRejected),
+            );
             continue;
         }
         // Only coordinate actions are cached; a TypeText or ExtractValue
         // proposal carries what the user typed and is never stored.
         if let VisionAction::Click { x, y } = proposal.action {
+            record_vision_metric(
+                metric_context.as_ref(),
+                latency_ms,
+                Some(proposal.confidence),
+                VisionProposalOutcome::Accepted,
+                Some(VerificationMetricResult::Accepted),
+            );
             batch.push((
                 purpose,
                 crate::CachedProposal {
@@ -350,6 +381,14 @@ async fn batch_prefill(
                     confidence: proposal.confidence,
                 },
             ));
+        } else {
+            record_vision_metric(
+                metric_context.as_ref(),
+                latency_ms,
+                Some(proposal.confidence),
+                VisionProposalOutcome::Rejected,
+                Some(VerificationMetricResult::OtherRejected),
+            );
         }
     }
     if !batch.is_empty() {
@@ -1846,6 +1885,8 @@ async fn escalate_extract_field_with_vision(
         .collect();
 
     let screenshot_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &png);
+    let propose_started = std::time::Instant::now();
+    let metric_context = assist.operational_metrics();
     let proposal = match assist
         .propose(VisionProposeRequest {
             purpose: field.purpose.clone(),
@@ -1858,6 +1899,13 @@ async fn escalate_extract_field_with_vision(
     {
         Ok(proposal) => proposal,
         Err(_) => {
+            record_vision_metric(
+                metric_context.as_ref(),
+                propose_started.elapsed().as_millis() as u64,
+                None,
+                VisionProposalOutcome::Failed,
+                None,
+            );
             screenshot_evidence.push(missing_extraction(
                 &field.name,
                 Some(ErrorCode::VisionAssistFailed),
@@ -1865,6 +1913,7 @@ async fn escalate_extract_field_with_vision(
             return screenshot_evidence;
         }
     };
+    let provider_latency_ms = propose_started.elapsed().as_millis() as u64;
 
     let value = match &proposal.action {
         VisionAction::ExtractValue { value } if proposal.confidence >= VISION_CONFIDENCE_FLOOR => {
@@ -1881,6 +1930,21 @@ async fn escalate_extract_field_with_vision(
         _ => None,
     };
     let error_code = value.is_none().then_some(ErrorCode::VisionAssistFailed);
+    record_vision_metric(
+        metric_context.as_ref(),
+        provider_latency_ms,
+        Some(proposal.confidence),
+        if value.is_some() {
+            VisionProposalOutcome::Accepted
+        } else {
+            VisionProposalOutcome::Rejected
+        },
+        Some(if value.is_some() {
+            VerificationMetricResult::Accepted
+        } else {
+            VerificationMetricResult::OtherRejected
+        }),
+    );
 
     if let Some(corpus) = &vision.corpus {
         let context_candidates = prompt_window
@@ -2146,6 +2210,9 @@ async fn stuck_outcome_with_prior_evidence(
             {
                 Ok(mut act_evidence) => {
                     tracing::info!(intent = intent_kind, "vision.prefill_hit");
+                    if let Some((metrics, _)) = assist.operational_metrics() {
+                        metrics.record_prefill(observability::PrefillOutcome::Hit);
+                    }
                     let mut evidence = prior_evidence;
                     evidence.append(&mut act_evidence);
                     let artifact_ids = artifact_ids_from(&evidence);
@@ -2168,9 +2235,14 @@ async fn stuck_outcome_with_prior_evidence(
                     // A cached proposal that cannot be executed is dropped,
                     // never retried; live escalation proceeds unchanged.
                     tracing::info!(intent = intent_kind, "vision.prefill_entry_dropped");
+                    if let Some((metrics, _)) = assist.operational_metrics() {
+                        metrics.record_prefill(observability::PrefillOutcome::DroppedEntry);
+                    }
                     proposals.drop_proposal(page_id, &key);
                 }
             }
+        } else if let Some((metrics, _)) = assist.operational_metrics() {
+            metrics.record_prefill(observability::PrefillOutcome::Miss);
         }
     }
 
@@ -2302,6 +2374,7 @@ async fn escalate_with_vision(
         )
     });
     let propose_started = std::time::Instant::now();
+    let metric_context = assist.operational_metrics();
     let proposal = match assist
         .propose(VisionProposeRequest {
             purpose: purpose.clone().unwrap_or_default(),
@@ -2314,6 +2387,13 @@ async fn escalate_with_vision(
     {
         Ok(proposal) => proposal,
         Err(error) => {
+            record_vision_metric(
+                metric_context.as_ref(),
+                propose_started.elapsed().as_millis() as u64,
+                None,
+                VisionProposalOutcome::Failed,
+                None,
+            );
             let mut evidence = base_evidence;
             evidence.append(&mut screenshot_evidence);
             return IntentOutcome::Failed {
@@ -2328,13 +2408,21 @@ async fn escalate_with_vision(
         }
     };
 
+    let provider_latency_ms = propose_started.elapsed().as_millis() as u64;
     tracing::info!(
         intent = intent_kind,
-        latency_ms = propose_started.elapsed().as_millis() as u64,
+        latency_ms = provider_latency_ms,
         "vision.provider_round_trip"
     );
     let proposal_hash = proposal_sha256(&proposal);
     if proposal.confidence < VISION_CONFIDENCE_FLOOR {
+        record_vision_metric(
+            metric_context.as_ref(),
+            provider_latency_ms,
+            Some(proposal.confidence),
+            VisionProposalOutcome::Rejected,
+            Some(VerificationMetricResult::OtherRejected),
+        );
         tracing::info!(
             intent = intent_kind,
             confidence = proposal.confidence,
@@ -2406,6 +2494,13 @@ async fn escalate_with_vision(
     {
         Ok(evidence) => evidence,
         Err(error) => {
+            record_vision_metric(
+                metric_context.as_ref(),
+                provider_latency_ms,
+                Some(proposal.confidence),
+                VisionProposalOutcome::Rejected,
+                Some(VerificationMetricResult::OtherRejected),
+            );
             record_escalation(
                 &corpus,
                 corpus_inputs.as_ref(),
@@ -2471,6 +2566,13 @@ async fn escalate_with_vision(
         None,
         resolved,
     );
+    record_vision_metric(
+        metric_context.as_ref(),
+        provider_latency_ms,
+        Some(proposal.confidence),
+        VisionProposalOutcome::Accepted,
+        Some(VerificationMetricResult::Accepted),
+    );
     evidence.push(intent_evidence(execution_record_with_path(
         intent_kind,
         purpose,
@@ -2485,6 +2587,27 @@ async fn escalate_with_vision(
         },
     )));
     IntentOutcome::Completed { evidence }
+}
+
+fn record_vision_metric(
+    metric_context: Option<&(OperationalMetrics, ProviderMode)>,
+    latency_ms: u64,
+    confidence: Option<f32>,
+    outcome: VisionProposalOutcome,
+    verification: Option<VerificationMetricResult>,
+) {
+    let Some((metrics, provider_mode)) = metric_context else {
+        return;
+    };
+    metrics.record_vision_proposal(VisionProposalMetric {
+        provider_mode: *provider_mode,
+        latency_ms,
+        confidence: confidence.map(f64::from),
+        outcome,
+    });
+    if let Some(verification) = verification {
+        metrics.record_verification(verification);
+    }
 }
 
 /// Write one corpus record for a terminal escalation branch. No-ops unless

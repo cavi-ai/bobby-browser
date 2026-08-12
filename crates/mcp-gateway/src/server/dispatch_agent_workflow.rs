@@ -1036,12 +1036,45 @@ fn interface_failure_outcome(
     types::CommandOutcome::Failed {
         command_id,
         error: types::CommandError {
-            code: types::ErrorCode::Internal,
-            message: "runtime interface request failed".into(),
+            code: command_error_code(error.code),
+            // Job outcomes surface over MCP, so the message follows the same
+            // redaction rule as interface_error_response: only allowlisted
+            // operator diagnostics cross verbatim.
+            message: if error
+                .message
+                .starts_with(super::BROWSER_LAUNCH_DIAGNOSTIC_PREFIX)
+            {
+                error.message
+            } else {
+                "runtime interface request failed".into()
+            },
             layer: types::ErrorLayer::Interface,
             retryable: error.retryable,
         },
         evidence: Vec::new(),
+    }
+}
+
+/// Canonical mapping from the interface error canon to the command error
+/// canon; codes without a command-side counterpart collapse to the nearest
+/// classification, never to a blanket `Internal`.
+fn command_error_code(code: types::InterfaceErrorCode) -> types::ErrorCode {
+    use types::{ErrorCode, InterfaceErrorCode};
+    match code {
+        InterfaceErrorCode::InvalidRequest
+        | InterfaceErrorCode::UnsupportedInterfaceVersion
+        | InterfaceErrorCode::InvalidIdempotencyKey
+        | InterfaceErrorCode::IdempotencyConflict => ErrorCode::InvalidRequest,
+        InterfaceErrorCode::DeadlineExceeded => ErrorCode::DeadlineExceeded,
+        InterfaceErrorCode::NotFound => ErrorCode::NotFound,
+        InterfaceErrorCode::ResourceExhausted => ErrorCode::ResourceExhausted,
+        InterfaceErrorCode::MissingCapability
+        | InterfaceErrorCode::AuthenticationFailed
+        | InterfaceErrorCode::TokenExpired
+        | InterfaceErrorCode::MalformedScope
+        | InterfaceErrorCode::ArtifactDenied
+        | InterfaceErrorCode::UnsupportedOperation => ErrorCode::PolicyDenied,
+        InterfaceErrorCode::Internal => ErrorCode::Internal,
     }
 }
 

@@ -26,10 +26,13 @@ fn scorecard_counts_commands_snapshots_and_vision_outcomes() {
     assert_eq!(scorecard.engine, "chromium");
     assert!(scorecard.passed);
     assert_eq!(scorecard.tool_calls, 3);
+    assert_eq!(scorecard.action_count, 2);
     assert_eq!(scorecard.wall_ms, 130);
     assert_eq!(scorecard.snapshots_taken, 1);
     assert_eq!(scorecard.vision_escalations_attempted, 1);
     assert_eq!(scorecard.vision_escalations_accepted, 1);
+    assert_eq!(scorecard.vision_source, scorecard::VisionSource::Fallback);
+    assert_eq!(scorecard.context_source, scorecard::ContextSource::None);
 }
 
 #[test]

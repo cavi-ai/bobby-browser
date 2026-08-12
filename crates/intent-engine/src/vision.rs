@@ -11,6 +11,53 @@ pub const VISION_CONFIDENCE_FLOOR: f32 = 0.75;
 #[async_trait]
 pub trait VisionAssist: Send + Sync {
     async fn propose(&self, request: VisionProposeRequest) -> Result<VisionProposal, CommandError>;
+
+    /// Process-local aggregate metrics for this provider boundary. Providers
+    /// that are not attached to a runtime registry preserve legacy behavior.
+    fn operational_metrics(
+        &self,
+    ) -> Option<(
+        observability::OperationalMetrics,
+        observability::ProviderMode,
+    )> {
+        None
+    }
+
+    fn provider_mode(&self) -> observability::ProviderMode {
+        observability::ProviderMode::DirectLocal
+    }
+}
+
+struct InstrumentedVisionAssist {
+    inner: std::sync::Arc<dyn VisionAssist>,
+    metrics: observability::OperationalMetrics,
+}
+
+#[async_trait]
+impl VisionAssist for InstrumentedVisionAssist {
+    async fn propose(&self, request: VisionProposeRequest) -> Result<VisionProposal, CommandError> {
+        self.inner.propose(request).await
+    }
+
+    fn operational_metrics(
+        &self,
+    ) -> Option<(
+        observability::OperationalMetrics,
+        observability::ProviderMode,
+    )> {
+        Some((self.metrics.clone(), self.inner.provider_mode()))
+    }
+
+    fn provider_mode(&self) -> observability::ProviderMode {
+        self.inner.provider_mode()
+    }
+}
+
+pub fn instrument_vision_assist(
+    inner: std::sync::Arc<dyn VisionAssist>,
+    metrics: observability::OperationalMetrics,
+) -> std::sync::Arc<dyn VisionAssist> {
+    std::sync::Arc::new(InstrumentedVisionAssist { inner, metrics })
 }
 
 #[derive(Debug, Clone)]

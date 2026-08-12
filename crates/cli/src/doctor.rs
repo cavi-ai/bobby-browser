@@ -875,6 +875,10 @@ pub(crate) fn run_doctor(
     };
 
     if let Some(config) = &config {
+        report.ok(
+            "vision-timeout",
+            format!("{} ms configured", config.vision.timeout_ms),
+        );
         if let Some(check) = check_vision_config_dual(config) {
             push_doctor_check(&mut report, check);
         }

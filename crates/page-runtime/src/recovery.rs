@@ -94,6 +94,7 @@ pub enum RecoveryError {
 pub struct RecoveryCoordinator {
     store: CheckpointStore,
     workers: Option<Arc<WorkerPool>>,
+    operational_metrics: Option<observability::OperationalMetrics>,
 }
 
 pub struct VerifiedRecoveryCheckpoint {
@@ -158,6 +159,7 @@ impl RecoveryCoordinator {
         Self {
             store,
             workers: None,
+            operational_metrics: None,
         }
     }
 
@@ -165,7 +167,13 @@ impl RecoveryCoordinator {
         Self {
             store,
             workers: Some(workers),
+            operational_metrics: None,
         }
+    }
+
+    pub fn with_operational_metrics(mut self, metrics: observability::OperationalMetrics) -> Self {
+        self.operational_metrics = Some(metrics);
+        self
     }
 
     pub async fn save_verified(
@@ -258,13 +266,22 @@ impl RecoveryCoordinator {
         verified: &mut VerifiedRecoveryCheckpoint,
         replace_session: bool,
     ) -> Result<RecoveryDecision, RecoveryError> {
-        verified.verify_unchanged().await?;
-        self.stabilize_recovery_pool(&verified.checkpoint().session_id, replace_session)
-            .await?;
-        let prepared = self
-            .reattach_recovery_pool(verified.checkpoint().clone())
-            .await?;
-        self.complete_prepared_recovery(verified, prepared).await
+        let result = async {
+            verified.verify_unchanged().await?;
+            self.stabilize_recovery_pool(&verified.checkpoint().session_id, replace_session)
+                .await?;
+            let prepared = self
+                .reattach_recovery_pool(verified.checkpoint().clone())
+                .await?;
+            self.complete_prepared_recovery(verified, prepared).await
+        }
+        .await;
+        if result.is_err() {
+            if let Some(metrics) = &self.operational_metrics {
+                metrics.record_reconciliation(observability::ReconciliationMetricOutcome::Failed);
+            }
+        }
+        result
     }
 
     pub(crate) async fn stabilize_recovery_pool(
@@ -406,6 +423,19 @@ impl RecoveryCoordinator {
             },
             "checkpoint.reconciled"
         );
+        if let Some(metrics) = &self.operational_metrics {
+            metrics.record_reconciliation(match &decision {
+                RecoveryDecision::Resumed { .. } => {
+                    observability::ReconciliationMetricOutcome::Resumed
+                }
+                RecoveryDecision::NeedsReconciliation { .. } => {
+                    observability::ReconciliationMetricOutcome::NeedsReconciliation
+                }
+                RecoveryDecision::Restarted { .. } => {
+                    observability::ReconciliationMetricOutcome::Restarted
+                }
+            });
+        }
         Ok(decision)
     }
 

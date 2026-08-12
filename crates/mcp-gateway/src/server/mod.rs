@@ -25,9 +25,9 @@ use tokio::{
 use crate::annotations::{tool_annotations, tool_title};
 use crate::notify::{tools_list_changed_frame, NotificationSink};
 use crate::protocol::{
-    error, success, INTERFACE_ERROR, INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST,
-    MAX_EVENT_LIMIT, MAX_FRAME_BYTES, MAX_INPUT_BYTES, MAX_REQUEST_ID_BYTES, MCP_PROTOCOL_VERSION,
-    METHOD_NOT_FOUND, NOT_INITIALIZED, PARSE_ERROR, REQUEST_CANCELLED,
+    error, negotiate_protocol_version, success, INTERFACE_ERROR, INTERNAL_ERROR, INVALID_PARAMS,
+    INVALID_REQUEST, MAX_EVENT_LIMIT, MAX_FRAME_BYTES, MAX_INPUT_BYTES, MAX_REQUEST_ID_BYTES,
+    MCP_PROTOCOL_VERSION, METHOD_NOT_FOUND, NOT_INITIALIZED, PARSE_ERROR, REQUEST_CANCELLED,
 };
 use crate::resources::{static_resource_body, static_resources};
 use crate::schema::{
@@ -48,6 +48,10 @@ mod dispatch_workflow;
 mod tool_dispatch;
 
 const MAX_RESOURCE_ENCODED_BYTES: usize = 768 * 1024;
+/// Only error messages with this prefix may cross the MCP boundary verbatim:
+/// they are written by the runtime as operator-actionable diagnostics and
+/// contain no secrets. Everything else is redacted to the canonical code.
+pub(crate) const BROWSER_LAUNCH_DIAGNOSTIC_PREFIX: &str = "browser launch failed:";
 const MAX_PENDING_CANCELLATIONS: usize = 1024;
 /// How many notification frames `serve` may have queued for the writer before it
 /// stops pulling more off the subscription. See the comment at its use site.
@@ -65,6 +69,35 @@ enum Lifecycle {
     AwaitingInitialize,
     AwaitingInitializedNotification,
     Ready,
+}
+
+fn workflow_call_class(name: &str) -> observability::WorkflowCallClass {
+    use observability::WorkflowCallClass;
+
+    if name.starts_with("job_") {
+        WorkflowCallClass::Job
+    } else if name.starts_with("artifact_") || name == "download_url" {
+        WorkflowCallClass::Artifact
+    } else if name.contains("recover") || name.contains("checkpoint") {
+        WorkflowCallClass::Recovery
+    } else if matches!(
+        name,
+        "fill_and_submit_form" | "extract_structured" | "workflow_observe"
+    ) {
+        WorkflowCallClass::CompositeWorkflow
+    } else if matches!(name, "runtime_info" | "session_create" | "session_close") {
+        WorkflowCallClass::Lifecycle
+    } else if name.ends_with("_list") || name == "tools_search" {
+        WorkflowCallClass::Discovery
+    } else if name.starts_with("context_")
+        || name.starts_with("events_")
+        || name.contains("snapshot")
+        || matches!(name, "page_get" | "network_log")
+    {
+        WorkflowCallClass::Read
+    } else {
+        WorkflowCallClass::Mutation
+    }
 }
 
 /// MCP JSON-RPC server for one authenticated principal.
@@ -92,6 +125,7 @@ pub struct Server {
     toolset: std::sync::Mutex<crate::toolset::Toolset>,
     /// Optional job scheduler. When absent, job_* tools are not advertised.
     jobs: Option<Arc<dyn crate::jobs::JobPort>>,
+    operational_metrics: Option<observability::OperationalMetrics>,
 }
 
 impl Server {
@@ -110,7 +144,10 @@ impl Server {
         resources: ArtifactResources,
     ) -> Self {
         let handle = runtime.capability_handle();
-        Self::for_interface(runtime, handle, events, resources)
+        let operational_metrics = runtime.operational_metrics();
+        let mut server = Self::for_interface(runtime, handle, events, resources);
+        server.operational_metrics = Some(operational_metrics);
+        server
     }
 
     pub fn for_interface(
@@ -136,6 +173,7 @@ impl Server {
             shutting_down: AtomicBool::new(false),
             toolset: std::sync::Mutex::new(crate::toolset::Toolset::from_env().unwrap_or_default()),
             jobs: None,
+            operational_metrics: None,
         }
     }
 
@@ -219,9 +257,7 @@ impl Server {
             let Ok(parsed) = parsed else {
                 return id.map(|id| error(id, INVALID_PARAMS, "Invalid params", None));
             };
-            if parsed.protocol_version != MCP_PROTOCOL_VERSION
-                || !bounded_client_capabilities(&parsed.capabilities)
-            {
+            if !bounded_client_capabilities(&parsed.capabilities) {
                 return id.map(|id| {
                     error(
                         id,
@@ -231,6 +267,7 @@ impl Server {
                     )
                 });
             }
+            let negotiated = negotiate_protocol_version(&parsed.protocol_version);
             // A re-`initialize` is a session reset, not a protocol error: MCP
             // clients over streamable HTTP call `initialize` on every
             // reconnect. The reset clears stale cancellation state; in-flight
@@ -242,7 +279,7 @@ impl Server {
                 success(
                     id,
                     json!({
-                        "protocolVersion": MCP_PROTOCOL_VERSION,
+                        "protocolVersion": negotiated,
                         "capabilities": {
                             "tools": {"listChanged": true},
                             "resources": {"subscribe": false, "listChanged": false},
@@ -843,6 +880,9 @@ impl Server {
         if let Err(violation) = validate_tool_arguments(&call.name, &call.arguments) {
             return invalid_params(id, Some(violation));
         }
+        if let Some(metrics) = &self.operational_metrics {
+            metrics.record_workflow_call(workflow_call_class(&call.name));
+        }
         self.dispatch_named_tool(id, call, context).await
     }
 
@@ -1325,10 +1365,10 @@ fn bounded_parse<T: DeserializeOwned>(value: Value) -> Result<T, ()> {
 }
 
 fn to_json<T: serde::Serialize>(value: T) -> interface_core::InterfaceResult<Value> {
-    serde_json::to_value(value).map_err(|_| types::InterfaceError {
+    serde_json::to_value(value).map_err(|error| types::InterfaceError {
         code: types::InterfaceErrorCode::Internal,
         layer: types::ErrorLayer::Interface,
-        message: "runtime interface request failed".to_owned(),
+        message: format!("failed to serialize runtime response: {error}"),
         correlation_id: types::CorrelationId::new(),
         command_id: None,
         retryable: false,
@@ -1406,9 +1446,11 @@ fn interface_error_response(id: Value, mut interface_error: types::InterfaceErro
         ),
         None => format!("Runtime interface error: {code}"),
     };
+    // MCP clients are external agents: the message may carry secrets, so only
+    // an allowlisted, operator-actionable diagnostic crosses this boundary.
     let safe_diagnostic = interface_error
         .message
-        .starts_with("browser launch failed:")
+        .starts_with(BROWSER_LAUNCH_DIAGNOSTIC_PREFIX)
         .then(|| interface_error.message.clone());
     interface_error.message = "runtime interface request failed".to_owned();
     let repair = if safe_diagnostic.is_some() {
@@ -1583,7 +1625,7 @@ fn not_found_error(context: &types::RequestContext) -> types::InterfaceError {
     types::InterfaceError {
         code: types::InterfaceErrorCode::NotFound,
         layer: types::ErrorLayer::Interface,
-        message: "runtime interface request failed".to_owned(),
+        message: "requested resource was not found".to_owned(),
         correlation_id: context.correlation_id.clone(),
         command_id: None,
         retryable: false,

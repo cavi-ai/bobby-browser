@@ -7,6 +7,7 @@ use intent_engine::{
     IntentBrowser, IntentEngine, IntentOutcome, VisionAction, VisionAssist, VisionContext,
     VisionCorpus, VisionPromptCandidate, VisionPromptContext, VisionProposal, VisionProposeRequest,
 };
+use observability::{OperationalMetrics, ProviderMode};
 use types::{
     CaptureScreenshotCommand, ClickCommand, CommandError, ErrorCode, ErrorLayer, Evidence,
     ExtractField, ExtractIntent, ExtractValueKind, IntentCommand, IntentHints,
@@ -99,6 +100,7 @@ impl IntentBrowser for FakeBrowser {
 struct FakeVision {
     proposal: VisionProposal,
     requests: Arc<Mutex<Vec<VisionProposeRequest>>>,
+    metrics: Option<OperationalMetrics>,
 }
 
 #[async_trait]
@@ -107,12 +109,27 @@ impl VisionAssist for FakeVision {
         self.requests.lock().expect("requests").push(request);
         Ok(self.proposal.clone())
     }
+
+    fn operational_metrics(&self) -> Option<(OperationalMetrics, ProviderMode)> {
+        self.metrics
+            .as_ref()
+            .map(|metrics| (metrics.clone(), ProviderMode::DirectLocal))
+    }
 }
 
 fn fake_vision(proposal: VisionProposal) -> Arc<FakeVision> {
     Arc::new(FakeVision {
         proposal,
         requests: Arc::default(),
+        metrics: None,
+    })
+}
+
+fn metric_vision(proposal: VisionProposal, metrics: OperationalMetrics) -> Arc<FakeVision> {
+    Arc::new(FakeVision {
+        proposal,
+        requests: Arc::default(),
+        metrics: Some(metrics),
     })
 }
 
@@ -712,6 +729,7 @@ async fn extract_from_candidate_out_of_range_reports_vision_assist_failed() {
 #[tokio::test]
 async fn successful_candidate_extraction_records_index_without_runtime_value() {
     let secret = "runtime-extracted-secret-4f91";
+    let metrics = OperationalMetrics::default();
     let browser = FakeBrowser {
         candidate_responses: Arc::new(Mutex::new(VecDeque::from([vec![candidate_with_role(
             "link",
@@ -729,10 +747,13 @@ async fn successful_candidate_extraction_records_index_without_runtime_value() {
         &VisionContext {
             session_ok: true,
             capability_ok: true,
-            assist: Some(fake_vision(VisionProposal {
-                confidence: 0.9,
-                action: VisionAction::ExtractFromCandidate { index: 0 },
-            })),
+            assist: Some(metric_vision(
+                VisionProposal {
+                    confidence: 0.9,
+                    action: VisionAction::ExtractFromCandidate { index: 0 },
+                },
+                metrics.clone(),
+            )),
             corpus: Some(VisionCorpus::new(dir.path()).unwrap()),
             ..VisionContext::default()
         },
@@ -747,6 +768,8 @@ async fn successful_candidate_extraction_records_index_without_runtime_value() {
         record["modelResponse"]["action"],
         serde_json::json!({"kind":"extractFromCandidate","index":0})
     );
+    assert_eq!(metrics.snapshot().vision.accepted, 1);
+    assert_eq!(metrics.snapshot().verification.accepted, 1);
 }
 
 #[tokio::test]

@@ -12,6 +12,7 @@ dependencies = [
  "base64 0.23.0",
  "hex",
  "intent-engine",
+ "observability",
  "serde",
  "serde_json",
  "sha2",
@@ -2089,6 +2090,7 @@ dependencies = [
  "base64 0.23.0",
  "dom-engine",
  "hex",
+ "observability",
  "reqwest",
  "serde",
  "serde_json",
@@ -2640,6 +2642,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "types",
 ]
 
 [[package]]
@@ -2725,6 +2728,7 @@ dependencies = [
  "jsonschema",
  "libc",
  "network-engine",
+ "observability",
  "rustix",
  "serde",
  "serde_json",
@@ -3490,6 +3494,7 @@ dependencies = [
  "interface-core",
  "network-engine",
  "node-registry",
+ "observability",
  "page-runtime",
  "serde_json",
  "session-manager",

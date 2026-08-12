@@ -18,3 +18,4 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 config = { path = "../config", version = "0.8.0" }
+types = { path = "../types", version = "0.8.0" }

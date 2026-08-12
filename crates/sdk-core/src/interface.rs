@@ -40,6 +40,10 @@ pub struct AuthenticatedRuntime {
 }
 
 impl AuthenticatedRuntime {
+    pub fn operational_metrics(&self) -> observability::OperationalMetrics {
+        self.inner.operational_metrics()
+    }
+
     /// Wrap `inner` with the principal's live capability handle.
     pub fn new(inner: RuntimeService, authority: CapabilityHandle) -> Self {
         Self::with_idempotency(inner, authority, IdempotencyStore::default())
@@ -419,11 +423,17 @@ impl RuntimeInterface for AuthenticatedRuntime {
             .authorize(&ctx, InterfaceOperation::ReadPage)?;
         self.require_owned_session(&ctx, &session)?;
         if let Some(answer) = self.inner.pages.context().ask(&page, &description) {
+            self.inner
+                .operational_metrics()
+                .record_context_lookup(observability::ContextLookupOutcome::Hit);
             return Ok(Some(answer));
         }
         // Hot miss: a durable-profile runtime answers from the persisted
         // context graph (cold start); any other runtime behaves as before.
         let Some(promotion) = self.inner.pages.context_promotion() else {
+            self.inner
+                .operational_metrics()
+                .record_context_lookup(observability::ContextLookupOutcome::Miss);
             return Ok(None);
         };
         let url = self
@@ -433,7 +443,15 @@ impl RuntimeInterface for AuthenticatedRuntime {
             .await
             .ok()
             .and_then(|page| page.url);
-        Ok(promotion.ask(url.as_deref(), &description).await)
+        let answer = promotion.ask(url.as_deref(), &description).await;
+        self.inner
+            .operational_metrics()
+            .record_context_lookup(if answer.is_some() {
+                observability::ContextLookupOutcome::Hit
+            } else {
+                observability::ContextLookupOutcome::Miss
+            });
+        Ok(answer)
     }
 
     async fn authorize_operation(
@@ -744,23 +762,24 @@ fn command_extra_capabilities(command: &RuntimeCommand) -> Vec<Capability> {
 }
 
 fn map_runtime_error(ctx: &RequestContext, error: RuntimeError) -> InterfaceError {
-    if let RuntimeError::InvalidRequest(message) = &error {
-        if message.starts_with("browser launch failed:") {
-            return error_with(ctx, InterfaceErrorCode::InvalidRequest, message);
-        }
-    }
-    let (code, message) = match error {
-        RuntimeError::NotFound(_) => (
+    // The canonical code classifies the failure; the message must carry the
+    // runtime's detail so operators see the actual cause (e.g. "paired
+    // profile has no browser target discovery") instead of a generic label.
+    let (code, message) = match &error {
+        RuntimeError::NotFound(detail) => (
             InterfaceErrorCode::NotFound,
-            "runtime resource was not found",
+            format!("runtime resource was not found: {detail}"),
         ),
-        RuntimeError::InvalidRequest(_) => (
+        RuntimeError::InvalidRequest(detail) => (
             InterfaceErrorCode::InvalidRequest,
-            "runtime request is invalid",
+            format!("runtime request is invalid: {detail}"),
         ),
-        RuntimeError::Internal(_) => (InterfaceErrorCode::Internal, "runtime operation failed"),
+        RuntimeError::Internal(detail) => (
+            InterfaceErrorCode::Internal,
+            format!("runtime operation failed: {detail}"),
+        ),
     };
-    error_with(ctx, code, message)
+    error_with(ctx, code, &message)
 }
 
 fn internal_error(ctx: &RequestContext) -> InterfaceError {

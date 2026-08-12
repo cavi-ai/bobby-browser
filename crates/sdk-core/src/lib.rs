@@ -10,6 +10,7 @@ use std::sync::Arc;
 use chrono::{Duration, Utc};
 use config::AppConfig;
 use node_registry::NodeRegistry;
+use observability::OperationalMetrics;
 use page_runtime::{
     ExecutionPhaseObserver, NodeSelection, PageRuntime, SessionGate, VisionAssist, VisionGate,
 };
@@ -53,6 +54,7 @@ pub struct RuntimeService {
     /// `visionAssistFailed` repairs diverge on exactly this).
     vision_assist_configured: bool,
     vision_provider_configured: bool,
+    operational_metrics: OperationalMetrics,
 }
 
 struct InFlightGuard {
@@ -88,6 +90,7 @@ impl RuntimeService {
             nodes: Arc::new(NodeRegistry::default()),
             vision_assist_configured: false,
             vision_provider_configured: false,
+            operational_metrics: OperationalMetrics::default(),
             started_at: std::time::Instant::now(),
             in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
@@ -105,6 +108,7 @@ impl RuntimeService {
             nodes: Arc::new(NodeRegistry::default()),
             vision_assist_configured: false,
             vision_provider_configured: false,
+            operational_metrics: OperationalMetrics::default(),
             started_at: std::time::Instant::now(),
             in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
@@ -113,6 +117,11 @@ impl RuntimeService {
     fn with_vision_state(mut self, assist: bool, provider: bool) -> Self {
         self.vision_assist_configured = assist;
         self.vision_provider_configured = provider;
+        self
+    }
+
+    fn with_operational_metrics(mut self, metrics: OperationalMetrics) -> Self {
+        self.operational_metrics = metrics;
         self
     }
 
@@ -126,6 +135,10 @@ impl RuntimeService {
     /// Names of the nodes this runtime can reach.
     pub fn node_names(&self) -> Vec<String> {
         self.nodes.names().map(str::to_owned).collect()
+    }
+
+    pub fn operational_metrics(&self) -> OperationalMetrics {
+        self.operational_metrics.clone()
     }
 
     pub async fn build(config: &AppConfig) -> Result<Self, RuntimeError> {
@@ -234,6 +247,7 @@ impl RuntimeService {
         vision_assist: Option<Arc<dyn VisionAssist>>,
         structured_extractor: Option<Arc<dyn intent_engine::StructuredExtractor>>,
     ) -> Result<Self, RuntimeError> {
+        let operational_metrics = OperationalMetrics::default();
         let journal = Arc::new(
             JsonlJournal::open(&config.storage.journal_path)
                 .await
@@ -243,7 +257,8 @@ impl RuntimeService {
         let checkpoints = checkpoint_store::CheckpointStore::open(&config.storage.checkpoints_dir)
             .await
             .map_err(|error| RuntimeError::Internal(error.to_string()))?;
-        let recovery = RecoveryCoordinator::with_workers(checkpoints.clone(), workers.clone());
+        let recovery = RecoveryCoordinator::with_workers(checkpoints.clone(), workers.clone())
+            .with_operational_metrics(operational_metrics.clone());
         let network = network_engine::NetworkPolicy {
             allow_loopback: config.http.allow_loopback,
             allow_private_network: config.http.allow_private_network,
@@ -267,7 +282,8 @@ impl RuntimeService {
             ),
             network,
         )
-        .with_downloads_root(&config.browser.downloads_dir);
+        .with_downloads_root(&config.browser.downloads_dir)
+        .with_operational_metrics(operational_metrics.clone());
         let nodes = Arc::new(NodeRegistry::from_config(config));
         let provider: Option<Arc<dyn intent_engine::StructuredExtractor>> =
             structured_extractor.or_else(|| nodes.http_structured_extractor());
@@ -303,7 +319,8 @@ impl RuntimeService {
         let sessions = SessionManager::new(workers);
         Ok(Self::with_recovery(sessions, pages, recovery)
             .with_nodes(nodes)
-            .with_vision_state(vision_assist_present, provider_present))
+            .with_vision_state(vision_assist_present, provider_present)
+            .with_operational_metrics(operational_metrics))
     }
 
     pub async fn runtime_info(&self) -> RuntimeInfo {
@@ -328,6 +345,7 @@ impl RuntimeService {
             active_sessions,
             queued_jobs: self.in_flight.load(std::sync::atomic::Ordering::Acquire),
             uptime_ms: self.started_at.elapsed().as_millis() as u64,
+            operational_metrics: Some(self.operational_metrics.snapshot()),
         }
     }
 
