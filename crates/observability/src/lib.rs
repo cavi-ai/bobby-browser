@@ -1,6 +1,9 @@
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 pub mod locks;
+mod operational_metrics;
+
+pub use operational_metrics::*;
 
 pub mod fields {
     //! Standard field names. Bearer tokens, page content, and JS source are

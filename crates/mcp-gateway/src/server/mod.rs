@@ -71,6 +71,35 @@ enum Lifecycle {
     Ready,
 }
 
+fn workflow_call_class(name: &str) -> observability::WorkflowCallClass {
+    use observability::WorkflowCallClass;
+
+    if name.starts_with("job_") {
+        WorkflowCallClass::Job
+    } else if name.starts_with("artifact_") || name == "download_url" {
+        WorkflowCallClass::Artifact
+    } else if name.contains("recover") || name.contains("checkpoint") {
+        WorkflowCallClass::Recovery
+    } else if matches!(
+        name,
+        "fill_and_submit_form" | "extract_structured" | "workflow_observe"
+    ) {
+        WorkflowCallClass::CompositeWorkflow
+    } else if matches!(name, "runtime_info" | "session_create" | "session_close") {
+        WorkflowCallClass::Lifecycle
+    } else if name.ends_with("_list") || name == "tools_search" {
+        WorkflowCallClass::Discovery
+    } else if name.starts_with("context_")
+        || name.starts_with("events_")
+        || name.contains("snapshot")
+        || matches!(name, "page_get" | "network_log")
+    {
+        WorkflowCallClass::Read
+    } else {
+        WorkflowCallClass::Mutation
+    }
+}
+
 /// MCP JSON-RPC server for one authenticated principal.
 ///
 /// Holds the runtime interface, capability guard, event store, and tool catalog.
@@ -96,6 +125,7 @@ pub struct Server {
     toolset: std::sync::Mutex<crate::toolset::Toolset>,
     /// Optional job scheduler. When absent, job_* tools are not advertised.
     jobs: Option<Arc<dyn crate::jobs::JobPort>>,
+    operational_metrics: Option<observability::OperationalMetrics>,
 }
 
 impl Server {
@@ -114,7 +144,10 @@ impl Server {
         resources: ArtifactResources,
     ) -> Self {
         let handle = runtime.capability_handle();
-        Self::for_interface(runtime, handle, events, resources)
+        let operational_metrics = runtime.operational_metrics();
+        let mut server = Self::for_interface(runtime, handle, events, resources);
+        server.operational_metrics = Some(operational_metrics);
+        server
     }
 
     pub fn for_interface(
@@ -140,6 +173,7 @@ impl Server {
             shutting_down: AtomicBool::new(false),
             toolset: std::sync::Mutex::new(crate::toolset::Toolset::from_env().unwrap_or_default()),
             jobs: None,
+            operational_metrics: None,
         }
     }
 
@@ -846,6 +880,9 @@ impl Server {
         };
         if let Err(violation) = validate_tool_arguments(&call.name, &call.arguments) {
             return invalid_params(id, Some(violation));
+        }
+        if let Some(metrics) = &self.operational_metrics {
+            metrics.record_workflow_call(workflow_call_class(&call.name));
         }
         self.dispatch_named_tool(id, call, context).await
     }

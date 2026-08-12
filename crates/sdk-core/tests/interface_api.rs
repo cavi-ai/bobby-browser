@@ -394,6 +394,11 @@ async fn authenticated_runtime_implements_the_versioned_interface() {
     // `visionAssistFailed` diverges on exactly this signal.
     assert!(!info.capabilities.contains(&"vision-assist".to_owned()));
     assert!(!info.capabilities.contains(&"vision-provider".to_owned()));
+    let metrics = info
+        .operational_metrics
+        .expect("current runtimes expose process-local operational metrics");
+    assert_eq!(metrics.vision.attempted, 0);
+    assert_eq!(metrics.workflow_calls.composite_workflow, 0);
     assert!(api.list_sessions(read_context).await.unwrap().is_empty());
 }
 

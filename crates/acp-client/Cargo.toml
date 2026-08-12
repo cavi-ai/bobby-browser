@@ -14,6 +14,7 @@ async-trait.workspace = true
 auth-broker = { path = "../auth-broker", version = "0.8.0" }
 base64.workspace = true
 intent-engine = { path = "../intent-engine", version = "0.8.0" }
+observability = { path = "../observability", version = "0.8.0" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

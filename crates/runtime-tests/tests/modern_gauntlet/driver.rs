@@ -15,7 +15,7 @@ use types::{
 };
 
 use super::scenario::ScenarioServer;
-use super::scorecard::Scorecard;
+use super::scorecard::{ModelTier, ProviderMode, Scorecard};
 
 pub type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -687,9 +687,17 @@ impl ModernRuntime {
 
     pub fn scorecard(&self, passed: bool) -> TestResult<Scorecard> {
         let engine = std::env::var("BOBBY_GAUNTLET_ENGINE").unwrap_or_else(|_| "chromium".into());
-        Ok(Scorecard::from_journal(
+        let provider_mode = ProviderMode::from_label(
+            &std::env::var("BOBBY_GAUNTLET_PROVIDER_MODE").unwrap_or_default(),
+        );
+        let model_tier = ModelTier::from_label(
+            &std::env::var("BOBBY_GAUNTLET_MODEL_TIER").unwrap_or_default(),
+        );
+        Ok(Scorecard::from_journal_with_environment(
             &self.journey,
             engine,
+            provider_mode,
+            model_tier,
             &self.journal_path,
             passed,
         )?)
@@ -701,7 +709,9 @@ impl ModernRuntime {
             self.root.join("scorecard.json"),
             serde_json::to_vec_pretty(&scorecard)?,
         )?;
-        let directory = scorecard_directory().join(&scorecard.engine);
+        let directory = scorecard_directory()
+            .join(&scorecard.engine)
+            .join(scorecard.provider_mode.label());
         std::fs::create_dir_all(&directory)?;
         std::fs::write(
             directory.join(format!("{}.json", scorecard.station)),

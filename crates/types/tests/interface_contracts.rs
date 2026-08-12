@@ -2,7 +2,8 @@ use chrono::{Duration, Utc};
 use serde_json::json;
 use types::{
     Capability, CapabilitySet, ErrorLayer, IdempotencyKey, InterfaceError, InterfaceErrorCode,
-    InterfaceOperation, InterfaceVersion, PrincipalId, RequestContext, CURRENT_INTERFACE_VERSION,
+    InterfaceOperation, InterfaceVersion, PrincipalId, RequestContext, RuntimeInfo,
+    CURRENT_INTERFACE_VERSION,
 };
 use uuid::Uuid;
 
@@ -99,5 +100,25 @@ fn idempotency_conflict_has_a_stable_wire_code() {
     assert_eq!(
         serde_json::to_value(InterfaceErrorCode::IdempotencyConflict).unwrap(),
         json!("idempotencyConflict")
+    );
+}
+
+#[test]
+fn runtime_info_accepts_older_payloads_without_operational_metrics() {
+    let info: RuntimeInfo = serde_json::from_value(json!({
+        "version": "0.8.0",
+        "capabilities": ["sdk"],
+        "active_sessions": 0,
+        "queued_jobs": 0,
+        "uptime_ms": 42
+    }))
+    .unwrap();
+
+    assert!(info.operational_metrics.is_none());
+    assert!(
+        serde_json::to_value(info)
+            .unwrap()
+            .get("operationalMetrics")
+            .is_none()
     );
 }

@@ -20,6 +20,7 @@ thiserror.workspace = true
 tokio.workspace = true
 url.workspace = true
 tracing.workspace = true
+observability = { path = "../observability", version = "0.8.0" }
 types = { path = "../types", version = "0.8.0" }
 
 [dev-dependencies]

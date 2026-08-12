@@ -14,6 +14,7 @@ chrono.workspace = true
 checkpoint-store = { path = "../checkpoint-store", version = "0.8.0" }
 context-store = { path = "../context-store", version = "0.8.0" }
 node-registry = { path = "../node-registry", version = "0.8.0" }
+observability = { path = "../observability", version = "0.8.0" }
 config = { path = "../config", version = "0.8.0" }
 interface-core = { path = "../interface-core", version = "0.8.0" }
 serde_json.workspace = true

@@ -149,6 +149,10 @@ impl StructuredExtractor for HttpVisionAssist {
 
 #[async_trait]
 impl VisionAssist for HttpVisionAssist {
+    fn provider_mode(&self) -> observability::ProviderMode {
+        observability::ProviderMode::Http
+    }
+
     async fn propose(&self, request: VisionProposeRequest) -> Result<VisionProposal, CommandError> {
         let body = ProposeBody {
             purpose: &request.purpose,

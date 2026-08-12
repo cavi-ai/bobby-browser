@@ -7,6 +7,7 @@ use intent_engine::{
     IntentBrowser, IntentEngine, IntentOutcome, VisionAction, VisionAssist, VisionContext,
     VisionCorpus, VisionProposal, VisionProposeRequest, VISION_CONFIDENCE_FLOOR,
 };
+use observability::{OperationalMetrics, ProviderMode};
 use types::{
     CaptureScreenshotCommand, ClickCommand, CommandError, ErrorCode, Evidence, FillIntent,
     FillValue, IntentCommand, IntentHints, IntentResolutionPath, LocateIntent, PageId, TargetSpec,
@@ -152,6 +153,79 @@ fn click_proposal(confidence: f32) -> VisionProposal {
         confidence,
         action: VisionAction::Click { x: 12.0, y: 34.0 },
     }
+}
+
+struct MetricVision {
+    metrics: OperationalMetrics,
+    proposal: VisionProposal,
+}
+
+#[async_trait]
+impl VisionAssist for MetricVision {
+    async fn propose(
+        &self,
+        _request: VisionProposeRequest,
+    ) -> Result<VisionProposal, CommandError> {
+        Ok(self.proposal.clone())
+    }
+
+    fn operational_metrics(&self) -> Option<(OperationalMetrics, ProviderMode)> {
+        Some((self.metrics.clone(), ProviderMode::DirectLocal))
+    }
+}
+
+#[tokio::test]
+async fn vision_metrics_distinguish_rejected_from_verified_actions() {
+    let rejected_metrics = OperationalMetrics::default();
+    let rejected = IntentEngine::execute(
+        &locate(),
+        &PageId::new(),
+        &FakeBrowser::default(),
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(Arc::new(MetricVision {
+                metrics: rejected_metrics.clone(),
+                proposal: click_proposal(VISION_CONFIDENCE_FLOOR - 0.01),
+            })),
+            proposals: None,
+            defer_escalation: false,
+            prompt_context: None,
+            corpus: None,
+        },
+    )
+    .await;
+    assert!(matches!(rejected, IntentOutcome::Failed { .. }));
+    let rejected_snapshot = rejected_metrics.snapshot();
+    assert_eq!(rejected_snapshot.vision.rejected, 1);
+    assert_eq!(rejected_snapshot.vision.accepted, 0);
+    assert_eq!(rejected_snapshot.vision.confidence.below_acceptance, 1);
+
+    let accepted_metrics = OperationalMetrics::default();
+    let accepted = IntentEngine::execute(
+        &locate(),
+        &PageId::new(),
+        &FakeBrowser::default(),
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(Arc::new(MetricVision {
+                metrics: accepted_metrics.clone(),
+                proposal: click_proposal(0.95),
+            })),
+            proposals: None,
+            defer_escalation: false,
+            prompt_context: None,
+            corpus: None,
+        },
+    )
+    .await;
+    assert!(matches!(accepted, IntentOutcome::Completed { .. }));
+    let accepted_snapshot = accepted_metrics.snapshot();
+    assert_eq!(accepted_snapshot.vision.accepted, 1);
+    assert_eq!(accepted_snapshot.vision.rejected, 0);
+    assert_eq!(accepted_snapshot.vision.provider_direct_local, 1);
+    assert_eq!(accepted_snapshot.verification.accepted, 1);
 }
 
 struct RecordingVision {
@@ -1185,6 +1259,7 @@ impl IntentBrowser for FailingClickBrowser {
 struct CountingVision {
     propose_calls: Arc<AtomicUsize>,
     confidence: f32,
+    metrics: OperationalMetrics,
 }
 
 #[async_trait]
@@ -1198,6 +1273,10 @@ impl VisionAssist for CountingVision {
             confidence: self.confidence,
             action: VisionAction::Click { x: 10.0, y: 20.0 },
         })
+    }
+
+    fn operational_metrics(&self) -> Option<(OperationalMetrics, ProviderMode)> {
+        Some((self.metrics.clone(), ProviderMode::DirectLocal))
     }
 }
 
@@ -1250,9 +1329,11 @@ fn text_field(name: &str, purpose: &str) -> types::CompleteFormField {
 async fn complete_form_batches_one_screenshot_for_all_stuck_fields() {
     let propose_calls = Arc::new(AtomicUsize::new(0));
     let screenshot_calls = Arc::new(AtomicUsize::new(0));
+    let metrics = OperationalMetrics::default();
     let assist = Arc::new(CountingVision {
         propose_calls: propose_calls.clone(),
         confidence: 0.9,
+        metrics: metrics.clone(),
     });
     let proposals = Arc::new(RecordingProposals::default());
     // No candidates for any field: every fill gets stuck.
@@ -1304,6 +1385,7 @@ async fn complete_form_batches_one_screenshot_for_all_stuck_fields() {
         .filter(|item| matches!(item, Evidence::IntentExecution { record } if record.resolution_path == IntentResolutionPath::VisionPrefill))
         .count();
     assert_eq!(prefill_records, 3, "every field resolved from the batch");
+    assert_eq!(metrics.snapshot().vision.accepted, 3);
 }
 
 struct CountingScreenshotBrowser {

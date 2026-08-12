@@ -40,6 +40,10 @@ pub struct AuthenticatedRuntime {
 }
 
 impl AuthenticatedRuntime {
+    pub fn operational_metrics(&self) -> observability::OperationalMetrics {
+        self.inner.operational_metrics()
+    }
+
     /// Wrap `inner` with the principal's live capability handle.
     pub fn new(inner: RuntimeService, authority: CapabilityHandle) -> Self {
         Self::with_idempotency(inner, authority, IdempotencyStore::default())
@@ -419,11 +423,17 @@ impl RuntimeInterface for AuthenticatedRuntime {
             .authorize(&ctx, InterfaceOperation::ReadPage)?;
         self.require_owned_session(&ctx, &session)?;
         if let Some(answer) = self.inner.pages.context().ask(&page, &description) {
+            self.inner
+                .operational_metrics()
+                .record_context_lookup(observability::ContextLookupOutcome::Hit);
             return Ok(Some(answer));
         }
         // Hot miss: a durable-profile runtime answers from the persisted
         // context graph (cold start); any other runtime behaves as before.
         let Some(promotion) = self.inner.pages.context_promotion() else {
+            self.inner
+                .operational_metrics()
+                .record_context_lookup(observability::ContextLookupOutcome::Miss);
             return Ok(None);
         };
         let url = self
@@ -433,7 +443,13 @@ impl RuntimeInterface for AuthenticatedRuntime {
             .await
             .ok()
             .and_then(|page| page.url);
-        Ok(promotion.ask(url.as_deref(), &description).await)
+        let answer = promotion.ask(url.as_deref(), &description).await;
+        self.inner.operational_metrics().record_context_lookup(if answer.is_some() {
+            observability::ContextLookupOutcome::Hit
+        } else {
+            observability::ContextLookupOutcome::Miss
+        });
+        Ok(answer)
     }
 
     async fn authorize_operation(
