@@ -26,7 +26,8 @@ use crate::annotations::{tool_annotations, tool_title};
 use crate::notify::{tools_list_changed_frame, NotificationSink};
 use crate::protocol::{
     error, success, INTERFACE_ERROR, INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST,
-    MAX_EVENT_LIMIT, MAX_FRAME_BYTES, MAX_INPUT_BYTES, MAX_REQUEST_ID_BYTES, MCP_PROTOCOL_VERSION,
+    negotiate_protocol_version, MAX_EVENT_LIMIT, MAX_FRAME_BYTES, MAX_INPUT_BYTES,
+    MAX_REQUEST_ID_BYTES, MCP_PROTOCOL_VERSION,
     METHOD_NOT_FOUND, NOT_INITIALIZED, PARSE_ERROR, REQUEST_CANCELLED,
 };
 use crate::resources::{static_resource_body, static_resources};
@@ -257,9 +258,7 @@ impl Server {
             let Ok(parsed) = parsed else {
                 return id.map(|id| error(id, INVALID_PARAMS, "Invalid params", None));
             };
-            if parsed.protocol_version != MCP_PROTOCOL_VERSION
-                || !bounded_client_capabilities(&parsed.capabilities)
-            {
+            if !bounded_client_capabilities(&parsed.capabilities) {
                 return id.map(|id| {
                     error(
                         id,
@@ -269,6 +268,7 @@ impl Server {
                     )
                 });
             }
+            let negotiated = negotiate_protocol_version(&parsed.protocol_version);
             // A re-`initialize` is a session reset, not a protocol error: MCP
             // clients over streamable HTTP call `initialize` on every
             // reconnect. The reset clears stale cancellation state; in-flight
@@ -280,7 +280,7 @@ impl Server {
                 success(
                     id,
                     json!({
-                        "protocolVersion": MCP_PROTOCOL_VERSION,
+                        "protocolVersion": negotiated,
                         "capabilities": {
                             "tools": {"listChanged": true},
                             "resources": {"subscribe": false, "listChanged": false},

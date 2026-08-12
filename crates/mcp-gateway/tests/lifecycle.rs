@@ -409,3 +409,64 @@ async fn initialize_ready(server: &Server) {
         .handle_message(json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}))
         .await;
 }
+
+/// An older revision this gateway speaks is answered with that same revision, and the
+/// session proceeds. Rejecting it with -32602 made the gateway unreachable from any host
+/// pinned to an older revision — the client dropped the connection and bobby-browser never
+/// appeared in its tool list, while `bobby doctor` (which asks for the newest) reported
+/// the gateway healthy.
+#[tokio::test]
+async fn initialize_negotiates_an_older_supported_revision() {
+    for requested in ["2025-06-18", "2025-03-26", "2024-11-05"] {
+        let server = fixture_server(vec![Capability::SessionRead]).await;
+        let initialized = server
+            .handle_message(request(
+                json!(1),
+                "initialize",
+                json!({
+                    "protocolVersion": requested,
+                    "capabilities":{},
+                    "clientInfo":{"name":"older-client","version":"1.0.0"}
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            initialized.get("error").is_none(),
+            "{requested} was rejected: {initialized}"
+        );
+        assert_eq!(initialized["result"]["protocolVersion"], requested);
+
+        server
+            .handle_message(
+                json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}),
+            )
+            .await;
+        let tools = server
+            .handle_message(request(json!(2), "tools/list", json!({})))
+            .await
+            .unwrap();
+        assert!(tools["result"]["tools"].is_array(), "{requested} lost tools");
+    }
+}
+
+/// A revision this gateway does not implement is answered with the newest one it does,
+/// which the spec leaves the client to accept or drop — not an error frame.
+#[tokio::test]
+async fn initialize_offers_the_newest_revision_when_there_is_no_overlap() {
+    let server = fixture_server(vec![Capability::SessionRead]).await;
+    let initialized = server
+        .handle_message(request(
+            json!(1),
+            "initialize",
+            json!({
+                "protocolVersion":"1999-01-01",
+                "capabilities":{},
+                "clientInfo":{"name":"unknown-client","version":"1.0.0"}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(initialized.get("error").is_none());
+    assert_eq!(initialized["result"]["protocolVersion"], "2025-11-25");
+}
