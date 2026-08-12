@@ -901,12 +901,18 @@ async fn run_broker_serve(
         );
     }
     let factory = firefox_companion::selection::compose_worker_factory_warm(&config, selection)?;
-    match durable_profile_id {
+    let serve_result = match durable_profile_id {
         Some(profile_id) => {
-            broker::serve_with_context_promotion(config, startup, factory, profile_id).await?
+            broker::serve_with_context_promotion(config, startup, Arc::clone(&factory), profile_id)
+                .await
         }
-        None => broker::serve_with_worker_factory(config, startup, factory).await?,
-    }
+        None => broker::serve_with_worker_factory(config, startup, Arc::clone(&factory)).await,
+    };
+    // The serve future resolved on the shutdown signal: end shared browser
+    // resources (the Firefox BiDi WebDriver session) before exiting, or the
+    // browser keeps them and refuses later sessions.
+    factory.shutdown().await;
+    serve_result?;
     Ok(())
 }
 
