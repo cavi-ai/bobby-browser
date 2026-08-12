@@ -32,7 +32,7 @@ use crate::{CompanionExtensionObserver, FirefoxCompanionFactory};
 
 struct FirefoxRegistration {
     profile_id: ProfileId,
-    factory: ConfiguredFirefoxFactory,
+    factory: Arc<ConfiguredFirefoxFactory>,
 }
 
 struct ConfiguredFirefoxFactory {
@@ -312,6 +312,51 @@ impl ConfiguredFirefoxFactory {
     }
 }
 
+/// Bind companion servers for every Firefox entry in a selection and publish
+/// their descriptors, without waiting for extension discovery. The
+/// per-session launch path binds only for a 30s window, so an already-paired
+/// extension polling on its own schedule never finds the endpoint. The CLI
+/// calls this at serve startup and keeps the returned handles alive for the
+/// serve's lifetime; a warm handle makes first session attach skip the
+/// bootstrap entirely.
+pub async fn warm_companion_servers(
+    selection: &BrowserSelectionConfig,
+) -> Vec<Arc<CompanionServerHandle>> {
+    let mut handles = Vec::new();
+    for firefox in &selection.firefox {
+        let Ok(config) = FirefoxRuntimeConfig::try_from(firefox.clone()) else {
+            continue;
+        };
+        let attempt = start_bootstrap_attempt(
+            config.companion_bind,
+            config.descriptor_path.clone(),
+            config.pairing_code_ttl,
+            config.attachment_ttl,
+            Arc::new(|_| {}),
+        )
+        .await;
+        match attempt {
+            Ok(attempt) => match attempt.complete_keeping_publication() {
+                Ok(server) => {
+                    tracing::info!(
+                        bind = %config.companion_bind,
+                        descriptor = %config.descriptor_path.display(),
+                        "firefox companion warm: endpoint and descriptor live"
+                    );
+                    handles.push(server);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "firefox companion warm completion failed")
+                }
+            },
+            Err(error) => {
+                tracing::warn!(error = %error.message, "firefox companion warm bind failed")
+            }
+        }
+    }
+    handles
+}
+
 async fn start_bootstrap_attempt(
     companion_bind: SocketAddr,
     descriptor_path: PathBuf,
@@ -360,6 +405,18 @@ impl FirefoxBootstrapAttempt {
             publication.cleanup()?;
         }
         Ok(self.server.take().expect("bootstrap server must exist"))
+    }
+
+    /// Complete while keeping the descriptor published: the native host
+    /// reads it whenever the extension (or a manual Pair) connects, so the
+    /// warm path must not unpublish on completion. The publication lives as
+    /// long as the returned server handle.
+    fn complete_keeping_publication(mut self) -> std::io::Result<Arc<CompanionServerHandle>> {
+        let server = self.server.take().expect("bootstrap server must exist");
+        // Leak the publication into the server's lifetime: dropping the
+        // attempt would unpublish, so forget it deliberately.
+        std::mem::forget(self);
+        Ok(server)
     }
 }
 
@@ -546,6 +603,18 @@ pub fn compose_worker_factory(
     compose_worker_factory_with_pairing_observer(config, selection, Arc::new(|_| {}))
 }
 
+/// Compose with companion servers warmed: each Firefox factory binds its
+/// companion endpoint and publishes its descriptor at startup, so a paired
+/// extension discovers the server whenever it polls — the per-session
+/// bootstrap's 30s discovery window never aligns with the extension's
+/// schedule. Used by `bobby serve`; tests use the cold compose.
+pub fn compose_worker_factory_warm(
+    config: &AppConfig,
+    selection: BrowserSelectionConfig,
+) -> Result<Arc<dyn WorkerFactory>> {
+    compose_worker_factory_inner(config, selection, Arc::new(|_| {}), None, true)
+}
+
 pub fn compose_worker_factory_with_pairing_observer(
     config: &AppConfig,
     selection: BrowserSelectionConfig,
@@ -573,6 +642,16 @@ fn compose_worker_factory_with_enrollment(
     selection: BrowserSelectionConfig,
     pairing_code_observer: Arc<dyn Fn(&str) + Send + Sync>,
     enrollment: Option<EnrolledFirefoxProfile>,
+) -> Result<Arc<dyn WorkerFactory>> {
+    compose_worker_factory_inner(config, selection, pairing_code_observer, enrollment, false)
+}
+
+fn compose_worker_factory_inner(
+    config: &AppConfig,
+    selection: BrowserSelectionConfig,
+    pairing_code_observer: Arc<dyn Fn(&str) + Send + Sync>,
+    enrollment: Option<EnrolledFirefoxProfile>,
+    warm: bool,
 ) -> Result<Arc<dyn WorkerFactory>> {
     let firefox_artifacts = ArtifactStore::new(
         config.browser.artifacts_dir.clone(),
@@ -613,7 +692,7 @@ fn compose_worker_factory_with_enrollment(
                 };
                 FirefoxRegistration {
                     profile_id: config.profile_id.clone(),
-                    factory: ConfiguredFirefoxFactory {
+                    factory: Arc::new(ConfiguredFirefoxFactory {
                         config,
                         required: firefox_required,
                         pairing_code_observer: Arc::clone(&pairing_code_observer),
@@ -622,7 +701,7 @@ fn compose_worker_factory_with_enrollment(
                         upload_roots: firefox_upload_roots.clone(),
                         downloads_dir: firefox_downloads_dir.clone(),
                         bidi: Mutex::new(None),
-                    },
+                    }),
                 }
             })
         })
@@ -630,11 +709,56 @@ fn compose_worker_factory_with_enrollment(
     if enrolled.is_some() {
         anyhow::bail!("enrolled Firefox profile is not present in selection configuration");
     }
+    // Warm companion servers into each factory's live slot: the per-session
+    // launch path binds only for a 30s discovery window, so an already-paired
+    // extension polling on its own schedule never aligns. The warm handle
+    // lives in the factory's slot, so first session attach skips bootstrap.
+    if warm {
+        for registration in &firefox {
+            let slot_free = registration
+                .factory
+                .server
+                .try_lock()
+                .map(|guard| guard.is_none())
+                .unwrap_or(false);
+            if !slot_free {
+                continue;
+            }
+            let factory = Arc::clone(&registration.factory);
+            tokio::spawn(async move {
+                let attempt = start_bootstrap_attempt(
+                    factory.config.companion_bind,
+                    factory.config.descriptor_path.clone(),
+                    factory.config.pairing_code_ttl,
+                    factory.config.attachment_ttl,
+                    Arc::clone(&factory.pairing_code_observer),
+                )
+                .await;
+                match attempt {
+                    Ok(attempt) => match attempt.complete_keeping_publication() {
+                        Ok(server) => {
+                            *factory.server.lock().await = Some(server);
+                            tracing::info!(
+                                bind = %factory.config.companion_bind,
+                                "firefox companion warm: endpoint and descriptor live"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "firefox companion warm completion failed")
+                        }
+                    },
+                    Err(error) => {
+                        tracing::warn!(error = %error.message, "firefox companion warm bind failed")
+                    }
+                }
+            });
+        }
+    }
     registrations.extend(firefox.into_iter().map(|registration| {
         FactoryRegistration::negotiated(
             BrowserEngine::Firefox,
             Some(registration.profile_id),
-            Arc::new(registration.factory),
+            registration.factory,
         )
     }));
     let preference = preference(selection.preference)?;

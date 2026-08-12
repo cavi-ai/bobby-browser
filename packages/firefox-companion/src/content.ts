@@ -864,11 +864,17 @@ function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode
   const targetTotals = new Map<string, number>();
   const targetKey = (role: string, name: string): string => `${role}\u0000${name}`;
   const countTargets = (element: Element, depth: number): void => {
-    if (isElementHidden(element)) return;
-    const { role, name } = semantics(element);
-    if (role && name && name !== REDACTED && A11Y_ACTIONABLE_ROLES.has(role)) {
-      const key = targetKey(role, name);
-      targetTotals.set(key, (targetTotals.get(key) ?? 0) + 1);
+    try {
+      if (isElementHidden(element)) return;
+      const { role, name } = semantics(element);
+      if (role && name && name !== REDACTED && A11Y_ACTIONABLE_ROLES.has(role)) {
+        const key = targetKey(role, name);
+        targetTotals.set(key, (targetTotals.get(key) ?? 0) + 1);
+      }
+    } catch {
+      // A node that throws during inspection (hostile DOM, detached style
+      // context) is skipped, never fatal to the snapshot.
+      return;
     }
     if (depth < A11Y_MAX_DEPTH) {
       for (const child of Array.from(element.children).slice(0, 256)) {
@@ -879,7 +885,15 @@ function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode
   countTargets(root, 0);
 
   const build = (element: Element, depth: number): A11yNode | undefined => {
-    const { role, name, sensitive } = semantics(element);
+    let role: string | undefined;
+    let name: string | undefined;
+    let sensitive = false;
+    try {
+      ({ role, name, sensitive } = semantics(element));
+    } catch {
+      // Skip nodes that throw during inspection; never fatal.
+      return undefined;
+    }
     const children: A11yNode[] = [];
     if (depth < A11Y_MAX_DEPTH) {
       for (const child of Array.from(element.children).slice(0, 256)) {
@@ -888,7 +902,13 @@ function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode
         if (built) children.push(built);
       }
     }
-    if (isElementHidden(element)) return undefined;
+    let hidden = false;
+    try {
+      hidden = isElementHidden(element);
+    } catch {
+      hidden = true;
+    }
+    if (hidden) return undefined;
     if (!role) return children.length ? { children } : undefined;
     if (state.remaining <= 0) {
       state.truncated = true;
@@ -898,26 +918,31 @@ function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode
     const node: A11yNode = { role };
     if (name) node.name = name;
     if (["INPUT", "SELECT", "TEXTAREA"].includes(element.tagName)) {
-      const control = element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
-      node.value = controlValue(element, sensitive) ?? "";
-      node.required = control.required;
-      node.disabled = control.disabled;
-      node.invalid = !control.validity.valid;
-      if (element.tagName !== "SELECT") {
-        node.readOnly = (control as HTMLInputElement | HTMLTextAreaElement).readOnly;
+      try {
+        const control = element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+        node.value = controlValue(element, sensitive) ?? "";
+        node.required = control.required;
+        node.disabled = control.disabled;
+        node.invalid = !control.validity.valid;
+        if (element.tagName !== "SELECT") {
+          node.readOnly = (control as HTMLInputElement | HTMLTextAreaElement).readOnly;
+        }
+        if (element.tagName === "INPUT") {
+          const input = control as HTMLInputElement;
+          if (["checkbox", "radio"].includes(input.type)) node.checked = input.checked;
+          const autocomplete = observationString(input.autocomplete);
+          if (autocomplete) node.autocomplete = autocomplete;
+          const valueMin = observationString(input.min);
+          const valueMax = observationString(input.max);
+          if (valueMin) node.valueMin = valueMin;
+          if (valueMax) node.valueMax = valueMax;
+        }
+        const description = observationString(element.getAttribute("aria-description"));
+        if (description) node.description = description;
+      } catch {
+        // Control detail enrichment is best-effort: a hostile control drops
+        // the extras, never the node.
       }
-      if (element.tagName === "INPUT") {
-        const input = control as HTMLInputElement;
-        if (["checkbox", "radio"].includes(input.type)) node.checked = input.checked;
-        const autocomplete = observationString(input.autocomplete);
-        if (autocomplete) node.autocomplete = autocomplete;
-        const valueMin = observationString(input.min);
-        const valueMax = observationString(input.max);
-        if (valueMin) node.valueMin = valueMin;
-        if (valueMax) node.valueMax = valueMax;
-      }
-      const description = observationString(element.getAttribute("aria-description"));
-      if (description) node.description = description;
     }
     if (children.length) node.children = children;
     return node;
