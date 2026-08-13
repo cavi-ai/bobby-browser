@@ -345,7 +345,7 @@ impl FingerprintSession {
         }
 
         if self.browser_flavor == BrowserFlavor::Firefox {
-            if !self.user_agent.contains(&format!("Firefox/")) {
+            if !self.user_agent.contains("Firefox/") {
                 return Err(FingerprintApplyError::Inconsistent(
                     "Firefox persona user-agent must contain Firefox/{major}".into(),
                 ));
