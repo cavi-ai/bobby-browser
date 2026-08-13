@@ -750,6 +750,25 @@ async fn documents_page_with_preview(seed: &str) -> DocumentsPageProbe {
         matches!(outcome, CommandOutcome::Completed { .. }),
         "{outcome:?}"
     );
+    // The documents route renders its form from the SPA bundle, so `Interactive`
+    // (DOMContentLoaded) can land before the file input exists. Snapshotting
+    // straight after the navigate raced the render and failed this test in CI
+    // with "file input target from form snapshot".
+    let outcome = submit(PrimitiveCommand::WaitFor(WaitForCommand {
+        condition: WaitCondition::Element {
+            target: Box::new(TargetSpec {
+                css: Some("input[type=\"file\"]".into()),
+                ..TargetSpec::default()
+            }),
+            state: ElementState::Attached,
+        },
+        timeout_ms: 15_000,
+    }))
+    .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
     let form_snapshot = runtime
         .form_snapshot(&session.id, &page.id, None)
         .await
