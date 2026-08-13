@@ -843,8 +843,18 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
   } catch (_) {}
 
   try {
-    // Headless Chrome reports pdfViewerEnabled === false; desktop Windows
-    // Chrome ships the PDF viewer (true). CreepJS pdfIsDisabled.
+    // Headless reports "denied"; a fresh desktop profile says "default".
+    // CreepJS notificationIsDenied; permissions.query below reads this.
+    if (typeof Notification !== "undefined" && Notification.permission === "denied") {
+      Object.defineProperty(Notification, "permission", {
+        get: cloak(function permission() { return "default"; }),
+        configurable: true,
+      });
+    }
+  } catch (_) {}
+
+  try {
+    // Headless reports pdfViewerEnabled === false; desktop ships true.
     if ("pdfViewerEnabled" in navigator && navigator.pdfViewerEnabled === false) {
       Object.defineProperty(Navigator.prototype, "pdfViewerEnabled", {
         get: cloak(function pdfViewerEnabled() { return true; }),
@@ -854,13 +864,10 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
   } catch (_) {}
 
   try {
-    // Headless Chrome omits the Web Share API; desktop Windows Chrome has
-    // navigator.share/canShare. CreepJS noWebShare checks existence only.
+    // Headless omits Web Share; CreepJS noWebShare checks existence only.
     if (!("share" in navigator)) {
       Object.defineProperty(Navigator.prototype, "share", {
-        value: cloak(function share() {
-          return Promise.reject(new DOMException("Share canceled", "AbortError"));
-        }),
+        value: cloak(function share() {}),
         configurable: true,
         writable: true,
       });
@@ -1824,9 +1831,11 @@ mod tests {
     fn init_script_stays_under_size_budget() {
         let session = crate::create_session(&FingerprintConfig::default().with_session_seed(7));
         let script = build_init_script(&session).unwrap();
+        // Budget raised 40k -> 42k for the Notification.permission /
+        // pdfViewerEnabled / Web Share surfaces (CreepJS like-headless flags).
         assert!(
-            script.len() < 40_000,
-            "init script grew to {} bytes (budget 40k)",
+            script.len() < 42_000,
+            "init script grew to {} bytes (budget 42k)",
             script.len()
         );
     }
