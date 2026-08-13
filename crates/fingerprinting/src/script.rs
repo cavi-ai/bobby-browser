@@ -599,9 +599,16 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
     });
   }
   try {
-    patchWebGl(WebGLRenderingContext && WebGLRenderingContext.prototype);
-    if (typeof WebGL2RenderingContext !== "undefined") {
-      patchWebGl(WebGL2RenderingContext.prototype);
+    // Gecko masks the WebGL renderer natively ("Apple M1, or similar" on
+    // Apple Silicon) in BOTH page and worker scopes. Workers cannot be
+    // wrapped on Gecko (blob+importScripts breaks them), so a page-scope
+    // spoof would contradict the worker's native masked renderer —
+    // CreepJS hasBadWebGL. On Gecko, native masking is the consistent state.
+    if (typeof InstallTrigger === "undefined") {
+      patchWebGl(WebGLRenderingContext && WebGLRenderingContext.prototype);
+      if (typeof WebGL2RenderingContext !== "undefined") {
+        patchWebGl(WebGL2RenderingContext.prototype);
+      }
     }
   } catch (_) {}
 
@@ -732,6 +739,9 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
   } catch (_) {}
 
   try {
+    // Firefox has no userAgentData natively — synthesizing one on Gecko is
+    // itself a tell. Only Blink gets the client-hints surface.
+    if (typeof InstallTrigger !== "undefined") throw 0;
     const hints = P.clientHints || {};
     const brands = hints.brands || [];
     const fullVersionList = hints.fullVersionList || [];
@@ -1615,6 +1625,15 @@ pub fn build_worker_probe_script() -> String {
           ]);
         }
       } catch (_) {}
+      let webglRenderer = null;
+      try {
+        const canvas = new OffscreenCanvas(1, 1);
+        const gl = canvas.getContext("webgl") || canvas.getContext("webgl2");
+        if (gl) {
+          const ext = gl.getExtension("WEBGL_debug_renderer_info");
+          webglRenderer = gl.getParameter(ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER);
+        }
+      } catch (_) {}
       const payload = {
         ua: navigator.userAgent,
         platform: navigator.platform,
@@ -1622,6 +1641,7 @@ pub fn build_worker_probe_script() -> String {
         uaDataPlatform: navigator.userAgentData ? navigator.userAgentData.platform : null,
         uaDataBrands: navigator.userAgentData ? navigator.userAgentData.brands : null,
         highEntropy: highEntropy,
+        webglRenderer: webglRenderer,
         bootstrapApplied: !!globalThis[Symbol.for("bobby.fp.worker")]
       };
       if (typeof postMessage === "function") postMessage(payload);
@@ -1639,6 +1659,15 @@ pub fn build_worker_probe_script() -> String {
             ]);
           }
         } catch (_) {}
+        let webglRenderer = null;
+        try {
+          const canvas = new OffscreenCanvas(1, 1);
+          const gl = canvas.getContext("webgl") || canvas.getContext("webgl2");
+          if (gl) {
+            const ext = gl.getExtension("WEBGL_debug_renderer_info");
+            webglRenderer = gl.getParameter(ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER);
+          }
+        } catch (_) {}
         port.postMessage({
           ua: navigator.userAgent,
           platform: navigator.platform,
@@ -1646,6 +1675,7 @@ pub fn build_worker_probe_script() -> String {
           uaDataPlatform: navigator.userAgentData ? navigator.userAgentData.platform : null,
           uaDataBrands: navigator.userAgentData ? navigator.userAgentData.brands : null,
           highEntropy: highEntropy,
+          webglRenderer: webglRenderer,
           bootstrapApplied: !!globalThis[Symbol.for("bobby.fp.worker")]
         });
       })();

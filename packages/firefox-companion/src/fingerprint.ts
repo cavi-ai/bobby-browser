@@ -120,10 +120,32 @@ export async function getFingerprintProfile(
 ): Promise<FingerprintProfile> {
   const stored = await storage.local.get([FINGERPRINT_PROFILE_KEY]);
   const value = stored[FINGERPRINT_PROFILE_KEY];
-  if (value && typeof value === "object") {
-    return { ...DEFAULT_FINGERPRINT_PROFILE, ...(value as FingerprintProfile) };
-  }
-  return DEFAULT_FINGERPRINT_PROFILE;
+  const profile =
+    value && typeof value === "object"
+      ? { ...DEFAULT_FINGERPRINT_PROFILE, ...(value as FingerprintProfile) }
+      : DEFAULT_FINGERPRINT_PROFILE;
+  return geckoPersona(profile);
+}
+
+/** The shared default profile is a Chromium persona (Chrome UA, client
+ * hints). Serving it on Gecko is a cross-channel lie any detector sees:
+ * the engine is Firefox. Rewrite the engine-visible fields to a Firefox
+ * persona of the same version and platform; the init script gates its
+ * Chrome-only surfaces on engine detection.
+ */
+function geckoPersona(profile: FingerprintProfile): FingerprintProfile {
+  const version = profile.clientHints.fullVersion.split(".")[0] || "131";
+  const platformUa =
+    profile.platform === "MacIntel"
+      ? "Macintosh; Intel Mac OS X 10.15"
+      : profile.platform === "Linux x86_64"
+        ? "X11; Linux x86_64"
+        : "Windows NT 10.0; Win64; x64";
+  return {
+    ...profile,
+    userAgent: `Mozilla/5.0 (${platformUa}; rv:${version}.0) Gecko/20100101 Firefox/${version}.0`,
+    clientHints: { ...profile.clientHints, brands: [], fullVersionList: [] },
+  };
 }
 
 export async function setFingerprintProfile(
@@ -135,8 +157,7 @@ export async function setFingerprintProfile(
 
 /** Collapse whitespace / line comments outside of string literals. */
 function minifyJs(source: string): string {
-  let out = "";
-  let i = 0;
+  let out = "";  let i = 0;
   let inSquote = false;
   let inDquote = false;
   let inTemplate = false;
