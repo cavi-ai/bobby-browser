@@ -464,6 +464,13 @@ pub struct ScreenResolution {
     pub available_height: u32,
     pub color_depth: u32,
     pub pixel_ratio: f64,
+    /// The browser window's own size: smaller than the available area for a
+    /// realistic non-maximized profile. `innerWidth == screen.width` is a
+    /// CreepJS `hasVvpScreenRes` tell, so the window must not fill the screen.
+    #[serde(default)]
+    pub window_width: Option<u32>,
+    #[serde(default)]
+    pub window_height: Option<u32>,
 }
 
 impl Default for ScreenResolution {
@@ -475,6 +482,8 @@ impl Default for ScreenResolution {
             available_height: 1040,
             color_depth: 24,
             pixel_ratio: 1.0,
+            window_width: None,
+            window_height: None,
         }
     }
 }

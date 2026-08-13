@@ -843,6 +843,38 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
   } catch (_) {}
 
   try {
+    // Headless Chrome reports pdfViewerEnabled === false; desktop Windows
+    // Chrome ships the PDF viewer (true). CreepJS pdfIsDisabled.
+    if ("pdfViewerEnabled" in navigator && navigator.pdfViewerEnabled === false) {
+      Object.defineProperty(Navigator.prototype, "pdfViewerEnabled", {
+        get: cloak(function pdfViewerEnabled() { return true; }),
+        configurable: true,
+      });
+    }
+  } catch (_) {}
+
+  try {
+    // Headless Chrome omits the Web Share API; desktop Windows Chrome has
+    // navigator.share/canShare. CreepJS noWebShare checks existence only.
+    if (!("share" in navigator)) {
+      Object.defineProperty(Navigator.prototype, "share", {
+        value: cloak(function share() {
+          return Promise.reject(new DOMException("Share canceled", "AbortError"));
+        }),
+        configurable: true,
+        writable: true,
+      });
+    }
+    if (!("canShare" in navigator)) {
+      Object.defineProperty(Navigator.prototype, "canShare", {
+        value: cloak(function canShare() { return false; }),
+        configurable: true,
+        writable: true,
+      });
+    }
+  } catch (_) {}
+
+  try {
     const originalQuery = navigator.permissions && navigator.permissions.query
       ? navigator.permissions.query.bind(navigator.permissions)
       : null;
@@ -1000,10 +1032,16 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
   } catch (_) {}
 
   try {
-    const ow = P.screenResolution.width;
-    const oh = P.screenResolution.height;
-    const iw = P.screenResolution.availableWidth || ow;
-    const ih = P.screenResolution.availableHeight || oh;
+    const ww = P.screenResolution.windowWidth || P.screenResolution.availableWidth || P.screenResolution.width;
+    const wh = P.screenResolution.windowHeight || P.screenResolution.availableHeight || P.screenResolution.height;
+    const iw = ww;
+    const ih = wh;
+    // Outer bounds wrap the window (side borders + title bar), capped at the
+    // available area so the window never exceeds what the OS would allow.
+    const availW2 = P.screenResolution.availableWidth || P.screenResolution.width;
+    const availH2 = P.screenResolution.availableHeight || P.screenResolution.height;
+    const ow = Math.min(availW2, ww + 8);
+    const oh = Math.min(availH2, wh + 39);
     Object.defineProperty(window, "outerWidth", {
       get: cloak(function outerWidth() { return ow; }),
       configurable: true,

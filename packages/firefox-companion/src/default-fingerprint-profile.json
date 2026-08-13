@@ -10,7 +10,7 @@
     "maxTextureSize": 16384
   },
   "audioHash": "af4915f2cb8eef2d2afa2f5fc271a69e39d6adf4b9e0fe1209299461c22ecaaf",
-  "audioNoiseScale": 1.230953055331563e-07,
+  "audioNoiseScale": 1.230953055331563e-7,
   "fontList": [
     "Arial",
     "Arial Black",
@@ -46,7 +46,9 @@
     "availableWidth": 1920,
     "availableHeight": 1040,
     "colorDepth": 24,
-    "pixelRatio": 1.0
+    "pixelRatio": 1.0,
+    "windowWidth": 1900,
+    "windowHeight": 980
   },
   "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
   "platform": "Win32",

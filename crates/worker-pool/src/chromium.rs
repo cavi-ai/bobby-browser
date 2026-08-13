@@ -121,6 +121,17 @@ impl WorkerFactory for ChromiumWorkerFactory {
         if !self.config.headless {
             builder = builder.with_head();
         }
+        // The fingerprint screen is spoofed at the JS layer, but CSS media
+        // queries are evaluated natively against the real window: a default
+        // 800x600 headless window contradicts a 1920x1080 spoofed screen and
+        // CreepJS's screen query flags it ("like headless"). Size the real
+        // window to the spoofed screen so both channels agree.
+        if self.fingerprint.enabled {
+            builder = builder.window_size(
+                self.fingerprint.screen.width,
+                self.fingerprint.screen.height,
+            );
+        }
         // Chrome's sandbox requires root or unprivileged user namespaces;
         // hosted CI has neither. Honor an explicit opt-out rather than
         // guessing from uid (runners are unprivileged but still blocked).
@@ -780,7 +791,41 @@ impl ChromiumWorker {
         crate::fingerprint_host::ChromiumPageHost { page }
             .apply_fingerprint(plan.as_ref())
             .await
-            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error.to_string()))
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error.to_string()))?;
+
+        // The init script spoofs screen metrics at the JS layer, but the
+        // browser's virtual screen (screen.width, device-width media
+        // queries) is evaluated natively and stays at the headless default
+        // 800x600. Override device metrics to the spoofed profile so every
+        // channel agrees; without this CreepJS's screen query flags the
+        // mismatch ("like headless"). The viewport is the spoofed window
+        // size, smaller than the virtual screen — a pixel-exact full-screen
+        // viewport is itself a tell (hasVvpScreenRes).
+        let (screen_w, screen_h, pixel_ratio, window_w, window_h) = {
+            let config = self.fingerprint.lock().await;
+            let resolution = fingerprinting::ScreenMasker::new(config.screen.clone())
+                .get_spoofed_resolution();
+            (
+                resolution.width,
+                resolution.height,
+                resolution.pixel_ratio,
+                resolution.window_width.unwrap_or(resolution.width),
+                resolution.window_height.unwrap_or(resolution.height),
+            )
+        };
+        if screen_w > 0 && screen_h > 0 {
+            let params = chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams::builder()
+                .width(window_w as i64)
+                .height(window_h as i64)
+                .device_scale_factor(pixel_ratio)
+                .mobile(false)
+                .screen_width(screen_w as i64)
+                .screen_height(screen_h as i64)
+                .build()
+                .map_err(|error| driver_error(ErrorCode::InvalidRequest, error))?;
+            bounded_cdp(page.execute(params), command_failed).await?;
+        }
+        Ok(())
     }
 
     async fn unregister_page_state(
