@@ -803,8 +803,8 @@ impl ChromiumWorker {
         // viewport is itself a tell (hasVvpScreenRes).
         let (screen_w, screen_h, pixel_ratio, window_w, window_h) = {
             let config = self.fingerprint.lock().await;
-            let resolution = fingerprinting::ScreenMasker::new(config.screen.clone())
-                .get_spoofed_resolution();
+            let resolution =
+                fingerprinting::ScreenMasker::new(config.screen.clone()).get_spoofed_resolution();
             (
                 resolution.width,
                 resolution.height,

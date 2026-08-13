@@ -91,15 +91,40 @@ async fn fingerprint_screen_metrics_are_consistent_across_channels() {
 
     assert_eq!(metrics["screenW"], 1920, "screen.width");
     assert_eq!(metrics["screenH"], 1080, "screen.height");
-    assert_eq!(metrics["availH"], 1040, "avail height keeps the taskbar inset");
-    assert_eq!(metrics["mq800"], false, "device-width media query must not see the headless default");
-    assert_eq!(metrics["mq1920"], true, "device-width media query must match the spoofed screen");
-    assert_eq!(metrics["vvpScreenRes"], false, "window must not fill the screen exactly");
-    assert_ne!(metrics["innerW"], metrics["screenW"], "innerWidth must differ from screen.width");
-    assert!(metrics["innerW"].as_u64().unwrap() < metrics["availW"].as_u64().unwrap(),
-            "window fits inside the available area");
-    assert!(metrics["outerH"].as_u64().unwrap() < metrics["screenH"].as_u64().unwrap(),
-            "outer height stays below the full screen");
-    assert_eq!(metrics["pdfViewer"], true, "pdfViewerEnabled matches desktop Chrome");
-    assert_eq!(metrics["hasShare"], true, "Web Share API present as on desktop Chrome");
+    assert_eq!(
+        metrics["availH"], 1040,
+        "avail height keeps the taskbar inset"
+    );
+    assert_eq!(
+        metrics["mq800"], false,
+        "device-width media query must not see the headless default"
+    );
+    assert_eq!(
+        metrics["mq1920"], true,
+        "device-width media query must match the spoofed screen"
+    );
+    assert_eq!(
+        metrics["vvpScreenRes"], false,
+        "window must not fill the screen exactly"
+    );
+    assert_ne!(
+        metrics["innerW"], metrics["screenW"],
+        "innerWidth must differ from screen.width"
+    );
+    assert!(
+        metrics["innerW"].as_u64().unwrap() < metrics["availW"].as_u64().unwrap(),
+        "window fits inside the available area"
+    );
+    assert!(
+        metrics["outerH"].as_u64().unwrap() < metrics["screenH"].as_u64().unwrap(),
+        "outer height stays below the full screen"
+    );
+    assert_eq!(
+        metrics["pdfViewer"], true,
+        "pdfViewerEnabled matches desktop Chrome"
+    );
+    assert_eq!(
+        metrics["hasShare"], true,
+        "Web Share API present as on desktop Chrome"
+    );
 }
