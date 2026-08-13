@@ -11,15 +11,15 @@ publish = false
 hex = { workspace = true }
 anyhow.workspace = true
 async-trait.workspace = true
-artifact-store = { path = "../artifact-store", version = "0.8.0" }
+artifact-store = { path = "../artifact-store", version = "0.9.0" }
 base64.workspace = true
-behavioral-engine = { path = "../behavioral-engine", version = "0.8.0" }
-companion-core = { path = "../companion-core", version = "0.8.0" }
-companion-protocol = { path = "../companion-protocol", version = "0.8.0" }
-config = { path = "../config", version = "0.8.0" }
+behavioral-engine = { path = "../behavioral-engine", version = "0.9.0" }
+companion-core = { path = "../companion-core", version = "0.9.0" }
+companion-protocol = { path = "../companion-protocol", version = "0.9.0" }
+config = { path = "../config", version = "0.9.0" }
 dirs.workspace = true
-dom-engine = { path = "../dom-engine", version = "0.8.0" }
-fingerprinting = { path = "../fingerprinting", version = "0.8.0" }
+dom-engine = { path = "../dom-engine", version = "0.9.0" }
+fingerprinting = { path = "../fingerprinting", version = "0.9.0" }
 futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -27,10 +27,10 @@ sha2.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 tracing.workspace = true
-types = { path = "../types", version = "0.8.0" }
+types = { path = "../types", version = "0.9.0" }
 url.workspace = true
 uuid.workspace = true
-worker-pool = { path = "../worker-pool", version = "0.8.0" }
+worker-pool = { path = "../worker-pool", version = "0.9.0" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

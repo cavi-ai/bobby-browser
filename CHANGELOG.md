@@ -2,8 +2,40 @@
 
 ## Unreleased
 
-- Runtime operational metrics expose bounded intent, context, prefill, vision-provider, verification, retry, recovery, and admitted MCP-call counters through `runtime_info` without request content or typed values. `bobby doctor` reports the configured vision timeout, and modern-gauntlet scorecards add provider/model/source dimensions, action counts, fixed failure categories, and engine/provider-separated output.
+## 0.9.0 - 2026-08-12
+
+### Added
+
+- Runtime operational metrics on `runtime_info`: bounded intent-resolution, context-lookup, prefill, vision-provider, verification, retry, reconciliation, and admitted MCP-call counters, carrying no request content and no typed values. `instrument_vision_assist` wraps a provider so the vision boundary reports its own counters and provider mode.
+- `control_action` returns the controls a form revealed. An action that changes the form diffs the before/after form snapshots and reports each newly appeared control's kind, accessible name, and a verbatim-passable target on the action evidence, on managed Chromium and the Firefox companion both.
+- `intent_submit_and_verify` refuses a pre-satisfied `expectedState`. A text, element, or value condition that already holds before the boundary click fails with `expectedStatePreSatisfied` and never clicks; url, document, and `networkQuiet` conditions legitimately pre-hold and skip the check. The code is wired through the contract test, the advertised enum, the failure taxonomy, and the repair hint.
 - Candidate-grounded fill and extraction actions are index-only: typed values remain inside the runtime, and extraction reads the value from the selected DOM candidate.
+- `Evidence::Download` carries `savedTo`, the file's name below the configured downloads root, across the direct-HTTP, Chromium, and Firefox paths. Journaled and durable-prepared records strip it, so the no-absolute-paths rule for durable state holds.
+- `HINT: role=<role>` row in `BOBBY-VISION/1` prompts, emitted from the role `LocateIntent.hints` already carries. Thinking is suppressed at serve for v1 so the instruct template's empty `<think>` wrapper does not wrap the bare index, and `_parse_index` tolerates that wrapper for adapters trained on thinking-enabled templates.
+- Response prefill in the mlx-vlm provider: `propose` prefills the JSON skeleton onto the assistant turn so completions carry coordinates instead of fenced blocks or a bare action name. Abstain kinds normalize to a zero-coordinate click, whose low confidence fails the runtime floor.
+- `clickCandidate` action and v1 adapter serving, trap-mode corpus growth, and an out-of-sample corpus split for adapter-vs-base generalization evals.
+- Validation weighting in persisted context recall. `ask()` breaks match-ladder ties by a control's validation record — ln-diminished success boost, failure drag, 30-day half-life recency with a half-weight floor. The name-match ladder is untouched, so a fuzzy match can never outrank an exact one.
+- `bobby doctor` reports the configured vision timeout. Modern-gauntlet scorecards carry provider, model, and source dimensions, action counts, fixed failure categories, and engine/provider-separated output.
+
+### Changed
+
+- `initialize` negotiates the MCP protocol revision instead of requiring the newest. The gateway answers with the client's revision when it speaks it — 2025-11-25, 2025-06-18, 2025-03-26, 2024-11-05 — and otherwise with the newest. A non-matching revision no longer fails with `-32602`, which made the gateway unreachable from any host pinned to an older revision.
+- The Firefox companion server binds and publishes its descriptor at `bobby serve` startup, so a paired extension discovers it whenever it polls rather than only inside a per-session 30s window. Serve shutdown ends the shared BiDi connection.
+- `workflow_observe` accepts a target, forwarded to the underlying snapshot, so an observation reads one region instead of the whole page's chrome on every call.
+- The DOM candidate collector roles `ARTICLE` elements, so `a11y_snapshot` target scoping resolves article subtrees.
+- The competitor gauntlet no longer pins the full toolset: the benchmark measures the default `explore` phase a user actually gets.
+- Runtime error detail reaches the operator interface.
+
+### Fixed
+
+- `a11y_snapshot` scoped to an iframe element returns the frame's content. It detects the frame owner through `DOM.describeNode` and returns the content frame's tree with hop-stamped targets, instead of the empty main-frame iframe node.
+- A command that fails because the browser process died revives once instead of wedging the session at a permanent `browser page is not open`: the dead worker retires, a fresh browser launches, the page reopens at its last URL, replayable commands retry transparently, and mutating commands fail with an explicit revival note. The CDP event stream's end is logged with session, worker, and transport detail.
+- `RUST_LOG` output from the stdio gateway goes to stderr, leaving stdout as the protocol channel; `mcp-stdio` previously emitted no logs at all.
+- The a11y tree walk in the Firefox companion catches per node, so a hostile DOM node is skipped instead of failing the whole snapshot with `content action failed`.
+- Vision abstention fails closed.
+- `record_escalation` skips empty-candidate escalations, which mislabelled gather failure as model judgment. The collection harness fails when `BOBBY_GAUNTLET_VISION_ENDPOINT` is unset rather than passing green with zero rows, and the vague-locate sweep reopens a dead page so every purpose reaches the model.
+- Onboarding regression checks are hardened, and the release gates compile on Windows.
+- Firefox install finishes before vision readiness is reported.
 
 ## 0.8.0 - 2026-08-10
 
