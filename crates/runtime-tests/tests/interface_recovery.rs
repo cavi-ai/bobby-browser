@@ -154,6 +154,29 @@ impl BrowserWorker for TestWorker {
     }
 }
 
+/// Phases the journal file holds, in order, for failure diagnostics.
+fn journal_phases(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|record| record["phase"].as_str().map(str::to_owned))
+                .unwrap_or_else(|| "unreadable".to_owned())
+        })
+        .collect()
+}
+
+/// Rebuild a runtime from `path` alone and recover `command_id` through it.
+async fn rebuilt_outcome(path: &Path, command_id: CommandId) -> CommandOutcome {
+    service(path, None)
+        .await
+        .pages
+        .recover_command(command_id)
+        .await
+}
+
 async fn service(path: &Path, observer: Option<Arc<dyn ExecutionPhaseObserver>>) -> RuntimeService {
     let journal = Arc::new(JsonlJournal::open(path).await.unwrap());
     let workers = Arc::new(WorkerPool::new(8, Arc::new(TestFactory)));
@@ -339,11 +362,17 @@ async fn broker_disconnect_after_durable_executing_rebuilds_without_guessing() {
     let _ = server.await;
     observer.release.notify_waiters();
     drop(runtime);
-    let rebuilt = service(&path, None).await;
-    assert!(matches!(
-        rebuilt.pages.recover_command(command_id).await,
-        CommandOutcome::NeedsReconciliation { .. }
-    ));
+    // Both halves are reported, because a bare `assert!(matches!(…))` here failed
+    // once in CI and said only that the outcome was not NeedsReconciliation —
+    // not which recover_command branch ran, and not what the journal held. The
+    // phases separate "the durable executing record is missing" from "a terminal
+    // outcome was journaled after the simulated crash"; they are different bugs.
+    let phases = journal_phases(&path);
+    let outcome = rebuilt_outcome(&path, command_id).await;
+    assert!(
+        matches!(outcome, CommandOutcome::NeedsReconciliation { .. }),
+        "journal phases {phases:?} rebuilt to {outcome:?}"
+    );
 }
 
 #[tokio::test]
