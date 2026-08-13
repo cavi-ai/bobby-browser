@@ -10,7 +10,7 @@
   },
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json --noEmit && esbuild src/background.ts src/content.ts src/popup.ts --bundle --format=iife --platform=browser --outdir=dist && cp manifest.json dist/manifest.json && cp popup.html dist/popup.html && mkdir -p dist/icons && cp -R icons/. dist/icons/",
+    "build": "tsc -p tsconfig.json --noEmit && esbuild src/background.ts src/content.ts src/popup.ts --bundle --format=iife --platform=browser --outdir=dist && node copy-static.mjs",
     "test": "node --import tsx --test test/*.test.ts"
   },
   "devDependencies": {
