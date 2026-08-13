@@ -49,9 +49,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+      # No `version:` input. pnpm/action-setup@v6 errors on a version given both
+      # here and as `packageManager` in package.json, which failed all five
+      # v0.9.0 binary builds. ci.yml, publish.yml, and publish-docs.yml already
+      # take the version from package.json alone.
       - uses: pnpm/action-setup@v6
-        with:
-          version: 10.28.2
       - uses: actions/setup-node@v6
         with:
           node-version: 24.18.1
