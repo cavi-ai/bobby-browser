@@ -33,6 +33,19 @@ async fn installed_firefox_fingerprint_collector_dogfood_passes() {
         creepjs["headlessFlags"]["webDriverIsOn"],
         creepjs["headlessFlags"]["prefersLightColor"],
     );
+    eprintln!(
+        "Firefox like-headless flags: {}",
+        serde_json::to_string_pretty(&creepjs["likeHeadlessFlags"]).unwrap_or_default()
+    );
+    eprintln!(
+        "Firefox stealth flags: {}",
+        serde_json::to_string_pretty(&creepjs["stealthFlags"]).unwrap_or_default()
+    );
+    eprintln!(
+        "Firefox GPU page={:?} worker={:?}",
+        creepjs["pageGpu"],
+        creepjs.pointer("/workerProbe/worker/webglRenderer")
+    );
     assert_eq!(
         creepjs["headlessFlags"]["webDriverIsOn"], false,
         "webDriverIsOn must be false"

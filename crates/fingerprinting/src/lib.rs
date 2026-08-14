@@ -64,6 +64,10 @@ pub struct FingerprintConfig {
     /// When true, init script injects a minimal `window.chrome` object (Chromium only).
     #[serde(default = "default_inject_chrome")]
     pub inject_chrome: bool,
+    /// Browser family the persona presents. Chrome by default; the Firefox
+    /// companion sets Firefox so the UA is a Gecko UA.
+    #[serde(default)]
+    pub browser_flavor: BrowserFlavor,
     #[serde(default = "default_session_seed")]
     pub session_seed: u64,
 }
@@ -85,6 +89,7 @@ impl Default for FingerprintConfig {
             max_touch_points: default_max_touch_points(),
             chrome_major: default_chrome_major(),
             inject_chrome: default_inject_chrome(),
+            browser_flavor: BrowserFlavor::default(),
             session_seed: default_session_seed(),
         }
     }
@@ -186,9 +191,31 @@ impl FingerprintConfig {
         self
     }
 
+    pub fn with_browser_flavor(mut self, flavor: BrowserFlavor) -> Self {
+        self.browser_flavor = flavor;
+        self
+    }
+
     pub fn with_platform(mut self, platform: impl Into<String>) -> Self {
         self.platform = platform.into();
         self
+    }
+}
+
+/// Which browser family the persona presents. Chromium personas carry
+/// Chrome UAs and client hints; Firefox personas carry an rv:/Gecko UA and
+/// must not emit Chrome-only surfaces.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum BrowserFlavor {
+    #[default]
+    Chrome,
+    Firefox,
+}
+
+impl BrowserFlavor {
+    pub fn is_chrome(&self) -> bool {
+        matches!(self, BrowserFlavor::Chrome)
     }
 }
 
@@ -214,6 +241,10 @@ pub struct FingerprintSession {
     pub max_touch_points: u32,
     pub inject_chrome: bool,
     pub client_hints: ClientHintsProfile,
+    /// Persona browser family. Skipped when Chrome so Chromium sessions
+    /// serialize byte-identically to before this field existed.
+    #[serde(default, skip_serializing_if = "BrowserFlavor::is_chrome")]
+    pub browser_flavor: BrowserFlavor,
 }
 
 fn is_lowercase_hex64(value: &str) -> bool {
@@ -311,6 +342,15 @@ impl FingerprintSession {
             return Err(FingerprintApplyError::Inconsistent(
                 "client_hints.full_version must be non-empty".into(),
             ));
+        }
+
+        if self.browser_flavor == BrowserFlavor::Firefox {
+            if !self.user_agent.contains("Firefox/") {
+                return Err(FingerprintApplyError::Inconsistent(
+                    "Firefox persona user-agent must contain Firefox/{major}".into(),
+                ));
+            }
+            return Ok(());
         }
 
         let ua_major = parse_chrome_major_from_ua(&self.user_agent).ok_or_else(|| {
@@ -464,6 +504,13 @@ pub struct ScreenResolution {
     pub available_height: u32,
     pub color_depth: u32,
     pub pixel_ratio: f64,
+    /// The browser window's own size: smaller than the available area for a
+    /// realistic non-maximized profile. `innerWidth == screen.width` is a
+    /// CreepJS `hasVvpScreenRes` tell, so the window must not fill the screen.
+    #[serde(default)]
+    pub window_width: Option<u32>,
+    #[serde(default)]
+    pub window_height: Option<u32>,
 }
 
 impl Default for ScreenResolution {
@@ -475,6 +522,8 @@ impl Default for ScreenResolution {
             available_height: 1040,
             color_depth: 24,
             pixel_ratio: 1.0,
+            window_width: None,
+            window_height: None,
         }
     }
 }
@@ -498,7 +547,8 @@ pub fn create_session(config: &FingerprintConfig) -> FingerprintSession {
 
     let screen_masker = ScreenMasker::new(config.screen.clone());
     let screen_res = screen_masker.get_spoofed_resolution();
-    let user_agent = generate_user_agent(config.chrome_major, &config.platform);
+    let browser_flavor = config.browser_flavor;
+    let user_agent = generate_user_agent(config.chrome_major, &config.platform, browser_flavor);
     let client_hints = ua_ch::build_client_hints(config.chrome_major, &config.platform);
 
     FingerprintSession {
@@ -520,11 +570,22 @@ pub fn create_session(config: &FingerprintConfig) -> FingerprintSession {
         max_touch_points: config.max_touch_points,
         inject_chrome: config.inject_chrome,
         client_hints,
+        browser_flavor,
     }
 }
 
-fn generate_user_agent(chrome_major: u32, platform: &str) -> String {
+fn generate_user_agent(chrome_major: u32, platform: &str, flavor: BrowserFlavor) -> String {
     let major = chrome_major.max(100);
+    if flavor == BrowserFlavor::Firefox {
+        let platform_ua = match platform {
+            "MacIntel" => "Macintosh; Intel Mac OS X 10.15",
+            "Linux x86_64" => "X11; Linux x86_64",
+            _ => "Windows NT 10.0; Win64; x64",
+        };
+        return format!(
+            "Mozilla/5.0 ({platform_ua}; rv:{major}.0) Gecko/20100101 Firefox/{major}.0"
+        );
+    }
     match platform {
         "MacIntel" => format!(
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"

@@ -1154,7 +1154,42 @@ const FIREFOX_CREEPJS_PROBE: &str = r#"(async () => {
     stealthFlags: {
       hasToStringProxy,
       hasBadChromeRuntime,
+      hasIframeProxy: (() => {
+        try {
+          const iframe = document.createElement('iframe');
+          iframe.srcdoc = 'probe';
+          return !!iframe.contentWindow === false;
+        } catch (err) { return true; }
+      })(),
+      hasHighChromeIndex: (() => {
+        try {
+          return Object.keys(window).slice(-50).includes('chrome') &&
+            Object.getOwnPropertyNames(window).slice(-50).includes('chrome');
+        } catch (_) { return false; }
+      })(),
     },
+    likeHeadlessFlags: {
+      noChrome: !('chrome' in window),
+      noPlugins: navigator.plugins ? navigator.plugins.length === 0 : true,
+      notificationIsDenied: ('Notification' in window) && Notification.permission === 'denied',
+      prefersLightColor: matchMedia('(prefers-color-scheme: light)').matches,
+      pdfIsDisabled: ('pdfViewerEnabled' in navigator) && navigator.pdfViewerEnabled === false,
+      noTaskbar: screen.height === screen.availHeight && screen.width === screen.availWidth,
+      hasVvpScreenRes: (innerWidth === screen.width && outerHeight === screen.height),
+      noWebShare: !('share' in navigator) || !('canShare' in navigator),
+      noContentIndex: !('ContentIndex' in window),
+      noContactsManager: !('ContactsManager' in window),
+      noDownlinkMax: !('downlinkMax' in (navigator.connection || {})),
+    },
+    pageGpu: (() => {
+      try {
+        const canvas = document.createElement('canvas');
+        const gl = canvas.getContext('webgl') || canvas.getContext('webgl2');
+        if (!gl) return null;
+        const ext = gl.getExtension('WEBGL_debug_renderer_info');
+        return gl.getParameter(ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER);
+      } catch (_) { return null; }
+    })(),
     platformHint,
     systemFonts: (() => {
       try {

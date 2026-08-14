@@ -18,6 +18,12 @@ pub struct ScreenConfig {
     pub pixel_ratio: f64,
     #[serde(default = "default_taskbar_inset")]
     pub taskbar_inset: u32,
+    /// Explicit browser-window size. When unset the masker computes a
+    /// realistic non-maximized window (screen minus borders).
+    #[serde(default)]
+    pub window_width: Option<u32>,
+    #[serde(default)]
+    pub window_height: Option<u32>,
 }
 
 impl Default for ScreenConfig {
@@ -28,6 +34,8 @@ impl Default for ScreenConfig {
             color_depth: default_color_depth(),
             pixel_ratio: default_pixel_ratio(),
             taskbar_inset: default_taskbar_inset(),
+            window_width: None,
+            window_height: None,
         }
     }
 }
@@ -92,6 +100,17 @@ impl ScreenMasker {
     /// Get the spoofed screen resolution.
     pub fn get_spoofed_resolution(&self) -> ScreenResolution {
         let available_height = self.config.height.saturating_sub(self.config.taskbar_inset);
+        // A real desktop window does not fill the screen: default to a
+        // non-maximized window slightly smaller than the available area so
+        // `innerWidth != screen.width` (CreepJS hasVvpScreenRes stays false).
+        let window_width = self
+            .config
+            .window_width
+            .unwrap_or_else(|| self.config.width.saturating_sub(20));
+        let window_height = self
+            .config
+            .window_height
+            .unwrap_or_else(|| available_height.saturating_sub(60));
 
         ScreenResolution {
             width: self.config.width,
@@ -100,6 +119,8 @@ impl ScreenMasker {
             available_height,
             color_depth: self.config.color_depth,
             pixel_ratio: self.config.pixel_ratio,
+            window_width: Some(window_width),
+            window_height: Some(window_height),
         }
     }
 }

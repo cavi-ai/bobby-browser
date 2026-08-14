@@ -599,9 +599,16 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
     });
   }
   try {
-    patchWebGl(WebGLRenderingContext && WebGLRenderingContext.prototype);
-    if (typeof WebGL2RenderingContext !== "undefined") {
-      patchWebGl(WebGL2RenderingContext.prototype);
+    // Gecko masks the WebGL renderer natively ("Apple M1, or similar" on
+    // Apple Silicon) in BOTH page and worker scopes. Workers cannot be
+    // wrapped on Gecko (blob+importScripts breaks them), so a page-scope
+    // spoof would contradict the worker's native masked renderer —
+    // CreepJS hasBadWebGL. On Gecko, native masking is the consistent state.
+    if (typeof InstallTrigger === "undefined") {
+      patchWebGl(WebGLRenderingContext && WebGLRenderingContext.prototype);
+      if (typeof WebGL2RenderingContext !== "undefined") {
+        patchWebGl(WebGL2RenderingContext.prototype);
+      }
     }
   } catch (_) {}
 
@@ -732,6 +739,9 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
   } catch (_) {}
 
   try {
+    // Firefox has no userAgentData natively — synthesizing one on Gecko is
+    // itself a tell. Only Blink gets the client-hints surface.
+    if (typeof InstallTrigger !== "undefined") throw 0;
     const hints = P.clientHints || {};
     const brands = hints.brands || [];
     const fullVersionList = hints.fullVersionList || [];
@@ -838,6 +848,45 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
       Object.defineProperty(Navigator.prototype, "mimeTypes", {
         get: function () { return mimeTypes; },
         configurable: true,
+      });
+    }
+  } catch (_) {}
+
+  try {
+    // Headless reports "denied"; a fresh desktop profile says "default".
+    // CreepJS notificationIsDenied; permissions.query below reads this.
+    if (typeof Notification !== "undefined" && Notification.permission === "denied") {
+      Object.defineProperty(Notification, "permission", {
+        get: cloak(function permission() { return "default"; }),
+        configurable: true,
+      });
+    }
+  } catch (_) {}
+
+  try {
+    // Headless reports pdfViewerEnabled === false; desktop ships true.
+    if ("pdfViewerEnabled" in navigator && navigator.pdfViewerEnabled === false) {
+      Object.defineProperty(Navigator.prototype, "pdfViewerEnabled", {
+        get: cloak(function pdfViewerEnabled() { return true; }),
+        configurable: true,
+      });
+    }
+  } catch (_) {}
+
+  try {
+    // Headless omits Web Share; CreepJS noWebShare checks existence only.
+    if (!("share" in navigator)) {
+      Object.defineProperty(Navigator.prototype, "share", {
+        value: cloak(function share() {}),
+        configurable: true,
+        writable: true,
+      });
+    }
+    if (!("canShare" in navigator)) {
+      Object.defineProperty(Navigator.prototype, "canShare", {
+        value: cloak(function canShare() { return false; }),
+        configurable: true,
+        writable: true,
       });
     }
   } catch (_) {}
@@ -1000,10 +1049,16 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
   } catch (_) {}
 
   try {
-    const ow = P.screenResolution.width;
-    const oh = P.screenResolution.height;
-    const iw = P.screenResolution.availableWidth || ow;
-    const ih = P.screenResolution.availableHeight || oh;
+    const ww = P.screenResolution.windowWidth || P.screenResolution.availableWidth || P.screenResolution.width;
+    const wh = P.screenResolution.windowHeight || P.screenResolution.availableHeight || P.screenResolution.height;
+    const iw = ww;
+    const ih = wh;
+    // Outer bounds wrap the window (side borders + title bar), capped at the
+    // available area so the window never exceeds what the OS would allow.
+    const availW2 = P.screenResolution.availableWidth || P.screenResolution.width;
+    const availH2 = P.screenResolution.availableHeight || P.screenResolution.height;
+    const ow = Math.min(availW2, ww + 8);
+    const oh = Math.min(availH2, wh + 39);
     Object.defineProperty(window, "outerWidth", {
       get: cloak(function outerWidth() { return ow; }),
       configurable: true,
@@ -1570,6 +1625,15 @@ pub fn build_worker_probe_script() -> String {
           ]);
         }
       } catch (_) {}
+      let webglRenderer = null;
+      try {
+        const canvas = new OffscreenCanvas(1, 1);
+        const gl = canvas.getContext("webgl") || canvas.getContext("webgl2");
+        if (gl) {
+          const ext = gl.getExtension("WEBGL_debug_renderer_info");
+          webglRenderer = gl.getParameter(ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER);
+        }
+      } catch (_) {}
       const payload = {
         ua: navigator.userAgent,
         platform: navigator.platform,
@@ -1577,6 +1641,7 @@ pub fn build_worker_probe_script() -> String {
         uaDataPlatform: navigator.userAgentData ? navigator.userAgentData.platform : null,
         uaDataBrands: navigator.userAgentData ? navigator.userAgentData.brands : null,
         highEntropy: highEntropy,
+        webglRenderer: webglRenderer,
         bootstrapApplied: !!globalThis[Symbol.for("bobby.fp.worker")]
       };
       if (typeof postMessage === "function") postMessage(payload);
@@ -1594,6 +1659,15 @@ pub fn build_worker_probe_script() -> String {
             ]);
           }
         } catch (_) {}
+        let webglRenderer = null;
+        try {
+          const canvas = new OffscreenCanvas(1, 1);
+          const gl = canvas.getContext("webgl") || canvas.getContext("webgl2");
+          if (gl) {
+            const ext = gl.getExtension("WEBGL_debug_renderer_info");
+            webglRenderer = gl.getParameter(ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER);
+          }
+        } catch (_) {}
         port.postMessage({
           ua: navigator.userAgent,
           platform: navigator.platform,
@@ -1601,6 +1675,7 @@ pub fn build_worker_probe_script() -> String {
           uaDataPlatform: navigator.userAgentData ? navigator.userAgentData.platform : null,
           uaDataBrands: navigator.userAgentData ? navigator.userAgentData.brands : null,
           highEntropy: highEntropy,
+          webglRenderer: webglRenderer,
           bootstrapApplied: !!globalThis[Symbol.for("bobby.fp.worker")]
         });
       })();
@@ -1786,9 +1861,11 @@ mod tests {
     fn init_script_stays_under_size_budget() {
         let session = crate::create_session(&FingerprintConfig::default().with_session_seed(7));
         let script = build_init_script(&session).unwrap();
+        // Budget raised 40k -> 42k for the Notification.permission /
+        // pdfViewerEnabled / Web Share surfaces (CreepJS like-headless flags).
         assert!(
-            script.len() < 40_000,
-            "init script grew to {} bytes (budget 40k)",
+            script.len() < 42_000,
+            "init script grew to {} bytes (budget 42k)",
             script.len()
         );
     }

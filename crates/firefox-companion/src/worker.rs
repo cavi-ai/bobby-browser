@@ -1369,7 +1369,8 @@ impl FirefoxCompanionWorker {
         let session_jitter = behavioral_config.session_jitter;
         let fingerprint = FingerprintConfig::default()
             .with_session_seed(session_seed)
-            .with_inject_chrome(false);
+            .with_inject_chrome(false)
+            .with_browser_flavor(fingerprinting::BrowserFlavor::Firefox);
         let fingerprint_enabled = AtomicBool::new(fingerprint.enabled);
         let humanization_enabled = AtomicBool::new(false);
 
