@@ -71,6 +71,15 @@ request_timeout_ms = 30000
 max_concurrent_requests = 8
 
 [vision]
+provider = "mlx"
+collect_training_data = false
+training_data_dir = "data/vision"
+
+[vision.providers]
+
+[vision.providers.mlx]
+base_url = "http://127.0.0.1:9101"
+model = "mlx-community/Qwen2.5-VL-3B-Instruct-4bit"
 # ACP harness example (OAuth stays in the harness):
 # backend = "acp"
 # profile = "codex"
@@ -125,3 +134,10 @@ token_records_path = "./data/storage/authorities.json"
 max_principals = 16
 # Maximum requests in flight per principal at once.
 max_in_flight_per_principal = 8
+
+[nodes]
+
+[nodes.vision]
+kind = "vision"
+endpoint_url = "http://127.0.0.1:9100/vision"
+token_env = "BOBBY_VISION_TOKEN"
