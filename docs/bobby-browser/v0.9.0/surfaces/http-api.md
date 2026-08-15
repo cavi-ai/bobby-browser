@@ -109,7 +109,12 @@ Failures return JSON `{ "error": { … } }` where `error` is an `InterfaceError`
 | `resourceExhausted` | 429 |
 | `invalidRequest` | 422 (or 413 when oversized) |
 | `unsupportedInterfaceVersion` | 422 |
+| `engineUnreachable` | 503 |
 | `internal` | 500 |
+
+`engineUnreachable` means the configured browser engine did not answer, so no
+session could be opened. The request itself was well-formed: run `bobby doctor`,
+start or re-point the engine it names, then resubmit unchanged.
 
 Command outcomes may map to `200` / `403` / `409` / `429` / `503` depending on
 `CommandOutcome.status` — the TypeScript client checks status against the body.

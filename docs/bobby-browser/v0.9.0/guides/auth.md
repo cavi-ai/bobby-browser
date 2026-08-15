@@ -29,6 +29,17 @@ authority-store records keyed to the old bearer will no longer match.
 For SDK / HTTP clients, export that same plaintext as `AUTOMATION_RUNTIME_TOKEN`
 (conventional client alias — not a serve bootstrap env var).
 
+`bobby token` prints the enrolled bearer, so the one `bobby init` printed does
+not have to be kept:
+
+```bash
+export AUTOMATION_RUNTIME_TOKEN="$(bobby token)"
+```
+
+It reads the same file `bobby serve` resolves (`--bootstrap-env`,
+`BOBBY_BROWSER_BOOTSTRAP_ENV`, then the OS config path) and refuses to write to
+a redirected stdout unless `--stdout` says that was the intent.
+
 ## Serve resolution order
 
 `bobby serve` resolves bootstrap in this order:

@@ -51,23 +51,40 @@ browser until a session and page are opened over HTTP (`POST /v1/sessions`,
 ## Discovery and sockets
 
 - `GET /json/version`, `GET /json/list` — discovery
-- WebSockets: `/devtools/browser/:id`, `/devtools/page/:id`
+- WebSocket: `/devtools/browser/:id` — the only socket. Every `/json/list`
+  entry carries this same browser-level URL; there is no per-page
+  `/devtools/page/:id` endpoint. Targets are addressed by id over the browser
+  socket.
+
+`/json/list` reports the URL and title this gateway last verified for a page.
+A page it has not navigated reads as `about:blank`, because discovery has no
+way to ask the runtime what a page is showing.
 
 Every discovery request and WebSocket upgrade must include exactly one
 `Authorization: Bearer <token>` header. Credentials are never accepted in URLs
 or query strings. Long-lived sockets re-check capability and expiry.
+
+Get the bearer with `bobby token` (it refuses to write to a redirected stdout
+without `--stdout`):
+
+```bash
+export AUTOMATION_RUNTIME_TOKEN="$(bobby token)"
+```
 
 ## Connect snippets
 
 Pinned clients in this repo (see `packages/interface-conformance/package.json`
 and `pnpm-lock.yaml`):
 
-- `playwright-core` **1.62.0**
-- `puppeteer-core` **25.4.0**
+- `playwright-core` **1.62.1**
+- `puppeteer-core` **25.5.0**
 
-(`docs/cdp-support.json` still labels some parameter schema revisions with
-historical `playwright-1.61.1-*` strings; use the lockfile versions for client
-installs.)
+Playwright is pinned by bundle identity, not by version string: the gateway
+carries the exact length and SHA-256 of each supported release's injected and
+utility scripts. Playwright 1.61 and 1.62 are covered. A newer release needs its
+own entry — `docs/cdp-support.json`'s `playwright-1.61.1-*` revision labels name
+the schema shape those entries were first cut against, not the only version
+accepted.
 
 ```ts
 import { chromium } from "playwright-core";
@@ -103,13 +120,58 @@ What it cannot apply, it refuses rather than ignores: a `deviceScaleFactor`
 other than 1, a non-portrait `screenOrientation`, and `hasTouch` each fail with
 the reason. Pass `defaultViewport: null` to skip viewport emulation entirely.
 
-## Client-side page creation
+## What this surface is
 
-| Call | Outcome |
-|---|---|
-| Playwright `context.pages()[0]` | the page opened at connect |
-| Playwright `context.newPage()` | unsupported — `Target.createTarget` is uncovered for Playwright, which fails wiring a target it never sees attached |
-| Puppeteer `browser.newPage()` | opens a page in the connection's runtime session |
+A pinned client shim, not a CDP backend. The gateway recognizes a fixed set of
+call shapes and refuses everything else:
+
+- `Runtime.evaluate` accepts only Playwright's own injected-script bootstraps,
+  matched by exact length and SHA-256. Any other expression — including `1+1` —
+  is refused with `unrecognized bounded runtime bootstrap`.
+
+  This is not a rule against running JavaScript. The runtime evaluates it on
+  request through `evaluate_javascript` (MCP / HTTP / SDK), gated by
+  `javascript:evaluate` plus `executionPolicy.javascriptEvaluation`. This
+  gateway has no path to that evaluator and no remote-object lifetimes to hand
+  back, so it refuses rather than pretending. Need JavaScript, use those
+  surfaces.
+- `Runtime.callFunctionOn` accepts one pinned Puppeteer declaration over a
+  closed list of operations.
+- There is no `DOM` domain, and no `Target.attachToTarget`.
+
+A client release newer than the pins fails closed on every page it opens. That
+is a coverage gap to be filled by adding a pin, not a runtime fault; run with
+`RUST_LOG=debug` and the `cdp.runtime.bootstrap_rejected` line reports the
+length and digest that arrived.
+
+## Client operations
+
+| Operation | Playwright | Puppeteer |
+|---|---|---|
+| `connectOverCDP` / `connect` | yes | yes |
+| read the page opened at connect | `contexts()[0].pages()[0]` | not enumerated; use `newPage()` |
+| open a page client-side | no — `Target.createTarget` is uncovered for Playwright, which fails wiring a target it never sees attached | `browser.newPage()` |
+| navigate | yes | yes |
+| screenshot | yes | yes |
+| viewport emulation | refused when it needs a `deviceScaleFactor` other than 1 | yes, within that same bound |
+| fill a labeled field, click a named button or link, set input files | yes, by accessible label or role + name | only the conformance scenario's own operations |
+| CSS/XPath selectors, `waitForSelector`, `innerText`, `content`, `$eval` | no | no |
+| `evaluate` | no — use `evaluate_javascript` on MCP / HTTP / SDK | no |
+| `pdf`, cookies, history, request interception | no | no |
+
+Reads are the sharp edge: an operation resolves through an accessible label or a
+role plus name, the way the runtime's own commands address a page. A CSS
+selector or an arbitrary expression has nothing to translate to and fails
+closed.
+
+Puppeteer is narrower still — its bridge matches a fixed list of
+operation/selector pairs rather than translating an arbitrary label. Use
+Playwright, or one of the runtime's own surfaces, for anything beyond connect,
+navigate, screenshot, and viewport.
+
+For anything the table refuses, use HTTP, MCP, or a TypeScript/Rust SDK: they
+drive the runtime's verified command set, including the accessibility snapshot
+that replaces DOM scraping.
 
 ## Allowlist and limits
 

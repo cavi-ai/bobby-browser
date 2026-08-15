@@ -1197,13 +1197,14 @@ components:
       required: [name]
       additionalProperties: false
       description: |
-        Builtin handlers today are `echo` and `sleep`. `sleep` payload ms is
-        capped at 30_000. Other names fail closed unless a custom handler is
-        registered on the scheduler.
+        Builtin handlers today are `echo`, `sleep`, `http_probe`, `http_wait`,
+        and `http_fetch`; `bobby doctor` lists them under `job-handlers`.
+        `sleep` payload ms is capped at 30_000. Other names fail closed unless a
+        custom handler is registered on the scheduler.
       properties:
         name: { type: string }
         payload:
-          description: Unconstrained JSON; handler-specific (echo/sleep builtins)
+          description: Unconstrained JSON; handler-specific (see the builtin list above)
         priority:
           type: string
           enum: [low, normal, high, critical]

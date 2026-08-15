@@ -15,7 +15,7 @@ export function isErrorLayer(value: unknown): boolean {
 
 /** Type guard for `InterfaceError.code` values. */
 export function isInterfaceErrorCode(value: unknown): boolean {
-  return value === "invalidRequest" || value === "unsupportedInterfaceVersion" || value === "invalidIdempotencyKey" || value === "idempotencyConflict" || value === "deadlineExceeded" || value === "authenticationFailed" || value === "tokenExpired" || value === "missingCapability" || value === "malformedScope" || value === "artifactDenied" || value === "unsupportedOperation" || value === "notFound" || value === "resourceExhausted" || value === "internal";
+  return value === "invalidRequest" || value === "unsupportedInterfaceVersion" || value === "invalidIdempotencyKey" || value === "idempotencyConflict" || value === "deadlineExceeded" || value === "authenticationFailed" || value === "tokenExpired" || value === "missingCapability" || value === "malformedScope" || value === "artifactDenied" || value === "unsupportedOperation" || value === "notFound" || value === "resourceExhausted" || value === "engineUnreachable" || value === "internal";
 }
 
 function isCapability(value: unknown): boolean {

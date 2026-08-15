@@ -658,6 +658,11 @@ pub enum RuntimeError {
     NotFound(String),
     #[error("invalid request: {0}")]
     InvalidRequest(String),
+    /// The configured browser engine could not be reached or started. An
+    /// environment fault, not a bad call: the caller's arguments were fine and
+    /// resubmitting them unchanged is the right move once the engine is up.
+    #[error("{0}")]
+    EngineUnreachable(String),
     #[error("internal error: {0}")]
     Internal(String),
 }

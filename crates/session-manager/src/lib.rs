@@ -34,7 +34,10 @@ impl SessionManager {
         if let Some(workers) = &self.workers {
             workers.lease(session.id.clone()).await.map_err(|error| {
                 if error.code == types::ErrorCode::BrowserLaunchFailed {
-                    RuntimeError::InvalidRequest(format!(
+                    // Keep the diagnostic prefix leading the message: the MCP
+                    // gateway allowlists it by prefix before letting any runtime
+                    // detail cross to an external agent.
+                    RuntimeError::EngineUnreachable(format!(
                         "browser launch failed: {}; run `bobby doctor` to verify the Firefox BiDi endpoint and detect another service occupying its configured port",
                         error.message
                     ))

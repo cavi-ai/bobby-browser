@@ -915,10 +915,13 @@ fn parse_json<T: DeserializeOwned>(
     correlation_id: &CorrelationId,
 ) -> Result<T, ProtocolError> {
     let bytes = body.map_err(|_| ProtocolError::oversized(correlation_id.clone()))?;
-    serde_json::from_slice(&bytes).map_err(|_| {
+    serde_json::from_slice(&bytes).map_err(|error| {
+        // serde already knows which field and offset failed. Naming it is the
+        // difference between one fix and a guessing game; its Display describes
+        // the shape only, never the submitted values.
         ProtocolError::from(interface_error(
             InterfaceErrorCode::InvalidRequest,
-            "request body is not valid JSON for this operation",
+            &format!("request body is not valid JSON for this operation: {error}"),
             correlation_id.clone(),
             None,
         ))

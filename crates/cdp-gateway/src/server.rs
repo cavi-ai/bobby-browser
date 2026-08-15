@@ -271,8 +271,16 @@ impl CdpGateway {
             .map(|target| TargetDescription {
                 id: target.opaque,
                 r#type: "page".into(),
-                title: "Automation Runtime".into(),
-                url: "about:blank".into(),
+                // A client picks a target out of this list. One shared constant
+                // for title and url made every target look identical; report
+                // what the gateway actually verified, and say blank when it has
+                // verified nothing rather than inventing a name.
+                title: target
+                    .title
+                    .clone()
+                    .or_else(|| target.url.clone())
+                    .unwrap_or_else(|| "about:blank".into()),
+                url: target.url.unwrap_or_else(|| "about:blank".into()),
                 web_socket_debugger_url: self.browser_ws_url(),
             })
             .collect())
@@ -1688,7 +1696,7 @@ impl CdpConnection {
                         }
                         if let Err(error) = self.queue_events(events).await { return CdpResponse::failure(&request, error); }
                         self.record_interface_event("navigation.completed", json!({"evidence":evidence})).await;
-                        let _ = title;
+                        self.targets.lock().await.note_navigation(&runtime_session, &page, &final_url, &title);
                         Ok(json!({"frameId":target_id,"loaderId":loader_id,"isDownload":false}))
                     }
                     Ok(_) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "navigation did not complete")),
@@ -2596,19 +2604,57 @@ struct CatalogTarget {
     opaque: String,
     runtime_session: String,
     page: String,
+    /// Last URL this gateway verified for the page, `None` until it navigates
+    /// one. Discovery has no way to ask the runtime, so an unnavigated page is
+    /// reported as blank rather than guessed at.
+    url: Option<String>,
+    title: Option<String>,
+}
+
+/// Opaque target id plus whatever this gateway has since verified about the page.
+///
+/// Deliberately not `Default`: an entry is only ever valid with a freshly minted
+/// `opaque`, and a defaulted one would hand every target the same empty id.
+#[derive(Clone)]
+struct CatalogEntry {
+    opaque: String,
+    url: Option<String>,
+    title: Option<String>,
+}
+
+impl CatalogEntry {
+    fn new() -> Self {
+        Self {
+            opaque: Uuid::new_v4().simple().to_string(),
+            url: None,
+            title: None,
+        }
+    }
 }
 
 #[derive(Default)]
 struct TargetCatalog {
-    by_page: HashMap<(String, String), String>,
+    by_page: HashMap<(String, String), CatalogEntry>,
 }
 
 impl TargetCatalog {
     fn register(&mut self, session_id: &SessionId, page_id: &PageId) -> String {
         self.by_page
             .entry((session_id.0.to_string(), page_id.0.to_string()))
-            .or_insert_with(|| Uuid::new_v4().simple().to_string())
+            .or_insert_with(CatalogEntry::new)
+            .opaque
             .clone()
+    }
+
+    /// Record a navigation this gateway performed and verified, so discovery can
+    /// tell one target from another instead of labelling every one `about:blank`.
+    fn note_navigation(&mut self, runtime_session: &str, page: &str, url: &str, title: &str) {
+        let entry = self
+            .by_page
+            .entry((runtime_session.to_owned(), page.to_owned()))
+            .or_insert_with(CatalogEntry::new);
+        entry.url = Some(url.to_owned());
+        entry.title = (!title.is_empty()).then(|| title.to_owned());
     }
 
     fn targets_for(&mut self, sessions: &[SessionState]) -> Vec<CatalogTarget> {
@@ -2618,15 +2664,17 @@ impl TargetCatalog {
             for page in &session.page_ids {
                 let page = page.0.to_string();
                 let key = (runtime_session.clone(), page.clone());
-                let opaque = self
+                let entry = self
                     .by_page
                     .entry(key.clone())
-                    .or_insert_with(|| Uuid::new_v4().simple().to_string())
+                    .or_insert_with(CatalogEntry::new)
                     .clone();
                 live.push(CatalogTarget {
-                    opaque,
+                    opaque: entry.opaque,
                     runtime_session: key.0,
                     page: key.1,
+                    url: entry.url,
+                    title: entry.title,
                 });
             }
         }

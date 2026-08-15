@@ -286,6 +286,7 @@ pub enum InterfaceErrorCode {
     UnsupportedOperation,
     NotFound,
     ResourceExhausted,
+    EngineUnreachable,
     Internal,
 }
 

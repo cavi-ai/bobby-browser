@@ -33,6 +33,7 @@ use firefox_companion::selection::{
 };
 use std::{
     future::Future,
+    io::IsTerminal,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -264,6 +265,16 @@ enum CliCommand {
         /// Allow --fix to download the already-selected local MLX model
         #[arg(long, requires = "fix")]
         download_model: bool,
+    },
+    /// Print the current bootstrap bearer for SDK / HTTP / CDP clients
+    Token {
+        /// Path to bootstrap.env (overrides BOBBY_BROWSER_BOOTSTRAP_ENV)
+        #[arg(long)]
+        bootstrap_env: Option<PathBuf>,
+        /// Print even when stdout is not a terminal (piping a secret is a
+        /// deliberate act, so it takes a deliberate flag)
+        #[arg(long)]
+        stdout: bool,
     },
     /// Submit / inspect / cancel broker jobs (`/v1/jobs`)
     Jobs {
@@ -755,6 +766,10 @@ pub async fn run() -> Result<()> {
                 }
             }
         }
+        CliCommand::Token {
+            bootstrap_env,
+            stdout,
+        } => run_token(bootstrap_env, stdout)?,
         CliCommand::Jobs { command } => run_jobs(command)?,
         CliCommand::Openshell { command } => run_openshell(command)?,
         CliCommand::Context { command } => run_context(command).await?,
@@ -1547,6 +1562,31 @@ pub(crate) fn resolve_bootstrap_path(cli: Option<PathBuf>) -> Result<PathBuf> {
         return Ok(PathBuf::from(path));
     }
     bootstrap_local::default_bootstrap_path()
+}
+
+/// Print the enrolled bootstrap bearer.
+///
+/// `bobby init` prints the plaintext once, at creation. Every client snippet
+/// then asks for `AUTOMATION_RUNTIME_TOKEN` with no supported way to read it
+/// back, so the answer was "open the dotenv and copy the field yourself".
+fn run_token(bootstrap_env: Option<PathBuf>, stdout: bool) -> Result<()> {
+    let path = resolve_bootstrap_path(bootstrap_env)?;
+    let bearer = bootstrap_local::load_bootstrap_bearer(&path).with_context(|| {
+        format!(
+            "no bootstrap credential at {}; run `bobby init` first",
+            path.display()
+        )
+    })?;
+    // A redirected stdout is a log, a file, or another process's buffer. Writing
+    // a live bearer there by accident is the one failure this command must not
+    // make easy, so it takes --stdout to say that was the intent.
+    if !stdout && !std::io::stdout().is_terminal() {
+        anyhow::bail!(
+            "refusing to write the bearer to a non-terminal stdout; pass --stdout if that is intended"
+        );
+    }
+    println!("{bearer}");
+    Ok(())
 }
 
 async fn run_firefox_profile_enroll(

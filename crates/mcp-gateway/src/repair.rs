@@ -133,6 +133,9 @@ pub(crate) fn repair_for_code(code: &str) -> Option<Value> {
             "Match the client's interface version to the one runtime_info advertises."
         }
         "unsupportedOperation" => "Check the tool name against tools/list.",
+        "engineUnreachable" => {
+            "The configured browser engine did not answer; the call itself was fine. Run `bobby doctor`, start or re-point the engine it names, then resubmit unchanged."
+        }
         _ => return None,
     };
     Some(repair(action))
@@ -191,6 +194,7 @@ mod tests {
             "artifactDenied",
             "unsupportedInterfaceVersion",
             "unsupportedOperation",
+            "engineUnreachable",
         ] {
             assert!(repair_for_code(code).is_some(), "no repair for {code}");
         }

@@ -9,6 +9,12 @@
 - `[cdp]` section in the sample `config.toml`.
 - `bobby doctor` reports a `cdp-port` check: whether the configured CDP address is serving authenticated discovery, is free, or is already owned by another process. The default 9222 is also Firefox's default remote-debugging port, so the collision is named before `bobby cdp` fails on it.
 - `cdp.listener.ready` startup log carrying the CDP discovery endpoint and WebSocket base.
+- `bobby token` prints the enrolled bootstrap bearer. It refuses a redirected stdout without `--stdout`.
+- `engineUnreachable` interface error code (HTTP 503): the configured browser engine did not answer, so no session opened. Carries the browser-launch repair instead of the "fix the named argument" hint that `invalidRequest` implies, and reaches MCP clients as `error.repair`.
+- `bobby doctor` reports `firefox-bidi-port-mismatch` as a failure when the CDP port is held by another service while an enrolled BiDi endpoint accepts nothing — the shape a companion launched on the CDP port produces, previously two unrelated warnings.
+- Playwright 1.62.1's injected-script bootstrap is pinned. The gateway matches that bundle by length and digest, and only 1.61 and 1.62.0 were pinned, so every page a 1.62.1 client opened failed closed on its first locator call.
+- `cdp.runtime.bootstrap_rejected` debug log carries the length and digest of an unpinned bootstrap, which is what a new pin is cut from. No caller JavaScript is logged.
+- CI runs `test:playwright` and `test:puppeteer` on the chromium job. They were the only automated proof a real client can drive a page over CDP and ran nowhere.
 
 ### Changed
 
@@ -17,6 +23,10 @@
 - `Target.createTarget` with no runtime session states that CDP attaches to sessions rather than creating them, and names the routes that open one (`POST /v1/sessions`, `POST /v1/pages`, MCP `session_create`/`page_open`, SDK).
 - `bobby doctor` reports `cdp-listen` when CDP is disabled, naming the address `bobby cdp` would bind.
 - The authenticated-CDP guide documents the session-and-page prerequisite, managed Chromium as the pairing-free engine, and that pages are opened through the runtime rather than by the client.
+- The authenticated-CDP guide states the surface's scope: a pinned client shim with no DOM domain and no JavaScript execution, plus a per-client operation table. It also drops the `/devtools/page/:id` socket it advertised, which was never implemented.
+- `/json/list` reports the URL and title the gateway last verified for each page. Every entry read `about:blank` / `Automation Runtime`, so a client could not tell one target from another.
+- A rejected JSON request body names the offending field and position from serde instead of one fixed sentence. Request values are never included.
+- `bobby doctor` distinguishes a refused BiDi connection from a live socket speaking another protocol; a refused connection reported "another service may own the port" when nothing was listening.
 
 ## 0.9.0 - 2026-08-12
 
