@@ -2612,7 +2612,10 @@ struct CatalogTarget {
 }
 
 /// Opaque target id plus whatever this gateway has since verified about the page.
-#[derive(Clone, Default)]
+///
+/// Deliberately not `Default`: an entry is only ever valid with a freshly minted
+/// `opaque`, and a defaulted one would hand every target the same empty id.
+#[derive(Clone)]
 struct CatalogEntry {
     opaque: String,
     url: Option<String>,
