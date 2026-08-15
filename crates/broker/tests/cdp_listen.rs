@@ -52,6 +52,28 @@ async fn cdp_listener_serves_json_version_when_enabled() {
 }
 
 #[tokio::test]
+async fn cdp_bind_failure_names_the_address_and_the_port_override() {
+    let occupied = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("occupy a port");
+    let port = occupied.local_addr().expect("bound address").port();
+
+    let (listen, _authority, _bearer) = testing::try_spawn_test_cdp_listener(CdpConfig {
+        enabled: true,
+        host: "127.0.0.1".into(),
+        port,
+    })
+    .await;
+
+    let error = format!(
+        "{:#}",
+        listen.err().expect("bind fails on an occupied port")
+    );
+    assert!(error.contains(&format!("127.0.0.1:{port}")), "{error}");
+    assert!(error.contains("--cdp-port"), "{error}");
+}
+
+#[tokio::test]
 async fn cdp_listener_binds_runtime_for_an_issued_principal() {
     let (cdp, authority, _startup_bearer) = testing::spawn_test_cdp_listener(CdpConfig {
         enabled: true,

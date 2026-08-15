@@ -751,7 +751,10 @@ impl CdpConnection {
                     Err(error) => return CdpResponse::failure(&request, runtime_error(error)),
                 };
                 let Some(session) = sessions.first() else {
-                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "no runtime session is available"));
+                    // First call after a bare connect lands here: CDP attaches to
+                    // runtime sessions, it does not create them. Say where they come
+                    // from rather than leaving the client to guess.
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "no runtime session is available: CDP attaches to existing runtime sessions and cannot create one -- open a session and page first (POST /v1/sessions then POST /v1/pages, MCP session_create/page_open, or an SDK client), then reuse the page this connection already exposes"));
                 };
                 let page = match self.runtime.open_page(ctx, OpenPageRequest { session_id: session.id.clone() }).await {
                     Ok(page) => page,

@@ -1105,6 +1105,15 @@ pub mod testing {
     pub async fn spawn_test_cdp_listener(
         cdp_config: CdpConfig,
     ) -> (CdpListen, Arc<EnrolledAuthority>, String) {
+        let (listen, authority, bearer) = try_spawn_test_cdp_listener(cdp_config).await;
+        (listen.expect("cdp listener binds"), authority, bearer)
+    }
+
+    /// Same fixture, but hands back the bind result so a test can assert on a
+    /// failure (an occupied port) instead of panicking on it.
+    pub async fn try_spawn_test_cdp_listener(
+        cdp_config: CdpConfig,
+    ) -> (anyhow::Result<CdpListen>, Arc<EnrolledAuthority>, String) {
         let startup = StartupCredential::new(
             ADMIN_BEARER.to_owned(),
             PrincipalId::from_uuid(Uuid::nil()),
@@ -1160,8 +1169,7 @@ pub mod testing {
             artifact_store,
             upload_root,
         )
-        .await
-        .expect("cdp listener binds");
+        .await;
         (listen, authority, ADMIN_BEARER.to_owned())
     }
 }
