@@ -1464,40 +1464,74 @@ pub(crate) fn run_doctor(
 /// before `bobby cdp` is ever run.
 fn check_cdp_port(config: &config::CdpConfig) -> DoctorCheck {
     let address = format!("{}:{}", config.host, config.port);
+    let check = |status, detail| DoctorCheck {
+        status,
+        name: "cdp-port".to_string(),
+        detail,
+    };
+
+    // Occupancy is decided by the TCP connect, not by the HTTP answer. A
+    // service that holds the port without speaking HTTP still stops `bobby cdp`
+    // from binding it, and judging by the HTTP probe alone reported exactly
+    // that case as free.
+    if !cdp_port_accepts_connections(&config.host, config.port) {
+        return if config.enabled {
+            check(
+                DoctorStatus::Warn,
+                format!("{address} is not accepting connections; is `bobby cdp` running?"),
+            )
+        } else {
+            check(
+                DoctorStatus::Ok,
+                format!("{address} is free for `bobby cdp`"),
+            )
+        };
+    }
+
     let discovery = format!("http://{address}/json/version");
     match probe_cdp_discovery(&discovery) {
-        Ok(401) => DoctorCheck {
-            status: DoctorStatus::Ok,
-            name: "cdp-port".to_string(),
-            detail: format!("{address} is serving authenticated CDP discovery"),
-        },
-        Ok(status) if config.enabled => DoctorCheck {
-            status: DoctorStatus::Warn,
-            name: "cdp-port".to_string(),
-            detail: format!(
+        // Authenticated discovery refuses a request with no bearer, so 401 is
+        // the gateway answering correctly.
+        Ok(401) => check(
+            DoctorStatus::Ok,
+            format!("{address} is serving authenticated CDP discovery"),
+        ),
+        Ok(status) if config.enabled => check(
+            DoctorStatus::Warn,
+            format!(
                 "{address} answered {status}; authenticated CDP answers 401 without a bearer, \
                  so another service may own the port"
             ),
-        },
-        Ok(status) => DoctorCheck {
-            status: DoctorStatus::Warn,
-            name: "cdp-port".to_string(),
-            detail: format!(
+        ),
+        Ok(status) => check(
+            DoctorStatus::Warn,
+            format!(
                 "{address} is already in use (answered {status}); `bobby cdp` cannot bind it -- \
                  free the port or run `bobby cdp --cdp-port <port>`"
             ),
-        },
-        Err(error) if config.enabled => DoctorCheck {
-            status: DoctorStatus::Warn,
-            name: "cdp-port".to_string(),
-            detail: format!("{discovery} not reachable ({error}); is `bobby cdp` running?"),
-        },
-        Err(_) => DoctorCheck {
-            status: DoctorStatus::Ok,
-            name: "cdp-port".to_string(),
-            detail: format!("{address} is free for `bobby cdp`"),
-        },
+        ),
+        Err(error) if config.enabled => check(
+            DoctorStatus::Warn,
+            format!("{discovery} did not answer ({error}); is `bobby cdp` running?"),
+        ),
+        Err(_) => check(
+            DoctorStatus::Warn,
+            format!(
+                "{address} is already in use by a service that does not answer CDP discovery; \
+                 `bobby cdp` cannot bind it -- free the port or run `bobby cdp --cdp-port <port>`"
+            ),
+        ),
     }
+}
+
+fn cdp_port_accepts_connections(host: &str, port: u16) -> bool {
+    use std::net::ToSocketAddrs;
+    let Ok(addresses) = (host, port).to_socket_addrs() else {
+        return false;
+    };
+    addresses.into_iter().any(|address| {
+        std::net::TcpStream::connect_timeout(&address, Duration::from_millis(500)).is_ok()
+    })
 }
 
 fn probe_cdp_discovery(url: &str) -> Result<u16> {
@@ -1638,7 +1672,7 @@ mod bidi_probe_tests {
 #[cfg(test)]
 mod cdp_port_tests {
     use super::*;
-    use std::io::Write;
+    use std::io::{Read, Write};
 
     fn config_for(port: u16, enabled: bool) -> config::CdpConfig {
         config::CdpConfig {
@@ -1668,18 +1702,52 @@ mod cdp_port_tests {
     fn an_occupied_port_is_named_before_bobby_cdp_fails_to_bind_on_it() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        // Read the request before answering. Closing a socket with unread bytes
+        // still in it can reset the connection before the client reads the
+        // response, which made the probe see a failure instead of a 200 (CI,
+        // 2026-08-15).
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut chunk = [0_u8; 256];
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
                 .unwrap();
+            stream.flush().unwrap();
         });
 
         let check = check_cdp_port(&config_for(port, false));
-        assert_eq!(check.status, DoctorStatus::Warn);
+        assert_eq!(check.status, DoctorStatus::Warn, "{}", check.detail);
         assert!(check.detail.contains("already in use"), "{}", check.detail);
         assert!(check.detail.contains("--cdp-port"), "{}", check.detail);
         server.join().unwrap();
+    }
+
+    /// The failure that hid behind the HTTP probe: something holds the port but
+    /// never speaks HTTP. It still blocks the bind, so it cannot read as free.
+    #[test]
+    fn a_silent_occupier_is_reported_as_in_use_not_free() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let _accepted = listener.accept().map(|(stream, _)| {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                drop(stream);
+            });
+        });
+
+        let check = check_cdp_port(&config_for(port, false));
+        assert_eq!(check.status, DoctorStatus::Warn, "{}", check.detail);
+        assert!(check.detail.contains("already in use"), "{}", check.detail);
+        assert!(check.detail.contains("--cdp-port"), "{}", check.detail);
+        let _ = server.join();
     }
 
     #[test]
