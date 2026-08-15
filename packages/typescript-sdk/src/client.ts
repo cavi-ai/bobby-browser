@@ -284,6 +284,7 @@ function interfaceErrorStatus(code: InterfaceError["code"]): number {
   if (code === "deadlineExceeded") return 408;
   if (code === "idempotencyConflict") return 409;
   if (code === "resourceExhausted") return 429;
+  if (code === "engineUnreachable") return 503;
   if (code === "internal") return 500;
   return 422;
 }

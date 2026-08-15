@@ -608,6 +608,10 @@ the signal:
   nothing ran.
 - `deadlineExceeded` -- the request's deadline passed before dispatch.
   Re-issue with a longer deadline; retryable if the command is Replayable.
+- `engineUnreachable` -- the configured browser engine did not answer, so no
+  session could be opened. The call was well-formed: run `bobby doctor`, start
+  or re-point the engine it names, then resubmit unchanged. This is the
+  RPC-layer twin of the command-layer `browserLaunchFailed` below.
 - `notFound` / `resourceExhausted` / `internal` -- see their entries below;
   the RPC-layer and command-layer meanings are called out there.
 

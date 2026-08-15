@@ -159,6 +159,8 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm --filter @cavi-ai/bobby-gauntlet test
           pnpm --filter @cavi-ai/bobby-gauntlet build
+          # The conformance package typechecks against the SDK's emitted types.
+          pnpm --filter @cavi-ai/bobby-browser build
 
       - name: Install Chrome
         uses: browser-actions/setup-chrome@latest
@@ -222,6 +224,19 @@ jobs:
           --test javascript_evaluation
           --test mcp_live
           -- --ignored --test-threads=1
+
+      # The only automated proof that a real client can drive a page over the CDP
+      # surface. Everything else that touches CDP in CI is either MCP on the wire
+      # or a synthetic in-process driver, both of which pass while a real client
+      # fails: the gateway pins Playwright's injected bundle by digest, so a
+      # client upgrade breaks every page it opens and nothing else notices.
+      # Each test spawns the conformance gateway itself, so this belongs on the
+      # job that already has Chrome.
+      - name: CDP client conformance · playwright
+        run: pnpm --filter @cavi-ai/bobby-interface-conformance test:playwright
+
+      - name: CDP client conformance · puppeteer
+        run: pnpm --filter @cavi-ai/bobby-interface-conformance test:puppeteer
 
       - name: Worker-pool live tests
         run: >-
@@ -319,8 +334,8 @@ jobs:
         run: pnpm --filter @cavi-ai/bobby-firefox-companion test
 
       - name: Interface conformance
-        # Browser-driven conformance (matrix, playwright, puppeteer) needs a real
-        # Chrome and runs locally; this gate covers typecheck and the browser-free tests.
+        # Typecheck and the browser-free tests. The browser-driven client
+        # conformance needs a real Chrome and runs on the chromium job.
         run: pnpm --filter @cavi-ai/bobby-interface-conformance test:unit
 
       - name: Docs artifact

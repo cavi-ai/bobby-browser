@@ -774,6 +774,11 @@ fn map_runtime_error(ctx: &RequestContext, error: RuntimeError) -> InterfaceErro
             InterfaceErrorCode::InvalidRequest,
             format!("runtime request is invalid: {detail}"),
         ),
+        // No prefix: the MCP gateway recognizes this message by its leading
+        // "browser launch failed:" marker, and a wrapper would hide it.
+        RuntimeError::EngineUnreachable(detail) => {
+            (InterfaceErrorCode::EngineUnreachable, detail.clone())
+        }
         RuntimeError::Internal(detail) => (
             InterfaceErrorCode::Internal,
             format!("runtime operation failed: {detail}"),

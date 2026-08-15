@@ -1028,6 +1028,11 @@ pub(crate) fn run_doctor(
         }
     }
 
+    // Enrolled BiDi endpoints that nothing is listening on. Held so the CDP-port
+    // check below can join the two halves: a companion answering on the CDP port
+    // while its enrolled port is dead is one fault, not two warnings.
+    let mut unreachable_bidi: Vec<String> = Vec::new();
+
     if let (Some(config), Some(selection)) = (&config, &selection) {
         match compose_worker_factory(config, selection.clone()) {
             Ok(_) => report.ok(
@@ -1054,14 +1059,24 @@ pub(crate) fn run_doctor(
                             "firefox-bidi",
                             format!("{} accepted a WebDriver BiDi handshake", profile.bidi_url),
                         ),
-                        Err(error) => {
+                        Err(BidiProbeFailure::Unreachable(error)) => {
+                            unreachable_bidi.push(profile.bidi_url.clone());
                             report.warn(
-                            "firefox-bidi",
-                            format!(
-                                "{} is not a Firefox WebDriver BiDi endpoint ({error:#}); another service may own the port",
-                                profile.bidi_url,
-                            ),
-                        );
+                                "firefox-bidi",
+                                format!(
+                                    "nothing is listening on {} ({error:#}); the enrolled Firefox companion is not running there",
+                                    profile.bidi_url,
+                                ),
+                            );
+                        }
+                        Err(failure @ BidiProbeFailure::NotBidi(_)) => {
+                            report.warn(
+                                "firefox-bidi",
+                                format!(
+                                    "{} answered but is not a Firefox WebDriver BiDi endpoint ({failure}); another service may own the port",
+                                    profile.bidi_url,
+                                ),
+                            );
                         }
                     }
                 }
@@ -1448,7 +1463,29 @@ pub(crate) fn run_doctor(
                     );
                 }
             }
-            push_doctor_check(&mut report, check_cdp_port(&config.cdp));
+            let (cdp_check, cdp_state) = check_cdp_port(&config.cdp);
+            push_doctor_check(&mut report, cdp_check);
+            // Two warnings, one fault: something else holds the CDP port and the
+            // enrolled BiDi endpoint answers nothing. A companion launched on the
+            // CDP port instead of its enrolled one produces exactly this pair,
+            // and it leaves every browser call dead -- so it fails, not warns.
+            if cdp_state == CdpPortState::Occupied && !unreachable_bidi.is_empty() {
+                report.fail(
+                    "firefox-bidi-port-mismatch",
+                    format!(
+                        "{}:{} is held by another service while enrolled BiDi endpoint(s) {} accept \
+                         nothing -- a Firefox companion launched on the CDP port rather than its \
+                         enrolled port matches this exactly. Relaunch the companion on the enrolled \
+                         port (`make firefox-start`); do not re-enroll onto {}:{}, `bobby cdp` \
+                         needs that port free.",
+                        config.cdp.host,
+                        config.cdp.port,
+                        unreachable_bidi.join(", "),
+                        config.cdp.host,
+                        config.cdp.port,
+                    ),
+                );
+            }
         }
     }
 
@@ -1462,7 +1499,19 @@ pub(crate) fn run_doctor(
 /// port, so an occupied port is the common first-run failure — and it surfaces
 /// only as a bind error at startup. Reporting it here names the collision
 /// before `bobby cdp` is ever run.
-fn check_cdp_port(config: &config::CdpConfig) -> DoctorCheck {
+/// What the CDP port probe found, for checks that need the outcome itself
+/// rather than the wording of its message.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CdpPortState {
+    /// Authenticated CDP discovery answered; `bobby cdp` owns the port.
+    Serving,
+    /// Nothing is listening; `bobby cdp` can bind it.
+    Free,
+    /// Something that is not this gateway holds the port.
+    Occupied,
+}
+
+fn check_cdp_port(config: &config::CdpConfig) -> (DoctorCheck, CdpPortState) {
     let address = format!("{}:{}", config.host, config.port);
     let check = |status, detail| DoctorCheck {
         status,
@@ -1476,14 +1525,20 @@ fn check_cdp_port(config: &config::CdpConfig) -> DoctorCheck {
     // that case as free.
     if !cdp_port_accepts_connections(&config.host, config.port) {
         return if config.enabled {
-            check(
-                DoctorStatus::Warn,
-                format!("{address} is not accepting connections; is `bobby cdp` running?"),
+            (
+                check(
+                    DoctorStatus::Warn,
+                    format!("{address} is not accepting connections; is `bobby cdp` running?"),
+                ),
+                CdpPortState::Free,
             )
         } else {
-            check(
-                DoctorStatus::Ok,
-                format!("{address} is free for `bobby cdp`"),
+            (
+                check(
+                    DoctorStatus::Ok,
+                    format!("{address} is free for `bobby cdp`"),
+                ),
+                CdpPortState::Free,
             )
         };
     }
@@ -1492,34 +1547,49 @@ fn check_cdp_port(config: &config::CdpConfig) -> DoctorCheck {
     match probe_cdp_discovery(&discovery) {
         // Authenticated discovery refuses a request with no bearer, so 401 is
         // the gateway answering correctly.
-        Ok(401) => check(
-            DoctorStatus::Ok,
-            format!("{address} is serving authenticated CDP discovery"),
-        ),
-        Ok(status) if config.enabled => check(
-            DoctorStatus::Warn,
-            format!(
-                "{address} answered {status}; authenticated CDP answers 401 without a bearer, \
-                 so another service may own the port"
+        Ok(401) => (
+            check(
+                DoctorStatus::Ok,
+                format!("{address} is serving authenticated CDP discovery"),
             ),
+            CdpPortState::Serving,
         ),
-        Ok(status) => check(
-            DoctorStatus::Warn,
-            format!(
-                "{address} is already in use (answered {status}); `bobby cdp` cannot bind it -- \
-                 free the port or run `bobby cdp --cdp-port <port>`"
+        Ok(status) if config.enabled => (
+            check(
+                DoctorStatus::Warn,
+                format!(
+                    "{address} answered {status}; authenticated CDP answers 401 without a bearer, \
+                     so another service may own the port"
+                ),
             ),
+            CdpPortState::Occupied,
         ),
-        Err(error) if config.enabled => check(
-            DoctorStatus::Warn,
-            format!("{discovery} did not answer ({error}); is `bobby cdp` running?"),
-        ),
-        Err(_) => check(
-            DoctorStatus::Warn,
-            format!(
-                "{address} is already in use by a service that does not answer CDP discovery; \
-                 `bobby cdp` cannot bind it -- free the port or run `bobby cdp --cdp-port <port>`"
+        Ok(status) => (
+            check(
+                DoctorStatus::Warn,
+                format!(
+                    "{address} is already in use (answered {status}); `bobby cdp` cannot bind it \
+                     -- free the port or run `bobby cdp --cdp-port <port>`"
+                ),
             ),
+            CdpPortState::Occupied,
+        ),
+        Err(error) if config.enabled => (
+            check(
+                DoctorStatus::Warn,
+                format!("{discovery} did not answer ({error}); is `bobby cdp` running?"),
+            ),
+            CdpPortState::Occupied,
+        ),
+        Err(_) => (
+            check(
+                DoctorStatus::Warn,
+                format!(
+                    "{address} is already in use by a service that does not answer CDP discovery; \
+                     `bobby cdp` cannot bind it -- free the port or run `bobby cdp --cdp-port <port>`"
+                ),
+            ),
+            CdpPortState::Occupied,
         ),
     }
 }
@@ -1555,38 +1625,74 @@ fn probe_cdp_discovery_blocking(url: &str) -> Result<u16> {
     Ok(response.status().as_u16())
 }
 
-fn probe_firefox_bidi(endpoint: &str) -> Result<()> {
-    let url = Url::parse(endpoint).context("invalid WebDriver BiDi URL")?;
-    if url.scheme() != "ws" {
-        anyhow::bail!("doctor currently probes loopback ws:// BiDi endpoints only");
+/// Why a WebDriver BiDi probe failed.
+///
+/// A refused connection and a live socket speaking something else need opposite
+/// repairs. Reporting both as "another service may own the port" told operators
+/// a port was taken when in fact nothing was listening on it.
+enum BidiProbeFailure {
+    /// Nothing accepted the connection at that address.
+    Unreachable(anyhow::Error),
+    /// Something answered, but not with a WebSocket upgrade.
+    NotBidi(anyhow::Error),
+}
+
+impl std::fmt::Display for BidiProbeFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unreachable(error) | Self::NotBidi(error) => write!(formatter, "{error:#}"),
+        }
     }
-    let host = url.host_str().context("BiDi URL has no host")?;
-    let port = url
-        .port_or_known_default()
-        .context("BiDi URL has no port")?;
-    let address = url
-        .socket_addrs(|| Some(port))?
-        .into_iter()
-        .next()
-        .context("BiDi host resolved to no addresses")?;
-    let mut stream = std::net::TcpStream::connect_timeout(&address, Duration::from_millis(500))?;
-    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(1)))?;
-    let path = if url.path().is_empty() {
-        "/"
-    } else {
-        url.path()
+}
+
+fn probe_firefox_bidi(endpoint: &str) -> std::result::Result<(), BidiProbeFailure> {
+    use BidiProbeFailure::{NotBidi, Unreachable};
+    let probe = || -> Result<std::net::TcpStream> {
+        let url = Url::parse(endpoint).context("invalid WebDriver BiDi URL")?;
+        if url.scheme() != "ws" {
+            anyhow::bail!("doctor currently probes loopback ws:// BiDi endpoints only");
+        }
+        let port = url
+            .port_or_known_default()
+            .context("BiDi URL has no port")?;
+        let address = url
+            .socket_addrs(|| Some(port))?
+            .into_iter()
+            .next()
+            .context("BiDi host resolved to no addresses")?;
+        Ok(std::net::TcpStream::connect_timeout(
+            &address,
+            Duration::from_millis(500),
+        )?)
     };
-    write!(
-        stream,
-        "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
-    )?;
-    let mut response = [0_u8; 4096];
-    let read = stream.read(&mut response)?;
-    let head = String::from_utf8_lossy(&response[..read]);
-    let status = head.lines().next().unwrap_or("empty response");
+    let mut stream = probe().map_err(Unreachable)?;
+    let mut handshake = || -> Result<String> {
+        let url = Url::parse(endpoint)?;
+        let host = url.host_str().context("BiDi URL has no host")?.to_owned();
+        let port = url
+            .port_or_known_default()
+            .context("BiDi URL has no port")?;
+        stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+        let path = if url.path().is_empty() {
+            "/".to_owned()
+        } else {
+            url.path().to_owned()
+        };
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        )?;
+        let mut response = [0_u8; 4096];
+        let read = stream.read(&mut response)?;
+        let head = String::from_utf8_lossy(&response[..read]);
+        Ok(head.lines().next().unwrap_or("empty response").to_owned())
+    };
+    let status = handshake().map_err(NotBidi)?;
     if !status.contains(" 101 ") {
-        anyhow::bail!("WebSocket handshake returned {status}");
+        return Err(NotBidi(anyhow::anyhow!(
+            "WebSocket handshake returned {status}"
+        )));
     }
     Ok(())
 }
@@ -1664,8 +1770,29 @@ mod bidi_probe_tests {
         });
 
         let error = probe_firefox_bidi(&format!("ws://{address}/session")).unwrap_err();
-        assert!(error.to_string().contains("404"), "{error:#}");
+        assert!(
+            matches!(error, BidiProbeFailure::NotBidi(_)),
+            "a live socket answering HTTP is not an unreachable endpoint: {error}"
+        );
+        assert!(error.to_string().contains("404"), "{error}");
         server.join().unwrap();
+    }
+
+    /// A refused connection is nobody listening, which is the opposite of the
+    /// port being owned. Classifying both the same way sent operators hunting
+    /// for a process that was never there.
+    #[test]
+    fn firefox_bidi_probe_separates_a_refused_connection_from_a_wrong_protocol() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let error = probe_firefox_bidi(&format!("ws://127.0.0.1:{port}/session")).unwrap_err();
+        assert!(
+            matches!(error, BidiProbeFailure::Unreachable(_)),
+            "nothing is listening, so this is unreachable, not a protocol mismatch: {error}"
+        );
     }
 }
 
@@ -1693,8 +1820,9 @@ mod cdp_port_tests {
 
     #[test]
     fn a_free_port_is_reported_as_available_for_bobby_cdp() {
-        let check = check_cdp_port(&config_for(free_port(), false));
+        let (check, state) = check_cdp_port(&config_for(free_port(), false));
         assert_eq!(check.status, DoctorStatus::Ok);
+        assert!(state == CdpPortState::Free);
         assert!(check.detail.contains("is free"), "{}", check.detail);
     }
 
@@ -1723,8 +1851,9 @@ mod cdp_port_tests {
             stream.flush().unwrap();
         });
 
-        let check = check_cdp_port(&config_for(port, false));
+        let (check, state) = check_cdp_port(&config_for(port, false));
         assert_eq!(check.status, DoctorStatus::Warn, "{}", check.detail);
+        assert!(state == CdpPortState::Occupied);
         assert!(check.detail.contains("already in use"), "{}", check.detail);
         assert!(check.detail.contains("--cdp-port"), "{}", check.detail);
         server.join().unwrap();
@@ -1743,8 +1872,9 @@ mod cdp_port_tests {
             });
         });
 
-        let check = check_cdp_port(&config_for(port, false));
+        let (check, state) = check_cdp_port(&config_for(port, false));
         assert_eq!(check.status, DoctorStatus::Warn, "{}", check.detail);
+        assert!(state == CdpPortState::Occupied);
         assert!(check.detail.contains("already in use"), "{}", check.detail);
         assert!(check.detail.contains("--cdp-port"), "{}", check.detail);
         let _ = server.join();
@@ -1752,8 +1882,9 @@ mod cdp_port_tests {
 
     #[test]
     fn an_enabled_listener_that_is_not_answering_is_a_warning() {
-        let check = check_cdp_port(&config_for(free_port(), true));
+        let (check, state) = check_cdp_port(&config_for(free_port(), true));
         assert_eq!(check.status, DoctorStatus::Warn);
+        assert!(state == CdpPortState::Free);
         assert!(check.detail.contains("bobby cdp"), "{}", check.detail);
     }
 }

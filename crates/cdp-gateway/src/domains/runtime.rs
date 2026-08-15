@@ -3,13 +3,21 @@ use sha2::{Digest, Sha256};
 
 use crate::{CdpError, CdpErrorCode};
 
+// One entry per client release, because Playwright rewrites these bundles every
+// release. A version with no entry fails closed on the first page it opens; the
+// `cdp.runtime.bootstrap_rejected` debug line reports the length and digest that
+// arrived, which is what a new entry is made from.
 const PLAYWRIGHT_1_61_INJECTED: (usize, &str) = (
     311_362,
     "219b161932480469c7ebe3baf2d66a8101276625916b6a60ad4e57f4858eb6cc",
 );
-const PLAYWRIGHT_1_62_INJECTED: (usize, &str) = (
+const PLAYWRIGHT_1_62_0_INJECTED: (usize, &str) = (
     316_703,
     "60769c02b1d2f781a31f54e504ad2ee5fdf397b4fe47b43e7284f6d4e231a771",
+);
+const PLAYWRIGHT_1_62_1_INJECTED: (usize, &str) = (
+    317_080,
+    "b817c6e941f652f2996b93bd096e6a6e9457e16b40e8ebf62adcd855f723b263",
 );
 const PLAYWRIGHT_1_61_UTILITY: (usize, &str) = (
     10_652,
@@ -20,14 +28,15 @@ const PLAYWRIGHT_1_62_UTILITY: (usize, &str) = (
     "fd3b882cab3a898b34e827ab330d9fb152340d61f7d0c3cec30247018af131e4",
 );
 
+const INJECTED_BOOTSTRAPS: [(usize, &str); 3] = [
+    PLAYWRIGHT_1_61_INJECTED,
+    PLAYWRIGHT_1_62_0_INJECTED,
+    PLAYWRIGHT_1_62_1_INJECTED,
+];
+
 fn is_pinned_bootstrap_identity(len: usize, digest: &str) -> bool {
-    [
-        PLAYWRIGHT_1_61_INJECTED,
-        PLAYWRIGHT_1_62_INJECTED,
-        PLAYWRIGHT_1_61_UTILITY,
-        PLAYWRIGHT_1_62_UTILITY,
-    ]
-    .contains(&(len, digest))
+    INJECTED_BOOTSTRAPS.contains(&(len, digest))
+        || [PLAYWRIGHT_1_61_UTILITY, PLAYWRIGHT_1_62_UTILITY].contains(&(len, digest))
 }
 
 fn normalize_playwright_frame_seq(expression: &str) -> Option<String> {
@@ -69,9 +78,8 @@ pub(crate) fn bootstrap_injected_script(params: &Value) -> Result<Value, CdpErro
         .as_ref()
         .zip(normalized_digest.as_deref())
         .map(|(value, digest)| (value.len(), digest));
-    let injected = normalized_identity.is_some_and(|identity| {
-        identity == PLAYWRIGHT_1_61_INJECTED || identity == PLAYWRIGHT_1_62_INJECTED
-    });
+    let injected =
+        normalized_identity.is_some_and(|identity| INJECTED_BOOTSTRAPS.contains(&identity));
     let pinned = is_pinned_bootstrap_identity(identity.0, identity.1) || injected;
     if params
         .get("contextId")
@@ -80,6 +88,16 @@ pub(crate) fn bootstrap_injected_script(params: &Value) -> Result<Value, CdpErro
         || expression.len() > crate::MAX_FRAME_BYTES
         || !pinned
     {
+        // The pins are per client release. When a client upgrades past them, every
+        // page it opens fails here and the wire error cannot say why. Length and
+        // digest identify which bootstrap arrived without logging caller JavaScript.
+        tracing::debug!(
+            length = expression.len(),
+            digest = %digest,
+            normalized_digest = normalized_digest.as_deref().unwrap_or("none"),
+            pinned,
+            "cdp.runtime.bootstrap_rejected"
+        );
         return Err(CdpError::new(
             CdpErrorCode::InvalidParams,
             "unrecognized bounded runtime bootstrap",

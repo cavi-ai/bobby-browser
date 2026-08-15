@@ -580,6 +580,9 @@ fn error_status(error: &InterfaceError) -> StatusCode {
         InterfaceErrorCode::DeadlineExceeded => StatusCode::REQUEST_TIMEOUT,
         InterfaceErrorCode::IdempotencyConflict => StatusCode::CONFLICT,
         InterfaceErrorCode::ResourceExhausted => StatusCode::TOO_MANY_REQUESTS,
+        // The runtime is up; its browser engine is not. A dependency outage, so
+        // the same request is worth resubmitting once the engine answers.
+        InterfaceErrorCode::EngineUnreachable => StatusCode::SERVICE_UNAVAILABLE,
         InterfaceErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         InterfaceErrorCode::InvalidRequest
         | InterfaceErrorCode::UnsupportedInterfaceVersion
