@@ -117,6 +117,21 @@ model = "mlx-community/Qwen2.5-VL-3B-Instruct-4bit"
 # base_url = "http://127.0.0.1:11434/v1"
 # model = "llava"
 
+[cdp]
+# Authenticated Chromium DevTools discovery and WebSockets, on a dedicated TCP
+# listener. `bobby cdp` turns this on for one run; `bobby serve` honours the
+# value below.
+enabled = false
+host = "127.0.0.1"
+# 9222 is also Firefox's default remote-debugging port. `bobby doctor` reports
+# the collision as `cdp-port`; override with `bobby cdp --cdp-port <port>`.
+port = 9222
+# Open a runtime page for a connecting client that holds session:write and
+# page:write and has no session yet. CDP cannot create a session itself, so
+# with this off a connected client has nothing to drive until one is opened
+# over HTTP, MCP, or an SDK.
+auto_session = true
+
 [interface]
 # Maximum size, in bytes, of a single interface request.
 max_request_bytes = 1048576

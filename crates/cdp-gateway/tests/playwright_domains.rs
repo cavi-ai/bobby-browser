@@ -131,6 +131,115 @@ async fn target_event_admission_rejects_worker_families_and_allows_popup_pages()
 }
 
 #[tokio::test]
+async fn client_initialization_accepts_any_pinned_puppeteer_utility_world_version() {
+    let authority = AuthorityStore::in_memory();
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid::Uuid::new_v4()),
+            [
+                Capability::SessionRead,
+                Capability::PageWrite,
+                Capability::JavascriptEvaluate,
+            ],
+            Utc::now() + Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .expose_once();
+    let now = Utc::now();
+    let connection = CdpConnection::new(
+        authority.verify(&token).await.unwrap(),
+        Arc::new(support::PageCreatingRuntime {
+            session: SessionState {
+                id: SessionId::new(),
+                profile: "p".into(),
+                proxy: None,
+                page_ids: vec![],
+                created_at: now,
+                last_used_at: now,
+                execution_policy: types::ExecutionPolicy::default(),
+            },
+        }),
+        MethodRegistry::compiled(),
+    );
+
+    for world in [
+        "__puppeteer_utility_world__25.4.0",
+        "__puppeteer_utility_world__25.5.0",
+        "__puppeteer_utility_world__26.0.0",
+    ] {
+        let response = connection
+            .dispatch(CdpRequest::new(
+                1,
+                "Page.addScriptToEvaluateOnNewDocument",
+                json!({"source":"//# sourceURL=pptr:internal","worldName":world}),
+            ))
+            .await;
+        let value = serde_json::to_value(response).unwrap();
+        assert!(
+            value["result"]["identifier"].is_string(),
+            "{world}: {value}"
+        );
+    }
+
+    for params in [
+        json!({"source":"//# sourceURL=pptr:internal","worldName":"__puppeteer_utility_world__"}),
+        json!({"source":"//# sourceURL=pptr:internal","worldName":"__puppeteer_utility_world__25..0"}),
+        json!({"source":"//# sourceURL=pptr:internal","worldName":"__puppeteer_utility_world__25.4.0-evil"}),
+        json!({"source":"fetch('http://attacker')","worldName":"__puppeteer_utility_world__25.4.0"}),
+    ] {
+        let response = connection
+            .dispatch(CdpRequest::new(
+                2,
+                "Page.addScriptToEvaluateOnNewDocument",
+                params.clone(),
+            ))
+            .await;
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(
+            value["error"]["code"],
+            CdpErrorCode::InvalidParams as i32,
+            "{params}: {value}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn creating_a_target_without_a_runtime_session_names_where_sessions_come_from() {
+    let authority = AuthorityStore::in_memory();
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid::Uuid::new_v4()),
+            [Capability::SessionRead, Capability::PageWrite],
+            Utc::now() + Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .expose_once();
+    let connection = CdpConnection::new(
+        authority.verify(&token).await.unwrap(),
+        Arc::new(support::StaticRuntime { sessions: vec![] }),
+        MethodRegistry::compiled(),
+    );
+
+    let response = connection
+        .dispatch(CdpRequest::new(
+            1,
+            "Target.createTarget",
+            json!({"url":"about:blank"}),
+        ))
+        .await;
+
+    let error = serde_json::to_value(response).unwrap()["error"]["message"]
+        .as_str()
+        .expect("failure carries a message")
+        .to_owned();
+    assert!(error.contains("cannot create one"), "{error}");
+    assert!(error.contains("/v1/sessions"), "{error}");
+    assert!(error.contains("page_open"), "{error}");
+}
+
+#[tokio::test]
 async fn puppeteer_target_manager_receives_tab_then_child_page_with_parent_routing() {
     let connection = page_creating_connection().await;
     let mut recorder = ProtocolRecorder(Vec::new());

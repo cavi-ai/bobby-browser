@@ -21,6 +21,8 @@ pub(crate) enum Handler {
     BrowserSetDownloadBehavior,
     EmulationSetFocus,
     EmulationSetMedia,
+    EmulationSetDeviceMetrics,
+    EmulationSetTouch,
     LogEnable,
     NetworkEnable,
     PageAddScript,
@@ -60,6 +62,8 @@ impl Handler {
             Self::BrowserSetDownloadBehavior => "configure_runtime_downloads",
             Self::EmulationSetFocus => "submit_runtime_focus_emulation",
             Self::EmulationSetMedia => "submit_runtime_media_emulation",
+            Self::EmulationSetDeviceMetrics => "submit_runtime_viewport_emulation",
+            Self::EmulationSetTouch => "validate_touch_emulation_matches_runtime",
             Self::LogEnable => "configure_gateway_log_events",
             Self::NetworkEnable => "configure_gateway_network_events",
             Self::PageAddScript => "validate_empty_init_script_compatibility",
@@ -228,6 +232,14 @@ impl MethodRegistry {
             (
                 "Emulation.setEmulatedMedia".to_owned(),
                 Handler::EmulationSetMedia,
+            ),
+            (
+                "Emulation.setDeviceMetricsOverride".to_owned(),
+                Handler::EmulationSetDeviceMetrics,
+            ),
+            (
+                "Emulation.setTouchEmulationEnabled".to_owned(),
+                Handler::EmulationSetTouch,
             ),
             ("Log.enable".to_owned(), Handler::LogEnable),
             ("Network.enable".to_owned(), Handler::NetworkEnable),

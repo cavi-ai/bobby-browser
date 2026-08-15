@@ -125,6 +125,10 @@ pub struct CdpConfig {
     pub enabled: bool,
     pub host: String,
     pub port: u16,
+    /// Open a runtime page for a connecting client that holds `session:write`
+    /// and `page:write` and has no session yet. CDP cannot create a session
+    /// itself, so without this a connected client has nothing to drive.
+    pub auto_session: bool,
 }
 
 impl Default for CdpConfig {
@@ -133,6 +137,7 @@ impl Default for CdpConfig {
             enabled: false,
             host: "127.0.0.1".to_string(),
             port: 9222,
+            auto_session: true,
         }
     }
 }

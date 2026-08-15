@@ -33,11 +33,11 @@ use tokio::{
 use types::{
     AttemptId, CaptureScreenshotCommand, CheckpointId, CheckpointInvariant,
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand, CommandClass,
-    CommandEnvelope, CommandId, CommandOutcome, CorrelationId, ErrorLayer, InspectCommand,
-    InterfaceError, InterfaceErrorCode, NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand,
-    RecoveryDecision, RequestContext, RuntimeCommand, ScreenshotMode, SessionId, SessionState,
-    SetEmulatedMediaCommand, SetFocusEmulationCommand, TargetSpec, TextMatch, TypeTextCommand,
-    UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
+    CommandEnvelope, CommandId, CommandOutcome, CorrelationId, CreateSessionRequest, ErrorLayer,
+    InspectCommand, InterfaceError, InterfaceErrorCode, NavigateCommand, OpenPageRequest, PageId,
+    PrimitiveCommand, RecoveryDecision, RequestContext, RuntimeCommand, ScreenshotMode, SessionId,
+    SessionState, SetEmulatedMediaCommand, SetFocusEmulationCommand, TargetSpec, TextMatch,
+    TypeTextCommand, UploadFilesCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
 
 fn boundary_state_error(message: &str) -> InterfaceError {
@@ -139,6 +139,7 @@ pub struct CdpGateway {
     artifacts: Option<artifact_store::ArtifactStore>,
     upload_staging_root: Option<PathBuf>,
     streams: Arc<Mutex<DownloadStreamStore>>,
+    auto_session: bool,
 }
 
 impl CdpGateway {
@@ -190,7 +191,17 @@ impl CdpGateway {
                 256 * 1024 * 1024,
                 std::time::Duration::from_secs(300),
             ))),
+            auto_session: true,
         }
+    }
+
+    /// Whether a connecting client with `session:write` and `page:write` gets a
+    /// runtime page opened for it when none exists. On by default: without it,
+    /// `connectOverCDP` lands on an empty browser and every client's first call
+    /// fails, because CDP cannot create a runtime session itself.
+    pub fn with_auto_session(mut self, auto_session: bool) -> Self {
+        self.auto_session = auto_session;
+        self
     }
 
     pub fn with_artifacts(mut self, artifacts: artifact_store::ArtifactStore) -> Self {
@@ -277,6 +288,9 @@ impl CdpGateway {
         }
         let handle = self.authenticate(bearer).await?;
         let runtime = (self.bind_runtime)(handle.clone());
+        if self.auto_session {
+            self.ensure_runtime_page(&handle, runtime.as_ref()).await;
+        }
         let connection = Arc::new(CdpConnection::with_targets(
             handle,
             runtime,
@@ -293,6 +307,74 @@ impl CdpGateway {
         connections.retain(|existing| existing.strong_count() > 0);
         connections.push(Arc::downgrade(&connection));
         Ok(connection)
+    }
+
+    /// Give a connecting client something to drive.
+    ///
+    /// A CDP client connects and immediately reads the page list; DevTools
+    /// clients have no way to ask for a session, and `Target.createTarget` needs
+    /// one that already exists. Without this, `connectOverCDP` succeeds and then
+    /// every first call fails, which reads as a broken gateway rather than a
+    /// missing prerequisite.
+    ///
+    /// Best-effort by design: a client that only holds discovery capabilities,
+    /// or a runtime that refuses, still gets its socket. Bounded to one page,
+    /// and only when the principal has no session at all.
+    async fn ensure_runtime_page(&self, handle: &CapabilityHandle, runtime: &dyn RuntimeInterface) {
+        let ctx = handle.context(Utc::now() + Duration::seconds(30), None);
+        if !ctx.capabilities.contains(types::Capability::SessionWrite)
+            || !ctx.capabilities.contains(types::Capability::PageWrite)
+        {
+            return;
+        }
+        let sessions = match runtime.list_sessions(ctx.clone()).await {
+            Ok(sessions) => sessions,
+            Err(error) => {
+                tracing::debug!(error = ?error.code, "cdp.auto_session.list_failed");
+                return;
+            }
+        };
+        if sessions.iter().any(|session| !session.page_ids.is_empty()) {
+            return;
+        }
+        let session = match sessions.first() {
+            Some(session) => session.clone(),
+            None => match runtime
+                .create_session(
+                    ctx.clone(),
+                    CreateSessionRequest {
+                        profile: "default".to_owned(),
+                        proxy: None,
+                        execution_policy: types::ExecutionPolicy::default(),
+                    },
+                )
+                .await
+            {
+                Ok(session) => session,
+                Err(error) => {
+                    tracing::warn!(error = ?error.code, message = %error.message, "cdp.auto_session.create_failed");
+                    return;
+                }
+            },
+        };
+        match runtime
+            .open_page(
+                ctx,
+                OpenPageRequest {
+                    session_id: session.id.clone(),
+                },
+            )
+            .await
+        {
+            Ok(page) => tracing::info!(
+                session = %session.id.0,
+                page = %page.id.0,
+                "cdp.auto_session.ready"
+            ),
+            Err(error) => {
+                tracing::warn!(error = ?error.code, message = %error.message, "cdp.auto_session.open_page_failed")
+            }
+        }
     }
 
     pub async fn replace_worker_generation(
@@ -751,7 +833,10 @@ impl CdpConnection {
                     Err(error) => return CdpResponse::failure(&request, runtime_error(error)),
                 };
                 let Some(session) = sessions.first() else {
-                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "no runtime session is available"));
+                    // First call after a bare connect lands here: CDP attaches to
+                    // runtime sessions, it does not create them. Say where they come
+                    // from rather than leaving the client to guess.
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "no runtime session is available: CDP attaches to existing runtime sessions and cannot create one -- open a session and page first (POST /v1/sessions then POST /v1/pages, MCP session_create/page_open, or an SDK client), then reuse the page this connection already exposes"));
                 };
                 let page = match self.runtime.open_page(ctx, OpenPageRequest { session_id: session.id.clone() }).await {
                     Ok(page) => page,
@@ -1667,6 +1752,68 @@ impl CdpConnection {
                     Err(error) => Err(error),
                 }
             }
+            Some(Handler::EmulationSetDeviceMetrics) => {
+                // Puppeteer applies its default viewport through this method on
+                // every page it opens, so refusing it refuses the client. The
+                // runtime's own emulation covers width, height, and the mobile
+                // flag; a scale factor or orientation it cannot apply is
+                // refused rather than silently ignored, which would leave the
+                // client believing a viewport it never got.
+                let params = request.params.as_object();
+                let Some(params) = params.filter(|params| params.len() <= 8) else {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "invalid device metrics configuration"));
+                };
+                if params.keys().any(|key| !matches!(key.as_str(), "width" | "height" | "deviceScaleFactor" | "mobile" | "screenOrientation")) {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "unsupported device metrics field"));
+                }
+                let (Some(width), Some(height)) = (
+                    params.get("width").and_then(Value::as_u64).filter(|value| (1..=16384).contains(value)),
+                    params.get("height").and_then(Value::as_u64).filter(|value| (1..=16384).contains(value)),
+                ) else {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "viewport dimensions must be within 1..=16384"));
+                };
+                let mobile = params.get("mobile").and_then(Value::as_bool).unwrap_or(false);
+                if params.get("deviceScaleFactor").and_then(Value::as_f64).is_some_and(|scale| scale != 1.0) {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "device scale factor emulation is unsupported; connect with deviceScaleFactor 1"));
+                }
+                if let Some(orientation) = params.get("screenOrientation") {
+                    let angle = orientation.get("angle").and_then(Value::as_i64).unwrap_or(0);
+                    let kind = orientation.get("type").and_then(Value::as_str).unwrap_or("portraitPrimary");
+                    if angle != 0 || kind != "portraitPrimary" {
+                        return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "screen orientation emulation is unsupported; only portraitPrimary at angle 0 is applied"));
+                    }
+                }
+                let Some((session_id, page_id)) = self.runtime_identity(request.session_id.as_deref()).await else {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "unknown runtime page"));
+                };
+                let viewport = types::ViewportSize { width: width as u32, height: height as u32 };
+                let envelope = CommandEnvelope { schema_version:CommandEnvelope::SCHEMA_VERSION,
+                    command_id:CommandId::new(), workflow_id:WorkflowId::new(), attempt_id:AttemptId::new(),
+                    session_id, page_id:Some(page_id), deadline:Utc::now()+Duration::seconds(30),
+                    command:RuntimeCommand::Primitive(PrimitiveCommand::Emulate(types::EmulateCommand { viewport: Some(viewport), geolocation: None, mobile: Some(mobile) })) };
+                match self.runtime.submit(ctx, envelope).await {
+                    Ok(CommandOutcome::Completed { evidence, .. }) if evidence.iter().any(|item| matches!(item, types::Evidence::Emulation { viewport: Some(applied), .. } if applied == &viewport)) => Ok(json!({})),
+                    Ok(_) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "viewport emulation produced no verified evidence")),
+                    Err(error) => Err(error),
+                }
+            }
+            Some(Handler::EmulationSetTouch) => {
+                // Puppeteer pairs this with the viewport above. The runtime has
+                // no touch emulation, so `false` is answered truthfully as the
+                // state that already holds, and `true` is refused instead of
+                // being accepted as a no-op the client would trust.
+                let Some(params) = request.params.as_object().filter(|params| params.len() <= 2) else {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "invalid touch emulation configuration"));
+                };
+                if params.keys().any(|key| !matches!(key.as_str(), "enabled" | "maxTouchPoints")) {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "unsupported touch emulation field"));
+                }
+                match params.get("enabled").and_then(Value::as_bool) {
+                    Some(false) => Ok(json!({})),
+                    Some(true) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "touch emulation is unsupported; connect without hasTouch")),
+                    None => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "invalid touch emulation configuration")),
+                }
+            }
             Some(Handler::PageEnable) => {
                 if !request.params.as_object().is_some_and(serde_json::Map::is_empty) {
                     return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "Page.enable takes no parameters"));
@@ -2150,9 +2297,25 @@ fn supported_client_initialization(params: &Value) -> bool {
     let world = params.get("worldName").and_then(Value::as_str);
     let playwright =
         source == Some("") && world.is_some_and(|name| !name.is_empty() && name.len() <= 256);
-    let puppeteer = source == Some("//# sourceURL=pptr:internal")
-        && world == Some("__puppeteer_utility_world__25.5.0");
+    let puppeteer =
+        source == Some("//# sourceURL=pptr:internal") && world.is_some_and(puppeteer_utility_world);
     params.as_object().is_some_and(|params| params.len() == 2) && (playwright || puppeteer)
+}
+
+/// Puppeteer names its utility world `__puppeteer_utility_world__` + its own
+/// package version, so a single pinned version stops matching on the next
+/// upgrade and rejects every page the client opens. The pin was `25.5.0` while
+/// the repo pinned puppeteer-core 25.4.0, so the branch matched nothing at all.
+/// Still bounded: the suffix is a short dotted numeric version, nothing else.
+fn puppeteer_utility_world(name: &str) -> bool {
+    let Some(version) = name.strip_prefix("__puppeteer_utility_world__") else {
+        return false;
+    };
+    (1..=32).contains(&version.len())
+        && version.starts_with(|c: char| c.is_ascii_digit())
+        && version.ends_with(|c: char| c.is_ascii_digit())
+        && version.chars().all(|c| c.is_ascii_digit() || c == '.')
+        && !version.contains("..")
 }
 
 fn download_events(
@@ -2190,20 +2353,46 @@ mod security_tests {
         DownloadStreamStore, RemoteObject, UploadStaging,
     };
 
+    /// Puppeteer's utility world carries its own package version, so pinning a
+    /// single one refuses every other release. The previous pin was `25.5.0`
+    /// while the repo installed puppeteer-core 25.4.0, and this test asserted
+    /// 25.4.0 must be refused — locking in a gateway that rejected every page
+    /// the pinned client opened.
     #[test]
-    fn client_initialization_is_pinned_to_the_supported_puppeteer_version() {
-        assert!(supported_client_initialization(&serde_json::json!({
-            "source": "//# sourceURL=pptr:internal",
-            "worldName": "__puppeteer_utility_world__25.5.0"
-        })));
+    fn client_initialization_accepts_a_versioned_puppeteer_utility_world() {
+        for version in ["25.4.0", "25.5.0", "26.0.0", "1.0"] {
+            assert!(
+                supported_client_initialization(&serde_json::json!({
+                    "source": "//# sourceURL=pptr:internal",
+                    "worldName": format!("__puppeteer_utility_world__{version}")
+                })),
+                "{version}"
+            );
+        }
+        for world in [
+            "__puppeteer_utility_world__",
+            "__puppeteer_utility_world__25..0",
+            "__puppeteer_utility_world__25.4.0-evil",
+            "__puppeteer_utility_world__v25.4.0",
+            "__puppeteer_utility_world__25.4.0/../..",
+            "__other_world__25.4.0",
+        ] {
+            assert!(
+                !supported_client_initialization(&serde_json::json!({
+                    "source": "//# sourceURL=pptr:internal",
+                    "worldName": world
+                })),
+                "{world}"
+            );
+        }
         assert!(!supported_client_initialization(&serde_json::json!({
             "source": "//# sourceURL=pptr:internal",
-            "worldName": "__puppeteer_utility_world__25.4.0"
-        })));
-        assert!(!supported_client_initialization(&serde_json::json!({
-            "source": "//# sourceURL=pptr:internal",
-            "worldName": "__puppeteer_utility_world__25.5.0",
+            "worldName": "__puppeteer_utility_world__25.4.0",
             "runImmediately": true
+        })));
+        assert!(!supported_client_initialization(&serde_json::json!({
+            "source": "fetch('http://attacker')",
+            "worldName": "__puppeteer_utility_world__25.4.0"
         })));
     }
 

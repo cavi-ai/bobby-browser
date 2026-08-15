@@ -23,6 +23,31 @@ port = 9222
 Both commands share the same broker, sessions, and bearer credentials. Override
 the CDP port at the CLI with `bobby cdp --cdp-port 9333`.
 
+9222 belongs to CDP here: `make firefox-start` puts the companion profile's
+remote-debugging endpoint on 9224 so the two do not collide. Any other browser
+you started yourself on 9222 still owns it first — `bobby doctor` reports that
+as `cdp-port` and startup fails naming the address; pick another port with
+`--cdp-port`.
+
+## Setup
+
+```bash
+# Managed Chromium needs no pairing; the default engine preference
+# (Firefox companion) does.
+export AUTOMATION_RUNTIME_BROWSER_SELECTION='{"preference":{"mode":"managedChromium"}}'
+bobby cdp --cdp-port 9333
+```
+
+That is the whole setup. A connecting client that holds `session:write` and
+`page:write` and has no session yet gets one opened for it, with a blank page,
+so `contexts()[0].pages()[0]` is there on the first read. CDP itself cannot
+create a session — `Target.createTarget` reaches an existing one — so without
+this a connected client would have nothing to drive.
+
+Set `[cdp].auto_session = false` to turn it off; a client then sees an empty
+browser until a session and page are opened over HTTP (`POST /v1/sessions`,
+`POST /v1/pages`), MCP (`session_create`, `page_open`), or an SDK.
+
 ## Discovery and sockets
 
 - `GET /json/version`, `GET /json/list` — discovery
@@ -52,6 +77,11 @@ const endpoint = "http://127.0.0.1:9222";
 const browser = await chromium.connectOverCDP(endpoint, {
   headers: { Authorization: `Bearer ${process.env.AUTOMATION_RUNTIME_TOKEN!}` },
 });
+
+// Drive the pages the runtime already opened. Client-side page creation
+// (`context.newPage()`, `browser.newPage()`) is not a supported path — see
+// below.
+const page = browser.contexts()[0].pages()[0];
 ```
 
 ```ts
@@ -62,7 +92,24 @@ const browser = await puppeteer.connect({
   browserWSEndpoint: wsEndpoint,
   headers: { Authorization: `Bearer ${process.env.AUTOMATION_RUNTIME_TOKEN!}` },
 });
+
+// Puppeteer's own target discovery does not enumerate pre-existing runtime
+// pages, so this falls through to newPage(), which opens one.
+const page = (await browser.pages())[0] ?? (await browser.newPage());
 ```
+
+Puppeteer's default viewport is applied through the runtime's own emulation.
+What it cannot apply, it refuses rather than ignores: a `deviceScaleFactor`
+other than 1, a non-portrait `screenOrientation`, and `hasTouch` each fail with
+the reason. Pass `defaultViewport: null` to skip viewport emulation entirely.
+
+## Client-side page creation
+
+| Call | Outcome |
+|---|---|
+| Playwright `context.pages()[0]` | the page opened at connect |
+| Playwright `context.newPage()` | unsupported — `Target.createTarget` is uncovered for Playwright, which fails wiring a target it never sees attached |
+| Puppeteer `browser.newPage()` | opens a page in the connection's runtime session |
 
 ## Allowlist and limits
 

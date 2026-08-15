@@ -1151,7 +1151,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         run: Box::new(move || {
             let install = install_firefox_companion(extension_path.as_deref())?;
             Ok(format!(
-                "sideloaded into {}; config copy at {}; native host at {}. Next: `make firefox-start` (Bobby profile at {}; BiDi on :9222), then Pair from the toolbar popup. Local agents use `bobby mcp-stdio` — no `bobby serve` required",
+                "sideloaded into {}; config copy at {}; native host at {}. Next: `make firefox-start` (Bobby profile at {}; BiDi on :9224), then Pair from the toolbar popup. Local agents use `bobby mcp-stdio` — no `bobby serve` required",
                 install.sideload_dir.display(),
                 install.extension_dir.display(),
                 install.manifest_path.display(),

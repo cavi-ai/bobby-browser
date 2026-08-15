@@ -10,13 +10,19 @@
 # Env:
 #   BOBBY_FIREFOX_BIN          firefox binary (default: discover)
 #   BOBBY_FIREFOX_PROFILE      profile dir (default: <config>/firefox-profile)
-#   BOBBY_FIREFOX_DEBUG_PORT   remote debugging port (default: 9222)
+#   BOBBY_FIREFOX_DEBUG_PORT   remote debugging port (default: 9224)
 #   BOBBY_BROWSER_STATE        override config/state dir (default: platform bobby-browser dir)
+#
+# 9224, not 9222: 9222 is the port authenticated CDP binds ([cdp].port), and the
+# two ran in the same product on the same host. Whichever started second failed
+# to bind. CDP keeps 9222 because that is the port DevTools clients expect; this
+# endpoint is internal to bobby and is discovered from the profile's
+# WebDriverBiDiServer.json, so moving it costs nothing.
 
 set -euo pipefail
 
 action="${1:-start}"
-PORT="${BOBBY_FIREFOX_DEBUG_PORT:-9222}"
+PORT="${BOBBY_FIREFOX_DEBUG_PORT:-9224}"
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 log() { printf '==> %s\n' "$*"; }

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Added
+
+- `Emulation.setDeviceMetricsOverride` and `Emulation.setTouchEmulationEnabled` are allowlisted, so a Puppeteer client's default viewport applies through the runtime's own emulation instead of failing the connect. A scale factor other than 1, a non-portrait orientation, and `hasTouch` are refused with the reason rather than silently ignored.
+- `[cdp].auto_session` (default true): a connecting CDP client holding `session:write` and `page:write` with no session open gets one, with a blank page, so `contexts()[0].pages()[0]` resolves on connect. CDP cannot create a session itself, so a connected client previously had nothing to drive.
+- `[cdp]` section in the sample `config.toml`.
+- `bobby doctor` reports a `cdp-port` check: whether the configured CDP address is serving authenticated discovery, is free, or is already owned by another process. The default 9222 is also Firefox's default remote-debugging port, so the collision is named before `bobby cdp` fails on it.
+- `cdp.listener.ready` startup log carrying the CDP discovery endpoint and WebSocket base.
+
+### Changed
+
+- `scripts/dev/firefox-start.sh` puts the companion profile's remote-debugging endpoint on 9224. It defaulted to 9222, the port authenticated CDP binds, so whichever of the two started second failed to bind. `BOBBY_FIREFOX_DEBUG_PORT` still overrides it.
+- CDP bind failures name the address, the Firefox 9222 overlap, and `--cdp-port`, instead of a bare `Address already in use`.
+- `Target.createTarget` with no runtime session states that CDP attaches to sessions rather than creating them, and names the routes that open one (`POST /v1/sessions`, `POST /v1/pages`, MCP `session_create`/`page_open`, SDK).
+- `bobby doctor` reports `cdp-listen` when CDP is disabled, naming the address `bobby cdp` would bind.
+- The authenticated-CDP guide documents the session-and-page prerequisite, managed Chromium as the pairing-free engine, and that pages are opened through the runtime rather than by the client.
+
 ## 0.9.0 - 2026-08-12
 
 ### Added
