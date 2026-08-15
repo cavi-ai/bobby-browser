@@ -21,9 +21,13 @@
     "docs:verify": "node scripts/docs/verify-bobby-browser.mjs",
     "docs:test": "node --test --test-concurrency=1 scripts/docs/*.test.mjs",
     "docs:release-artifact": "node scripts/docs/release-artifact.mjs",
-    "docs:release-envelope": "node scripts/docs/create-release-envelope.mjs"
+    "docs:release-envelope": "node scripts/docs/create-release-envelope.mjs",
+    "format": "cargo fmt --all --check",
+    "lint": "cargo clippy --workspace --all-targets -- -D warnings",
+    "prepare": "husky"
   },
   "devDependencies": {
+    "husky": "^9.1.7",
     "typescript": "7.0.2"
   }
 }
