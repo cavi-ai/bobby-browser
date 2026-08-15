@@ -23,10 +23,11 @@ port = 9222
 Both commands share the same broker, sessions, and bearer credentials. Override
 the CDP port at the CLI with `bobby cdp --cdp-port 9333`.
 
-Port 9222 is also Firefox's default remote-debugging port. When a Firefox
-companion profile is running, the CDP listener cannot bind it — `bobby doctor`
-reports the occupancy as `cdp-port`, and startup fails naming the address. Pick
-another port with `--cdp-port`.
+9222 belongs to CDP here: `make firefox-start` puts the companion profile's
+remote-debugging endpoint on 9224 so the two do not collide. Any other browser
+you started yourself on 9222 still owns it first — `bobby doctor` reports that
+as `cdp-port` and startup fails naming the address; pick another port with
+`--cdp-port`.
 
 ## Setup
 
@@ -90,7 +91,6 @@ import puppeteer from "puppeteer-core";
 const browser = await puppeteer.connect({
   browserWSEndpoint: wsEndpoint,
   headers: { Authorization: `Bearer ${process.env.AUTOMATION_RUNTIME_TOKEN!}` },
-  defaultViewport: null,
 });
 
 // Puppeteer's own target discovery does not enumerate pre-existing runtime
@@ -98,9 +98,10 @@ const browser = await puppeteer.connect({
 const page = (await browser.pages())[0] ?? (await browser.newPage());
 ```
 
-`defaultViewport: null` is required: a viewport asks for
-`Emulation.setTouchEmulationEnabled`, which is outside the allowlist, and the
-connect fails before the first navigation.
+Puppeteer's default viewport is applied through the runtime's own emulation.
+What it cannot apply, it refuses rather than ignores: a `deviceScaleFactor`
+other than 1, a non-portrait `screenOrientation`, and `hasTouch` each fail with
+the reason. Pass `defaultViewport: null` to skip viewport emulation entirely.
 
 ## Client-side page creation
 

@@ -113,6 +113,28 @@
       "puppeteerCovered": false
     },
     {
+      "name": "Emulation.setDeviceMetricsOverride",
+      "requiredCapability": "browser:mutate",
+      "parameterSchemaRevision": "puppeteer-viewport-scale-1-portrait",
+      "translationFunction": "submit_runtime_viewport_emulation",
+      "scenarios": [
+        "puppeteer-connect"
+      ],
+      "playwrightCovered": false,
+      "puppeteerCovered": true
+    },
+    {
+      "name": "Emulation.setTouchEmulationEnabled",
+      "requiredCapability": "browser:mutate",
+      "parameterSchemaRevision": "puppeteer-viewport-touch-disabled",
+      "translationFunction": "validate_touch_emulation_matches_runtime",
+      "scenarios": [
+        "puppeteer-connect"
+      ],
+      "playwrightCovered": false,
+      "puppeteerCovered": true
+    },
+    {
       "name": "Log.enable",
       "requiredCapability": "page:read",
       "parameterSchemaRevision": "cdp-1.3",

@@ -155,7 +155,37 @@ EOF
   printf 'ok - accepts a fresh endpoint owned by launched Firefox\n'
 }
 
+# 9222 is the port authenticated CDP binds. When this launcher defaulted there
+# too, whichever of the two started second failed to bind.
+test_default_debug_port_does_not_collide_with_cdp() {
+  make_fixture
+  trap cleanup_fixture RETURN
+  unset BOBBY_FIREFOX_DEBUG_PORT
+
+  cat >"$BOBBY_FIREFOX_BIN" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$$" >"$FIXTURE/firefox.pid"
+touch "$PROFILE/.parentlock"
+printf '%s\n' "$*" >"$FIXTURE/firefox.args"
+printf '{"ws_host":"127.0.0.1","ws_port":9224}\n' >"$PROFILE/WebDriverBiDiServer.json"
+/bin/sleep 2
+EOF
+  chmod +x "$BOBBY_FIREFOX_BIN"
+  install_owned_listener_fakes
+
+  output="$($LAUNCHER start 2>&1)" \
+    || fail "default-port launch was rejected: $output"
+  [[ "$output" == *"BiDi listening on 127.0.0.1:9224"* ]] \
+    || fail "default port is not 9224: $output"
+  [[ "$(cat "$FIXTURE/firefox.args")" == *"--remote-debugging-port=9224"* ]] \
+    || fail "Firefox was not launched on the default 9224: $(cat "$FIXTURE/firefox.args")"
+  [[ "$(cat "$FIXTURE/firefox.args")" != *"9222"* ]] \
+    || fail "launcher still reaches for the CDP port: $(cat "$FIXTURE/firefox.args")"
+  printf 'ok - default debug port does not collide with the CDP port\n'
+}
+
 test_rejects_foreign_listener_before_launch
 test_surfaces_early_exit_diagnostics
+test_default_debug_port_does_not_collide_with_cdp
 test_rejects_stale_endpoint_file
 test_accepts_fresh_endpoint_owned_by_launched_firefox

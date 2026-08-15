@@ -237,7 +237,7 @@ enum CliCommand {
         /// Loopback address the pairing server binds to
         #[arg(long, default_value = "127.0.0.1:9876")]
         bind: SocketAddr,
-        /// BiDi WebSocket URL of the running Firefox (e.g. ws://127.0.0.1:9222/session)
+        /// BiDi WebSocket URL of the running Firefox (e.g. ws://127.0.0.1:9224/session)
         #[arg(long)]
         bidi_url: String,
         /// Firefox profile directory the companion extension runs in

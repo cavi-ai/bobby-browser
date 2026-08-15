@@ -108,7 +108,7 @@ on partial failure.
 make firefox-start
 ```
 
-That launches the Bobby profile with `--remote-debugging-port=9222` (no
+That launches the Bobby profile with `--remote-debugging-port=9224` (no
 launchd). `make firefox-stop` quits it. Manual equivalent:
 
 ```bash
@@ -116,13 +116,16 @@ PROFILE="$HOME/Library/Application Support/bobby-browser/firefox-profile"
 "/Applications/Firefox Developer Edition.app/Contents/MacOS/firefox" \
   --no-remote --foreground \
   --profile "$PROFILE" \
-  --remote-debugging-port=9222 \
+  --remote-debugging-port=9224 \
   about:blank
 ```
 
 Firefox writes the BiDi endpoint to `$PROFILE/WebDriverBiDiServer.json`. A
 fixed port keeps `bidiUrl` stable across restarts; `--remote-debugging-port=0`
 also works if you read the port back from that file.
+
+Not 9222: that is the port authenticated CDP binds ([`[cdp].port`](../surfaces/cdp.md)),
+and whichever of the two started second failed to bind.
 
 ### 4. Enroll via popup Pair
 
@@ -147,7 +150,7 @@ ids. `bobby serve`, the MCP gateway, and `bobby doctor` then resolve the
 selection with no environment wiring:
 
 ```json
-{"firefox":[{"attachmentTtlMs":300000,"bidiUrl":"ws://127.0.0.1:9222/session","companionBind":"127.0.0.1:9876","descriptorPath":"…/firefox-native-host-descriptor.json","pairingCodeTtlMs":300000,"profileDir":"…/firefox-profile","profileId":"…","timeoutMs":30000}],"preference":{"engine":"firefox","mode":"exact","profileId":"…"}}
+{"firefox":[{"attachmentTtlMs":300000,"bidiUrl":"ws://127.0.0.1:9224/session","companionBind":"127.0.0.1:9876","descriptorPath":"…/firefox-native-host-descriptor.json","pairingCodeTtlMs":300000,"profileDir":"…/firefox-profile","profileId":"…","timeoutMs":30000}],"preference":{"engine":"firefox","mode":"exact","profileId":"…"}}
 ```
 
 Setting `AUTOMATION_RUNTIME_BROWSER_SELECTION` to that JSON remains
@@ -171,7 +174,7 @@ For headless CI or automation, keep the CLI enroll command:
 bobby enroll-firefox-profile \
   --descriptor "$STATE/firefox-native-host-descriptor.json" \
   --bind 127.0.0.1:9876 \
-  --bidi-url "ws://127.0.0.1:9222/session" \
+  --bidi-url "ws://127.0.0.1:9224/session" \
   --profile-dir "$PROFILE" \
   --timeout-secs 120
 ```

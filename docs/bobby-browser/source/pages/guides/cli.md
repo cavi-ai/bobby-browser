@@ -177,7 +177,7 @@ bobby install-firefox-native-host \
   --descriptor /abs/descriptor.json
 bobby enroll-firefox-profile \
   --descriptor /abs/descriptor.json \
-  --bidi-url ws://127.0.0.1:9222/session \
+  --bidi-url ws://127.0.0.1:9224/session \
   --profile-dir /abs/profile
 ```
 

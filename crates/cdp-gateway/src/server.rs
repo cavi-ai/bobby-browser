@@ -1752,6 +1752,68 @@ impl CdpConnection {
                     Err(error) => Err(error),
                 }
             }
+            Some(Handler::EmulationSetDeviceMetrics) => {
+                // Puppeteer applies its default viewport through this method on
+                // every page it opens, so refusing it refuses the client. The
+                // runtime's own emulation covers width, height, and the mobile
+                // flag; a scale factor or orientation it cannot apply is
+                // refused rather than silently ignored, which would leave the
+                // client believing a viewport it never got.
+                let params = request.params.as_object();
+                let Some(params) = params.filter(|params| params.len() <= 8) else {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "invalid device metrics configuration"));
+                };
+                if params.keys().any(|key| !matches!(key.as_str(), "width" | "height" | "deviceScaleFactor" | "mobile" | "screenOrientation")) {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "unsupported device metrics field"));
+                }
+                let (Some(width), Some(height)) = (
+                    params.get("width").and_then(Value::as_u64).filter(|value| (1..=16384).contains(value)),
+                    params.get("height").and_then(Value::as_u64).filter(|value| (1..=16384).contains(value)),
+                ) else {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "viewport dimensions must be within 1..=16384"));
+                };
+                let mobile = params.get("mobile").and_then(Value::as_bool).unwrap_or(false);
+                if params.get("deviceScaleFactor").and_then(Value::as_f64).is_some_and(|scale| scale != 1.0) {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "device scale factor emulation is unsupported; connect with deviceScaleFactor 1"));
+                }
+                if let Some(orientation) = params.get("screenOrientation") {
+                    let angle = orientation.get("angle").and_then(Value::as_i64).unwrap_or(0);
+                    let kind = orientation.get("type").and_then(Value::as_str).unwrap_or("portraitPrimary");
+                    if angle != 0 || kind != "portraitPrimary" {
+                        return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "screen orientation emulation is unsupported; only portraitPrimary at angle 0 is applied"));
+                    }
+                }
+                let Some((session_id, page_id)) = self.runtime_identity(request.session_id.as_deref()).await else {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "unknown runtime page"));
+                };
+                let viewport = types::ViewportSize { width: width as u32, height: height as u32 };
+                let envelope = CommandEnvelope { schema_version:CommandEnvelope::SCHEMA_VERSION,
+                    command_id:CommandId::new(), workflow_id:WorkflowId::new(), attempt_id:AttemptId::new(),
+                    session_id, page_id:Some(page_id), deadline:Utc::now()+Duration::seconds(30),
+                    command:RuntimeCommand::Primitive(PrimitiveCommand::Emulate(types::EmulateCommand { viewport: Some(viewport), geolocation: None, mobile: Some(mobile) })) };
+                match self.runtime.submit(ctx, envelope).await {
+                    Ok(CommandOutcome::Completed { evidence, .. }) if evidence.iter().any(|item| matches!(item, types::Evidence::Emulation { viewport: Some(applied), .. } if applied == &viewport)) => Ok(json!({})),
+                    Ok(_) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "viewport emulation produced no verified evidence")),
+                    Err(error) => Err(error),
+                }
+            }
+            Some(Handler::EmulationSetTouch) => {
+                // Puppeteer pairs this with the viewport above. The runtime has
+                // no touch emulation, so `false` is answered truthfully as the
+                // state that already holds, and `true` is refused instead of
+                // being accepted as a no-op the client would trust.
+                let Some(params) = request.params.as_object().filter(|params| params.len() <= 2) else {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "invalid touch emulation configuration"));
+                };
+                if params.keys().any(|key| !matches!(key.as_str(), "enabled" | "maxTouchPoints")) {
+                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "unsupported touch emulation field"));
+                }
+                match params.get("enabled").and_then(Value::as_bool) {
+                    Some(false) => Ok(json!({})),
+                    Some(true) => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "touch emulation is unsupported; connect without hasTouch")),
+                    None => return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "invalid touch emulation configuration")),
+                }
+            }
             Some(Handler::PageEnable) => {
                 if !request.params.as_object().is_some_and(serde_json::Map::is_empty) {
                     return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "Page.enable takes no parameters"));
