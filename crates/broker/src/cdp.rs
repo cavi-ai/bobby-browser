@@ -61,6 +61,7 @@ pub async fn spawn_cdp_listener_with_shutdown<A: Authority + 'static>(
             cdp_gateway::MethodRegistry::compiled(),
             ws_base,
         )
+        .with_auto_session(config.auto_session)
         .with_artifacts(artifacts)
         .with_upload_staging_root(upload_staging_root),
     );

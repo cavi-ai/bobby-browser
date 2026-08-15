@@ -1645,6 +1645,7 @@ mod cdp_port_tests {
             enabled,
             host: "127.0.0.1".to_string(),
             port,
+            auto_session: true,
         }
     }
 

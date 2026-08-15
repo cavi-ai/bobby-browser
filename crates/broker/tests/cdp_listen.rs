@@ -40,6 +40,7 @@ async fn cdp_listener_serves_json_version_when_enabled() {
         enabled: true,
         host: "127.0.0.1".into(),
         port: 0,
+        auto_session: true,
     })
     .await;
     let (status, body) = http_get(cdp.addr, "/json/version", Some(&bearer)).await;
@@ -62,6 +63,7 @@ async fn cdp_bind_failure_names_the_address_and_the_port_override() {
         enabled: true,
         host: "127.0.0.1".into(),
         port,
+        auto_session: true,
     })
     .await;
 
@@ -79,6 +81,7 @@ async fn cdp_listener_binds_runtime_for_an_issued_principal() {
         enabled: true,
         host: "127.0.0.1".into(),
         port: 0,
+        auto_session: true,
     })
     .await;
     let principal = types::PrincipalId::from_uuid(uuid::Uuid::new_v4());

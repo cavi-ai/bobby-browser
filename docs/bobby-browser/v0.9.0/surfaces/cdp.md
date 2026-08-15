@@ -30,25 +30,22 @@ another port with `--cdp-port`.
 
 ## Setup
 
-CDP **attaches to** runtime sessions; it does not create them. A client that
-connects with no session open gets `no runtime session is available` on its
-first call. Open a session and a page first, then connect.
-
 ```bash
-# 1. Runtime with CDP on a free port. Managed Chromium needs no pairing;
-#    the default engine preference (Firefox companion) does.
+# Managed Chromium needs no pairing; the default engine preference
+# (Firefox companion) does.
 export AUTOMATION_RUNTIME_BROWSER_SELECTION='{"preference":{"mode":"managedChromium"}}'
 bobby cdp --cdp-port 9333
-
-# 2. Session + page over HTTP (MCP session_create/page_open and the SDKs do the
-#    same thing). Both calls carry the shared headers from the auth guide.
-curl -sS -X POST http://127.0.0.1:7777/v1/sessions … -d '{"profile":"default"}'
-curl -sS -X POST http://127.0.0.1:7777/v1/pages    … -d '{"session_id":"<id>"}'
 ```
 
-Confirm before connecting a client: `GET /json/version` returns the
-`webSocketDebuggerUrl`, and `GET /json/list` lists one target per open page.
-An empty `/json/list` means step 2 has not run.
+That is the whole setup. A connecting client that holds `session:write` and
+`page:write` and has no session yet gets one opened for it, with a blank page,
+so `contexts()[0].pages()[0]` is there on the first read. CDP itself cannot
+create a session — `Target.createTarget` reaches an existing one — so without
+this a connected client would have nothing to drive.
+
+Set `[cdp].auto_session = false` to turn it off; a client then sees an empty
+browser until a session and page are opened over HTTP (`POST /v1/sessions`,
+`POST /v1/pages`), MCP (`session_create`, `page_open`), or an SDK.
 
 ## Discovery and sockets
 
@@ -93,22 +90,25 @@ import puppeteer from "puppeteer-core";
 const browser = await puppeteer.connect({
   browserWSEndpoint: wsEndpoint,
   headers: { Authorization: `Bearer ${process.env.AUTOMATION_RUNTIME_TOKEN!}` },
+  defaultViewport: null,
 });
 
-const page = (await browser.pages())[0];
+// Puppeteer's own target discovery does not enumerate pre-existing runtime
+// pages, so this falls through to newPage(), which opens one.
+const page = (await browser.pages())[0] ?? (await browser.newPage());
 ```
+
+`defaultViewport: null` is required: a viewport asks for
+`Emulation.setTouchEmulationEnabled`, which is outside the allowlist, and the
+connect fails before the first navigation.
 
 ## Client-side page creation
 
-Open pages through the runtime (`POST /v1/pages`, MCP `page_open`, SDK), not
-through the client. `Target.createTarget` is allowlisted but only reaches an
-existing runtime session, and neither pinned client completes its own
-page-creation sequence against the gateway:
-
 | Call | Outcome |
 |---|---|
-| Playwright `context.newPage()` | `Target.createTarget` is uncovered for Playwright; the client fails while wiring the target it never sees attached |
-| Puppeteer `browser.newPage()` | target is created, then `Page.addScriptToEvaluateOnNewDocument` is rejected: only pinned bounded client initialization signatures are supported |
+| Playwright `context.pages()[0]` | the page opened at connect |
+| Playwright `context.newPage()` | unsupported — `Target.createTarget` is uncovered for Playwright, which fails wiring a target it never sees attached |
+| Puppeteer `browser.newPage()` | opens a page in the connection's runtime session |
 
 ## Allowlist and limits
 

@@ -139,7 +139,7 @@
     {
       "name": "Page.addScriptToEvaluateOnNewDocument",
       "requiredCapability": "javascript:evaluate",
-      "parameterSchemaRevision": "playwright-1.61.1-puppeteer-25.3.0-pinned-init",
+      "parameterSchemaRevision": "playwright-empty-source-puppeteer-versioned-utility-world",
       "translationFunction": "validate_empty_init_script_compatibility",
       "scenarios": [
         "playwright-connect-over-cdp",
@@ -337,7 +337,10 @@
       "requiredCapability": "recovery:write",
       "parameterSchemaRevision": "automation-conformance-1",
       "translationFunction": "persist_verified_browser_checkpoint",
-      "scenarios": ["playwright-canonical", "puppeteer-canonical"],
+      "scenarios": [
+        "playwright-canonical",
+        "puppeteer-canonical"
+      ],
       "playwrightCovered": true,
       "puppeteerCovered": true
     },
@@ -346,7 +349,10 @@
       "requiredCapability": "recovery:read",
       "parameterSchemaRevision": "automation-conformance-1",
       "translationFunction": "inspect_browser_recovery_without_replay",
-      "scenarios": ["playwright-canonical", "puppeteer-canonical"],
+      "scenarios": [
+        "playwright-canonical",
+        "puppeteer-canonical"
+      ],
       "playwrightCovered": true,
       "puppeteerCovered": true
     },
@@ -355,7 +361,10 @@
       "requiredCapability": "session:read",
       "parameterSchemaRevision": "automation-conformance-1",
       "translationFunction": "read_observed_browser_interface_events",
-      "scenarios": ["playwright-canonical", "puppeteer-canonical"],
+      "scenarios": [
+        "playwright-canonical",
+        "puppeteer-canonical"
+      ],
       "playwrightCovered": true,
       "puppeteerCovered": true
     },
@@ -364,7 +373,10 @@
       "requiredCapability": "session:read",
       "parameterSchemaRevision": "automation-conformance-1",
       "translationFunction": "read_bounded_protocol_inventory",
-      "scenarios": ["playwright-canonical", "puppeteer-canonical"],
+      "scenarios": [
+        "playwright-canonical",
+        "puppeteer-canonical"
+      ],
       "playwrightCovered": true,
       "puppeteerCovered": true
     },

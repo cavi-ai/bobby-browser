@@ -4,6 +4,8 @@
 
 ### Added
 
+- `[cdp].auto_session` (default true): a connecting CDP client holding `session:write` and `page:write` with no session open gets one, with a blank page, so `contexts()[0].pages()[0]` resolves on connect. CDP cannot create a session itself, so a connected client previously had nothing to drive.
+- `[cdp]` section in the sample `config.toml`.
 - `bobby doctor` reports a `cdp-port` check: whether the configured CDP address is serving authenticated discovery, is free, or is already owned by another process. The default 9222 is also Firefox's default remote-debugging port, so the collision is named before `bobby cdp` fails on it.
 - `cdp.listener.ready` startup log carrying the CDP discovery endpoint and WebSocket base.
 
