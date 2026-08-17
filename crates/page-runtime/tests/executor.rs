@@ -8,12 +8,11 @@ use chrono::{Duration, Utc};
 use tokio::sync::Mutex;
 use types::{
     AttemptId, CheckpointId, ClickCommand, ClickModifier, CommandClass, CommandEnvelope,
-    CommandError, CommandId,
-    CommandOutcome, CommandPhase, DownloadUrlCommand, ErrorCode, ErrorLayer, Evidence,
-    ExecutionPath, ExecutionReason, FollowIntent, InspectCommand, IntentCommand, IntentHints,
-    NavigateCommand, PageId, PrimitiveCommand, RuntimeCommand, SessionId, SubmitAndVerifyIntent,
-    TargetSpec, TextMatch, TypeTextCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId,
-    WorkflowCheckpoint, WorkflowId,
+    CommandError, CommandId, CommandOutcome, CommandPhase, DownloadUrlCommand, ErrorCode,
+    ErrorLayer, Evidence, ExecutionPath, ExecutionReason, FollowIntent, InspectCommand,
+    IntentCommand, IntentHints, NavigateCommand, PageId, PrimitiveCommand, RuntimeCommand,
+    SessionId, SubmitAndVerifyIntent, TargetSpec, TextMatch, TypeTextCommand, WaitCondition,
+    WaitForCommand, WaitUntil, WorkerId, WorkflowCheckpoint, WorkflowId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
 use workflow_journal::{
@@ -764,7 +763,11 @@ async fn duplicate_click_modifiers_fail_before_browser_execution() {
                 && error.message == "click modifiers must be unique"
     ));
     assert!(
-        !events.lock().await.iter().any(|event| event == "browser:click"),
+        !events
+            .lock()
+            .await
+            .iter()
+            .any(|event| event == "browser:click"),
         "invalid modifiers must fail before browser execution"
     );
 }
