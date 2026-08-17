@@ -136,7 +136,8 @@ export type WaitUntil = "commit" | "domContentLoaded" | "interactive" | "network
 export interface NavigateCommand { url: string; waitUntil: WaitUntil; timeoutMs: number; }
 export interface DownloadUrlCommand { url: string; expectedContentType: string | null; maxBytes: number; }
 export interface InspectCommand { selector: string | null; target: TargetSpec | null; includeHtml: boolean; }
-export interface ClickCommand { selector: string; target: TargetSpec | null; boundary: boolean; expectedUrl: string | null; }
+export type ClickModifier = "shift" | "ctrl" | "alt" | "meta";
+export interface ClickCommand { selector: string; target: TargetSpec | null; boundary: boolean; expectedUrl: string | null; modifiers?: ClickModifier[]; }
 export interface TypeTextCommand { selector: string; target: TargetSpec | null; value: string; clearFirst: boolean; expectedUrl?: string | null; }
 export interface UploadFilesCommand { selector: string; target: TargetSpec | null; paths: string[]; }
 export interface OpenPageCommand { url: string | null; }

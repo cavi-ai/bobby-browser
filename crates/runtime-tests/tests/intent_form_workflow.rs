@@ -258,6 +258,7 @@ async fn intent_form_workflow_is_deterministic_on_live_chromium() {
             }),
             boundary: false,
             expected_url: None,
+            modifiers: Vec::new(),
         }),
     )
     .await;

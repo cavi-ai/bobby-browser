@@ -272,7 +272,16 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                 "target": nullable(json!({"$ref":"#/$defs/TargetSpec"})),
                 "boundary": {"type":"boolean"},
                 "autoCheckpoint":{"type":"boolean"},
-                "expectedUrl": nullable(string(1, MAX_URL_BYTES))
+                "expectedUrl": nullable(string(1, MAX_URL_BYTES)),
+                "modifiers": {
+                    "type": "array",
+                    "maxItems": 4,
+                    "uniqueItems": true,
+                    "items": {
+                        "type": "string",
+                        "enum": ["shift", "ctrl", "alt", "meta"]
+                    }
+                }
             }),
             vec!["sessionId", "pageId"],
         ),
@@ -2593,6 +2602,22 @@ mod tests {
     use crate::workflow_handles::WORKFLOW_SCOPE_TOOLS;
 
     #[test]
+    fn click_modifier_schema_rejects_duplicates() {
+        let violation = validate_tool_arguments(
+            "click",
+            &json!({
+                "sessionId": "10000000-0000-4000-8000-000000000001",
+                "pageId": "10000000-0000-4000-8000-000000000002",
+                "selector": "#range-end",
+                "modifiers": ["shift", "shift"]
+            }),
+        )
+        .expect_err("duplicate modifiers must fail schema validation");
+        assert_eq!(violation.pointer, "/modifiers");
+        assert_eq!(violation.constraint, "uniqueItems");
+    }
+
+    #[test]
     fn workflow_contract_schemas_bound_inputs_and_define_object_outputs() {
         let start = tool_schema("workflow_start");
         assert_eq!(start["required"], json!(["profile"]));
@@ -3031,6 +3056,17 @@ fn validate_at(
                 .is_some_and(|min| (values.len() as u64) < min)
             {
                 return Err(SchemaViolation::at(pointer, "minItems"));
+            }
+            if schema
+                .get("uniqueItems")
+                .and_then(Value::as_bool)
+                .is_some_and(|required| required)
+                && values
+                    .iter()
+                    .enumerate()
+                    .any(|(index, value)| values[..index].contains(value))
+            {
+                return Err(SchemaViolation::at(pointer, "uniqueItems"));
             }
             let Some(items) = schema.get("items") else {
                 return Ok(());

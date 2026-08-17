@@ -272,6 +272,8 @@ pub(crate) struct ClickArgs {
     #[serde(default)]
     pub(crate) auto_checkpoint: Option<bool>,
     pub(crate) expected_url: Option<String>,
+    #[serde(default)]
+    pub(crate) modifiers: Vec<types::ClickModifier>,
 }
 
 /// Popup wait is always Boundary class, so — like boundary `click` — it

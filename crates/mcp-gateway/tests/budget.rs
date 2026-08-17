@@ -121,6 +121,28 @@ async fn tools_list_stays_within_the_connect_budget() {
 }
 
 #[tokio::test]
+async fn click_schema_advertises_native_modifier_keys() {
+    let tools = list_tools(all_capabilities()).await;
+    let click = tools
+        .iter()
+        .find(|tool| tool["name"] == "click")
+        .expect("click is advertised");
+
+    assert_eq!(
+        click["inputSchema"]["properties"]["modifiers"],
+        json!({
+            "type": "array",
+            "maxItems": 4,
+            "uniqueItems": true,
+            "items": {
+                "type": "string",
+                "enum": ["shift", "ctrl", "alt", "meta"]
+            }
+        })
+    );
+}
+
+#[tokio::test]
 async fn tools_list_never_exceeds_the_frame_cap() {
     let tools = list_tools(all_capabilities()).await;
     let bytes = serde_json::to_string(&tools).unwrap().len();
