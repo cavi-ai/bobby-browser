@@ -246,6 +246,7 @@ impl ModernRuntime {
             target: None,
             boundary,
             expected_url: None,
+            modifiers: Vec::new(),
         });
         if boundary {
             self.submit_boundary(command).await
@@ -362,6 +363,7 @@ impl ModernRuntime {
                 target: None,
                 boundary: true,
                 expected_url: None,
+                modifiers: Vec::new(),
             }),
         )
         .await
@@ -385,6 +387,7 @@ impl ModernRuntime {
             target: Some(target),
             boundary: true,
             expected_url: None,
+            modifiers: Vec::new(),
         }))
         .await
     }
@@ -616,6 +619,7 @@ impl ModernRuntime {
                     target: None,
                     boundary: true,
                     expected_url: None,
+                    modifiers: Vec::new(),
                 }),
             )
             .await?;

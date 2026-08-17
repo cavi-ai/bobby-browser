@@ -2135,6 +2135,29 @@ async fn flat_browser_tools_validate_arguments_and_submit_envelopes() {
         .unwrap();
     assert_eq!(unknown_field["error"]["code"], -32602, "{unknown_field}");
 
+    let modified_click = server
+        .handle_message(request(
+            811,
+            "tools/call",
+            json!({
+                "name":"click",
+                "arguments":{
+                    "sessionId":SessionId::new().0.to_string(),
+                    "pageId":types::PageId::new().0.to_string(),
+                    "selector":"#range-end",
+                    "modifiers":["shift"]
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(modified_click["error"].is_null(), "{modified_click}");
+    assert_eq!(
+        modified_click["result"]["structuredContent"]["status"],
+        json!("failed"),
+        "modifier arguments must reach runtime dispatch instead of failing MCP parsing"
+    );
+
     let navigated = server
         .handle_message(request(
             82,

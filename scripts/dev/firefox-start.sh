@@ -90,7 +90,8 @@ listener_pids() {
 endpoint_is_fresh() {
   local endpoint="$1"
   [[ -f "$endpoint" ]] || return 1
-  grep -Eq '"ws_port"[[:space:]]*:[[:space:]]*'"$PORT"'([[:space:]]*[,}])' "$endpoint"
+  tr -d '[:space:]' <"$endpoint" \
+    | grep -Eq '"ws_port":'"$PORT"'([,}])'
 }
 
 print_startup_log() {

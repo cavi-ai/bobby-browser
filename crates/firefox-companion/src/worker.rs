@@ -1968,9 +1968,10 @@ impl FirefoxCompanionWorker {
         context: &str,
         shared_id: &str,
         mouse_path: Option<&MousePath>,
+        modifiers: &[types::ClickModifier],
     ) -> Result<(), CommandError> {
         let shared_id = self.preflight_pointer_target(context, shared_id).await?;
-        let actions = match mouse_path {
+        let pointer_actions = match mouse_path {
             Some(path) if !path.points.is_empty() => {
                 let pointer_moves = self.pointer_moves_for_path(&path.points, &shared_id);
                 let mut actions_array = Vec::new();
@@ -1992,17 +1993,71 @@ impl FirefoxCompanionWorker {
                 }
                 actions_array.push(serde_json::json!({"type": "pointerDown", "button": 0}));
                 actions_array.push(serde_json::json!({"type": "pointerUp", "button": 0}));
-                serde_json::json!({
-                    "context": context,
-                    "actions": [{
+                actions_array
+            }
+            _ => pointer_action_sequence(&shared_id),
+        };
+        let actions = if modifiers.is_empty() {
+            serde_json::json!({
+                "context": context,
+                "actions": [{
+                    "type": "pointer",
+                    "id": "automation-runtime-pointer",
+                    "parameters": {"pointerType": "mouse"},
+                    "actions": pointer_actions
+                }]
+            })
+        } else {
+            let modifier_values = modifiers
+                .iter()
+                .map(firefox_modifier_key)
+                .collect::<Vec<_>>();
+            let core_pointer_ticks = pointer_actions.len();
+            let mut aligned_pointer_actions =
+                Vec::with_capacity(core_pointer_ticks + modifier_values.len().saturating_mul(2));
+            aligned_pointer_actions.extend(
+                std::iter::repeat_with(|| serde_json::json!({"type": "pause"}))
+                    .take(modifier_values.len()),
+            );
+            aligned_pointer_actions.extend(pointer_actions);
+            aligned_pointer_actions.extend(
+                std::iter::repeat_with(|| serde_json::json!({"type": "pause"}))
+                    .take(modifier_values.len()),
+            );
+
+            let mut key_actions = Vec::with_capacity(aligned_pointer_actions.len());
+            key_actions.extend(
+                modifier_values
+                    .iter()
+                    .map(|value| serde_json::json!({"type": "keyDown", "value": value})),
+            );
+            key_actions.extend(
+                std::iter::repeat_with(|| serde_json::json!({"type": "pause"}))
+                    .take(core_pointer_ticks),
+            );
+            key_actions.extend(
+                modifier_values
+                    .iter()
+                    .rev()
+                    .map(|value| serde_json::json!({"type": "keyUp", "value": value})),
+            );
+
+            serde_json::json!({
+                "context": context,
+                "actions": [
+                    {
                         "type": "pointer",
                         "id": "automation-runtime-pointer",
                         "parameters": {"pointerType": "mouse"},
-                        "actions": actions_array
-                    }]
-                })
-            }
-            _ => pointer_actions(context, &shared_id),
+                        "actions": aligned_pointer_actions
+                    },
+                    {
+                        "type": "key",
+                        "id": "automation-runtime-click-modifiers",
+                        "actions": key_actions
+                    }
+                ]
+            })
         };
         self.transport.send("input.performActions", actions).await?;
         Ok(())
@@ -2912,6 +2967,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                         target: Some(target.clone()),
                         boundary: false,
                         expected_url: None,
+                        modifiers: Vec::new(),
                     },
                 )
                 .await?;
@@ -3138,7 +3194,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
         let path =
             self.with_session_random(|random| self.mouse_simulator.generate_approach_path(random));
 
-        self.perform_pointer_click(&context, &shared_id, Some(&path))
+        self.perform_pointer_click(&context, &shared_id, Some(&path), &command.modifiers)
             .await?;
         Ok(vec![
             Evidence::Element {
@@ -3217,6 +3273,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                     target: command.target.clone(),
                     boundary: true,
                     expected_url: None,
+                    modifiers: Vec::new(),
                 },
             )
             .await?;
@@ -3543,6 +3600,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                     target: command.target.clone(),
                     boundary: true,
                     expected_url: None,
+                    modifiers: Vec::new(),
                 },
             )
             .await?;
@@ -3808,7 +3866,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
             .await?;
         let path =
             self.with_session_random(|random| self.mouse_simulator.generate_approach_path(random));
-        self.perform_pointer_click(&context, &shared_id, Some(&path))
+        self.perform_pointer_click(&context, &shared_id, Some(&path), &[])
             .await?;
 
         let humanize = self.humanization_enabled.load(Ordering::Relaxed);
@@ -5261,26 +5319,27 @@ fn bounded_text_matches(matcher: &TextMatch, value: &str) -> Result<bool, Comman
         .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))
 }
 
-fn pointer_actions(context: &str, shared_id: &str) -> Value {
-    json!({
-        "context": context,
-        "actions": [{
-            "type": "pointer",
-            "id": "automation-runtime-pointer",
-            "parameters": {"pointerType": "mouse"},
-            "actions": [
-                {
-                    "type": "pointerMove",
-                    "x": 0,
-                    "y": 0,
-                    "duration": 0,
-                    "origin": {"type": "element", "element": {"sharedId": shared_id}}
-                },
-                {"type": "pointerDown", "button": 0},
-                {"type": "pointerUp", "button": 0}
-            ]
-        }]
-    })
+fn pointer_action_sequence(shared_id: &str) -> Vec<Value> {
+    vec![
+        json!({
+            "type": "pointerMove",
+            "x": 0,
+            "y": 0,
+            "duration": 0,
+            "origin": {"type": "element", "element": {"sharedId": shared_id}}
+        }),
+        json!({"type": "pointerDown", "button": 0}),
+        json!({"type": "pointerUp", "button": 0}),
+    ]
+}
+
+fn firefox_modifier_key(modifier: &types::ClickModifier) -> &'static str {
+    match modifier {
+        types::ClickModifier::Shift => "\u{e008}",
+        types::ClickModifier::Ctrl => "\u{e009}",
+        types::ClickModifier::Alt => "\u{e00a}",
+        types::ClickModifier::Meta => "\u{e03d}",
+    }
 }
 
 /// Renews the worker's attachment lease at half the remaining TTL, keeping

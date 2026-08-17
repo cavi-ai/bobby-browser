@@ -1121,6 +1121,7 @@ async fn execute_submit_and_verify(
         target: Some(action_target),
         boundary: true,
         expected_url: expected_url_from_wait(&expected_state),
+        modifiers: Vec::new(),
     };
     // If a text/element/value expected-state already holds before the click,
     // a post-act pass proves nothing — the matcher hit static page copy and
@@ -1426,6 +1427,7 @@ async fn execute_follow(
         target: Some(action_target),
         boundary,
         expected_url: expected_url_from_wait(&expected_destination),
+        modifiers: Vec::new(),
     };
     let mut click_evidence = match browser.click(page_id, &click).await {
         Ok(evidence) => evidence,
@@ -1602,6 +1604,7 @@ async fn execute_dismiss_obstruction(
         // no pre-established checkpoint and takes no caller-supplied boundary flag.
         boundary: false,
         expected_url: None,
+        modifiers: Vec::new(),
     };
     let mut click_evidence = match browser.click(page_id, &click).await {
         Ok(evidence) => evidence,
@@ -2710,6 +2713,7 @@ async fn execute_vision_action(
                         )?),
                         boundary: false,
                         expected_url: None,
+                        modifiers: Vec::new(),
                     },
                 )
                 .await

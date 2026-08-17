@@ -504,6 +504,16 @@ pub struct InspectCommand {
     pub include_html: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum ClickModifier {
+    Shift,
+    Ctrl,
+    Alt,
+    Meta,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
@@ -512,6 +522,8 @@ pub struct ClickCommand {
     pub target: Option<TargetSpec>,
     pub boundary: bool,
     pub expected_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modifiers: Vec<ClickModifier>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
