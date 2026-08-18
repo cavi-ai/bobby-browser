@@ -18,6 +18,8 @@ pub enum ValidateError {
     ExtractValueTooLong,
     #[error("candidate action is incompatible with the request intent")]
     CandidateIntentMismatch,
+    #[error("challengeSolved is only valid for a solveChallenge request")]
+    ChallengeIntentMismatch,
     #[error("candidate action index is outside the request candidate list")]
     CandidateIndexOutOfRange,
 }
@@ -38,6 +40,7 @@ pub fn validate_proposal(proposal: &ProposeResponse) -> Result<(), ValidateError
         VisionAction::TypeIntoCandidate { .. } | VisionAction::ExtractFromCandidate { .. } => {
             Ok(())
         }
+        VisionAction::ChallengeSolved => Ok(()),
     }
 }
 
@@ -47,6 +50,11 @@ pub fn validate_proposal_for_request(
     candidate_count: usize,
 ) -> Result<(), ValidateError> {
     validate_proposal(proposal)?;
+    // challengeSolved is only meaningful as the terminal answer to a solve
+    // request; any other intent receiving it is an upstream confusion.
+    if matches!(proposal.action, VisionAction::ChallengeSolved) && intent_kind != "solveChallenge" {
+        return Err(ValidateError::ChallengeIntentMismatch);
+    }
     let (index, compatible) = match proposal.action {
         VisionAction::ClickCandidate { index } => (
             Some(index),

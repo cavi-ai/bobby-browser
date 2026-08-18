@@ -65,6 +65,7 @@ metric_snapshot!(IntentMetricsSnapshot {
     wait_for_state,
     follow,
     dismiss,
+    solve_challenge,
     deterministic,
     context,
     vision_prefill,

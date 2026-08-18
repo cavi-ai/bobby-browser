@@ -1,6 +1,7 @@
 interface RecaptchaApi {
   render(container: HTMLElement, options: { sitekey: string; callback: (token: string) => void }): number;
   getResponse(widgetId: number): string;
+  ready(callback: () => void): void;
 }
 
 type RecaptchaWindow = Window & { grecaptcha?: RecaptchaApi };
@@ -11,6 +12,9 @@ export class RecaptchaController {
 
   async mount(container: HTMLElement, siteKey: string): Promise<void> {
     const api = await loadRecaptcha(container.ownerDocument);
+    // With `render=explicit` the script load only installs a stub; `render`
+    // is not callable until the real API arrives — gate on `ready`.
+    await new Promise<void>((resolve) => api.ready(resolve));
     this.widgetId = api.render(container, {
       sitekey: siteKey,
       callback: (token) => { this.token = token; },

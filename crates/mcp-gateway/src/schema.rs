@@ -1569,6 +1569,33 @@ fn intent_commands() -> Vec<Value> {
                 &["purpose", "fields"],
             ),
         ),
+        tagged_input(
+            "solveChallenge",
+            object(
+                json!({
+                    "purpose":string(1, 256),
+                    "hints":{
+                        "type":"object",
+                        "properties":{
+                            "timeoutMs":{"type":"integer","minimum":1,"maximum":MAX_TIMEOUT_MS},
+                            "region":{
+                                "type":"object",
+                                "properties":{
+                                    "x":{"type":"number"},
+                                    "y":{"type":"number"},
+                                    "width":{"type":"number"},
+                                    "height":{"type":"number"}
+                                },
+                                "required":["x","y","width","height"],
+                                "additionalProperties":false
+                            }
+                        },
+                        "additionalProperties":false
+                    }
+                }),
+                &["purpose"],
+            ),
+        ),
     ]
 }
 
