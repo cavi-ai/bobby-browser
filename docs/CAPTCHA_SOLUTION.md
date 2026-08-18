@@ -16,9 +16,14 @@
   solveChallenge guidance in the Ollama/OpenAI propose prompts. The
   external MLX adapter server (127.0.0.1:9101) builds its own prompts and
   needs the same guidance — outside this repo.
-- **Phase 4: CLI & ZigZagZig** — pending. The intent is reachable via MCP
-  (`command_execute`, kind `solveChallenge`) but has no dedicated CLI verb
-  or zigzagzig wiring yet.
+- **Phase 4: CLI & ZigZagZig** — done (2026-08-18). `bobby vision solve
+  --purpose … [--url … | --session … --page …] [--node vision]
+  [--timeout-ms 120000] [--zigzagzig]` submits the intent over `/v1`;
+  `--zigzagzig` creates the session with humanize + fingerprint.
+  Smoke-tested live against the gauntlet Level 2 page over authenticated
+  HTTP (green checkmark confirmed from the final artifact). Adding a
+  solve tactic to the skill-runtime `/zigzagzig` ladder is a skill-contract
+  change, deliberately left for PR review.
 - **Phase 5: Learning** — pending. No context-store challenge priors yet.
 - **Phase 6: Gauntlet** — done and proven live (2026-08-18). Level 2 test
   lives in `crates/runtime-tests/tests/modern_gauntlet_level2_e2e.rs`, gated

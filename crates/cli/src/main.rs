@@ -9,6 +9,7 @@ mod vision_collect;
 mod vision_connect;
 mod vision_login;
 mod vision_readiness;
+mod vision_solve;
 mod vision_token;
 
 use anyhow::{Context, Result};
@@ -433,6 +434,32 @@ enum VisionCommands {
         #[arg(long)]
         journey: Option<String>,
     },
+    /// Solve a captcha or verification challenge on a page via the vision loop
+    Solve {
+        /// What to solve, e.g. "solve the reCAPTCHA challenge"
+        #[arg(long)]
+        purpose: String,
+        /// Create a fresh session and navigate here before solving
+        #[arg(long)]
+        url: Option<String>,
+        /// Act on an existing session (requires --page; skips creation)
+        #[arg(long)]
+        session: Option<String>,
+        /// Act on an existing page (requires --session)
+        #[arg(long)]
+        page: Option<String>,
+        /// Vision node the session escalates to
+        #[arg(long, default_value = "vision")]
+        node: String,
+        /// Solve budget in milliseconds
+        #[arg(long, default_value_t = 120_000)]
+        timeout_ms: u64,
+        /// ZigZagZig mode: humanized input timing + fingerprint spoofing
+        #[arg(long)]
+        zigzagzig: bool,
+        #[command(flatten)]
+        common: JobsCommonArgs,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -784,6 +811,29 @@ pub async fn run() -> Result<()> {
                 journey,
             } => {
                 vision_collect::run_collect(output, examples, journey)?;
+            }
+            VisionCommands::Solve {
+                purpose,
+                url,
+                session,
+                page,
+                node,
+                timeout_ms,
+                zigzagzig,
+                common,
+            } => {
+                let (base_url, bearer) = prepare_jobs_client(&common)?;
+                vision_solve::solve(vision_solve::VisionSolveOptions {
+                    purpose,
+                    url,
+                    session,
+                    page,
+                    node,
+                    timeout_ms,
+                    zigzagzig,
+                    base_url,
+                    bearer,
+                })?;
             }
         },
         CliCommand::VisionConnect(args) => vision_connect::connect(args.into())?,
