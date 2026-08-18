@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.10.0 - 2026-08-18
+
 ### Added
 
 - `Emulation.setDeviceMetricsOverride` and `Emulation.setTouchEmulationEnabled` are allowlisted, so a Puppeteer client's default viewport applies through the runtime's own emulation instead of failing the connect. A scale factor other than 1, a non-portrait orientation, and `hasTouch` are refused with the reason rather than silently ignored.
@@ -16,6 +18,14 @@
 - `cdp.runtime.bootstrap_rejected` debug log carries the length and digest of an unpinned bootstrap, which is what a new pin is cut from. No caller JavaScript is logged.
 - CI runs `test:playwright` and `test:puppeteer` on the chromium job. They were the only automated proof a real client can drive a page over CDP and ran nowhere.
 
+- `click.modifiers`: an optional array holding at most one each of `shift`, `ctrl`, `alt`, and `meta`. Chromium dispatches the native pointer click with the matching modifier bits; the Firefox companion drives a tick-aligned key source that presses before the pointer sequence and releases after it. A duplicate modifier is refused with `click modifiers must be unique`, and a modified click that enters automatic download capture fails with `invalidRequest` rather than dropping the modifiers silently. Reaches MCP `click`, the `CommandEnvelope`, and the TypeScript SDK's `ClickCommand`.
+- `SolveChallenge` intent, opt-in: the engine loops screenshot, vision proposal, act, reassess on a 750ms poll until the model returns the new `challengeSolved` action or the hint deadline elapses. It fails closed on provider error, below-floor confidence, a disallowed action, and a closed vision gate (`VisionAssistDenied`). `challengeSolved` is carried across the vision wire, validation, and the collector, and `command_execute`'s schema union now covers nine command kinds.
+- `bobby vision solve` submits a `SolveChallenge` over `/v1`: it creates a vision-enabled session or reuses `--session`/`--page`, optionally navigates, then runs the solve loop under a caller-sized budget. `--zigzagzig` layers humanized input timing and fingerprint spoofing onto that session.
+- Per-site challenge priors: a solve outcome promotes to `SiteContext.challenges` — success and failure counters with a day-precision stamp — instead of the control schema, which has no resolved control for a solve to promote.
+- `BrowserFlavor` fingerprint axis (Chrome default, Firefox). The companion's BiDi `emulation.setUserAgentOverride` sends a Gecko UA on a Gecko engine instead of a Chrome UA, and session validation gates the Chrome-only checks behind the axis.
+- `ScreenResolution` carries `window_width` and `window_height`, so a profile presents a non-maximized window sized under the available area.
+- Level 2 of the modern gauntlet drives the solve loop against a live reCAPTCHA v2 widget. It is environment-gated and outside the five release tests.
+
 ### Changed
 
 - `scripts/dev/firefox-start.sh` puts the companion profile's remote-debugging endpoint on 9224. It defaulted to 9222, the port authenticated CDP binds, so whichever of the two started second failed to bind. `BOBBY_FIREFOX_DEBUG_PORT` still overrides it.
@@ -27,6 +37,21 @@
 - `/json/list` reports the URL and title the gateway last verified for each page. Every entry read `about:blank` / `Automation Runtime`, so a client could not tell one target from another.
 - A rejected JSON request body names the offending field and position from serde instead of one fixed sentence. Request values are never included.
 - `bobby doctor` distinguishes a refused BiDi connection from a live socket speaking another protocol; a refused connection reported "another service may own the port" when nothing was listening.
+
+- `v1_request_with_limits` lets a caller raise the `/v1` request timeout. The 10s default cannot outlive a single local-model propose round, let alone a multi-round solve.
+- `propose` prompts spell out the exact action JSON shapes and the `solveChallenge` guidance; models were guessing the schema and returning bare strings.
+
+### Fixed
+
+- CreepJS screen and media-query leak: Chrome launches with `--window-size` matching the spoofed screen, and each page applies `Emulation.setDeviceMetricsOverride` with the viewport at window size and the screen at full size, so `hasVvpScreenRes` stays false. The init script also reports `pdfViewerEnabled`, a minimal `navigator.share`/`canShare`, and `Notification.permission` `default`, each of which headless gets wrong. Like-headless drops 25% to 19%, with headless and stealth both at 0%; the init-script budget moves 40k to 42k.
+- A transient vision failure — an unparseable reply or below-floor confidence — costs one solve attempt instead of the whole budget, and the loop reassesses. Only the deadline is terminal for it, and the deadline error reports the last transient failure. A disallowed action and an act failure stay terminal.
+- `solveChallenge` is click-only. A vision `typeText` carries no resolved target, so its empty selector errored at the driver; the prompts now state the never-type constraint.
+- The Python vision adapter drops chatty non-action response fields, such as `reasoning` and sibling text, at the edge instead of failing closed, which preserves the no-echo guarantee. snake_case action kinds (`type_text`, `challenge_solved`) canonicalize to the wire spelling. `ProposeResponse` drops `deny_unknown_fields` at the upstream edge while the action variants keep it.
+- `SolveChallengeHints::default()` no longer drops the 30s timeout.
+- The five release binary builds: `release-binaries` no longer pins a pnpm version, which `pnpm/action-setup@v6` refuses when `packageManager` declares one as well. The Firefox companion's static files stage from `copy-static.mjs` instead of shell, because pnpm runs package scripts through `cmd.exe` on Windows, which has neither `cp` nor `mkdir -p`.
+- `Formula/bobby-browser.rb` carries the v0.9.0 asset digests.
+- `scripts/dev/firefox-start.sh` compares the endpoint's `ws_port` after stripping whitespace, so a reformatted endpoint file no longer reads as stale.
+- `a11y_snapshot_descends_into_iframes` waits for `input[type=file]` to attach before snapshotting. The documents route builds its form in the SPA bundle, so `DOMContentLoaded` can precede the input.
 
 ## 0.9.0 - 2026-08-12
 
