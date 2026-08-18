@@ -81,6 +81,7 @@ impl Server {
                         target: input.target,
                         boundary: input.boundary.unwrap_or(false),
                         expected_url: input.expected_url,
+                        modifiers: input.modifiers,
                     }),
                 );
                 pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);

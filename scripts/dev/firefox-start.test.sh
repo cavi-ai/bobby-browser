@@ -142,7 +142,7 @@ test_accepts_fresh_endpoint_owned_by_launched_firefox() {
 #!/usr/bin/env bash
 printf '%s\n' "$$" >"$FIXTURE/firefox.pid"
 touch "$PROFILE/.parentlock"
-printf '{"ws_host":"127.0.0.1","ws_port":9222}\n' >"$PROFILE/WebDriverBiDiServer.json"
+printf '{\n  "ws_host": "127.0.0.1",\n  "ws_port": 9222\n}\n' >"$PROFILE/WebDriverBiDiServer.json"
 /bin/sleep 2
 EOF
   chmod +x "$BOBBY_FIREFOX_BIN"

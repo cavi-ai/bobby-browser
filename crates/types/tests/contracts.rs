@@ -2,17 +2,18 @@ use chrono::{TimeZone, Utc};
 use serde_json::json;
 use types::{
     AttemptId, Capability, CaptureScreenshotCommand, ClickAndWaitForDownloadCommand,
-    ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand, CommandClass, CommandEnvelope,
-    CommandError, CommandId, CommandOutcome, CompleteFormField, CompleteFormIntent, ControlAction,
-    ControlActionCommand, ControlActionEvidence, CreateSessionRequest, DismissObstructionIntent,
-    DownloadUrlCommand, ElementState, ErrorCode, ErrorLayer, EvaluateJavaScriptCommand, Evidence,
-    ExecutionPath, ExecutionPolicy, ExecutionReason, ExecutionRecord, ExtractField, ExtractIntent,
-    ExtractValueKind, FillIntent, FillValue, FollowIntent, FormControlOperation, FormControlState,
-    FormControlTarget, FormControlValidity, InspectCommand, IntentCommand, IntentHints,
-    IntentResolutionPath, ListPagesCommand, LocateIntent, NetworkResourceType, OpenPageCommand,
-    PageId, PrimitiveCommand, RuntimeCommand, ScreenshotMode, SessionId, SubmitAndVerifyIntent,
-    TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand,
-    WaitForStateIntent, WaitUntil, WorkflowId,
+    ClickAndWaitForPopupCommand, ClickCommand, ClickModifier, ClosePageCommand, CommandClass,
+    CommandEnvelope, CommandError, CommandId, CommandOutcome, CompleteFormField,
+    CompleteFormIntent, ControlAction, ControlActionCommand, ControlActionEvidence,
+    CreateSessionRequest, DismissObstructionIntent, DownloadUrlCommand, ElementState, ErrorCode,
+    ErrorLayer, EvaluateJavaScriptCommand, Evidence, ExecutionPath, ExecutionPolicy,
+    ExecutionReason, ExecutionRecord, ExtractField, ExtractIntent, ExtractValueKind, FillIntent,
+    FillValue, FollowIntent, FormControlOperation, FormControlState, FormControlTarget,
+    FormControlValidity, InspectCommand, IntentCommand, IntentHints, IntentResolutionPath,
+    ListPagesCommand, LocateIntent, NetworkResourceType, OpenPageCommand, PageId, PrimitiveCommand,
+    RuntimeCommand, ScreenshotMode, SessionId, SubmitAndVerifyIntent, TargetSpec, TextMatch,
+    TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitForStateIntent,
+    WaitUntil, WorkflowId,
 };
 use uuid::Uuid;
 
@@ -157,6 +158,50 @@ fn adaptive_http_failures_have_stable_error_codes() {
 }
 
 #[test]
+fn click_modifiers_round_trip_and_legacy_clicks_default_empty() {
+    let value = json!({
+        "kind": "click",
+        "input": {
+            "selector": "#range-end",
+            "target": null,
+            "boundary": false,
+            "expectedUrl": null,
+            "modifiers": ["shift", "ctrl", "alt", "meta"]
+        }
+    });
+
+    let command: PrimitiveCommand = serde_json::from_value(value.clone()).unwrap();
+    let PrimitiveCommand::Click(click) = &command else {
+        panic!("expected click command");
+    };
+    assert_eq!(
+        click.modifiers,
+        vec![
+            ClickModifier::Shift,
+            ClickModifier::Ctrl,
+            ClickModifier::Alt,
+            ClickModifier::Meta,
+        ]
+    );
+    assert_eq!(serde_json::to_value(command).unwrap(), value);
+
+    let legacy: PrimitiveCommand = serde_json::from_value(json!({
+        "kind": "click",
+        "input": {
+            "selector": "#plain",
+            "target": null,
+            "boundary": false,
+            "expectedUrl": null
+        }
+    }))
+    .unwrap();
+    let PrimitiveCommand::Click(legacy) = legacy else {
+        panic!("expected click command");
+    };
+    assert!(legacy.modifiers.is_empty());
+}
+
+#[test]
 fn semantic_target_wait_and_screenshot_contracts_are_stable() {
     let target = TargetSpec {
         role: Some("button".into()),
@@ -188,6 +233,7 @@ fn semantic_target_wait_and_screenshot_contracts_are_stable() {
         target: Some(target_spec("button", "Continue")),
         boundary: false,
         expected_url: None,
+        modifiers: Vec::new(),
     });
 
     assert_eq!(wait.class(), CommandClass::Replayable);
@@ -357,6 +403,7 @@ fn commands_expose_recovery_class() {
             target: None,
             boundary: true,
             expected_url: None,
+            modifiers: Vec::new(),
         })
         .class(),
         CommandClass::Boundary

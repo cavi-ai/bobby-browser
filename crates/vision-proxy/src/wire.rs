@@ -64,6 +64,9 @@ pub enum VisionAction {
     ExtractFromCandidate {
         index: u32,
     },
+    /// Terminal signal for a `solveChallenge` request: the challenge widget
+    /// is in a solved state. Carries no payload.
+    ChallengeSolved,
 }
 
 #[derive(Debug, Clone, Deserialize)]

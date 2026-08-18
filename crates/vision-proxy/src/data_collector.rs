@@ -117,6 +117,9 @@ impl VisionTrainingExample {
                 crate::wire::VisionAction::ExtractFromCandidate { index } => {
                     serde_json::json!({"kind": "extractFromCandidate", "index": index})
                 }
+                crate::wire::VisionAction::ChallengeSolved => {
+                    serde_json::json!({"kind": "challengeSolved"})
+                }
             };
             serde_json::json!({
                 "confidence": r.confidence,

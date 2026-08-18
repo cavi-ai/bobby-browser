@@ -381,6 +381,7 @@ async fn click_emits_curved_pointer_path_with_hover_dwell() {
                 target: None,
                 boundary: false,
                 expected_url: None,
+                modifiers: Vec::new(),
             },
         )
         .await
@@ -531,6 +532,7 @@ async fn scroll_into_view_emits_wheel_stream_when_needed() {
                 target: None,
                 boundary: false,
                 expected_url: None,
+                modifiers: Vec::new(),
             },
         )
         .await

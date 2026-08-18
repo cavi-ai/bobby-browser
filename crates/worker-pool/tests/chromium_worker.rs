@@ -13,11 +13,11 @@ use network_engine::state::{HttpCookie, ResponseStateDelta};
 use std::collections::BTreeMap;
 use types::{
     AccessibilityNode, AccessibilitySnapshotCommand, CaptureScreenshotCommand,
-    ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand,
-    ControlAction, ControlActionCommand, ElementState, ErrorCode, EvaluateJavaScriptCommand,
-    Evidence, InspectCommand, ListPagesCommand, NavigateCommand, NetworkLogCommand,
-    OpenPageCommand, PageId, ScreenshotMode, SessionId, TargetSpec, TextMatch, TypeTextCommand,
-    UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil,
+    ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand, ClickModifier,
+    ClosePageCommand, ControlAction, ControlActionCommand, ElementState, ErrorCode,
+    EvaluateJavaScriptCommand, Evidence, InspectCommand, ListPagesCommand, NavigateCommand,
+    NetworkLogCommand, OpenPageCommand, PageId, ScreenshotMode, SessionId, TargetSpec, TextMatch,
+    TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil,
 };
 use worker_pool::{
     resolve_upload_paths, session_download_dir, ChromiumWorkerFactory, WorkerFactory,
@@ -660,6 +660,7 @@ async fn semantic_targets_fail_closed_and_reresolve_after_replacement() {
                     target: Some(continue_target.clone()),
                     boundary: false,
                     expected_url: None,
+                    modifiers: Vec::new(),
                 },
             )
             .await
@@ -678,6 +679,7 @@ async fn semantic_targets_fail_closed_and_reresolve_after_replacement() {
                 }),
                 boundary: false,
                 expected_url: None,
+                modifiers: Vec::new(),
             },
         )
         .await
@@ -1155,6 +1157,7 @@ async fn page_scoped_text_wait_sees_async_body_updates() {
                 target: None,
                 boundary: false,
                 expected_url: None,
+                modifiers: Vec::new(),
             },
         )
         .await
@@ -1190,6 +1193,75 @@ async fn page_scoped_text_wait_sees_async_body_updates() {
             } if *observations > 0
         ));
     }
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn click_modifiers_reach_chromium_native_mouse_events() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: concat!(
+                    "data:text/html,",
+                    "<button id=target type=button>click</button><output id=result></output>",
+                    "<script>target.addEventListener('click',e=>{result.textContent=JSON.stringify({shift:e.shiftKey,ctrl:e.ctrlKey,alt:e.altKey,meta:e.metaKey})})</script>"
+                )
+                .into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    worker
+        .click(
+            &page_id,
+            &ClickCommand {
+                selector: "#target".into(),
+                target: None,
+                boundary: false,
+                expected_url: None,
+                modifiers: vec![ClickModifier::Shift, ClickModifier::Alt],
+            },
+        )
+        .await
+        .unwrap();
+    let evidence = worker
+        .inspect(
+            &page_id,
+            &InspectCommand {
+                selector: Some("#result".into()),
+                target: None,
+                include_html: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        &evidence[0],
+        Evidence::Inspection { text, .. }
+            if text == "{\"shift\":true,\"ctrl\":false,\"alt\":true,\"meta\":false}"
+    ));
     worker.close().await.unwrap();
 }
 
@@ -1457,6 +1529,7 @@ async fn resolves_nested_cross_origin_frames_and_open_shadow_roots() {
                 }),
                 boundary: false,
                 expected_url: None,
+                modifiers: Vec::new(),
             },
         )
         .await
@@ -1523,6 +1596,7 @@ async fn resolves_ambient_and_explicit_closed_shadow_roots() {
                 }),
                 boundary: false,
                 expected_url: None,
+                modifiers: Vec::new(),
             },
         )
         .await
@@ -1557,6 +1631,7 @@ async fn resolves_ambient_and_explicit_closed_shadow_roots() {
                 }),
                 boundary: false,
                 expected_url: None,
+                modifiers: Vec::new(),
             },
         )
         .await
@@ -1585,6 +1660,7 @@ async fn resolves_ambient_and_explicit_closed_shadow_roots() {
                 }),
                 boundary: false,
                 expected_url: None,
+                modifiers: Vec::new(),
             },
         )
         .await
@@ -1799,6 +1875,7 @@ async fn humanized_input_reaches_the_page_with_synthesized_timing() {
                 target: None,
                 boundary: false,
                 expected_url: None,
+                modifiers: Vec::new(),
             },
         )
         .await
@@ -1915,6 +1992,7 @@ async fn dogfood_humanized_stream_biometrics() {
                 target: None,
                 boundary: false,
                 expected_url: None,
+                modifiers: Vec::new(),
             },
         )
         .await

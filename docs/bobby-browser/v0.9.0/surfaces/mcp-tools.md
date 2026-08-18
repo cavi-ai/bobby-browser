@@ -24,7 +24,7 @@ Tools are advertised only when the principal holds the required capability.
 |---|---|---|
 | `a11y_snapshot` | `browser:mutate` | Capture a compact accessibility tree with bounded form-control state, sensitive-value redaction, and command-ready semantic targets (`maxNodes` optional, 1…2048; default 256) |
 | `checkpoint_save` | `recovery:write` | Persist a verified workflow checkpoint |
-| `click` | `browser:mutate` | Click an element |
+| `click` | `browser:mutate` | Click an element, optionally with native `shift`, `ctrl`, `alt`, or `meta` modifiers |
 | `click_and_wait_for_popup` | `browser:mutate` | Click, wait for a `window.open` popup, and sync that page into `page_list` (auto-checkpoint boundary by default) |
 | `command_execute` | `browser:mutate` | Execute one bounded `CommandEnvelope` |
 | `context_ask` | `page:read` | Ask the retained page context where a described control is |
@@ -97,6 +97,12 @@ state so navigation failure cannot be mistaken for a successfully loaded page.
 semantic `target`. Targets returned by `a11y_snapshot` can be passed through
 unchanged; a legacy selector is not required when `target` is present.
 `upload_files` still requires `paths`.
+
+`click.modifiers` is an optional unique array containing at most one each of
+`shift`, `ctrl`, `alt`, and `meta`. Chromium and Firefox apply those keys during
+the native pointer click and release them afterward. Modified clicks that enter
+automatic download capture fail with `invalidRequest` instead of silently
+dropping the requested modifiers.
 
 `command_execute` still accepts nested intent envelopes
 (`{ kind: "intent", input: { kind: "locate" \| … } }`) and remains the escape
