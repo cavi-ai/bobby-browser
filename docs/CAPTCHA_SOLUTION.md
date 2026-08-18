@@ -13,9 +13,31 @@
   action. Unit tests: `crates/intent-engine/tests/solve_challenge.rs`.
 - **Phase 3: Vision integration** — done. `challengeSolved` action across
   the wire (`vision-proxy` wire/validate/data_collector, `http_vision`),
-  solveChallenge guidance in the Ollama/OpenAI propose prompts. The
-  external MLX adapter server (127.0.0.1:9101) builds its own prompts and
-  needs the same guidance — outside this repo.
+  solveChallenge guidance in the Ollama/OpenAI propose prompts. The MLX
+  adapter in `scripts/vision-mlx/` (canonical provider base + legacy
+  server) now shares the same schema guidance, canonicalizes snake_case
+  action kinds, and drops chatty non-action response fields instead of
+  failing closed on them (a chatty model emits them deterministically —
+  rejection was unrecoverable, dropping preserves the no-echo guarantee).
+
+## Robustness findings (2026-08-18, live 3B/27B comparison)
+
+- **Engine retry semantics**: a transient dud (unparseable/off-schema
+  reply, below-floor confidence) costs one attempt and the loop
+  reassesses; only the deadline is terminal for those. Disallowed actions
+  and act failures stay terminal. One dud no longer kills a 120s budget.
+- **solveChallenge is click-only** by design: `typeText` proposals carry
+  no resolved target and the empty-selector act errors at the driver
+  (TypeIntoCandidate replaced raw vision typing in #317). Prompts say
+  click-only with an explicit never-type constraint. Text captchas need a
+  focused-element typing path — future work.
+- **Qwen2.5-VL-3B (the default MLX model) cannot reliably drive
+  solveChallenge**: it deterministically proposes typing the widget label
+  ("I'm not a robot") on some pixel variants of the same page, and the
+  fail-closed engine correctly refuses. The system works with a stronger
+  model (qwen3.8:27b: Level 2 green in ~43s). The 3B failure is a model
+  capability limit, not a pipeline defect — the pipeline correctly
+  identifies and rejects it.
 - **Phase 4: CLI & ZigZagZig** — done (2026-08-18). `bobby vision solve
   --purpose … [--url … | --session … --page …] [--node vision]
   [--timeout-ms 120000] [--zigzagzig]` submits the intent over `/v1`;

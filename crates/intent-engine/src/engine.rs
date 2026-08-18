@@ -2104,9 +2104,12 @@ const SOLVE_POLL_INTERVAL_MS: u64 = 750;
 
 /// Vision-primary challenge solving. There is no DOM resolution phase: the
 /// loop is screenshot → propose → act → reassess until the model reports
-/// `challengeSolved` or the deadline passes. Fails closed: a provider
-/// error, a below-floor confidence, or a disallowed action ends the intent
-/// rather than acting on an unverifiable proposal.
+/// `challengeSolved` or the deadline passes. Small local models emit a dud
+/// (unparseable, low-confidence) every few rounds, so a transient provider
+/// error or a below-floor proposal costs one attempt and the loop
+/// reassesses; only the deadline is terminal for those. Fails closed on the
+/// paths that would act on an unverifiable proposal: a disallowed action or
+/// a failed act ends the intent immediately.
 async fn execute_solve_challenge(
     page_id: &PageId,
     browser: &dyn IntentBrowser,
@@ -2142,13 +2145,20 @@ async fn execute_solve_challenge(
     // flood the journal with stale frames.
     let mut act_evidence: Vec<Evidence> = Vec::new();
     let mut attempts = 0_u32;
+    // The most recent transient dud (provider error or below-floor
+    // proposal), reported when the deadline is what finally ends the loop.
+    let mut last_transient: Option<String> = None;
     loop {
         if std::time::Instant::now() >= deadline {
+            let transient = last_transient
+                .as_deref()
+                .map(|message| format!("; last transient failure: {message}"))
+                .unwrap_or_default();
             return IntentOutcome::Failed {
                 error: CommandError {
                     code: ErrorCode::DeadlineExceeded,
                     message: format!(
-                        "challenge not solved within {timeout_ms}ms ({attempts} attempts)"
+                        "challenge not solved within {timeout_ms}ms ({attempts} attempts){transient}"
                     ),
                     layer: ErrorLayer::Page,
                     retryable: false,
@@ -2206,6 +2216,9 @@ async fn execute_solve_challenge(
         {
             Ok(proposal) => proposal,
             Err(error) => {
+                // Transient: small local models emit an unparseable or
+                // off-schema reply every few rounds. Cost one attempt and
+                // reassess rather than killing the whole budget.
                 record_vision_metric(
                     metric_context.as_ref(),
                     propose_started.elapsed().as_millis() as u64,
@@ -2213,23 +2226,17 @@ async fn execute_solve_challenge(
                     VisionProposalOutcome::Failed,
                     None,
                 );
-                let mut evidence = std::mem::take(&mut act_evidence);
-                evidence.append(&mut screenshot_evidence);
-                return IntentOutcome::Failed {
-                    error: CommandError {
-                        code: ErrorCode::VisionAssistFailed,
-                        message: format!("vision propose failed: {}", error.message),
-                        layer: ErrorLayer::Page,
-                        retryable: false,
-                    },
-                    evidence,
-                };
+                last_transient = Some(format!("vision propose failed: {}", error.message));
+                tokio::time::sleep(std::time::Duration::from_millis(SOLVE_POLL_INTERVAL_MS)).await;
+                continue;
             }
         };
         let provider_latency_ms = propose_started.elapsed().as_millis() as u64;
         let proposal_hash = proposal_sha256(&proposal);
 
         if proposal.confidence < VISION_CONFIDENCE_FLOOR {
+            // Below-floor is the model saying "not sure" — the correct next
+            // step in a solve loop is a reassess, not a terminal failure.
             record_vision_metric(
                 metric_context.as_ref(),
                 provider_latency_ms,
@@ -2237,36 +2244,12 @@ async fn execute_solve_challenge(
                 VisionProposalOutcome::Rejected,
                 Some(VerificationMetricResult::OtherRejected),
             );
-            let mut evidence = std::mem::take(&mut act_evidence);
-            evidence.append(&mut screenshot_evidence);
-            evidence.push(intent_evidence(execution_record_with_path(
-                "solveChallenge",
-                Some(purpose),
-                plan_summary,
-                Vec::new(),
-                None,
-                format!(
-                    "visionConfidenceBelowFloor:{:.2}<{VISION_CONFIDENCE_FLOOR}",
-                    proposal.confidence
-                ),
-                ResolutionDetails {
-                    path: IntentResolutionPath::VisionFallback,
-                    vision_proposal_sha256: Some(proposal_hash),
-                    artifact_ids: artifact_ids_from(&screenshot_evidence),
-                },
-            )));
-            return IntentOutcome::Failed {
-                error: CommandError {
-                    code: ErrorCode::VisionAssistFailed,
-                    message: format!(
-                        "vision proposal confidence {:.2} below floor {VISION_CONFIDENCE_FLOOR}",
-                        proposal.confidence
-                    ),
-                    layer: ErrorLayer::Page,
-                    retryable: false,
-                },
-                evidence,
-            };
+            last_transient = Some(format!(
+                "vision proposal confidence {:.2} below floor {VISION_CONFIDENCE_FLOOR}",
+                proposal.confidence
+            ));
+            tokio::time::sleep(std::time::Duration::from_millis(SOLVE_POLL_INTERVAL_MS)).await;
+            continue;
         }
 
         match &proposal.action {
@@ -2296,7 +2279,7 @@ async fn execute_solve_challenge(
                 )));
                 return IntentOutcome::Completed { evidence };
             }
-            action @ (VisionAction::Click { .. } | VisionAction::TypeText { .. }) => {
+            action @ VisionAction::Click { .. } => {
                 record_vision_metric(
                     metric_context.as_ref(),
                     provider_latency_ms,
