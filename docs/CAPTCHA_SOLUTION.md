@@ -24,7 +24,15 @@
   HTTP (green checkmark confirmed from the final artifact). Adding a
   solve tactic to the skill-runtime `/zigzagzig` ladder is a skill-contract
   change, deliberately left for PR review.
-- **Phase 5: Learning** — pending. No context-store challenge priors yet.
+- **Phase 5: Learning** — done (2026-08-18). `SiteContext.challenges`
+  holds per-site solve counters (success/failure + day-precision stamp,
+  same privacy discipline as intent stats); promotion routes
+  `solveChallenge` outcomes there instead of the control schema (a solve
+  has no resolved control — it acts on pixels inside a widget iframe).
+  `ContextStore::challenge_prior(site)` returns the most-attempted kind
+  for a future detector; `bobby context list` prints the summary. The
+  DetectChallenge consumer of the prior remains future work (solving is
+  opt-in by design).
 - **Phase 6: Gauntlet** — done and proven live (2026-08-18). Level 2 test
   lives in `crates/runtime-tests/tests/modern_gauntlet_level2_e2e.rs`, gated
   on `BOBBY_GAUNTLET_LEVEL=2` + reCAPTCHA keypair +

@@ -1397,7 +1397,27 @@ async fn run_context(command: ContextCommands) -> Result<()> {
                 println!("no remembered sites for profile {profile}");
             } else {
                 for site in sites {
-                    println!("{site}");
+                    let challenges = store
+                        .site(&site)
+                        .await
+                        .map(|context| context.challenges)
+                        .unwrap_or_default();
+                    if challenges.is_empty() {
+                        println!("{site}");
+                    } else {
+                        let summary = challenges
+                            .iter()
+                            .map(|(kind, stats)| {
+                                format!(
+                                    "{kind}({}/{} solved)",
+                                    stats.success_count,
+                                    stats.success_count + stats.failure_count
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        println!("{site}  challenges: {summary}");
+                    }
                 }
             }
         }
@@ -3239,7 +3259,13 @@ model = "mlx-community/example-selected"
         let mut pages = std::collections::BTreeMap::new();
         pages.insert("/login".to_string(), context_store::PageContext { forms });
         store
-            .upsert_site("https://example.com", context_store::SiteContext { pages })
+            .upsert_site(
+                "https://example.com",
+                context_store::SiteContext {
+                    pages,
+                    ..context_store::SiteContext::default()
+                },
+            )
             .await;
         assert!(store.flush().await.is_empty());
         drop(store);
