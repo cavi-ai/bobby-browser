@@ -336,6 +336,7 @@ async fn broker_disconnect_after_durable_executing_rebuilds_without_guessing() {
             target: None,
             boundary: false,
             expected_url: None,
+            modifiers: Vec::new(),
         })),
     };
     let command_id = envelope.command_id.clone();
@@ -695,6 +696,7 @@ async fn daemon_rebuild_uses_durable_phases_and_never_guesses_after_browser_disp
                 target: None,
                 boundary: false,
                 expected_url: None,
+                modifiers: Vec::new(),
             })),
         };
         let command_id = envelope.command_id.clone();
@@ -828,6 +830,7 @@ async fn worker_generation_replacement_mid_command_rebuilds_without_guessing() {
             target: None,
             boundary: false,
             expected_url: None,
+            modifiers: Vec::new(),
         })),
     };
     let command_id = envelope.command_id.clone();

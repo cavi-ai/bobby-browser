@@ -111,6 +111,7 @@ async fn popup_opens_as_a_listed_page() {
         target: None,
         boundary: false,
         expected_url: None,
+        modifiers: Vec::new(),
     }))
     .await;
     assert!(

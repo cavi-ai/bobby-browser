@@ -395,6 +395,7 @@ async fn real_server_binding_and_worker_close_release_the_coordinator_page_id() 
                 target: None,
                 boundary: true,
                 expected_url: None,
+                modifiers: Vec::new(),
             },
         )
         .await

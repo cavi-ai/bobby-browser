@@ -6,6 +6,9 @@ pub enum StuckKind {
     TargetAmbiguous,
     ObstructionSuspected,
     VerifyNoDomSignal,
+    /// Not a stuck state: `solveChallenge` escalates to vision as its
+    /// primary path, so the propose request carries this marker.
+    ChallengePresent,
 }
 
 impl StuckKind {
@@ -19,6 +22,7 @@ impl StuckKind {
             Self::TargetAmbiguous => ErrorCode::TargetAmbiguous,
             Self::ObstructionSuspected => ErrorCode::ObstructionSuspected,
             Self::VerifyNoDomSignal => ErrorCode::VerificationFailed,
+            Self::ChallengePresent => ErrorCode::VisionAssistFailed,
         }
     }
 }

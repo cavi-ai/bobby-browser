@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type {
+  ClickCommand,
+  ClickModifier,
   CommandOutcome,
   ControlAction,
   ControlActionEvidence,
@@ -12,6 +14,18 @@ import type {
   RuntimeInfo,
   TargetSpec,
 } from "../src/index.js";
+
+test("ClickCommand exposes the cross-engine modifier contract", () => {
+  const modifiers: ClickModifier[] = ["shift", "ctrl", "alt", "meta"];
+  const click: ClickCommand = {
+    selector: "#range-end",
+    target: null,
+    boundary: false,
+    expectedUrl: null,
+    modifiers,
+  };
+  assert.deepEqual(click.modifiers, modifiers);
+});
 
 test("TargetSpec accepts the minimal semantic target supported by the wire schema", () => {
   const target: TargetSpec = {

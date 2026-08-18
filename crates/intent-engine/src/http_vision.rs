@@ -48,6 +48,7 @@ enum ActionBody {
     ClickCandidate { index: u32 },
     TypeIntoCandidate { index: u32 },
     ExtractFromCandidate { index: u32 },
+    ChallengeSolved,
 }
 
 impl HttpVisionAssist {
@@ -212,6 +213,15 @@ impl VisionAssist for HttpVisionAssist {
                 validate_candidate_action(&request, index, "extractFromCandidate")?;
                 VisionAction::ExtractFromCandidate { index }
             }
+            ActionBody::ChallengeSolved if request.intent_kind == "solveChallenge" => {
+                VisionAction::ChallengeSolved
+            }
+            ActionBody::ChallengeSolved => {
+                return Err(provider_error(format!(
+                    "vision challengeSolved action is incompatible with intent {}",
+                    request.intent_kind
+                )));
+            }
         };
         Ok(VisionProposal {
             confidence: proposal.confidence,
@@ -246,6 +256,7 @@ fn stuck_name(stuck: StuckKind) -> &'static str {
         StuckKind::TargetAmbiguous => "targetAmbiguous",
         StuckKind::ObstructionSuspected => "obstructionSuspected",
         StuckKind::VerifyNoDomSignal => "verifyNoDomSignal",
+        StuckKind::ChallengePresent => "challengePresent",
     }
 }
 

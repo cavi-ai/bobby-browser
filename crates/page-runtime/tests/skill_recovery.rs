@@ -313,6 +313,7 @@ async fn read_only_tactics_precede_interaction_retry_and_preserve_the_postcondit
             target: None,
             boundary: false,
             expected_url: Some("https://example.test/done".into()),
+            modifiers: Vec::new(),
         })),
     };
 
@@ -443,6 +444,7 @@ async fn uncertain_boundary_reconciles_without_duplicate_click() {
             target: None,
             boundary: true,
             expected_url: Some("https://example.test/done".into()),
+            modifiers: Vec::new(),
         })),
     };
 
@@ -572,6 +574,7 @@ async fn cancelled_boundary_recovery_persists_receipt_without_duplicate_click() 
             target: None,
             boundary: true,
             expected_url: Some("https://example.test/other".into()),
+            modifiers: Vec::new(),
         })),
     };
     let first = tokio::spawn({
@@ -715,6 +718,7 @@ async fn checkpoint_authority_mismatch_fails_before_pool_replacement() {
             target: None,
             boundary: true,
             expected_url: Some("https://example.test/other".into()),
+            modifiers: Vec::new(),
         })),
     };
 

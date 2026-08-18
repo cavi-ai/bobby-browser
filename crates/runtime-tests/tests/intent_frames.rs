@@ -169,6 +169,7 @@ async fn intent_locate_resolves_inside_an_iframe_without_a_frame_path() {
         target: None,
         boundary: false,
         expected_url: None,
+        modifiers: Vec::new(),
     }))
     .await;
     assert!(
@@ -257,6 +258,7 @@ async fn intent_locate_resolves_inside_an_iframe_without_a_frame_path() {
         target: Some(frame_button()),
         boundary: false,
         expected_url: None,
+        modifiers: Vec::new(),
     }))
     .await;
     assert!(
@@ -494,6 +496,7 @@ async fn intent_submit_with_text_expected_state_observes_the_confirmation() {
             target: None,
             boundary: false,
             expected_url: None,
+            modifiers: Vec::new(),
         },
     )))
     .await;
@@ -507,6 +510,7 @@ async fn intent_submit_with_text_expected_state_observes_the_confirmation() {
             target: None,
             boundary: false,
             expected_url: None,
+            modifiers: Vec::new(),
         },
     )))
     .await;
@@ -797,6 +801,7 @@ async fn documents_page_with_preview(seed: &str) -> DocumentsPageProbe {
         target: None,
         boundary: false,
         expected_url: None,
+        modifiers: Vec::new(),
     }))
     .await;
     assert!(
@@ -1035,6 +1040,7 @@ async fn a11y_snapshot_exposes_link_urls() {
         target: None,
         boundary: false,
         expected_url: None,
+        modifiers: Vec::new(),
     }))
     .await;
     assert!(

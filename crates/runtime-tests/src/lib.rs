@@ -439,6 +439,7 @@ pub async fn run_installed_firefox_workflow(
                 target: None,
                 boundary: true,
                 expected_url: None,
+                modifiers: Vec::new(),
             },
         )
         .await?;
@@ -623,6 +624,7 @@ pub async fn run_installed_firefox_behavioral_dogfood(
                 target: None,
                 boundary: true,
                 expected_url: None,
+                modifiers: Vec::new(),
             },
         )
         .await;

@@ -699,6 +699,16 @@ impl PageRuntime {
                 return Err(validation_error("navigation URL scheme is not supported"));
             }
         }
+        if let RuntimeCommand::Primitive(PrimitiveCommand::Click(command)) = &envelope.command {
+            let has_duplicate = command
+                .modifiers
+                .iter()
+                .enumerate()
+                .any(|(index, modifier)| command.modifiers[..index].contains(modifier));
+            if has_duplicate {
+                return Err(validation_error("click modifiers must be unique"));
+            }
+        }
         // Boundary primitives (Click { boundary: true }, …) and Boundary intents
         // (SubmitAndVerify, or Follow when the caller sets boundary: true, via
         // IntentCommand::class) share this pre-act checkpoint gate.

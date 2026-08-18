@@ -7,12 +7,12 @@ use checkpoint_store::CheckpointStore;
 use chrono::{Duration, Utc};
 use tokio::sync::Mutex;
 use types::{
-    AttemptId, CheckpointId, ClickCommand, CommandClass, CommandEnvelope, CommandError, CommandId,
-    CommandOutcome, CommandPhase, DownloadUrlCommand, ErrorCode, ErrorLayer, Evidence,
-    ExecutionPath, ExecutionReason, FollowIntent, InspectCommand, IntentCommand, IntentHints,
-    NavigateCommand, PageId, PrimitiveCommand, RuntimeCommand, SessionId, SubmitAndVerifyIntent,
-    TargetSpec, TextMatch, TypeTextCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId,
-    WorkflowCheckpoint, WorkflowId,
+    AttemptId, CheckpointId, ClickCommand, ClickModifier, CommandClass, CommandEnvelope,
+    CommandError, CommandId, CommandOutcome, CommandPhase, DownloadUrlCommand, ErrorCode,
+    ErrorLayer, Evidence, ExecutionPath, ExecutionReason, FollowIntent, InspectCommand,
+    IntentCommand, IntentHints, NavigateCommand, PageId, PrimitiveCommand, RuntimeCommand,
+    SessionId, SubmitAndVerifyIntent, TargetSpec, TextMatch, TypeTextCommand, WaitCondition,
+    WaitForCommand, WaitUntil, WorkerId, WorkflowCheckpoint, WorkflowId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
 use workflow_journal::{
@@ -740,6 +740,39 @@ async fn missing_registered_page_is_not_found_while_other_page_validation_stays_
 }
 
 #[tokio::test]
+async fn duplicate_click_modifiers_fail_before_browser_execution() {
+    let (runtime, session, page, events) = runtime(DriverMode::Succeed, None).await;
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page,
+            PrimitiveCommand::Click(ClickCommand {
+                selector: "#range-end".into(),
+                target: None,
+                boundary: false,
+                expected_url: None,
+                modifiers: vec![ClickModifier::Shift, ClickModifier::Shift],
+            }),
+        ))
+        .await;
+
+    assert!(matches!(
+        outcome,
+        CommandOutcome::Failed { error, .. }
+            if error.code == ErrorCode::InvalidRequest
+                && error.message == "click modifiers must be unique"
+    ));
+    assert!(
+        !events
+            .lock()
+            .await
+            .iter()
+            .any(|event| event == "browser:click"),
+        "invalid modifiers must fail before browser execution"
+    );
+}
+
+#[tokio::test]
 async fn raw_css_select_type_text_verifies_the_exact_option_value() {
     let (runtime, session, page, events) = runtime(DriverMode::Succeed, None).await;
     let outcome = runtime
@@ -848,6 +881,7 @@ async fn production_runtime_requires_matching_checkpoint_before_boundary_action(
         target: None,
         boundary: true,
         expected_url: None,
+        modifiers: Vec::new(),
     });
     let request = envelope(session.clone(), page.id.clone(), boundary.clone());
 
@@ -1108,6 +1142,7 @@ async fn boundary_prepare_failure_is_safe_to_retry() {
                 target: None,
                 boundary: true,
                 expected_url: None,
+                modifiers: Vec::new(),
             }),
         ))
         .await;
@@ -1207,6 +1242,7 @@ async fn boundary_driver_failure_needs_reconciliation() {
                 target: None,
                 boundary: true,
                 expected_url: None,
+                modifiers: Vec::new(),
             }),
         ))
         .await;
@@ -1230,6 +1266,7 @@ async fn boundary_pre_effect_resolution_failure_is_failed_not_needs_reconciliati
                 target: None,
                 boundary: true,
                 expected_url: None,
+                modifiers: Vec::new(),
             }),
         ))
         .await;
@@ -1327,6 +1364,7 @@ async fn boundary_target_detached_is_retryable_not_needs_reconciliation() {
                 target: None,
                 boundary: true,
                 expected_url: None,
+                modifiers: Vec::new(),
             }),
         ))
         .await;
@@ -1373,6 +1411,7 @@ async fn inspect_of_a_mutated_page_uses_the_browser_not_a_refetch() {
                 target: None,
                 boundary: false,
                 expected_url: None,
+                modifiers: Vec::new(),
             }),
         ))
         .await;
@@ -1454,6 +1493,7 @@ async fn failed_mutation_taints_the_page_before_the_next_inspect() {
                 target: None,
                 boundary: false,
                 expected_url: None,
+                modifiers: Vec::new(),
             }),
         ))
         .await;
@@ -2514,6 +2554,7 @@ async fn mutating_and_boundary_commands_never_call_http() {
                 target: None,
                 boundary: false,
                 expected_url: None,
+                modifiers: Vec::new(),
             }),
         ))
         .await;
