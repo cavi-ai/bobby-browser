@@ -50,8 +50,17 @@ pub struct CompanionServerConfig {
 pub enum CompanionServerError {
     #[error("companion server address must be loopback: {0}")]
     NonLoopbackAddress(SocketAddr),
-    #[error("failed to bind companion server")]
-    Bind(#[source] std::io::Error),
+    /// The address is in the message because the caller flattens this error
+    /// with `to_string()`, which drops both the source and the port. A bind
+    /// collision on the companion port is the one failure an operator can act
+    /// on directly, and "failed to bind companion server" alone named neither
+    /// the port nor the reason.
+    #[error("failed to bind companion server on {addr} ({source})")]
+    Bind {
+        addr: SocketAddr,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("failed to read companion server address")]
     LocalAddress(#[source] std::io::Error),
 }
@@ -69,7 +78,10 @@ impl CompanionServer {
 
         let listener = TcpListener::bind(config.bind_addr)
             .await
-            .map_err(CompanionServerError::Bind)?;
+            .map_err(|source| CompanionServerError::Bind {
+                addr: config.bind_addr,
+                source,
+            })?;
         let local_addr = listener
             .local_addr()
             .map_err(CompanionServerError::LocalAddress)?;

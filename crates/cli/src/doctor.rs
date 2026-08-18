@@ -1101,14 +1101,20 @@ pub(crate) fn run_doctor(
                     format!("{} does not exist yet", profile.profile_dir.display()),
                 );
             }
-            if profile.companion_bind.parse::<SocketAddr>().is_err() {
-                report.fail(
-                    "firefox-companion-bind",
-                    format!(
-                        "profile {} has an invalid companionBind",
-                        profile.profile_id
-                    ),
-                );
+            match profile.companion_bind.parse::<SocketAddr>() {
+                Ok(bind) => {
+                    let companion_check = check_companion_port(bind);
+                    push_doctor_check(&mut report, companion_check);
+                }
+                Err(_) => {
+                    report.fail(
+                        "firefox-companion-bind",
+                        format!(
+                            "profile {} has an invalid companionBind",
+                            profile.profile_id
+                        ),
+                    );
+                }
             }
         }
     }
@@ -1606,23 +1612,87 @@ fn cdp_port_accepts_connections(host: &str, port: u16) -> bool {
 
 fn probe_cdp_discovery(url: &str) -> Result<u16> {
     let url = url.to_owned();
-    match std::thread::spawn(move || probe_cdp_discovery_blocking(&url)).join() {
+    match std::thread::spawn(move || probe_http_status_blocking(&url)).join() {
         Ok(result) => result,
         Err(_) => anyhow::bail!("cdp discovery probe thread panicked"),
     }
 }
 
-fn probe_cdp_discovery_blocking(url: &str) -> Result<u16> {
+fn probe_http_status_blocking(url: &str) -> Result<u16> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(2))
         .no_proxy()
         .build()
-        .context("failed to build cdp discovery HTTP client")?;
+        .context("failed to build doctor HTTP client")?;
     let response = client
         .get(url)
         .send()
         .with_context(|| format!("GET {url}"))?;
     Ok(response.status().as_u16())
+}
+
+fn address_accepts_connections(address: SocketAddr) -> bool {
+    std::net::TcpStream::connect_timeout(&address, Duration::from_millis(500)).is_ok()
+}
+
+fn probe_companion_route(url: &str) -> Result<u16> {
+    let url = url.to_owned();
+    match std::thread::spawn(move || probe_http_status_blocking(&url)).join() {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!("companion route probe thread panicked"),
+    }
+}
+
+/// Whether the profile's `companionBind` can still be bound.
+///
+/// Every runtime binds its own companion server on this address, so the second
+/// `bobby serve` / `bobby cdp` / `bobby mcp-stdio` on one profile fails every
+/// Firefox session with `engineUnreachable`. Doctor validated only that the
+/// address parsed, so that collision showed up as an all-green report and a
+/// browser that would not start -- and the failure's own repair hint says to
+/// run doctor to find it.
+fn check_companion_port(bind: SocketAddr) -> DoctorCheck {
+    let check = |status, detail| DoctorCheck {
+        status,
+        name: "companion-port".to_string(),
+        detail,
+    };
+
+    if !address_accepts_connections(bind) {
+        return check(
+            DoctorStatus::Ok,
+            format!("{bind} is free for the Firefox companion server"),
+        );
+    }
+
+    // The companion route is a WebSocket upgrade: a plain GET is rejected 400
+    // and an unauthenticated upgrade 401. Either answer identifies our own
+    // server rather than a stranger on the port.
+    match probe_companion_route(&format!("http://{bind}/v1/companion")) {
+        Ok(400) | Ok(401) => check(
+            DoctorStatus::Ok,
+            format!(
+                "{bind} is serving the Firefox companion; one runtime owns it, so a second \
+                 `bobby serve`/`bobby cdp`/`bobby mcp-stdio` on this profile cannot bind it and \
+                 its Firefox sessions fail with engineUnreachable until the first one exits"
+            ),
+        ),
+        Ok(status) => check(
+            DoctorStatus::Warn,
+            format!(
+                "{bind} answered {status}; the Firefox companion answers 400 to a plain GET, so \
+                 another service holds the port -- Firefox sessions fail with engineUnreachable \
+                 until it is freed"
+            ),
+        ),
+        Err(error) => check(
+            DoctorStatus::Warn,
+            format!(
+                "{bind} is held by a service that does not answer the companion route ({error}) \
+                 -- Firefox sessions fail with engineUnreachable until it is freed"
+            ),
+        ),
+    }
 }
 
 /// Why a WebDriver BiDi probe failed.
@@ -1886,5 +1956,85 @@ mod cdp_port_tests {
         assert_eq!(check.status, DoctorStatus::Warn);
         assert!(state == CdpPortState::Free);
         assert!(check.detail.contains("bobby cdp"), "{}", check.detail);
+    }
+
+    /// Nothing holds the companion port, so the next runtime can bind it.
+    #[test]
+    fn a_free_companion_port_reports_ok() {
+        let bind: SocketAddr = format!("127.0.0.1:{}", free_port()).parse().unwrap();
+        let check = check_companion_port(bind);
+        assert_eq!(check.status, DoctorStatus::Ok, "{}", check.detail);
+        assert_eq!(check.name, "companion-port");
+        assert!(check.detail.contains("is free"), "{}", check.detail);
+    }
+
+    /// The state that left Firefox unusable behind an all-green report: a
+    /// runtime already owns the companion port, so the next one cannot bind it
+    /// and every Firefox session it opens fails.
+    #[test]
+    fn a_companion_port_owned_by_a_runtime_names_the_second_runtime_failure() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let bind = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            // Two connections arrive: the reachability probe, which opens and
+            // drops without writing, and the HTTP probe behind it.
+            for _ in 0..2 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0_u8; 256];
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => {
+                            request.extend_from_slice(&chunk[..read]);
+                            if request.ends_with(b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if request.is_empty() {
+                    continue;
+                }
+                // How the companion route answers a plain GET: it is a
+                // WebSocket upgrade, so a bare request is rejected 400.
+                let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
+                let _ = stream.flush();
+            }
+        });
+
+        let check = check_companion_port(bind);
+        assert_eq!(check.status, DoctorStatus::Ok, "{}", check.detail);
+        assert!(
+            check.detail.contains("engineUnreachable"),
+            "{}",
+            check.detail
+        );
+        server.join().unwrap();
+    }
+
+    /// A stranger on the companion port blocks the bind just as surely, but
+    /// needs the opposite repair, so it must not read as our own server.
+    #[test]
+    fn a_stranger_on_the_companion_port_warns() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let bind = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let _accepted = listener.accept().map(|(stream, _)| {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                drop(stream);
+            });
+        });
+
+        let check = check_companion_port(bind);
+        assert_eq!(check.status, DoctorStatus::Warn, "{}", check.detail);
+        assert!(
+            check.detail.contains("engineUnreachable"),
+            "{}",
+            check.detail
+        );
+        let _ = server.join();
     }
 }
