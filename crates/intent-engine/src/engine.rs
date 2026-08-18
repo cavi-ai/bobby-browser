@@ -2190,15 +2190,12 @@ async fn execute_solve_challenge(
         {
             Ok(result) => result,
             Err(error) => {
-                return IntentOutcome::Failed {
-                    error: CommandError {
-                        code: ErrorCode::VisionAssistFailed,
-                        message: format!("vision screenshot failed: {}", error.message),
-                        layer: ErrorLayer::Page,
-                        retryable: false,
-                    },
-                    evidence: std::mem::take(&mut act_evidence),
-                };
+                // Transient like any other dud: a renderer crash-and-recover
+                // makes one capture fail while the page lives on. A truly
+                // dead page keeps failing and the deadline reports it.
+                last_transient = Some(format!("vision screenshot failed: {}", error.message));
+                tokio::time::sleep(std::time::Duration::from_millis(SOLVE_POLL_INTERVAL_MS)).await;
+                continue;
             }
         };
 

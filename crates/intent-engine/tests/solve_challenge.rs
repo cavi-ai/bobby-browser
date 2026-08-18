@@ -37,6 +37,7 @@ impl VisionAssist for ScriptedVision {
 struct FakeBrowser {
     click_xy_calls: AtomicUsize,
     type_text_calls: AtomicUsize,
+    screenshot_failures: AtomicUsize,
 }
 
 #[async_trait]
@@ -100,6 +101,15 @@ impl IntentBrowser for FakeBrowser {
         _page_id: &PageId,
         _command: &CaptureScreenshotCommand,
     ) -> Result<(Vec<u8>, Vec<Evidence>), CommandError> {
+        if self
+            .screenshot_failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(unsupported("capture_screenshot"));
+        }
         Ok((
             b"png".to_vec(),
             vec![Evidence::Screenshot {
@@ -261,6 +271,24 @@ async fn solve_challenge_retries_transient_duds_within_the_budget() {
         &PageId::new(),
         &FakeBrowser::default(),
         &vision_with_errors(vec![Ok(low), Err(provider_error), Ok(solved())]),
+    )
+    .await;
+    assert!(matches!(outcome, IntentOutcome::Completed { .. }));
+}
+
+#[tokio::test]
+async fn solve_challenge_retries_a_failed_screenshot() {
+    // A renderer hiccup makes one capture fail while the page lives on;
+    // the loop reassesses instead of dying.
+    let browser = FakeBrowser {
+        screenshot_failures: AtomicUsize::new(2),
+        ..FakeBrowser::default()
+    };
+    let outcome = IntentEngine::execute(
+        &solve(30_000),
+        &PageId::new(),
+        &browser,
+        &vision(vec![solved()]),
     )
     .await;
     assert!(matches!(outcome, IntentOutcome::Completed { .. }));
