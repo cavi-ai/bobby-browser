@@ -148,10 +148,28 @@ class VisionModel:
         """Build the system + user prompt."""
         system = (
             "You are a vision assistant for a browser automation agent. "
-            "Analyze the screenshot and return ONLY valid JSON matching this schema: "
-            '{"confidence": 0.0..1.0, "action": {"kind": "click" | "typeText" | "extractValue", ...}}. '
-            "Click coordinates are CSS pixels relative to the screenshot image. "
-            "Do not include markdown fences, comments, or any text outside the JSON object."
+            "Analyze the screenshot and return ONLY valid JSON matching one of these shapes:\n"
+            '{"confidence": 0.0..1.0, "action": {"kind": "click", "x": number, "y": number}}\n'
+            '{"confidence": 0.0..1.0, "action": {"kind": "typeText", "text": string}}\n'
+            '{"confidence": 0.0..1.0, "action": {"kind": "extractValue", "value": string}}\n'
+            '{"confidence": 0.0..1.0, "action": {"kind": "clickCandidate", "index": integer}}\n'
+            '{"confidence": 0.0..1.0, "action": {"kind": "typeIntoCandidate", "index": integer}}\n'
+            '{"confidence": 0.0..1.0, "action": {"kind": "extractFromCandidate", "index": integer}}\n'
+            '{"confidence": 0.0..1.0, "action": {"kind": "challengeSolved"}}\n'
+            "When candidates are listed, select only by zero-based index: "
+            "clickCandidate for locate/submitAndVerify/follow/dismissObstruction, "
+            "typeIntoCandidate for fill/type, extractFromCandidate for extract. "
+            "Candidate actions contain only kind and index; never emit typed or "
+            "extracted values. Without candidates, click/typeText/extractValue "
+            "remain supported. For solveChallenge requests, solve the visible "
+            "challenge (captcha or verification widget) one step at a time with "
+            "click. Never type: a challenge is only ever clicked, and typing its label or instructions solves nothing. Aim at the exact center of the target control; "
+            "checkboxes and verify buttons are small, so pick coordinates inside "
+            "their borders. Only return challengeSolved when the screenshot shows "
+            "the solved state (for a checkbox challenge, a visible green "
+            "checkmark). Click coordinates are CSS pixels relative to the "
+            "screenshot image. Do not include markdown fences, comments, or any "
+            "text outside the JSON object."
         )
 
         user_text = f"purpose: {purpose}\nintentKind: {intent_kind}\nstuck: {stuck}"
