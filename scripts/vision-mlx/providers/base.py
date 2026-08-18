@@ -12,6 +12,7 @@ Action kinds match `crates/vision-proxy/src/wire.rs`:
     - {"kind": "clickCandidate", "index": int}
     - {"kind": "typeIntoCandidate", "index": int}
     - {"kind": "extractFromCandidate", "index": int}
+    - {"kind": "challengeSolved"}                   terminal solveChallenge signal
 
 Providers are swappable via `create_provider()`: mlx-vlm (direct local
 inference), ollama, lmstudio, or openai — same interface, different backend.
@@ -111,8 +112,11 @@ class ProposeResponse:
             "typeIntoCandidate",
             "extractFromCandidate",
         )
-        if kind not in ("click", "typeText", "extractValue", *candidate_kinds):
+        if kind not in ("click", "typeText", "extractValue", "challengeSolved", *candidate_kinds):
             raise ValueError(f"invalid action kind: {kind}")
+        if kind == "challengeSolved":
+            if set(self.action) != {"kind"}:
+                raise ValueError("challengeSolved must contain only kind")
         if kind == "click":
             if set(self.action) != {"kind", "x", "y"}:
                 raise ValueError("click must contain only kind, x, and y")
@@ -162,8 +166,21 @@ class VisionProvider(ABC):
         '{"confidence": 0.0..1.0, "action": {"kind": "clickCandidate", "index": integer}}\n'
         '{"confidence": 0.0..1.0, "action": {"kind": "typeIntoCandidate", "index": integer}}\n'
         '{"confidence": 0.0..1.0, "action": {"kind": "extractFromCandidate", "index": integer}}\n'
-        "Click coordinates are CSS pixels relative to the screenshot image. "
-        "Do not include markdown fences, comments, or any text outside the JSON object."
+        '{"confidence": 0.0..1.0, "action": {"kind": "challengeSolved"}}\n'
+        "When candidates are listed, select only by zero-based index: "
+        "clickCandidate for locate/submitAndVerify/follow/dismissObstruction, "
+        "typeIntoCandidate for fill/type, extractFromCandidate for extract. "
+        "Candidate actions contain only kind and index; never emit typed or "
+        "extracted values. Without candidates, click/typeText/extractValue "
+        "remain supported. For solveChallenge requests, solve the visible "
+        "challenge (captcha or verification widget) one step at a time with "
+        "click. Never type: a challenge is only ever clicked, and typing its label or instructions solves nothing. Aim at the exact center of the target control; "
+        "checkboxes and verify buttons are small, so pick coordinates inside "
+        "their borders. Only return challengeSolved when the screenshot shows "
+        "the solved state (for a checkbox challenge, a visible green "
+        "checkmark). Click coordinates are CSS pixels relative to the "
+        "screenshot image. Do not include markdown fences, comments, or any "
+        "text outside the JSON object."
     )
 
     EXTRACT_SYSTEM = (
@@ -270,7 +287,9 @@ class VisionProvider(ABC):
             raise ValueError("unknown vision action fields")
 
         normalized = {"kind": kind}
-        if kind == "click":
+        if kind == "challengeSolved":
+            pass  # terminal signal; carries no payload
+        elif kind == "click":
             # Models emit coordinates variously: {x, y}, {coordinate: [x, y]},
             # {position: {x, y}}, or {clickX, clickY}.
             x = action.get("x", action.get("clickX"))
@@ -300,12 +319,20 @@ class VisionProvider(ABC):
             "mouse_click": "click",
             "press": "click",
             "type": "typeText",
+            "type_text": "typeText",
             "inputText": "typeText",
             "enterText": "typeText",
             "text": "typeText",
             "extract": "extractValue",
+            "extract_value": "extractValue",
             "read": "extractValue",
             "getValue": "extractValue",
+            # Models snake_case the camelCase schema they are shown; both the
+            # Rust packet path and several model families use this spelling.
+            "click_candidate": "clickCandidate",
+            "type_into_candidate": "typeIntoCandidate",
+            "extract_from_candidate": "extractFromCandidate",
+            "challenge_solved": "challengeSolved",
         }.get(kind, kind)
 
     @staticmethod
@@ -317,6 +344,7 @@ class VisionProvider(ABC):
             "clickCandidate": {"kind", "index"},
             "typeIntoCandidate": {"kind", "index"},
             "extractFromCandidate": {"kind", "index"},
+            "challengeSolved": {"kind"},
         }.get(kind)
 
     @classmethod
@@ -329,8 +357,16 @@ class VisionProvider(ABC):
         if isinstance(action, str):
             canonical = cls._canonical_action_kind(action)
             sibling_fields = (cls._allowed_action_fields(canonical) or {"kind"}) - {"kind"}
-        if set(raw) - {"confidence", "action"} - sibling_fields:
-            raise ValueError("unknown vision response fields")
+            # Unknown siblings of a string action are dropped, never merged
+            # into the payload: no typed value can ride along, but a chatty
+            # extra ("reasoning", commentary) must not be fatal either.
+            if extras := set(raw) - {"confidence", "action"} - sibling_fields:
+                log.info("dropping non-action response fields: %s", sorted(extras))
+        elif extras := set(raw) - {"confidence", "action"}:
+            # Dict-action extras (a "reasoning" field, commentary) never
+            # reach the action: drop them. The action itself stays strictly
+            # validated, so no typed value can ride along.
+            log.info("dropping non-action response fields: %s", sorted(extras))
 
         # Model may emit "action": "click" with coordinate fields as siblings
         if isinstance(action, str):

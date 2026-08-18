@@ -25,8 +25,8 @@ importers:
         specifier: 26.2.0
         version: 26.2.0
       tsx:
-        specifier: 4.23.11
-        version: 4.23.11
+        specifier: 4.23.12
+        version: 4.23.12
       typescript:
         specifier: 7.0.2
         version: 7.0.2
@@ -46,8 +46,8 @@ importers:
         specifier: 30.0.1
         version: 30.0.1
       tsx:
-        specifier: 4.23.11
-        version: 4.23.11
+        specifier: 4.23.12
+        version: 4.23.12
       typescript:
         specifier: 7.0.2
         version: 7.0.2
@@ -67,8 +67,8 @@ importers:
         specifier: 30.0.1
         version: 30.0.1
       tsx:
-        specifier: 4.23.11
-        version: 4.23.11
+        specifier: 4.23.12
+        version: 4.23.12
       typescript:
         specifier: 7.0.2
         version: 7.0.2
@@ -782,8 +782,8 @@ packages:
     resolution: {integrity: sha512-bLVMLPtstlZ4iMQHpFHTR7GAGj2jxi8Dg0s2h2MafAE4uSWF98FC/3MomU51iQAMf8/qDUbKWf5GxuvvVcXEhw==}
     engines: {node: '>=20'}
 
-  tsx@4.23.11:
-    resolution: {integrity: sha512-Ry2oTEUnhBdeEdWIztY8kf3/nBGnPnjMLVGL0YfdRXMORuPER5NlKmayqxtxRxwB1xBN+RivRaJfe7PM1rtiyw==}
+  tsx@4.23.12:
+    resolution: {integrity: sha512-FDf4L4sYzKtzWYhU/Xm0AQFdTjdIxNo9ElTf2mxXM6k8YMHXzYUe4yODVaXP4V9uMFbVg8c0qyBccK2OOxb45Q==}
     engines: {node: '>=18.0.0'}
     hasBin: true
 
@@ -1368,7 +1368,7 @@ snapshots:
     dependencies:
       punycode: 2.3.1
 
-  tsx@4.23.11:
+  tsx@4.23.12:
     dependencies:
       esbuild: 0.28.1
     optionalDependencies:

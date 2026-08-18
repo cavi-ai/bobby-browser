@@ -16,7 +16,7 @@ use types::{
 /// proposal repeats, so an uncooperative model can be simulated without an
 /// infinite script.
 struct ScriptedVision {
-    proposals: Mutex<Vec<VisionProposal>>,
+    proposals: Mutex<Vec<Result<VisionProposal, CommandError>>>,
     calls: AtomicUsize,
 }
 
@@ -29,7 +29,7 @@ impl VisionAssist for ScriptedVision {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         let proposals = self.proposals.lock().unwrap_or_else(|p| p.into_inner());
         let index = call.min(proposals.len().saturating_sub(1));
-        Ok(proposals[index].clone())
+        proposals[index].clone()
     }
 }
 
@@ -148,6 +148,10 @@ fn click() -> VisionProposal {
 }
 
 fn vision(script: Vec<VisionProposal>) -> VisionContext {
+    vision_with_errors(script.into_iter().map(Ok).collect())
+}
+
+fn vision_with_errors(script: Vec<Result<VisionProposal, CommandError>>) -> VisionContext {
     VisionContext {
         session_ok: true,
         capability_ok: true,
@@ -169,7 +173,7 @@ async fn solve_challenge_requires_an_open_vision_gate() {
             session_ok: false,
             capability_ok: true,
             assist: Some(Arc::new(ScriptedVision {
-                proposals: Mutex::new(vec![solved()]),
+                proposals: Mutex::new(vec![Ok(solved())]),
                 calls: AtomicUsize::new(0),
             })),
             proposals: None,
@@ -241,39 +245,69 @@ async fn solve_challenge_acts_then_reassesses_until_solved() {
 }
 
 #[tokio::test]
-async fn solve_challenge_fails_closed_below_the_confidence_floor() {
+async fn solve_challenge_retries_transient_duds_within_the_budget() {
+    // A below-floor proposal and a provider error each cost one attempt;
+    // the loop reassesses and can still complete.
+    let mut low = solved();
+    low.confidence = 0.5;
+    let provider_error = CommandError {
+        code: ErrorCode::VisionAssistFailed,
+        message: "endpoint returned an invalid proposal".into(),
+        layer: types::ErrorLayer::Driver,
+        retryable: true,
+    };
+    let outcome = IntentEngine::execute(
+        &solve(30_000),
+        &PageId::new(),
+        &FakeBrowser::default(),
+        &vision_with_errors(vec![Ok(low), Err(provider_error), Ok(solved())]),
+    )
+    .await;
+    assert!(matches!(outcome, IntentOutcome::Completed { .. }));
+}
+
+#[tokio::test]
+async fn solve_challenge_reports_transient_duds_when_the_deadline_wins() {
     let mut low = solved();
     low.confidence = 0.5;
     let outcome = IntentEngine::execute(
-        &solve(30_000),
+        &solve(50),
         &PageId::new(),
         &FakeBrowser::default(),
         &vision(vec![low]),
     )
     .await;
     let IntentOutcome::Failed { error, .. } = outcome else {
-        panic!("below-floor proposal must fail closed");
+        panic!("a model that never gains confidence must hit the deadline");
     };
-    assert_eq!(error.code, ErrorCode::VisionAssistFailed);
+    assert_eq!(error.code, ErrorCode::DeadlineExceeded);
+    assert!(error.message.contains("below floor"), "{error:?}");
 }
 
 #[tokio::test]
 async fn solve_challenge_rejects_actions_it_cannot_ground() {
-    let candidate = VisionProposal {
-        confidence: 0.9,
-        action: VisionAction::ClickCandidate { index: 0 },
-    };
-    let outcome = IntentEngine::execute(
-        &solve(30_000),
-        &PageId::new(),
-        &FakeBrowser::default(),
-        &vision(vec![candidate]),
-    )
-    .await;
-    let IntentOutcome::Failed { error, .. } = outcome else {
-        panic!("candidate actions are not allowed for solveChallenge");
-    };
-    assert_eq!(error.code, ErrorCode::VisionAssistFailed);
+    for action in [
+        VisionAction::ClickCandidate { index: 0 },
+        // Typing needs a resolved target; a vision typeText carries none, and
+        // the empty-selector act errors at the driver. Click-only for now.
+        VisionAction::TypeText { text: "x".into() },
+    ] {
+        let candidate = VisionProposal {
+            confidence: 0.9,
+            action,
+        };
+        let outcome = IntentEngine::execute(
+            &solve(30_000),
+            &PageId::new(),
+            &FakeBrowser::default(),
+            &vision(vec![candidate]),
+        )
+        .await;
+        let IntentOutcome::Failed { error, .. } = outcome else {
+            panic!("non-click actions are not allowed for solveChallenge");
+        };
+        assert_eq!(error.code, ErrorCode::VisionAssistFailed);
+    }
 }
 
 #[tokio::test]

@@ -35,15 +35,20 @@ class VisionProviderNormalizationTests(unittest.TestCase):
                 self.assertEqual(response.action, expected)
                 response.validate()
 
-    def test_string_action_sibling_whitelist_rejects_unknown_fields_without_echo(self):
+    def test_string_action_unknown_siblings_are_dropped_without_echo(self):
         secret = "runtime-secret-string-action-field"
-        for kind in ("click", "typeText", "extractValue", "clickCandidate"):
+        for kind in ("click", "typeText", "extractValue"):
             with self.subTest(kind=kind):
-                with self.assertRaisesRegex(ValueError, "unknown vision response fields") as error:
-                    VisionProvider.normalize_response(
-                        {"confidence": 0.8, "action": kind, "unknown": secret}
-                    )
-                self.assertNotIn(secret, str(error.exception))
+                response = VisionProvider.normalize_response(
+                    {"confidence": 0.8, "action": kind, "unknown": secret}
+                )
+                self.assertNotIn(secret, str(response.to_dict()))
+        # Candidate kinds have no default payload, so a bare string action
+        # with no usable index is invalid regardless of the dropped extra.
+        with self.assertRaises(ValueError):
+            VisionProvider.normalize_response(
+                {"confidence": 0.8, "action": "clickCandidate", "unknown": secret}
+            )
 
     def test_request_and_action_unknown_fields_fail_closed_without_echoing_values(self):
         secret = "runtime-secret-provider-field"
@@ -52,9 +57,17 @@ class VisionProviderNormalizationTests(unittest.TestCase):
         self.assertNotIn(secret, str(error.exception))
         with self.assertRaises(ValueError):
             ProposeResponse(0.9, {"kind": "typeIntoCandidate", "index": 0, "text": secret}).validate()
-        with self.assertRaisesRegex(ValueError, "unknown vision response fields") as error:
-            VisionProvider.normalize_response({"confidence": 0.9, "action": {"kind": "clickCandidate", "index": 0}, "text": secret})
-        self.assertNotIn(secret, str(error.exception))
+
+    def test_dict_action_extra_response_fields_are_dropped_without_echoing_values(self):
+        # A chatty sibling on a dict action never reaches the action or the
+        # normalized output, so dropping it cannot leak a typed value — but
+        # it also must not be fatal: chatty models emit one deterministically.
+        secret = "runtime-secret-provider-field"
+        response = VisionProvider.normalize_response(
+            {"confidence": 0.9, "action": {"kind": "click", "x": 1, "y": 2}, "text": secret}
+        )
+        self.assertEqual(response.action, {"kind": "click", "x": 1.0, "y": 2.0})
+        self.assertNotIn(secret, str(response.to_dict()))
 
     def test_abstention_actions_force_zero_confidence(self):
         for kind in ("terminate", "abort", "refuse", "none", "noop"):
@@ -99,6 +112,66 @@ class VisionProviderNormalizationTests(unittest.TestCase):
                     VisionProvider.normalize_action(
                         {"kind": kind, "index": 1, "text": "secret", "value": "secret"}
                     )
+
+    def test_challenge_solved_round_trips_without_a_payload(self):
+        for kind in ("challengeSolved", "challenge_solved"):
+            with self.subTest(kind=kind):
+                response = VisionProvider.normalize_response(
+                    {"confidence": 0.9, "action": {"kind": kind}}
+                )
+                self.assertEqual(response.confidence, 0.9)
+                self.assertEqual(response.action, {"kind": "challengeSolved"})
+
+    def test_snake_case_action_kinds_canonicalize(self):
+        for given, canonical, payload in (
+            ("type_text", "typeText", {"text": "hello"}),
+            ("extract_value", "extractValue", {"value": "hello"}),
+            ("click_candidate", "clickCandidate", {"index": 0}),
+            ("type_into_candidate", "typeIntoCandidate", {"index": 0}),
+            ("extract_from_candidate", "extractFromCandidate", {"index": 0}),
+        ):
+            with self.subTest(given=given):
+                action = VisionProvider.normalize_action({"kind": given, **payload})
+                self.assertEqual(action["kind"], canonical)
+
+    def test_dict_action_tolerates_non_action_response_fields(self):
+        # Models often add a "reasoning" or commentary sibling; it never
+        # reaches the action, so it is dropped rather than fatal.
+        response = VisionProvider.normalize_response(
+            {
+                "confidence": 0.9,
+                "action": {"kind": "click", "x": 1, "y": 2},
+                "reasoning": "the checkbox is at those coordinates",
+            }
+        )
+        self.assertEqual(response.action, {"kind": "click", "x": 1.0, "y": 2.0})
+
+    def test_string_action_unknown_siblings_are_dropped_not_merged(self):
+        # Unknown siblings of a string action are dropped rather than merged
+        # into the payload, so a typed value cannot ride along.
+        secret = "runtime-secret-provider-field"
+        response = VisionProvider.normalize_response(
+            {"confidence": 0.9, "action": "click", "x": 3, "y": 4, "secret": secret}
+        )
+        self.assertEqual(response.action, {"kind": "click", "x": 3.0, "y": 4.0})
+        self.assertNotIn(secret, str(response.to_dict()))
+
+    def test_challenge_solved_rejects_any_payload(self):
+        with self.assertRaises(ValueError):
+            VisionProvider.normalize_response(
+                {"confidence": 0.9, "action": {"kind": "challengeSolved", "x": 1}}
+            )
+
+    def test_propose_prompt_covers_candidates_and_solve_challenge(self):
+        for required in (
+            "challengeSolved",
+            "clickCandidate",
+            "typeIntoCandidate",
+            "extractFromCandidate",
+            "solveChallenge",
+            "green",
+        ):
+            self.assertIn(required, VisionProvider.PROPOSE_SYSTEM)
 
 
 if __name__ == "__main__":
