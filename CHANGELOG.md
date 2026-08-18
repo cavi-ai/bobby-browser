@@ -55,6 +55,7 @@
 - `scripts/dev/firefox-start.sh` compares the endpoint's `ws_port` after stripping whitespace, so a reformatted endpoint file no longer reads as stale.
 - `a11y_snapshot_descends_into_iframes` waits for `input[type=file]` to attach before snapshotting. The documents route builds its form in the SPA bundle, so `DOMContentLoaded` can precede the input.
 - A companion-server bind failure names the address and the operating system error. The caller flattens the error through `to_string()`, so the operator saw `failed to bind companion server` with neither the port nor `Address already in use`.
+- A solve screenshot that fails while the page is still alive costs one attempt instead of ending the solve. A renderer crash-and-recover surfaced as a terminal capture failure mid-solve; a genuinely dead page still fails every attempt and the deadline reports it.
 
 ## 0.9.0 - 2026-08-12
 
