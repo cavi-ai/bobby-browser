@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum ChallengeType {
     RecaptchaV2Checkbox,
@@ -13,6 +14,7 @@ pub enum ChallengeType {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ChallengeDetection {
     pub challenge_type: ChallengeType,
     pub confidence: f32,
@@ -25,6 +27,7 @@ pub struct ChallengeDetection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ChallengeRegion {
     pub x: f32,
     pub y: f32,
@@ -33,6 +36,7 @@ pub struct ChallengeRegion {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ChallengeDetectionHints {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_field_purpose: Option<String>,
@@ -41,13 +45,16 @@ pub struct ChallengeDetectionHints {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SolveChallengeIntent {
     pub purpose: String,
-    #[serde(default = "default_solve_hints")]
+    #[serde(default)]
     pub hints: SolveChallengeHints,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct SolveChallengeHints {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub region: Option<ChallengeRegion>,
@@ -55,8 +62,13 @@ pub struct SolveChallengeHints {
     pub timeout_ms: u64,
 }
 
-fn default_solve_hints() -> SolveChallengeHints {
-    SolveChallengeHints::default()
+impl Default for SolveChallengeHints {
+    fn default() -> Self {
+        Self {
+            region: None,
+            timeout_ms: default_solve_timeout_ms(),
+        }
+    }
 }
 
 fn default_solve_timeout_ms() -> u64 {
@@ -64,9 +76,18 @@ fn default_solve_timeout_ms() -> u64 {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum SolveStep {
-    Click { x: f32, y: f32 },
-    TypeText { text: String, target_field_purpose: String },
-    WaitAndReassess { ms: u64 },
+    Click {
+        x: f32,
+        y: f32,
+    },
+    TypeText {
+        text: String,
+        target_field_purpose: String,
+    },
+    WaitAndReassess {
+        ms: u64,
+    },
 }

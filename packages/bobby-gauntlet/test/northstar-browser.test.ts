@@ -180,6 +180,9 @@ test("Level 2 renders an irregular form and submits the real reCAPTCHA widget re
         assert.equal(widgetId, 7);
         return "verified-widget-token";
       },
+      ready(callback: () => void): void {
+        callback();
+      },
     },
   });
   let checkpoint = "";

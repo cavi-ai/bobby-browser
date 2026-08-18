@@ -44,7 +44,10 @@ fn site_with_controls(controls: Vec<ControlContext>) -> SiteContext {
     forms.insert("page".to_string(), FormContext { controls });
     let mut pages = BTreeMap::new();
     pages.insert("/".to_string(), PageContext { forms });
-    SiteContext { pages }
+    SiteContext {
+        pages,
+        ..SiteContext::default()
+    }
 }
 
 /// Seed a store with `n_sites` sites, each holding `per_site` controls with

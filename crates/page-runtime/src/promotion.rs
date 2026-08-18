@@ -61,6 +61,20 @@ impl ContextPromotion {
             _ => None,
         });
         let Some(record) = record else { return };
+        // A challenge solve has no resolved control — it acts on pixels
+        // inside a widget iframe. Record it at site level as the challenge
+        // prior instead of forcing it into the control schema.
+        if record.intent_kind == "solveChallenge" {
+            self.store
+                .record_challenge(
+                    &site,
+                    "solveChallenge",
+                    success,
+                    day_since_epoch(chrono::Utc::now()),
+                )
+                .await;
+            return;
+        }
         let resolution = evidence.iter().find_map(|item| match item {
             Evidence::Resolution { target, .. } => Some(target.as_ref()),
             _ => None,

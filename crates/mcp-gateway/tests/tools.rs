@@ -651,7 +651,7 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
             .as_array()
             .unwrap()
             .len(),
-        8
+        9
     );
 
     // In `tools/list`, `command_execute` must advertise the envelope command as

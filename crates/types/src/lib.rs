@@ -7,6 +7,8 @@
 
 #[path = "../../bobby-browser-client/src/auth.rs"]
 mod auth;
+#[path = "../../bobby-browser-client/src/challenges.rs"]
+mod challenges;
 #[path = "../../bobby-browser-client/src/commands.rs"]
 mod commands;
 #[path = "../../bobby-browser-client/src/forms.rs"]
@@ -25,6 +27,7 @@ mod skills;
 mod state;
 
 pub use auth::*;
+pub use challenges::*;
 pub use commands::*;
 pub use forms::*;
 pub use ids::*;

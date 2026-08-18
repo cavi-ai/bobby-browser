@@ -76,6 +76,11 @@ pub enum IntentCommand {
     Follow(FollowIntent),
     DismissObstruction(DismissObstructionIntent),
     Extract(ExtractIntent),
+    /// Vision-primary challenge solving (captchas, verification widgets).
+    /// Bypasses DOM resolution: the engine loops screenshot → vision proposal
+    /// → action until the model reports the challenge solved or the hint
+    /// timeout elapses.
+    SolveChallenge(crate::challenges::SolveChallengeIntent),
 }
 
 impl IntentCommand {
@@ -85,6 +90,7 @@ impl IntentCommand {
             Self::Fill(_) | Self::CompleteForm(_) | Self::DismissObstruction(_) => {
                 CommandClass::Reconciliable
             }
+            Self::SolveChallenge(_) => CommandClass::Reconciliable,
             Self::SubmitAndVerify(_) => CommandClass::Boundary,
             Self::Follow(intent) => {
                 if intent.boundary {
