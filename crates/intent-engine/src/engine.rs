@@ -202,6 +202,10 @@ impl IntentEngine {
             IntentPlan::Extract { fields } => {
                 execute_extract(intent, page_id, browser, vision, fields).await
             }
+            IntentPlan::SolveChallenge {
+                purpose,
+                timeout_ms,
+            } => execute_solve_challenge(page_id, browser, vision, purpose, timeout_ms).await,
         }
     }
 }
@@ -1121,6 +1125,7 @@ async fn execute_submit_and_verify(
         target: Some(action_target),
         boundary: true,
         expected_url: expected_url_from_wait(&expected_state),
+        modifiers: Vec::new(),
     };
     // If a text/element/value expected-state already holds before the click,
     // a post-act pass proves nothing — the matcher hit static page copy and
@@ -1426,6 +1431,7 @@ async fn execute_follow(
         target: Some(action_target),
         boundary,
         expected_url: expected_url_from_wait(&expected_destination),
+        modifiers: Vec::new(),
     };
     let mut click_evidence = match browser.click(page_id, &click).await {
         Ok(evidence) => evidence,
@@ -1602,6 +1608,7 @@ async fn execute_dismiss_obstruction(
         // no pre-established checkpoint and takes no caller-supplied boundary flag.
         boundary: false,
         expected_url: None,
+        modifiers: Vec::new(),
     };
     let mut click_evidence = match browser.click(page_id, &click).await {
         Ok(evidence) => evidence,
@@ -2087,6 +2094,249 @@ fn non_escalating_failure(error: CommandError, evidence: Evidence) -> IntentOutc
     IntentOutcome::Failed {
         error,
         evidence: vec![evidence],
+    }
+}
+
+/// Pause between solve iterations: gives the widget time to react to the
+/// last action (checkbox flip, grid round, verify) before the next
+/// screenshot re-assessment.
+const SOLVE_POLL_INTERVAL_MS: u64 = 750;
+
+/// Vision-primary challenge solving. There is no DOM resolution phase: the
+/// loop is screenshot → propose → act → reassess until the model reports
+/// `challengeSolved` or the deadline passes. Small local models emit a dud
+/// (unparseable, low-confidence) every few rounds, so a transient provider
+/// error or a below-floor proposal costs one attempt and the loop
+/// reassesses; only the deadline is terminal for those. Fails closed on the
+/// paths that would act on an unverifiable proposal: a disallowed action or
+/// a failed act ends the intent immediately.
+async fn execute_solve_challenge(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    vision: &VisionContext,
+    purpose: String,
+    timeout_ms: u64,
+) -> IntentOutcome {
+    let plan_summary = format!("solveChallenge timeout_ms={timeout_ms}");
+    let gates_open = vision.session_ok && vision.capability_ok;
+    let Some(assist) = vision.assist.as_ref().filter(|_| gates_open) else {
+        return IntentOutcome::Failed {
+            error: CommandError {
+                code: ErrorCode::VisionAssistDenied,
+                message: "solveChallenge requires vision assist; the vision gates are closed"
+                    .into(),
+                layer: ErrorLayer::Page,
+                retryable: false,
+            },
+            evidence: vec![intent_evidence(execution_record(
+                "solveChallenge",
+                Some(purpose),
+                plan_summary,
+                Vec::new(),
+                None,
+                "visionDenied",
+            ))],
+        };
+    };
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    // Executed actions accumulate across iterations; only the latest
+    // screenshot's evidence is reported, so a long grid solve does not
+    // flood the journal with stale frames.
+    let mut act_evidence: Vec<Evidence> = Vec::new();
+    let mut attempts = 0_u32;
+    // The most recent transient dud (provider error or below-floor
+    // proposal), reported when the deadline is what finally ends the loop.
+    let mut last_transient: Option<String> = None;
+    loop {
+        if std::time::Instant::now() >= deadline {
+            let transient = last_transient
+                .as_deref()
+                .map(|message| format!("; last transient failure: {message}"))
+                .unwrap_or_default();
+            return IntentOutcome::Failed {
+                error: CommandError {
+                    code: ErrorCode::DeadlineExceeded,
+                    message: format!(
+                        "challenge not solved within {timeout_ms}ms ({attempts} attempts){transient}"
+                    ),
+                    layer: ErrorLayer::Page,
+                    retryable: false,
+                },
+                evidence: {
+                    let mut evidence = std::mem::take(&mut act_evidence);
+                    evidence.push(intent_evidence(execution_record(
+                        "solveChallenge",
+                        Some(purpose),
+                        plan_summary,
+                        Vec::new(),
+                        None,
+                        format!("solveTimeout attempts={attempts}"),
+                    )));
+                    evidence
+                },
+            };
+        }
+        attempts += 1;
+
+        let (png, mut screenshot_evidence) = match browser
+            .capture_screenshot(
+                page_id,
+                &CaptureScreenshotCommand {
+                    mode: ScreenshotMode::Viewport,
+                },
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                return IntentOutcome::Failed {
+                    error: CommandError {
+                        code: ErrorCode::VisionAssistFailed,
+                        message: format!("vision screenshot failed: {}", error.message),
+                        layer: ErrorLayer::Page,
+                        retryable: false,
+                    },
+                    evidence: std::mem::take(&mut act_evidence),
+                };
+            }
+        };
+
+        let propose_started = std::time::Instant::now();
+        let metric_context = assist.operational_metrics();
+        let proposal = match assist
+            .propose(VisionProposeRequest {
+                purpose: purpose.clone(),
+                intent_kind: "solveChallenge".into(),
+                screenshot_png: png,
+                stuck: StuckKind::ChallengePresent,
+                context: vision.prompt_context.clone(),
+            })
+            .await
+        {
+            Ok(proposal) => proposal,
+            Err(error) => {
+                // Transient: small local models emit an unparseable or
+                // off-schema reply every few rounds. Cost one attempt and
+                // reassess rather than killing the whole budget.
+                record_vision_metric(
+                    metric_context.as_ref(),
+                    propose_started.elapsed().as_millis() as u64,
+                    None,
+                    VisionProposalOutcome::Failed,
+                    None,
+                );
+                last_transient = Some(format!("vision propose failed: {}", error.message));
+                tokio::time::sleep(std::time::Duration::from_millis(SOLVE_POLL_INTERVAL_MS)).await;
+                continue;
+            }
+        };
+        let provider_latency_ms = propose_started.elapsed().as_millis() as u64;
+        let proposal_hash = proposal_sha256(&proposal);
+
+        if proposal.confidence < VISION_CONFIDENCE_FLOOR {
+            // Below-floor is the model saying "not sure" — the correct next
+            // step in a solve loop is a reassess, not a terminal failure.
+            record_vision_metric(
+                metric_context.as_ref(),
+                provider_latency_ms,
+                Some(proposal.confidence),
+                VisionProposalOutcome::Rejected,
+                Some(VerificationMetricResult::OtherRejected),
+            );
+            last_transient = Some(format!(
+                "vision proposal confidence {:.2} below floor {VISION_CONFIDENCE_FLOOR}",
+                proposal.confidence
+            ));
+            tokio::time::sleep(std::time::Duration::from_millis(SOLVE_POLL_INTERVAL_MS)).await;
+            continue;
+        }
+
+        match &proposal.action {
+            VisionAction::ChallengeSolved => {
+                record_vision_metric(
+                    metric_context.as_ref(),
+                    provider_latency_ms,
+                    Some(proposal.confidence),
+                    VisionProposalOutcome::Accepted,
+                    Some(VerificationMetricResult::Accepted),
+                );
+                let mut evidence = std::mem::take(&mut act_evidence);
+                evidence.append(&mut screenshot_evidence);
+                let artifact_ids = artifact_ids_from(&evidence);
+                evidence.push(intent_evidence(execution_record_with_path(
+                    "solveChallenge",
+                    Some(purpose),
+                    plan_summary,
+                    Vec::new(),
+                    None,
+                    format!("challengeSolved attempts={attempts}"),
+                    ResolutionDetails {
+                        path: IntentResolutionPath::VisionFallback,
+                        vision_proposal_sha256: Some(proposal_hash),
+                        artifact_ids,
+                    },
+                )));
+                return IntentOutcome::Completed { evidence };
+            }
+            action @ VisionAction::Click { .. } => {
+                record_vision_metric(
+                    metric_context.as_ref(),
+                    provider_latency_ms,
+                    Some(proposal.confidence),
+                    VisionProposalOutcome::Accepted,
+                    Some(VerificationMetricResult::Accepted),
+                );
+                match execute_vision_action(page_id, browser, action, &[], None).await {
+                    Ok(mut step_evidence) => {
+                        act_evidence.append(&mut step_evidence);
+                    }
+                    Err(error) => {
+                        let mut evidence = std::mem::take(&mut act_evidence);
+                        evidence.append(&mut screenshot_evidence);
+                        evidence.push(intent_evidence(execution_record_with_path(
+                            "solveChallenge",
+                            Some(purpose),
+                            plan_summary.clone(),
+                            Vec::new(),
+                            None,
+                            format!("visionActFailed attempts={attempts}"),
+                            ResolutionDetails {
+                                path: IntentResolutionPath::VisionFallback,
+                                vision_proposal_sha256: Some(proposal_hash),
+                                artifact_ids: artifact_ids_from(&screenshot_evidence),
+                            },
+                        )));
+                        return IntentOutcome::Failed {
+                            error: CommandError {
+                                code: ErrorCode::VisionAssistFailed,
+                                message: format!("vision act failed: {}", error.message),
+                                layer: ErrorLayer::Page,
+                                retryable: false,
+                            },
+                            evidence,
+                        };
+                    }
+                }
+            }
+            other => {
+                let mut evidence = std::mem::take(&mut act_evidence);
+                evidence.append(&mut screenshot_evidence);
+                return IntentOutcome::Failed {
+                    error: CommandError {
+                        code: ErrorCode::VisionAssistFailed,
+                        message: format!(
+                            "vision action {other:?} is not allowed for solveChallenge"
+                        ),
+                        layer: ErrorLayer::Page,
+                        retryable: false,
+                    },
+                    evidence,
+                };
+            }
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(SOLVE_POLL_INTERVAL_MS)).await;
     }
 }
 
@@ -2682,6 +2932,7 @@ fn stuck_label(kind: StuckKind) -> &'static str {
         StuckKind::TargetAmbiguous => "targetAmbiguous",
         StuckKind::ObstructionSuspected => "obstructionSuspected",
         StuckKind::VerifyNoDomSignal => "verifyNoDomSignal",
+        StuckKind::ChallengePresent => "challengePresent",
     }
 }
 
@@ -2710,6 +2961,7 @@ async fn execute_vision_action(
                         )?),
                         boundary: false,
                         expected_url: None,
+                        modifiers: Vec::new(),
                     },
                 )
                 .await
@@ -2772,6 +3024,14 @@ async fn execute_vision_action(
             code: ErrorCode::VisionAssistFailed,
             message: "extractFromCandidate vision action is not an actionable page operation"
                 .into(),
+            layer: ErrorLayer::Page,
+            retryable: false,
+        }),
+        // Terminal signal, consumed by `execute_solve_challenge` before
+        // dispatch; never an act-on-the-page operation.
+        VisionAction::ChallengeSolved => Err(CommandError {
+            code: ErrorCode::VisionAssistFailed,
+            message: "challengeSolved vision action is not an actionable page operation".into(),
             layer: ErrorLayer::Page,
             retryable: false,
         }),

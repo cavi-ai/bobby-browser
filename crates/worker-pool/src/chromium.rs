@@ -18,6 +18,9 @@ use chromiumoxide::cdp::browser_protocol::browser::{
 use chromiumoxide::cdp::browser_protocol::emulation::{
     MediaFeature, SetEmulatedMediaParams, SetFocusEmulationEnabledParams,
 };
+use chromiumoxide::cdp::browser_protocol::input::{
+    DispatchMouseEventParams, DispatchMouseEventType, MouseButton,
+};
 use chromiumoxide::cdp::browser_protocol::network::{
     Cookie, CookieParam, CookiePartitionKey, CookiePriority, CookieSameSite, CookieSourceScheme,
     SetCookiesParams, TimeSinceEpoch,
@@ -372,6 +375,7 @@ impl ChromiumWorker {
         &self,
         page: &Page,
         resolved: &crate::targeting::ResolvedTarget,
+        modifiers: &[types::ClickModifier],
     ) -> Result<(), CommandError> {
         let target = resolved.clickable_point(page).await?.ok_or_else(|| {
             driver_error(
@@ -400,9 +404,45 @@ impl ChromiumWorker {
         if path.hover_dwell_ms > 0 {
             tokio::time::sleep(Duration::from_millis(path.hover_dwell_ms)).await;
         }
-        page.click(target)
+        self.dispatch_click(page, target, modifiers).await?;
+        Ok(())
+    }
+
+    async fn dispatch_click(
+        &self,
+        page: &Page,
+        target: Point,
+        modifiers: &[types::ClickModifier],
+    ) -> Result<(), CommandError> {
+        if modifiers.is_empty() {
+            page.click(target)
+                .await
+                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+            return Ok(());
+        }
+
+        let modifier_bits = chromium_modifier_bits(modifiers);
+        page.move_mouse(target)
             .await
             .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        for (event_type, buttons) in [
+            (DispatchMouseEventType::MousePressed, 1),
+            (DispatchMouseEventType::MouseReleased, 0),
+        ] {
+            let params = DispatchMouseEventParams::builder()
+                .r#type(event_type)
+                .x(target.x)
+                .y(target.y)
+                .modifiers(modifier_bits)
+                .button(MouseButton::Left)
+                .buttons(buttons)
+                .click_count(1)
+                .build()
+                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+            page.execute(params)
+                .await
+                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        }
         Ok(())
     }
 
@@ -925,6 +965,20 @@ fn should_retry_plain_click_target_drift(
         && error.code == ErrorCode::TargetNotFound
 }
 
+fn ensure_automatic_download_modifier_support(
+    modifiers: &[types::ClickModifier],
+) -> Result<(), CommandError> {
+    if modifiers.is_empty() {
+        return Ok(());
+    }
+    Err(CommandError {
+        code: ErrorCode::InvalidRequest,
+        message: "click modifiers are not supported by automatic download capture".into(),
+        layer: ErrorLayer::Driver,
+        retryable: false,
+    })
+}
+
 #[async_trait]
 impl BrowserWorker for ChromiumWorker {
     fn worker_id(&self) -> WorkerId {
@@ -1101,6 +1155,7 @@ impl BrowserWorker for ChromiumWorker {
             // session's downloads with Download evidence.
             match resolved.is_download_link(&page).await {
                 Ok(true) => {
+                    ensure_automatic_download_modifier_support(&command.modifiers)?;
                     return self
                         .click_and_wait_for_download(
                             page_id,
@@ -1123,9 +1178,18 @@ impl BrowserWorker for ChromiumWorker {
             }
             let text = resolved.inner_text(&page).await.ok().flatten();
             let result = if self.humanization_enabled() {
-                self.humanized_click(&page, &resolved).await
-            } else {
+                self.humanized_click(&page, &resolved, &command.modifiers)
+                    .await
+            } else if command.modifiers.is_empty() {
                 resolved.click(&page).await
+            } else {
+                let target = resolved.clickable_point(&page).await?.ok_or_else(|| {
+                    driver_error(
+                        ErrorCode::BrowserCommandFailed,
+                        "target has no clickable point",
+                    )
+                })?;
+                self.dispatch_click(&page, target, &command.modifiers).await
             };
             match result {
                 Ok(()) => {
@@ -3632,6 +3696,17 @@ fn cookie_record(
     }
 }
 
+fn chromium_modifier_bits(modifiers: &[types::ClickModifier]) -> i64 {
+    modifiers.iter().fold(0, |bits, modifier| {
+        bits | match modifier {
+            types::ClickModifier::Alt => 1,
+            types::ClickModifier::Ctrl => 2,
+            types::ClickModifier::Meta => 4,
+            types::ClickModifier::Shift => 8,
+        }
+    })
+}
+
 fn set_cookie_param(
     param: &types::SetCookieParam,
 ) -> chromiumoxide::cdp::browser_protocol::network::CookieParam {
@@ -3688,13 +3763,25 @@ mod tests {
 
     use super::{
         apply_state_commit, clamp_js_timeout_ms, compact_ax_tree, element_wait_missing_observation,
-        is_closed_page_message, is_missing_css_node, should_retry_plain_click_target_drift,
-        snapshot_cookie, text_matches, unscoped_css_wait_selector,
-        wait_should_retry_replaced_context, ChromiumWorker, HttpBridgeState,
+        ensure_automatic_download_modifier_support, is_closed_page_message, is_missing_css_node,
+        should_retry_plain_click_target_drift, snapshot_cookie, text_matches,
+        unscoped_css_wait_selector, wait_should_retry_replaced_context, ChromiumWorker,
+        HttpBridgeState,
     };
     use types::{
-        CommandError, ErrorCode, ErrorLayer, PageId, SessionId, TargetSpec, TextMatch, WorkerId,
+        ClickModifier, CommandError, ErrorCode, ErrorLayer, PageId, SessionId, TargetSpec,
+        TextMatch, WorkerId,
     };
+
+    #[test]
+    fn modified_download_clicks_fail_instead_of_dropping_native_modifiers() {
+        assert!(ensure_automatic_download_modifier_support(&[]).is_ok());
+        let error = ensure_automatic_download_modifier_support(&[ClickModifier::Shift])
+            .expect_err("automatic download capture cannot preserve click modifiers");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert!(!error.retryable);
+        assert!(error.message.contains("modifiers"));
+    }
 
     #[test]
     fn non_boundary_click_retries_bounded_predispatch_stale_targets_only() {

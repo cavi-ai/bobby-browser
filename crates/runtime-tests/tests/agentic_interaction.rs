@@ -163,6 +163,7 @@ async fn completes_semantic_drift_frame_shadow_wait_and_artifact_workflow() {
                 target: Some(drift.clone()),
                 boundary: false,
                 expected_url: None,
+                modifiers: Vec::new(),
             }),
         )
         .await;
@@ -181,6 +182,7 @@ async fn completes_semantic_drift_frame_shadow_wait_and_artifact_workflow() {
                     }),
                     boundary: false,
                     expected_url: None,
+                    modifiers: Vec::new(),
                 })
             ))
             .await,

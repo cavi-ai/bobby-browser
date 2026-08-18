@@ -178,6 +178,7 @@ async fn context_ttl_is_applied_during_runtime_build() {
                 )]),
             },
         )]),
+        ..SiteContext::default()
     };
     store.upsert_site("https://example.com", site).await;
     assert!(store.flush().await.is_empty());

@@ -186,6 +186,7 @@ impl Station {
                 target: None,
                 boundary: false,
                 expected_url: None,
+                modifiers: Vec::new(),
             },
         )))
         .await;
@@ -331,7 +332,10 @@ async fn fuzzy_match_latency_across_100_sites() {
         store
             .upsert_site(
                 &format!("https://site-{index}.example"),
-                context_store::SiteContext { pages },
+                context_store::SiteContext {
+                    pages,
+                    ..context_store::SiteContext::default()
+                },
             )
             .await;
     }

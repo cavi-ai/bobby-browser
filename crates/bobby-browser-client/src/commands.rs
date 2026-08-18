@@ -76,6 +76,11 @@ pub enum IntentCommand {
     Follow(FollowIntent),
     DismissObstruction(DismissObstructionIntent),
     Extract(ExtractIntent),
+    /// Vision-primary challenge solving (captchas, verification widgets).
+    /// Bypasses DOM resolution: the engine loops screenshot → vision proposal
+    /// → action until the model reports the challenge solved or the hint
+    /// timeout elapses.
+    SolveChallenge(crate::challenges::SolveChallengeIntent),
 }
 
 impl IntentCommand {
@@ -85,6 +90,7 @@ impl IntentCommand {
             Self::Fill(_) | Self::CompleteForm(_) | Self::DismissObstruction(_) => {
                 CommandClass::Reconciliable
             }
+            Self::SolveChallenge(_) => CommandClass::Reconciliable,
             Self::SubmitAndVerify(_) => CommandClass::Boundary,
             Self::Follow(intent) => {
                 if intent.boundary {
@@ -504,6 +510,16 @@ pub struct InspectCommand {
     pub include_html: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum ClickModifier {
+    Shift,
+    Ctrl,
+    Alt,
+    Meta,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
@@ -512,6 +528,8 @@ pub struct ClickCommand {
     pub target: Option<TargetSpec>,
     pub boundary: bool,
     pub expected_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modifiers: Vec<ClickModifier>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

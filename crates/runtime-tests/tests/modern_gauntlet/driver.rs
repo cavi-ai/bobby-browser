@@ -8,10 +8,10 @@ use types::{
     AccessibilitySnapshotCommand, AttemptId, CaptureScreenshotCommand, CheckpointId,
     CheckpointInvariant, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand,
     CommandClass, CommandEnvelope, CommandId, CommandOutcome, ControlAction, ControlActionCommand,
-    CreateSessionRequest, ErrorCode, Evidence, FormControlTarget, InspectCommand, ListPagesCommand,
-    NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand, RecoveryDecision, RuntimeCommand,
-    ScreenshotMode, SessionId, TargetSpec, TypeTextCommand, UploadFilesCommand, WaitCondition,
-    WaitForCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
+    CreateSessionRequest, ErrorCode, Evidence, FormControlTarget, InspectCommand, IntentCommand,
+    ListPagesCommand, NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand, RecoveryDecision,
+    RuntimeCommand, ScreenshotMode, SessionId, SolveChallengeIntent, TargetSpec, TypeTextCommand,
+    UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
 
 use super::scenario::ScenarioServer;
@@ -246,6 +246,7 @@ impl ModernRuntime {
             target: None,
             boundary,
             expected_url: None,
+            modifiers: Vec::new(),
         });
         if boundary {
             self.submit_boundary(command).await
@@ -362,6 +363,7 @@ impl ModernRuntime {
                 target: None,
                 boundary: true,
                 expected_url: None,
+                modifiers: Vec::new(),
             }),
         )
         .await
@@ -385,6 +387,7 @@ impl ModernRuntime {
             target: Some(target),
             boundary: true,
             expected_url: None,
+            modifiers: Vec::new(),
         }))
         .await
     }
@@ -420,6 +423,56 @@ impl ModernRuntime {
                 timeout_ms: 15_000,
             },
         ))
+        .await
+    }
+    // Only the Level 2 suite drives intents directly; the release suite
+    // binary would otherwise report these as dead code.
+    #[allow(dead_code)]
+    pub async fn submit_intent(&self, command: IntentCommand) -> TestResult<Vec<Evidence>> {
+        let debug = serde_json::to_string(&command).unwrap_or_default();
+        // Vision intents need both gates: the session policy grant (set by
+        // `gauntlet_execution_policy`) and the principal capability flag,
+        // which plain `submit` always denies.
+        let vision_capable = std::env::var("BOBBY_GAUNTLET_VISION_ENDPOINT")
+            .is_ok_and(|endpoint| !endpoint.trim().is_empty());
+        let outcome = self
+            .runtime
+            .submit_with_vision_capability(
+                CommandEnvelope {
+                    schema_version: CommandEnvelope::SCHEMA_VERSION,
+                    command_id: CommandId::new(),
+                    workflow_id: WorkflowId::new(),
+                    attempt_id: AttemptId::new(),
+                    session_id: self.session_id.clone(),
+                    page_id: Some(self.page_id.clone()),
+                    // Multi-round solves wait on a slow local model per round.
+                    deadline: Utc::now() + Duration::seconds(180),
+                    command: RuntimeCommand::Intent(command),
+                },
+                vision_capable,
+            )
+            .await;
+        match outcome {
+            CommandOutcome::Completed { evidence, .. } => Ok(evidence),
+            other => {
+                self.capture_failure_state(&self.page_id, &debug, &format!("{other:?}"))
+                    .await;
+                Err(format!("intent command {} failed: {:?}", debug, other).into())
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    pub async fn solve_challenge(&self, purpose: &str) -> TestResult<Vec<Evidence>> {
+        self.submit_intent(IntentCommand::SolveChallenge(SolveChallengeIntent {
+            purpose: purpose.into(),
+            hints: types::SolveChallengeHints {
+                region: None,
+                // One propose round against a local 27B vision model can
+                // take 30s+; the default 30s budget would expire mid-grid.
+                timeout_ms: 120_000,
+            },
+        }))
         .await
     }
 
@@ -616,6 +669,7 @@ impl ModernRuntime {
                     target: None,
                     boundary: true,
                     expected_url: None,
+                    modifiers: Vec::new(),
                 }),
             )
             .await?;
@@ -854,6 +908,9 @@ fn gauntlet_vision_config() -> config::VisionConfig {
                 std::env::var("BOBBY_GAUNTLET_VISION_TOKEN_ENV")
                     .unwrap_or_else(|_| "BOBBY_VISION_TOKEN".to_string()),
             ),
+            // Local vision models need far longer than the 15s default for a
+            // full-viewport screenshot proposal.
+            timeout_ms: 120_000,
             ..config::VisionConfig::default()
         },
         _ => config::VisionConfig::default(),
@@ -865,6 +922,9 @@ fn gauntlet_execution_policy() -> types::ExecutionPolicy {
         .is_ok_and(|endpoint| !endpoint.trim().is_empty());
     types::ExecutionPolicy {
         vision_assist,
+        // The legacy `[vision]` endpoint registers as the "vision" node; the
+        // session must name it or no provider resolves (deny-by-default).
+        vision_node: vision_assist.then(|| "vision".to_string()),
         ..Default::default()
     }
 }

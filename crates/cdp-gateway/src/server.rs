@@ -1251,7 +1251,7 @@ impl CdpConnection {
                             self.runtime.submit(ctx, CommandEnvelope {
                                 schema_version:CommandEnvelope::SCHEMA_VERSION, command_id:CommandId::new(), workflow_id:WorkflowId::new(), attempt_id:AttemptId::new(),
                                 session_id, page_id:Some(page_id), deadline:Utc::now()+Duration::seconds(30),
-                                command:RuntimeCommand::Primitive(PrimitiveCommand::Click(ClickCommand { selector:String::new(), target:Some(TargetSpec { role:Some("button".into()), accessible_name:Some(name.to_owned()), ..TargetSpec::default() }), boundary:false, expected_url:None })),
+                                command:RuntimeCommand::Primitive(PrimitiveCommand::Click(ClickCommand { selector:String::new(), target:Some(TargetSpec { role:Some("button".into()), accessible_name:Some(name.to_owned()), ..TargetSpec::default() }), boundary:false, expected_url:None, modifiers:Vec::new() })),
                             }).await
                         }
                         ("click", "role:link:Open details") => self.submit_boundary(ctx, session_id, page_id, PrimitiveCommand::ClickAndWaitForPopup(ClickAndWaitForPopupCommand {
@@ -1576,7 +1576,7 @@ impl CdpConnection {
                     let envelope = CommandEnvelope { schema_version:CommandEnvelope::SCHEMA_VERSION,
                         command_id:CommandId::new(), workflow_id:WorkflowId::new(), attempt_id:AttemptId::new(),
                         session_id, page_id:Some(page_id), deadline:Utc::now()+Duration::seconds(30),
-                        command:RuntimeCommand::Primitive(PrimitiveCommand::Click(ClickCommand { selector:String::new(), target:Some(target), boundary:false, expected_url:None })) };
+                        command:RuntimeCommand::Primitive(PrimitiveCommand::Click(ClickCommand { selector:String::new(), target:Some(target), boundary:false, expected_url:None, modifiers:Vec::new() })) };
                     return match self.runtime.submit(ctx, envelope).await {
                         Ok(CommandOutcome::Completed { .. }) => CdpResponse::success(&request, json!({"result":{"type":"string","value":"done"}})),
                         Ok(_) => CdpResponse::failure(&request, CdpError::new(CdpErrorCode::RuntimeFailure, "runtime click did not complete")),

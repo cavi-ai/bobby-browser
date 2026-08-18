@@ -33,8 +33,11 @@ pub struct ProposeContextCandidate {
     pub ordinal: Option<u32>,
 }
 
+/// Upstream chat ("reasoning", commentary siblings) is dropped by serde at
+/// this edge rather than rejected: never re-serialized downstream, never
+/// fatal. The action itself keeps `deny_unknown_fields`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct ProposeResponse {
     pub confidence: f32,
     pub action: VisionAction,
@@ -47,23 +50,32 @@ pub enum VisionAction {
         x: f64,
         y: f64,
     },
+    #[serde(alias = "type_text")]
     TypeText {
         text: String,
     },
+    #[serde(alias = "extract_value")]
     ExtractValue {
         value: String,
     },
     /// Click the candidate at this index in the prompt's candidate list;
     /// the runtime resolves the element and owns spatial grounding.
+    #[serde(alias = "click_candidate")]
     ClickCandidate {
         index: u32,
     },
+    #[serde(alias = "type_into_candidate")]
     TypeIntoCandidate {
         index: u32,
     },
+    #[serde(alias = "extract_from_candidate")]
     ExtractFromCandidate {
         index: u32,
     },
+    /// Terminal signal for a `solveChallenge` request: the challenge widget
+    /// is in a solved state. Carries no payload.
+    #[serde(alias = "challenge_solved")]
+    ChallengeSolved,
 }
 
 #[derive(Debug, Clone, Deserialize)]

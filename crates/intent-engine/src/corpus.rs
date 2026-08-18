@@ -151,6 +151,9 @@ pub fn raw_action(action: &VisionAction) -> serde_json::Value {
         VisionAction::ExtractFromCandidate { index } => {
             serde_json::json!({"kind": "extractFromCandidate", "index": index})
         }
+        VisionAction::ChallengeSolved => {
+            serde_json::json!({"kind": "challengeSolved"})
+        }
     }
 }
 

@@ -99,10 +99,24 @@ pub struct PageContext {
     pub forms: BTreeMap<String, FormContext>,
 }
 
+/// Counters for one challenge kind (e.g. `recaptchaV2Checkbox`) seen on a
+/// site. Day-precision stamp only, same privacy discipline as intent stats.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChallengeStats {
+    pub success_count: u64,
+    pub failure_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_verified_day: Option<u32>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SiteContext {
     #[serde(default)]
     pub pages: BTreeMap<String, PageContext>,
+    /// Per-site challenge outcomes keyed by challenge kind, promoted from
+    /// `solveChallenge` intent outcomes. The prior a future detector reads.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub challenges: BTreeMap<String, ChallengeStats>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -210,6 +224,40 @@ impl ContextStore {
     pub async fn upsert_site(&self, site_key: &str, site: SiteContext) {
         self.sites.lock().await.insert(site_key.to_string(), site);
         self.dirty.lock().await.insert(site_key.to_string(), true);
+    }
+
+    /// Records one challenge outcome against a site. Success stamps the
+    /// coarse day; failure only increments. Buffered behind `flush`.
+    pub async fn record_challenge(
+        &self,
+        site_key: &str,
+        challenge_kind: &str,
+        success: bool,
+        today: u32,
+    ) {
+        let mut site = self.site(site_key).await.unwrap_or_default();
+        let stats = site
+            .challenges
+            .entry(challenge_kind.to_string())
+            .or_default();
+        if success {
+            stats.success_count += 1;
+            stats.last_verified_day = Some(today);
+        } else {
+            stats.failure_count += 1;
+        }
+        self.upsert_site(site_key, site).await;
+    }
+
+    /// The most-attempted challenge kind for a site and its stats — the
+    /// probabilistic prior a challenge detector boosts from. `None` when the
+    /// site has no recorded challenge history.
+    pub async fn challenge_prior(&self, site_key: &str) -> Option<(String, ChallengeStats)> {
+        self.site(site_key)
+            .await?
+            .challenges
+            .into_iter()
+            .max_by_key(|(_, stats)| stats.success_count + stats.failure_count)
     }
 
     /// Persists every dirty site. Returns the keys that failed to write;
