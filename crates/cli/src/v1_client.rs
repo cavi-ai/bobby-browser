@@ -42,21 +42,40 @@ pub fn v1_url(base_url: &str, path: &str) -> Result<String> {
 
 /// Perform a `/v1` request off the Tokio runtime; returns status + raw body text.
 pub fn v1_request(options: V1Request) -> Result<V1Response> {
-    match std::thread::spawn(move || v1_request_blocking(options)).join() {
+    v1_request_with_limits(
+        options,
+        Duration::from_secs(REQUEST_TIMEOUT_SECS),
+        ChronoDuration::minutes(DEADLINE_MINUTES),
+    )
+}
+
+/// `v1_request` with caller-chosen limits: long-running commands (a vision
+/// solve loop waits on a local model per round) outgrow the 10s default.
+pub fn v1_request_with_limits(
+    options: V1Request,
+    request_timeout: Duration,
+    deadline: ChronoDuration,
+) -> Result<V1Response> {
+    match std::thread::spawn(move || v1_request_blocking(options, request_timeout, deadline)).join()
+    {
         Ok(result) => result,
         Err(_) => anyhow::bail!("v1 HTTP thread panicked"),
     }
 }
 
-fn v1_request_blocking(options: V1Request) -> Result<V1Response> {
+fn v1_request_blocking(
+    options: V1Request,
+    request_timeout: Duration,
+    deadline: ChronoDuration,
+) -> Result<V1Response> {
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        .timeout(request_timeout)
         .no_proxy()
         .build()
         .context("failed to build /v1 HTTP client")?;
 
     let correlation_id = Uuid::new_v4();
-    let deadline = (Utc::now() + ChronoDuration::minutes(DEADLINE_MINUTES)).to_rfc3339();
+    let deadline = (Utc::now() + deadline).to_rfc3339();
 
     let mut builder = client
         .request(options.method.clone(), &options.url)

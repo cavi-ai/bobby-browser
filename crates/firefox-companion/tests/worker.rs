@@ -20,9 +20,10 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, Mutex, Notify};
 use types::{
     AttachmentId, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand,
-    ClosePageCommand, CommandError, CompanionId, ErrorCode, ErrorLayer, Evidence, InspectCommand,
-    NavigateCommand, OpenPageCommand, PageId, ProfileId, SessionId, TargetSpec, TextMatch,
-    TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId,
+    ClickModifier, ClosePageCommand, CommandError, CompanionId, ErrorCode, ErrorLayer, Evidence,
+    InspectCommand, NavigateCommand, OpenPageCommand, PageId, ProfileId, SessionId, TargetSpec,
+    TextMatch, TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil,
+    WorkerId,
 };
 use worker_pool::BrowserWorker;
 
@@ -1586,6 +1587,7 @@ async fn click_uses_native_pointer_actions_and_engine_native_evidence() {
                 target: None,
                 boundary: false,
                 expected_url: None,
+                modifiers: vec![ClickModifier::Shift],
             },
         )
         .await
@@ -1621,10 +1623,23 @@ async fn click_uses_native_pointer_actions_and_engine_native_evidence() {
         .expect("native click must emit pointer actions");
     assert_eq!(pointer.params["context"], "context-1");
     assert_eq!(pointer.params["actions"][0]["type"], "pointer");
-    assert_eq!(
-        pointer.params["actions"][0]["actions"][0]["origin"]["element"]["sharedId"],
-        "element-1"
-    );
+    let pointer_actions = pointer.params["actions"][0]["actions"]
+        .as_array()
+        .expect("pointer action sequence");
+    let pointer_move = pointer_actions
+        .iter()
+        .find(|action| action["type"] == "pointerMove")
+        .expect("modifier click retains a native pointer move");
+    assert_eq!(pointer_move["origin"]["element"]["sharedId"], "element-1");
+    assert_eq!(pointer.params["actions"][1]["type"], "key");
+    let key_actions = pointer.params["actions"][1]["actions"]
+        .as_array()
+        .expect("modifier click emits a BiDi key action sequence");
+    assert_eq!(key_actions.first().unwrap()["type"], "keyDown");
+    assert_eq!(key_actions.first().unwrap()["value"], "\u{e008}");
+    assert_eq!(key_actions.last().unwrap()["type"], "keyUp");
+    assert_eq!(key_actions.last().unwrap()["value"], "\u{e008}");
+    assert_eq!(key_actions.len(), pointer_actions.len());
     assert_engine_native(&evidence);
 }
 
@@ -1652,6 +1667,7 @@ async fn native_click_scrolls_and_revalidates_a_below_fold_element_before_pointe
                 target: None,
                 boundary: false,
                 expected_url: None,
+                modifiers: Vec::new(),
             },
         )
         .await
@@ -1707,6 +1723,7 @@ async fn native_click_fails_typed_without_pointer_input_when_target_detaches_aft
                 target: None,
                 boundary: false,
                 expected_url: None,
+                modifiers: Vec::new(),
             },
         )
         .await
@@ -1747,6 +1764,7 @@ async fn native_click_fails_typed_for_obscured_and_out_of_bounds_targets() {
                     target: None,
                     boundary: false,
                     expected_url: None,
+                    modifiers: Vec::new(),
                 },
             )
             .await
@@ -1783,6 +1801,7 @@ async fn semantic_click_resolves_test_id_to_verified_css_before_native_input() {
                 }),
                 boundary: false,
                 expected_url: None,
+                modifiers: Vec::new(),
             },
         )
         .await
@@ -1833,6 +1852,7 @@ async fn semantic_click_missing_live_node_is_typed_as_target_drift_input() {
                 }),
                 boundary: false,
                 expected_url: None,
+                modifiers: Vec::new(),
             },
         )
         .await
@@ -1878,6 +1898,7 @@ async fn semantic_click_descends_exact_test_id_frame_before_native_input() {
                 }),
                 boundary: false,
                 expected_url: None,
+                modifiers: Vec::new(),
             },
         )
         .await
@@ -1933,6 +1954,7 @@ async fn semantic_frame_path_rejects_missing_ambiguous_and_non_frame_segments() 
                     }),
                     boundary: false,
                     expected_url: None,
+                    modifiers: Vec::new(),
                 },
             )
             .await
@@ -1978,6 +2000,7 @@ async fn semantic_click_descends_exact_open_shadow_root_before_native_input() {
                 }),
                 boundary: false,
                 expected_url: None,
+                modifiers: Vec::new(),
             },
         )
         .await
@@ -2037,6 +2060,7 @@ async fn semantic_shadow_path_rejects_missing_closed_and_ambiguous_roots() {
                     }),
                     boundary: false,
                     expected_url: None,
+                    modifiers: Vec::new(),
                 },
             )
             .await
@@ -2660,6 +2684,7 @@ async fn missing_page_context_is_not_found_without_transport_calls() {
                 target: None,
                 boundary: false,
                 expected_url: None,
+                modifiers: Vec::new(),
             },
         )
         .await
@@ -2702,6 +2727,7 @@ async fn native_input_failure_does_not_fall_back_to_dom_click() {
                 target: None,
                 boundary: false,
                 expected_url: None,
+                modifiers: Vec::new(),
             },
         )
         .await

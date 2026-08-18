@@ -651,7 +651,7 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
             .as_array()
             .unwrap()
             .len(),
-        8
+        9
     );
 
     // In `tools/list`, `command_execute` must advertise the envelope command as
@@ -2134,6 +2134,29 @@ async fn flat_browser_tools_validate_arguments_and_submit_envelopes() {
         .await
         .unwrap();
     assert_eq!(unknown_field["error"]["code"], -32602, "{unknown_field}");
+
+    let modified_click = server
+        .handle_message(request(
+            811,
+            "tools/call",
+            json!({
+                "name":"click",
+                "arguments":{
+                    "sessionId":SessionId::new().0.to_string(),
+                    "pageId":types::PageId::new().0.to_string(),
+                    "selector":"#range-end",
+                    "modifiers":["shift"]
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(modified_click["error"].is_null(), "{modified_click}");
+    assert_eq!(
+        modified_click["result"]["structuredContent"]["status"],
+        json!("failed"),
+        "modifier arguments must reach runtime dispatch instead of failing MCP parsing"
+    );
 
     let navigated = server
         .handle_message(request(

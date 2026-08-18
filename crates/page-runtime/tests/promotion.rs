@@ -163,6 +163,34 @@ async fn commands_without_an_intent_record_promote_nothing() {
         .is_none());
 }
 
+/// A challenge solve acts on pixels inside a widget iframe, so no control
+/// resolution exists to promote; the outcome lands on the site's challenge
+/// priors instead.
+#[tokio::test]
+async fn solve_challenge_outcomes_promote_to_site_challenge_priors() {
+    let (promotion, temp) = promotion().await;
+    let evidence = vec![Evidence::IntentExecution {
+        record: record("solveChallenge", IntentResolutionPath::VisionFallback),
+    }];
+    promotion.record_outcome(Some(URL), &evidence, true).await;
+    promotion.record_outcome(Some(URL), &evidence, false).await;
+    promotion.flush().await;
+    drop(promotion);
+
+    let (store, report) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
+    assert_eq!(report.sites_loaded, 1);
+    let site = store.site("https://example.test").await.unwrap();
+    assert!(site.pages.is_empty());
+    let stats = site.challenges.get("solveChallenge").unwrap();
+    assert_eq!(stats.success_count, 1);
+    assert_eq!(stats.failure_count, 1);
+    assert!(stats.last_verified_day.is_some());
+    let (kind, prior) = store.challenge_prior("https://example.test").await.unwrap();
+    assert_eq!(kind, "solveChallenge");
+    assert_eq!(prior.success_count, 1);
+    assert_eq!(prior.failure_count, 1);
+}
+
 #[tokio::test]
 async fn non_http_pages_promote_nothing() {
     let (promotion, _temp) = promotion().await;

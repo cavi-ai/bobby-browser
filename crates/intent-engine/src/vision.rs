@@ -255,6 +255,7 @@ pub fn validate_backend_result(
         VisionAction::ClickCandidate { .. } => "click_candidate",
         VisionAction::TypeIntoCandidate { .. } => "type_into_candidate",
         VisionAction::ExtractFromCandidate { .. } => "extract_from_candidate",
+        VisionAction::ChallengeSolved => "challenge_solved",
     };
     if !packet
         .allowed_actions
@@ -367,6 +368,10 @@ pub enum VisionAction {
     ExtractFromCandidate {
         index: u32,
     },
+    /// The model reports the challenge it was asked to solve (a captcha or
+    /// verification widget) is now in a solved state. Only valid for the
+    /// `solveChallenge` intent; carries no payload.
+    ChallengeSolved,
 }
 
 pub fn proposal_sha256(proposal: &VisionProposal) -> String {
@@ -397,6 +402,9 @@ pub fn proposal_sha256(proposal: &VisionProposal) -> String {
         VisionAction::ExtractFromCandidate { index } => {
             hasher.update(b"extractFromCandidate");
             hasher.update(index.to_le_bytes());
+        }
+        VisionAction::ChallengeSolved => {
+            hasher.update(b"challengeSolved");
         }
     }
     hex::encode(hasher.finalize())

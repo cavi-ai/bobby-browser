@@ -1343,6 +1343,7 @@ fn record_intent_metrics(
         types::IntentCommand::Follow(_) => observability::IntentMetricKind::Follow,
         types::IntentCommand::DismissObstruction(_) => observability::IntentMetricKind::Dismiss,
         types::IntentCommand::Extract(_) => observability::IntentMetricKind::Extract,
+        types::IntentCommand::SolveChallenge(_) => observability::IntentMetricKind::SolveChallenge,
     };
     let evidence = match outcome {
         IntentOutcome::Completed { evidence } | IntentOutcome::Failed { evidence, .. } => evidence,

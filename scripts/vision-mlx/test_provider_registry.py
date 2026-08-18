@@ -12,12 +12,12 @@ from providers.mlx_vlm_provider import MlxVlmProvider
 
 
 class ProviderRegistryTests(unittest.TestCase):
-    def test_portable_default_is_ollama(self):
+    def test_default_is_mlx_vlm(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             provider = create_provider()
 
-        self.assertEqual(DEFAULT_PROVIDER, "ollama")
-        self.assertIsInstance(provider, OllamaProvider)
+        self.assertEqual(DEFAULT_PROVIDER, "mlx-vlm")
+        self.assertIsInstance(provider, MlxVlmProvider)
 
     def test_explicit_mlx_model_override_reaches_provider(self):
         with mock.patch.dict(os.environ, {"VISION_MLX_MODEL": "env-model"}, clear=True):

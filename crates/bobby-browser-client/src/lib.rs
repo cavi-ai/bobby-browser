@@ -43,6 +43,7 @@
 //! - `schema` — derive `schemars::JsonSchema` on wire types.
 
 mod auth;
+mod challenges;
 mod commands;
 mod forms;
 mod http;
@@ -54,6 +55,7 @@ mod skills;
 mod state;
 
 pub use auth::*;
+pub use challenges::*;
 pub use commands::*;
 pub use forms::*;
 pub use http::*;

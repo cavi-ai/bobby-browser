@@ -268,6 +268,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
             target: None,
             boundary: false,
             expected_url: None,
+            modifiers: Vec::new(),
         }),
     )
     .await;
@@ -390,6 +391,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
                 target: None,
                 boundary: true,
                 expected_url: Some(expected_url.clone()),
+                modifiers: Vec::new(),
             })),
         })
         .await

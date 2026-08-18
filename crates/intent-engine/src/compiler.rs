@@ -40,6 +40,10 @@ pub enum IntentPlan {
     Extract {
         fields: Vec<ExtractFieldPlan>,
     },
+    SolveChallenge {
+        purpose: String,
+        timeout_ms: u64,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -174,6 +178,13 @@ pub fn compile_intent(command: &IntentCommand) -> Result<IntentPlan, CompileErro
                 });
             }
             Ok(IntentPlan::Extract { fields })
+        }
+        IntentCommand::SolveChallenge(intent) => {
+            let purpose = validate_purpose(&intent.purpose)?;
+            Ok(IntentPlan::SolveChallenge {
+                purpose: purpose.into(),
+                timeout_ms: intent.hints.timeout_ms.max(1),
+            })
         }
     }
 }
