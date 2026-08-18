@@ -26,6 +26,8 @@
 - `ScreenResolution` carries `window_width` and `window_height`, so a profile presents a non-maximized window sized under the available area.
 - Level 2 of the modern gauntlet drives the solve loop against a live reCAPTCHA v2 widget. It is environment-gated and outside the five release tests.
 
+- `bobby doctor` reports a `companion-port` check: whether the enrolled profile's `companionBind` is free, already serving the Firefox companion, or held by another service. Every runtime binds its own companion server on that address, so a second `bobby serve` / `bobby cdp` / `bobby mcp-stdio` on one profile cannot bind it and every Firefox session it opens fails with `engineUnreachable`. Doctor checked only that the address parsed, so that collision reported as an all-green run against a browser that would not start.
+
 ### Changed
 
 - `scripts/dev/firefox-start.sh` puts the companion profile's remote-debugging endpoint on 9224. It defaulted to 9222, the port authenticated CDP binds, so whichever of the two started second failed to bind. `BOBBY_FIREFOX_DEBUG_PORT` still overrides it.
@@ -52,6 +54,7 @@
 - `Formula/bobby-browser.rb` carries the v0.9.0 asset digests.
 - `scripts/dev/firefox-start.sh` compares the endpoint's `ws_port` after stripping whitespace, so a reformatted endpoint file no longer reads as stale.
 - `a11y_snapshot_descends_into_iframes` waits for `input[type=file]` to attach before snapshotting. The documents route builds its form in the SPA bundle, so `DOMContentLoaded` can precede the input.
+- A companion-server bind failure names the address and the operating system error. The caller flattens the error through `to_string()`, so the operator saw `failed to bind companion server` with neither the port nor `Address already in use`.
 
 ## 0.9.0 - 2026-08-12
 
