@@ -335,6 +335,22 @@ impl FrameManager {
         None
     }
 
+    /// Clears the navigation with the given id from the single in-flight slot
+    /// and from the pending queue. A navigation Chrome aborted before it
+    /// could load never satisfies the frame lifecycle poll() waits on, so
+    /// without this the slot only frees at its deadline and blocks every
+    /// later navigation on the same page until then.
+    pub fn abort_navigation(&mut self, id: NavigationId) {
+        if self
+            .navigation
+            .as_ref()
+            .is_some_and(|(watcher, _)| watcher.id == id)
+        {
+            self.navigation = None;
+        }
+        self.pending_navigations.retain(|(req, _)| req.id != id);
+    }
+
     /// Entrypoint for page navigation
     pub fn goto(&mut self, req: FrameNavigationRequest) {
         if let Some(frame_id) = self.main_frame.clone() {
@@ -691,6 +707,41 @@ impl AsRef<str> for LifecycleEvent {
             LifecycleEvent::DomcontentLoaded => "DOMContentLoaded",
             LifecycleEvent::NetworkIdle => "networkIdle",
             LifecycleEvent::NetworkAlmostIdle => "networkAlmostIdle",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chromiumoxide_types::Request;
+
+    fn navigation_request(id: usize) -> FrameNavigationRequest {
+        let req = Request::new(
+            "Page.navigate".into(),
+            serde_json::json!({ "url": format!("http://example.test/{id}") }),
+        );
+        FrameNavigationRequest::new(NavigationId(id), req)
+    }
+
+    #[test]
+    fn abort_navigation_frees_the_slot_so_the_next_navigation_is_dequeued() {
+        let mut manager = FrameManager::new(Duration::from_secs(30));
+        manager.main_frame = Some(FrameId::new("F1"));
+
+        manager.goto(navigation_request(1));
+        manager.goto(navigation_request(2));
+
+        match manager.poll(Instant::now()) {
+            Some(FrameEvent::NavigationRequest(id, _)) => assert_eq!(id, NavigationId(1)),
+            other => panic!("expected the first navigation request, got {other:?}"),
+        }
+
+        manager.abort_navigation(NavigationId(1));
+
+        match manager.poll(Instant::now()) {
+            Some(FrameEvent::NavigationRequest(id, _)) => assert_eq!(id, NavigationId(2)),
+            other => panic!("expected the second navigation request after abort, got {other:?}"),
         }
     }
 }

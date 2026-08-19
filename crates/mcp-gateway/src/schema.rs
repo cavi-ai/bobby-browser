@@ -2038,7 +2038,7 @@ fn evidence_variants() -> Vec<Value> {
             "executionPath",
             json!({
                 "path":{"type":"string","enum":["directHttp","chromium","chromiumFallback"]},
-                "reason":{"type":"string","enum":["eligibleStaticDocument","eligibleExplicitDownload","ineligibleCommand","semanticTargetRequired","javascriptRequired","unsupportedContentType","stateConflict","policyRequired","pageMutated"]},
+                "reason":{"type":"string","enum":["eligibleStaticDocument","eligibleExplicitDownload","ineligibleCommand","semanticTargetRequired","javascriptRequired","unsupportedContentType","stateConflict","policyRequired","pageMutated"],"description":"Why the direct-HTTP fast path was or was not taken; ineligibleCommand means the command class runs in the browser and is not a failure."},
                 "stateVersion":{"type":"integer","minimum":0},"elapsedMs":{"type":"integer","minimum":0},
                 "bytes":nullable(json!({"type":"integer","minimum":0})),"sha256":nullable(sha256()),
                 "finalUrl":nullable(string(0, MAX_URL_BYTES)),"contentType":nullable(string(0,256)),

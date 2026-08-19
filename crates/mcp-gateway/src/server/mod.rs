@@ -343,7 +343,15 @@ impl Server {
         {
             let mut in_flight = self.in_flight.lock().await;
             if in_flight.contains_key(&key) {
-                return Some(error(id, INVALID_REQUEST, "Invalid Request", None));
+                return Some(error(
+                    id,
+                    INVALID_REQUEST,
+                    "Invalid Request",
+                    Some(json!({
+                        "diagnostic": format!("request id {key} is already in flight"),
+                        "repair": "use a unique id per request; wait for the earlier response or send notifications/cancelled for it first"
+                    })),
+                ));
             }
             in_flight.insert(key.clone(), cancelled.clone());
         }
@@ -898,10 +906,20 @@ impl Server {
             .and_then(|error| error.get("message"))
             .and_then(Value::as_str)
             .is_some_and(|message| message.starts_with("candidate limit exceeded:"));
+        let navigation_aborted = value
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .is_some_and(|message| {
+                message.starts_with("navigation to ")
+                    && message.contains("was aborted by the browser")
+            });
         let repair = if status == Some("needsReconciliation") {
             Some(crate::repair::reconciliation_repair())
         } else if candidate_limit {
             Some(crate::repair::candidate_limit_repair())
+        } else if navigation_aborted {
+            Some(crate::repair::navigation_aborted_repair())
         } else {
             value
                 .get("error")

@@ -145,12 +145,29 @@ impl Handler {
     }
 
     /// received a response to a navigation request like `Page.navigate`
-    fn on_navigation_response(&mut self, id: NavigationId, resp: Response) {
+    fn on_navigation_response(
+        &mut self,
+        id: NavigationId,
+        session_id: Option<SessionId>,
+        resp: Response,
+    ) {
         if let Some(nav) = self.navigations.remove(&id) {
             match nav {
                 NavigationRequest::Navigate(mut nav) => {
-                    if nav.navigated {
+                    let carries_error = navigation_response_carries_error(&resp);
+                    if nav.navigated || carries_error {
                         let _ = nav.tx.send(Ok(resp));
+                        if carries_error {
+                            let target_id = session_id
+                                .as_ref()
+                                .and_then(|session_id| self.sessions.get(session_id))
+                                .map(|session| session.target_id().clone());
+                            if let Some(target_id) = target_id {
+                                if let Some(target) = self.targets.get_mut(&target_id) {
+                                    target.frame_manager_mut().abort_navigation(id);
+                                }
+                            }
+                        }
                     } else {
                         nav.set_response(resp);
                         self.navigations
@@ -237,8 +254,8 @@ impl Handler {
                         }
                     }
                 }
-                PendingRequest::Navigate(id) => {
-                    self.on_navigation_response(id, resp);
+                PendingRequest::Navigate(id, session_id) => {
+                    self.on_navigation_response(id, session_id, resp);
                 }
                 PendingRequest::ExternalCommand(tx) => {
                     let _ = tx.send(Ok(resp)).ok();
@@ -305,6 +322,7 @@ impl Handler {
     /// Send the Request over to the server and store its identifier to handle
     /// the response once received.
     fn submit_navigation(&mut self, id: NavigationId, req: CdpRequest, now: Instant) {
+        let session_id: Option<SessionId> = req.session_id.clone().map(Into::into);
         let call_id = self
             .conn
             .submit_command(
@@ -314,8 +332,10 @@ impl Handler {
             )
             .unwrap();
 
-        self.pending_commands
-            .insert(call_id, (PendingRequest::Navigate(id), req.method, now));
+        self.pending_commands.insert(
+            call_id,
+            (PendingRequest::Navigate(id, session_id), req.method, now),
+        );
     }
 
     fn submit_close(&mut self, tx: OneshotSender<Result<CloseReturns>>, now: Instant) {
@@ -495,7 +515,7 @@ impl Handler {
                     PendingRequest::GetTargets(tx) => {
                         let _ = tx.send(Err(CdpError::Timeout));
                     }
-                    PendingRequest::Navigate(nav) => {
+                    PendingRequest::Navigate(nav, _) => {
                         if let Some(nav) = self.navigations.remove(&nav) {
                             match nav {
                                 NavigationRequest::Navigate(nav) => {
@@ -518,6 +538,72 @@ impl Handler {
 
     pub fn event_listeners_mut(&mut self) -> &mut EventListeners {
         &mut self.event_listeners
+    }
+}
+
+/// A `Page.navigate` response signals a navigation Chrome aborted before it
+/// could load: a protocol-level error, or a `NavigateReturns` payload whose
+/// `errorText` is set (for example `net::ERR_ABORTED` when the response is a
+/// download). `on_navigation_response` uses this to stop waiting on a frame
+/// lifecycle event -- like `load` -- that such a navigation never produces.
+fn navigation_response_carries_error(resp: &Response) -> bool {
+    if resp.error.is_some() {
+        return true;
+    }
+    resp.result
+        .as_ref()
+        .and_then(|result| result.get("errorText"))
+        .and_then(|error_text| error_text.as_str())
+        .is_some_and(|error_text| !error_text.is_empty())
+}
+
+#[cfg(test)]
+mod navigation_response_carries_error_tests {
+    use super::{Response, navigation_response_carries_error};
+    use chromiumoxide_types::{CallId, Error};
+
+    fn response(result: Option<serde_json::Value>, error: Option<Error>) -> Response {
+        Response {
+            id: CallId::new(1),
+            result,
+            error,
+        }
+    }
+
+    #[test]
+    fn a_protocol_error_carries_an_error() {
+        let resp = response(
+            None,
+            Some(Error {
+                code: -32000,
+                message: "boom".into(),
+            }),
+        );
+        assert!(navigation_response_carries_error(&resp));
+    }
+
+    #[test]
+    fn a_non_empty_error_text_carries_an_error() {
+        let resp = response(
+            Some(serde_json::json!({ "errorText": "net::ERR_ABORTED" })),
+            None,
+        );
+        assert!(navigation_response_carries_error(&resp));
+    }
+
+    #[test]
+    fn an_empty_error_text_does_not_carry_an_error() {
+        let resp = response(Some(serde_json::json!({ "errorText": "" })), None);
+        assert!(!navigation_response_carries_error(&resp));
+    }
+
+    #[test]
+    fn a_successful_navigate_result_does_not_carry_an_error() {
+        let resp = response(
+            Some(serde_json::json!({ "frameId": "F1", "loaderId": "L1" })),
+            None,
+        );
+        assert!(!navigation_response_carries_error(&resp));
     }
 }
 
@@ -624,11 +710,35 @@ impl Stream for Handler {
                     Ok(Message::Event(ev)) => {
                         pin.on_event(ev);
                     }
-                    Err(err @ CdpError::InvalidMessage(_, _)) => {
+                    Err(CdpError::InvalidMessage(raw, parse_err)) => {
                         if pin.config.ignore_invalid_messages {
-                            tracing::warn!("WS Invalid message: {}", err);
+                            match invalid_message_kind(&raw) {
+                                InvalidMessageKind::Response { id } => {
+                                    tracing::warn!(
+                                        "WS Invalid message (response id {}): {}",
+                                        id,
+                                        parse_err
+                                    );
+                                }
+                                InvalidMessageKind::Event { method } => {
+                                    tracing::debug!(
+                                        "WS Invalid message (event {}): {}",
+                                        method,
+                                        parse_err
+                                    );
+                                }
+                                InvalidMessageKind::Unknown { snippet } => {
+                                    tracing::debug!(
+                                        "WS Invalid message ({}): {}",
+                                        snippet,
+                                        parse_err
+                                    );
+                                }
+                            }
                         } else {
-                            return Poll::Ready(Some(Err(err)));
+                            return Poll::Ready(Some(Err(CdpError::InvalidMessage(
+                                raw, parse_err,
+                            ))));
                         }
                     }
                     Err(err) => {
@@ -649,6 +759,76 @@ impl Stream for Handler {
                 return Poll::Pending;
             }
         }
+    }
+}
+
+/// Classification of a raw WS text frame that failed to deserialize into `Message`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InvalidMessageKind {
+    /// A CDP response frame (has a numeric "id"); always a real problem.
+    Response { id: i64 },
+    /// A CDP event frame (has a "method", no "id"); benign protocol drift.
+    Event { method: String },
+    /// Not JSON, or JSON without "method"; carries a short text snippet.
+    Unknown { snippet: String },
+}
+
+/// Classifies a raw WS frame that failed to parse as `Message` by peeking at its
+/// JSON shape, without needing a typed CDP schema for the frame.
+fn invalid_message_kind(raw: &str) -> InvalidMessageKind {
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(value) => {
+            if let Some(id) = value.get("id").and_then(|v| v.as_i64()) {
+                InvalidMessageKind::Response { id }
+            } else if let Some(method) = value.get("method").and_then(|v| v.as_str()) {
+                InvalidMessageKind::Event {
+                    method: method.to_string(),
+                }
+            } else {
+                InvalidMessageKind::Unknown {
+                    snippet: raw.chars().take(120).collect(),
+                }
+            }
+        }
+        Err(_) => InvalidMessageKind::Unknown {
+            snippet: raw.chars().take(120).collect(),
+        },
+    }
+}
+
+#[cfg(test)]
+mod invalid_message_kind_tests {
+    use super::{InvalidMessageKind, invalid_message_kind};
+
+    #[test]
+    fn event_frame_is_classified_as_event() {
+        let raw = r#"{"method":"Foo.bar","params":{}}"#;
+        assert_eq!(
+            invalid_message_kind(raw),
+            InvalidMessageKind::Event {
+                method: "Foo.bar".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn response_frame_is_classified_as_response() {
+        let raw = r#"{"id":7,"result":{}}"#;
+        assert_eq!(
+            invalid_message_kind(raw),
+            InvalidMessageKind::Response { id: 7 }
+        );
+    }
+
+    #[test]
+    fn garbage_is_classified_as_unknown() {
+        let raw = "not json at all";
+        assert_eq!(
+            invalid_message_kind(raw),
+            InvalidMessageKind::Unknown {
+                snippet: "not json at all".to_string()
+            }
+        );
     }
 }
 
@@ -739,7 +919,7 @@ enum PendingRequest {
     /// the raw cdp navigation request (like `NavigateParams`) arrives, but only
     /// after the `Target` notifies the `Handler` that the `Page` has finished
     /// loading, which comes after the response.
-    Navigate(NavigationId),
+    Navigate(NavigationId, Option<SessionId>),
     /// A common request received via a channel (`Page`).
     ExternalCommand(OneshotSender<Result<Response>>),
     /// Requests that are initiated directly from a `Target` (all the

@@ -3,9 +3,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chromiumoxide::browser::Browser;
+use chromiumoxide::browser::BrowserHandle;
 use chromiumoxide::cdp::browser_protocol::dom::{
-    BackendNodeId, DescribeNodeParams, Node as CdpNode, SetFileInputFilesParams, ShadowRootType,
+    BackendNodeId, DescribeNodeParams, GetFrameOwnerParams, Node as CdpNode,
+    SetFileInputFilesParams, ShadowRootType,
 };
 use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
 use chromiumoxide::cdp::browser_protocol::page::{
@@ -45,7 +46,7 @@ pub struct ResolvedTarget {
 /// `document.querySelector` cannot see into a closed tree, a handle already
 /// inside one can.
 #[derive(Clone)]
-enum LocatorScope {
+pub(crate) enum LocatorScope {
     Context(Option<ExecutionContextId>),
     ClosedRoot(Arc<Element>),
 }
@@ -441,6 +442,33 @@ impl ResolvedTarget {
     }
 }
 
+/// The DOM backend node id for a gathered candidate, for correlating it with
+/// a CDP frame owner (`DOM.getFrameOwner`'s `backend_node_id`) or an AX tree
+/// node (`AxNode.backend_dom_node_id`) by identity instead of by name/src
+/// heuristics. Mirrors [`ResolvedTarget::backend_node_id`] for a candidate
+/// that has not been resolved into a `ResolvedTarget` yet.
+pub(crate) async fn candidate_backend_node_id(
+    page: &Page,
+    scope: &LocatorScope,
+    shadow_hosts: &[String],
+    candidate: &Candidate,
+) -> Result<BackendNodeId, CommandError> {
+    let locator = JsLocator {
+        scope: scope.clone(),
+        shadow_hosts: shadow_hosts.to_vec(),
+        id: candidate.id.clone(),
+    };
+    let expression = locator_expression(&locator, "return el")?;
+    let object_id = resolve_object_id_scoped(page, scope, expression).await?;
+    Ok(page
+        .execute(DescribeNodeParams::builder().object_id(object_id).build())
+        .await
+        .map_err(cdp_error)?
+        .result
+        .node
+        .backend_node_id)
+}
+
 #[derive(Deserialize)]
 struct Rect {
     x: f64,
@@ -454,7 +482,7 @@ pub async fn resolve_target(
     page: &Page,
     selector: &str,
     target: Option<&TargetSpec>,
-    browser: Option<&mut Browser>,
+    browser: Option<&BrowserHandle>,
 ) -> Result<ResolvedTarget, CommandError> {
     resolve_target_with_visibility(page_id, page, selector, target, true, browser).await
 }
@@ -463,6 +491,15 @@ pub async fn resolve_target(
 /// against "" — but a wait condition would poll for it until the deadline,
 /// reporting a timeout instead of the real mistake. Reject it up front.
 fn validate_target_spec(target: &TargetSpec) -> Result<(), CommandError> {
+    validate_target_spec_hop(target, false)
+}
+
+/// `is_frame_hop` is true only for entries reached by descending
+/// `frame_path`: an unnamed iframe's stamped hop carries `accessibleName: ""`
+/// with `role` set (see `descend_a11y_iframes`), which must validate so the
+/// snapshot's own target can be passed back verbatim. `shadow_path` entries
+/// and the top-level target keep the strict rule.
+fn validate_target_spec_hop(target: &TargetSpec, is_frame_hop: bool) -> Result<(), CommandError> {
     for (field, value) in [
         ("css", &target.css),
         ("testId", &target.test_id),
@@ -471,7 +508,16 @@ fn validate_target_spec(target: &TargetSpec) -> Result<(), CommandError> {
         ("label", &target.label),
     ] {
         if let Some(value) = value {
-            if value.trim().is_empty() {
+            // Only an exact `""` is the stamped-hop shape (`unwrap_or_default`
+            // on the candidate's name); a whitespace-only value is not that
+            // shape and must still be rejected, matching the exact-`""` check
+            // both normalization points (`open_target_scope`, `segment()`)
+            // use downstream.
+            let unnamed_frame_hop = is_frame_hop
+                && field == "accessibleName"
+                && target.role.is_some()
+                && value.is_empty();
+            if value.trim().is_empty() && !unnamed_frame_hop {
                 return Err(target_error(
                     ErrorCode::InvalidRequest,
                     format!("target field {field} is empty and can never resolve"),
@@ -479,8 +525,11 @@ fn validate_target_spec(target: &TargetSpec) -> Result<(), CommandError> {
             }
         }
     }
-    for nested in target.frame_path.iter().chain(target.shadow_path.iter()) {
-        validate_target_spec(nested)?;
+    for nested in &target.frame_path {
+        validate_target_spec_hop(nested, true)?;
+    }
+    for nested in &target.shadow_path {
+        validate_target_spec_hop(nested, false)?;
     }
     Ok(())
 }
@@ -505,9 +554,9 @@ pub(crate) async fn main_frame_iframe_candidates(
 pub async fn gather_candidates(
     page: &Page,
     target: &TargetSpec,
-    mut browser: Option<&mut Browser>,
+    browser: Option<&BrowserHandle>,
 ) -> Result<Vec<Candidate>, CommandError> {
-    let scope = open_target_scope(page, target, browser.as_deref_mut()).await?;
+    let scope = open_target_scope(page, target, browser).await?;
     let scope_ref = scope.locator_scope();
     let (raw, _owners) = collect_candidates_merged(
         &scope.execution_page,
@@ -534,8 +583,7 @@ pub async fn gather_candidates(
             let Some(hop) = frame_stable_hop(&frame) else {
                 continue;
             };
-            let gathered =
-                gather_frame_candidates(&scope, &frame, &hop, browser.as_deref_mut()).await;
+            let gathered = gather_frame_candidates(&scope, &frame, &hop, browser).await;
             if let Ok(mut gathered) = gathered {
                 candidates.append(&mut gathered);
             }
@@ -552,7 +600,7 @@ pub async fn inspect_page_scoped_target(
     page: &Page,
     target: &TargetSpec,
     include_html: bool,
-    browser: Option<&mut Browser>,
+    browser: Option<&BrowserHandle>,
 ) -> Result<(String, Option<String>, Evidence), CommandError> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -617,19 +665,27 @@ async fn gather_frame_candidates(
     scope: &TargetScope,
     frame: &Candidate,
     hop: &TargetSpec,
-    browser: Option<&mut Browser>,
+    browser: Option<&BrowserHandle>,
 ) -> Result<Vec<Candidate>, CommandError> {
-    let (child, oopif) =
-        match find_child_frame(&scope.execution_page, &scope.frame_id, frame).await? {
-            Some(child) => (Some(child), None),
-            None => match browser {
-                Some(active_browser) => (
-                    None,
-                    find_oopif(active_browser, &scope.frame_id, frame).await?,
-                ),
-                None => (None, None),
-            },
-        };
+    let locator_scope = scope.locator_scope();
+    let (child, oopif) = match find_child_frame(
+        &scope.execution_page,
+        &locator_scope,
+        &scope.shadow_hosts,
+        &scope.frame_id,
+        frame,
+    )
+    .await?
+    {
+        Some(child) => (Some(child), None),
+        None => match browser {
+            Some(active_browser) => (
+                None,
+                find_oopif(active_browser, &scope.frame_id, frame).await?,
+            ),
+            None => (None, None),
+        },
+    };
     let (execution_page, frame_id) = if let Some(child) = child {
         (scope.execution_page.clone(), child)
     } else if let Some((oopif_page, oopif_frame)) = oopif {
@@ -678,7 +734,7 @@ impl TargetScope {
 async fn open_target_scope(
     page: &Page,
     target: &TargetSpec,
-    mut browser: Option<&mut Browser>,
+    browser: Option<&BrowserHandle>,
 ) -> Result<TargetScope, CommandError> {
     if target.frame_path.len() > 8 || target.shadow_path.len() > 8 {
         return Err(target_error(
@@ -701,14 +757,30 @@ async fn open_target_scope(
 
     for (index, frame_target) in target.frame_path.iter().enumerate() {
         let raw = collect_candidates(&execution_page, context_id, &shadow_hosts, scope_id).await?;
-        let (candidate, evidence, _) = choose(frame_target, raw, true)?;
+        // A hop stamped for an unnamed iframe carries `accessibleName: ""`
+        // (see `descend_a11y_iframes`); normalize it to `None` here so
+        // `choose` does not filter out every unnamed candidate.
+        let mut normalized_frame_target = (**frame_target).clone();
+        if normalized_frame_target.accessible_name.as_deref() == Some("") {
+            normalized_frame_target.accessible_name = None;
+        }
+        let (candidate, evidence, _) = choose(&normalized_frame_target, raw, true)?;
         frame_trace.push(evidence);
         let deadline = Instant::now() + Duration::from_secs(2);
         let (child, oopif) = loop {
-            if let Some(child) = find_child_frame(&execution_page, &frame_id, &candidate).await? {
+            let scope = LocatorScope::Context(context_id);
+            if let Some(child) = find_child_frame(
+                &execution_page,
+                &scope,
+                &shadow_hosts,
+                &frame_id,
+                &candidate,
+            )
+            .await?
+            {
                 break (Some(child), None);
             }
-            let found = match browser.as_deref_mut() {
+            let found = match browser {
                 Some(active_browser) => find_oopif(active_browser, &frame_id, &candidate).await?,
                 None => None,
             };
@@ -836,10 +908,20 @@ pub async fn resolve_target_with_visibility(
     selector: &str,
     target: Option<&TargetSpec>,
     require_visible: bool,
-    browser: Option<&mut Browser>,
+    browser: Option<&BrowserHandle>,
 ) -> Result<ResolvedTarget, CommandError> {
     let Some(target) = target else {
-        let element = page.find_element(selector).await.map_err(cdp_error)?;
+        let element = page.find_element(selector).await.map_err(|error| {
+            let message = error.to_string();
+            if message.contains("Could not find node with given id") {
+                target_error(
+                    ErrorCode::TargetNotFound,
+                    format!("no element matches selector `{selector}`"),
+                )
+            } else {
+                cdp_error(error)
+            }
+        })?;
         return Ok(ResolvedTarget {
             native: Some(element),
             locator: JsLocator {
@@ -857,6 +939,7 @@ pub async fn resolve_target_with_visibility(
     let scope = open_target_scope(page, target, browser).await?;
     let base_scope = scope.locator_scope();
     let deadline = Instant::now() + Duration::from_secs(2);
+    let mut attempt = 0u32;
     let (candidate, evidence, best_match_authorized, owner) = loop {
         let (raw, owners) = collect_candidates_merged(
             &scope.execution_page,
@@ -871,7 +954,8 @@ pub async fn resolve_target_with_visibility(
                 break (candidate, evidence, best_match_authorized, owner);
             }
             Err(error) if error.code == ErrorCode::TargetNotFound && Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_millis(25)).await;
+                tokio::time::sleep(retry_backoff(attempt)).await;
+                attempt += 1;
             }
             Err(error) => return Err(error),
         }
@@ -922,6 +1006,14 @@ pub async fn resolve_target_with_visibility(
             best_match_authorized,
         },
     })
+}
+
+/// Backoff schedule for the targetNotFound re-collect loop: 25, 50, 100, 200,
+/// 400 ms, capped at 500 ms, so a big page is not re-scanned every 25 ms for
+/// the whole 2 s deadline.
+fn retry_backoff(attempt: u32) -> Duration {
+    let shift = attempt.min(5);
+    Duration::from_millis((25u64 << shift).min(500))
 }
 
 fn choose(
@@ -1122,18 +1214,24 @@ fn candidate_collector_operation(scope: u64) -> Result<String, CommandError> {
     Ok(format!(
         r#"let n=0,out=[];
 const labelledBy=el=>(el.getAttribute('aria-labelledby')||'').split(/\s+/).filter(Boolean).map(id=>el.ownerDocument.getElementById(id)?.innerText?.trim()||'').filter(Boolean).join(' ')||null;
-const implicitRole=el=>{{if(el.tagName==='BUTTON')return 'button';if(el.tagName==='A'&&el.hasAttribute('href'))return 'link';if(el.tagName==='IFRAME')return 'iframe';if(el.tagName==='TEXTAREA'||el.isContentEditable)return 'textbox';if(el.tagName==='SELECT')return el.multiple?'listbox':'combobox';if(el.tagName==='FORM')return 'form';if(el.tagName==='DIALOG')return 'dialog';if(el.tagName==='MAIN')return 'main';if(el.tagName==='NAV')return 'navigation';if(el.tagName==='ARTICLE')return 'article';if(el.tagName==='SECTION'&&(el.getAttribute('aria-label')||el.getAttribute('aria-labelledby')))return 'region';if(el.tagName!=='INPUT')return null;const type=(el.type||'text').toLowerCase();if(['button','submit','reset','image','file'].includes(type))return 'button';if(type==='checkbox')return 'checkbox';if(type==='radio')return 'radio';if(type==='range')return 'slider';if(type==='number')return 'spinbutton';if(type==='search')return 'searchbox';return type==='hidden'?null:'textbox'}};
-const visit=current=>{{for(const el of current.querySelectorAll('*')){{const id={prefix}+(++n);el.setAttribute('data-bobby-target',id);const style=getComputedStyle(el),rect=el.getBoundingClientRect();const label=el.labels&&el.labels.length?Array.from(el.labels).map(x=>x.innerText.trim()).filter(Boolean).join(' '):null;const role=el.getAttribute('role')||implicitRole(el);const name=el.getAttribute('aria-label')||labelledBy(el)||label||(el.tagName==='IFRAME'?el.getAttribute('title'):null)||el.innerText?.trim()||null;const attributes={{}};for(const a of el.attributes)if(['name','type','src','href','placeholder','autocomplete','pattern','min','max','step','multiple'].includes(a.name)||a.name.startsWith('data-'))attributes[a.name]=a.value;for(const booleanName of ['required','readonly','checked','multiple'])if(el[booleanName]===true)attributes[booleanName]='true';const css=el.id?`#${{CSS.escape(el.id)}}`:`[data-bobby-target="${{id}}"]`;out.push({{id,css,testId:el.getAttribute('data-testid'),role,name,label,text:(el.innerText||el.value||'').trim(),attributes,attached:el.isConnected,visible:style.visibility!=='hidden'&&style.display!=='none'&&rect.width>0&&rect.height>0,enabled:!el.disabled&&el.getAttribute('aria-disabled')!=='true'&&!el.closest('fieldset[disabled]')}});if(el.shadowRoot)visit(el.shadowRoot)}}}};visit(root);return out"#
+const implicitRole=el=>{{if(el.tagName==='BUTTON')return 'button';if(el.tagName==='A'&&el.hasAttribute('href'))return 'link';if(el.tagName==='IFRAME')return 'iframe';if(el.tagName==='TEXTAREA'||el.isContentEditable)return 'textbox';if(el.tagName==='SELECT')return el.multiple?'listbox':'combobox';if(el.tagName==='FORM')return 'form';if(el.tagName==='DIALOG')return 'dialog';if(el.tagName==='MAIN')return 'main';if(el.tagName==='NAV')return 'navigation';if(el.tagName==='ARTICLE')return 'article';if(el.tagName==='SECTION'&&(el.getAttribute('aria-label')||el.getAttribute('aria-labelledby')))return 'region';if(/^H[1-6]$/.test(el.tagName))return 'heading';if(el.tagName==='UL'||el.tagName==='OL'||el.tagName==='MENU'||el.tagName==='DL')return 'list';if(el.tagName==='LI')return 'listitem';if(el.tagName==='IMG')return 'img';if(el.tagName==='OPTION')return 'option';if(el.tagName==='TABLE')return 'table';if(el.tagName==='TR')return 'row';if(el.tagName==='TD')return 'cell';if(el.tagName==='TH')return 'columnheader';if(el.tagName==='P')return 'paragraph';if(el.tagName==='HR')return 'separator';if(el.tagName==='FIELDSET'||el.tagName==='DETAILS')return 'group';if(el.tagName==='ASIDE')return 'complementary';if(el.tagName==='HEADER')return 'banner';if(el.tagName==='FOOTER')return 'contentinfo';if(el.tagName==='PROGRESS')return 'progressbar';if(el.tagName==='METER')return 'meter';if(el.tagName==='OUTPUT')return 'status';if(el.tagName==='SUMMARY')return 'button';if(el.tagName==='FIGURE')return 'figure';if(el.tagName==='BLOCKQUOTE')return 'blockquote';if(el.tagName==='DT')return 'term';if(el.tagName==='DD')return 'definition';if(el.tagName==='AREA'&&el.hasAttribute('href'))return 'link';if(el.tagName==='TIME')return 'time';if(el.tagName!=='INPUT')return null;const type=(el.type||'text').toLowerCase();if(['button','submit','reset','image','file'].includes(type))return 'button';if(type==='checkbox')return 'checkbox';if(type==='radio')return 'radio';if(type==='range')return 'slider';if(type==='number')return 'spinbutton';if(type==='search')return 'searchbox';return type==='hidden'?null:'textbox'}};
+const visit=current=>{{for(const el of current.querySelectorAll('*')){{const id={prefix}+(++n);el.setAttribute('data-bobby-target',id);const style=getComputedStyle(el),rect=el.getBoundingClientRect();const label=el.labels&&el.labels.length?Array.from(el.labels).map(x=>x.innerText.trim()).filter(Boolean).join(' '):null;const role=el.getAttribute('role')||implicitRole(el);const name=el.getAttribute('aria-label')||labelledBy(el)||label||(el.tagName==='IMG'?el.getAttribute('alt'):null)||(el.tagName==='IFRAME'?el.getAttribute('title'):null)||el.innerText?.trim()||null;const attributes={{}};for(const a of el.attributes)if(['name','type','src','href','placeholder','autocomplete','pattern','min','max','step','multiple'].includes(a.name)||a.name.startsWith('data-'))attributes[a.name]=a.value;for(const booleanName of ['required','readonly','checked','multiple'])if(el[booleanName]===true)attributes[booleanName]='true';const css=el.id?`#${{CSS.escape(el.id)}}`:`[data-bobby-target="${{id}}"]`;out.push({{id,css,testId:el.getAttribute('data-testid'),role,name,label,text:(el.innerText||el.value||'').trim(),attributes,attached:el.isConnected,visible:style.visibility!=='hidden'&&style.display!=='none'&&rect.width>0&&rect.height>0,enabled:!el.disabled&&el.getAttribute('aria-disabled')!=='true'&&!el.closest('fieldset[disabled]')}});if(el.shadowRoot)visit(el.shadowRoot)}}}};visit(root);return out"#
     ))
 }
 
+/// Maps a gathered iframe `candidate` to the CDP child frame it owns.
+/// Matches by DOM identity (`DOM.getFrameOwner`'s `backend_node_id` against
+/// the candidate's own backend node id) so unnamed iframes with no `src`
+/// resolve correctly even with 2+ siblings; name/src matching cannot tell
+/// such siblings apart. Falls back to the name/src heuristic (then the
+/// single-child guess) only when the identity lookup itself fails.
 async fn find_child_frame(
     page: &Page,
+    scope: &LocatorScope,
+    shadow_hosts: &[String],
     parent: &chromiumoxide::cdp::browser_protocol::page::FrameId,
     candidate: &Candidate,
 ) -> Result<Option<chromiumoxide::cdp::browser_protocol::page::FrameId>, CommandError> {
-    let wanted_name = candidate.attributes.get("name");
-    let wanted_src = candidate.attributes.get("src");
     let mut children = Vec::new();
     for frame in page.frames().await.map_err(cdp_error)? {
         if page
@@ -1145,7 +1243,46 @@ async fn find_child_frame(
         {
             continue;
         }
-        children.push(frame.clone());
+        children.push(frame);
+    }
+
+    match candidate_backend_node_id(page, scope, shadow_hosts, candidate).await {
+        Ok(wanted_backend_node_id) => {
+            for frame in &children {
+                match page.execute(GetFrameOwnerParams::new(frame.clone())).await {
+                    Ok(owner) if owner.result.backend_node_id == wanted_backend_node_id => {
+                        return Ok(Some(frame.clone()));
+                    }
+                    Ok(_) => continue,
+                    Err(error) => {
+                        tracing::debug!(
+                            ?error,
+                            "DOM.getFrameOwner failed, falling back to name/src match"
+                        );
+                        return find_child_frame_by_name_or_src(page, &children, candidate).await;
+                    }
+                }
+            }
+            Ok(None)
+        }
+        Err(error) => {
+            tracing::debug!(
+                ?error,
+                "candidate backend node id lookup failed, falling back to name/src match"
+            );
+            find_child_frame_by_name_or_src(page, &children, candidate).await
+        }
+    }
+}
+
+async fn find_child_frame_by_name_or_src(
+    page: &Page,
+    children: &[chromiumoxide::cdp::browser_protocol::page::FrameId],
+    candidate: &Candidate,
+) -> Result<Option<chromiumoxide::cdp::browser_protocol::page::FrameId>, CommandError> {
+    let wanted_name = candidate.attributes.get("name");
+    let wanted_src = candidate.attributes.get("src");
+    for frame in children {
         let name = page.frame_name(frame.clone()).await.map_err(cdp_error)?;
         let url = page.frame_url(frame.clone()).await.map_err(cdp_error)?;
         if wanted_name.is_some_and(|wanted| name.as_ref() == Some(wanted))
@@ -1154,14 +1291,14 @@ async fn find_child_frame(
                     .is_some_and(|actual| actual == wanted || actual.ends_with(wanted))
             })
         {
-            return Ok(Some(frame));
+            return Ok(Some(frame.clone()));
         }
     }
-    Ok((children.len() == 1).then(|| children.remove(0)))
+    Ok((children.len() == 1).then(|| children[0].clone()))
 }
 
 async fn find_oopif(
-    browser: &mut Browser,
+    browser: &BrowserHandle,
     parent: &chromiumoxide::cdp::browser_protocol::page::FrameId,
     candidate: &Candidate,
 ) -> Result<Option<(Page, chromiumoxide::cdp::browser_protocol::page::FrameId)>, CommandError> {
@@ -1375,6 +1512,15 @@ fn selector_evidence(page_id: &PageId, selector: &str) -> Evidence {
     }
 }
 
+/// A dead browser target rewritten to this message must still be recognized
+/// by `worker_pool::is_dead_worker_error` so click/type/inspect trigger the
+/// same revive path as a raw CDP "receiver is gone"; matching on
+/// `ErrorCode::TargetDetached` instead would also catch the stale-element
+/// case below and relaunch the browser for a handle that just needs a fresh
+/// resolve.
+pub(crate) const TARGET_GONE_MESSAGE: &str =
+    "the browser target is gone (crashed or closed); re-list pages or recover the session before retrying";
+
 fn cdp_error(error: chromiumoxide::error::CdpError) -> CommandError {
     let message = error.to_string();
     // A resolved node id expires when the page re-renders; that is a stale
@@ -1396,7 +1542,7 @@ fn cdp_error(error: chromiumoxide::error::CdpError) -> CommandError {
     {
         return CommandError {
             code: ErrorCode::TargetDetached,
-            message: "the browser target is gone (crashed or closed); re-list pages or recover the session before retrying".into(),
+            message: TARGET_GONE_MESSAGE.into(),
             layer: ErrorLayer::Driver,
             retryable: true,
         };
@@ -1594,5 +1740,54 @@ mod tests {
         })
         .expect_err("empty nested css must fail");
         assert!(err.message.contains("css"));
+    }
+
+    #[test]
+    fn retry_backoff_grows_exponentially_then_caps_at_500ms() {
+        assert_eq!(retry_backoff(0), Duration::from_millis(25));
+        assert_eq!(retry_backoff(1), Duration::from_millis(50));
+        assert_eq!(retry_backoff(2), Duration::from_millis(100));
+        assert_eq!(retry_backoff(3), Duration::from_millis(200));
+        assert_eq!(retry_backoff(4), Duration::from_millis(400));
+        assert_eq!(retry_backoff(5), Duration::from_millis(500));
+        assert_eq!(retry_backoff(6), Duration::from_millis(500));
+        assert_eq!(retry_backoff(50), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn implicit_role_covers_headings_lists_images_and_tables() {
+        let operation = candidate_collector_operation(1).expect("collector operation");
+        for mapping in [
+            "if(/^H[1-6]$/.test(el.tagName))return 'heading';",
+            "if(el.tagName==='UL'||el.tagName==='OL'||el.tagName==='MENU'||el.tagName==='DL')return 'list';",
+            "if(el.tagName==='LI')return 'listitem';",
+            "if(el.tagName==='IMG')return 'img';",
+            "if(el.tagName==='OPTION')return 'option';",
+            "if(el.tagName==='TABLE')return 'table';",
+            "if(el.tagName==='TR')return 'row';",
+            "if(el.tagName==='TD')return 'cell';",
+            "if(el.tagName==='TH')return 'columnheader';",
+            "if(el.tagName==='P')return 'paragraph';",
+            "if(el.tagName==='HR')return 'separator';",
+            "if(el.tagName==='FIELDSET'||el.tagName==='DETAILS')return 'group';",
+            "if(el.tagName==='ASIDE')return 'complementary';",
+            "if(el.tagName==='HEADER')return 'banner';",
+            "if(el.tagName==='FOOTER')return 'contentinfo';",
+            "if(el.tagName==='PROGRESS')return 'progressbar';",
+            "if(el.tagName==='METER')return 'meter';",
+            "if(el.tagName==='OUTPUT')return 'status';",
+            "if(el.tagName==='SUMMARY')return 'button';",
+            "if(el.tagName==='FIGURE')return 'figure';",
+            "if(el.tagName==='BLOCKQUOTE')return 'blockquote';",
+            "if(el.tagName==='DT')return 'term';",
+            "if(el.tagName==='DD')return 'definition';",
+            "if(el.tagName==='AREA'&&el.hasAttribute('href'))return 'link';",
+            "if(el.tagName==='TIME')return 'time';",
+        ] {
+            assert!(
+                operation.contains(mapping),
+                "missing implicit role mapping: {mapping}"
+            );
+        }
     }
 }

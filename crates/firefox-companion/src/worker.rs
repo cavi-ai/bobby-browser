@@ -3795,17 +3795,22 @@ impl BrowserWorker for FirefoxCompanionWorker {
         let value_json = serde_json::to_string(&command.value)
             .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
         let selection = self.transport.send("script.evaluate", json!({
-            "expression": format!("(()=>{{const element=document.querySelector({selector_json});if(element instanceof HTMLInputElement&&(element.type==='checkbox'||element.type==='radio')){{if({value_json}!=='true'&&{value_json}!=='false')return 'invalid-checked';const checked={value_json}==='true';if(element.type==='radio'&&!checked)return 'radio-uncheck';if(element.checked!==checked)element.click();return `checked:${{element.checked}}`;}}if(!(element instanceof HTMLSelectElement))return 'not-select';const wanted={value_json};const norm=s=>s.trim().toLowerCase();const byValue=[...element.options].filter(option=>option.value===wanted);const options=byValue.length?byValue:[...element.options].filter(option=>norm(option.label)===norm(wanted)||norm(option.textContent)===norm(wanted));if(options.length===0)return 'missing';if(options.length!==1)return 'ambiguous';if(options[0].disabled)return 'disabled';element.value=options[0].value;element.dispatchEvent(new Event('input',{{bubbles:true}}));element.dispatchEvent(new Event('change',{{bubbles:true}}));return element.value===options[0].value?'selected':'missing';}})()"),
+            "expression": format!("(()=>{{const element=document.querySelector({selector_json});if(element instanceof HTMLInputElement&&(element.type==='checkbox'||element.type==='radio')){{if({value_json}!=='true'&&{value_json}!=='false')return 'invalid-checked';const checked={value_json}==='true';if(element.type==='radio'&&!checked)return 'radio-uncheck';if(element.checked!==checked)element.click();return `checked:${{element.checked}}`;}}if(!(element instanceof HTMLSelectElement))return 'not-select';const wanted={value_json};const norm=s=>s.trim().toLowerCase();const byValue=[...element.options].filter(option=>option.value===wanted);const options=byValue.length?byValue:[...element.options].filter(option=>norm(option.label)===norm(wanted)||norm(option.textContent)===norm(wanted));if(options.length===0)return 'missing';if(options.length!==1)return 'ambiguous';if(options[0].disabled)return 'disabled';element.value=options[0].value;element.dispatchEvent(new Event('input',{{bubbles:true}}));element.dispatchEvent(new Event('change',{{bubbles:true}}));return element.value===options[0].value?`selected:${{element.value}}`:'missing';}})()"),
             "target": {"context": context, "sandbox": COMPANION_SANDBOX},
             "awaitPromise": false,
             "resultOwnership": "none",
         })).await?;
         match selection.pointer("/result/value").and_then(Value::as_str) {
-            Some("selected") => {
+            Some(value) if value.starts_with("selected:") => {
+                let selected_value = value.trim_start_matches("selected:");
                 let mut evidence = vec![
                     Evidence::Element {
                         selector: command.selector.clone(),
-                        text: Some(command.value.clone()),
+                        text: Some(selected_value.to_owned()),
+                    },
+                    Evidence::Configuration {
+                        name: "typedControlKind".into(),
+                        value: "select".into(),
                     },
                     self.evidence(InteractionPath::ExtensionApi),
                 ];
@@ -3835,6 +3840,10 @@ impl BrowserWorker for FirefoxCompanionWorker {
                     Evidence::Element {
                         selector: command.selector.clone(),
                         text: Some(value.trim_start_matches("checked:").into()),
+                    },
+                    Evidence::Configuration {
+                        name: "typedControlKind".into(),
+                        value: "checkable".into(),
                     },
                     self.evidence(InteractionPath::ExtensionApi),
                 ];

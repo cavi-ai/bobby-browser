@@ -37,6 +37,9 @@ enum DriverMode {
     /// First launch's page commands fail with a dead-browser error;
     /// replacements are healthy. Exercises command-path revival.
     DeadWorkerCommands,
+    /// Inspect reports a prefilled value with the typed text appended,
+    /// simulating `clear_first: false` into a non-empty field.
+    AppendPrefill,
 }
 
 struct RecordingJournal {
@@ -182,6 +185,15 @@ impl BrowserWorker for FakeWorker {
                 url: "https://example.test/".into(),
                 title: "Fixture".into(),
                 text: "not-the-typed-value".into(),
+                html: None,
+            }]);
+        }
+        if matches!(self.mode, DriverMode::AppendPrefill) {
+            return Ok(vec![Evidence::Inspection {
+                selector: command.selector.clone(),
+                url: "https://example.test/".into(),
+                title: "Fixture".into(),
+                text: "prefilledx".into(),
                 html: None,
             }]);
         }
@@ -1352,8 +1364,11 @@ async fn boundary_wait_timeout_is_failed_not_needs_reconciliation() {
     assert!(error.message.contains("click landed"), "{error:?}");
 }
 
+// A dead target during a boundary click is transient target loss: the
+// runtime revives the browser and reports a plain failed outcome that tells
+// the agent to re-issue, never needsReconciliation (the double-save trap).
 #[tokio::test]
-async fn boundary_target_detached_is_retryable_not_needs_reconciliation() {
+async fn boundary_target_detached_revives_and_fails_not_needs_reconciliation() {
     let (runtime, session, page, _) = runtime(DriverMode::TargetDetached, None).await;
     let outcome = runtime
         .execute(envelope(
@@ -1368,11 +1383,14 @@ async fn boundary_target_detached_is_retryable_not_needs_reconciliation() {
             }),
         ))
         .await;
-    assert!(matches!(
-        outcome,
-        CommandOutcome::RetryableFailure { error, .. }
-            if error.code == ErrorCode::TargetDetached
-    ));
+    let CommandOutcome::Failed { error, .. } = outcome else {
+        panic!("expected Failed after revival, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::TargetDetached);
+    assert!(
+        error.message.contains("fresh browser was launched"),
+        "{error:?}"
+    );
 }
 
 #[tokio::test]
@@ -2139,6 +2157,32 @@ async fn download_url_content_type_mismatch_fails_closed_without_browser_dispatc
 }
 
 #[tokio::test]
+async fn download_url_over_max_bytes_reports_failed_not_needs_reconciliation() {
+    let url = http_fixture(
+        "this response body is well over the configured byte cap",
+        "text/plain",
+    )
+    .await;
+    let (runtime, session, page, events, _root) = adaptive_runtime(DriverMode::Succeed).await;
+    events.lock().await.push(format!("url:{url}"));
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page,
+            PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+                url,
+                expected_content_type: None,
+                max_bytes: 8,
+                save_as: None,
+            }),
+        ))
+        .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Failed { error, .. } if error.code == ErrorCode::HttpResponseTooLarge)
+    );
+}
+
+#[tokio::test]
 async fn download_state_commit_failure_keeps_prepared_artifact_recoverable() {
     let url = http_fixture("guarded-download", "application/octet-stream").await;
     let (runtime, session, page, events, root) = adaptive_runtime(DriverMode::CommitFail).await;
@@ -2777,4 +2821,29 @@ async fn a_typed_value_that_never_lands_fails_verification() {
         other => panic!("mismatched page state must fail verification: {other:?}"),
     };
     assert_eq!(error.code, ErrorCode::VerificationFailed, "{error:?}");
+}
+
+#[tokio::test]
+async fn append_without_clear_verifies_when_inspected_text_ends_with_typed_value() {
+    // clear_first: false into a non-empty field leaves the independent
+    // inspect reading prefilled-plus-typed, not the typed value alone; that
+    // must still verify instead of being treated as a mismatch.
+    let (runtime, session, page, _) = runtime(DriverMode::AppendPrefill, None).await;
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page,
+            PrimitiveCommand::TypeText(TypeTextCommand {
+                selector: "input[name='email']".into(),
+                target: None,
+                value: "x".into(),
+                clear_first: false,
+                expected_url: None,
+            }),
+        ))
+        .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
 }

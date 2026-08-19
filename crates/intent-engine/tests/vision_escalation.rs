@@ -565,6 +565,21 @@ async fn stuck_without_vision_gates_returns_vision_assist_denied() {
         panic!("expected Failed, got {outcome:?}");
     };
     assert_eq!(error.code, ErrorCode::VisionAssistDenied);
+    // The message leads with the deterministic stuck reason and names the
+    // closed gate: an agent that never asked for vision can repair the
+    // target instead of reading a policy wall.
+    assert!(
+        error.message.starts_with("no candidate matched") || error.message.starts_with("target"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error
+            .message
+            .contains("vision assist is off for this session (executionPolicy.visionAssist)"),
+        "{}",
+        error.message
+    );
     assert!(
         !called.load(Ordering::SeqCst),
         "propose must not be called when vision gates are closed"

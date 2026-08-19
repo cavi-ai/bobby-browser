@@ -10,7 +10,7 @@ use behavioral_engine::{
     generate_session_seed, BehavioralConfig, BezierMouseSimulator, SessionRandom, TypingAction,
     TypingSimulator,
 };
-use chromiumoxide::browser::{Browser, BrowserConfig as ChromiumConfig};
+use chromiumoxide::browser::{Browser, BrowserConfig as ChromiumConfig, BrowserHandle};
 use chromiumoxide::cdp::browser_protocol::browser::{
     DownloadProgressState, EventDownloadProgress, EventDownloadWillBegin,
     SetDownloadBehaviorBehavior, SetDownloadBehaviorParams,
@@ -56,7 +56,7 @@ use crate::{
     process_registry, resolve_upload_paths, session_download_dir,
     targeting::{
         gather_candidates, inspect_page_scoped_target, resolve_target as resolve_browser_target,
-        resolve_target_with_visibility,
+        resolve_target_with_visibility, TARGET_GONE_MESSAGE,
     },
     BrowserWorker, WorkerFactory,
 };
@@ -342,12 +342,9 @@ impl ChromiumWorker {
         // gone, drop the registration so the caller gets a clean notFound
         // instead of a dead handle.
         let target_id = page.target_id().clone();
-        let reattached = {
-            let mut browser_guard = self.browser.lock().await;
-            match browser_guard.as_mut() {
-                Some(browser) => browser.get_page(target_id).await.ok(),
-                None => None,
-            }
+        let reattached = match self.browser_handle().await {
+            Ok(browser) => browser.get_page(target_id).await.ok(),
+            Err(_) => None,
         };
         match reattached {
             Some(fresh) => {
@@ -365,11 +362,32 @@ impl ChromiumWorker {
             }
         }
     }
+
+    /// Clone a handle to the live browser and release the mutex immediately.
+    /// Every page op that needs the browser goes through this instead of
+    /// holding the worker-wide mutex across a CDP await: one page's slow or
+    /// hung browser call used to serialize (or, with no timeout, permanently
+    /// stall) every other page of the session.
+    async fn browser_handle(&self) -> Result<BrowserHandle, CommandError> {
+        self.browser
+            .lock()
+            .await
+            .as_ref()
+            .map(Browser::handle)
+            .ok_or_else(closed_error)
+    }
+
     fn control_target_spec(target: &FormControlTarget) -> TargetSpec {
+        // An unnamed iframe's stamped hop carries an empty accessibleName;
+        // `TargetSpec { accessible_name: Some("") }` can never match a
+        // gathered candidate (whose name is `None`, not `Some("")`), so
+        // normalize to `None` here rather than relying on validation to
+        // relax the empty-field check for every FormControlTarget path.
         fn segment(segment: &types::SemanticTargetSegment) -> Box<TargetSpec> {
             Box::new(TargetSpec {
                 role: Some(segment.role.clone()),
-                accessible_name: Some(segment.accessible_name.clone()),
+                accessible_name: (!segment.accessible_name.is_empty())
+                    .then(|| segment.accessible_name.clone()),
                 ordinal: segment.ordinal,
                 ..Default::default()
             })
@@ -664,17 +682,19 @@ impl ChromiumWorker {
     async fn ensure_har_collector(
         &self,
         page_id: &PageId,
-    ) -> Result<Arc<crate::HarRecorder>, CommandError> {
+    ) -> Result<(Arc<crate::HarRecorder>, bool), CommandError> {
         let page = self.page_handle(page_id).await?;
         self.install_har_collector(page_id, page, None).await
     }
 
+    /// Returns whether this call attached the collector fresh (spawned a new
+    /// listener task) as opposed to reusing one already live for the page.
     async fn install_har_collector(
         &self,
         page_id: &PageId,
         page: Page,
         recovered_recorder: Option<Arc<crate::HarRecorder>>,
-    ) -> Result<Arc<crate::HarRecorder>, CommandError> {
+    ) -> Result<(Arc<crate::HarRecorder>, bool), CommandError> {
         // Coordinate page identity and collector installation under one lock
         // order. Unregistration takes these locks in the same order, so a
         // collector for a stale page cannot be inserted after replacement.
@@ -688,7 +708,7 @@ impl ChromiumWorker {
         if recovered_recorder.is_none() {
             if let (Some(recorder), Some(task)) = (recorders.get(page_id), tasks.get(page_id)) {
                 if !task.is_finished() {
-                    return Ok(recorder.clone());
+                    return Ok((recorder.clone(), false));
                 }
             }
         }
@@ -794,7 +814,7 @@ impl ChromiumWorker {
         });
         recorders.insert(page_id.clone(), recorder.clone());
         tasks.insert(page_id.clone(), task);
-        Ok(recorder)
+        Ok((recorder, true))
     }
 
     async fn resolve_target(
@@ -804,9 +824,8 @@ impl ChromiumWorker {
         selector: &str,
         target: Option<&types::TargetSpec>,
     ) -> Result<crate::targeting::ResolvedTarget, CommandError> {
-        let mut browser = self.browser.lock().await;
-        let browser = browser.as_mut().ok_or_else(closed_error)?;
-        resolve_browser_target(page_id, page, selector, target, Some(browser)).await
+        let browser = self.browser_handle().await?;
+        resolve_browser_target(page_id, page, selector, target, Some(&browser)).await
     }
 
     async fn register_page(&self, page_id: PageId, page: Page) -> Result<(), CommandError> {
@@ -984,13 +1003,10 @@ impl ChromiumWorker {
     /// Lazy (on `list_pages`) rather than a background listener: the only
     /// consumer is the listing itself.
     async fn sync_untracked_pages(&self) -> Result<(), CommandError> {
-        let live = {
-            let mut browser_guard = self.browser.lock().await;
-            let Some(browser) = browser_guard.as_mut() else {
-                return Ok(());
-            };
-            browser.pages().await.map_err(command_failed)?
+        let Ok(browser) = self.browser_handle().await else {
+            return Ok(());
         };
+        let live = browser.pages().await.map_err(command_failed)?;
         // `Page.close` is acknowledged before the browser finishes destroying
         // the target, so a page this worker just closed can still sit in the
         // handler's target cache. Tombstones keep it from being resurrected
@@ -1106,13 +1122,11 @@ impl BrowserWorker for ChromiumWorker {
     }
 
     async fn open_page(&self, page_id: PageId) -> Result<(), CommandError> {
-        let mut browser_guard = self.browser.lock().await;
-        let browser = browser_guard.as_mut().ok_or_else(closed_error)?;
+        let browser = self.browser_handle().await?;
         let page = browser
             .new_page("about:blank")
             .await
             .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
-        drop(browser_guard);
         self.register_page(page_id, page).await
     }
 
@@ -1128,7 +1142,7 @@ impl BrowserWorker for ChromiumWorker {
         )
         .await
         .map_err(|_| timeout_error(command.timeout_ms))?
-        .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        .map_err(|error| navigation_failed(command.url.as_str(), error))?;
         let url = page
             .url()
             .await
@@ -1164,14 +1178,13 @@ impl BrowserWorker for ChromiumWorker {
             .is_some_and(is_page_scoped_text_target)
         {
             let target = command.target.as_ref().expect("checked target");
-            let mut browser = self.browser.lock().await;
-            let browser = browser.as_mut().ok_or_else(closed_error)?;
+            let browser = self.browser_handle().await?;
             let (text, html, resolution) = inspect_page_scoped_target(
                 page_id,
                 &page,
                 target,
                 command.include_html,
-                Some(browser),
+                Some(&browser),
             )
             .await?;
             (text, html, Some(resolution))
@@ -1385,16 +1398,22 @@ impl BrowserWorker for ChromiumWorker {
         ensure_editable_control(&page, &resolved).await?;
         self.bring_page_to_front(&page).await;
         let mut humanization_evidence = None;
-        let observed = if resolved.is_checkable(&page).await? {
+        let (observed, control_kind) = if resolved.is_checkable(&page).await? {
             let checked = command.value.parse::<bool>().map_err(|_| {
                 driver_error(
                     ErrorCode::InvalidRequest,
                     "checkable controls require a boolean value",
                 )
             })?;
-            resolved.set_checked(&page, checked).await?.to_string()
+            (
+                resolved.set_checked(&page, checked).await?.to_string(),
+                "checkable",
+            )
         } else if resolved.is_select(&page).await? {
-            resolved.select_option(&page, &command.value).await?
+            (
+                resolved.select_option(&page, &command.value).await?,
+                "select",
+            )
         } else {
             if self.humanization_enabled() {
                 let synthesized = self
@@ -1410,13 +1429,17 @@ impl BrowserWorker for ChromiumWorker {
                     .type_text(&page, &command.value, command.clear_first)
                     .await?;
             }
-            resolved.value(&page).await?.unwrap_or_default()
+            (resolved.value(&page).await?.unwrap_or_default(), "text")
         };
         let validity = resolved.form_control_validity(&page).await?;
         let mut evidence = vec![
             Evidence::Element {
                 selector: command.selector.clone(),
                 text: Some(observed),
+            },
+            Evidence::Configuration {
+                name: "typedControlKind".into(),
+                value: control_kind.into(),
             },
             Evidence::Configuration {
                 name: "formControlValid".into(),
@@ -1591,15 +1614,12 @@ impl BrowserWorker for ChromiumWorker {
         command: &OpenPageCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         let page_id = PageId::new();
-        let page = {
-            let browser = self.browser.lock().await;
-            let browser = browser.as_ref().ok_or_else(closed_error)?;
-            // Always start blank so init scripts register before first real document.
-            browser
-                .new_page("about:blank")
-                .await
-                .map_err(command_failed)?
-        };
+        let browser = self.browser_handle().await?;
+        // Always start blank so init scripts register before first real document.
+        let page = browser
+            .new_page("about:blank")
+            .await
+            .map_err(command_failed)?;
         self.register_page(page_id.clone(), page).await?;
         if let Some(url) = command.url.as_deref() {
             let page = self.page_handle(&page_id).await?;
@@ -1664,7 +1684,7 @@ impl BrowserWorker for ChromiumWorker {
         command: &types::NetworkLogCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         let page = self.page_handle(page_id).await?;
-        let recorder = self.ensure_har_collector(page_id).await?;
+        let (recorder, attached_fresh) = self.ensure_har_collector(page_id).await?;
         let entries = recorder.take(command.clear).await;
         let page_url = page.url().await.ok().flatten().unwrap_or_default();
         let document = crate::har::har_document(&entries, &page_url);
@@ -1682,13 +1702,20 @@ impl BrowserWorker for ChromiumWorker {
             )
             .await
             .map_err(|error| driver_error(ErrorCode::Internal, error))?;
-        Ok(vec![Evidence::HarArtifact {
+        let mut evidence = vec![Evidence::HarArtifact {
             artifact_id: record.artifact_id,
             media_type: record.media_type,
             bytes: record.bytes,
             sha256: record.sha256,
             entries: entries.len() as u32,
-        }])
+        }];
+        if attached_fresh {
+            evidence.push(Evidence::Configuration {
+                name: "networkRecordingStarted".into(),
+                value: "true".into(),
+            });
+        }
+        Ok(evidence)
     }
 
     async fn emulate(
@@ -1964,9 +1991,8 @@ impl BrowserWorker for ChromiumWorker {
             // Scoped: resolve the target, fetch the AX tree of the frame it
             // lives in, and compact only its subtree.
             let resolved = {
-                let mut browser = self.browser.lock().await;
-                let browser = browser.as_mut().ok_or_else(closed_error)?;
-                crate::targeting::resolve_target(page_id, &page, "", Some(target), Some(browser))
+                let browser = self.browser_handle().await?;
+                crate::targeting::resolve_target(page_id, &page, "", Some(target), Some(&browser))
                     .await?
             };
             let backend_id = resolved.backend_node_id(&page).await?;
@@ -2150,8 +2176,7 @@ impl BrowserWorker for ChromiumWorker {
             .get(page_id)
             .cloned()
             .ok_or_else(page_missing)?;
-        let mut browser_guard = self.browser.lock().await;
-        let browser = browser_guard.as_mut().ok_or_else(closed_error)?;
+        let browser = self.browser_handle().await?;
         let mut events = browser
             .event_listener::<EventTargetCreated>()
             .await
@@ -2162,9 +2187,12 @@ impl BrowserWorker for ChromiumWorker {
             &opener,
             &command.selector,
             command.target.as_ref(),
-            Some(browser),
+            Some(&browser),
         )
         .await?;
+        // Same H3 class as `click`: a native element click on a backgrounded
+        // tab hangs to the CDP request timeout, so surface the opener first.
+        self.bring_page_to_front(&opener).await;
         resolved.click(&opener).await?;
         let event = tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
             loop {
@@ -2196,7 +2224,6 @@ impl BrowserWorker for ChromiumWorker {
         })
         .await
         .map_err(|_| timeout_error(command.timeout_ms))??;
-        drop(browser_guard);
         let popup_id = PageId::new();
         let page = page_evidence(popup_id.clone(), &popup).await?;
         self.register_page(popup_id.clone(), popup).await?;
@@ -2381,9 +2408,8 @@ impl BrowserWorker for ChromiumWorker {
         target: &types::TargetSpec,
     ) -> Result<Vec<dom_engine::Candidate>, CommandError> {
         let page = self.page_handle(page_id).await?;
-        let mut browser = self.browser.lock().await;
-        let browser = browser.as_mut().ok_or_else(closed_error)?;
-        gather_candidates(&page, target, Some(browser)).await
+        let browser = self.browser_handle().await?;
+        gather_candidates(&page, target, Some(&browser)).await
     }
 
     async fn capture_screenshot(
@@ -3015,16 +3041,16 @@ async fn wait_condition_satisfied(
             let resolved = if let Some(selector) = unscoped_css_wait_selector(target) {
                 resolve_target_with_visibility(page_id, page, selector, None, false, None).await
             } else {
-                let mut browser = browser.lock().await;
-                match browser.as_mut() {
-                    Some(browser) => {
+                let handle = browser.lock().await.as_ref().map(Browser::handle);
+                match handle {
+                    Some(handle) => {
                         resolve_target_with_visibility(
                             page_id,
                             page,
                             "",
                             Some(target),
                             false,
-                            Some(browser),
+                            Some(&handle),
                         )
                         .await
                     }
@@ -3079,10 +3105,10 @@ async fn wait_condition_satisfied(
                 let value = read_page_scoped_text(browser, page_id, page, target).await?;
                 return Ok(WaitPoll::saw(text_matches(matcher, &value)?, value));
             }
-            let mut browser = browser.lock().await;
-            let resolved = match browser.as_mut() {
-                Some(browser) => {
-                    resolve_browser_target(page_id, page, "", Some(target), Some(browser)).await
+            let handle = browser.lock().await.as_ref().map(Browser::handle);
+            let resolved = match handle {
+                Some(handle) => {
+                    resolve_browser_target(page_id, page, "", Some(target), Some(&handle)).await
                 }
                 None => Err(closed_error()),
             };
@@ -3202,6 +3228,7 @@ fn is_closed_page_message(message: &str) -> bool {
         || message.contains("session closed")
         || message.contains("Session with given id not found")
         || message.contains("oneshot canceled")
+        || message.contains(TARGET_GONE_MESSAGE)
 }
 
 fn wait_should_retry_replaced_context(error: &CommandError) -> bool {
@@ -3287,9 +3314,13 @@ async fn read_page_scoped_text(
     if target.frame_path.is_empty() {
         return read_page_body_text(page).await;
     }
-    let mut browser = browser.lock().await;
-    let browser = browser.as_mut().ok_or_else(closed_error)?;
-    inspect_page_scoped_target(page_id, page, target, false, Some(browser))
+    let handle = browser
+        .lock()
+        .await
+        .as_ref()
+        .map(Browser::handle)
+        .ok_or_else(closed_error)?;
+    inspect_page_scoped_target(page_id, page, target, false, Some(&handle))
         .await
         .map(|(text, _, _)| text)
 }
@@ -3371,6 +3402,27 @@ async fn bounded_cmd<T>(
 }
 
 fn command_failed(error: chromiumoxide::error::CdpError) -> CommandError {
+    driver_error(ErrorCode::BrowserCommandFailed, error)
+}
+
+/// Maps a `page.goto` failure to a `CommandError`. A message naming
+/// `net::ERR_ABORTED` is a navigation the browser aborted before it loaded,
+/// such as a download response (Content-Disposition attachment or a
+/// non-renderable type like application/octet-stream) or an explicitly
+/// cancelled navigation; that case is not retryable and points the caller at
+/// the download tools instead of surfacing the bare browser text. Every
+/// other goto error keeps the existing mapping.
+fn navigation_failed(url: &str, error: chromiumoxide::error::CdpError) -> CommandError {
+    if error.to_string().contains("net::ERR_ABORTED") {
+        return CommandError {
+            code: ErrorCode::BrowserCommandFailed,
+            message: format!(
+                "navigation to {url} was aborted by the browser: the response is a download (Content-Disposition attachment / non-renderable type) or the navigation was cancelled; use download_url for files, or click_and_wait_for_download for in-page links"
+            ),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        };
+    }
     driver_error(ErrorCode::BrowserCommandFailed, error)
 }
 
@@ -3479,8 +3531,25 @@ fn driver_error(code: ErrorCode, error: impl std::fmt::Display) -> CommandError 
         code,
         message: error.to_string(),
         layer: ErrorLayer::Driver,
-        retryable: true,
+        retryable: driver_error_is_retryable(code),
     }
+}
+
+/// A driver failure is retryable unless the code names a condition a retry
+/// cannot fix: a malformed request, a target that is not there, or a policy
+/// refusal. Every other code (transport hiccups, launch failures, internal
+/// errors, timeouts) may succeed on a fresh attempt.
+fn driver_error_is_retryable(code: ErrorCode) -> bool {
+    !matches!(
+        code,
+        ErrorCode::InvalidRequest
+            | ErrorCode::VerificationFailed
+            | ErrorCode::TargetNotFound
+            | ErrorCode::TargetAmbiguous
+            | ErrorCode::NotFound
+            | ErrorCode::PolicyDenied
+            | ErrorCode::FrameNotFound
+    )
 }
 
 fn page_missing() -> CommandError {
@@ -3628,6 +3697,33 @@ async fn descend_a11y_iframes(
     let Ok(frames) = page.frames().await else {
         return false;
     };
+    // Frame <-> element identity, computed once for every candidate: name/src
+    // are absent for a `srcdoc` iframe with no `name` attribute, so 2+ such
+    // siblings cannot be told apart by the old heuristic. A candidate whose
+    // backend node id lookup fails is skipped here and falls back to the
+    // name/src heuristic per-frame below.
+    let mut candidate_backend_ids: Vec<(
+        chromiumoxide::cdp::browser_protocol::dom::BackendNodeId,
+        &dom_engine::Candidate,
+    )> = Vec::new();
+    for candidate in &iframes {
+        match crate::targeting::candidate_backend_node_id(
+            page,
+            &crate::targeting::LocatorScope::Context(None),
+            &[],
+            candidate,
+        )
+        .await
+        {
+            Ok(backend_node_id) => candidate_backend_ids.push((backend_node_id, candidate)),
+            Err(error) => {
+                tracing::debug!(
+                    ?error,
+                    "candidate backend node id lookup failed, iframe descent falls back to name/src match for this candidate"
+                );
+            }
+        }
+    }
     let mut truncated = false;
     for frame in frames {
         if budget == 0 {
@@ -3644,26 +3740,43 @@ async fn descend_a11y_iframes(
         if !is_child {
             continue;
         }
-        let frame_name = page.frame_name(frame.clone()).await.ok().flatten();
-        let frame_url = page.frame_url(frame.clone()).await.ok().flatten();
-        let candidate = iframes
-            .iter()
-            .find(|candidate| {
-                frame_name
-                    .as_ref()
-                    .is_some_and(|name| candidate.attributes.get("name") == Some(name))
-                    || frame_url.as_ref().is_some_and(|url| {
-                        candidate
-                            .attributes
-                            .get("src")
-                            .is_some_and(|src| url == src || url.ends_with(src))
+        let owner_backend_node_id = page
+            .execute(
+                chromiumoxide::cdp::browser_protocol::dom::GetFrameOwnerParams::new(frame.clone()),
+            )
+            .await
+            .ok()
+            .map(|owner| owner.result.backend_node_id);
+        let candidate = match owner_backend_node_id.and_then(|backend_node_id| {
+            candidate_backend_ids
+                .iter()
+                .find(|(id, _)| *id == backend_node_id)
+                .map(|(_, candidate)| *candidate)
+        }) {
+            Some(candidate) => Some(candidate),
+            None => {
+                let frame_name = page.frame_name(frame.clone()).await.ok().flatten();
+                let frame_url = page.frame_url(frame.clone()).await.ok().flatten();
+                iframes
+                    .iter()
+                    .find(|candidate| {
+                        frame_name
+                            .as_ref()
+                            .is_some_and(|name| candidate.attributes.get("name") == Some(name))
+                            || frame_url.as_ref().is_some_and(|url| {
+                                candidate
+                                    .attributes
+                                    .get("src")
+                                    .is_some_and(|src| url == src || url.ends_with(src))
+                            })
                     })
-            })
-            .or(if iframes.len() == 1 {
-                iframes.first()
-            } else {
-                None
-            });
+                    .or(if iframes.len() == 1 {
+                        iframes.first()
+                    } else {
+                        None
+                    })
+            }
+        };
         let Some(candidate) = candidate else {
             continue;
         };
@@ -3679,22 +3792,36 @@ async fn descend_a11y_iframes(
         };
         let (mut frame_roots, frame_truncated) = compact_ax_tree(&tree.result.nodes, budget);
         truncated |= frame_truncated;
+        // Two distinct counting domains: `splice_occurrence` finds the right
+        // main-tree `Iframe` AX node (grouped by that node's own name, always
+        // same-name); `hop_ordinal` is the resolver's own ranked index for
+        // this hop (an unnamed hop matches every visible iframe candidate,
+        // not just the unnamed ones, since `choose` drops the name filter
+        // entirely once accessibleName normalizes to `None`).
         let same_name: Vec<&dom_engine::Candidate> = iframes
             .iter()
             .filter(|other| other.name == candidate.name)
             .collect();
-        let occurrence = same_name
+        let splice_occurrence = same_name
             .iter()
             .position(|other| other.id == candidate.id)
             .unwrap_or(0);
+        let visible_iframes: Vec<&dom_engine::Candidate> =
+            iframes.iter().filter(|other| other.state.visible).collect();
+        let hop_ordinal = iframe_hop_ordinal(&visible_iframes, candidate);
         let segment = types::SemanticTargetSegment {
             role: "iframe".into(),
             accessible_name: candidate.name.clone().unwrap_or_default(),
-            ordinal: (same_name.len() > 1).then_some(occurrence),
+            ordinal: hop_ordinal,
         };
         stamp_a11y_frame_path(&mut frame_roots, &segment);
         budget = budget.saturating_sub(count_a11y_nodes(&frame_roots));
-        match splice_under_iframe(nodes, candidate.name.as_deref(), occurrence, frame_roots) {
+        match splice_under_iframe(
+            nodes,
+            candidate.name.as_deref(),
+            splice_occurrence,
+            frame_roots,
+        ) {
             Ok(()) => {}
             Err(frame_roots) => {
                 nodes.push(types::AccessibilityNode {
@@ -3707,6 +3834,30 @@ async fn descend_a11y_iframes(
         }
     }
     truncated
+}
+
+/// The stamped hop's ordinal for an iframe candidate among the resolver's own
+/// matching set: `choose` filters `collect_candidates` output by role and (if
+/// set) accessibleName, over attached+visible candidates, then ranks by score
+/// and DOM order. A named candidate's matching set is every visible iframe
+/// with that name; an unnamed candidate's is every visible iframe, since a
+/// normalized (`None`) accessibleName applies no name filter at all. `None`
+/// when that set has at most one element, matching the pre-existing rule that
+/// an unambiguous hop carries no ordinal.
+fn iframe_hop_ordinal(
+    visible_iframes: &[&dom_engine::Candidate],
+    candidate: &dom_engine::Candidate,
+) -> Option<usize> {
+    let matching: Vec<&&dom_engine::Candidate> = visible_iframes
+        .iter()
+        .filter(|other| candidate.name.is_none() || other.name == candidate.name)
+        .collect();
+    (matching.len() > 1).then(|| {
+        matching
+            .iter()
+            .position(|other| other.id == candidate.id)
+            .unwrap_or(0)
+    })
 }
 
 fn compact_ax_tree(
@@ -3737,6 +3888,14 @@ fn compact_ax_tree_from(
             .filter(|value| !value.is_empty())
     }
 
+    fn name_text(
+        value: &Option<chromiumoxide::cdp::browser_protocol::accessibility::AxValue>,
+    ) -> Option<String> {
+        text(value)
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+    }
+
     fn property_text(node: &AxNode, name: &str) -> Option<String> {
         node.properties
             .as_ref()?
@@ -3764,7 +3923,7 @@ fn compact_ax_tree_from(
     let mut target_totals = std::collections::BTreeMap::new();
     for node in raw {
         let role = text(&node.role);
-        let name = text(&node.name);
+        let name = name_text(&node.name);
         if let (Some(role), Some(name)) = (role, name) {
             if !node.ignored
                 && super::accessibility_role_is_actionable(&role)
@@ -3789,7 +3948,7 @@ fn compact_ax_tree_from(
     ) -> Option<types::AccessibilityNode> {
         let node = by_id.get(id)?;
         let role = text(&node.role);
-        let name = text(&node.name);
+        let name = name_text(&node.name);
         // InlineTextBox leaves carry the same text as their StaticText
         // parent — pure payload duplication. Skip them regardless of name.
         // Unlabeled generic wrappers are skipped too; keep their children by
@@ -3980,11 +4139,12 @@ mod tests {
     };
 
     use super::{
-        apply_state_commit, clamp_js_timeout_ms, compact_ax_tree, element_wait_missing_observation,
-        ensure_automatic_download_modifier_support, is_closed_page_message, is_missing_css_node,
+        apply_state_commit, clamp_js_timeout_ms, compact_ax_tree, driver_error_is_retryable,
+        element_wait_missing_observation, ensure_automatic_download_modifier_support,
+        iframe_hop_ordinal, is_closed_page_message, is_dead_worker_error, is_missing_css_node,
         should_retry_plain_click_target_drift, snapshot_cookie, text_matches,
         unscoped_css_wait_selector, validate_clip, wait_should_retry_replaced_context,
-        ChromiumWorker, HttpBridgeState, EDITABLE_CONTROL_CHECK_JS,
+        ChromiumWorker, HttpBridgeState, EDITABLE_CONTROL_CHECK_JS, TARGET_GONE_MESSAGE,
     };
     use types::{
         ClickModifier, CommandError, ErrorCode, ErrorLayer, PageId, SessionId, TargetSpec,
@@ -4002,6 +4162,40 @@ mod tests {
         assert!(EDITABLE_CONTROL_CHECK_JS.contains("HTMLTextAreaElement"));
         assert!(EDITABLE_CONTROL_CHECK_JS.contains("HTMLSelectElement"));
         assert!(EDITABLE_CONTROL_CHECK_JS.contains("el.isContentEditable"));
+    }
+
+    #[test]
+    fn driver_error_retryable_matches_the_failure_class() {
+        let not_retryable = [
+            ErrorCode::InvalidRequest,
+            ErrorCode::VerificationFailed,
+            ErrorCode::TargetNotFound,
+            ErrorCode::TargetAmbiguous,
+            ErrorCode::NotFound,
+            ErrorCode::PolicyDenied,
+            ErrorCode::FrameNotFound,
+        ];
+        for code in not_retryable {
+            assert!(
+                !driver_error_is_retryable(code),
+                "{code:?} must not be retryable"
+            );
+        }
+
+        let retryable = [
+            ErrorCode::BrowserCommandFailed,
+            ErrorCode::BrowserLaunchFailed,
+            ErrorCode::Internal,
+            ErrorCode::ScreenshotCaptureFailed,
+            ErrorCode::TargetDetached,
+            ErrorCode::DeadlineExceeded,
+        ];
+        for code in retryable {
+            assert!(
+                driver_error_is_retryable(code),
+                "{code:?} must be retryable"
+            );
+        }
     }
 
     #[test]
@@ -4265,6 +4459,25 @@ mod tests {
     }
 
     #[test]
+    fn dead_target_error_rewritten_by_targeting_triggers_the_revive_path() {
+        let rewritten = CommandError {
+            code: ErrorCode::TargetDetached,
+            message: TARGET_GONE_MESSAGE.into(),
+            layer: ErrorLayer::Driver,
+            retryable: true,
+        };
+        assert!(is_dead_worker_error(&rewritten));
+
+        let stale_element = CommandError {
+            code: ErrorCode::TargetDetached,
+            message: "target has no live object".into(),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        };
+        assert!(!is_dead_worker_error(&stale_element));
+    }
+
+    #[test]
     fn accessibility_snapshot_preserves_form_state_and_redacts_masked_values() {
         let raw: Vec<chromiumoxide::cdp::browser_protocol::accessibility::AxNode> = serde_json::from_value(serde_json::json!([{
             "nodeId": "root",
@@ -4311,6 +4524,80 @@ mod tests {
         );
         assert_eq!(nodes[0].target.as_ref().unwrap().ordinal, Some(0));
         assert_eq!(nodes[1].target.as_ref().unwrap().ordinal, Some(1));
+    }
+
+    fn iframe_candidate(id: &str, name: Option<&str>, visible: bool) -> dom_engine::Candidate {
+        dom_engine::Candidate {
+            id: id.into(),
+            css: None,
+            test_id: None,
+            role: Some("iframe".into()),
+            name: name.map(str::to_string),
+            label: None,
+            text: String::new(),
+            attributes: BTreeMap::new(),
+            state: dom_engine::CandidateState {
+                attached: true,
+                visible,
+                enabled: true,
+            },
+            frame_path: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn iframe_hop_ordinal_for_unnamed_iframe_counts_every_visible_iframe() {
+        // A named sibling sits between the two unnamed candidates; an
+        // unnamed hop's ordinal must count through it (position 2 for
+        // `two`), not group only with the other unnamed candidate (which
+        // would give position 1).
+        let one = iframe_candidate("one", None, true);
+        let named = iframe_candidate("named", Some("Named"), true);
+        let two = iframe_candidate("two", None, true);
+        let visible = [&one, &named, &two];
+
+        assert_eq!(iframe_hop_ordinal(&visible, &one), Some(0));
+        assert_eq!(iframe_hop_ordinal(&visible, &two), Some(2));
+    }
+
+    #[test]
+    fn iframe_hop_ordinal_for_named_iframe_counts_only_same_name_iframes() {
+        let first_ada = iframe_candidate("a", Some("Ada"), true);
+        let unnamed = iframe_candidate("u", None, true);
+        let second_ada = iframe_candidate("b", Some("Ada"), true);
+        let visible = [&first_ada, &unnamed, &second_ada];
+
+        assert_eq!(iframe_hop_ordinal(&visible, &first_ada), Some(0));
+        assert_eq!(iframe_hop_ordinal(&visible, &second_ada), Some(1));
+    }
+
+    #[test]
+    fn iframe_hop_ordinal_is_none_for_a_single_match() {
+        let only = iframe_candidate("only", None, true);
+        let visible = [&only];
+        assert_eq!(iframe_hop_ordinal(&visible, &only), None);
+    }
+
+    #[test]
+    fn accessibility_snapshot_trims_surrounding_whitespace_from_the_name() {
+        let raw: Vec<chromiumoxide::cdp::browser_protocol::accessibility::AxNode> =
+            serde_json::from_value(serde_json::json!([{
+                "nodeId": "root",
+                "ignored": true,
+                "childIds": ["1"]
+            }, {
+                "nodeId": "1",
+                "ignored": false,
+                "parentId": "root",
+                "role": {"type": "role", "value": "textbox"},
+                "name": {"type": "computedString", "value": "Name "}
+            }]))
+            .expect("valid CDP AX fixture");
+
+        let (nodes, truncated) = compact_ax_tree(&raw, 10);
+        assert!(!truncated);
+        assert_eq!(nodes[0].name.as_deref(), Some("Name"));
+        assert_eq!(nodes[0].target.as_ref().unwrap().accessible_name, "Name");
     }
 
     #[test]

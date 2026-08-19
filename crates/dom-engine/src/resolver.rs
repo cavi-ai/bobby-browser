@@ -153,6 +153,19 @@ fn bounded_candidate_field(value: &str) -> String {
     }
 }
 
+/// Case-insensitive role match that also treats `img` and `image` as the
+/// same role: Chrome's a11y tree moved from `img` to `image`, but the DOM
+/// collector's implicit-role mapping still emits `img` for an `<img>`
+/// element, so a snapshot role fed back as a target must resolve either way.
+fn roles_match(wanted: &str, actual: &str) -> bool {
+    if wanted.eq_ignore_ascii_case(actual) {
+        return true;
+    }
+    let is_img_alias =
+        |role: &str| role.eq_ignore_ascii_case("img") || role.eq_ignore_ascii_case("image");
+    is_img_alias(wanted) && is_img_alias(actual)
+}
+
 fn score<'a>(
     target: &TargetSpec,
     candidate: &'a Candidate,
@@ -185,19 +198,20 @@ fn score<'a>(
         if !candidate
             .role
             .as_ref()
-            .is_some_and(|actual| actual.eq_ignore_ascii_case(wanted))
+            .is_some_and(|actual| roles_match(wanted, actual))
         {
             return None;
         }
         score += 30;
         reasons.push("exactRole".into());
     }
-    exact!(
-        target.accessible_name.as_ref(),
-        candidate.name.as_ref(),
-        50,
-        "exactAccessibleName"
-    );
+    if let Some(wanted) = target.accessible_name.as_ref() {
+        if candidate.name.as_deref().map(str::trim) != Some(wanted.trim()) {
+            return None;
+        }
+        score += 50;
+        reasons.push("exactAccessibleName".into());
+    }
     exact!(
         target.label.as_ref(),
         candidate.label.as_ref(),

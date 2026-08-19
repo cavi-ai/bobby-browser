@@ -475,7 +475,7 @@ fn check_vision_config_dual(config: &AppConfig) -> Option<DoctorCheck> {
     Some(DoctorCheck {
         status: DoctorStatus::Warn,
         name: "vision-config-dual".to_string(),
-        detail: "both [nodes] and [vision].endpoint_url are set; [nodes] wins and [vision] endpoint is ignored — move it into [nodes.<name>] with kind = \"vision\"".to_string(),
+        detail: "both [nodes] and [vision].endpoint_url are set; [nodes] wins and [vision] endpoint is ignored -- move it into [nodes.<name>] with kind = \"vision\"".to_string(),
     })
 }
 
@@ -1667,16 +1667,22 @@ fn check_companion_port(bind: SocketAddr) -> DoctorCheck {
 
     // The companion route is a WebSocket upgrade: a plain GET is rejected 400
     // and an unauthenticated upgrade 401. Either answer identifies our own
-    // server rather than a stranger on the port.
+    // server rather than a stranger on the port, but it still blocks a
+    // second runtime from binding it, so this is a warning, not all-clear.
     match probe_companion_route(&format!("http://{bind}/v1/companion")) {
-        Ok(400) | Ok(401) => check(
-            DoctorStatus::Ok,
-            format!(
-                "{bind} is serving the Firefox companion; one runtime owns it, so a second \
-                 `bobby serve`/`bobby cdp`/`bobby mcp-stdio` on this profile cannot bind it and \
-                 its Firefox sessions fail with engineUnreachable until the first one exits"
-            ),
-        ),
+        Ok(400) | Ok(401) => {
+            let owner = companion_port_owner(bind.port())
+                .map(|(pid, command)| format!(" (pid {pid}, {command})"))
+                .unwrap_or_default();
+            check(
+                DoctorStatus::Warn,
+                format!(
+                    "{bind} is held by a running bobby runtime{owner}; a second bobby \
+                     serve/cdp/mcp-stdio on this profile cannot bind it and its Firefox \
+                     sessions fail with engineUnreachable -- if that pid is an orphan, stop it"
+                ),
+            )
+        }
         Ok(status) => check(
             DoctorStatus::Warn,
             format!(
@@ -1693,6 +1699,66 @@ fn check_companion_port(bind: SocketAddr) -> DoctorCheck {
             ),
         ),
     }
+}
+
+/// Best-effort `(pid, command)` of the process listening on `port`.
+///
+/// Shells out to `lsof` on unix with a 2 s cap; returns `None` on any
+/// failure, timeout, or non-unix platform rather than block or mislead.
+fn companion_port_owner(port: u16) -> Option<(u32, String)> {
+    if !cfg!(unix) {
+        return None;
+    }
+    lsof_listen_owner(port, Duration::from_secs(2))
+}
+
+fn lsof_listen_owner(port: u16, timeout: Duration) -> Option<(u32, String)> {
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+
+    let mut child = Command::new("lsof")
+        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-Fpc"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut output = String::new();
+        let _ = stdout.read_to_string(&mut output);
+        let _ = sender.send(output);
+    });
+
+    match receiver.recv_timeout(timeout) {
+        Ok(output) => {
+            let _ = child.wait();
+            parse_lsof_owner(&output)
+        }
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            None
+        }
+    }
+}
+
+/// Parses `lsof -Fpc` output (`p<pid>` and `c<command>` lines) into the
+/// listener's pid and command name.
+fn parse_lsof_owner(output: &str) -> Option<(u32, String)> {
+    let mut pid = None;
+    let mut command = None;
+    for line in output.lines() {
+        if let Some(rest) = line.strip_prefix('p') {
+            if let Ok(parsed) = rest.parse::<u32>() {
+                pid = Some(parsed);
+            }
+        } else if let Some(rest) = line.strip_prefix('c') {
+            command = Some(rest.to_string());
+        }
+    }
+    pid.zip(command)
 }
 
 /// Why a WebDriver BiDi probe failed.
@@ -2006,7 +2072,7 @@ mod cdp_port_tests {
         });
 
         let check = check_companion_port(bind);
-        assert_eq!(check.status, DoctorStatus::Ok, "{}", check.detail);
+        assert_eq!(check.status, DoctorStatus::Warn, "{}", check.detail);
         assert!(
             check.detail.contains("engineUnreachable"),
             "{}",
@@ -2036,5 +2102,18 @@ mod cdp_port_tests {
             check.detail
         );
         let _ = server.join();
+    }
+
+    #[test]
+    fn lsof_owner_output_parses_pid_and_command() {
+        let owner = parse_lsof_owner("p20298\ncmcp-gateway\n");
+        assert_eq!(owner, Some((20298, "mcp-gateway".to_string())));
+    }
+
+    #[test]
+    fn lsof_owner_output_missing_a_field_is_none() {
+        assert_eq!(parse_lsof_owner("p20298\n"), None);
+        assert_eq!(parse_lsof_owner("cmcp-gateway\n"), None);
+        assert_eq!(parse_lsof_owner(""), None);
     }
 }

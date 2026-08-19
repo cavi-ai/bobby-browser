@@ -2592,7 +2592,7 @@ async fn type_text_uses_native_focus_clear_and_key_sequences_without_content_evi
 async fn type_text_selects_an_exact_option_value_without_keyboard_input() {
     let bidi = FakeBidi::new(vec![
         Ok(json!({"context": "context-1"})),
-        Ok(json!({"result": {"type": "string", "value": "selected"}})),
+        Ok(json!({"result": {"type": "string", "value": "selected:pro"}})),
     ]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
@@ -2630,6 +2630,17 @@ async fn type_text_selects_an_exact_option_value_without_keyboard_input() {
     assert!(evidence.iter().any(|item| matches!(
         item,
         Evidence::BrowserExecution { interaction_path, .. } if interaction_path == &expected
+    )));
+    // The worker reports the option value the page actually holds and the
+    // control kind, so the runtime's post-type verification can confirm a
+    // select chosen by label.
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::Element { text: Some(text), .. } if text == "pro"
+    )));
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::Configuration { name, value } if name == "typedControlKind" && value == "select"
     )));
 }
 

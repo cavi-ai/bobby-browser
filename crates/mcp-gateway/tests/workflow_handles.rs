@@ -743,6 +743,13 @@ async fn workflow_start_without_url_returns_a_completed_retained_binding() {
     assert_eq!(result["session"]["id"], result["sessionId"]);
     assert_eq!(result["page"]["id"], result["pageId"]);
     assert_eq!(result["navigationOutcome"], Value::Null);
+    assert!(
+        result["session"]["page_ids"]
+            .as_array()
+            .expect("page_ids array")
+            .contains(&result["pageId"]),
+        "session page_ids must contain the opened page id even without a navigation: {response}"
+    );
 }
 
 #[tokio::test]
@@ -784,6 +791,23 @@ async fn navigated_workflow_start_uses_the_minted_workflow_id_and_completes() {
     let result = &response["result"]["structuredContent"];
     assert_eq!(result["status"], "completed", "{response}");
     assert_eq!(result["navigationOutcome"]["status"], "completed");
+    assert_eq!(
+        result["page"]["url"],
+        json!("https://live-harness.test/"),
+        "page url must reflect the completed navigation, not the pre-navigation open: {response}"
+    );
+    assert_eq!(
+        result["page"]["ready_state"],
+        json!("interactive"),
+        "page ready_state must reflect the completed navigation: {response}"
+    );
+    assert!(
+        result["session"]["page_ids"]
+            .as_array()
+            .expect("page_ids array")
+            .contains(&result["pageId"]),
+        "session page_ids must contain the opened page id: {response}"
+    );
 
     let command_id = CommandId(
         uuid::Uuid::parse_str(
@@ -1837,4 +1861,53 @@ async fn failed_authenticated_session_delete_preserves_page_runtime_until_succes
         live.runtime.pages.get(&page_id).await,
         Err(types::RuntimeError::NotFound(_))
     ));
+}
+
+#[tokio::test]
+async fn reusing_a_request_id_while_the_first_is_in_flight_returns_invalid_request_with_repair() {
+    let handle = verified_handle(vec![
+        Capability::SessionRead,
+        Capability::SessionWrite,
+        Capability::PageWrite,
+    ])
+    .await;
+    let live = common::live_server_blocking_open(handle).await;
+    initialize(&live.server).await;
+    let server = Arc::clone(&live.server);
+    let pending =
+        tokio::spawn(async move { start(&server, 400, json!({"profile":"duplicate-id"})).await });
+
+    tokio::time::timeout(
+        StdDuration::from_secs(5),
+        live.probe.open_entered.notified(),
+    )
+    .await
+    .expect("open_page entered within five seconds");
+
+    let duplicate = live
+        .server
+        .handle_message(request(400, "ping", json!({})))
+        .await
+        .expect("duplicate id response");
+    assert_eq!(duplicate["error"]["code"], -32600, "{duplicate}");
+    assert_eq!(
+        duplicate["error"]["message"], "Invalid Request",
+        "{duplicate}"
+    );
+    assert_eq!(
+        duplicate["error"]["data"]["diagnostic"], "request id 400 is already in flight",
+        "{duplicate}"
+    );
+    assert_eq!(
+        duplicate["error"]["data"]["repair"],
+        "use a unique id per request; wait for the earlier response or send notifications/cancelled for it first",
+        "{duplicate}"
+    );
+
+    live.probe.open_release.notify_one();
+    let response = tokio::time::timeout(StdDuration::from_secs(5), pending)
+        .await
+        .expect("original request completed")
+        .unwrap();
+    assert!(response.get("error").is_none(), "{response}");
 }
