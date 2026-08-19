@@ -57,26 +57,6 @@ pub fn resolve_candidates(
     candidates: &[Candidate],
     policy: &ResolutionPolicy,
 ) -> Result<ResolutionDecision, ResolutionError> {
-    if candidates.len() > policy.max_candidates {
-        let matches = candidates
-            .iter()
-            .take(10)
-            .map(|candidate| {
-                format!(
-                    "id={},role={},name={}",
-                    bounded_candidate_field(&candidate.id),
-                    bounded_candidate_field(candidate.role.as_deref().unwrap_or("-")),
-                    bounded_candidate_field(candidate.name.as_deref().unwrap_or("-"))
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("; ");
-        return Err(ResolutionError::CandidateLimitExceeded {
-            count: candidates.len(),
-            limit: policy.max_candidates,
-            matches,
-        });
-    }
     let regex = match &target.text {
         Some(TextMatch::Regex(pattern)) => {
             if pattern.len() > policy.max_regex_len {
@@ -107,6 +87,29 @@ pub fn resolve_candidates(
             .cmp(&left.2.score)
             .then_with(|| left.0.cmp(&right.0))
     });
+    // An explicit ordinal picks one match deterministically, so a large
+    // matching set is not ambiguity for it; the bound guards the ranked
+    // choice below.
+    if target.ordinal.is_none() && ranked.len() > policy.max_candidates {
+        let matches = ranked
+            .iter()
+            .take(10)
+            .map(|(_, candidate, _)| {
+                format!(
+                    "id={},role={},name={}",
+                    bounded_candidate_field(&candidate.id),
+                    bounded_candidate_field(candidate.role.as_deref().unwrap_or("-")),
+                    bounded_candidate_field(candidate.name.as_deref().unwrap_or("-"))
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(ResolutionError::CandidateLimitExceeded {
+            count: ranked.len(),
+            limit: policy.max_candidates,
+            matches,
+        });
+    }
     if ranked.is_empty() {
         return Ok(ResolutionDecision::NotFound);
     }

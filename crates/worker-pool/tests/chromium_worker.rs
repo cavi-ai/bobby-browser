@@ -14,10 +14,11 @@ use std::collections::BTreeMap;
 use types::{
     AccessibilityNode, AccessibilitySnapshotCommand, CaptureScreenshotCommand,
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand, ClickModifier,
-    ClosePageCommand, ControlAction, ControlActionCommand, ElementState, ErrorCode,
-    EvaluateJavaScriptCommand, Evidence, InspectCommand, ListPagesCommand, NavigateCommand,
-    NetworkLogCommand, OpenPageCommand, PageId, ScreenshotMode, SessionId, TargetSpec, TextMatch,
-    TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil,
+    ClosePageCommand, ControlAction, ControlActionCommand, DialogAction, ElementState, ErrorCode,
+    EvaluateJavaScriptCommand, Evidence, HandleDialogCommand, InspectCommand, ListPagesCommand,
+    NavigateCommand, NetworkLogCommand, OpenPageCommand, PageId, ScreenshotMode, SessionId,
+    TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand,
+    WaitUntil,
 };
 use worker_pool::{
     resolve_upload_paths, session_download_dir, ChromiumWorkerFactory, WorkerFactory,
@@ -592,6 +593,181 @@ async fn drives_a_real_chromium_page() {
     let listed = worker.list_pages(&ListPagesCommand).await.unwrap();
     assert!(matches!(&listed[0], types::Evidence::Pages { pages } if pages.len() == 1));
     worker.close().await.unwrap();
+}
+
+/// Typing into a readonly, disabled, or otherwise non-editable control must
+/// fail fast with `InvalidRequest` rather than dispatch key events at it —
+/// on macOS headless Chrome, dispatching keys into a target that never
+/// accepts them pins the browser process at 100% CPU permanently.
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn refuses_to_type_into_readonly_and_disabled_controls() {
+    let profiles = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: profiles.path().to_path_buf(),
+        headless: true,
+        max_active: 8,
+        upload_roots: vec![profiles.path().to_path_buf()],
+        downloads_dir: profiles.path().join("downloads"),
+        artifacts_dir: profiles.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: "data:text/html,<input id=ro readonly value=ro><input id=dis disabled><input id=ok>".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    fn type_command(selector: &str) -> TypeTextCommand {
+        TypeTextCommand {
+            selector: selector.into(),
+            target: None,
+            value: "x".into(),
+            clear_first: false,
+            expected_url: None,
+        }
+    }
+
+    let readonly_result = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        worker.type_text(&page_id, &type_command("#ro")),
+    )
+    .await
+    .expect("typing into a readonly input must not hang");
+    let error = readonly_result.expect_err("typing into a readonly input must be refused");
+    assert_eq!(error.code, ErrorCode::InvalidRequest);
+    assert!(!error.retryable);
+
+    let disabled_result = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        worker.type_text(&page_id, &type_command("#dis")),
+    )
+    .await
+    .expect("typing into a disabled input must not hang");
+    let error = disabled_result.expect_err("typing into a disabled input must be refused");
+    assert_eq!(error.code, ErrorCode::InvalidRequest);
+    assert!(!error.retryable);
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        worker.type_text(&page_id, &type_command("#ok")),
+    )
+    .await
+    .expect("typing into an editable input must not hang")
+    .expect("typing into an editable input must succeed");
+
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn types_unicode_and_newlines_into_a_textarea() {
+    let profiles = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: profiles.path().to_path_buf(),
+        headless: true,
+        max_active: 8,
+        upload_roots: vec![profiles.path().to_path_buf()],
+        downloads_dir: profiles.path().join("downloads"),
+        artifacts_dir: profiles.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let worker = factory.launch(&SessionId::new()).await.unwrap();
+        let page_id = PageId::new();
+        worker.open_page(page_id.clone()).await.unwrap();
+        worker
+            .navigate(
+                &page_id,
+                &NavigateCommand {
+                    url: "data:text/html,<textarea id='t'></textarea><input id='i'>".into(),
+                    wait_until: WaitUntil::Interactive,
+                    timeout_ms: 10_000,
+                },
+            )
+            .await
+            .unwrap();
+        let textarea_value = "Zoë 日本 🧪\nline2";
+        worker
+            .type_text(
+                &page_id,
+                &TypeTextCommand {
+                    selector: "#t".into(),
+                    target: None,
+                    value: textarea_value.into(),
+                    clear_first: true,
+                    expected_url: None,
+                },
+            )
+            .await
+            .unwrap();
+        let input_value = "naïve";
+        worker
+            .type_text(
+                &page_id,
+                &TypeTextCommand {
+                    selector: "#i".into(),
+                    target: None,
+                    value: input_value.into(),
+                    clear_first: true,
+                    expected_url: None,
+                },
+            )
+            .await
+            .unwrap();
+        let textarea_evidence = worker
+            .inspect(
+                &page_id,
+                &InspectCommand {
+                    selector: Some("#t".into()),
+                    target: None,
+                    include_html: false,
+                },
+            )
+            .await
+            .unwrap();
+        let textarea_text = match &textarea_evidence[0] {
+            Evidence::Inspection { text, .. } => text.clone(),
+            other => panic!("unexpected evidence: {other:?}"),
+        };
+        assert_eq!(textarea_text, textarea_value);
+        let input_evidence = worker
+            .inspect(
+                &page_id,
+                &InspectCommand {
+                    selector: Some("#i".into()),
+                    target: None,
+                    include_html: false,
+                },
+            )
+            .await
+            .unwrap();
+        let input_text = match &input_evidence[0] {
+            Evidence::Inspection { text, .. } => text.clone(),
+            other => panic!("unexpected evidence: {other:?}"),
+        };
+        assert_eq!(input_text, input_value);
+        worker.close().await.unwrap();
+    })
+    .await
+    .expect("test timed out");
 }
 
 #[tokio::test]
@@ -1262,6 +1438,195 @@ async fn click_modifiers_reach_chromium_native_mouse_events() {
         Evidence::Inspection { text, .. }
             if text == "{\"shift\":true,\"ctrl\":false,\"alt\":true,\"meta\":false}"
     ));
+    worker.close().await.unwrap();
+}
+
+/// A click that opens alert()/confirm()/prompt() must not hang the click
+/// call itself: the renderer is blocked showing the dialog, so the click's
+/// own CDP round trip may never get a response. `click` must return with
+/// `dialogOpened` evidence instead, and the dialog it recorded must still be
+/// there for a later `dialog` call to consume — the page must not be left
+/// dead afterward.
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn click_returns_when_a_dialog_opens_and_dialog_accepts_it() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: concat!(
+                    "data:text/html,",
+                    "<button id=a onclick=\"alert('hi')\">A</button><div id=o></div>"
+                )
+                .into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let click_evidence = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        worker.click(
+            &page_id,
+            &ClickCommand {
+                selector: "#a".into(),
+                target: None,
+                boundary: false,
+                expected_url: None,
+                modifiers: vec![],
+            },
+        ),
+    )
+    .await
+    .expect("click must return well before the dialog blocks it forever")
+    .expect("click must succeed even though it opened a dialog");
+    assert!(
+        click_evidence.iter().any(|evidence| matches!(
+            evidence,
+            Evidence::Configuration { name, .. } if name == "dialogOpened"
+        )),
+        "click evidence missing dialogOpened: {click_evidence:?}"
+    );
+
+    let dialog_evidence = worker
+        .handle_dialog(
+            &page_id,
+            &HandleDialogCommand {
+                action: DialogAction::Accept,
+                timeout_ms: Some(2_000),
+            },
+        )
+        .await
+        .expect("the dialog recorded by the click must still be there to accept");
+    assert!(
+        dialog_evidence.iter().any(
+            |evidence| matches!(evidence, Evidence::Dialog { message, .. } if message == "hi")
+        ),
+        "dialog evidence missing the alert message: {dialog_evidence:?}"
+    );
+
+    worker
+        .inspect(
+            &page_id,
+            &InspectCommand {
+                selector: Some("#o".into()),
+                target: None,
+                include_html: false,
+            },
+        )
+        .await
+        .expect("the page must still be alive after the dialog is handled");
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn plain_click_completes_on_a_background_page() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+
+    let page_a = PageId::new();
+    worker.open_page(page_a.clone()).await.unwrap();
+    worker
+        .navigate(
+            &page_a,
+            &NavigateCommand {
+                url: concat!(
+                    "data:text/html,",
+                    "<button id=b onclick=\"document.getElementById('o').textContent=",
+                    "'clicked'\">B</button><div id=o></div>"
+                )
+                .into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    // Backgrounds page A: opening a second page brings it to the front.
+    let page_b = PageId::new();
+    worker.open_page(page_b.clone()).await.unwrap();
+    worker
+        .navigate(
+            &page_b,
+            &NavigateCommand {
+                url: "data:text/html,<p>B</p>".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        worker.click(
+            &page_a,
+            &ClickCommand {
+                selector: "#b".into(),
+                target: None,
+                boundary: false,
+                expected_url: None,
+                modifiers: vec![],
+            },
+        ),
+    )
+    .await
+    .expect("plain click on a backgrounded page must not hang until the envelope deadline")
+    .expect("plain click on a backgrounded page must succeed");
+
+    let inspect_evidence = worker
+        .inspect(
+            &page_a,
+            &InspectCommand {
+                selector: Some("#o".into()),
+                target: None,
+                include_html: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        inspect_evidence.iter().any(|evidence| matches!(
+            evidence,
+            Evidence::Inspection { text, .. } if text == "clicked"
+        )),
+        "expected #o to read 'clicked' after the background click: {inspect_evidence:?}"
+    );
+
     worker.close().await.unwrap();
 }
 

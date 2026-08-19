@@ -25,7 +25,9 @@ use chromiumoxide::cdp::browser_protocol::network::{
     Cookie, CookieParam, CookiePartitionKey, CookiePriority, CookieSameSite, CookieSourceScheme,
     SetCookiesParams, TimeSinceEpoch,
 };
-use chromiumoxide::cdp::browser_protocol::page::{CaptureScreenshotFormat, Viewport};
+use chromiumoxide::cdp::browser_protocol::page::{
+    CaptureScreenshotFormat, EventJavascriptDialogClosed, EventJavascriptDialogOpening, Viewport,
+};
 use chromiumoxide::cdp::browser_protocol::target::{EventTargetCreated, TargetId};
 use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
 use chromiumoxide::layout::Point;
@@ -195,6 +197,7 @@ impl WorkerFactory for ChromiumWorkerFactory {
                 self.config.max_artifact_bytes,
                 self.config.max_screenshot_dimension,
             ),
+            max_screenshot_dimension: self.config.max_screenshot_dimension,
             max_js_result_bytes: self.config.max_js_result_bytes,
             max_js_timeout_ms: self.config.max_js_timeout_ms,
             browser: Mutex::new(Some(browser)),
@@ -203,6 +206,8 @@ impl WorkerFactory for ChromiumWorkerFactory {
             network_trackers: Mutex::new(HashMap::new()),
             har_recorders: Mutex::new(HashMap::new()),
             har_tasks: Mutex::new(HashMap::new()),
+            pending_dialogs: Arc::new(Mutex::new(HashMap::new())),
+            dialog_tasks: Mutex::new(HashMap::new()),
             http_state: Mutex::new(HttpBridgeState::default()),
             handler_task: Mutex::new(Some(handler_task)),
             fingerprint: Mutex::new(self.fingerprint.clone()),
@@ -273,6 +278,7 @@ struct ChromiumWorker {
     download_dir: PathBuf,
     session_id: SessionId,
     artifacts: ArtifactStore,
+    max_screenshot_dimension: u32,
     max_js_result_bytes: usize,
     max_js_timeout_ms: u64,
     browser: Mutex<Option<Browser>>,
@@ -283,6 +289,15 @@ struct ChromiumWorker {
     network_trackers: Mutex<HashMap<PageId, Arc<crate::network_quiet::NetworkQuietTracker>>>,
     har_recorders: Mutex<HashMap<PageId, Arc<crate::HarRecorder>>>,
     har_tasks: Mutex<HashMap<PageId, JoinHandle<()>>>,
+    /// Dialogs (`alert`/`confirm`/`prompt`) that opened on a page before a
+    /// client called `dialog`, keyed by page. `install_dialog_listener`
+    /// spawns a background task per registered page that records the latest
+    /// dialog here — sequential MCP agents call `click` then `dialog`, and
+    /// by the time `dialog` runs the JavaScript dialog is usually already
+    /// open, so waiting for a *future* `EventJavascriptDialogOpening` (the
+    /// old behavior) hangs forever.
+    pending_dialogs: Arc<Mutex<HashMap<PageId, Arc<EventJavascriptDialogOpening>>>>,
+    dialog_tasks: Mutex<HashMap<PageId, JoinHandle<()>>>,
     http_state: Mutex<HttpBridgeState>,
     handler_task: Mutex<Option<JoinHandle<()>>>,
     fingerprint: Mutex<FingerprintConfig>,
@@ -444,6 +459,18 @@ impl ChromiumWorker {
                 .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
         }
         Ok(())
+    }
+
+    /// Best-effort `Page.bringToFront`, run immediately before dispatching a
+    /// click or keyboard event so the target page is not backgrounded — on a
+    /// background target in headless Chrome, chromiumoxide's own click path
+    /// (scroll-into-view + clickable-point + `Input.dispatchMouseEvent`)
+    /// never resolves. Failure here never aborts the caller: it is logged
+    /// and the dispatch proceeds anyway.
+    async fn bring_page_to_front(&self, page: &Page) {
+        if let Err(error) = bounded_cdp(page.bring_to_front(), command_failed).await {
+            tracing::debug!(?error, "bring-to-front before dispatch failed");
+        }
     }
 
     /// Humanized typing: focus the target, then replay `behavioral-engine`
@@ -791,8 +818,66 @@ impl ChromiumWorker {
             .lock()
             .await
             .insert(page_id.clone(), tracker);
+        self.install_dialog_listener(&page_id, &page).await;
         self.pages.lock().await.insert(page_id, page);
         Ok(())
+    }
+
+    /// Spawn a background task that records this page's JavaScript dialogs
+    /// as they open, so a dialog already open by the time `dialog` is
+    /// called is not missed (see `pending_dialogs`). Best-effort: if the
+    /// page cannot hand out a dialog listener, no task is spawned and
+    /// `handle_dialog` falls back to its own future-event wait.
+    async fn install_dialog_listener(&self, page_id: &PageId, page: &Page) {
+        let Ok(mut opened) = page.event_listener::<EventJavascriptDialogOpening>().await else {
+            return;
+        };
+        // A dialog closed by anything other than `handle_dialog` (a
+        // navigation, the page itself) must drop its pending record, or the
+        // next click on this page would report it as freshly opened.
+        let Ok(mut closed) = page.event_listener::<EventJavascriptDialogClosed>().await else {
+            return;
+        };
+        let pending_dialogs = self.pending_dialogs.clone();
+        let task_page_id = page_id.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    event = opened.next() => {
+                        let Some(event) = event else { break };
+                        pending_dialogs
+                            .lock()
+                            .await
+                            .insert(task_page_id.clone(), event);
+                    }
+                    event = closed.next() => {
+                        if event.is_none() {
+                            break;
+                        }
+                        pending_dialogs.lock().await.remove(&task_page_id);
+                    }
+                }
+            }
+        });
+        if let Some(previous) = self.dialog_tasks.lock().await.insert(page_id.clone(), task) {
+            previous.abort();
+        }
+    }
+
+    /// Poll `pending_dialogs` for a dialog recorded on this page. Only used
+    /// to race against an in-flight click (see `click`); never resolves on
+    /// its own if no dialog opens, so callers must bound it with a select
+    /// against something else that can complete.
+    async fn wait_for_pending_dialog(&self, page_id: &PageId) -> (String, String) {
+        loop {
+            if let Some(event) = self.pending_dialogs.lock().await.get(page_id) {
+                return (
+                    format!("{:?}", event.r#type).to_lowercase(),
+                    event.message.clone(),
+                );
+            }
+            tokio::time::sleep(DIALOG_POLL_INTERVAL).await;
+        }
     }
 
     async fn apply_fingerprint_to_page(&self, page: &Page) -> Result<(), CommandError> {
@@ -874,6 +959,10 @@ impl ChromiumWorker {
         preserve_har: bool,
     ) -> (Option<Page>, Option<Arc<crate::HarRecorder>>) {
         self.network_trackers.lock().await.remove(page_id);
+        self.pending_dialogs.lock().await.remove(page_id);
+        if let Some(task) = self.dialog_tasks.lock().await.remove(page_id) {
+            task.abort();
+        }
         let mut pages = self.pages.lock().await;
         let mut recorders = self.har_recorders.lock().await;
         let mut tasks = self.har_tasks.lock().await;
@@ -954,6 +1043,9 @@ impl ChromiumWorker {
 
 const PLAIN_CLICK_TARGET_DRIFT_RETRIES: usize = 3;
 const PLAIN_CLICK_TARGET_DRIFT_DELAY: Duration = Duration::from_millis(25);
+/// How often `click` polls for a dialog having opened while its own click
+/// future is still pending.
+const DIALOG_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 fn should_retry_plain_click_target_drift(
     boundary: bool,
@@ -1177,11 +1269,13 @@ impl BrowserWorker for ChromiumWorker {
                 Err(error) => return Err(error),
             }
             let text = resolved.inner_text(&page).await.ok().flatten();
-            let result = if self.humanization_enabled() {
-                self.humanized_click(&page, &resolved, &command.modifiers)
-                    .await
+            self.bring_page_to_front(&page).await;
+            let mut click_future: std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<(), CommandError>> + Send + '_>,
+            > = if self.humanization_enabled() {
+                Box::pin(self.humanized_click(&page, &resolved, &command.modifiers))
             } else if command.modifiers.is_empty() {
-                resolved.click(&page).await
+                Box::pin(resolved.click(&page))
             } else {
                 let target = resolved.clickable_point(&page).await?.ok_or_else(|| {
                     driver_error(
@@ -1189,26 +1283,57 @@ impl BrowserWorker for ChromiumWorker {
                         "target has no clickable point",
                     )
                 })?;
-                self.dispatch_click(&page, target, &command.modifiers).await
+                Box::pin(self.dispatch_click(&page, target, &command.modifiers))
             };
-            match result {
-                Ok(()) => {
-                    return Ok(vec![
-                        Evidence::Element {
-                            selector: command.selector.clone(),
-                            text,
-                        },
-                        resolved.evidence,
-                    ]);
+            // A click that opens alert()/confirm()/prompt() blocks the
+            // renderer, so the click's own CDP round trip may never return
+            // a response. Race it against a dialog having opened on this
+            // page instead of waiting on it unconditionally.
+            let dialog = tokio::select! {
+                result = &mut click_future => {
+                    drop(click_future);
+                    match result {
+                        Ok(()) => {
+                            return Ok(vec![
+                                Evidence::Element {
+                                    selector: command.selector.clone(),
+                                    text,
+                                },
+                                resolved.evidence,
+                            ]);
+                        }
+                        Err(error)
+                            if should_retry_plain_click_target_drift(
+                                command.boundary,
+                                attempt,
+                                &error,
+                            ) =>
+                        {
+                            tokio::time::sleep(PLAIN_CLICK_TARGET_DRIFT_DELAY).await;
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
-                Err(error)
-                    if should_retry_plain_click_target_drift(command.boundary, attempt, &error) =>
-                {
-                    tokio::time::sleep(PLAIN_CLICK_TARGET_DRIFT_DELAY).await;
-                    continue;
-                }
-                Err(error) => return Err(error),
-            }
+                dialog = self.wait_for_pending_dialog(page_id) => dialog,
+            };
+            // A dialog opened while the click future was still resolving.
+            // The renderer is blocked showing it, so that future's own CDP
+            // round trip may never get a response — don't wait on it.
+            // The dialog firing is proof the click landed; report it right
+            // away so the caller can call `dialog` next.
+            drop(click_future);
+            return Ok(vec![
+                Evidence::Element {
+                    selector: command.selector.clone(),
+                    text,
+                },
+                resolved.evidence,
+                Evidence::Configuration {
+                    name: "dialogOpened".into(),
+                    value: format!("{}: {}", dialog.0, dialog.1),
+                },
+            ]);
         }
         unreachable!("plain-click target drift retries are bounded")
     }
@@ -1257,6 +1382,8 @@ impl BrowserWorker for ChromiumWorker {
         let resolved = self
             .resolve_target(page_id, &page, &command.selector, command.target.as_ref())
             .await?;
+        ensure_editable_control(&page, &resolved).await?;
+        self.bring_page_to_front(&page).await;
         let mut humanization_evidence = None;
         let observed = if resolved.is_checkable(&page).await? {
             let checked = command.value.parse::<bool>().map_err(|_| {
@@ -1383,6 +1510,7 @@ impl BrowserWorker for ChromiumWorker {
         let resolved = self
             .resolve_target(page_id, &page, "", Some(&target))
             .await?;
+        self.bring_page_to_front(&page).await;
         let mut committed: Option<Vec<String>> = None;
         match &command.action {
             ControlAction::SetText { value } => resolved.type_text(&page, value, true).await?,
@@ -1622,23 +1750,31 @@ impl BrowserWorker for ChromiumWorker {
             command.timeout_ms.unwrap_or(30_000).clamp(1, 300_000),
         );
         let page = self.page_handle(page_id).await?;
-        let mut events = page
-            .event_listener::<chromiumoxide::cdp::browser_protocol::page::EventJavascriptDialogOpening>()
-            .await
-            .map_err(command_failed)?;
-        let event = tokio::time::timeout(timeout, events.next())
-            .await
-            .map_err(|_| {
-                driver_error(
-                    ErrorCode::DeadlineExceeded,
-                    format!(
-                        "no JavaScript dialog opened within {}ms",
-                        timeout.as_millis()
-                    ),
-                )
-            })?
-            .ok_or_else(|| driver_error(ErrorCode::NotFound, "dialog event stream closed"))?;
         let accept = matches!(command.action, types::DialogAction::Accept);
+        // The dialog may already be open — a click that triggered it always
+        // runs before the client asks about it — so check the recorded
+        // pending dialog first and only fall back to waiting on a future
+        // event if none was captured.
+        let event = if let Some(event) = self.pending_dialogs.lock().await.remove(page_id) {
+            event
+        } else {
+            let mut events = page
+                .event_listener::<EventJavascriptDialogOpening>()
+                .await
+                .map_err(command_failed)?;
+            tokio::time::timeout(timeout, events.next())
+                .await
+                .map_err(|_| {
+                    driver_error(
+                        ErrorCode::DeadlineExceeded,
+                        format!(
+                            "no JavaScript dialog opened within {}ms",
+                            timeout.as_millis()
+                        ),
+                    )
+                })?
+                .ok_or_else(|| driver_error(ErrorCode::NotFound, "dialog event stream closed"))?
+        };
         page.execute(
             chromiumoxide::cdp::browser_protocol::page::HandleJavaScriptDialogParams::new(accept),
         )
@@ -2295,18 +2431,7 @@ impl BrowserWorker for ChromiumWorker {
                 width,
                 height,
             } => {
-                if !x.is_finite()
-                    || !y.is_finite()
-                    || !width.is_finite()
-                    || !height.is_finite()
-                    || *width <= 0.0
-                    || *height <= 0.0
-                {
-                    return Err(driver_error(
-                        ErrorCode::InvalidRequest,
-                        "screenshot clip must have finite positive dimensions",
-                    ));
-                }
+                validate_clip(*x, *y, *width, *height, self.max_screenshot_dimension)?;
                 (
                     bounded_cdp(
                         page.screenshot(
@@ -3249,8 +3374,104 @@ fn command_failed(error: chromiumoxide::error::CdpError) -> CommandError {
     driver_error(ErrorCode::BrowserCommandFailed, error)
 }
 
+/// Typing into a target that cannot accept text — disabled, readonly, a
+/// fieldset-disabled ancestor, a non-typeable input type (hidden, button,
+/// submit, reset, image, file), or a non-form/non-contenteditable element
+/// such as `<h1>` — still dispatches key events. On macOS headless Chrome
+/// that pins the browser process at 100% CPU permanently instead of
+/// failing fast, so this must be checked before any key dispatch.
+const EDITABLE_CONTROL_CHECK_JS: &str = "function() { const el = this; return !el.disabled && !el.closest('fieldset[disabled]') && ((el instanceof HTMLInputElement && !el.readOnly && !['hidden','button','submit','reset','image','file'].includes((el.type||'text').toLowerCase())) || (el instanceof HTMLTextAreaElement && !el.readOnly) || el instanceof HTMLSelectElement || el.isContentEditable); }";
+
+/// Runs [`EDITABLE_CONTROL_CHECK_JS`] against the resolved target via
+/// `DOM.resolveNode` + `Runtime.callFunctionOn` on its backend node id —
+/// `ResolvedTarget`'s own JS-eval path is private to `targeting`, but its
+/// `backend_node_id` accessor is `pub(crate)`, which is enough to scope the
+/// same check through raw CDP from here.
+async fn ensure_editable_control(
+    page: &Page,
+    resolved: &crate::targeting::ResolvedTarget,
+) -> Result<(), CommandError> {
+    let backend_id = resolved.backend_node_id(page).await?;
+    let object_id = page
+        .execute(
+            chromiumoxide::cdp::browser_protocol::dom::ResolveNodeParams::builder()
+                .backend_node_id(backend_id)
+                .build(),
+        )
+        .await
+        .map_err(command_failed)?
+        .result
+        .object
+        .object_id
+        .ok_or_else(|| driver_error(ErrorCode::TargetNotFound, "target has no live object"))?;
+    let value = page
+        .execute(
+            chromiumoxide::cdp::js_protocol::runtime::CallFunctionOnParams::builder()
+                .object_id(object_id)
+                .function_declaration(EDITABLE_CONTROL_CHECK_JS)
+                .return_by_value(true)
+                .await_promise(false)
+                .build()
+                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?,
+        )
+        .await
+        .map_err(command_failed)?
+        .result
+        .result
+        .value
+        .ok_or_else(|| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "editability check returned no value",
+            )
+        })?;
+    let editable: bool = serde_json::from_value(value)
+        .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+    if editable {
+        return Ok(());
+    }
+    Err(CommandError {
+        code: ErrorCode::InvalidRequest,
+        message: "target is not an editable control (disabled, readonly, hidden, or not a text/select/checkable control)".into(),
+        layer: ErrorLayer::Driver,
+        retryable: false,
+    })
+}
+
 fn screenshot_error(error: chromiumoxide::error::CdpError) -> CommandError {
     driver_error(ErrorCode::ScreenshotCaptureFailed, error)
+}
+
+/// Bounds a screenshot clip before it reaches CDP. An unbounded clip (e.g.
+/// 50000x50000) sent to Chrome can kill the browser process outright, so
+/// this must run before the CDP call rather than relying on the
+/// `max_screenshot_dimension` cap `ArtifactStore` applies after capture.
+fn validate_clip(x: f64, y: f64, width: f64, height: f64, max: u32) -> Result<(), CommandError> {
+    if !x.is_finite()
+        || !y.is_finite()
+        || !width.is_finite()
+        || !height.is_finite()
+        || width <= 0.0
+        || height <= 0.0
+    {
+        return Err(CommandError {
+            code: ErrorCode::InvalidRequest,
+            message: "screenshot clip must have finite positive dimensions".into(),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        });
+    }
+    if x < 0.0 || y < 0.0 || width > max as f64 || height > max as f64 {
+        return Err(CommandError {
+            code: ErrorCode::InvalidRequest,
+            message: format!(
+                "screenshot clip exceeds the configured maximum dimension of {max}px or lies outside the viewport origin"
+            ),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        });
+    }
+    Ok(())
 }
 
 fn driver_error(code: ErrorCode, error: impl std::fmt::Display) -> CommandError {
@@ -3567,6 +3788,24 @@ fn compact_ax_tree_from(
         depth: usize,
     ) -> Option<types::AccessibilityNode> {
         let node = by_id.get(id)?;
+        let role = text(&node.role);
+        let name = text(&node.name);
+        // InlineTextBox leaves carry the same text as their StaticText
+        // parent — pure payload duplication. Skip them regardless of name.
+        // Unlabeled generic wrappers are skipped too; keep their children by
+        // re-parenting.
+        let emits = !node.ignored
+            && role.as_deref() != Some("InlineTextBox")
+            && !(matches!(role.as_deref(), None | Some("generic" | "none")) && name.is_none());
+        // Budget is reserved before descending so deep leaves can't starve
+        // ancestors: without this, a node's own slot could be consumed by
+        // its children first and the node itself would never emit.
+        if emits {
+            if *budget == 0 {
+                return None;
+            }
+            *budget -= 1;
+        }
         let mut children = Vec::new();
         if depth < 64 {
             if let Some(child_ids) = &node.child_ids {
@@ -3581,14 +3820,12 @@ fn compact_ax_tree_from(
                 }
             }
         }
-        if node.ignored {
+        if !emits {
             return (!children.is_empty()).then_some(types::AccessibilityNode {
                 children,
                 ..types::AccessibilityNode::default()
             });
         }
-        let role = text(&node.role);
-        let name = text(&node.name);
         let autocomplete = property_text(node, "autocomplete");
         let raw_value = text(&node.value);
         let masked_value = raw_value.as_deref().is_some_and(|value| {
@@ -3605,25 +3842,6 @@ fn compact_ax_tree_from(
         } else {
             raw_value
         };
-        // InlineTextBox leaves carry the same text as their StaticText
-        // parent — pure payload duplication. Skip them regardless of name.
-        if role.as_deref() == Some("InlineTextBox") {
-            return (!children.is_empty()).then_some(types::AccessibilityNode {
-                children,
-                ..types::AccessibilityNode::default()
-            });
-        }
-        // Skip unlabeled generic wrappers; keep their children by re-parenting.
-        if matches!(role.as_deref(), None | Some("generic" | "none")) && name.is_none() {
-            return (!children.is_empty()).then_some(types::AccessibilityNode {
-                children,
-                ..types::AccessibilityNode::default()
-            });
-        }
-        if *budget == 0 {
-            return None;
-        }
-        *budget -= 1;
         // Only links: the AX `url` property also lands on the root web
         // area, where it is the document URL — which for a data: page
         // embeds the whole document, secrets included.
@@ -3765,13 +3983,55 @@ mod tests {
         apply_state_commit, clamp_js_timeout_ms, compact_ax_tree, element_wait_missing_observation,
         ensure_automatic_download_modifier_support, is_closed_page_message, is_missing_css_node,
         should_retry_plain_click_target_drift, snapshot_cookie, text_matches,
-        unscoped_css_wait_selector, wait_should_retry_replaced_context, ChromiumWorker,
-        HttpBridgeState,
+        unscoped_css_wait_selector, validate_clip, wait_should_retry_replaced_context,
+        ChromiumWorker, HttpBridgeState, EDITABLE_CONTROL_CHECK_JS,
     };
     use types::{
         ClickModifier, CommandError, ErrorCode, ErrorLayer, PageId, SessionId, TargetSpec,
         TextMatch, WorkerId,
     };
+
+    #[test]
+    fn editable_control_check_js_covers_every_required_guard() {
+        assert!(EDITABLE_CONTROL_CHECK_JS.contains("!el.disabled"));
+        assert!(EDITABLE_CONTROL_CHECK_JS.contains("el.closest('fieldset[disabled]')"));
+        assert!(EDITABLE_CONTROL_CHECK_JS.contains("HTMLInputElement"));
+        assert!(EDITABLE_CONTROL_CHECK_JS.contains("!el.readOnly"));
+        assert!(EDITABLE_CONTROL_CHECK_JS.contains("'hidden'"));
+        assert!(EDITABLE_CONTROL_CHECK_JS.contains("'file'"));
+        assert!(EDITABLE_CONTROL_CHECK_JS.contains("HTMLTextAreaElement"));
+        assert!(EDITABLE_CONTROL_CHECK_JS.contains("HTMLSelectElement"));
+        assert!(EDITABLE_CONTROL_CHECK_JS.contains("el.isContentEditable"));
+    }
+
+    #[test]
+    fn validate_clip_rejects_dimensions_over_the_configured_maximum() {
+        let error = validate_clip(-10.0, -10.0, 50_000.0, 50_000.0, 16_384)
+            .expect_err("clip exceeding the maximum dimension must be rejected");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert!(!error.retryable);
+    }
+
+    #[test]
+    fn validate_clip_rejects_negative_origin() {
+        let error = validate_clip(-1.0, 0.0, 100.0, 100.0, 16_384)
+            .expect_err("clip with a negative origin must be rejected");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert!(!error.retryable);
+    }
+
+    #[test]
+    fn validate_clip_accepts_dimensions_within_the_maximum() {
+        validate_clip(0.0, 0.0, 100.0, 100.0, 16_384).expect("clip within bounds must be accepted");
+    }
+
+    #[test]
+    fn validate_clip_rejects_non_finite_dimensions() {
+        let error = validate_clip(0.0, 0.0, f64::NAN, 100.0, 16_384)
+            .expect_err("a non-finite dimension must be rejected");
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert!(!error.retryable);
+    }
 
     #[test]
     fn modified_download_clicks_fail_instead_of_dropping_native_modifiers() {
@@ -3817,6 +4077,7 @@ mod tests {
             download_dir: root.join("downloads"),
             session_id: SessionId::new(),
             artifacts: super::ArtifactStore::new(root.join("artifacts"), 1024, 1024),
+            max_screenshot_dimension: 1024,
             max_js_result_bytes: 1024,
             max_js_timeout_ms: 1_000,
             browser: super::Mutex::new(None),
@@ -3825,6 +4086,8 @@ mod tests {
             network_trackers: super::Mutex::new(super::HashMap::new()),
             har_recorders: super::Mutex::new(super::HashMap::new()),
             har_tasks: super::Mutex::new(super::HashMap::new()),
+            pending_dialogs: super::Arc::new(super::Mutex::new(super::HashMap::new())),
+            dialog_tasks: super::Mutex::new(super::HashMap::new()),
             http_state: super::Mutex::new(HttpBridgeState::default()),
             handler_task: super::Mutex::new(None),
             fingerprint: super::Mutex::new(fingerprint.clone()),
@@ -4110,6 +4373,76 @@ mod tests {
         assert!(truncated);
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].target.as_ref().unwrap().ordinal, Some(0));
+    }
+
+    /// Budget must be reserved for a node before its children are visited,
+    /// or a deep subtree of leaves can consume the whole budget before any
+    /// ancestor — including the root — gets a turn, leaving the snapshot
+    /// with zero nodes no matter how large the cap is raised.
+    #[test]
+    fn compact_ax_tree_reserves_budget_before_descending_into_children() {
+        let mut item_ids = Vec::new();
+        let mut items = Vec::new();
+        for i in 0..300 {
+            let item_id = format!("item{i}");
+            let text_id = format!("{item_id}-text");
+            items.push(serde_json::json!({
+                "nodeId": item_id,
+                "ignored": false,
+                "parentId": "list",
+                "role": {"type": "role", "value": "listitem"},
+                "childIds": [text_id]
+            }));
+            items.push(serde_json::json!({
+                "nodeId": text_id,
+                "ignored": false,
+                "parentId": item_id,
+                "role": {"type": "role", "value": "StaticText"},
+                "name": {"type": "computedString", "value": format!("Item {i}")}
+            }));
+            item_ids.push(item_id);
+        }
+
+        let mut all = vec![
+            serde_json::json!({
+                "nodeId": "root",
+                "ignored": false,
+                "role": {"type": "role", "value": "RootWebArea"},
+                "childIds": ["heading", "list"]
+            }),
+            serde_json::json!({
+                "nodeId": "heading",
+                "ignored": false,
+                "parentId": "root",
+                "role": {"type": "role", "value": "heading"},
+                "name": {"type": "computedString", "value": "Fixture page"}
+            }),
+            serde_json::json!({
+                "nodeId": "list",
+                "ignored": false,
+                "parentId": "root",
+                "role": {"type": "role", "value": "list"},
+                "childIds": item_ids
+            }),
+        ];
+        all.extend(items);
+
+        let raw: Vec<chromiumoxide::cdp::browser_protocol::accessibility::AxNode> =
+            serde_json::from_value(serde_json::Value::Array(all)).expect("valid CDP AX fixture");
+
+        let (nodes, truncated) = compact_ax_tree(&raw, 10);
+        assert_eq!(nodes.len(), 1, "root must always be emitted");
+        assert_eq!(super::count_a11y_nodes(&nodes), 10);
+        assert!(truncated);
+
+        let (nodes, truncated) = compact_ax_tree(&raw, 1);
+        assert_eq!(nodes.len(), 1, "root must always be emitted");
+        assert_eq!(super::count_a11y_nodes(&nodes), 1);
+        assert!(truncated);
+
+        let (nodes, truncated) = compact_ax_tree(&raw, 5000);
+        assert_eq!(super::count_a11y_nodes(&nodes), raw.len());
+        assert!(!truncated);
     }
 
     // These cover only the Chrome-specific layer: `WorkerId`-keyed PID-registry

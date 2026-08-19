@@ -30,7 +30,7 @@ pub(crate) fn candidate_limit_repair() -> Value {
 
 pub(crate) fn browser_launch_repair() -> Value {
     json!({
-        "action": "run `bobby doctor`; stop the process occupying the configured Firefox BiDi port or choose a free port, then retry session_create"
+        "action": "run `bobby doctor`; another runtime (bobby serve/cdp/mcp-stdio or a stray mcp-gateway) may own the Firefox companion port (default 127.0.0.1:9876) or the BiDi endpoint; stop it or point this runtime at a free companionBind, then retry session_create"
     })
 }
 
