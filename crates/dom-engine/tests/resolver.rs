@@ -191,3 +191,45 @@ fn role_matching_is_case_insensitive() {
         matches!(resolve_candidates(&target, &[frame], &ResolutionPolicy::default()).unwrap(), ResolutionDecision::Resolved { candidate, .. } if candidate.id == "frame")
     );
 }
+
+/// `<label>Name <input></label>` produces an AX name with trailing
+/// whitespace while the DOM collector trims label innerText; a snapshot
+/// target passed back verbatim must still resolve, in either direction.
+#[test]
+fn accessible_name_matching_trims_surrounding_whitespace() {
+    let trimmed = candidate("field", "Name", true);
+    let target = TargetSpec {
+        accessible_name: Some("Name ".into()),
+        ..TargetSpec::default()
+    };
+    assert!(
+        matches!(resolve_candidates(&target, &[trimmed], &ResolutionPolicy::default()).unwrap(), ResolutionDecision::Resolved { candidate, .. } if candidate.id == "field")
+    );
+
+    let untrimmed = candidate("field2", "Name ", true);
+    let target = TargetSpec {
+        accessible_name: Some("Name".into()),
+        ..TargetSpec::default()
+    };
+    assert!(
+        matches!(resolve_candidates(&target, &[untrimmed], &ResolutionPolicy::default()).unwrap(), ResolutionDecision::Resolved { candidate, .. } if candidate.id == "field2")
+    );
+}
+
+/// Chrome's a11y tree moved from `img` to `image`; the DOM collector's
+/// implicit-role mapping still emits `img` for an `<img>` element. A target
+/// role of `image` (as returned by an a11y snapshot) must still resolve
+/// against a candidate carrying the collector's `img` role.
+#[test]
+fn image_role_matches_img_candidate_role() {
+    let mut logo = candidate("logo", "Logo", true);
+    logo.role = Some("img".into());
+    let target = TargetSpec {
+        role: Some("image".into()),
+        accessible_name: Some("Logo".into()),
+        ..TargetSpec::default()
+    };
+    assert!(
+        matches!(resolve_candidates(&target, &[logo], &ResolutionPolicy::default()).unwrap(), ResolutionDecision::Resolved { candidate, .. } if candidate.id == "logo")
+    );
+}

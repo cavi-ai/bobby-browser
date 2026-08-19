@@ -24,6 +24,13 @@ pub(crate) fn reconciliation_repair() -> Value {
     repair(NEEDS_RECONCILIATION_ACTION)
 }
 
+/// Repair for a navigation Chrome aborted (a download response or a cancelled
+/// navigation): the generic `browserCommandFailed` advice says retry, and a
+/// retry repeats the abort.
+pub(crate) fn navigation_aborted_repair() -> Value {
+    repair("Do not retry the navigation; fetch files with download_url, or use click_and_wait_for_download for an in-page link, and navigate only to renderable URLs.")
+}
+
 pub(crate) fn candidate_limit_repair() -> Value {
     repair("Narrow the target using role + accessibleName, label, testId, CSS, or ordinal, then retry once; the error lists the first bounded matches and the exact count/limit.")
 }
@@ -108,7 +115,7 @@ pub(crate) fn repair_for_code(code: &str) -> Option<Value> {
             "Take a fresh a11y_snapshot; there may be another dismissal control, or the wrong thing was dismissed."
         }
         "visionAssistDenied" => {
-            "Configuration or authorization gap, not a retry; fall back to a deterministic tool, or grant the missing capability or session policy."
+            "The message leads with the deterministic stuck reason (targetNotFound, targetAmbiguous, obstructionSuspected); repair that first (fresh a11y_snapshot, narrower target); enabling visionAssist on the session or granting vision:assist only adds the vision fallback."
         }
         "visionAssistFailed" => {
             "If no vision provider is configured, treat like visionAssistDenied; only transient causes (capture error, response error, low-confidence proposal) merit a single retry."
@@ -203,6 +210,16 @@ mod tests {
     #[test]
     fn unknown_codes_get_no_guessed_hint() {
         assert!(repair_for_code("madeUpCode").is_none());
+    }
+
+    #[test]
+    fn aborted_navigation_repair_points_at_the_download_tools() {
+        let action = navigation_aborted_repair()["action"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(action.contains("download_url"), "{action}");
+        assert!(action.starts_with("Do not retry"), "{action}");
     }
 
     #[test]

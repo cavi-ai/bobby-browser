@@ -328,6 +328,16 @@ async fn page_open_accepts_a_url_and_returns_the_navigation_outcome() {
         response["result"]["structuredContent"]["navigationOutcome"]["evidence"][0]["url"],
         json!("https://example.test/jobs")
     );
+    assert_eq!(
+        response["result"]["structuredContent"]["url"],
+        json!("https://example.test/jobs"),
+        "page url must reflect the completed navigation, not the pre-navigation open: {response}"
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["ready_state"],
+        json!("interactive"),
+        "page ready_state must reflect the completed navigation: {response}"
+    );
 }
 
 #[tokio::test]

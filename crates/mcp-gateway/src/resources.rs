@@ -789,9 +789,13 @@ tools most likely to produce it.
   vision-fallback escalation instead computes its gate from only capability
   and session policy; provider configuration is checked separately, so a
   missing provider reached through an `intent_*` tool does **not** produce
-  this code -- see `visionAssistFailed`. Repair: this is a configuration or
-  authorization gap, not a retry -- fall back to a deterministic tool, or
-  grant the missing capability / session policy.
+  this code -- see `visionAssistFailed`. On every `intent_*` tool the message
+  leads with the deterministic stuck reason (`targetNotFound`,
+  `targetAmbiguous`, `obstructionSuspected`, with the stuck evidence attached)
+  and then names the closed gate, so a session that never asked for vision
+  still sees what to fix. Repair: repair the stuck reason first (fresh
+  `a11y_snapshot`, narrower target); enabling `visionAssist` on the session
+  or granting the capability only adds the vision fallback.
 - `visionAssistFailed` -- the gate the reached path checks was open, but the
   vision path still didn't produce a usable result. Critically, on every
   `intent_*` tool this includes a **provider that isn't configured at all**:

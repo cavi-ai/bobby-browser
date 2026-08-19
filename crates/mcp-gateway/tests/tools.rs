@@ -1383,18 +1383,25 @@ async fn command_execute_schema_accepts_locate_intent_envelope() {
     assert_eq!(record["candidates"], json!([]), "{response}");
     assert_eq!(record["verification"], "targetNotFound", "{response}");
     // Command-layer failures carry the machine-readable repair hint on the
-    // error itself; the fake DOM denies vision assist, whose repair is the
-    // deterministic fallback.
+    // error itself; the fake DOM denies vision assist, whose message leads
+    // with the stuck reason and whose repair is to fix that reason first.
     assert_eq!(
         content["error"]["code"],
         json!("visionAssistDenied"),
         "{response}"
     );
     assert!(
+        content["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("targetNotFound"),
+        "{response}"
+    );
+    assert!(
         content["error"]["repair"]["action"]
             .as_str()
             .unwrap()
-            .contains("deterministic tool"),
+            .contains("stuck reason"),
         "{response}"
     );
     assert_eq!(

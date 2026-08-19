@@ -909,10 +909,13 @@ fn report_outcome(
             format!("completed ({} evidence record(s))", evidence.len())
         }
         CommandOutcome::Failed { error, .. } => {
-            format!("failed: {:?} — {}", error.code, error.message)
+            format!("failed: {:?} -- {}", error.code, error.message)
         }
         CommandOutcome::NeedsReconciliation { error, .. } => {
-            format!("needs reconciliation: {:?} — {}", error.code, error.message)
+            format!(
+                "needs reconciliation: {:?} -- {}",
+                error.code, error.message
+            )
         }
         other => format!("outcome: {other:?}"),
     };

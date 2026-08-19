@@ -105,7 +105,7 @@ impl Server {
                             .require_capability(&context, types::Capability::BrowserMutate)?;
                     }
                     let session_id = input.session_id;
-                    let page = self
+                    let mut page = self
                         .runtime
                         .open_page(
                             context.clone(),
@@ -149,6 +149,12 @@ impl Server {
                         };
                     let navigation_completed =
                         matches!(navigation_outcome, types::CommandOutcome::Completed { .. });
+                    if let types::CommandOutcome::Completed { evidence, .. } = &navigation_outcome {
+                        if let Some(types::Evidence::Navigation { url, .. }) = evidence.first() {
+                            page.url = Some(url.clone());
+                            page.ready_state = "interactive".to_owned();
+                        }
+                    }
                     let mut value = to_json(page)?;
                     let object = value
                         .as_object_mut()

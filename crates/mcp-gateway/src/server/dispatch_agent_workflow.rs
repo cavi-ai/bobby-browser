@@ -384,11 +384,21 @@ impl Server {
         };
         let SetupReady {
             reservation,
-            session,
-            page,
+            mut session,
+            mut page,
             navigation_outcome,
             disposition,
         } = ready;
+
+        if let Some(types::CommandOutcome::Completed { evidence, .. }) = &navigation_outcome {
+            if let Some(types::Evidence::Navigation { url, .. }) = evidence.first() {
+                page.url = Some(url.clone());
+                page.ready_state = "interactive".to_owned();
+            }
+        }
+        if !session.page_ids.contains(&page.id) {
+            session.page_ids.push(page.id.clone());
+        }
 
         if !reservation.generation_is_current() {
             let cleanup = request_supervisor_cleanup(

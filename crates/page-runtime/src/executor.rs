@@ -386,7 +386,7 @@ impl PageRuntime {
                                             &envelope,
                                             CommandError {
                                                 code: ErrorCode::TargetDetached,
-                                                message: "the browser process was killed; a fresh browser was launched and the page reloaded to its last URL — inspect current state and re-issue the command".into(),
+                                                message: "the browser process was killed; a fresh browser was launched and the page reloaded to its last URL -- inspect current state and re-issue the command".into(),
                                                 layer: ErrorLayer::Driver,
                                                 retryable: false,
                                             },
@@ -776,8 +776,31 @@ impl PageRuntime {
                         },
                     )
                     .await?;
-                let matches = verification.iter().any(|item| {
-                    matches!(item, Evidence::Inspection { text, .. } if text == &command.value)
+                let inspected = verification.iter().find_map(|item| match item {
+                    Evidence::Inspection { text, .. } => Some(text.as_str()),
+                    _ => None,
+                });
+                let observed = evidence.iter().find_map(|item| match item {
+                    Evidence::Element { text, .. } => text.as_deref(),
+                    _ => None,
+                });
+                let kind = evidence
+                    .iter()
+                    .find_map(|item| match item {
+                        Evidence::Configuration { name, value } if name == "typedControlKind" => {
+                            Some(value.as_str())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or("text");
+                let matches = inspected.is_some_and(|inspected| {
+                    typed_value_verified(
+                        &command.value,
+                        command.clear_first,
+                        inspected,
+                        observed,
+                        kind,
+                    )
                 });
                 if matches {
                     let mut combined = evidence;
@@ -1072,6 +1095,27 @@ impl PageRuntime {
         envelope: &CommandEnvelope,
         outcome: CommandOutcome,
     ) -> (CommandOutcome, bool) {
+        let failure_fields = match &outcome {
+            CommandOutcome::Failed { error, .. } => Some(("failed", error)),
+            CommandOutcome::RetryableFailure { error, .. } => Some(("retryableFailure", error)),
+            CommandOutcome::NeedsReconciliation { error, .. } => {
+                Some(("needsReconciliation", error))
+            }
+            CommandOutcome::PolicyDenied { error, .. } => Some(("policyDenied", error)),
+            _ => None,
+        };
+        if let Some((outcome_label, error)) = failure_fields {
+            tracing::warn!(
+                command = crate::context::command_kind_name(&envelope.command),
+                session_id = %envelope.session_id.0,
+                page_id = ?envelope.page_id.as_ref().map(|id| id.0),
+                outcome = outcome_label,
+                code = ?error.code,
+                retryable = error.retryable,
+                message = %error.message,
+                "command failed"
+            );
+        }
         // A failed command may still have changed the page (a click that timed
         // out waiting for navigation may have navigated), so the context graph
         // forgets on any non-replayable failure.
@@ -1235,8 +1279,10 @@ fn requires_reconciliation(envelope: &CommandEnvelope) -> bool {
         )
 }
 
-/// Errors raised before the command could reach the browser: argument
-/// validation and target resolution run before dispatch, so the side effect
+/// Errors raised before the command could reach the browser, or aborted
+/// before any artifact/file landed: argument validation and target
+/// resolution run before dispatch, and a response body over the configured
+/// cap is dropped mid-stream with nothing written, so the side effect
 /// provably never landed. Reporting `needsReconciliation` for these tells
 /// the agent to stop and reconcile an effect that never happened.
 fn is_pre_effect(error: &CommandError) -> bool {
@@ -1249,6 +1295,7 @@ fn is_pre_effect(error: &CommandError) -> bool {
             | ErrorCode::ShadowRootUnavailable
             | ErrorCode::IntentCompileFailed
             | ErrorCode::IntentActionMismatch
+            | ErrorCode::HttpResponseTooLarge
     )
 }
 
@@ -1313,11 +1360,154 @@ fn verification_error(message: impl Into<String>) -> CommandError {
     }
 }
 
+/// Whether a TypeText command's post-action state counts as verified.
+///
+/// `inspected` is the independent post-action read (`Inspection.text`);
+/// `observed` is the worker's own post-action element read
+/// (`Evidence::Element.text`, first one); `kind` is the worker's
+/// `typedControlKind` Configuration value ("text" when the worker did not
+/// report one). Exact match always passes; an append (`!clear_first`) passes
+/// when the independent read ends with the typed value; a checkable passes
+/// when the worker's checked-state read echoes the typed boolean; a select
+/// passes when the independent read confirms the option value the worker set.
+fn typed_value_verified(
+    value: &str,
+    clear_first: bool,
+    inspected: &str,
+    observed: Option<&str>,
+    kind: &str,
+) -> bool {
+    if inspected == value {
+        return true;
+    }
+    if !clear_first && inspected.ends_with(value) {
+        return true;
+    }
+    if value.parse::<bool>().is_ok() && observed == Some(value) {
+        return true;
+    }
+    if kind == "select"
+        && observed.is_some_and(|observed| !observed.is_empty() && observed == inspected)
+    {
+        return true;
+    }
+    false
+}
+
 fn internal_error(message: impl Into<String>) -> CommandError {
     CommandError {
         code: ErrorCode::Internal,
         message: message.into(),
         layer: ErrorLayer::Page,
         retryable: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::typed_value_verified;
+
+    #[test]
+    fn exact_match_passes() {
+        assert!(typed_value_verified("Ada", true, "Ada", None, "text"));
+    }
+
+    #[test]
+    fn exact_match_fails_on_mismatch() {
+        assert!(!typed_value_verified(
+            "ada@example.test",
+            true,
+            "not-the-typed-value",
+            None,
+            "text"
+        ));
+    }
+
+    #[test]
+    fn append_without_clear_passes_when_inspected_ends_with_value() {
+        assert!(typed_value_verified("x", false, "prefilledx", None, "text"));
+    }
+
+    #[test]
+    fn append_with_clear_first_does_not_use_suffix_rule() {
+        assert!(!typed_value_verified("x", true, "prefilledx", None, "text"));
+    }
+
+    #[test]
+    fn append_fails_when_inspected_does_not_end_with_value() {
+        assert!(!typed_value_verified("x", false, "prefilled", None, "text"));
+    }
+
+    #[test]
+    fn checkable_passes_when_observed_echoes_typed_boolean() {
+        assert!(typed_value_verified(
+            "true",
+            true,
+            "on",
+            Some("true"),
+            "checkable"
+        ));
+    }
+
+    #[test]
+    fn checkable_fails_when_observed_does_not_match() {
+        assert!(!typed_value_verified(
+            "true",
+            true,
+            "on",
+            Some("false"),
+            "checkable"
+        ));
+    }
+
+    #[test]
+    fn checkable_fails_when_value_is_not_boolean() {
+        assert!(!typed_value_verified(
+            "maybe",
+            true,
+            "on",
+            Some("maybe"),
+            "checkable"
+        ));
+    }
+
+    #[test]
+    fn select_passes_when_observed_confirms_inspected_option_value() {
+        assert!(typed_value_verified(
+            "Pro plan",
+            true,
+            "pro",
+            Some("pro"),
+            "select"
+        ));
+    }
+
+    #[test]
+    fn select_fails_when_observed_differs_from_inspected() {
+        assert!(!typed_value_verified(
+            "Pro plan",
+            true,
+            "pro",
+            Some("basic"),
+            "select"
+        ));
+    }
+
+    #[test]
+    fn select_fails_when_observed_is_empty() {
+        assert!(!typed_value_verified(
+            "Pro plan",
+            true,
+            "pro",
+            Some(""),
+            "select"
+        ));
+    }
+
+    #[test]
+    fn select_fails_when_observed_is_absent() {
+        assert!(!typed_value_verified(
+            "Pro plan", true, "pro", None, "select"
+        ));
     }
 }

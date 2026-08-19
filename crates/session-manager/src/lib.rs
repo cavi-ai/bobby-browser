@@ -38,7 +38,7 @@ impl SessionManager {
                     // gateway allowlists it by prefix before letting any runtime
                     // detail cross to an external agent.
                     RuntimeError::EngineUnreachable(format!(
-                        "browser launch failed: {}; run `bobby doctor` to verify the Firefox BiDi endpoint and detect another service occupying its configured port",
+                        "browser launch failed: {}; run `bobby doctor` -- another runtime may hold the Firefox companion bind (default 127.0.0.1:9876) or the BiDi endpoint",
                         error.message
                     ))
                 } else {

@@ -380,20 +380,7 @@ impl Browser {
 
     /// Create a new browser page
     pub async fn new_page(&self, params: impl Into<CreateTargetParams>) -> Result<Page> {
-        let (tx, rx) = oneshot_channel();
-        let mut params = params.into();
-        if let Some(id) = self.browser_context.id() {
-            if params.browser_context_id.is_none() {
-                params.browser_context_id = Some(id.clone());
-            }
-        }
-
-        self.sender
-            .clone()
-            .send(HandlerMessage::CreatePage(params, tx))
-            .await?;
-
-        rx.await?
+        BrowserHandle::new_page_impl(&self.sender, &self.browser_context, params).await
     }
 
     /// Version information about the browser
@@ -408,49 +395,31 @@ impl Browser {
 
     /// Call a browser method.
     pub async fn execute<T: Command>(&self, cmd: T) -> Result<CommandResponse<T::Response>> {
-        let (tx, rx) = oneshot_channel();
-        let method = cmd.identifier();
-        let msg = CommandMessage::new(cmd, tx)?;
-
-        self.sender
-            .clone()
-            .send(HandlerMessage::Command(msg))
-            .await?;
-        let resp = rx.await??;
-        to_command_response::<T>(resp, method)
+        BrowserHandle::execute_impl(&self.sender, cmd).await
     }
 
     /// Return all of the pages of the browser
     pub async fn pages(&self) -> Result<Vec<Page>> {
-        let (tx, rx) = oneshot_channel();
-        self.sender
-            .clone()
-            .send(HandlerMessage::GetPages(tx))
-            .await?;
-        Ok(rx.await?)
+        BrowserHandle::pages_impl(&self.sender).await
     }
 
     /// Return page of given target_id
     pub async fn get_page(&self, target_id: TargetId) -> Result<Page> {
-        let (tx, rx) = oneshot_channel();
-        self.sender
-            .clone()
-            .send(HandlerMessage::GetPage(target_id, tx))
-            .await?;
-        rx.await?.ok_or(CdpError::NotFound)
+        BrowserHandle::get_page_impl(&self.sender, target_id).await
     }
 
     /// Set listener for browser event
     pub async fn event_listener<T: IntoEventKind>(&self) -> Result<EventStream<T>> {
-        let (tx, rx) = unbounded();
-        self.sender
-            .clone()
-            .send(HandlerMessage::AddEventListener(
-                EventListenerRequest::new::<T>(tx),
-            ))
-            .await?;
+        BrowserHandle::event_listener_impl(&self.sender).await
+    }
 
-        Ok(EventStream::new(rx))
+    /// Returns a cheaply cloneable handle to this browser that can be held across
+    /// awaits without keeping any external lock on the `Browser` itself.
+    pub fn handle(&self) -> BrowserHandle {
+        BrowserHandle {
+            sender: self.sender.clone(),
+            browser_context: self.browser_context.clone(),
+        }
     }
 
     /// Creates a new empty browser context.
@@ -498,6 +467,107 @@ impl Browser {
 
         self.execute(SetCookiesParams::new(cookies)).await?;
         Ok(self)
+    }
+}
+
+/// A cheaply cloneable handle to a [`Browser`] that carries only the pieces needed
+/// to send commands and read pages: the connection handler's message `Sender` and
+/// the browser context. Unlike `Browser`, it does not own the child process or the
+/// browser's configuration, so it does not need `&mut` access and can be cloned out
+/// from behind a lock and held across awaits without keeping that lock held.
+#[derive(Clone, Debug)]
+pub struct BrowserHandle {
+    sender: Sender<HandlerMessage>,
+    browser_context: BrowserContext,
+}
+
+impl BrowserHandle {
+    async fn new_page_impl(
+        sender: &Sender<HandlerMessage>,
+        browser_context: &BrowserContext,
+        params: impl Into<CreateTargetParams>,
+    ) -> Result<Page> {
+        let (tx, rx) = oneshot_channel();
+        let mut params = params.into();
+        if let Some(id) = browser_context.id() {
+            if params.browser_context_id.is_none() {
+                params.browser_context_id = Some(id.clone());
+            }
+        }
+
+        sender
+            .clone()
+            .send(HandlerMessage::CreatePage(params, tx))
+            .await?;
+
+        rx.await?
+    }
+
+    async fn execute_impl<T: Command>(
+        sender: &Sender<HandlerMessage>,
+        cmd: T,
+    ) -> Result<CommandResponse<T::Response>> {
+        let (tx, rx) = oneshot_channel();
+        let method = cmd.identifier();
+        let msg = CommandMessage::new(cmd, tx)?;
+
+        sender.clone().send(HandlerMessage::Command(msg)).await?;
+        let resp = rx.await??;
+        to_command_response::<T>(resp, method)
+    }
+
+    async fn pages_impl(sender: &Sender<HandlerMessage>) -> Result<Vec<Page>> {
+        let (tx, rx) = oneshot_channel();
+        sender.clone().send(HandlerMessage::GetPages(tx)).await?;
+        Ok(rx.await?)
+    }
+
+    async fn get_page_impl(sender: &Sender<HandlerMessage>, target_id: TargetId) -> Result<Page> {
+        let (tx, rx) = oneshot_channel();
+        sender
+            .clone()
+            .send(HandlerMessage::GetPage(target_id, tx))
+            .await?;
+        rx.await?.ok_or(CdpError::NotFound)
+    }
+
+    async fn event_listener_impl<T: IntoEventKind>(
+        sender: &Sender<HandlerMessage>,
+    ) -> Result<EventStream<T>> {
+        let (tx, rx) = unbounded();
+        sender
+            .clone()
+            .send(HandlerMessage::AddEventListener(
+                EventListenerRequest::new::<T>(tx),
+            ))
+            .await?;
+
+        Ok(EventStream::new(rx))
+    }
+
+    /// Create a new browser page
+    pub async fn new_page(&self, params: impl Into<CreateTargetParams>) -> Result<Page> {
+        Self::new_page_impl(&self.sender, &self.browser_context, params).await
+    }
+
+    /// Call a browser method.
+    pub async fn execute<T: Command>(&self, cmd: T) -> Result<CommandResponse<T::Response>> {
+        Self::execute_impl(&self.sender, cmd).await
+    }
+
+    /// Return all of the pages of the browser
+    pub async fn pages(&self) -> Result<Vec<Page>> {
+        Self::pages_impl(&self.sender).await
+    }
+
+    /// Return page of given target_id
+    pub async fn get_page(&self, target_id: TargetId) -> Result<Page> {
+        Self::get_page_impl(&self.sender, target_id).await
+    }
+
+    /// Set listener for browser event
+    pub async fn event_listener<T: IntoEventKind>(&self) -> Result<EventStream<T>> {
+        Self::event_listener_impl(&self.sender).await
     }
 }
 

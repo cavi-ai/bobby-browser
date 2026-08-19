@@ -226,6 +226,194 @@ async fn har_preserves_redirect_responses_that_reuse_a_request_id() {
 
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
+async fn navigating_to_a_download_response_fails_fast_instead_of_hanging_to_the_deadline() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let fixture = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut request = [0_u8; 1024];
+                let read = stream.read(&mut request).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&request[..read]);
+                if request.starts_with("GET /ok") {
+                    let body = "<!doctype html><title>OK</title><p id=\"ok\">ok fixture</p>";
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                } else {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=file.bin\r\nContent-Length: 3\r\nConnection: close\r\n\r\nbin",
+                        )
+                        .await
+                        .unwrap();
+                }
+            });
+        }
+    });
+    let download_url = format!("http://{address}/file.bin");
+    let ok_url = format!("http://{address}/ok");
+    let root = tempfile::tempdir().unwrap();
+    let session_id = SessionId::new();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&session_id).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+
+    let started = std::time::Instant::now();
+    let result = worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: download_url.clone(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await;
+    let elapsed = started.elapsed();
+    let error = result.expect_err("navigating to a download response must not report success");
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "navigation to a download must fail fast instead of waiting for the deadline, took {elapsed:?}"
+    );
+    assert!(
+        !error.retryable,
+        "an aborted download navigation is not retryable, retrying reaches the same download"
+    );
+    assert!(
+        error.message.contains("download_url"),
+        "error must point the caller at download_url, got: {}",
+        error.message
+    );
+
+    let started = std::time::Instant::now();
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: ok_url.clone(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "the navigation after an aborted download must not wait on the freed slot, took {elapsed:?}"
+    );
+    let observed = worker
+        .inspect(
+            &page_id,
+            &InspectCommand {
+                selector: Some("#ok".into()),
+                target: None,
+                include_html: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        observed
+            .iter()
+            .any(|item| matches!(item, Evidence::Inspection { text, .. } if text == "ok fixture")),
+        "expected the /ok fixture text, got {observed:?}"
+    );
+
+    worker.close().await.unwrap();
+    fixture.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn network_log_reports_networkrecordingstarted_only_on_the_attaching_call() {
+    let fixture = test_site::spawn().await;
+    let root = tempfile::tempdir().unwrap();
+    let session_id = SessionId::new();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&session_id).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+
+    let first = worker
+        .network_log(&page_id, &NetworkLogCommand { clear: false })
+        .await
+        .unwrap();
+    assert!(
+        first.iter().any(|evidence| matches!(
+            evidence,
+            Evidence::Configuration { name, value }
+                if name == "networkRecordingStarted" && value == "true"
+        )),
+        "the attaching call must report networkRecordingStarted: {first:?}"
+    );
+
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: fixture.base_url(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let second = worker
+        .network_log(&page_id, &NetworkLogCommand { clear: false })
+        .await
+        .unwrap();
+    let entries = match &second[0] {
+        Evidence::HarArtifact { entries, .. } => *entries,
+        other => panic!("unexpected evidence: {other:?}"),
+    };
+    assert!(entries > 0, "the navigation request must be recorded");
+    assert!(
+        !second.iter().any(|evidence| matches!(
+            evidence,
+            Evidence::Configuration { name, .. } if name == "networkRecordingStarted"
+        )),
+        "an already-attached collector must not report networkRecordingStarted again: {second:?}"
+    );
+
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
 async fn synchronizes_versioned_http_state() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -772,6 +960,117 @@ async fn types_unicode_and_newlines_into_a_textarea() {
 
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
+async fn type_text_reports_the_typed_control_kind_and_the_committed_value() {
+    let profiles = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: profiles.path().to_path_buf(),
+        headless: true,
+        max_active: 8,
+        upload_roots: vec![profiles.path().to_path_buf()],
+        downloads_dir: profiles.path().join("downloads"),
+        artifacts_dir: profiles.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let worker = factory.launch(&SessionId::new()).await.unwrap();
+        let page_id = PageId::new();
+        worker.open_page(page_id.clone()).await.unwrap();
+        worker
+            .navigate(
+                &page_id,
+                &NavigateCommand {
+                    url: "data:text/html,<input id='text' value='prefilled'><input id='cb' type='checkbox'><select id='sel'><option value='basic'>Basic</option><option value='pro'>Pro plan</option></select>".into(),
+                    wait_until: WaitUntil::Interactive,
+                    timeout_ms: 10_000,
+                },
+            )
+            .await
+            .unwrap();
+
+        fn element_text(evidence: &[Evidence]) -> Option<String> {
+            evidence.iter().find_map(|item| match item {
+                Evidence::Element { text, .. } => text.clone(),
+                _ => None,
+            })
+        }
+        fn typed_control_kind(evidence: &[Evidence]) -> Option<String> {
+            evidence.iter().find_map(|item| match item {
+                Evidence::Configuration { name, value } if name == "typedControlKind" => {
+                    Some(value.clone())
+                }
+                _ => None,
+            })
+        }
+
+        let text_evidence = worker
+            .type_text(
+                &page_id,
+                &TypeTextCommand {
+                    selector: "#text".into(),
+                    target: None,
+                    value: "x".into(),
+                    clear_first: false,
+                    expected_url: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            element_text(&text_evidence).as_deref(),
+            Some("prefilledx")
+        );
+        assert_eq!(typed_control_kind(&text_evidence).as_deref(), Some("text"));
+
+        let checkbox_evidence = worker
+            .type_text(
+                &page_id,
+                &TypeTextCommand {
+                    selector: "#cb".into(),
+                    target: None,
+                    value: "true".into(),
+                    clear_first: false,
+                    expected_url: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(element_text(&checkbox_evidence).as_deref(), Some("true"));
+        assert_eq!(
+            typed_control_kind(&checkbox_evidence).as_deref(),
+            Some("checkable")
+        );
+
+        let select_evidence = worker
+            .type_text(
+                &page_id,
+                &TypeTextCommand {
+                    selector: "#sel".into(),
+                    target: None,
+                    value: "Pro plan".into(),
+                    clear_first: false,
+                    expected_url: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(element_text(&select_evidence).as_deref(), Some("pro"));
+        assert_eq!(
+            typed_control_kind(&select_evidence).as_deref(),
+            Some("select")
+        );
+
+        worker.close().await.unwrap();
+    })
+    .await
+    .expect("test timed out");
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
 async fn semantic_targets_fail_closed_and_reresolve_after_replacement() {
     let root = tempfile::tempdir().unwrap();
     let factory = ChromiumWorkerFactory::new(BrowserConfig {
@@ -1183,6 +1482,99 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
         ));
     }
     worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn control_action_activates_a11y_snapshot_button_targets_outside_a_form() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: "data:text/html,<button id=plain>Plain</button><div role=button tabindex=0 id=divbtn>Div</div><a role=button href=%23 id=anchorbtn>Anchor</a><button aria-label=Labelled id=labelled>x</button><button id=padded> Padded </button>".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let snapshot = worker
+        .a11y_snapshot(
+            &page_id,
+            &AccessibilitySnapshotCommand {
+                max_nodes: Some(128),
+                target: None,
+            },
+        )
+        .await
+        .unwrap();
+    let nodes = snapshot
+        .iter()
+        .find_map(|item| match item {
+            Evidence::AccessibilitySnapshot { nodes, .. } => Some(nodes),
+            _ => None,
+        })
+        .expect("accessibility snapshot evidence");
+
+    fn find_button_node<'a>(
+        nodes: &'a [AccessibilityNode],
+        name: &str,
+    ) -> Option<&'a AccessibilityNode> {
+        nodes.iter().find_map(|node| {
+            (node.role.as_deref() == Some("button") && node.name.as_deref() == Some(name))
+                .then_some(node)
+                .or_else(|| find_button_node(&node.children, name))
+        })
+    }
+
+    let mut failures = Vec::new();
+    for name in ["Plain", "Div", "Anchor", "Labelled", "Padded"] {
+        let node = find_button_node(nodes, name)
+            .unwrap_or_else(|| panic!("no a11y button node named {name}"));
+        let ax_target = node
+            .target
+            .as_ref()
+            .unwrap_or_else(|| panic!("button {name} has no command-ready target"));
+        let target = types::FormControlTarget {
+            role: ax_target.role.clone(),
+            accessible_name: ax_target.accessible_name.clone(),
+            ordinal: ax_target.ordinal,
+            frame_path: ax_target.frame_path.clone(),
+            shadow_path: Vec::new(),
+        };
+        let result = worker
+            .control_action(
+                &page_id,
+                &ControlActionCommand {
+                    target,
+                    action: ControlAction::Activate,
+                },
+            )
+            .await;
+        if let Err(error) = result {
+            failures.push(format!("{name}: {error:?}"));
+        }
+    }
+    worker.close().await.unwrap();
+    assert!(failures.is_empty(), "activate failed for: {failures:?}");
 }
 
 #[tokio::test]
@@ -2449,5 +2841,398 @@ async fn dogfood_humanized_stream_biometrics() {
         (dx * py - dy * px).abs() > 1.0
     });
     assert!(off_line, "mouse path is a straight line: {moves:?}");
+    worker.close().await.unwrap();
+}
+
+fn find_by_role<'a>(
+    nodes: &'a [AccessibilityNode],
+    roles: &[&str],
+) -> Option<&'a AccessibilityNode> {
+    for node in nodes {
+        if node
+            .role
+            .as_deref()
+            .is_some_and(|role| roles.contains(&role))
+        {
+            return Some(node);
+        }
+        if let Some(found) = find_by_role(&node.children, roles) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn implicit_roles_from_the_dom_collector_match_the_a11y_snapshot() {
+    let profiles = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: profiles.path().to_path_buf(),
+        headless: true,
+        max_active: 8,
+        upload_roots: vec![profiles.path().to_path_buf()],
+        downloads_dir: profiles.path().join("downloads"),
+        artifacts_dir: profiles.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let worker = factory.launch(&SessionId::new()).await.unwrap();
+        let page_id = PageId::new();
+        worker.open_page(page_id.clone()).await.unwrap();
+        worker
+            .navigate(
+                &page_id,
+                &NavigateCommand {
+                    url: "data:text/html,<h1>Title</h1><ul><li>One</li></ul>\
+                          <img alt='Logo' src='data:,'>\
+                          <table><tr><th>H</th><td>C</td></tr></table>"
+                        .into(),
+                    wait_until: WaitUntil::Interactive,
+                    timeout_ms: 10_000,
+                },
+            )
+            .await
+            .unwrap();
+        let snapshot = worker
+            .a11y_snapshot(
+                &page_id,
+                &AccessibilitySnapshotCommand {
+                    max_nodes: Some(256),
+                    target: None,
+                },
+            )
+            .await
+            .unwrap();
+        let nodes = snapshot
+            .iter()
+            .find_map(|item| match item {
+                Evidence::AccessibilitySnapshot { nodes, .. } => Some(nodes),
+                _ => None,
+            })
+            .expect("accessibility snapshot evidence");
+        for roles in [
+            vec!["heading"],
+            vec!["listitem"],
+            vec!["img", "image"],
+            vec!["cell"],
+        ] {
+            let node = find_by_role(nodes, &roles)
+                .unwrap_or_else(|| panic!("no node with role in {roles:?} in {nodes:#?}"));
+            let target = TargetSpec {
+                role: node.role.clone(),
+                accessible_name: node.name.clone(),
+                ..TargetSpec::default()
+            };
+            worker
+                .inspect(
+                    &page_id,
+                    &InspectCommand {
+                        selector: None,
+                        target: Some(target),
+                        include_html: false,
+                    },
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "role {roles:?} (emitted {:?}) failed to resolve: {error:?}",
+                        node.role
+                    )
+                });
+        }
+        worker.close().await.unwrap();
+    })
+    .await
+    .expect("test timed out");
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn a_css_selector_matching_nothing_is_reported_as_no_matching_element() {
+    let profiles = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: profiles.path().to_path_buf(),
+        headless: true,
+        max_active: 8,
+        upload_roots: vec![profiles.path().to_path_buf()],
+        downloads_dir: profiles.path().join("downloads"),
+        artifacts_dir: profiles.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let worker = factory.launch(&SessionId::new()).await.unwrap();
+        let page_id = PageId::new();
+        worker.open_page(page_id.clone()).await.unwrap();
+        worker
+            .navigate(
+                &page_id,
+                &NavigateCommand {
+                    url: "data:text/html,<p>fresh page</p>".into(),
+                    wait_until: WaitUntil::Interactive,
+                    timeout_ms: 10_000,
+                },
+            )
+            .await
+            .unwrap();
+        let error = worker
+            .inspect(
+                &page_id,
+                &InspectCommand {
+                    selector: Some("#nope".into()),
+                    target: None,
+                    include_html: false,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::TargetNotFound);
+        assert!(error.message.contains("no element matches selector"));
+        assert!(!error.message.contains("stale"));
+        worker.close().await.unwrap();
+    })
+    .await
+    .expect("test timed out");
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn descends_unnamed_srcdoc_iframes_and_resolves_the_stamped_ordinal_hop() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: "data:text/html,<iframe srcdoc='<button>One</button>'></iframe><iframe srcdoc='<button>Two</button>'></iframe>".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let snapshot = worker
+        .a11y_snapshot(
+            &page_id,
+            &AccessibilitySnapshotCommand {
+                max_nodes: Some(128),
+                target: None,
+            },
+        )
+        .await
+        .unwrap();
+    let nodes = snapshot
+        .iter()
+        .find_map(|item| match item {
+            Evidence::AccessibilitySnapshot { nodes, .. } => Some(nodes),
+            _ => None,
+        })
+        .expect("accessibility snapshot evidence");
+
+    fn find_iframe_nodes<'a>(nodes: &'a [AccessibilityNode], out: &mut Vec<&'a AccessibilityNode>) {
+        for node in nodes {
+            if node.role.as_deref() == Some("Iframe") {
+                out.push(node);
+            }
+            find_iframe_nodes(&node.children, out);
+        }
+    }
+    let mut iframe_nodes = Vec::new();
+    find_iframe_nodes(nodes, &mut iframe_nodes);
+    assert_eq!(iframe_nodes.len(), 2, "both iframes must appear: {nodes:?}");
+    for iframe in &iframe_nodes {
+        assert!(
+            !iframe.children.is_empty(),
+            "unnamed iframe must still be descended into: {iframe:?}"
+        );
+    }
+
+    fn find_button_node<'a>(
+        nodes: &'a [AccessibilityNode],
+        name: &str,
+    ) -> Option<&'a AccessibilityNode> {
+        nodes.iter().find_map(|node| {
+            (node.role.as_deref() == Some("button") && node.name.as_deref() == Some(name))
+                .then_some(node)
+                .or_else(|| find_button_node(&node.children, name))
+        })
+    }
+
+    let two = find_button_node(nodes, "Two").expect("button Two inside the descended iframe");
+    let ax_target = two
+        .target
+        .as_ref()
+        .expect("button Two has a command-ready target");
+    assert_eq!(ax_target.frame_path.len(), 1);
+    assert_eq!(ax_target.frame_path[0].accessible_name, "");
+    assert_eq!(ax_target.frame_path[0].ordinal, Some(1));
+
+    // The snapshot's own stamped target, passed back exactly as an agent
+    // would (a JSON round trip through `AccessibilityTarget`'s wire shape),
+    // must validate and resolve even though the frame hop carries an empty
+    // accessibleName.
+    let value = serde_json::to_value(ax_target).expect("serialize accessibility target");
+    let verbatim_target: TargetSpec =
+        serde_json::from_value(value).expect("deserialize accessibility target as TargetSpec");
+    worker
+        .click(
+            &page_id,
+            &ClickCommand {
+                selector: String::new(),
+                target: Some(verbatim_target),
+                boundary: false,
+                expected_url: None,
+                modifiers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+    // A hand-built target using only role + ordinal (no accessibleName at
+    // all) must resolve the same unnamed iframe by identity, not by the
+    // name/src heuristic (both iframes have neither).
+    let hand_built = TargetSpec {
+        role: Some("button".into()),
+        accessible_name: Some("Two".into()),
+        frame_path: vec![Box::new(TargetSpec {
+            role: Some("iframe".into()),
+            ordinal: Some(1),
+            ..TargetSpec::default()
+        })],
+        ..TargetSpec::default()
+    };
+    worker
+        .inspect(
+            &page_id,
+            &InspectCommand {
+                selector: None,
+                target: Some(hand_built),
+                include_html: false,
+            },
+        )
+        .await
+        .unwrap();
+
+    worker.close().await.unwrap();
+}
+
+/// A hung `click_and_wait_for_popup` on one page must not block another
+/// page's commands: the worker-wide browser mutex used to be held for the
+/// whole click-plus-wait, up to `timeout_ms`, serializing every other page.
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn a_hung_click_and_wait_for_popup_does_not_block_other_pages() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 8,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+
+    let page_a = PageId::new();
+    worker.open_page(page_a.clone()).await.unwrap();
+    worker
+        .navigate(
+            &page_a,
+            &NavigateCommand {
+                url: "data:text/html,<button id='continue' type='button'>Continue</button>".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let opened = worker
+        .open_page_command(&OpenPageCommand {
+            url: Some("data:text/html,<title>Page B</title><button id='b'>B</button>".into()),
+        })
+        .await
+        .unwrap();
+    let page_b = match &opened[0] {
+        types::Evidence::Page { page_id, .. } => page_id.clone(),
+        other => panic!("unexpected evidence: {other:?}"),
+    };
+
+    // `#continue` never opens a popup, so this waits out the full timeout.
+    let popup_worker = worker.clone();
+    let popup_page = page_a.clone();
+    let popup_task = tokio::spawn(async move {
+        popup_worker
+            .click_and_wait_for_popup(
+                &popup_page,
+                &ClickAndWaitForPopupCommand {
+                    selector: "#continue".into(),
+                    target: None,
+                    timeout_ms: 6_000,
+                },
+            )
+            .await
+    });
+
+    // Give the click a head start so it is inside its wait loop, then prove
+    // page B is not blocked behind page A's still-pending popup wait. The
+    // probe resolves a target, the path that used to take the worker-wide
+    // browser mutex; a whole-page inspect never did and would pass either way.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let started = std::time::Instant::now();
+    worker
+        .inspect(
+            &page_b,
+            &InspectCommand {
+                selector: None,
+                target: Some(TargetSpec {
+                    css: Some("#b".into()),
+                    ..Default::default()
+                }),
+                include_html: false,
+            },
+        )
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "inspect on page B took {elapsed:?} while page A's click_and_wait_for_popup was in \
+         flight; the worker-wide browser mutex is still blocking other pages"
+    );
+
+    let popup_result = popup_task.await.unwrap();
+    let error = popup_result.expect_err("no popup ever opens for #continue");
+    assert_eq!(error.code, types::ErrorCode::DeadlineExceeded);
+
     worker.close().await.unwrap();
 }

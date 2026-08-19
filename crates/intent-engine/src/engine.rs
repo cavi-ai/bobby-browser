@@ -2120,11 +2120,17 @@ async fn execute_solve_challenge(
     let plan_summary = format!("solveChallenge timeout_ms={timeout_ms}");
     let gates_open = vision.session_ok && vision.capability_ok;
     let Some(assist) = vision.assist.as_ref().filter(|_| gates_open) else {
+        let reason = if !vision.session_ok {
+            "vision assist is off for this session (executionPolicy.visionAssist)"
+        } else if !vision.capability_ok {
+            "the principal lacks the vision:assist capability"
+        } else {
+            "no vision provider is configured"
+        };
         return IntentOutcome::Failed {
             error: CommandError {
                 code: ErrorCode::VisionAssistDenied,
-                message: "solveChallenge requires vision assist; the vision gates are closed"
-                    .into(),
+                message: format!("solveChallenge requires vision assist; {reason}"),
                 layer: ErrorLayer::Page,
                 retryable: false,
             },
@@ -2415,12 +2421,7 @@ async fn stuck_outcome_with_prior_evidence(
 
     let gates_open = vision.session_ok && vision.capability_ok;
     let Some(assist) = vision.assist.as_ref() else {
-        return vision_denied_or_unavailable(
-            gates_open,
-            prior_evidence,
-            stuck_evidence,
-            verification,
-        );
+        return vision_denied_or_unavailable(vision, prior_evidence, stuck_evidence, verification);
     };
     if !gates_open {
         let mut evidence = prior_evidence;
@@ -2429,7 +2430,7 @@ async fn stuck_outcome_with_prior_evidence(
         return IntentOutcome::Failed {
             error: CommandError {
                 code: ErrorCode::VisionAssistDenied,
-                message: format!("vision assist denied; underlying stuck reason: {verification}"),
+                message: vision_denied_message(vision, verification),
                 layer: ErrorLayer::Page,
                 retryable: false,
             },
@@ -2505,15 +2506,30 @@ async fn stuck_outcome_with_prior_evidence(
     .await
 }
 
+/// The `visionAssistDenied` message leads with the deterministic stuck
+/// reason (the actionable part: which target was missing or ambiguous) and
+/// then names the closed gate, so an agent that never asked for vision can
+/// repair the target instead of reading the code as a policy wall. The code
+/// stays `visionAssistDenied` because the ACP gateway and one-shot consent
+/// flows key their "ask the human for vision" escalation off it.
+fn vision_denied_message(vision: &VisionContext, verification: &str) -> String {
+    let gate = if !vision.session_ok {
+        "vision assist is off for this session (executionPolicy.visionAssist)"
+    } else {
+        "the principal lacks the vision:assist capability"
+    };
+    format!("{verification}; no vision fallback ran because {gate}")
+}
+
 fn vision_denied_or_unavailable(
-    gates_open: bool,
+    vision: &VisionContext,
     prior_evidence: Vec<Evidence>,
     stuck_evidence: Evidence,
     verification: &str,
 ) -> IntentOutcome {
     let mut evidence = prior_evidence;
     evidence.push(stuck_evidence);
-    if gates_open {
+    if vision.session_ok && vision.capability_ok {
         IntentOutcome::Failed {
             error: CommandError {
                 code: ErrorCode::VisionAssistFailed,
@@ -2528,7 +2544,7 @@ fn vision_denied_or_unavailable(
         IntentOutcome::Failed {
             error: CommandError {
                 code: ErrorCode::VisionAssistDenied,
-                message: format!("vision assist denied; underlying stuck reason: {verification}"),
+                message: vision_denied_message(vision, verification),
                 layer: ErrorLayer::Page,
                 retryable: false,
             },
