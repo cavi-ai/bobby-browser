@@ -312,7 +312,7 @@ enum CliCommand {
         /// Upstream provider: "openai", "ollama", or "mlx"
         #[arg(long, default_value = "openai")]
         upstream: String,
-        /// Model id (defaults per upstream: gpt-4o / llava:7b / Qwen2.5-VL-3B)
+        /// Model id (defaults per upstream: gpt-4o / llava:7b / Qwen3.5-27B)
         #[arg(long)]
         model: Option<String>,
         /// Vision upstream base URL (defaults per upstream: openai / 11434 / 9101)

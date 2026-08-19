@@ -694,7 +694,14 @@ fn agents_skill_item_enabled(skill: bool, project_skill: bool, use_defaults: boo
     skill || project_skill || use_defaults
 }
 
-const MLX_MODELS: [(&str, &str); 3] = [
+const MLX_MODELS: [(&str, &str); 4] = [
+    // First entry is the interactive default. Qwen3.5-27B grounds precisely
+    // and drives solveChallenge; the 2.5-VL small/balanced options cannot
+    // (see docs/CAPTCHA_SOLUTION.md).
+    (
+        "Recommended (Qwen3.5 27B)",
+        "mlx-community/Qwen3.5-27B-4bit",
+    ),
     ("Small (3B)", "mlx-community/Qwen2.5-VL-3B-Instruct-4bit"),
     ("Balanced (7B)", "mlx-community/Qwen2.5-VL-7B-Instruct-4bit"),
     ("Large (32B)", "mlx-community/Qwen2.5-VL-32B-Instruct-4bit"),
@@ -850,6 +857,7 @@ fn configure_mlx_model_interactive(state: &mut VisionInstallState) -> Result<boo
         format!("{} — {}", MLX_MODELS[0].0, MLX_MODELS[0].1),
         format!("{} — {}", MLX_MODELS[1].0, MLX_MODELS[1].1),
         format!("{} — {}", MLX_MODELS[2].0, MLX_MODELS[2].1),
+        format!("{} — {}", MLX_MODELS[3].0, MLX_MODELS[3].1),
         "Back without downloading".to_owned(),
     ];
     let choice = Select::with_theme(&ColorfulTheme::default())
@@ -1425,7 +1433,7 @@ mod install_tests {
     }
 
     #[test]
-    fn ollama_is_the_portable_install_default_and_three_mlx_choices_are_stable() {
+    fn ollama_is_the_portable_install_default_and_mlx_choices_are_stable() {
         let state = VisionInstallState::default();
         assert!(state.enabled);
         assert_eq!(state.provider, "ollama");
@@ -1433,6 +1441,7 @@ mod install_tests {
         assert_eq!(
             MLX_MODELS.map(|(_, model)| model),
             [
+                "mlx-community/Qwen3.5-27B-4bit",
                 "mlx-community/Qwen2.5-VL-3B-Instruct-4bit",
                 "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
                 "mlx-community/Qwen2.5-VL-32B-Instruct-4bit",
@@ -1447,9 +1456,10 @@ mod install_tests {
         let previous = std::env::var_os("HF_HOME");
         unsafe { std::env::set_var("HF_HOME", home.path()) };
         let model = MLX_MODELS[0].1;
-        let snapshot = home
-            .path()
-            .join("hub/models--mlx-community--Qwen2.5-VL-3B-Instruct-4bit/snapshots/abc");
+        let snapshot = home.path().join(format!(
+            "hub/models--{}/snapshots/abc",
+            model.replace('/', "--")
+        ));
         std::fs::create_dir_all(&snapshot).unwrap();
         std::fs::write(snapshot.join("config.json"), "{}").unwrap();
         assert!(!cached_hugging_face_model(model).unwrap());
