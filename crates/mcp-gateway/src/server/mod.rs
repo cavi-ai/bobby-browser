@@ -1458,16 +1458,62 @@ fn interface_error_response(id: Value, mut interface_error: types::InterfaceErro
     } else {
         crate::repair::repair_for_code(&code)
     };
+    let repair_action = repair
+        .as_ref()
+        .and_then(|repair| repair["action"].as_str())
+        .map(ToOwned::to_owned);
     let mut data = json!({"interfaceError":interface_error});
-    if let Some(diagnostic) = safe_diagnostic {
+    if let Some(diagnostic) = &safe_diagnostic {
         data["diagnostic"] = json!(diagnostic);
     }
     if let Some(repair) = repair {
         data["repair"] = repair;
     }
+    let message = interface_error_message(
+        &diagnostic,
+        safe_diagnostic.as_deref(),
+        repair_action.as_deref(),
+    );
     let mut response = error(id, INTERFACE_ERROR, "Runtime interface error", Some(data));
-    response["error"]["message"] = json!(diagnostic);
+    response["error"]["message"] = json!(message);
     response
+}
+
+/// Caps the agent-facing message at `MAX_INTERFACE_ERROR_MESSAGE_BYTES`,
+/// truncating the diagnostic detail first so the repair action -- the part
+/// that tells the agent what to actually do -- always survives intact.
+const MAX_INTERFACE_ERROR_MESSAGE_BYTES: usize = 1024;
+
+fn interface_error_message(
+    diagnostic: &str,
+    safe_diagnostic: Option<&str>,
+    repair_action: Option<&str>,
+) -> String {
+    let suffix = repair_action
+        .map(|action| format!("; repair: {action}"))
+        .unwrap_or_default();
+    let detail = safe_diagnostic
+        .map(|detail| {
+            let budget = MAX_INTERFACE_ERROR_MESSAGE_BYTES
+                .saturating_sub(diagnostic.len())
+                .saturating_sub(suffix.len())
+                .saturating_sub(2);
+            format!(": {}", truncate_at_char_boundary(detail, budget))
+        })
+        .unwrap_or_default();
+    let message = format!("{diagnostic}{detail}{suffix}");
+    truncate_at_char_boundary(&message, MAX_INTERFACE_ERROR_MESSAGE_BYTES).to_owned()
+}
+
+fn truncate_at_char_boundary(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 fn collect_artifact_ids(value: &Value, found: &mut BTreeSet<String>) {
@@ -1772,6 +1818,56 @@ mod tests {
         let message = response["error"]["message"].as_str().unwrap();
         assert!(message.contains("missingCapability"), "{message}");
         assert!(message.contains("browser:fingerprint"), "{message}");
+        assert!(!response.to_string().contains(secret));
+    }
+
+    #[test]
+    fn interface_error_message_carries_the_allowlisted_diagnostic_and_repair_action() {
+        let diagnostic = format!(
+            "{BROWSER_LAUNCH_DIAGNOSTIC_PREFIX} failed to bind companion server on 127.0.0.1:9876 (Address already in use); run `bobby doctor`"
+        );
+        let response = interface_error_response(
+            json!(9),
+            types::InterfaceError {
+                code: types::InterfaceErrorCode::EngineUnreachable,
+                layer: types::ErrorLayer::Interface,
+                message: diagnostic.clone(),
+                correlation_id: types::CorrelationId::new(),
+                command_id: None,
+                retryable: true,
+                retry_after_ms: None,
+                reconciliation_required: false,
+                required_capability: None,
+            },
+        );
+        let message = response["error"]["message"].as_str().unwrap();
+        assert!(message.contains(&diagnostic), "{message}");
+        let repair_action = crate::repair::browser_launch_repair()["action"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(message.contains(&repair_action), "{message}");
+    }
+
+    #[test]
+    fn interface_error_message_never_carries_a_non_allowlisted_raw_message() {
+        let secret = "internal stack trace with a leaked token";
+        let response = interface_error_response(
+            json!(10),
+            types::InterfaceError {
+                code: types::InterfaceErrorCode::Internal,
+                layer: types::ErrorLayer::Interface,
+                message: secret.to_owned(),
+                correlation_id: types::CorrelationId::new(),
+                command_id: None,
+                retryable: false,
+                retry_after_ms: None,
+                reconciliation_required: false,
+                required_capability: None,
+            },
+        );
+        let message = response["error"]["message"].as_str().unwrap();
+        assert!(!message.contains(secret), "{message}");
         assert!(!response.to_string().contains(secret));
     }
 }

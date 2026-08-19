@@ -68,24 +68,50 @@ fn equivalent_candidates_fail_closed_with_ranked_evidence() {
 
 #[test]
 fn candidate_limit_error_reports_count_limit_matches_and_repair() {
-    let candidates = vec![
-        candidate("first", "Resume", true),
-        candidate("second", "Resume", true),
-        candidate("third", "Resume", true),
-    ];
-    let policy = ResolutionPolicy {
-        max_candidates: 2,
-        ..ResolutionPolicy::default()
-    };
-    let error = resolve_candidates(&target("Resume"), &candidates, &policy).unwrap_err();
+    let candidates = (0..150)
+        .map(|index| candidate(&format!("candidate-{index}"), "Same", true))
+        .collect::<Vec<_>>();
+    let error =
+        resolve_candidates(&target("Same"), &candidates, &ResolutionPolicy::default()).unwrap_err();
     let message = error.to_string();
-    assert!(message.contains("3 candidates"), "{message}");
-    assert!(message.contains("limit 2"), "{message}");
+    assert!(message.contains("150 candidates"), "{message}");
+    assert!(message.contains("limit 100"), "{message}");
     assert!(
-        message.contains("first") && message.contains("second"),
+        message.contains("candidate-0") && message.contains("candidate-9"),
         "{message}"
     );
+    assert!(!message.contains("candidate-10,"), "{message}");
     assert!(message.contains("Narrow the target"), "{message}");
+}
+
+#[test]
+fn explicit_ordinal_is_exempt_from_the_candidate_limit() {
+    let candidates = (0..150)
+        .map(|index| candidate(&format!("row-{index}"), "Same", true))
+        .collect::<Vec<_>>();
+    let mut spec = target("Same");
+    spec.ordinal = Some(120);
+    let decision = resolve_candidates(&spec, &candidates, &ResolutionPolicy::default()).unwrap();
+    assert!(
+        matches!(decision, ResolutionDecision::Resolved { candidate, .. } if candidate.id == "row-120")
+    );
+}
+
+#[test]
+fn candidate_limit_applies_only_to_matching_candidates() {
+    let mut candidates = (0..500)
+        .map(|index| {
+            let mut decoy = candidate(&format!("decoy-{index}"), &format!("Decoy {index}"), true);
+            decoy.role = Some("generic".into());
+            decoy
+        })
+        .collect::<Vec<_>>();
+    candidates.push(candidate("go-now", "Go now", true));
+    let decision =
+        resolve_candidates(&target("Go now"), &candidates, &ResolutionPolicy::default()).unwrap();
+    assert!(
+        matches!(decision, ResolutionDecision::Resolved { candidate, .. } if candidate.id == "go-now")
+    );
 }
 
 #[test]

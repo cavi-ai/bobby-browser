@@ -7,6 +7,7 @@ use chromiumoxide::browser::Browser;
 use chromiumoxide::cdp::browser_protocol::dom::{
     BackendNodeId, DescribeNodeParams, Node as CdpNode, SetFileInputFilesParams, ShadowRootType,
 };
+use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
 use chromiumoxide::cdp::browser_protocol::page::{
     CaptureScreenshotFormat, GetFrameTreeParams, Viewport,
 };
@@ -14,6 +15,7 @@ use chromiumoxide::cdp::browser_protocol::target::GetTargetsParams;
 use chromiumoxide::cdp::js_protocol::runtime::{
     EvaluateParams, ExecutionContextId, RemoteObjectId,
 };
+use chromiumoxide::keys::get_key_definition;
 use chromiumoxide::layout::Point;
 use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide::{Element, Page};
@@ -215,7 +217,27 @@ impl ResolvedTarget {
                     .await
                     .map_err(cdp_error)?;
             }
-            element.type_str(value).await.map_err(cdp_error)?;
+            // Split into runs of chars the US keyboard layout can key-press
+            // versus runs that need a caret-level insert (Unicode outside
+            // the US map, or newlines, which type_str cannot key-press).
+            let mut runs: Vec<(bool, String)> = Vec::new();
+            for ch in value.chars() {
+                let keyable =
+                    ch != '\n' && ch != '\r' && get_key_definition(ch.to_string()).is_some();
+                match runs.last_mut() {
+                    Some((run_keyable, run)) if *run_keyable == keyable => run.push(ch),
+                    _ => runs.push((keyable, ch.to_string())),
+                }
+            }
+            for (keyable, run) in runs {
+                if keyable {
+                    element.type_str(run).await.map_err(cdp_error)?;
+                } else {
+                    page.execute(InsertTextParams::new(run))
+                        .await
+                        .map_err(cdp_error)?;
+                }
+            }
             return Ok(());
         }
         let value = serde_json::to_string(value).map_err(|error| {
