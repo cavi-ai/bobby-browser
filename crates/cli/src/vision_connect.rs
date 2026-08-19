@@ -357,7 +357,7 @@ pub(crate) fn preset(name: &str) -> Option<(String, VisionProviderConfig)> {
         },
         "mlx" => VisionProviderConfig {
             base_url: "http://127.0.0.1:9101".into(),
-            model: "mlx-community/Qwen2.5-VL-3B-Instruct-4bit".into(),
+            model: "mlx-community/Qwen3.5-27B-4bit".into(),
             api_key_env: None,
         },
         _ => return None,

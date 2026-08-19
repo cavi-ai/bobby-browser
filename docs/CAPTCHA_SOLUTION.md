@@ -31,13 +31,32 @@
   (TypeIntoCandidate replaced raw vision typing in #317). Prompts say
   click-only with an explicit never-type constraint. Text captchas need a
   focused-element typing path — future work.
-- **Qwen2.5-VL-3B (the default MLX model) cannot reliably drive
+
+## Model evaluation (2026-08-18, panel of 4 gauntlet screenshots + Level 2 e2e)
+
+| Model | Result |
+|---|---|
+| Qwen2.5-VL-3B (old default) | Deterministically proposes typing the widget label ("I'm not a robot"); engine correctly refuses. Cannot drive. |
+| Qwen2.5-VL-7B | Dead-center grounding but 0.70 self-confidence — permanently under the 0.75 floor. Cannot drive. |
+| GLM-4.1V-9B-Thinking | Incoherent: unconditional challengeSolved, confidence uncorrelated with reality. Disqualified. |
+| Qwen3-VL-30B-A3B | Excellent grounding once its **[0,1000) normalized coordinates** are rescaled (see below). |
+| **mlx-community/Qwen3.5-27B-4bit** | **Chosen default.** Dead-center grounding, Level 2 e2e green in ~14s. |
+| ollama qwen3.8:27b-mlx (qwen3_5) | Proven path (e2e green 2×); kept as the ollama profile. |
+
+**Key discovery — normalized coordinates**: Qwen3-VL/Qwen3.5 emit click
+coordinates normalized to [0, 1000), not absolute pixels (Qwen2.5-VL was
+absolute). Every "misgrounded" result mapped exactly once rescaled
+(428,558 → (813,547) = the checkpoint button; (296,683) → (562,669) =
+checkbox center). The mlx-vlm provider now rescales per model family
+(`VISION_COORD_SPACE=normalized|absolute` override) and uses the
+system+user chat template — the single-message template made Qwen3.5 emit
+malformed JSON (`"x": 298, 684}` with no `y` key).
+
+- **Qwen2.5-VL-3B (the old default) cannot reliably drive
   solveChallenge**: it deterministically proposes typing the widget label
   ("I'm not a robot") on some pixel variants of the same page, and the
-  fail-closed engine correctly refuses. The system works with a stronger
-  model (qwen3.8:27b: Level 2 green in ~43s). The 3B failure is a model
-  capability limit, not a pipeline defect — the pipeline correctly
-  identifies and rejects it.
+  fail-closed engine correctly refuses. The 3B failure is a model
+  capability limit, not a pipeline defect.
 - **Phase 4: CLI & ZigZagZig** — done (2026-08-18). `bobby vision solve
   --purpose … [--url … | --session … --page …] [--node vision]
   [--timeout-ms 120000] [--zigzagzig]` submits the intent over `/v1`;

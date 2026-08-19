@@ -291,16 +291,23 @@ class VisionProvider(ABC):
             pass  # terminal signal; carries no payload
         elif kind == "click":
             # Models emit coordinates variously: {x, y}, {coordinate: [x, y]},
-            # {position: {x, y}}, or {clickX, clickY}.
-            x = action.get("x", action.get("clickX"))
-            y = action.get("y", action.get("clickY"))
-            coord = action.get("coordinate") or action.get("coordinates") or action.get("position")
+            # {position: {x, y}}, {clickX, clickY}, or list-typed values like
+            # {"x": [566], "y": [671]} or {"x": [566, 671]}.
+            x = cls._as_scalar(action.get("x", action.get("clickX")))
+            y = cls._as_scalar(action.get("y", action.get("clickY")))
+            if isinstance(action.get("x", action.get("clickX")), (list, tuple)) and y is None:
+                pair = action.get("x", action.get("clickX"))
+                if len(pair) >= 2:
+                    x, y = cls._as_scalar(pair[0]), cls._as_scalar(pair[1])
+            coord = cls._as_scalar(
+                action.get("coordinate") or action.get("coordinates") or action.get("position")
+            )
             if (x is None or y is None) and coord is not None:
                 if isinstance(coord, (list, tuple)) and len(coord) >= 2:
-                    x, y = coord[0], coord[1]
+                    x, y = cls._as_scalar(coord[0]), cls._as_scalar(coord[1])
                 elif isinstance(coord, dict):
-                    x = coord.get("x", x)
-                    y = coord.get("y", y)
+                    x = cls._as_scalar(coord.get("x", x))
+                    y = cls._as_scalar(coord.get("y", y))
             normalized["x"] = float(x if x is not None else 0.0)
             normalized["y"] = float(y if y is not None else 0.0)
         elif kind == "typeText":
@@ -310,6 +317,13 @@ class VisionProvider(ABC):
         else:
             normalized["value"] = str(action.get("value", action.get("text", "")))
         return normalized
+
+    @staticmethod
+    def _as_scalar(value):
+        """Unwrap single-element lists: models emit {"x": [566]} for scalars."""
+        if isinstance(value, (list, tuple)) and len(value) == 1:
+            return value[0]
+        return value
 
     @staticmethod
     def _canonical_action_kind(kind: str) -> str:

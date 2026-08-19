@@ -122,6 +122,15 @@ class VisionProviderNormalizationTests(unittest.TestCase):
                 self.assertEqual(response.confidence, 0.9)
                 self.assertEqual(response.action, {"kind": "challengeSolved"})
 
+    def test_list_typed_coordinates_unwrap(self):
+        for given, expected in (
+            ({"kind": "click", "x": [566], "y": [671]}, {"kind": "click", "x": 566.0, "y": 671.0}),
+            ({"kind": "click", "x": [566, 671]}, {"kind": "click", "x": 566.0, "y": 671.0}),
+            ({"kind": "click", "coordinate": [[566, 671]]}, {"kind": "click", "x": 566.0, "y": 671.0}),
+        ):
+            with self.subTest(given=given):
+                self.assertEqual(VisionProvider.normalize_action(given), expected)
+
     def test_snake_case_action_kinds_canonicalize(self):
         for given, canonical, payload in (
             ("type_text", "typeText", {"text": "hello"}),
