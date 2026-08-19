@@ -9,8 +9,8 @@ use intent_engine::{
 };
 use observability::{OperationalMetrics, ProviderMode};
 use types::{
-    CaptureScreenshotCommand, ClickCommand, CommandError, ErrorCode, Evidence, FillIntent,
-    FillValue, IntentCommand, IntentHints, IntentResolutionPath, LocateIntent, PageId, TargetSpec,
+    CaptureScreenshotCommand, ClickCommand, CommandError, ControlAction, ErrorCode, Evidence,
+    FillIntent, IntentCommand, IntentHints, IntentResolutionPath, LocateIntent, PageId, TargetSpec,
     TypeTextCommand, UploadFilesCommand, WaitForCommand,
 };
 
@@ -263,7 +263,7 @@ fn form_candidate(id: &str, role: &str, name: &str) -> dom_engine::Candidate {
     }
 }
 
-fn fill(purpose: &str, role: &str, value: FillValue) -> IntentCommand {
+fn fill(purpose: &str, role: &str, value: ControlAction) -> IntentCommand {
     IntentCommand::Fill(FillIntent {
         purpose: purpose.into(),
         hints: IntentHints {
@@ -306,8 +306,8 @@ async fn type_into_candidate_uses_runtime_text_without_disclosing_it_to_the_prov
         &fill(
             "Contact field",
             "textbox",
-            FillValue::Text {
-                text: "runtime secret".into(),
+            ControlAction::SetText {
+                value: "runtime secret".into(),
                 clear_first: true,
             },
         ),
@@ -392,8 +392,8 @@ async fn type_into_candidate_verification_failure_redacts_runtime_text_from_corp
         &fill(
             "Contact field",
             "textbox",
-            FillValue::Text {
-                text: SECRET.into(),
+            ControlAction::SetText {
+                value: SECRET.into(),
                 clear_first: true,
             },
         ),
@@ -451,8 +451,8 @@ async fn type_into_candidate_out_of_range_fails_closed_without_mutation() {
         &fill(
             "Contact field",
             "textbox",
-            FillValue::Text {
-                text: "runtime secret".into(),
+            ControlAction::SetText {
+                value: "runtime secret".into(),
                 clear_first: true,
             },
         ),
@@ -504,9 +504,7 @@ async fn type_into_candidate_rejects_non_text_fill_without_mutation() {
         &fill(
             "State field",
             "combobox",
-            FillValue::Select {
-                option: "CA".into(),
-            },
+            ControlAction::SelectOne { value: "CA".into() },
         ),
         &PageId::new(),
         &browser,
@@ -1333,8 +1331,8 @@ fn text_field(name: &str, purpose: &str) -> types::CompleteFormField {
         name: name.into(),
         purpose: purpose.into(),
         hints: IntentHints::default(),
-        value: types::FillValue::Text {
-            text: format!("value-{name}"),
+        value: types::ControlAction::SetText {
+            value: format!("value-{name}"),
             clear_first: true,
         },
     }

@@ -1536,7 +1536,9 @@ impl BrowserWorker for ChromiumWorker {
         self.bring_page_to_front(&page).await;
         let mut committed: Option<Vec<String>> = None;
         match &command.action {
-            ControlAction::SetText { value } => resolved.type_text(&page, value, true).await?,
+            ControlAction::SetText { value, clear_first } => {
+                resolved.type_text(&page, value, *clear_first).await?
+            }
             ControlAction::SetChecked { checked } => {
                 resolved.set_checked(&page, *checked).await?;
             }

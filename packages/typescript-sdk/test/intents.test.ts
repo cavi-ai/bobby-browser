@@ -90,7 +90,7 @@ test("locateEnvelope builds a full CommandEnvelope", () => {
 });
 
 test("fill / submitAndVerify / waitForState helpers nest correctly", () => {
-  const fill = fillEnvelope(META, "Email", { kind: "text", text: "a@b.co" });
+  const fill = fillEnvelope(META, "Email", { kind: "setText", value: "a@b.co" });
   assert.deepEqual(fill.command, {
     kind: "intent",
     input: {
@@ -106,7 +106,7 @@ test("fill / submitAndVerify / waitForState helpers nest correctly", () => {
           shadowPath: [],
           allowBestMatch: false,
         },
-        value: { kind: "text", text: "a@b.co", clearFirst: false },
+        value: { kind: "setText", value: "a@b.co", clearFirst: true },
       },
     },
   });
@@ -132,12 +132,32 @@ test("fill / submitAndVerify / waitForState helpers nest correctly", () => {
   });
 });
 
+test("fillEnvelope setText defaults clearFirst to true (replace) on the wire", () => {
+  const fill = fillEnvelope(META, "Email", { kind: "setText", value: "a@b.co" });
+  if (fill.command.kind !== "intent" || fill.command.input.kind !== "fill") throw new Error("expected fill intent");
+  assert.deepEqual(fill.command.input.input.value, { kind: "setText", value: "a@b.co", clearFirst: true });
+
+  const appended = fillEnvelope(META, "Email", { kind: "setText", value: "x", clearFirst: false });
+  if (appended.command.kind !== "intent" || appended.command.input.kind !== "fill") throw new Error("expected fill intent");
+  assert.deepEqual(appended.command.input.input.value, { kind: "setText", value: "x", clearFirst: false });
+});
+
+test("fillEnvelope accepts selectMany and clear unchanged", () => {
+  const many = fillEnvelope(META, "Toppings", { kind: "selectMany", values: ["ham", "cheese"] });
+  if (many.command.kind !== "intent" || many.command.input.kind !== "fill") throw new Error("expected fill intent");
+  assert.deepEqual(many.command.input.input.value, { kind: "selectMany", values: ["ham", "cheese"] });
+
+  const cleared = fillEnvelope(META, "Email", { kind: "clear" });
+  if (cleared.command.kind !== "intent" || cleared.command.input.kind !== "fill") throw new Error("expected fill intent");
+  assert.deepEqual(cleared.command.input.input.value, { kind: "clear" });
+});
+
 test("completeFormRuntimeCommand preserves ordered fields and normalizes nested hints", () => {
   const command = completeFormRuntimeCommand({
     purpose: "complete application form",
     fields: [
-      { name: "email", purpose: "enter email", hints: { role: "textbox", nearText: { kind: "exact", value: "Email address" } }, value: { kind: "text", text: "ada@example.test" } },
-      { name: "terms", purpose: "accept terms", hints: { role: "checkbox", nearText: { kind: "exact", value: "Accept terms" } }, value: { kind: "checked", checked: true } },
+      { name: "email", purpose: "enter email", hints: { role: "textbox", nearText: { kind: "exact", value: "Email address" } }, value: { kind: "setText", value: "ada@example.test" } },
+      { name: "terms", purpose: "accept terms", hints: { role: "checkbox", nearText: { kind: "exact", value: "Accept terms" } }, value: { kind: "setChecked", checked: true } },
     ],
   });
   assert.equal(command.kind, "intent");
@@ -145,12 +165,12 @@ test("completeFormRuntimeCommand preserves ordered fields and normalizes nested 
   assert.equal(command.input.kind, "completeForm");
   if (command.input.kind !== "completeForm") throw new Error("expected completeForm");
   assert.deepEqual(command.input.input.fields.map((field) => field.name), ["email", "terms"]);
-  assert.deepEqual(command.input.input.fields[0]?.value, { kind: "text", text: "ada@example.test", clearFirst: false });
+  assert.deepEqual(command.input.input.fields[0]?.value, { kind: "setText", value: "ada@example.test", clearFirst: true });
 });
 
 test("completeFormRuntimeCommand rejects empty and duplicate fields", () => {
   assert.throws(() => completeFormRuntimeCommand({ purpose: "complete form", fields: [] }), /must not be empty/);
-  const field = { name: "email", purpose: "enter email", value: { kind: "text", text: "a@b.co" } } as const;
+  const field = { name: "email", purpose: "enter email", value: { kind: "setText", value: "a@b.co" } } as const;
   assert.throws(
     () => completeFormRuntimeCommand({ purpose: "complete form", fields: [field, field] }),
     /duplicate completeForm field name/,

@@ -844,7 +844,7 @@ impl Server {
         // tolerated `None` would un-gate any tool someone forgets to map.
         if call.name == "toolset_select" {
             if let Err(violation) = validate_tool_arguments(&call.name, &call.arguments) {
-                return invalid_params(id, Some(violation));
+                return invalid_params(id, &call.name, &call.arguments, Some(violation));
             }
             let input: ToolsetSelectArgs = match bounded_parse(call.arguments) {
                 Ok(input) => input,
@@ -886,7 +886,7 @@ impl Server {
             }
         };
         if let Err(violation) = validate_tool_arguments(&call.name, &call.arguments) {
-            return invalid_params(id, Some(violation));
+            return invalid_params(id, &call.name, &call.arguments, Some(violation));
         }
         if let Some(metrics) = &self.operational_metrics {
             metrics.record_workflow_call(workflow_call_class(&call.name));
@@ -1399,15 +1399,28 @@ fn to_json<T: serde::Serialize>(value: T) -> interface_core::InterfaceResult<Val
 /// `-32602` with the schema keyword and JSON Pointer that rejected the call.
 ///
 /// `pointer` and `constraint` must describe the schema, never the submitted
-/// value, so they disclose nothing `tools/list` does not.
-fn invalid_params(id: Value, violation: Option<crate::schema::SchemaViolation>) -> Value {
+/// value, so they disclose nothing `tools/list` does not. `tool` and
+/// `arguments` are used only to detect a pre-0.11.0 `FillValue` marker and
+/// append its migration mapping to the repair action -- a canned string, not
+/// an echo of what was sent, so this does not weaken that guarantee.
+fn invalid_params(
+    id: Value,
+    tool: &str,
+    arguments: &Value,
+    violation: Option<crate::schema::SchemaViolation>,
+) -> Value {
     let data = violation.map(|violation| {
         let mut data = json!({
             "reason":"schemaViolation",
             "pointer":violation.pointer,
             "constraint":violation.constraint
         });
-        if let Some(repair) = crate::repair::repair_for_protocol_reason("schemaViolation") {
+        if let Some(mut repair) = crate::repair::repair_for_protocol_reason("schemaViolation") {
+            if let Some(migration) = crate::repair::legacy_fill_shape_migration(tool, arguments) {
+                if let Some(action) = repair["action"].as_str() {
+                    repair["action"] = json!(format!("{action} {migration}"));
+                }
+            }
             data["repair"] = repair;
         }
         data

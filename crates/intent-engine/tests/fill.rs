@@ -7,9 +7,8 @@ use intent_engine::{compatible, IntentBrowser, IntentEngine, IntentOutcome, Visi
 use types::{
     CaptureScreenshotCommand, ClickCommand, CommandError, CompleteFormField, CompleteFormIntent,
     ControlAction, ControlActionCommand, ControlActionEvidence, ErrorCode, Evidence, FillIntent,
-    FillValue, FormControlOperation, FormControlState, FormControlValidity, IntentCommand,
-    IntentHints, IntentResolutionPath, PageId, TargetSpec, TypeTextCommand, UploadFilesCommand,
-    WaitForCommand,
+    FormControlOperation, FormControlState, FormControlValidity, IntentCommand, IntentHints,
+    IntentResolutionPath, PageId, TargetSpec, TypeTextCommand, UploadFilesCommand, WaitForCommand,
 };
 
 #[tokio::test]
@@ -32,8 +31,8 @@ async fn complete_form_fills_fields_in_order_without_submitting() {
             near_text: Some(types::TextMatch::Exact(label.into())),
             ..Default::default()
         },
-        value: FillValue::Text {
-            text: "Ada".into(),
+        value: ControlAction::SetText {
+            value: "Ada".into(),
             clear_first: true,
         },
     };
@@ -139,6 +138,13 @@ impl IntentBrowser for FakeBrowser {
                 FormControlOperation::SetChecked,
                 FormControlState::Checked { checked: *checked },
             ),
+            ControlAction::SelectMany { values } => (
+                FormControlOperation::SelectMany,
+                FormControlState::Selection {
+                    values: values.clone(),
+                },
+            ),
+            ControlAction::Clear => (FormControlOperation::Clear, FormControlState::Empty),
             _ => return Err(unsupported("control_action")),
         };
         Ok(vec![Evidence::ControlAction {
@@ -224,7 +230,11 @@ fn combobox(name: &str) -> Candidate {
     candidate(name, Some("combobox"), name, BTreeMap::new())
 }
 
-fn fill(purpose: &str, role: Option<&str>, value: FillValue) -> IntentCommand {
+fn listbox(name: &str) -> Candidate {
+    candidate(name, Some("listbox"), name, BTreeMap::new())
+}
+
+fn fill(purpose: &str, role: Option<&str>, value: ControlAction) -> IntentCommand {
     IntentCommand::Fill(FillIntent {
         purpose: purpose.into(),
         hints: IntentHints {
@@ -238,49 +248,45 @@ fn fill(purpose: &str, role: Option<&str>, value: FillValue) -> IntentCommand {
 #[test]
 fn compatible_matches_worker_candidate_signals() {
     assert!(compatible(
-        &FillValue::Text {
-            text: "Ada".into(),
+        &ControlAction::SetText {
+            value: "Ada".into(),
             clear_first: true,
         },
         &textbox("Email")
     ));
     assert!(!compatible(
-        &FillValue::Files {
+        &ControlAction::SetFiles {
             paths: vec!["/tmp/a.txt".into()],
         },
         &textbox("Email")
     ));
     assert!(compatible(
-        &FillValue::Files {
+        &ControlAction::SetFiles {
             paths: vec!["/tmp/a.txt".into()],
         },
         &file_input("Resume")
     ));
     assert!(!compatible(
-        &FillValue::Text {
-            text: "Ada".into(),
+        &ControlAction::SetText {
+            value: "Ada".into(),
             clear_first: true,
         },
         &file_input("Resume")
     ));
     assert!(compatible(
-        &FillValue::Select {
-            option: "CA".into(),
-        },
+        &ControlAction::SelectOne { value: "CA".into() },
         &combobox("State")
     ));
     assert!(!compatible(
-        &FillValue::Select {
-            option: "CA".into(),
-        },
+        &ControlAction::SelectOne { value: "CA".into() },
         &textbox("Email")
     ));
     assert!(compatible(
-        &FillValue::Checked { checked: true },
+        &ControlAction::SetChecked { checked: true },
         &candidate("updates", Some("checkbox"), "Updates", BTreeMap::new())
     ));
     assert!(compatible(
-        &FillValue::Checked { checked: true },
+        &ControlAction::SetChecked { checked: true },
         &candidate(
             "professional",
             Some("radio"),
@@ -288,6 +294,20 @@ fn compatible_matches_worker_candidate_signals() {
             BTreeMap::new()
         )
     ));
+    assert!(compatible(
+        &ControlAction::SelectMany {
+            values: vec!["ham".into()]
+        },
+        &listbox("Toppings")
+    ));
+    assert!(!compatible(
+        &ControlAction::SelectMany {
+            values: vec!["ham".into()]
+        },
+        &combobox("State")
+    ));
+    assert!(compatible(&ControlAction::Clear, &textbox("Email")));
+    assert!(compatible(&ControlAction::Activate, &textbox("Email")));
 }
 
 #[tokio::test]
@@ -307,8 +327,8 @@ async fn fill_text_types_and_verifies() {
         &fill(
             "Email",
             Some("textbox"),
-            FillValue::Text {
-                text: "Ada".into(),
+            ControlAction::SetText {
+                value: "Ada".into(),
                 clear_first: true,
             },
         ),
@@ -356,9 +376,7 @@ async fn fill_select_dispatches_a_typed_control_action_instead_of_text_input() {
         &fill(
             "State",
             Some("combobox"),
-            FillValue::Select {
-                option: "CA".into(),
-            },
+            ControlAction::SelectOne { value: "CA".into() },
         ),
         &page_id,
         &browser,
@@ -402,7 +420,7 @@ async fn fill_checked_dispatches_a_typed_control_action_instead_of_text_input() 
         &fill(
             "Updates",
             Some("checkbox"),
-            FillValue::Checked { checked: true },
+            ControlAction::SetChecked { checked: true },
         ),
         &PageId::new(),
         &browser,
@@ -434,8 +452,8 @@ async fn fill_fails_when_the_worker_returns_no_postcondition_evidence() {
         &fill(
             "Email",
             Some("textbox"),
-            FillValue::Text {
-                text: "ada@example.test".into(),
+            ControlAction::SetText {
+                value: "ada@example.test".into(),
                 clear_first: true,
             },
         ),
@@ -479,8 +497,8 @@ async fn fill_rejects_browser_invalid_control_even_when_value_matches() {
         &fill(
             "Postal code",
             Some("textbox"),
-            FillValue::Text {
-                text: "12".into(),
+            ControlAction::SetText {
+                value: "12".into(),
                 clear_first: true,
             },
         ),
@@ -520,7 +538,7 @@ async fn fill_files_uploads_and_verifies() {
         &fill(
             "Resume",
             Some("textbox"),
-            FillValue::Files {
+            ControlAction::SetFiles {
                 paths: vec!["/tmp/resume.txt".into()],
             },
         ),
@@ -562,7 +580,7 @@ async fn fill_files_on_textbox_is_action_mismatch() {
         &fill(
             "Email",
             Some("textbox"),
-            FillValue::Files {
+            ControlAction::SetFiles {
                 paths: vec!["/tmp/resume.txt".into()],
             },
         ),
@@ -588,4 +606,152 @@ async fn fill_files_on_textbox_is_action_mismatch() {
     let record = record.expect("IntentExecution on mismatch");
     assert_eq!(record.verification, "actionMismatch");
     assert_eq!(record.resolution_path, IntentResolutionPath::Deterministic);
+}
+
+#[tokio::test]
+async fn fill_select_many_dispatches_a_typed_control_action() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![listbox("Toppings")]),
+        calls: Arc::clone(&calls),
+        type_text_evidence: Vec::new(),
+        upload_evidence: Vec::new(),
+    };
+    let outcome = IntentEngine::execute(
+        &fill(
+            "Toppings",
+            Some("listbox"),
+            ControlAction::SelectMany {
+                values: vec!["ham".into(), "olives".into()],
+            },
+        ),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("expected Completed, got {outcome:?}");
+    };
+    {
+        let log = calls.lock().expect("call log");
+        assert!(log.type_text.is_empty());
+        assert!(matches!(
+            log.control_action.as_slice(),
+            [ControlActionCommand {
+                action: ControlAction::SelectMany { values },
+                ..
+            }] if values == &["ham".to_owned(), "olives".to_owned()]
+        ));
+    }
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::IntentExecution { record } if record.verification == "filled"
+    )));
+}
+
+#[tokio::test]
+async fn fill_select_many_on_a_single_select_is_action_mismatch() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![combobox("State")]),
+        calls: Arc::clone(&calls),
+        type_text_evidence: Vec::new(),
+        upload_evidence: Vec::new(),
+    };
+    let outcome = IntentEngine::execute(
+        &fill(
+            "State",
+            Some("combobox"),
+            ControlAction::SelectMany {
+                values: vec!["CA".into()],
+            },
+        ),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    let IntentOutcome::Failed { error, .. } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::IntentActionMismatch);
+    assert!(calls.lock().expect("call log").control_action.is_empty());
+}
+
+#[tokio::test]
+async fn fill_clear_dispatches_a_typed_control_action() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![textbox("Email")]),
+        calls: Arc::clone(&calls),
+        type_text_evidence: Vec::new(),
+        upload_evidence: Vec::new(),
+    };
+    let outcome = IntentEngine::execute(
+        &fill("Email", Some("textbox"), ControlAction::Clear),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("expected Completed, got {outcome:?}");
+    };
+    {
+        let log = calls.lock().expect("call log");
+        assert!(log.type_text.is_empty());
+        assert!(matches!(
+            log.control_action.as_slice(),
+            [ControlActionCommand {
+                action: ControlAction::Clear,
+                ..
+            }]
+        ));
+    }
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::IntentExecution { record } if record.verification == "filled"
+    )));
+}
+
+/// `activate` deserializes fine into a fill's `ControlAction` value (the
+/// wire vocabulary is shared with control_action) but is never valid for
+/// fill/complete_form: activating a control is not a value to fill. It must
+/// fail clearly, naming `control_action` as the right tool, instead of
+/// silently no-op'ing or dispatching a click.
+#[tokio::test]
+async fn fill_rejects_activate_and_names_control_action_as_the_right_tool() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![textbox("Email")]),
+        calls: Arc::clone(&calls),
+        type_text_evidence: Vec::new(),
+        upload_evidence: Vec::new(),
+    };
+    let outcome = IntentEngine::execute(
+        &fill("Email", Some("textbox"), ControlAction::Activate),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    let IntentOutcome::Failed { error, .. } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::InvalidRequest);
+    assert!(!error.retryable);
+    assert!(
+        error.message.contains("control_action"),
+        "unexpected message {:?}",
+        error.message
+    );
+    let log = calls.lock().expect("call log");
+    assert!(log.type_text.is_empty());
+    assert!(log.control_action.is_empty());
+    assert!(log.upload_files.is_empty());
 }

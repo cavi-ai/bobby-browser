@@ -1,8 +1,9 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use dom_engine::Candidate;
 use types::{
-    CandidateEvidence, Evidence, ExecutionRecord, FillValue, FormControlOperation,
+    CandidateEvidence, ControlAction, Evidence, ExecutionRecord, FormControlOperation,
     FormControlState, IntentResolutionPath,
 };
 
@@ -88,8 +89,22 @@ pub fn summarize_target(target: &types::TargetSpec) -> String {
 /// - native `<input type="file">` is emitted as `role=button` with `attributes["type"]=file`
 /// - text-like controls use `textbox` / `searchbox` / `spinbutton` without `type=file`
 /// - native `<select>` is emitted as `role=combobox` (also accept `listbox`)
-/// - there is no dedicated select primitive; Select fills via `TypeTextCommand`
-pub fn compatible(value: &FillValue, candidate: &Candidate) -> bool {
+/// - there is no dedicated select primitive; SelectOne fills via `TypeTextCommand`
+/// - native `<select multiple>` (and ARIA `role="listbox"`) is the only
+///   candidate shape gathered with role `listbox`; a plain `<select>` is
+///   `combobox` regardless of option count (see the gather script's
+///   `implicitRole` in `worker-pool::targeting`)
+///
+/// `Clear` is always reported compatible: it is valid for nearly every
+/// control kind (text, select, file) and the few exceptions (checkbox,
+/// radio, submit/reset) are rejected with `IntentActionMismatch` by the
+/// worker's `supported_operations` gate during execution, so duplicating
+/// that per-kind list here would only drift from it. `Activate` is likewise
+/// always reported compatible here: it is unconditionally rejected in
+/// [`crate::engine`]'s `act_fill` with a message naming `control_action` as
+/// the right tool, and gating on role would only replace that clear message
+/// with a generic `IntentActionMismatch`.
+pub fn compatible(value: &ControlAction, candidate: &Candidate) -> bool {
     let is_file_input = candidate
         .attributes
         .get("type")
@@ -97,24 +112,31 @@ pub fn compatible(value: &FillValue, candidate: &Candidate) -> bool {
     let role = candidate.role.as_deref().unwrap_or("");
 
     match value {
-        FillValue::Files { .. } => is_file_input,
-        FillValue::Text { .. } => {
+        ControlAction::SetFiles { .. } => is_file_input,
+        ControlAction::SetText { .. } => {
             !is_file_input && matches!(role, "textbox" | "searchbox" | "spinbutton")
         }
-        FillValue::Select { .. } => !is_file_input && matches!(role, "combobox" | "listbox"),
-        FillValue::Checked { .. } => matches!(role, "checkbox" | "radio"),
+        ControlAction::SelectOne { .. } => !is_file_input && matches!(role, "combobox" | "listbox"),
+        ControlAction::SelectMany { .. } => !is_file_input && role == "listbox",
+        ControlAction::SetChecked { .. } => matches!(role, "checkbox" | "radio"),
+        ControlAction::Clear | ControlAction::Activate => true,
     }
 }
 
 /// Verify fill postconditions from worker evidence when present.
 /// Missing evidence is a verification failure: an action completing is not
 /// proof that a reactive application accepted or retained the value.
-pub fn verify_fill(value: &FillValue, evidence: &[Evidence]) -> Result<(), String> {
+pub fn verify_fill(value: &ControlAction, evidence: &[Evidence]) -> Result<(), String> {
     match value {
-        FillValue::Text { text, .. } => verify_typed_value(text, evidence),
-        FillValue::Select { option } => verify_selected_value(option, evidence),
-        FillValue::Checked { checked } => verify_checked_state(*checked, evidence),
-        FillValue::Files { paths } => verify_upload_paths(paths, evidence),
+        ControlAction::SetText { value, .. } => verify_typed_value(value, evidence),
+        ControlAction::SelectOne { value } => verify_selected_value(value, evidence),
+        ControlAction::SetChecked { checked } => verify_checked_state(*checked, evidence),
+        ControlAction::SetFiles { paths } => verify_upload_paths(paths, evidence),
+        ControlAction::SelectMany { values } => verify_selected_values(values, evidence),
+        ControlAction::Clear => verify_cleared(evidence),
+        ControlAction::Activate => {
+            Err("activate is not valid for fill; use control_action instead".into())
+        }
     }
 }
 
@@ -152,6 +174,78 @@ fn verify_selected_value(expected: &str, evidence: &[Evidence]) -> Result<(), St
         state => Err(format!(
             "typed select evidence had incompatible state: {state:?}"
         )),
+    }
+}
+
+/// Mirrors [`verify_selected_value`]'s tolerance for label-vs-value drift:
+/// the worker's `control_action_evidence` already reconciled the requested
+/// set (which may name options by label) against the committed option
+/// values before emitting this evidence, so a matching-length `Selection`
+/// is proof the requested set landed even when the strings themselves
+/// differ from what the browser echoes back.
+fn verify_selected_values(expected: &[String], evidence: &[Evidence]) -> Result<(), String> {
+    let action = evidence.iter().find_map(|item| match item {
+        Evidence::ControlAction { action }
+            if action.operation == FormControlOperation::SelectMany =>
+        {
+            Some(action)
+        }
+        _ => None,
+    });
+    let Some(action) = action else {
+        return Err("missing typed multi-select evidence".into());
+    };
+    if !action.validity.valid {
+        return Err(action
+            .validity
+            .message
+            .clone()
+            .unwrap_or_else(|| "browser rejected the selected values".into()));
+    }
+    match &action.state {
+        FormControlState::Selection { values } if values.len() == expected.len() => Ok(()),
+        FormControlState::Selection { values } => {
+            let expected_set: BTreeSet<&str> = expected.iter().map(String::as_str).collect();
+            let actual_set: BTreeSet<&str> = values.iter().map(String::as_str).collect();
+            if expected_set == actual_set {
+                Ok(())
+            } else {
+                Err(format!(
+                    "selected values mismatch: expected {expected:?}, observed {values:?}"
+                ))
+            }
+        }
+        state => Err(format!(
+            "typed multi-select evidence had incompatible state: {state:?}"
+        )),
+    }
+}
+
+fn verify_cleared(evidence: &[Evidence]) -> Result<(), String> {
+    let action = evidence.iter().find_map(|item| match item {
+        Evidence::ControlAction { action } if action.operation == FormControlOperation::Clear => {
+            Some(action)
+        }
+        _ => None,
+    });
+    let Some(action) = action else {
+        return Err("missing typed clear evidence".into());
+    };
+    if !action.validity.valid {
+        return Err(action
+            .validity
+            .message
+            .clone()
+            .unwrap_or_else(|| "browser rejected the clear".into()));
+    }
+    match &action.state {
+        FormControlState::Empty => Ok(()),
+        FormControlState::Text { value } if value.is_empty() => Ok(()),
+        FormControlState::Redacted { present } if !present => Ok(()),
+        FormControlState::Checked { checked } if !checked => Ok(()),
+        FormControlState::Selection { values } if values.is_empty() => Ok(()),
+        FormControlState::Files { count } if *count == 0 => Ok(()),
+        state => Err(format!("clear did not produce an empty state: {state:?}")),
     }
 }
 

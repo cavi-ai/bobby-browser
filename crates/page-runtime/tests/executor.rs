@@ -8,11 +8,13 @@ use chrono::{Duration, Utc};
 use tokio::sync::Mutex;
 use types::{
     AttemptId, CheckpointId, ClickCommand, ClickModifier, CommandClass, CommandEnvelope,
-    CommandError, CommandId, CommandOutcome, CommandPhase, DownloadUrlCommand, ErrorCode,
-    ErrorLayer, Evidence, ExecutionPath, ExecutionReason, FollowIntent, InspectCommand,
-    IntentCommand, IntentHints, NavigateCommand, PageId, PrimitiveCommand, RuntimeCommand,
-    SessionId, SubmitAndVerifyIntent, TargetSpec, TextMatch, TypeTextCommand, WaitCondition,
-    WaitForCommand, WaitUntil, WorkerId, WorkflowCheckpoint, WorkflowId,
+    CommandError, CommandId, CommandOutcome, CommandPhase, ControlAction, ControlActionCommand,
+    ControlActionEvidence, DownloadUrlCommand, ErrorCode, ErrorLayer, Evidence, ExecutionPath,
+    ExecutionReason, FollowIntent, FormControlOperation, FormControlState, FormControlTarget,
+    FormControlValidity, InspectCommand, IntentCommand, IntentHints, NavigateCommand, PageId,
+    PrimitiveCommand, RuntimeCommand, SessionId, SubmitAndVerifyIntent, TargetSpec, TextMatch,
+    TypeTextCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId, WorkflowCheckpoint,
+    WorkflowId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
 use workflow_journal::{
@@ -275,6 +277,50 @@ impl BrowserWorker for FakeWorker {
         Ok(vec![Evidence::Element {
             selector: command.selector.clone(),
             text: Some(command.value.clone()),
+        }])
+    }
+    async fn control_action(
+        &self,
+        _: &PageId,
+        command: &ControlActionCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.events
+            .lock()
+            .await
+            .push("browser:control_action".into());
+        if matches!(self.mode, DriverMode::DeadWorkerCommands) {
+            return Err(CommandError {
+                code: ErrorCode::BrowserCommandFailed,
+                message: "send failed because receiver is gone".into(),
+                layer: ErrorLayer::Driver,
+                retryable: true,
+            });
+        }
+        let (operation, state) = match &command.action {
+            ControlAction::SelectMany { values } => (
+                FormControlOperation::SelectMany,
+                FormControlState::Selection {
+                    values: values.clone(),
+                },
+            ),
+            ControlAction::Clear => (FormControlOperation::Clear, FormControlState::Empty),
+            _ => return Err(driver_failure()),
+        };
+        Ok(vec![Evidence::ControlAction {
+            action: ControlActionEvidence {
+                operation,
+                target: command.target.clone(),
+                state,
+                validity: FormControlValidity {
+                    will_validate: true,
+                    valid: true,
+                    flags: Vec::new(),
+                    message: None,
+                    described_by: Vec::new(),
+                },
+                node_replaced: false,
+                revealed_controls: Vec::new(),
+            },
         }])
     }
     async fn collect_candidates(
@@ -706,6 +752,16 @@ fn navigate() -> PrimitiveCommand {
         wait_until: WaitUntil::Interactive,
         timeout_ms: 1_000,
     })
+}
+
+fn form_control_target(role: &str, accessible_name: &str) -> FormControlTarget {
+    FormControlTarget {
+        role: role.into(),
+        accessible_name: accessible_name.into(),
+        ordinal: None,
+        frame_path: Vec::new(),
+        shadow_path: Vec::new(),
+    }
 }
 
 fn driver_failure() -> CommandError {
@@ -2846,4 +2902,57 @@ async fn append_without_clear_verifies_when_inspected_text_ends_with_typed_value
         matches!(outcome, CommandOutcome::Completed { .. }),
         "{outcome:?}"
     );
+}
+
+#[tokio::test]
+async fn control_action_select_many_completes_with_typed_selection_evidence() {
+    let (runtime, session, page, _) = runtime(DriverMode::Succeed, None).await;
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page,
+            PrimitiveCommand::ControlAction(ControlActionCommand {
+                target: form_control_target("listbox", "Toppings"),
+                action: ControlAction::SelectMany {
+                    values: vec!["ham".into(), "olives".into()],
+                },
+            }),
+        ))
+        .await;
+    let CommandOutcome::Completed { evidence, .. } = outcome else {
+        panic!("expected Completed, got {outcome:?}");
+    };
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::ControlAction { action }
+            if action.operation == FormControlOperation::SelectMany
+                && action.state
+                    == FormControlState::Selection {
+                        values: vec!["ham".into(), "olives".into()],
+                    }
+    )));
+}
+
+#[tokio::test]
+async fn control_action_clear_completes_with_typed_empty_evidence() {
+    let (runtime, session, page, _) = runtime(DriverMode::Succeed, None).await;
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page,
+            PrimitiveCommand::ControlAction(ControlActionCommand {
+                target: form_control_target("textbox", "Email"),
+                action: ControlAction::Clear,
+            }),
+        ))
+        .await;
+    let CommandOutcome::Completed { evidence, .. } = outcome else {
+        panic!("expected Completed, got {outcome:?}");
+    };
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::ControlAction { action }
+            if action.operation == FormControlOperation::Clear
+                && action.state == FormControlState::Empty
+    )));
 }

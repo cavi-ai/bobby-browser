@@ -78,3 +78,17 @@ the reread control, execute it once through their native transport, then return
 `ControlActionEvidence` with the operation, semantic target, typed state,
 validity, and node-replacement status. Unsupported or ambiguous targets fail
 before mutation; uncertainty after dispatch is never blindly replayed.
+
+`controlAction` accepts one of the following unified operations:
+
+| Kind | Shape | Notes |
+|---|---|---|
+| `setText` | `{ kind: "setText", value: string, clearFirst?: bool }` | Replace or append text; `clearFirst` defaults to true (replace existing) |
+| `setChecked` | `{ kind: "setChecked", checked: bool }` | Toggle checkbox or radio state |
+| `selectOne` | `{ kind: "selectOne", value: string }` | Select one option by value or visible label |
+| `selectMany` | `{ kind: "selectMany", values: [string] }` | Select multiple options by value or label |
+| `setFiles` | `{ kind: "setFiles", paths: [string] }` | Set file input paths |
+| `clear` | `{ kind: "clear" }` | Clear control value |
+| `activate` | `{ kind: "activate" }` | Activate a link or button |
+
+The `fill` intent and `completeForm` intent use the same `ControlAction` vocabulary, except `activate` is rejected in fill (fill is for control value operations only). `control_action` MCP tool accepts all kinds including `activate`.

@@ -82,8 +82,9 @@ Build envelopes with helpers from the package (`locateEnvelope`,
 `followEnvelope`, `dismissObstructionEnvelope`, `extractEnvelope`) and pass
 them to `submit`. Over MCP, prefer the dedicated `intent_*` tools (same
 semantics; server-minted envelopes). Multi-field verified forms use
-`completeFormRuntimeCommand` plus `intentEnvelope`. `FillValue` kinds: `text`,
-`select`, `checked`, `files`.
+`completeFormRuntimeCommand` plus `intentEnvelope`. Fill and `completeForm`
+use the unified `ControlAction` vocabulary: `setText`, `setChecked`,
+`selectOne`, `selectMany`, `setFiles`, `clear`.
 Use `intentHintsFromAccessibilityTarget(node.target)` to carry snapshot role,
 accessible name, and duplicate-control ordinal into any intent. `TargetSpec`
 fields are optional, so primitive commands can also accept the minimal

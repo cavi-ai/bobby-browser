@@ -5,9 +5,11 @@ import type {
   ClickCommand,
   ClickModifier,
   CommandOutcome,
+  CompleteFormField,
   ControlAction,
   ControlActionEvidence,
   Evidence,
+  FillIntent,
   InterfaceError,
   InterfaceEvent,
   OpenPageRequest,
@@ -39,6 +41,7 @@ test("TargetSpec accepts the minimal semantic target supported by the wire schem
 test("control action contracts preserve the closed tagged wire shape", () => {
   const actions: ControlAction[] = [
     { kind: "setText", value: "Ada" },
+    { kind: "setText", value: "Ada", clearFirst: false },
     { kind: "setChecked", checked: true },
     { kind: "selectOne", value: "pro" },
     { kind: "selectMany", values: ["one", "two"] },
@@ -53,8 +56,31 @@ test("control action contracts preserve the closed tagged wire shape", () => {
     validity: { willValidate: true, valid: true, flags: [], message: null, describedBy: [] },
     nodeReplaced: false,
   };
-  assert.equal(actions.length, 7);
+  assert.equal(actions.length, 8);
   assert.equal(evidence.operation, "setChecked");
+});
+
+test("FillIntent and CompleteFormField carry the unified ControlAction vocabulary", () => {
+  const fill: FillIntent = { purpose: "Email", value: { kind: "setText", value: "a@b.co" } };
+  const field: CompleteFormField = {
+    name: "toppings",
+    purpose: "Toppings",
+    value: { kind: "selectMany", values: ["ham", "cheese"] },
+  };
+  assert.deepEqual(fill.value, { kind: "setText", value: "a@b.co" });
+  assert.deepEqual(field.value, { kind: "selectMany", values: ["ham", "cheese"] });
+});
+
+test("legacy FillValue shapes no longer type-check as ControlAction", () => {
+  // @ts-expect-error legacy `text`/`text` kind was replaced by `setText`/`value`
+  const legacyText: ControlAction = { kind: "text", text: "a@b.co" };
+  // @ts-expect-error legacy `select`/`option` kind was replaced by `selectOne`/`value`
+  const legacySelect: ControlAction = { kind: "select", option: "Pro" };
+  // @ts-expect-error legacy `checked` kind was replaced by `setChecked`
+  const legacyChecked: ControlAction = { kind: "checked", checked: true };
+  // @ts-expect-error legacy `files` kind was replaced by `setFiles`
+  const legacyFiles: ControlAction = { kind: "files", paths: ["cv.pdf"] };
+  assert.ok(legacyText && legacySelect && legacyChecked && legacyFiles);
 });
 
 test("contracts preserve every discriminated wire variant", () => {

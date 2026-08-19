@@ -2916,14 +2916,14 @@ impl BrowserWorker for FirefoxCompanionWorker {
         worker_pool::validate_control_action(&control, &command.action)?;
         let mut committed: Option<Vec<String>> = None;
         match &command.action {
-            ControlAction::SetText { value } => {
+            ControlAction::SetText { value, clear_first } => {
                 self.type_text(
                     page_id,
                     &TypeTextCommand {
                         selector: String::new(),
                         target: Some(target.clone()),
                         value: value.clone(),
-                        clear_first: true,
+                        clear_first: *clear_first,
                         expected_url: None,
                     },
                 )

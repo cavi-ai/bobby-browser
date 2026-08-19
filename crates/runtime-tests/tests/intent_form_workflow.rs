@@ -5,8 +5,8 @@ use config::{AppConfig, BrowserConfig, ServerConfig, StorageConfig};
 use sdk_core::RuntimeService;
 use types::{
     AttemptId, CheckpointId, CheckpointInvariant, ClickCommand, CommandClass, CommandEnvelope,
-    CommandId, CommandOutcome, CreateSessionRequest, ElementState, Evidence, ExecutionRecord,
-    FillIntent, FillValue, InspectCommand, IntentCommand, IntentHints, IntentResolutionPath,
+    CommandId, CommandOutcome, ControlAction, CreateSessionRequest, ElementState, Evidence,
+    ExecutionRecord, FillIntent, InspectCommand, IntentCommand, IntentHints, IntentResolutionPath,
     LocateIntent, NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand, RuntimeCommand,
     SessionId, SubmitAndVerifyIntent, TargetSpec, TextMatch, WaitCondition, WaitForCommand,
     WaitForStateIntent, WaitUntil, WorkflowCheckpoint, WorkflowId,
@@ -217,8 +217,8 @@ async fn intent_form_workflow_is_deterministic_on_live_chromium() {
                 role: Some("textbox".into()),
                 ..IntentHints::default()
             },
-            value: FillValue::Text {
-                text: "Ada".into(),
+            value: ControlAction::SetText {
+                value: "Ada".into(),
                 clear_first: true,
             },
         }),
@@ -236,7 +236,7 @@ async fn intent_form_workflow_is_deterministic_on_live_chromium() {
                 role: Some("button".into()),
                 ..IntentHints::default()
             },
-            value: FillValue::Files {
+            value: ControlAction::SetFiles {
                 paths: vec![resume.to_string_lossy().into_owned()],
             },
         }),
@@ -291,8 +291,8 @@ async fn intent_form_workflow_is_deterministic_on_live_chromium() {
                 role: Some("textbox".into()),
                 ..IntentHints::default()
             },
-            value: FillValue::Text {
-                text: "Analytical Engines".into(),
+            value: ControlAction::SetText {
+                value: "Analytical Engines".into(),
                 clear_first: true,
             },
         }),

@@ -6,7 +6,7 @@
  */
 
 /** Interface version negotiated via the `x-interface-version` request header. */
-export const INTERFACE_VERSION = "2026-07-23" as const;
+export const INTERFACE_VERSION = "2026-08-19" as const;
 
 export type Id = string;
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
@@ -185,8 +185,14 @@ export interface FormGroup { id: string; label: string | null; description: stri
 export interface FormValidity { valid: boolean; invalidControlIds: string[]; }
 export interface FormDescriptor { id: string; target: FormControlTarget | null; accessibleName: string | null; description: string | null; groups: FormGroup[]; controls: FormControl[]; submitControlIds: string[]; resetControlIds: string[]; validity: FormValidity; }
 export interface FormSnapshot { schemaVersion: typeof FORM_SNAPSHOT_SCHEMA_VERSION; pageId: Id; forms: FormDescriptor[]; unownedControls: FormControl[]; truncated: boolean; }
+/**
+ * The unified mutation vocabulary for form controls. Used both as the
+ * `controlAction` primitive's payload and as {@link FillIntent} /
+ * {@link CompleteFormField}'s `value` — `activate` is accepted by the type
+ * but rejected at runtime for fill and completeForm (control_action only).
+ */
 export type ControlAction =
-  | { kind: "setText"; value: string }
+  | { kind: "setText"; value: string; /** Defaults to `true` (replace) when omitted. */ clearFirst?: boolean }
   | { kind: "setChecked"; checked: boolean }
   | { kind: "selectOne"; value: string }
   | { kind: "selectMany"; values: string[] }
@@ -238,13 +244,8 @@ export interface IntentHints {
   allowBestMatch?: boolean;
 }
 export interface LocateIntent { purpose: string; hints?: IntentHints; }
-export type FillValue =
-  | { kind: "text"; text: string; clearFirst?: boolean }
-  | { kind: "select"; option: string }
-  | { kind: "checked"; checked: boolean }
-  | { kind: "files"; paths: string[] };
-export interface FillIntent { purpose: string; hints?: IntentHints; value: FillValue; }
-export interface CompleteFormField { name: string; purpose: string; hints?: IntentHints; value: FillValue; }
+export interface FillIntent { purpose: string; hints?: IntentHints; value: ControlAction; }
+export interface CompleteFormField { name: string; purpose: string; hints?: IntentHints; value: ControlAction; }
 export interface CompleteFormIntent { purpose: string; fields: CompleteFormField[]; }
 export interface SubmitAndVerifyIntent { purpose: string; hints?: IntentHints; expectedState: WaitForCommand; }
 export interface WaitForStateIntent { condition: WaitCondition; timeoutMs: number; }

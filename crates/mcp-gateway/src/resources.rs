@@ -500,8 +500,8 @@ every capability `required_capabilities` names for it (`crates/mcp-gateway/src/s
   - `downloadUrl` and `clickAndWaitForDownload`: `file:download`.
   - `evaluateJavaScript`: `javascript:evaluate`.
   - `extractStructured`: `vision:assist`.
-  - every intent: `intent:execute`; a `fill` whose value is `files`, or a
-    `completeForm` with any `files` field, additionally needs `file:upload`.
+  - every intent: `intent:execute`; a `fill` whose value is `setFiles`, or a
+    `completeForm` with any `setFiles` field, additionally needs `file:upload`.
   - every other primitive: nothing beyond `browser:mutate`.
 - `file:upload` -- gates `upload_files` (with `browser:mutate`), among
   others: `control_action` with a `setFiles` action and file-carrying intent

@@ -79,21 +79,23 @@ await client.submit(
   fillEnvelope(
     meta,
     "enter the applicant email",
-    { kind: "text", text: "a@example.com", clearFirst: true },
+    { kind: "setText", value: "a@example.com", clearFirst: true },
     { role: "textbox", nearText: { kind: "exact", value: "Email address" } },
   ),
   { idempotencyKey: crypto.randomUUID() },
 );
 ```
 
-`FillValue` kinds:
+Unified `ControlAction` kinds for fill:
 
 | Kind | Shape | Notes |
 |---|---|---|
-| `text` | `{ kind: "text", text, clearFirst? }` | Default path for textboxes |
-| `select` | `{ kind: "select", option }` | Matches option **value** first, then visible label (trimmed, case-insensitive) |
-| `checked` | `{ kind: "checked", checked: boolean }` | Checkbox / radio only |
-| `files` | `{ kind: "files", paths }` | Requires `file:upload` |
+| `setText` | `{ kind: "setText", value, clearFirst? }` | Default path for textboxes; `clearFirst` defaults to true (replace) |
+| `selectOne` | `{ kind: "selectOne", value }` | Matches option **value** first, then visible label (trimmed, case-insensitive) |
+| `selectMany` | `{ kind: "selectMany", values }` | Multi-select only; matches by value or label |
+| `setChecked` | `{ kind: "setChecked", checked: boolean }` | Checkbox / radio only |
+| `setFiles` | `{ kind: "setFiles", paths }` | Requires `file:upload` |
+| `clear` | `{ kind: "clear" }` | Clear field value |
 
 `select` therefore resolves by value first so forms using explicit values remain stable,
 then retries with trimmed visible-label matching before failing.
@@ -105,17 +107,17 @@ await client.submit(
   fillEnvelope(
     meta,
     "accept terms",
-    { kind: "checked", checked: true },
+    { kind: "setChecked", checked: true },
     { role: "checkbox", nearText: { kind: "exact", value: "I agree" } },
   ),
   { idempotencyKey: crypto.randomUUID() },
 );
 ```
 
-`checked` toggles via a real click when the control's state differs. Radios
+`setChecked` toggles via a real click when the control's state differs. Radios
 may be selected (`checked: true`) but cannot be unchecked directly
 (`checked: false` fails closed). Non-checkable targets must not use
-`kind: "checked"`.
+`kind: "setChecked"`.
 
 When `role` and exact `nearText` are supplied, `nearText` is the control's
 accessible name while `purpose` remains the agent's task description. This
@@ -175,13 +177,13 @@ await client.submit(
           name: "email",
           purpose: "enter the applicant email",
           hints: { role: "textbox", nearText: { kind: "exact", value: "Email address" } },
-          value: { kind: "text", text: "a@example.com", clearFirst: true },
+          value: { kind: "setText", value: "a@example.com", clearFirst: true },
         },
         {
           name: "terms",
           purpose: "accept terms",
           hints: { role: "checkbox", nearText: { kind: "exact", value: "I agree" } },
-          value: { kind: "checked", checked: true },
+          value: { kind: "setChecked", checked: true },
         },
       ],
     }),
@@ -282,6 +284,8 @@ await client.submit(
   { idempotencyKey: crypto.randomUUID() },
 );
 ```
+
+Note: `ExtractValueKind` (`text`, `attribute`, `href`) is separate from fill and control operations.
 
 `ExtractValueKind`: `text`, `attribute` (+ `attribute` name), `href`.
 

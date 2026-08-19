@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use thiserror::Error;
 use types::{
-    ExtractValueKind, FillValue, IntentCommand, IntentHints, TargetSpec, TextMatch, WaitCondition,
-    WaitForCommand, MAX_INTENT_PURPOSE_BYTES,
+    ControlAction, ExtractValueKind, IntentCommand, IntentHints, TargetSpec, TextMatch,
+    WaitCondition, WaitForCommand, MAX_INTENT_PURPOSE_BYTES,
 };
 
 const MAX_FORM_FIELDS: usize = 128;
@@ -15,7 +15,7 @@ pub enum IntentPlan {
     },
     Fill {
         target: TargetSpec,
-        value: FillValue,
+        value: ControlAction,
     },
     CompleteForm {
         fields: Vec<CompleteFormFieldPlan>,
@@ -63,7 +63,7 @@ pub struct CompleteFormFieldPlan {
     pub name: String,
     pub purpose: String,
     pub target: TargetSpec,
-    pub value: FillValue,
+    pub value: ControlAction,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]

@@ -13,11 +13,11 @@ import {
   type CommandEnvelope,
   type CompleteFormIntent,
   type AccessibilityTarget,
+  type ControlAction,
   type DismissObstructionIntent,
   type ExtractField,
   type ExtractIntent,
   type FillIntent,
-  type FillValue,
   type FollowIntent,
   type Id,
   type IntentHints,
@@ -127,9 +127,10 @@ export function completeFormRuntimeCommand(input: CompleteFormIntent): RuntimeCo
   return { kind: "intent", input: { kind: "completeForm", input: { purpose: input.purpose, fields } } };
 }
 
-function normalizeFillValue(value: FillValue): FillValue {
-  if (value.kind === "text") {
-    return { kind: "text", text: value.text, clearFirst: value.clearFirst ?? false };
+/** Emits the canonical wire shape; `setText` without `clearFirst` means replace. */
+function normalizeFillValue(value: ControlAction): ControlAction {
+  if (value.kind === "setText") {
+    return { kind: "setText", value: value.value, clearFirst: value.clearFirst ?? true };
   }
   return value;
 }
@@ -256,7 +257,7 @@ export function locateEnvelope(meta: IntentEnvelopeMeta, purpose: string, hints?
 }
 
 /** Convenience: {@link fillRuntimeCommand} + {@link intentEnvelope}. */
-export function fillEnvelope(meta: IntentEnvelopeMeta, purpose: string, value: FillValue, hints?: IntentHints): CommandEnvelope {
+export function fillEnvelope(meta: IntentEnvelopeMeta, purpose: string, value: ControlAction, hints?: IntentHints): CommandEnvelope {
   return intentEnvelope(meta, fillRuntimeCommand({ purpose, value, hints }));
 }
 
