@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- `Formula/bobby-browser.rb` carries the v0.11.0 asset digests.
+
 ## 0.11.0 - 2026-08-20
 
 ### Breaking
