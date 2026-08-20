@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.11.0 - 2026-08-20
+
 ### Breaking
 
 - **Unified control action vocabulary**: `FillValue` is removed. `fill` and `completeForm` intents now use a single `ControlAction` enum shared with the `control_action` MCP tool. Old fill vocabulary replaced with new unified kinds:
@@ -18,6 +20,50 @@
 - `control_action` `setText` accepts `clearFirst` (default true, replace behavior; unchanged from prior hard-coded behavior in worker-pool and firefox-companion).
 - `type_text` remains unchanged; its `clearFirst` still defaults false.
 - Interface version bumped to `2026-08-19`; HTTP clients must send the new `x-interface-version`.
+
+### Added
+
+- Qwen3.5-27B-4bit (`mlx-community/Qwen3.5-27B-4bit`) is the MLX vision default in `vision-proxy`, `bobby vision connect`, and the `bobby install` model list, where it is the recommended first choice. The previous Qwen2.5-VL-3B default could not drive the solve loop.
+- `VISION_COORD_SPACE=normalized|absolute` overrides the mlx-vlm provider's per-model coordinate-space detection.
+- `network_log` reports `networkRecordingStarted` on the call that attaches the collector, and its description states that recording begins at the first call on a page. A first call previously returned an empty HAR with nothing naming the cause.
+- `bobby doctor`'s companion-port check names the listening process's pid and command, read from `lsof` under a 2s cap on unix. It is omitted rather than blocking on any lookup failure or non-unix platform.
+- `click` carries `dialogOpened` evidence when `alert`/`confirm`/`prompt` opens during the click.
+- `type_text` carries `typedControlKind` evidence, which verification uses to accept a checkable's or a select's post-state.
+- `form_snapshot` collects `[role=button]` elements and names a button from its own text when it carries no label, so buttons are targetable straight from the snapshot.
+- The DOM candidate collector maps implicit roles for headings, lists, list items, images, tables, rows, and cells, so those elements resolve by role with no explicit `role` attribute.
+
+### Changed
+
+- Interface error messages carry the allowlisted diagnostic and the repair action, capped at 1024 bytes with the diagnostic truncated first so the repair action survives intact. A non-allowlisted raw message is still never included.
+- The candidate limit applies to the matching set after filtering instead of every gathered candidate, and an explicit `ordinal` skips the bound because it picks one match deterministically. A large page no longer fails a target that matches once.
+- `type_text` splits its value into runs the US keyboard layout can key-press and runs that need a caret-level `Input.insertText`, so Unicode outside that layout and newlines are typed rather than key-pressed.
+- The browser-launch repair and the `engineUnreachable` diagnostic name the Firefox companion bind (default `127.0.0.1:9876`) and the other runtime that may hold it, alongside the BiDi endpoint.
+- `visionAssistDenied` leads with the deterministic stuck reason (`targetNotFound`, `targetAmbiguous`, `obstructionSuspected`) and then names the closed gate. The code is unchanged; the message read as a policy wall to an agent that never asked for vision.
+- A duplicate in-flight JSON-RPC request id is rejected with a diagnostic and a repair instead of a bare `Invalid Request`.
+- The advertised `executionPath.reason` enum carries a description: `ineligibleCommand` means the command class runs in the browser and is not a failure.
+- Every failing command outcome is logged at WARN with command, session, page, outcome, code, retryable, and message.
+- The `targetNotFound` re-collect loop backs off 25, 50, 100, 200, 400 ms, capped at 500 ms, instead of re-scanning a large page every 25 ms for the whole deadline.
+- A page opened by `page_open` or an agent workflow reports its navigated URL and an `interactive` ready state, and is listed on its session, instead of the pre-navigation blank state.
+
+### Fixed
+
+- A `click` that opens `alert`/`confirm`/`prompt` returns instead of hanging. The renderer blocks while the dialog is up, so the click's own CDP round trip may never answer; the click races a per-page dialog listener and reports `dialogOpened`. `dialog` consumes a dialog that opened before it was called rather than waiting on a future event that already fired.
+- `click` and keyboard dispatch bring the target page to front first. On a background target in headless Chrome the click path never resolved. A failed raise is logged and the dispatch proceeds.
+- `type_text` against a non-editable target — disabled, readonly, a `fieldset[disabled]` ancestor, a non-typeable input type, or a non-form element — fails with `invalidRequest` instead of dispatching key events, which pinned headless Chrome at 100% CPU on macOS.
+- A screenshot clip is bounded before it reaches CDP: a negative origin, a non-finite value, or a dimension over `max_screenshot_dimension` is refused with `invalidRequest`. An unbounded clip could kill the browser process.
+- `a11y_snapshot` reserves a node's budget slot before descending into its children, so a deep subtree of leaves cannot consume the whole budget and return zero nodes.
+- Page operations clone a browser handle and release the worker mutex instead of holding it across a CDP await, so one page's slow or hung call no longer serializes or stalls every other page in the session.
+- A dead browser target rewritten by the targeting layer triggers the same revive path as a raw CDP receiver-is-gone error, instead of wedging the page.
+- A navigation the browser aborted (`net::ERR_ABORTED` — a download response or a cancelled navigation) fails as non-retryable and points at `download_url` and `click_and_wait_for_download`, instead of advising a retry that repeats the abort. The frame's navigation slot is freed.
+- Driver failures are retryable by code: a malformed request, a target that is not there, and a policy refusal are not retried; transport, launch, internal, and timeout codes are.
+- `httpResponseTooLarge` is a plain `failed` rather than `needsReconciliation`. The body is dropped mid-stream with nothing written, so no effect can have landed.
+- An iframe hop resolves by DOM identity — `DOM.getFrameOwner`'s backend node id against the candidate's own — instead of name and `src`, so unnamed sibling iframes are told apart. An unnamed hop's stamped target validates and resolves, so a snapshot target passes back verbatim.
+- Role matching treats `img` and `image` as one role. Chrome's a11y tree emits `image` while the DOM collector emits `img`, so a snapshot role fed back as a target resolves either way.
+- Accessible names are trimmed on both sides of the comparison, so a name carrying surrounding whitespace matches.
+- `type_text` verification accepts an append (`clearFirst: false`), a checkable's checked state, and a select's committed option, instead of requiring the post-action read to equal the typed value exactly.
+- The mlx-vlm provider rescales normalized `[0, 1000)` click coordinates onto the screenshot frame for the families that emit them (Qwen3-VL, Qwen3.5), and unwraps list-typed coordinates such as `{"x": [566]}` and `{"coordinate": [[x, y]]}`.
+- The mlx-vlm provider builds a system+user chat template when the processor supports it. The single-message template made Qwen3.5 emit a click with no `y` key.
+- `Formula/bobby-browser.rb` carries the v0.10.0 asset digests.
 
 ## 0.10.0 - 2026-08-18
 
