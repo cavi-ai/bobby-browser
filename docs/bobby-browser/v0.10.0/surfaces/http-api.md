@@ -5,7 +5,7 @@ documentedVersion: 0.10.0
 # HTTP API reference
 
 Authenticated broker routes under `/v1/*`. Interface version:
-`2026-07-23` (`CURRENT_INTERFACE_VERSION` / TypeScript `INTERFACE_VERSION`).
+`2026-08-19` (`CURRENT_INTERFACE_VERSION` / TypeScript `INTERFACE_VERSION`).
 
 Unauthenticated: `GET /healthz` → `{ "ok": true }`.
 

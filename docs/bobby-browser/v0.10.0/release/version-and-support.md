@@ -5,7 +5,7 @@ documentedVersion: 0.10.0
 # Version and support
 
 Product docs line: **0.10.0**. Interface version string:
-**`2026-07-23`** (`CURRENT_INTERFACE_VERSION` / TypeScript `INTERFACE_VERSION`).
+**`2026-08-19`** (`CURRENT_INTERFACE_VERSION` / TypeScript `INTERFACE_VERSION`).
 
 ## Support expectations (alpha)
 

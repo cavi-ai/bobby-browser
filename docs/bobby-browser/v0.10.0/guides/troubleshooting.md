@@ -70,7 +70,7 @@ MCP HTTP is bearer-only: no `x-interface-version`, `x-correlation-id`, or
 
 ## Interface version
 
-Send `x-interface-version: 2026-07-23`. Mismatch →
+Send `x-interface-version: 2026-08-19`. Mismatch →
 `unsupportedInterfaceVersion`.
 
 ## Session lifecycle
@@ -84,8 +84,8 @@ Send `x-interface-version: 2026-07-23`. Mismatch →
 
 - Prefer exact `nearText` + `role` when the accessible name is known; leave
   `purpose` as the agent task phrase.
-- `kind: "select"` matches option **value** first, then fallback to visible label (trimmed, case-insensitive).
-- `kind: "checked"` is only for checkbox/radio. Radios accept
+- `kind: "selectOne"` matches option **value** first, then fallback to visible label (trimmed, case-insensitive).
+- `kind: "setChecked"` is only for checkbox/radio. Radios accept
   `checked: true` only — unchecking a radio fails closed.
 - A fill without postcondition evidence fails; do not treat a silent click as
   success. Re-locate and retry under a new attempt id / idempotency key.
