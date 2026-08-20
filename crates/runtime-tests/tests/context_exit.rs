@@ -18,9 +18,9 @@ use chrono::{Duration, Utc};
 use modern_gauntlet::scenario::{ScenarioConfig, ScenarioServer};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use types::{
-    AttemptId, Capability, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest,
-    FillIntent, FillValue, IntentCommand, IntentHints, NavigateCommand, OpenPageRequest, PageId,
-    PrimitiveCommand, RuntimeCommand, SessionId, WaitUntil, WorkflowId,
+    AttemptId, Capability, CommandEnvelope, CommandId, CommandOutcome, ControlAction,
+    CreateSessionRequest, FillIntent, IntentCommand, IntentHints, NavigateCommand, OpenPageRequest,
+    PageId, PrimitiveCommand, RuntimeCommand, SessionId, WaitUntil, WorkflowId,
 };
 use worker_pool::ChromiumWorkerFactory;
 
@@ -168,8 +168,8 @@ impl Station {
                 role: Some("textbox".into()),
                 ..IntentHints::default()
             },
-            value: FillValue::Text {
-                text: value.into(),
+            value: ControlAction::SetText {
+                value: value.into(),
                 clear_first: true,
             },
         })))

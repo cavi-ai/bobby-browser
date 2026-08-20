@@ -8,10 +8,10 @@ use observability::{
 };
 use types::{
     CaptureScreenshotCommand, ClickCommand, CommandError, ControlAction, ControlActionCommand,
-    ErrorCode, ErrorLayer, Evidence, ExecutionRecord, ExtractValueKind, FillValue,
-    FormControlTarget, IntentCommand, IntentResolutionPath, PageId, ScreenshotMode,
-    SemanticTargetSegment, TargetFingerprint, TargetSpec, TypeTextCommand, UploadFilesCommand,
-    WaitCondition, WaitForCommand,
+    ErrorCode, ErrorLayer, Evidence, ExecutionRecord, ExtractValueKind, FormControlTarget,
+    IntentCommand, IntentResolutionPath, PageId, ScreenshotMode, SemanticTargetSegment,
+    TargetFingerprint, TargetSpec, TypeTextCommand, UploadFilesCommand, WaitCondition,
+    WaitForCommand,
 };
 
 use crate::compiler::{compile_intent, CompleteFormFieldPlan, ExtractFieldPlan, IntentPlan};
@@ -672,7 +672,7 @@ async fn execute_fill(
     browser: &dyn IntentBrowser,
     vision: &VisionContext,
     target: TargetSpec,
-    value: FillValue,
+    value: ControlAction,
 ) -> IntentOutcome {
     let purpose = match intent {
         IntentCommand::Fill(fill) => Some(fill.purpose.clone()),
@@ -680,8 +680,8 @@ async fn execute_fill(
     };
     let plan_summary = format!("{} value={}", summarize_target(&target), fill_kind(&value));
     let fill_payload = match &value {
-        FillValue::Text { text, clear_first } => Some(VisionFillPayload {
-            text: text.clone(),
+        ControlAction::SetText { value, clear_first } => Some(VisionFillPayload {
+            text: value.clone(),
             clear_first: *clear_first,
         }),
         _ => None,
@@ -861,39 +861,39 @@ async fn act_fill(
     browser: &dyn IntentBrowser,
     candidate: &Candidate,
     intent_target: &TargetSpec,
-    value: &FillValue,
+    value: &ControlAction,
 ) -> Result<Vec<Evidence>, CommandError> {
     let (selector, target) = action_target(candidate, intent_target);
     match value {
-        // Worker-pool has no select API; Select is typed via TypeTextCommand.
-        FillValue::Text { text, clear_first } => {
+        // Worker-pool has no select API; SelectOne is typed via TypeTextCommand.
+        ControlAction::SetText { value, clear_first } => {
             browser
                 .type_text(
                     page_id,
                     &TypeTextCommand {
                         selector,
                         target: Some(target),
-                        value: text.clone(),
+                        value: value.clone(),
                         clear_first: *clear_first,
                         expected_url: None,
                     },
                 )
                 .await
         }
-        FillValue::Select { option } => {
+        ControlAction::SelectOne { value } => {
             browser
                 .control_action(
                     page_id,
                     &ControlActionCommand {
                         target: form_control_target(candidate, intent_target)?,
                         action: ControlAction::SelectOne {
-                            value: option.clone(),
+                            value: value.clone(),
                         },
                     },
                 )
                 .await
         }
-        FillValue::Checked { checked } => {
+        ControlAction::SetChecked { checked } => {
             browser
                 .control_action(
                     page_id,
@@ -904,7 +904,7 @@ async fn act_fill(
                 )
                 .await
         }
-        FillValue::Files { paths } => {
+        ControlAction::SetFiles { paths } => {
             browser
                 .upload_files(
                     page_id,
@@ -916,6 +916,36 @@ async fn act_fill(
                 )
                 .await
         }
+        ControlAction::SelectMany { values } => {
+            browser
+                .control_action(
+                    page_id,
+                    &ControlActionCommand {
+                        target: form_control_target(candidate, intent_target)?,
+                        action: ControlAction::SelectMany {
+                            values: values.clone(),
+                        },
+                    },
+                )
+                .await
+        }
+        ControlAction::Clear => {
+            browser
+                .control_action(
+                    page_id,
+                    &ControlActionCommand {
+                        target: form_control_target(candidate, intent_target)?,
+                        action: ControlAction::Clear,
+                    },
+                )
+                .await
+        }
+        ControlAction::Activate => Err(CommandError {
+            code: ErrorCode::InvalidRequest,
+            message: "activate is not valid for fill; use control_action instead".into(),
+            layer: ErrorLayer::Page,
+            retryable: false,
+        }),
     }
 }
 
@@ -1004,12 +1034,15 @@ fn fingerprint(page_id: &PageId, candidate: &Candidate) -> TargetFingerprint {
     }
 }
 
-fn fill_kind(value: &FillValue) -> &'static str {
+fn fill_kind(value: &ControlAction) -> &'static str {
     match value {
-        FillValue::Text { .. } => "text",
-        FillValue::Select { .. } => "select",
-        FillValue::Checked { .. } => "checked",
-        FillValue::Files { .. } => "files",
+        ControlAction::SetText { .. } => "setText",
+        ControlAction::SelectOne { .. } => "selectOne",
+        ControlAction::SetChecked { .. } => "setChecked",
+        ControlAction::SetFiles { .. } => "setFiles",
+        ControlAction::SelectMany { .. } => "selectMany",
+        ControlAction::Clear => "clear",
+        ControlAction::Activate => "activate",
     }
 }
 
@@ -2999,8 +3032,8 @@ async fn execute_vision_action(
                     },
                 )
                 .await?;
-            let value = FillValue::Text {
-                text: payload.text.clone(),
+            let value = ControlAction::SetText {
+                value: payload.text.clone(),
                 clear_first: payload.clear_first,
             };
             verify_fill(&value, &evidence).map_err(|_| CommandError {

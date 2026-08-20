@@ -1071,6 +1071,139 @@ async fn type_text_reports_the_typed_control_kind_and_the_committed_value() {
 
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
+async fn control_action_set_text_without_clear_first_still_clears_before_typing() {
+    let profiles = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: profiles.path().to_path_buf(),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![profiles.path().to_path_buf()],
+        downloads_dir: profiles.path().join("downloads"),
+        artifacts_dir: profiles.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: "data:text/html,<input id=name aria-label=Name value=prefilled>".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let form_snapshot = worker.form_snapshot(&page_id, None).await.unwrap();
+    let snapshot = form_snapshot
+        .iter()
+        .find_map(|item| match item {
+            Evidence::FormSnapshot { snapshot } => Some(snapshot),
+            _ => None,
+        })
+        .expect("form snapshot evidence");
+    let name_field = snapshot
+        .unowned_controls
+        .iter()
+        .find(|control| control.accessible_name.as_deref() == Some("Name"))
+        .expect("Name control");
+    let target = name_field.target.clone().unwrap();
+
+    // The wire body carries no `clearFirst`; ControlAction::SetText must still
+    // default to replace semantics (matches the previously hard-coded true).
+    let action: ControlAction =
+        serde_json::from_value(serde_json::json!({"kind":"setText","value":"x"})).unwrap();
+    let evidence = worker
+        .control_action(&page_id, &ControlActionCommand { target, action })
+        .await
+        .unwrap();
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::ControlAction { action }
+            if action.state == types::FormControlState::Text { value: "x".into() }
+    )));
+
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn control_action_clear_empties_a_text_input() {
+    let profiles = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: profiles.path().to_path_buf(),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![profiles.path().to_path_buf()],
+        downloads_dir: profiles.path().join("downloads"),
+        artifacts_dir: profiles.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: "data:text/html,<input id=name aria-label=Name value=prefilled>".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let form_snapshot = worker.form_snapshot(&page_id, None).await.unwrap();
+    let snapshot = form_snapshot
+        .iter()
+        .find_map(|item| match item {
+            Evidence::FormSnapshot { snapshot } => Some(snapshot),
+            _ => None,
+        })
+        .expect("form snapshot evidence");
+    let name_field = snapshot
+        .unowned_controls
+        .iter()
+        .find(|control| control.accessible_name.as_deref() == Some("Name"))
+        .expect("Name control");
+    let target = name_field.target.clone().unwrap();
+
+    // Text inputs also expose a prototype `checked` property; clear must reach
+    // the value branch, not the checkbox one.
+    let evidence = worker
+        .control_action(
+            &page_id,
+            &ControlActionCommand {
+                target,
+                action: ControlAction::Clear,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::ControlAction { action }
+            if action.state == types::FormControlState::Empty
+                || action.state == types::FormControlState::Text { value: String::new() }
+    )));
+
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
 async fn semantic_targets_fail_closed_and_reresolve_after_replacement() {
     let root = tempfile::tempdir().unwrap();
     let factory = ChromiumWorkerFactory::new(BrowserConfig {

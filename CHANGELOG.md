@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Breaking
+
+- **Unified control action vocabulary**: `FillValue` is removed. `fill` and `completeForm` intents now use a single `ControlAction` enum shared with the `control_action` MCP tool. Old fill vocabulary replaced with new unified kinds:
+
+| old (fill) | new |
+|---|---|
+| `{"kind":"text","text":X,"clearFirst":false}` | `{"kind":"setText","value":X,"clearFirst":false}` (clearFirst now defaults true = replace; pass false to append) |
+| `{"kind":"select","option":X}` | `{"kind":"selectOne","value":X}` |
+| `{"kind":"checked","checked":X}` | `{"kind":"setChecked","checked":X}` |
+| `{"kind":"files","paths":X}` | `{"kind":"setFiles","paths":X}` |
+
+- New operations available in fill: `selectMany` (multi-select), `clear` (clear field).
+- `activate` is rejected in fill; it remains control_action-only.
+- `control_action` `setText` accepts `clearFirst` (default true, replace behavior; unchanged from prior hard-coded behavior in worker-pool and firefox-companion).
+- `type_text` remains unchanged; its `clearFirst` still defaults false.
+- Interface version bumped to `2026-08-19`; HTTP clients must send the new `x-interface-version`.
+
 ## 0.10.0 - 2026-08-18
 
 ### Added

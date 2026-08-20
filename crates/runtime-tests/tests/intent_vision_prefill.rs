@@ -15,9 +15,9 @@ use intent_engine::{VisionAction, VisionAssist, VisionProposal, VisionProposeReq
 use sdk_core::RuntimeService;
 use types::{
     AttemptId, CommandEnvelope, CommandError, CommandId, CommandOutcome, CompleteFormField,
-    CompleteFormIntent, CreateSessionRequest, Evidence, ExecutionPolicy, FillValue, IntentCommand,
-    IntentResolutionPath, LocateIntent, NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand,
-    RuntimeCommand, SessionId, WaitUntil, WorkflowId,
+    CompleteFormIntent, ControlAction, CreateSessionRequest, Evidence, ExecutionPolicy,
+    IntentCommand, IntentResolutionPath, LocateIntent, NavigateCommand, OpenPageRequest, PageId,
+    PrimitiveCommand, RuntimeCommand, SessionId, WaitUntil, WorkflowId,
 };
 
 struct CountingVision {
@@ -114,8 +114,8 @@ fn stuck_form() -> IntentCommand {
                 name: "alpha".into(),
                 purpose: "Missing Alpha Field That Does Not Exist".into(),
                 hints: Default::default(),
-                value: FillValue::Text {
-                    text: "a".into(),
+                value: ControlAction::SetText {
+                    value: "a".into(),
                     clear_first: true,
                 },
             },
@@ -123,8 +123,8 @@ fn stuck_form() -> IntentCommand {
                 name: "beta".into(),
                 purpose: "Missing Beta Field That Does Not Exist".into(),
                 hints: Default::default(),
-                value: FillValue::Text {
-                    text: "b".into(),
+                value: ControlAction::SetText {
+                    value: "b".into(),
                     clear_first: true,
                 },
             },

@@ -20,7 +20,7 @@ use config::{AppConfig, BrowserConfig, ServerConfig, StorageConfig};
 use sdk_core::RuntimeService;
 use types::{
     AttemptId, CommandEnvelope, CommandId, CommandOutcome, CompleteFormField, CompleteFormIntent,
-    CreateSessionRequest, Evidence, ExecutionPolicy, FillValue, IntentCommand, IntentHints,
+    ControlAction, CreateSessionRequest, Evidence, ExecutionPolicy, IntentCommand, IntentHints,
     IntentResolutionPath, LocateIntent, NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand,
     RuntimeCommand, SessionId, WaitUntil, WorkflowId,
 };
@@ -218,8 +218,8 @@ fn stuck_form() -> IntentCommand {
                 name: "first".into(),
                 purpose: "First name".into(),
                 hints: Default::default(),
-                value: FillValue::Text {
-                    text: "Ada".into(),
+                value: ControlAction::SetText {
+                    value: "Ada".into(),
                     clear_first: true,
                 },
             },
@@ -227,8 +227,8 @@ fn stuck_form() -> IntentCommand {
                 name: "last".into(),
                 purpose: "Last name".into(),
                 hints: Default::default(),
-                value: FillValue::Text {
-                    text: "Lovelace".into(),
+                value: ControlAction::SetText {
+                    value: "Lovelace".into(),
                     clear_first: true,
                 },
             },

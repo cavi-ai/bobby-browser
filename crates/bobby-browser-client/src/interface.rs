@@ -10,7 +10,7 @@ use crate::{
 };
 
 /// Value of the `x-interface-version` header for this release.
-pub const CURRENT_INTERFACE_VERSION: &str = "2026-07-23";
+pub const CURRENT_INTERFACE_VERSION: &str = "2026-08-19";
 
 /// Marker for the sole supported interface version ([`CURRENT_INTERFACE_VERSION`]).
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]

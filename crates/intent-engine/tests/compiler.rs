@@ -1,7 +1,7 @@
 use intent_engine::{compile_intent, CompileError, IntentPlan};
 use types::{
-    CompleteFormField, CompleteFormIntent, DismissObstructionIntent, ExtractField, ExtractIntent,
-    ExtractValueKind, FillIntent, FillValue, FollowIntent, IntentCommand, IntentHints,
+    CompleteFormField, CompleteFormIntent, ControlAction, DismissObstructionIntent, ExtractField,
+    ExtractIntent, ExtractValueKind, FillIntent, FollowIntent, IntentCommand, IntentHints,
     LocateIntent, TextMatch, WaitCondition, WaitForCommand, WaitForStateIntent, WaitUntil,
 };
 
@@ -15,8 +15,8 @@ fn compile_complete_form_preserves_order_and_rejects_duplicate_names() {
             near_text: Some(TextMatch::Exact(label.into())),
             ..Default::default()
         },
-        value: FillValue::Text {
-            text: name.into(),
+        value: ControlAction::SetText {
+            value: name.into(),
             clear_first: true,
         },
     };
@@ -92,8 +92,8 @@ fn compile_fill_maps_purpose_to_text_when_role_absent() {
     let plan = compile_intent(&IntentCommand::Fill(FillIntent {
         purpose: "Email".into(),
         hints: IntentHints::default(),
-        value: FillValue::Text {
-            text: "a@b.co".into(),
+        value: ControlAction::SetText {
+            value: "a@b.co".into(),
             clear_first: true,
         },
     }))
@@ -105,10 +105,10 @@ fn compile_fill_maps_purpose_to_text_when_role_absent() {
     assert_eq!(target.text, Some(TextMatch::Contains("Email".into())));
     assert!(matches!(
         value,
-        FillValue::Text {
-            text,
+        ControlAction::SetText {
+            value,
             clear_first: true,
-        } if text == "a@b.co"
+        } if value == "a@b.co"
     ));
 }
 
@@ -120,8 +120,8 @@ fn compile_fill_uses_purpose_as_accessible_name_when_role_is_present() {
             role: Some("textbox".into()),
             ..IntentHints::default()
         },
-        value: FillValue::Text {
-            text: "Ada Lovelace".into(),
+        value: ControlAction::SetText {
+            value: "Ada Lovelace".into(),
             clear_first: true,
         },
     }))
@@ -143,8 +143,8 @@ fn compile_fill_uses_near_text_as_the_control_name_without_conflating_task_purpo
             near_text: Some(TextMatch::Exact("Email address".into())),
             ..IntentHints::default()
         },
-        value: FillValue::Text {
-            text: "ada@example.test".into(),
+        value: ControlAction::SetText {
+            value: "ada@example.test".into(),
             clear_first: true,
         },
     }))
@@ -167,8 +167,8 @@ fn compile_fill_preserves_snapshot_ordinal_for_duplicate_controls() {
             ordinal: Some(1),
             ..IntentHints::default()
         },
-        value: FillValue::Text {
-            text: "555-0102".into(),
+        value: ControlAction::SetText {
+            value: "555-0102".into(),
             clear_first: true,
         },
     }))
@@ -366,8 +366,8 @@ fn compile_fill_accepts_a_snapshot_target_accessible_name_verbatim() {
             accessible_name: Some("Email address".into()),
             ..IntentHints::default()
         },
-        value: FillValue::Text {
-            text: "ada@example.test".into(),
+        value: ControlAction::SetText {
+            value: "ada@example.test".into(),
             clear_first: true,
         },
     }))

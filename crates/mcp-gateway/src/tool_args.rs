@@ -205,7 +205,7 @@ intent_args!(IntentLocateArgs {
 intent_args!(IntentFillArgs {
     purpose: String,
     hints: Option<types::IntentHints>,
-    value: types::FillValue,
+    value: types::ControlAction,
 });
 
 intent_args!(IntentCompleteFormArgs {

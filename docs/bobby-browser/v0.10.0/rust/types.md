@@ -9,7 +9,7 @@ documentedVersion: 0.10.0
 `/v1` Serde wire types ship inside
 [`bobby-browser-client`](bobby-browser-client.md) on crates.io
 (`CreateSessionRequest`, command envelopes, outcomes, forms, recovery,
-`CURRENT_INTERFACE_VERSION` = `2026-07-23`).
+`CURRENT_INTERFACE_VERSION` = `2026-08-19`).
 
 ```bash
 cargo add bobby-browser-client

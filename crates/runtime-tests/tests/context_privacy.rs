@@ -11,8 +11,8 @@ use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, ServerConfig, StorageConfig};
 use sdk_core::RuntimeService;
 use types::{
-    AttemptId, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest, Evidence,
-    FillIntent, FillValue, IntentCommand, IntentHints, NavigateCommand, OpenPageRequest, PageId,
+    AttemptId, CommandEnvelope, CommandId, CommandOutcome, ControlAction, CreateSessionRequest,
+    Evidence, FillIntent, IntentCommand, IntentHints, NavigateCommand, OpenPageRequest, PageId,
     PrimitiveCommand, RuntimeCommand, SessionId, WaitUntil, WorkflowId,
 };
 use worker_pool::ChromiumWorkerFactory;
@@ -176,8 +176,8 @@ async fn typed_values_never_reach_the_context_store() {
                 role: Some("textbox".into()),
                 ..IntentHints::default()
             },
-            value: FillValue::Text {
-                text: CANARY.into(),
+            value: ControlAction::SetText {
+                value: CANARY.into(),
                 clear_first: true,
             },
         })),

@@ -12,9 +12,10 @@ use serde_json::{json, Value};
 use session_manager::SessionManager;
 use types::{
     AttemptId, CheckpointId, CommandClass, CommandEnvelope, CommandId, CompleteFormField,
-    CompleteFormIntent, DismissObstructionIntent, Evidence, FillIntent, FillValue, FollowIntent,
-    IntentCommand, IntentHints, LocateIntent, PrimitiveCommand, RuntimeCommand, SessionId,
-    TextMatch, WaitCondition, WaitForCommand, WorkflowCheckpoint, WorkflowId,
+    CompleteFormIntent, ControlAction, DismissObstructionIntent, Evidence, FillIntent,
+    FollowIntent, IntentCommand, IntentHints, LocateIntent, PageId, PrimitiveCommand,
+    RuntimeCommand, SessionId, TextMatch, WaitCondition, WaitForCommand, WorkflowCheckpoint,
+    WorkflowId,
 };
 use types::{Capability, PrincipalId};
 use uuid::uuid;
@@ -1447,8 +1448,8 @@ async fn command_execute_schema_accepts_fill_intent_with_snapshot_ordinal() {
                 near_text: Some(TextMatch::Exact("Name".into())),
                 ..IntentHints::default()
             },
-            value: FillValue::Text {
-                text: "Ada".into(),
+            value: ControlAction::SetText {
+                value: "Ada".into(),
                 clear_first: true,
             },
         })),
@@ -1511,8 +1512,8 @@ async fn command_execute_schema_accepts_bounded_complete_form_intent() {
                     near_text: Some(TextMatch::Exact("Email address".into())),
                     ..IntentHints::default()
                 },
-                value: FillValue::Text {
-                    text: "ada@example.test".into(),
+                value: ControlAction::SetText {
+                    value: "ada@example.test".into(),
                     clear_first: true,
                 },
             }],
@@ -2502,7 +2503,7 @@ async fn intent_tools_build_their_own_envelope_and_thread_the_workflow() {
                     "workflowId":minted,
                     "purpose":"enter the applicant email",
                     "hints":{"role":"textbox"},
-                    "value":{"kind":"text","text":"a@example.test","clearFirst":true}
+                    "value":{"kind":"setText","value":"a@example.test","clearFirst":true}
                 }
             }),
         ))
@@ -2679,6 +2680,65 @@ async fn rejected_arguments_name_the_offending_field_and_constraint() {
         json!("deadlineOutOfRange"),
         "{stale_deadline}"
     );
+}
+
+#[tokio::test]
+async fn legacy_fill_value_shape_gets_a_migration_repair_hint() {
+    // A caller still on the pre-0.11.0 FillValue shape gets the exact
+    // kind/field rename, not just a bare `oneOf` mismatch.
+    let server = fixture_server(vec![Capability::BrowserMutate, Capability::IntentExecute]).await;
+    let session_id = SessionId::new().0.to_string();
+    let page_id = PageId::new().0.to_string();
+
+    let rejected = server
+        .handle_message(request(
+            65,
+            "tools/call",
+            json!({
+                "name":"intent_fill",
+                "arguments":{
+                    "sessionId":session_id,
+                    "pageId":page_id,
+                    "purpose":"Email",
+                    "value":{"kind":"text","text":"a@b.co"}
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        rejected["error"]["data"]["reason"],
+        json!("schemaViolation"),
+        "{rejected}"
+    );
+    let action = rejected["error"]["data"]["repair"]["action"]
+        .as_str()
+        .expect("repair action");
+    assert!(action.contains("setText"), "{action}");
+    assert!(action.contains("0.11.0"), "{action}");
+
+    // A payload with no legacy marker gets the plain schemaViolation repair,
+    // unchanged.
+    let plain = server
+        .handle_message(request(
+            66,
+            "tools/call",
+            json!({
+                "name":"intent_fill",
+                "arguments":{
+                    "sessionId":session_id,
+                    "pageId":page_id,
+                    "purpose":"Email",
+                    "value":{"kind":"bogus"}
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    let plain_action = plain["error"]["data"]["repair"]["action"]
+        .as_str()
+        .expect("repair action");
+    assert!(!plain_action.contains("0.11.0"), "{plain_action}");
 }
 
 #[tokio::test]

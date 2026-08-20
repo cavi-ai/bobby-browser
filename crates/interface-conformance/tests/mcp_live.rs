@@ -19,8 +19,8 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 use types::{
     AccessibilityNode, AttemptId, CaptureScreenshotCommand, CheckpointId, CheckpointInvariant,
     ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, CommandClass, CommandEnvelope,
-    CommandId, CommandOutcome, CompleteFormField, CompleteFormIntent, Evidence, FillIntent,
-    FillValue, InspectCommand, IntentCommand, IntentHints, NavigateCommand, PrimitiveCommand,
+    CommandId, CommandOutcome, CompleteFormField, CompleteFormIntent, ControlAction, Evidence,
+    FillIntent, InspectCommand, IntentCommand, IntentHints, NavigateCommand, PrimitiveCommand,
     RuntimeCommand, ScreenshotMode, TextMatch, UploadFilesCommand, WaitUntil, WorkflowCheckpoint,
     WorkflowId,
 };
@@ -226,8 +226,8 @@ async fn prove_snapshot_target_round_trip(
                 ordinal: work_phone_target.ordinal,
                 ..IntentHints::default()
             },
-            value: FillValue::Text {
-                text: "555-0102".into(),
+            value: ControlAction::SetText {
+                value: "555-0102".into(),
                 clear_first: true,
             },
         })),
@@ -440,8 +440,8 @@ async fn run_mcp_sample(
                         near_text: Some(TextMatch::Exact("Name".into())),
                         ..IntentHints::default()
                     },
-                    value: FillValue::Text {
-                        text: "Ada Lovelace".into(),
+                    value: ControlAction::SetText {
+                        value: "Ada Lovelace".into(),
                         clear_first: true,
                     },
                 }],

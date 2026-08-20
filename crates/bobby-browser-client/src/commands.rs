@@ -140,7 +140,7 @@ pub struct FillIntent {
     pub purpose: String,
     #[serde(default)]
     pub hints: IntentHints,
-    pub value: FillValue,
+    pub value: ControlAction,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,7 +151,7 @@ pub struct CompleteFormField {
     pub purpose: String,
     #[serde(default)]
     pub hints: IntentHints,
-    pub value: FillValue,
+    pub value: ControlAction,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,27 +160,6 @@ pub struct CompleteFormField {
 pub struct CompleteFormIntent {
     pub purpose: String,
     pub fields: Vec<CompleteFormField>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum FillValue {
-    Text {
-        text: String,
-        #[serde(default)]
-        #[serde(rename = "clearFirst")]
-        clear_first: bool,
-    },
-    Select {
-        option: String,
-    },
-    Checked {
-        checked: bool,
-    },
-    Files {
-        paths: Vec<String>,
-    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -396,15 +375,31 @@ pub struct ControlActionCommand {
     pub action: ControlAction,
 }
 
+fn default_clear_first() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum ControlAction {
-    SetText { value: String },
-    SetChecked { checked: bool },
-    SelectOne { value: String },
-    SelectMany { values: Vec<String> },
-    SetFiles { paths: Vec<String> },
+    SetText {
+        value: String,
+        #[serde(default = "default_clear_first", rename = "clearFirst")]
+        clear_first: bool,
+    },
+    SetChecked {
+        checked: bool,
+    },
+    SelectOne {
+        value: String,
+    },
+    SelectMany {
+        values: Vec<String>,
+    },
+    SetFiles {
+        paths: Vec<String>,
+    },
     Clear,
     Activate,
 }
@@ -419,7 +414,7 @@ impl ControlAction {
         }
 
         match self {
-            Self::SetText { value } | Self::SelectOne { value } => bounded(value, "value"),
+            Self::SetText { value, .. } | Self::SelectOne { value } => bounded(value, "value"),
             Self::SelectMany { values } => {
                 if values.is_empty() || values.len() > MAX_FORM_REFERENCES {
                     return Err(format!(

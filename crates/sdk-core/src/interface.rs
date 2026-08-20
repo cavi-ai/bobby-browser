@@ -14,8 +14,8 @@ use interface_core::{
     SessionCheckpointOutcome, SessionOwnershipRecorder,
 };
 use types::{
-    Capability, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest, ErrorLayer,
-    Evidence, FillValue, IntentCommand, InterfaceError, InterfaceErrorCode, InterfaceOperation,
+    Capability, CommandEnvelope, CommandId, CommandOutcome, ControlAction, CreateSessionRequest,
+    ErrorLayer, Evidence, IntentCommand, InterfaceError, InterfaceErrorCode, InterfaceOperation,
     OpenPageRequest, PageState, PrimitiveCommand, RecoveryDecision, RequestContext, RuntimeCommand,
     RuntimeError, RuntimeInfo, SessionId, SessionState, WorkflowCheckpoint, WorkflowId,
 };
@@ -745,7 +745,7 @@ fn command_extra_capabilities(command: &RuntimeCommand) -> Vec<Capability> {
         }
         RuntimeCommand::Primitive(_) => vec![],
         RuntimeCommand::Intent(IntentCommand::Fill(fill))
-            if matches!(fill.value, FillValue::Files { .. }) =>
+            if matches!(fill.value, ControlAction::SetFiles { .. }) =>
         {
             vec![Capability::IntentExecute, Capability::FileUpload]
         }
@@ -753,7 +753,7 @@ fn command_extra_capabilities(command: &RuntimeCommand) -> Vec<Capability> {
             if form
                 .fields
                 .iter()
-                .any(|field| matches!(field.value, FillValue::Files { .. })) =>
+                .any(|field| matches!(field.value, ControlAction::SetFiles { .. })) =>
         {
             vec![Capability::IntentExecute, Capability::FileUpload]
         }

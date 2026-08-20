@@ -148,6 +148,49 @@ pub(crate) fn repair_for_code(code: &str) -> Option<Value> {
     Some(repair(action))
 }
 
+/// Migration mapping appended to a schema-violation repair when the rejected
+/// payload still carries a pre-0.11.0 `FillValue` marker: the wire vocabulary
+/// unified onto `ControlAction`'s `kind`+field spelling (`crates/types/tests/
+/// contracts.rs`, "L3 unification contract").
+const LEGACY_FILL_SHAPE_MIGRATION: &str = "The payload also still uses the legacy fill shape, \
+    changed in 0.11.0: kind \"text\" (field \"text\") is now kind \"setText\" (field \"value\"); \
+    kind \"select\" (field \"option\") is now kind \"selectOne\" (field \"value\"); \
+    kind \"checked\" is now kind \"setChecked\"; kind \"files\" is now kind \"setFiles\".";
+
+/// Tools whose arguments can carry a fill or control-action value, and so are
+/// worth scanning for the legacy `FillValue` shape on rejection.
+const FILL_SHAPE_TOOLS: &[&str] = &[
+    "intent_fill",
+    "intent_complete_form",
+    "control_action",
+    "command_execute",
+];
+
+/// True when `value`, or anything nested inside it, still carries a
+/// pre-0.11.0 `FillValue` marker. None of these spellings exist in the
+/// unified `ControlAction` vocabulary, so seeing one means the caller has not
+/// migrated yet rather than having sent a differently-broken payload.
+fn contains_legacy_fill_shape(value: &Value) -> bool {
+    match value {
+        Value::Object(fields) => {
+            let kind = fields.get("kind").and_then(Value::as_str);
+            (kind == Some("text") && fields.contains_key("text"))
+                || fields.contains_key("option")
+                || matches!(kind, Some("select") | Some("checked") | Some("files"))
+                || fields.values().any(contains_legacy_fill_shape)
+        }
+        Value::Array(items) => items.iter().any(contains_legacy_fill_shape),
+        _ => false,
+    }
+}
+
+/// The legacy-shape migration text for a schema-violation on `tool`, when its
+/// rejected `arguments` still carry a pre-0.11.0 `FillValue` marker.
+pub(crate) fn legacy_fill_shape_migration(tool: &str, arguments: &Value) -> Option<&'static str> {
+    (FILL_SHAPE_TOOLS.contains(&tool) && contains_legacy_fill_shape(arguments))
+        .then_some(LEGACY_FILL_SHAPE_MIGRATION)
+}
+
 /// Repair for a protocol-layer `-32602` rejection reason string.
 pub(crate) fn repair_for_protocol_reason(reason: &str) -> Option<Value> {
     let action = match reason {

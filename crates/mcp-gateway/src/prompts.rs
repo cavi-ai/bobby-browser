@@ -140,9 +140,11 @@ fn fill_and_submit_form(arguments: &Value) -> Option<Value> {
          2. Call intent_complete_form with sessionId=\"{session_id}\", pageId=\"{page_id}\", the \
          workflowId from step 1, a purpose describing the form, and fields: one entry per \
          control to fill, each of shape {{\"name\": <control name>, \"purpose\": <what this \
-         field is for>, \"value\": <FillValue>}} where FillValue is exactly one of \
-         {{\"kind\":\"text\",\"text\":...}}, {{\"kind\":\"select\",\"option\":...}}, \
-         {{\"kind\":\"checked\",\"checked\":...}}, {{\"kind\":\"files\",\"paths\":[...]}}. \
+         field is for>, \"value\": <ControlAction>}} where ControlAction is exactly one of \
+         {{\"kind\":\"setText\",\"value\":...,\"clearFirst\":true|false}} (clearFirst defaults \
+         to true; set false to append), {{\"kind\":\"selectOne\",\"value\":...}}, \
+         {{\"kind\":\"selectMany\",\"values\":[...]}}, {{\"kind\":\"setChecked\",\"checked\":...}}, \
+         {{\"kind\":\"setFiles\",\"paths\":[...]}}, {{\"kind\":\"clear\"}}. \
          All of name, purpose, and value are required -- omitting one fails validation. \
          The tool fills and verifies each field in order, never submits on its own, and is \
          Reconciliable: an interrupted fill is safe to inspect and redo. Capture the \

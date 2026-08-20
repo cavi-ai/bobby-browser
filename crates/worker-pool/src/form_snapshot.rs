@@ -535,11 +535,12 @@ pub fn control_action_evidence(
 ) -> Result<ControlActionEvidence, CommandError> {
     validate_control_action(control, action)?;
     let matched = match (action, &control.state) {
-        (ControlAction::SetText { value }, FormControlState::Text { value: actual }) => {
-            value == actual
-        }
-        (ControlAction::SetText { value }, FormControlState::Empty) => value.is_empty(),
-        (ControlAction::SetText { value }, FormControlState::Redacted { present }) => {
+        (
+            ControlAction::SetText { value, clear_first },
+            FormControlState::Text { value: actual },
+        ) => value == actual || (!clear_first && actual.ends_with(value.as_str())),
+        (ControlAction::SetText { value, .. }, FormControlState::Empty) => value.is_empty(),
+        (ControlAction::SetText { value, .. }, FormControlState::Redacted { present }) => {
             *present != value.is_empty()
         }
         (ControlAction::SetChecked { checked }, FormControlState::Checked { checked: actual }) => {
@@ -871,7 +872,8 @@ mod tests {
         assert!(validate_control_action(
             control,
             &ControlAction::SetText {
-                value: "wrong kind".into()
+                value: "wrong kind".into(),
+                clear_first: true,
             }
         )
         .is_err());
@@ -913,13 +915,17 @@ mod tests {
 
         assert!(validate_control_action(
             &snapshot.unowned_controls[0],
-            &ControlAction::SetText { value: "x".into() }
+            &ControlAction::SetText {
+                value: "x".into(),
+                clear_first: true,
+            }
         )
         .is_err());
         let evidence = control_action_evidence(
             &snapshot.unowned_controls[1],
             &ControlAction::SetText {
                 value: "never-retained".into(),
+                clear_first: true,
             },
             false,
             None,
@@ -974,6 +980,46 @@ mod tests {
             "requested label must not be compared against option values"
         );
         control_action_evidence(control, &action, false, Some(&["high".into()])).unwrap();
+    }
+
+    /// `clearFirst: false` appends instead of replacing, so the committed
+    /// state ends with the typed value rather than equalling it (mirrors the
+    /// `typed_value_verified` suffix rule in `page-runtime::executor` for the
+    /// `TypeTextCommand` path).
+    #[test]
+    fn append_without_clear_first_verifies_against_the_committed_suffix() {
+        let mut field = raw_control("notes", "Notes");
+        field.value = Some("prefilledx".into());
+        field.value_present = true;
+        let snapshot = normalize_form_snapshot(
+            PageId::new(),
+            RawFormSnapshot {
+                forms: Vec::new(),
+                groups: Vec::new(),
+                controls: vec![field],
+                truncated: false,
+            },
+            512,
+        )
+        .unwrap();
+        let control = &snapshot.unowned_controls[0];
+        let action = ControlAction::SetText {
+            value: "x".into(),
+            clear_first: false,
+        };
+        let evidence = control_action_evidence(control, &action, false, None).unwrap();
+        assert_eq!(
+            evidence.state,
+            FormControlState::Text {
+                value: "prefilledx".into()
+            }
+        );
+
+        let mismatched = ControlAction::SetText {
+            value: "y".into(),
+            clear_first: false,
+        };
+        assert!(control_action_evidence(control, &mismatched, false, None).is_err());
     }
 
     /// An a11y-style target with explicit `ordinal: 0` must match the

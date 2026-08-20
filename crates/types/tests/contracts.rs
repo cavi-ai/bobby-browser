@@ -8,12 +8,11 @@ use types::{
     CreateSessionRequest, DismissObstructionIntent, DownloadUrlCommand, ElementState, ErrorCode,
     ErrorLayer, EvaluateJavaScriptCommand, Evidence, ExecutionPath, ExecutionPolicy,
     ExecutionReason, ExecutionRecord, ExtractField, ExtractIntent, ExtractValueKind, FillIntent,
-    FillValue, FollowIntent, FormControlOperation, FormControlState, FormControlTarget,
-    FormControlValidity, InspectCommand, IntentCommand, IntentHints, IntentResolutionPath,
-    ListPagesCommand, LocateIntent, NetworkResourceType, OpenPageCommand, PageId, PrimitiveCommand,
-    RuntimeCommand, ScreenshotMode, SessionId, SubmitAndVerifyIntent, TargetSpec, TextMatch,
-    TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitForStateIntent,
-    WaitUntil, WorkflowId,
+    FollowIntent, FormControlOperation, FormControlState, FormControlTarget, FormControlValidity,
+    InspectCommand, IntentCommand, IntentHints, IntentResolutionPath, ListPagesCommand,
+    LocateIntent, NetworkResourceType, OpenPageCommand, PageId, PrimitiveCommand, RuntimeCommand,
+    ScreenshotMode, SessionId, SubmitAndVerifyIntent, TargetSpec, TextMatch, TypeTextCommand,
+    UploadFilesCommand, WaitCondition, WaitForCommand, WaitForStateIntent, WaitUntil, WorkflowId,
 };
 use uuid::Uuid;
 
@@ -710,15 +709,16 @@ fn create_session_request_honors_explicit_execution_policy_grant() {
 }
 
 #[test]
-fn checked_fill_value_round_trips_as_camel_case() {
-    let value = FillValue::Checked { checked: true };
+fn checked_control_action_round_trips_as_camel_case() {
+    let value = ControlAction::SetChecked { checked: true };
     assert_eq!(
         serde_json::to_value(&value).unwrap(),
-        json!({"kind":"checked","checked":true})
+        json!({"kind":"setChecked","checked":true})
     );
     assert!(matches!(
-        serde_json::from_value::<FillValue>(json!({"kind":"checked","checked":false})).unwrap(),
-        FillValue::Checked { checked: false }
+        serde_json::from_value::<ControlAction>(json!({"kind":"setChecked","checked":false}))
+            .unwrap(),
+        ControlAction::SetChecked { checked: false }
     ));
 }
 
@@ -733,8 +733,8 @@ fn intent_commands_round_trip_and_classes() {
     let fill = IntentCommand::Fill(FillIntent {
         purpose: "Email".into(),
         hints: IntentHints::default(),
-        value: FillValue::Text {
-            text: "a@b.co".into(),
+        value: ControlAction::SetText {
+            value: "a@b.co".into(),
             clear_first: true,
         },
     });
@@ -746,8 +746,8 @@ fn intent_commands_round_trip_and_classes() {
             name: "email".into(),
             purpose: "Enter email".into(),
             hints: IntentHints::default(),
-            value: FillValue::Text {
-                text: "a@b.co".into(),
+            value: ControlAction::SetText {
+                value: "a@b.co".into(),
                 clear_first: true,
             },
         }],
@@ -761,14 +761,14 @@ fn intent_commands_round_trip_and_classes() {
     let files = IntentCommand::Fill(FillIntent {
         purpose: "Resume".into(),
         hints: IntentHints::default(),
-        value: FillValue::Files {
+        value: ControlAction::SetFiles {
             paths: vec!["./data/uploads/cv.pdf".into()],
         },
     });
     assert!(matches!(
         files,
         IntentCommand::Fill(FillIntent {
-            value: FillValue::Files { .. },
+            value: ControlAction::SetFiles { .. },
             ..
         })
     ));
@@ -1510,7 +1510,8 @@ fn control_action_validates_bounds_and_evidence_round_trips() {
     .validate()
     .is_err());
     assert!(ControlAction::SetText {
-        value: "x".repeat(types::MAX_FORM_VALUE_BYTES + 1)
+        value: "x".repeat(types::MAX_FORM_VALUE_BYTES + 1),
+        clear_first: true,
     }
     .validate()
     .is_err());
@@ -1544,4 +1545,112 @@ fn control_action_validates_bounds_and_evidence_round_trips() {
         serde_json::to_value(serde_json::from_value::<Evidence>(value.clone()).unwrap()).unwrap(),
         value
     );
+}
+
+// === L3 unification contract (fix/l3-unified-control-values) ===
+// These tests define the unified mutation vocabulary: FillIntent and
+// CompleteFormField carry ControlAction, FillValue no longer exists, and the
+// control_action verbs (setText/setChecked/selectOne/selectMany/setFiles/
+// clear) are the only wire spelling. Do not weaken these assertions.
+
+#[test]
+fn fill_uses_the_control_action_vocabulary() {
+    let fill: FillIntent = serde_json::from_value(json!({
+        "purpose": "Email",
+        "value": {"kind":"setText","value":"a@b.co"}
+    }))
+    .unwrap();
+    assert!(matches!(
+        &fill.value,
+        ControlAction::SetText { value, clear_first: true } if value == "a@b.co"
+    ));
+    assert_eq!(
+        serde_json::to_value(&fill.value).unwrap(),
+        json!({"kind":"setText","value":"a@b.co","clearFirst":true})
+    );
+
+    let appended: FillIntent = serde_json::from_value(json!({
+        "purpose": "Email",
+        "value": {"kind":"setText","value":"x","clearFirst":false}
+    }))
+    .unwrap();
+    assert!(matches!(
+        &appended.value,
+        ControlAction::SetText {
+            clear_first: false,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn set_text_clear_first_defaults_to_replace_everywhere() {
+    // control_action's current wire shape must keep parsing: setText without
+    // clearFirst means replace, matching the previous hard-coded behavior.
+    let action: ControlAction =
+        serde_json::from_value(json!({"kind":"setText","value":"x"})).unwrap();
+    assert!(matches!(
+        action,
+        ControlAction::SetText {
+            clear_first: true,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn fill_accepts_select_many_and_clear() {
+    let many: FillIntent = serde_json::from_value(json!({
+        "purpose": "Toppings",
+        "value": {"kind":"selectMany","values":["ham","cheese"]}
+    }))
+    .unwrap();
+    assert!(matches!(&many.value, ControlAction::SelectMany { values } if values.len() == 2));
+
+    let clear: FillIntent = serde_json::from_value(json!({
+        "purpose": "Email",
+        "value": {"kind":"clear"}
+    }))
+    .unwrap();
+    assert!(matches!(&clear.value, ControlAction::Clear));
+}
+
+#[test]
+fn fill_round_trips_selection_and_files_under_the_unified_kinds() {
+    for (value, expected) in [
+        (
+            json!({"kind":"selectOne","value":"Pro"}),
+            json!({"kind":"selectOne","value":"Pro"}),
+        ),
+        (
+            json!({"kind":"setChecked","checked":true}),
+            json!({"kind":"setChecked","checked":true}),
+        ),
+        (
+            json!({"kind":"setFiles","paths":["./data/uploads/cv.pdf"]}),
+            json!({"kind":"setFiles","paths":["./data/uploads/cv.pdf"]}),
+        ),
+    ] {
+        let fill: FillIntent = serde_json::from_value(json!({
+            "purpose": "field",
+            "value": value
+        }))
+        .unwrap();
+        assert_eq!(serde_json::to_value(&fill.value).unwrap(), expected);
+    }
+}
+
+#[test]
+fn legacy_fill_value_shapes_are_rejected() {
+    for legacy in [
+        json!({"purpose":"Email","value":{"kind":"text","text":"a@b.co"}}),
+        json!({"purpose":"Plan","value":{"kind":"select","option":"Pro"}}),
+        json!({"purpose":"TOS","value":{"kind":"checked","checked":true}}),
+        json!({"purpose":"CV","value":{"kind":"files","paths":["cv.pdf"]}}),
+    ] {
+        assert!(
+            serde_json::from_value::<FillIntent>(legacy.clone()).is_err(),
+            "legacy shape must no longer parse: {legacy}"
+        );
+    }
 }

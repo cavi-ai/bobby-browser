@@ -333,7 +333,7 @@ impl ResolvedTarget {
     pub async fn clear_control(&self, page: &Page) -> Result<(), CommandError> {
         self.eval::<bool>(
             page,
-            "if(el instanceof HTMLInputElement&&el.type==='file'){throw new Error('file controls require native clear')}if(el instanceof HTMLSelectElement){for(const option of el.options)option.selected=false}else if('checked'in el){el.checked=false}else if('value'in el){el.value=''}else if(el.isContentEditable){el.textContent=''}else{throw new Error('resolved control cannot be cleared')}el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return true",
+            "if(el instanceof HTMLInputElement&&el.type==='file'){throw new Error('file controls require native clear')}if(el instanceof HTMLSelectElement){for(const option of el.options)option.selected=false}else if(el instanceof HTMLInputElement&&(el.type==='checkbox'||el.type==='radio')){el.checked=false}else if('value'in el){el.value=''}else if(el.isContentEditable){el.textContent=''}else{throw new Error('resolved control cannot be cleared')}el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return true",
         )
         .await?;
         Ok(())

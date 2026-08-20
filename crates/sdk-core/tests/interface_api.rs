@@ -19,8 +19,8 @@ use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use session_manager::SessionManager;
 use types::{
     AttemptId, Capability, CheckpointId, ClickCommand, CommandClass, CommandEnvelope, CommandError,
-    CommandId, CommandOutcome, CompleteFormField, CompleteFormIntent, CreateSessionRequest,
-    Evidence, ExecutionPolicy, FillIntent, FillValue, IdempotencyKey, InspectCommand,
+    CommandId, CommandOutcome, CompleteFormField, CompleteFormIntent, ControlAction,
+    CreateSessionRequest, Evidence, ExecutionPolicy, FillIntent, IdempotencyKey, InspectCommand,
     IntentCommand, IntentHints, InterfaceErrorCode, LocateIntent, NavigateCommand, OpenPageRequest,
     PageId, PrincipalId, RequestContext, RuntimeCommand, SessionId, TargetSpec, TypeTextCommand,
     WorkerId, WorkflowCheckpoint, WorkflowId,
@@ -1421,7 +1421,7 @@ fn fill_files_intent_envelope(session_id: SessionId) -> CommandEnvelope {
         command: RuntimeCommand::Intent(IntentCommand::Fill(FillIntent {
             purpose: "Resume".into(),
             hints: IntentHints::default(),
-            value: FillValue::Files {
+            value: ControlAction::SetFiles {
                 paths: vec!["./data/uploads/cv.pdf".into()],
             },
         })),
@@ -1438,7 +1438,7 @@ fn complete_form_files_intent_envelope(session_id: SessionId) -> CommandEnvelope
                 name: "resume".into(),
                 purpose: "Resume".into(),
                 hints: IntentHints::default(),
-                value: FillValue::Files {
+                value: ControlAction::SetFiles {
                     paths: vec!["./data/uploads/cv.pdf".into()],
                 },
             }],

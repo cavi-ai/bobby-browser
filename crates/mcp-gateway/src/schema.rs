@@ -148,7 +148,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                     "required":["role","accessibleName"]
                 },
                 "action": {"oneOf":[
-                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setText"},"value":string(0,4096)},"required":["kind","value"]},
+                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setText"},"value":string(0,4096),"clearFirst":{"type":"boolean","default":true,"description":"replace the current value; set false to append"}},"required":["kind","value"]},
                     {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setChecked"},"checked":{"type":"boolean"}},"required":["kind","checked"]},
                     {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"selectOne"},"value":string(0,4096)},"required":["kind","value"]},
                     {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"selectMany"},"values":nonempty_array(string(0,4096),512)},"required":["kind","values"]},
@@ -1638,31 +1638,44 @@ fn intent_hints() -> Value {
     )
 }
 
+/// The `ControlAction` subset a fill accepts: every variant but `activate`,
+/// which control_action alone can express (see `crate::commands::ControlAction`
+/// in `bobby-browser-client`; fill rejects it at the intent-engine layer).
 fn fill_values() -> Vec<Value> {
     vec![
         tagged_fields(
-            "text",
+            "setText",
             json!({
-                "text":string(0, MAX_STRING_BYTES),
-                "clearFirst":{"type":"boolean"}
+                "value":string(0, MAX_STRING_BYTES),
+                "clearFirst":{
+                    "type":"boolean",
+                    "default":true,
+                    "description":"replace the current value; set false to append"
+                }
             }),
-            &["text"],
+            &["value"],
         ),
         tagged_fields(
-            "select",
-            json!({"option":string(0, MAX_STRING_BYTES)}),
-            &["option"],
-        ),
-        tagged_fields(
-            "checked",
+            "setChecked",
             json!({"checked":{"type":"boolean"}}),
             &["checked"],
         ),
         tagged_fields(
-            "files",
-            json!({"paths":array(string(1, MAX_STRING_BYTES), 64)}),
+            "selectOne",
+            json!({"value":string(0, MAX_STRING_BYTES)}),
+            &["value"],
+        ),
+        tagged_fields(
+            "selectMany",
+            json!({"values":nonempty_array(string(0, MAX_STRING_BYTES), types::MAX_FORM_REFERENCES)}),
+            &["values"],
+        ),
+        tagged_fields(
+            "setFiles",
+            json!({"paths":nonempty_array(string(1, MAX_STRING_BYTES), types::MAX_FORM_REFERENCES)}),
             &["paths"],
         ),
+        tagged_fields("clear", json!({}), &[]),
     ]
 }
 
@@ -1800,7 +1813,7 @@ fn primitive_commands() -> Vec<Value> {
                         "required":["role","accessibleName","ordinal","framePath","shadowPath"]
                     },
                     "action": {"oneOf":[
-                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setText"},"value":string(0,4096)},"required":["kind","value"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setText"},"value":string(0,4096),"clearFirst":{"type":"boolean","default":true,"description":"replace the current value; set false to append"}},"required":["kind","value"]},
                         {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setChecked"},"checked":{"type":"boolean"}},"required":["kind","checked"]},
                         {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"selectOne"},"value":string(0,4096)},"required":["kind","value"]},
                         {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"selectMany"},"values":nonempty_array(string(0,4096),512)},"required":["kind","values"]},

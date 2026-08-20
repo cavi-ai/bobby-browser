@@ -63,7 +63,7 @@ Every `/v1/*` request (except MCP streamable HTTP's own rules — see
 | Header | Required | Notes |
 |---|---|---|
 | `Authorization` | yes | `Bearer <token>`; exactly one header; printable ASCII bearer |
-| `x-interface-version` | yes | Current value: `2026-07-23` |
+| `x-interface-version` | yes | Current value: `2026-08-19` |
 | `x-correlation-id` | yes | UUID string; max 64 bytes |
 | `x-deadline` | yes | RFC3339 timestamp; must be after now and within 5 minutes ahead |
 | `idempotency-key` | mutating POSTs | 1–128 printable ASCII; enables replay/conflict detection |
@@ -95,7 +95,7 @@ PRINCIPAL=$(uuidgen | tr '[:upper:]' '[:lower:]')
 
 curl -sS -X POST "http://127.0.0.1:7777/v1/principals" \
   -H "Authorization: Bearer ${AUTOMATION_RUNTIME_TOKEN}" \
-  -H "x-interface-version: 2026-07-23" \
+  -H "x-interface-version: 2026-08-19" \
   -H "x-correlation-id: ${CORRELATION}" \
   -H "x-deadline: ${DEADLINE}" \
   -H "idempotency-key: issue-${PRINCIPAL}" \
