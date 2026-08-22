@@ -2,8 +2,11 @@
 
 ## Unreleased
 
+## 0.11.1 - 2026-08-22
+
 ### Fixed
 
+- Product documentation navigation includes every shipped page, and producer verification now rejects pages omitted from navigation.
 - `Formula/bobby-browser.rb` carries the v0.11.0 asset digests.
 
 ## 0.11.0 - 2026-08-20
