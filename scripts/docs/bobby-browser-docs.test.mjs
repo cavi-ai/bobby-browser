@@ -164,6 +164,21 @@ test("verify fails when navigation points at a missing page", async () => {
   }
 });
 
+test("verify fails when a Markdown page is omitted from navigation", async () => {
+  await withSourceFixture(async (fixtureRoot) => {
+    const navigationPath = path.join(fixtureRoot, SOURCE_REL, "navigation.json");
+    const navigation = JSON.parse(await readFile(navigationPath, "utf8"));
+    const guides = navigation.sections.find((section) => section.title === "Guides");
+    guides.pages = guides.pages.filter((page) => page.path !== "guides/openshell.md");
+    await writeFile(navigationPath, `${JSON.stringify(navigation, null, 2)}\n`, "utf8");
+    await buildBobbyBrowserDocs(fixtureRoot, RELEASE);
+    await assert.rejects(
+      () => verifyBobbyBrowserDocs(fixtureRoot, RELEASE),
+      /documentation page missing from navigation: guides\/openshell\.md/,
+    );
+  });
+});
+
 test("generated docs publish the Bobby skill and gauntlet operator guides", async () => {
   await withSourceFixture(async (fixtureRoot) => {
     await buildBobbyBrowserDocs(fixtureRoot, RELEASE);

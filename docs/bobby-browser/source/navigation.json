@@ -56,6 +56,10 @@
           "path": "surfaces/http-api.md"
         },
         {
+          "title": "ACP (Agent Client Protocol)",
+          "path": "surfaces/acp.md"
+        },
+        {
           "title": "OpenAPI (HTTP v1)",
           "path": "openapi/v1.yaml"
         },
@@ -127,6 +131,10 @@
         {
           "title": "Firefox companion",
           "path": "guides/firefox-companion.md"
+        },
+        {
+          "title": "OpenShell host",
+          "path": "guides/openshell.md"
         },
         {
           "title": "Troubleshooting",
