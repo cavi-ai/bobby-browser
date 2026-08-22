@@ -607,6 +607,94 @@ async fn grow_authorization_corpus() -> TestResult<()> {
 }
 
 #[tokio::test]
+async fn grow_authorization_traps_corpus() -> TestResult<()> {
+    // Trap-mode pass over the authorization journey: OAuth popup +
+    // notification obstruction, with interruption-modal variation per run.
+    // One of the two journeys still missing a Level 2 pass (whitepaper
+    // §6.2); onboarding stays excluded (CAPTCHA hard-gate).
+    let mut collector = CorpusCollector::new();
+    for run_idx in 0..runs_per_journey() {
+        let seed = format!("authorization-traps-{run_idx}");
+        let server = ScenarioServer::start(trap_config(&seed, run_idx)).await?;
+        let runtime = ModernRuntime::launch(&server, Journey::Authorization).await?;
+        let step = |name: &str| format!("{name}_t{run_idx}");
+
+        if run_idx.is_multiple_of(2)
+            && runtime
+                .wait_visible("section[aria-label='Workflow interruption'] button")
+                .await
+                .is_ok()
+        {
+            collector
+                .capture(
+                    &runtime,
+                    &GroundTruth::Click {
+                        selector: "section[aria-label='Workflow interruption'] button",
+                        purpose: "Dismiss the workflow interruption".into(),
+                        ordinal: None,
+                    },
+                    "authorization-traps",
+                    &step("dismiss_interruption"),
+                )
+                .await?;
+            runtime
+                .click("section[aria-label='Workflow interruption'] button", false)
+                .await?;
+        }
+
+        runtime
+            .wait_visible("button[aria-label='Connect Ledger Cloud']")
+            .await?;
+        collector
+            .capture(
+                &runtime,
+                &GroundTruth::Click {
+                    selector: "button[aria-label='Connect Ledger Cloud']",
+                    purpose: "Connect the Ledger Cloud integration".into(),
+                    ordinal: None,
+                },
+                "authorization-traps",
+                &step("connect_ledger"),
+            )
+            .await?;
+        let popup = runtime
+            .click_popup("button[aria-label='Connect Ledger Cloud']")
+            .await?;
+        runtime.click_on(&popup, "#authorize").await?;
+        runtime.wait_visible("[data-connected='true']").await?;
+
+        collector
+            .capture(
+                &runtime,
+                &GroundTruth::Click {
+                    selector: "button[aria-label='Dismiss notification preferences']",
+                    purpose: "Dismiss the notification preferences prompt".into(),
+                    ordinal: None,
+                },
+                "authorization-traps",
+                &step("dismiss_obstruction"),
+            )
+            .await?;
+        runtime
+            .click(
+                "button[aria-label='Dismiss notification preferences']",
+                false,
+            )
+            .await?;
+        runtime.mark_completed(&format!("authorization-traps-{run_idx}"))?;
+    }
+    let path = corpus_path("authorization-traps");
+    collector.save(&path)?;
+    println!(
+        "wrote {} examples to {} ({} runs)",
+        collector.len(),
+        path.display(),
+        runs_per_journey()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn grow_documents_corpus() -> TestResult<()> {
     let count = grow_journey("documents", async |runtime, collector, _server, run_idx| {
         let step = |name: &str| format!("{name}_r{run_idx}");
@@ -709,5 +797,122 @@ async fn grow_report_recovery_corpus() -> TestResult<()> {
     )
     .await?;
     assert_eq!(count, 2 * runs_per_journey());
+    Ok(())
+}
+
+#[tokio::test]
+async fn grow_report_recovery_traps_corpus() -> TestResult<()> {
+    // Trap-mode pass over the report-recovery journey: generate + recover +
+    // download-link layout, with interruption-modal variation per run. The
+    // recovery restart is a fresh app mount, so the modal can re-appear
+    // mid-journey; both dismissals are captured as records. This is the
+    // download-link layout family the corpus had no trap coverage for
+    // (whitepaper §6.2).
+    let mut collector = CorpusCollector::new();
+    for run_idx in 0..runs_per_journey() {
+        let seed = format!("report-recovery-traps-{run_idx}");
+        let server = ScenarioServer::start(trap_config(&seed, run_idx)).await?;
+        let runtime = ModernRuntime::launch(&server, Journey::ReportRecovery).await?;
+        let step = |name: &str| format!("{name}_t{run_idx}");
+
+        if run_idx.is_multiple_of(2)
+            && runtime
+                .wait_visible("section[aria-label='Workflow interruption'] button")
+                .await
+                .is_ok()
+        {
+            collector
+                .capture(
+                    &runtime,
+                    &GroundTruth::Click {
+                        selector: "section[aria-label='Workflow interruption'] button",
+                        purpose: "Dismiss the workflow interruption".into(),
+                        ordinal: None,
+                    },
+                    "report-recovery-traps",
+                    &step("dismiss_interruption"),
+                )
+                .await?;
+            runtime
+                .click("section[aria-label='Workflow interruption'] button", false)
+                .await?;
+        }
+
+        collector
+            .capture(
+                &runtime,
+                &GroundTruth::Click {
+                    selector: "form[aria-label='Generate report'] button",
+                    purpose: "Generate the operations report".into(),
+                    ordinal: None,
+                },
+                "report-recovery-traps",
+                &step("generate_report"),
+            )
+            .await?;
+        let workflow_id = runtime
+            .click_boundary_with_workflow("form[aria-label='Generate report'] button")
+            .await?;
+
+        let server_url = server.application_url("/reports");
+        let (runtime, _recovery) = runtime
+            .restart_and_recover(&workflow_id, &server_url)
+            .await?;
+
+        // Recovery is a fresh mount: the interruption modal re-appears on
+        // trap runs and must be dismissed before the download link is
+        // reachable. Captured as its own record — a mid-journey
+        // obstruction layout the base pass never sees.
+        if run_idx.is_multiple_of(2)
+            && runtime
+                .wait_visible("section[aria-label='Workflow interruption'] button")
+                .await
+                .is_ok()
+        {
+            collector
+                .capture(
+                    &runtime,
+                    &GroundTruth::Click {
+                        selector: "section[aria-label='Workflow interruption'] button",
+                        purpose: "Dismiss the workflow interruption".into(),
+                        ordinal: None,
+                    },
+                    "report-recovery-traps",
+                    &step("dismiss_interruption_recovered"),
+                )
+                .await?;
+            runtime
+                .click("section[aria-label='Workflow interruption'] button", false)
+                .await?;
+        }
+
+        runtime
+            .wait_visible("a[download='atlas-operations.csv']")
+            .await?;
+        collector
+            .capture(
+                &runtime,
+                &GroundTruth::Click {
+                    selector: "a[download='atlas-operations.csv']",
+                    purpose: "Download the generated report".into(),
+                    ordinal: None,
+                },
+                "report-recovery-traps",
+                &step("download_report"),
+            )
+            .await?;
+        runtime
+            .click_download("a[download='atlas-operations.csv']")
+            .await?;
+        runtime.mark_completed(&format!("report-recovery-traps-{run_idx}"))?;
+    }
+    let path = corpus_path("report-recovery-traps");
+    collector.save(&path)?;
+    println!(
+        "wrote {} examples to {} ({} runs)",
+        collector.len(),
+        path.display(),
+        runs_per_journey()
+    );
     Ok(())
 }

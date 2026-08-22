@@ -55,6 +55,38 @@ class MixedActionEvaluationTests(unittest.TestCase):
                 corpus.flush()
                 self.assertEqual(load_examples(corpus.name), [])
 
+    def test_v1_keeps_abstain_negatives_as_supervised(self):
+        # V1's abstain class is trained on failed records with no target:
+        # their completion is "-1". A schema-blind success filter silently
+        # drops the class (whitepaper §4e/§4f).
+        negative = {
+            "success": False,
+            "outcomeStage": "visionRejectionFloor",
+            "purpose": "the button that moves forward",
+            "intentKind": "locate",
+            "contextCandidates": [{"role": "button", "name": "Cancel"}],
+            "targetIndex": None,
+            "modelResponse": {"confidence": 0.5, "action": {"kind": "click"}},
+        }
+        self.assertEqual(build_completion(negative, schema="v1"), "-1")
+        with tempfile.NamedTemporaryFile("w+", suffix=".jsonl") as corpus:
+            corpus.write(json.dumps(negative) + "\n")
+            corpus.flush()
+            self.assertEqual(len(load_examples(corpus.name, "v1")), 1)
+            # Other schemas have no abstain target: still excluded.
+            self.assertEqual(load_examples(corpus.name), [])
+            self.assertEqual(load_examples(corpus.name, "candidate"), [])
+
+    def test_v1_failed_record_with_a_target_stays_a_diagnostic(self):
+        record = {"success": False, "targetIndex": 1, "modelResponse": {"action": {"kind": "clickCandidate", "index": 1}}}
+        with self.assertRaisesRegex(ValueError, "not supervised"):
+            build_completion(record, schema="v1")
+        with tempfile.NamedTemporaryFile("w+", suffix=".jsonl") as corpus:
+            corpus.write(json.dumps(record) + "\n")
+            corpus.flush()
+            self.assertEqual(load_examples(corpus.name, "v1"), [])
+
+
     def test_candidate_typing_scores_the_selected_target_without_content(self):
         predictions = [
             {"prediction": {"action": {"kind": "typeIntoCandidate", "index": 1}}}
