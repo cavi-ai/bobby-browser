@@ -265,6 +265,7 @@ export async function assertNavigationResolves(artifactRoot) {
     await readFile(path.join(artifactRoot, "navigation.json"), "utf8"),
   );
   const pagePaths = collectNavigationPagePaths(navigation);
+  const navigatedPaths = new Set(pagePaths);
   for (const pagePath of pagePaths) {
     const absolute = path.join(artifactRoot, pagePath);
     try {
@@ -277,6 +278,13 @@ export async function assertNavigationResolves(artifactRoot) {
         throw new Error(`navigation path missing: ${pagePath}`);
       }
       throw error;
+    }
+  }
+  const documentationPages = (await listFilesRecursive(artifactRoot, artifactRoot))
+    .filter((relativePath) => relativePath.endsWith(".md"));
+  for (const pagePath of documentationPages) {
+    if (!navigatedPaths.has(pagePath)) {
+      throw new Error(`documentation page missing from navigation: ${pagePath}`);
     }
   }
   return pagePaths;

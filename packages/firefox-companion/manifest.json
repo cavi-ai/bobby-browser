@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Bobby Browser Companion",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "Isolated Firefox page observation and interaction companion",
   "browser_specific_settings": {
     "gecko": {
