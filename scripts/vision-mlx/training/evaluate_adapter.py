@@ -101,7 +101,7 @@ def parse_v1_response(text: str, n_candidates: int) -> int | None:
 
 
 def generate_predictions(model, tokenizer, examples: list, max_tokens: int, schema: str = "coords") -> list:
-    examples = supervised_examples(examples)
+    examples = supervised_examples(examples, schema)
     from mlx_lm.generate import generate
 
     predictions = []
@@ -406,7 +406,7 @@ def main():
     from fine_tune_vision import FineTuneConfig, VisionEvaluator
 
     with open(args.input, "r") as f:
-        examples = supervised_examples([json.loads(line) for line in f if line.strip()])
+        examples = supervised_examples([json.loads(line) for line in f if line.strip()], args.schema)
     if args.limit:
         examples = examples[: args.limit]
     print(f"Evaluating {len(examples)} examples on {args.model}"

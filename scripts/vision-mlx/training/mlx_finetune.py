@@ -134,12 +134,20 @@ def normalize_corpus_example(example: dict) -> dict:
     return normalized
 
 
-def supervised_examples(examples: list) -> list:
-    """Exclude diagnostic failure records from supervised model paths."""
+def supervised_examples(examples: list, schema: str = "coords") -> list:
+    """Exclude diagnostic failure records from supervised model paths.
+
+    V1 keeps abstain-labeled negatives (success=False with no target
+    index): their completion is "-1", which is valid supervision for the
+    abstain class, not a diagnostic (whitepaper §4e/§4f). Other schemas
+    have no abstain target, so all failed records stay excluded.
+    """
     supervised = []
     for example in examples:
         normalized = normalize_corpus_example(example)
         if normalized.get("success") is not False:
+            supervised.append(normalized)
+        elif schema == "v1" and selected_index(normalized) is None:
             supervised.append(normalized)
     return supervised
 
@@ -163,7 +171,10 @@ def model_response(example: dict) -> dict:
 
 def build_completion(example: dict, schema: str = "coords") -> str:
     example = normalize_corpus_example(example)
-    if example.get("success") is False:
+    if (
+        example.get("success") is False
+        and not (schema == "v1" and selected_index(example) is None)
+    ):
         raise ValueError("unsuccessful corpus records are diagnostics, not supervised examples")
     if schema == "v1":
         return build_v1_completion(example)
@@ -199,13 +210,13 @@ def build_completion(example: dict, schema: str = "coords") -> str:
     return json.dumps(out)
 
 
-def load_examples(path: str) -> list:
+def load_examples(path: str, schema: str = "coords") -> list:
     examples = []
     with open(path, "r") as f:
         for line in f:
             if line.strip():
                 examples.append(json.loads(line))
-    return supervised_examples(examples)
+    return supervised_examples(examples, schema)
 
 
 def write_mlx_dataset(examples: list, out_dir: Path, train_ratio: float, seed: int, schema: str = "coords") -> dict:
@@ -238,7 +249,7 @@ def run_mlx_finetune(config: MLXFineTuneConfig) -> dict:
     from mlx_lm.tuner.datasets import CacheDataset, load_dataset
     from mlx_lm.tuner.utils import linear_to_lora_layers
 
-    examples = load_examples(config.input_path)
+    examples = load_examples(config.input_path, config.schema)
     if not examples:
         raise SystemExit(f"no training examples in {config.input_path}")
 
