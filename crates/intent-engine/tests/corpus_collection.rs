@@ -187,6 +187,7 @@ async fn candidate_grounded_corpus_actions_are_index_only() {
                 defer_escalation: false,
                 prompt_context: None,
                 corpus: Some(corpus),
+                context_store: None,
             },
         )
         .await;
@@ -238,6 +239,7 @@ async fn completed_escalation_writes_a_corpus_record_with_target_index() {
             defer_escalation: false,
             prompt_context: None,
             corpus: Some(corpus),
+            context_store: None,
         },
     )
     .await;
@@ -294,6 +296,7 @@ async fn floor_rejection_writes_a_failed_record_without_resolution() {
             defer_escalation: false,
             prompt_context: None,
             corpus: Some(corpus),
+            context_store: None,
         },
     )
     .await;
@@ -341,6 +344,7 @@ async fn no_corpus_configured_writes_nothing() {
             defer_escalation: false,
             prompt_context: None,
             corpus: None,
+            context_store: None,
         },
     )
     .await;

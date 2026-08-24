@@ -22,6 +22,7 @@ url.workspace = true
 tracing.workspace = true
 observability = { path = "../observability", version = "0.11.1" }
 types = { path = "../types", version = "0.11.1" }
+context-store = { path = "../context-store", version = "0.11.1" }
 
 [dev-dependencies]
 tempfile.workspace = true

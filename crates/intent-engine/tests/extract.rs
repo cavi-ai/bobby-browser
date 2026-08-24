@@ -381,6 +381,7 @@ async fn extract_escalates_missing_field_to_vision_and_uses_the_proposed_value()
             defer_escalation: false,
             prompt_context: None,
             corpus: None,
+            context_store: None,
         },
     )
     .await;
@@ -437,6 +438,7 @@ async fn extract_reports_field_missing_when_vision_confidence_is_below_floor() {
             defer_escalation: false,
             prompt_context: None,
             corpus: None,
+            context_store: None,
         },
     )
     .await;
@@ -559,6 +561,7 @@ async fn extract_from_candidate_reads_the_exact_provider_selected_candidate_for_
                 recent_command_kinds: vec!["locate".into()],
             }),
             corpus: None,
+            context_store: None,
         },
     )
     .await;
@@ -667,6 +670,7 @@ async fn extract_from_candidate_uses_second_dom_candidate_when_provider_visible_
             defer_escalation: false,
             prompt_context: None,
             corpus: None,
+            context_store: None,
         },
     )
     .await;
@@ -755,6 +759,7 @@ async fn successful_candidate_extraction_records_index_without_runtime_value() {
                 metrics.clone(),
             )),
             corpus: Some(VisionCorpus::new(dir.path()).unwrap()),
+            context_store: None,
             ..VisionContext::default()
         },
     )
@@ -849,6 +854,7 @@ async fn execute_vision_extract(browser: &FakeBrowser, assist: Arc<FakeVision>) 
             defer_escalation: false,
             prompt_context: None,
             corpus: None,
+            context_store: None,
         },
     )
     .await
