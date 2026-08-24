@@ -126,7 +126,8 @@ impl PageRuntime {
     pub fn with_context_promotion(mut self, promotion: Arc<ContextPromotion>) -> Self {
         // Share the store with the adaptive engine so `solveChallenge` can
         // read the site-level challenge prior the sink writes.
-        self.adaptive = std::mem::take(&mut self.adaptive).with_context_store(promotion.store_arc());
+        self.adaptive =
+            std::mem::take(&mut self.adaptive).with_context_store(promotion.store_arc());
         self.promotion = Some(promotion);
         self
     }

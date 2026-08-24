@@ -364,10 +364,7 @@ struct PurposeProbe {
 
 #[async_trait]
 impl VisionAssist for PurposeProbe {
-    async fn propose(
-        &self,
-        request: VisionProposeRequest,
-    ) -> Result<VisionProposal, CommandError> {
+    async fn propose(&self, request: VisionProposeRequest) -> Result<VisionProposal, CommandError> {
         self.purposes
             .lock()
             .unwrap_or_else(|p| p.into_inner())

@@ -2168,9 +2168,9 @@ async fn execute_solve_challenge(
     // prior when the graph has seen this site before. Evidence keeps the
     // original purpose so journals stay caller-shaped.
     let propose_purpose = match challenge_prior.as_deref() {
-        Some(kind) => format!(
-            "{purpose} Known challenge type for this site from prior runs: {kind}."
-        ),
+        Some(kind) => {
+            format!("{purpose} Known challenge type for this site from prior runs: {kind}.")
+        }
         None => purpose.clone(),
     };
     let gates_open = vision.session_ok && vision.capability_ok;
