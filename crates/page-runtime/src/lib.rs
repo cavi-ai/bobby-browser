@@ -124,6 +124,9 @@ impl PageRuntime {
     /// Attaches the durable context promotion sink (Firefox-companion
     /// runtimes only; see [`ContextPromotion`]).
     pub fn with_context_promotion(mut self, promotion: Arc<ContextPromotion>) -> Self {
+        // Share the store with the adaptive engine so `solveChallenge` can
+        // read the site-level challenge prior the sink writes.
+        self.adaptive = std::mem::take(&mut self.adaptive).with_context_store(promotion.store_arc());
         self.promotion = Some(promotion);
         self
     }

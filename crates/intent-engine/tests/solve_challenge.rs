@@ -173,6 +173,7 @@ fn vision_with_errors(script: Vec<Result<VisionProposal, CommandError>>) -> Visi
         defer_escalation: false,
         prompt_context: None,
         corpus: None,
+        context_store: None,
     }
 }
 
@@ -190,6 +191,7 @@ async fn solve_challenge_requires_an_open_vision_gate() {
             defer_escalation: false,
             prompt_context: None,
             corpus: None,
+            context_store: None,
         },
         VisionContext {
             session_ok: true,
@@ -199,6 +201,7 @@ async fn solve_challenge_requires_an_open_vision_gate() {
             defer_escalation: false,
             prompt_context: None,
             corpus: None,
+            context_store: None,
         },
     ] {
         let outcome = IntentEngine::execute(
@@ -351,4 +354,99 @@ async fn solve_challenge_times_out_when_the_model_never_solves() {
         panic!("an unsolved challenge must hit the deadline");
     };
     assert_eq!(error.code, ErrorCode::DeadlineExceeded);
+}
+
+/// Captures every purpose the engine hands to the provider, then reports
+/// solved so the loop ends on the first proposal.
+struct PurposeProbe {
+    purposes: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl VisionAssist for PurposeProbe {
+    async fn propose(
+        &self,
+        request: VisionProposeRequest,
+    ) -> Result<VisionProposal, CommandError> {
+        self.purposes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(request.purpose);
+        Ok(solved())
+    }
+}
+
+#[tokio::test]
+async fn solve_challenge_enriches_the_prompt_with_the_site_prior() {
+    let root = tempfile::tempdir().unwrap();
+    let (store, _) = context_store::ContextStore::open(root.path(), "test")
+        .await
+        .unwrap();
+    let url = "https://example.com/signup";
+    let site = context_store::site_key(url).expect("site key");
+    store
+        .record_challenge(&site, "recaptcha", true, 20_000)
+        .await;
+
+    let probe = Arc::new(PurposeProbe {
+        purposes: Mutex::new(Vec::new()),
+    });
+    let vision = VisionContext {
+        session_ok: true,
+        capability_ok: true,
+        assist: Some(probe.clone()),
+        proposals: None,
+        defer_escalation: false,
+        prompt_context: Some(intent_engine::VisionPromptContext {
+            url: Some(url.into()),
+            candidates: Vec::new(),
+            recent_command_kinds: Vec::new(),
+        }),
+        corpus: None,
+        context_store: Some(Arc::new(store)),
+    };
+    let outcome = IntentEngine::execute(
+        &solve(30_000),
+        &PageId::new(),
+        &FakeBrowser::default(),
+        &vision,
+    )
+    .await;
+    assert!(matches!(outcome, IntentOutcome::Completed { .. }));
+    let purposes = probe.purposes.lock().unwrap_or_else(|p| p.into_inner());
+    assert_eq!(purposes.len(), 1);
+    assert!(
+        purposes[0].contains("solve the reCAPTCHA challenge"),
+        "caller's purpose stays intact: {}",
+        purposes[0]
+    );
+    assert!(
+        purposes[0].contains("recaptcha"),
+        "site prior reaches the provider prompt: {}",
+        purposes[0]
+    );
+}
+
+#[tokio::test]
+async fn solve_challenge_without_a_store_leaves_the_prompt_alone() {
+    let probe = Arc::new(PurposeProbe {
+        purposes: Mutex::new(Vec::new()),
+    });
+    let mut vision = vision_with_errors(vec![Ok(solved())]);
+    vision.assist = Some(probe.clone());
+    vision.prompt_context = Some(intent_engine::VisionPromptContext {
+        url: Some("https://example.com/signup".into()),
+        candidates: Vec::new(),
+        recent_command_kinds: Vec::new(),
+    });
+    let outcome = IntentEngine::execute(
+        &solve(30_000),
+        &PageId::new(),
+        &FakeBrowser::default(),
+        &vision,
+    )
+    .await;
+    assert!(matches!(outcome, IntentOutcome::Completed { .. }));
+    let purposes = probe.purposes.lock().unwrap_or_else(|p| p.into_inner());
+    assert_eq!(purposes.as_slice(), ["solve the reCAPTCHA challenge"]);
 }

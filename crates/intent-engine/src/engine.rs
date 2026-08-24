@@ -43,6 +43,10 @@ pub struct VisionContext {
     /// Escalation corpus sink (`[vision].corpus_dir`). `None` writes nothing;
     /// the default path is byte-identical to before.
     pub corpus: Option<crate::VisionCorpus>,
+    /// Durable context graph for challenge priors. `None` keeps the byte-identical
+    /// default path; when present, `solveChallenge` reads the most-attempted
+    /// challenge kind for the site and records the outcome after solving.
+    pub context_store: Option<Arc<context_store::ContextStore>>,
 }
 
 #[derive(Debug, Clone)]
@@ -2151,6 +2155,24 @@ async fn execute_solve_challenge(
     timeout_ms: u64,
 ) -> IntentOutcome {
     let plan_summary = format!("solveChallenge timeout_ms={timeout_ms}");
+    // Site-level prior: which challenge kind has been attempted most for
+    // this site. Read-only hint; the loop still detects from the frame.
+    let challenge_prior = match (&vision.context_store, &vision.prompt_context) {
+        (Some(store), Some(ctx)) => match ctx.url.as_deref().and_then(context_store::site_key) {
+            Some(key) => store.challenge_prior(&key).await.map(|(kind, _stats)| kind),
+            None => None,
+        },
+        _ => None,
+    };
+    // Purpose handed to the provider: the caller's purpose plus the site
+    // prior when the graph has seen this site before. Evidence keeps the
+    // original purpose so journals stay caller-shaped.
+    let propose_purpose = match challenge_prior.as_deref() {
+        Some(kind) => format!(
+            "{purpose} Known challenge type for this site from prior runs: {kind}."
+        ),
+        None => purpose.clone(),
+    };
     let gates_open = vision.session_ok && vision.capability_ok;
     let Some(assist) = vision.assist.as_ref().filter(|_| gates_open) else {
         let reason = if !vision.session_ok {
@@ -2242,7 +2264,7 @@ async fn execute_solve_challenge(
         let metric_context = assist.operational_metrics();
         let proposal = match assist
             .propose(VisionProposeRequest {
-                purpose: purpose.clone(),
+                purpose: propose_purpose.clone(),
                 intent_kind: "solveChallenge".into(),
                 screenshot_png: png,
                 stuck: StuckKind::ChallengePresent,

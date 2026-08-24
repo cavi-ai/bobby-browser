@@ -192,6 +192,7 @@ async fn vision_metrics_distinguish_rejected_from_verified_actions() {
             defer_escalation: false,
             prompt_context: None,
             corpus: None,
+            context_store: None,
         },
     )
     .await;
@@ -217,6 +218,7 @@ async fn vision_metrics_distinguish_rejected_from_verified_actions() {
             defer_escalation: false,
             prompt_context: None,
             corpus: None,
+            context_store: None,
         },
     )
     .await;
@@ -321,6 +323,7 @@ async fn type_into_candidate_uses_runtime_text_without_disclosing_it_to_the_prov
             defer_escalation: false,
             prompt_context: None,
             corpus: Some(VisionCorpus::new(dir.path()).expect("vision corpus")),
+            context_store: None,
         },
     )
     .await;
@@ -407,6 +410,7 @@ async fn type_into_candidate_verification_failure_redacts_runtime_text_from_corp
             defer_escalation: false,
             prompt_context: None,
             corpus: Some(corpus),
+            context_store: None,
         },
     )
     .await;
@@ -466,6 +470,7 @@ async fn type_into_candidate_out_of_range_fails_closed_without_mutation() {
             defer_escalation: false,
             prompt_context: None,
             corpus: None,
+            context_store: None,
         },
     )
     .await;
@@ -516,6 +521,7 @@ async fn type_into_candidate_rejects_non_text_fill_without_mutation() {
             defer_escalation: false,
             prompt_context: None,
             corpus: None,
+            context_store: None,
         },
     )
     .await;
@@ -555,6 +561,7 @@ async fn stuck_without_vision_gates_returns_vision_assist_denied() {
             defer_escalation: false,
             prompt_context: None,
             corpus: None,
+            context_store: None,
         },
     )
     .await;
@@ -653,6 +660,7 @@ async fn click_candidate_proposal_clicks_the_referenced_element() {
             defer_escalation: false,
             prompt_context: None,
             corpus: None,
+            context_store: None,
         },
     )
     .await;
@@ -728,6 +736,7 @@ async fn click_candidate_index_outside_the_prompt_list_fails_closed() {
             defer_escalation: false,
             prompt_context: None,
             corpus: None,
+            context_store: None,
         },
     )
     .await;
@@ -765,6 +774,7 @@ async fn stuck_with_gates_uses_vision_propose_and_execute() {
             defer_escalation: false,
             prompt_context: None,
             corpus: None,
+            context_store: None,
         },
     )
     .await;
@@ -811,6 +821,7 @@ async fn low_confidence_proposal_fails_closed() {
             defer_escalation: false,
             prompt_context: None,
             corpus: None,
+            context_store: None,
         },
     )
     .await;
@@ -858,6 +869,7 @@ async fn policy_denied_never_calls_vision() {
             defer_escalation: false,
             prompt_context: None,
             corpus: None,
+            context_store: None,
         },
     )
     .await;
@@ -907,6 +919,7 @@ async fn an_open_session_policy_does_not_substitute_for_the_capability() {
             defer_escalation: false,
             prompt_context: None,
             corpus: None,
+            context_store: None,
         },
     )
     .await;
@@ -952,6 +965,7 @@ async fn holding_the_capability_does_not_substitute_for_the_session_grant() {
             defer_escalation: false,
             prompt_context: None,
             corpus: None,
+            context_store: None,
         },
     )
     .await;
@@ -1033,6 +1047,7 @@ async fn cache_hit_never_calls_the_provider() {
             defer_escalation: false,
             prompt_context: None,
             corpus: None,
+            context_store: None,
         },
     )
     .await;
@@ -1082,6 +1097,7 @@ async fn cache_miss_falls_through_to_live_escalation() {
             defer_escalation: false,
             prompt_context: None,
             corpus: None,
+            context_store: None,
         },
     )
     .await;
@@ -1125,6 +1141,7 @@ async fn closed_gates_never_consult_the_cache() {
                 defer_escalation: false,
                 prompt_context: None,
                 corpus: None,
+                context_store: None,
             },
         )
         .await;
@@ -1184,6 +1201,7 @@ async fn a_failed_cached_proposal_is_dropped_and_escalates_live() {
             defer_escalation: false,
             prompt_context: None,
             corpus: None,
+            context_store: None,
         },
     )
     .await;
@@ -1376,6 +1394,7 @@ async fn complete_form_batches_one_screenshot_for_all_stuck_fields() {
             defer_escalation: false,
             prompt_context: None,
             corpus: None,
+            context_store: None,
         },
     )
     .await;
@@ -1498,6 +1517,7 @@ async fn provider_loss_during_batch_degrades_to_the_deterministic_path() {
             defer_escalation: false,
             prompt_context: None,
             corpus: None,
+            context_store: None,
         },
     )
     .await;

@@ -15,6 +15,7 @@
 //! never fails the command that triggered it.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use context_store::{
     day_since_epoch, site_key, ContextStore, ControlContext, IntentStats, RecordSource,
@@ -27,16 +28,24 @@ use types::{ContextAnswer, ContextAnswerSource, Evidence, IntentResolutionPath, 
 const PAGE_LEVEL_FORM: &str = "page";
 
 pub struct ContextPromotion {
-    store: ContextStore,
+    store: Arc<ContextStore>,
 }
 
 impl ContextPromotion {
     pub fn new(store: ContextStore) -> Self {
-        Self { store }
+        Self {
+            store: Arc::new(store),
+        }
     }
 
     pub fn store(&self) -> &ContextStore {
         &self.store
+    }
+
+    /// Shared handle to the store, for read-side consumers (challenge
+    /// priors in the intent engine) that must not own the promotion sink.
+    pub fn store_arc(&self) -> Arc<ContextStore> {
+        self.store.clone()
     }
 
     /// Promotes the resolved target of a completed or failed command.

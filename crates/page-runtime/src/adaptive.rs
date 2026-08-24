@@ -737,6 +737,10 @@ pub struct AdaptivePageEngine {
     context_graph: Option<Arc<crate::ContextGraph>>,
     /// Escalation corpus sink (`[vision].corpus_dir`). `None` writes nothing.
     corpus: Option<intent_engine::VisionCorpus>,
+    /// Durable context store, shared with the promotion sink. Read side of
+    /// the site-level challenge prior; `None` keeps the byte-identical
+    /// default path.
+    context_store: Option<Arc<context_store::ContextStore>>,
     operational_metrics: Option<observability::OperationalMetrics>,
 }
 
@@ -774,6 +778,7 @@ impl AdaptivePageEngine {
             proposals: None,
             context_graph: None,
             corpus: None,
+            context_store: None,
             operational_metrics: None,
         }
     }
@@ -821,6 +826,13 @@ impl AdaptivePageEngine {
     /// Enables escalation corpus collection into the configured directory.
     pub fn with_vision_corpus(mut self, corpus: intent_engine::VisionCorpus) -> Self {
         self.corpus = Some(corpus);
+        self
+    }
+
+    /// Attaches the durable context store so `solveChallenge` can read the
+    /// site-level challenge prior. Shares the promotion sink's handle.
+    pub fn with_context_store(mut self, store: Arc<context_store::ContextStore>) -> Self {
+        self.context_store = Some(store);
         self
     }
 
@@ -964,6 +976,7 @@ impl AdaptivePageEngine {
                 page.as_ref().and_then(|page| page.url.clone()),
                 self.context_graph.clone(),
                 self.corpus.clone(),
+                self.context_store.clone(),
                 self.operational_metrics.clone(),
             )
             .await;
@@ -1286,6 +1299,7 @@ async fn execute_intent(
     page_url: Option<String>,
     context_graph: Option<Arc<crate::ContextGraph>>,
     corpus: Option<intent_engine::VisionCorpus>,
+    context_store: Option<Arc<context_store::ContextStore>>,
     operational_metrics: Option<observability::OperationalMetrics>,
 ) -> Result<AdaptiveExecution, AdaptiveFailure> {
     let page_id = envelope.page_id.as_ref().expect("validated page id");
@@ -1315,6 +1329,7 @@ async fn execute_intent(
         defer_escalation: false,
         prompt_context,
         corpus,
+        context_store,
     };
     let outcome = IntentEngine::execute(intent, page_id, &browser, &vision).await;
     record_intent_metrics(operational_metrics.as_ref(), intent, &outcome);
