@@ -474,6 +474,7 @@ mod tests {
             created_at: Utc::now(),
             last_used_at: Utc::now(),
             execution_policy: types::ExecutionPolicy::default(),
+            zigzagzig: false,
         }
     }
 

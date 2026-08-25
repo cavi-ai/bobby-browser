@@ -12,12 +12,12 @@ export type Id = string;
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
 export interface RuntimeInfo { version: string; capabilities: string[]; active_sessions: number; queued_jobs: number; uptime_ms: number; }
-export interface SessionState { id: Id; profile: string; proxy: string | null; page_ids: Id[]; created_at: string; last_used_at: string; execution_policy: { javascriptEvaluation: boolean; visionAssist: boolean; fingerprint: boolean; humanize: boolean; visionNode?: string }; }
+export interface SessionState { id: Id; profile: string; proxy: string | null; page_ids: Id[]; created_at: string; last_used_at: string; execution_policy: { javascriptEvaluation: boolean; visionAssist: boolean; fingerprint: boolean; humanize: boolean; visionNode?: string }; /** Present iff true: a godmode session running the ZigZagZig recovery ladder. */ zigzagzig?: boolean; }
 export type PageMode = "Document" | "Interactive" | "Render";
 export interface PageState { id: Id; session_id: Id; url: string | null; mode: PageMode; ready_state: string; pending_requests: number; }
 /** Session execution policy. Omitted fields default to denied. */
 export interface ExecutionPolicy { javascriptEvaluation?: boolean; visionAssist?: boolean; fingerprint?: boolean; humanize?: boolean; visionNode?: string; }
-export interface CreateSessionRequest { profile: string; proxy: string | null; executionPolicy?: ExecutionPolicy; }
+export interface CreateSessionRequest { profile: string; proxy: string | null; executionPolicy?: ExecutionPolicy; /** Godmode session: every capability on + the ZigZagZig recovery ladder on every page-bound command. */ zigzagzig?: boolean; }
 export interface OpenPageRequest { session_id: Id; }
 
 export type ErrorLayer = "interface" | "broker" | "workflow" | "page" | "driver" | "browser" | "network" | "site" | "journal";

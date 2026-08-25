@@ -167,6 +167,13 @@ pub struct SessionState {
     pub created_at: DateTime<Utc>,
     pub last_used_at: DateTime<Utc>,
     pub execution_policy: ExecutionPolicy,
+    /// Set at creation by `CreateSessionRequest::zigzagzig`: page-bound
+    /// commands run under the ZigZagZig recovery ladder. Recorded
+    /// separately from the policy — a hand-assembled everything-on policy
+    /// does not opt into the ladder. Absent from the wire when off, so
+    /// plain sessions carry no godmode baggage.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub zigzagzig: bool,
 }
 
 /// Page within a session.

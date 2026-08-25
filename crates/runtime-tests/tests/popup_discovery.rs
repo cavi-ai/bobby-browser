@@ -72,6 +72,7 @@ async fn popup_opens_as_a_listed_page() {
             profile: "popup-discovery".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();

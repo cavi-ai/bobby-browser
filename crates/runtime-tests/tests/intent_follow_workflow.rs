@@ -163,6 +163,7 @@ async fn follow_intent_is_deterministic_on_live_chromium_for_both_boundary_state
             profile: "intent-follow".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();

@@ -81,6 +81,7 @@ async fn a_session_names_the_node_it_escalates_to() {
             profile: "node-selection".into(),
             proxy: None,
             execution_policy: policy(Some("local")),
+            zigzagzig: false,
         })
         .await
         .expect("session is created");

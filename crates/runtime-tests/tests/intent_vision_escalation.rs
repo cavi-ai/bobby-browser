@@ -125,6 +125,7 @@ async fn stuck_locate_uses_injected_fake_vision_assist() {
                 vision_assist: true,
                 ..ExecutionPolicy::default()
             },
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -266,6 +267,7 @@ async fn stuck_locate_records_a_real_local_vision_proposal() {
                 vision_node: Some("local".into()),
                 ..ExecutionPolicy::default()
             },
+            zigzagzig: false,
         })
         .await
         .unwrap();

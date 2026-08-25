@@ -97,6 +97,7 @@ async fn completes_semantic_drift_frame_shadow_wait_and_artifact_workflow() {
             profile: "agentic-proof".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();

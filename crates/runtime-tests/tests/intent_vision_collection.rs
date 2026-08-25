@@ -111,6 +111,7 @@ async fn open_fixture(runtime: &RuntimeService, url: &str) -> (SessionId, PageId
                 vision_assist: true,
                 ..ExecutionPolicy::default()
             },
+            zigzagzig: false,
         })
         .await
         .unwrap();

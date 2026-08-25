@@ -1032,6 +1032,13 @@ pub struct CreateSessionRequest {
     pub proxy: Option<String>,
     #[serde(default)]
     pub execution_policy: ExecutionPolicy,
+    /// Godmode session: every execution-policy capability forced on, and
+    /// every page-bound command runs under the ZigZagZig recovery ladder —
+    /// a stuck command escalates through observe, re-resolve, retry,
+    /// challenge solve, checkpoint, and session replacement automatically.
+    /// Off by default; the ladder is opt-in per session.
+    #[serde(default)]
+    pub zigzagzig: bool,
 }
 
 /// `POST /v1/pages` body.

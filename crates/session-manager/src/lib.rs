@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use tokio::sync::RwLock;
-use types::{CreateSessionRequest, PageId, RuntimeError, SessionId, SessionState};
+use types::{CreateSessionRequest, ExecutionPolicy, PageId, RuntimeError, SessionId, SessionState};
 use worker_pool::WorkerPool;
 
 #[derive(Clone, Default)]
@@ -22,6 +22,20 @@ impl SessionManager {
 
     pub async fn create(&self, req: CreateSessionRequest) -> Result<SessionState, RuntimeError> {
         let now = Utc::now();
+        // Godmode: a zigzagzig session forces every capability on — the
+        // ladder escalates into vision solving, so the session must be
+        // allowed to use what the ladder reaches for.
+        let execution_policy = if req.zigzagzig {
+            ExecutionPolicy {
+                javascript_evaluation: true,
+                vision_assist: true,
+                fingerprint: true,
+                humanize: true,
+                ..req.execution_policy
+            }
+        } else {
+            req.execution_policy
+        };
         let session = SessionState {
             id: SessionId::default(),
             profile: req.profile,
@@ -29,7 +43,8 @@ impl SessionManager {
             page_ids: Vec::new(),
             created_at: now,
             last_used_at: now,
-            execution_policy: req.execution_policy,
+            execution_policy,
+            zigzagzig: req.zigzagzig,
         };
         if let Some(workers) = &self.workers {
             workers.lease(session.id.clone()).await.map_err(|error| {

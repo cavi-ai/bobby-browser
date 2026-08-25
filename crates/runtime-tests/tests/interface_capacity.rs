@@ -399,6 +399,7 @@ async fn thirty_two_real_sessions_run_only_eight_runtime_service_workflows_at_on
                 profile: format!("warm-{index}"),
                 proxy: None,
                 execution_policy: Default::default(),
+                zigzagzig: false,
             }),
         )
         .await

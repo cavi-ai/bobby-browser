@@ -46,13 +46,18 @@ Machine-readable catalog: [OpenAPI 3.1](../openapi/v1.yaml).
 Shapes use camelCase JSON. Do not invent fields; follow the TypeScript SDK
 validators / Rust types.
 
-- **POST `/v1/sessions`** — `{ profile, proxy, executionPolicy? }`. Every
+- **POST `/v1/sessions`** — `{ profile, proxy, executionPolicy?, zigzagzig? }`. Every
   `executionPolicy` flag is deny-by-default, so an omitted policy is
   `{ javascriptEvaluation: false, visionAssist: false, fingerprint: false, humanize: false }`.
   `fingerprint` applies fingerprint spoofing to workers leased for this
   session; `humanize` synthesizes human-like input timing and reports what it
   synthesized as `humanization` evidence. Both are written to the worker on
   every lease, so one session's opt-in never carries into another's.
+  `zigzagzig: true` creates a godmode session: every policy flag is forced
+  on and each page-bound command runs under the ZigZagZig recovery ladder —
+  a stuck command escalates through observe, re-resolve, retry, in-place
+  challenge solve, checkpoint resume, and session replacement automatically
+  (see [Internal skill runtime](../guides/skills.md)).
 - **DELETE `/v1/sessions/{session}`** — empty body; `204` on success
 - **POST `/v1/pages`** — `{ session_id }` (snake_case on this request; session/page state also uses `id` / `session_id` / `page_ids`)
 - **POST `/v1/commands`** — `CommandEnvelope` (`schemaVersion: 2`, ids, `deadline`,

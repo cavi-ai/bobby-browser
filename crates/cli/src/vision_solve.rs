@@ -82,15 +82,12 @@ pub fn solve(options: VisionSolveOptions) -> Result<()> {
 }
 
 fn open_session_and_page(options: &VisionSolveOptions) -> Result<(SessionId, PageId)> {
+    // The solve loop needs vision assist; the rest of the policy comes from
+    // the zigzagzig flag, which forces every capability on server-side.
     let policy = ExecutionPolicy {
         vision_assist: true,
         vision_node: Some(options.node.clone()),
-        // ZigZagZig is the everything-on mode: humanized timing, fingerprint
-        // spoofing, and JS evaluation alongside the vision assist the solve
-        // loop needs. Without the flag the session is vision-only.
-        javascript_evaluation: options.zigzagzig,
-        fingerprint: options.zigzagzig,
-        humanize: options.zigzagzig,
+        ..ExecutionPolicy::default()
     };
     let session = post(
         options,
@@ -99,6 +96,7 @@ fn open_session_and_page(options: &VisionSolveOptions) -> Result<(SessionId, Pag
             profile: "vision-solve".into(),
             proxy: None,
             execution_policy: policy,
+            zigzagzig: options.zigzagzig,
         },
     )?;
     let session_id = parse_session_id(

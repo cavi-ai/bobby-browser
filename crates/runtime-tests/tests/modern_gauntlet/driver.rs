@@ -210,6 +210,7 @@ impl ModernRuntime {
                 profile: profile.clone(),
                 proxy: None,
                 execution_policy: gauntlet_execution_policy(),
+                zigzagzig: false,
             })
             .await?;
         let page = runtime
@@ -708,6 +709,7 @@ impl ModernRuntime {
                 profile: format!("{profile}-replacement"),
                 proxy: None,
                 execution_policy: Default::default(),
+                zigzagzig: false,
             })
             .await?;
         let page = runtime
