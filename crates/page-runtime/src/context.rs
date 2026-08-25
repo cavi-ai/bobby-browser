@@ -368,6 +368,7 @@ pub fn command_kind_name(command: &RuntimeCommand) -> &'static str {
             types::IntentCommand::DismissObstruction(_) => "dismiss_obstruction",
             types::IntentCommand::Extract(_) => "extract",
             types::IntentCommand::SolveChallenge(_) => "solve_challenge",
+            types::IntentCommand::DetectChallenge(_) => "detect_challenge",
         },
         RuntimeCommand::Primitive(primitive) => match primitive {
             PrimitiveCommand::Navigate(_) => "navigate",

@@ -81,12 +81,16 @@ pub enum IntentCommand {
     /// → action until the model reports the challenge solved or the hint
     /// timeout elapses.
     SolveChallenge(crate::challenges::SolveChallengeIntent),
+    /// Read-only challenge classification: screenshot → vision classify →
+    /// report. Never acts on the page, so it is replayable like Locate.
+    DetectChallenge(crate::challenges::DetectChallengeIntent),
 }
 
 impl IntentCommand {
     pub fn class(&self) -> CommandClass {
         match self {
             Self::Locate(_) | Self::WaitForState(_) | Self::Extract(_) => CommandClass::Replayable,
+            Self::DetectChallenge(_) => CommandClass::Replayable,
             Self::Fill(_) | Self::CompleteForm(_) | Self::DismissObstruction(_) => {
                 CommandClass::Reconciliable
             }

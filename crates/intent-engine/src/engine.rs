@@ -210,6 +210,10 @@ impl IntentEngine {
                 purpose,
                 timeout_ms,
             } => execute_solve_challenge(page_id, browser, vision, purpose, timeout_ms).await,
+            IntentPlan::DetectChallenge {
+                purpose,
+                timeout_ms,
+            } => execute_detect_challenge(page_id, browser, vision, purpose, timeout_ms).await,
         }
     }
 }
@@ -2398,6 +2402,197 @@ async fn execute_solve_challenge(
     }
 }
 
+/// Read-only challenge classification: screenshot → vision classify → report.
+/// Never acts on the page. Detection carries no confidence floor — acting is
+/// what the floor protects, and a caller choosing whether to solve needs the
+/// model's honest uncertainty, not a silent retry loop. The site prior
+/// enriches the prompt exactly like the solve path; it never blends into the
+/// reported detection, so a clean page stays provably clean.
+async fn execute_detect_challenge(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    vision: &VisionContext,
+    purpose: String,
+    timeout_ms: u64,
+) -> IntentOutcome {
+    let plan_summary = format!("detectChallenge timeout_ms={timeout_ms}");
+    // Site-level prior, same read-only hint contract as the solve loop.
+    let challenge_prior = match (&vision.context_store, &vision.prompt_context) {
+        (Some(store), Some(ctx)) => match ctx.url.as_deref().and_then(context_store::site_key) {
+            Some(key) => store.challenge_prior(&key).await.map(|(kind, _stats)| kind),
+            None => None,
+        },
+        _ => None,
+    };
+    let propose_purpose = match challenge_prior.as_deref() {
+        Some(kind) => {
+            format!("{purpose} Known challenge type for this site from prior runs: {kind}.")
+        }
+        None => purpose.clone(),
+    };
+    let gates_open = vision.session_ok && vision.capability_ok;
+    let Some(assist) = vision.assist.as_ref().filter(|_| gates_open) else {
+        let reason = if !vision.session_ok {
+            "vision assist is off for this session (executionPolicy.visionAssist)"
+        } else if !vision.capability_ok {
+            "the principal lacks the vision:assist capability"
+        } else {
+            "no vision provider is configured"
+        };
+        return IntentOutcome::Failed {
+            error: CommandError {
+                code: ErrorCode::VisionAssistDenied,
+                message: format!("detectChallenge requires vision assist; {reason}"),
+                layer: ErrorLayer::Page,
+                retryable: false,
+            },
+            evidence: vec![intent_evidence(execution_record(
+                "detectChallenge",
+                Some(purpose),
+                plan_summary,
+                Vec::new(),
+                None,
+                "visionDenied",
+            ))],
+        };
+    };
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let mut attempts = 0_u32;
+    let mut last_transient: Option<String> = None;
+    loop {
+        if std::time::Instant::now() >= deadline {
+            let transient = last_transient
+                .as_deref()
+                .map(|message| format!("; last transient failure: {message}"))
+                .unwrap_or_default();
+            return IntentOutcome::Failed {
+                error: CommandError {
+                    code: ErrorCode::DeadlineExceeded,
+                    message: format!(
+                        "challenge not classified within {timeout_ms}ms ({attempts} attempts){transient}"
+                    ),
+                    layer: ErrorLayer::Page,
+                    retryable: false,
+                },
+                evidence: vec![intent_evidence(execution_record(
+                    "detectChallenge",
+                    Some(purpose),
+                    plan_summary,
+                    Vec::new(),
+                    None,
+                    format!("detectTimeout attempts={attempts}"),
+                ))],
+            };
+        }
+        attempts += 1;
+
+        let (png, mut screenshot_evidence) = match browser
+            .capture_screenshot(
+                page_id,
+                &CaptureScreenshotCommand {
+                    mode: ScreenshotMode::Viewport,
+                },
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                last_transient = Some(format!("vision screenshot failed: {}", error.message));
+                tokio::time::sleep(std::time::Duration::from_millis(SOLVE_POLL_INTERVAL_MS)).await;
+                continue;
+            }
+        };
+
+        let propose_started = std::time::Instant::now();
+        let metric_context = assist.operational_metrics();
+        let proposal = match assist
+            .propose(VisionProposeRequest {
+                purpose: propose_purpose.clone(),
+                intent_kind: "detectChallenge".into(),
+                screenshot_png: png,
+                stuck: StuckKind::ChallengePresent,
+                context: vision.prompt_context.clone(),
+            })
+            .await
+        {
+            Ok(proposal) => proposal,
+            Err(error) => {
+                record_vision_metric(
+                    metric_context.as_ref(),
+                    propose_started.elapsed().as_millis() as u64,
+                    None,
+                    VisionProposalOutcome::Failed,
+                    None,
+                );
+                last_transient = Some(format!("vision propose failed: {}", error.message));
+                tokio::time::sleep(std::time::Duration::from_millis(SOLVE_POLL_INTERVAL_MS)).await;
+                continue;
+            }
+        };
+        let provider_latency_ms = propose_started.elapsed().as_millis() as u64;
+        let proposal_hash = proposal_sha256(&proposal);
+
+        let detection = match &proposal.action {
+            VisionAction::ChallengeDetected {
+                challenge_type,
+                region,
+                blocking,
+            } => Some(types::ChallengeDetection {
+                challenge_type: *challenge_type,
+                confidence: proposal.confidence,
+                region: *region,
+                blocking: *blocking,
+                hints: None,
+            }),
+            VisionAction::NoChallengeDetected => None,
+            // Off-task answers (click, typeText, …) are an upstream
+            // confusion, not a classification: one attempt and reassess.
+            other => {
+                record_vision_metric(
+                    metric_context.as_ref(),
+                    provider_latency_ms,
+                    Some(proposal.confidence),
+                    VisionProposalOutcome::Rejected,
+                    Some(VerificationMetricResult::OtherRejected),
+                );
+                last_transient = Some(format!("vision action {other:?} is not a detection answer"));
+                tokio::time::sleep(std::time::Duration::from_millis(SOLVE_POLL_INTERVAL_MS)).await;
+                continue;
+            }
+        };
+
+        record_vision_metric(
+            metric_context.as_ref(),
+            provider_latency_ms,
+            Some(proposal.confidence),
+            VisionProposalOutcome::Accepted,
+            Some(VerificationMetricResult::Accepted),
+        );
+        let artifact_ids = artifact_ids_from(&screenshot_evidence);
+        let mut evidence = Vec::new();
+        evidence.append(&mut screenshot_evidence);
+        evidence.push(Evidence::ChallengeDetection {
+            detection,
+            prior_kind: challenge_prior.clone(),
+        });
+        evidence.push(intent_evidence(execution_record_with_path(
+            "detectChallenge",
+            Some(purpose),
+            plan_summary,
+            Vec::new(),
+            None,
+            format!("challengeClassified attempts={attempts}"),
+            ResolutionDetails {
+                path: IntentResolutionPath::VisionFallback,
+                vision_proposal_sha256: Some(proposal_hash),
+                artifact_ids,
+            },
+        )));
+        return IntentOutcome::Completed { evidence };
+    }
+}
+
 /// The deterministic-path facts a stuck report carries into failure evidence and
 /// into any vision escalation.
 #[derive(Debug, Clone)]
@@ -3103,6 +3298,16 @@ async fn execute_vision_action(
             layer: ErrorLayer::Page,
             retryable: false,
         }),
+        // Classification answers, consumed by `execute_detect_challenge`
+        // before dispatch; detection never acts on the page.
+        VisionAction::ChallengeDetected { .. } | VisionAction::NoChallengeDetected => {
+            Err(CommandError {
+                code: ErrorCode::VisionAssistFailed,
+                message: "detection vision action is not an actionable page operation".into(),
+                layer: ErrorLayer::Page,
+                retryable: false,
+            })
+        }
     }
 }
 

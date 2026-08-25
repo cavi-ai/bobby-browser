@@ -42,13 +42,44 @@ struct ProposalBody {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 enum ActionBody {
-    Click { x: f64, y: f64 },
-    TypeText { text: String },
-    ExtractValue { value: String },
-    ClickCandidate { index: u32 },
-    TypeIntoCandidate { index: u32 },
-    ExtractFromCandidate { index: u32 },
+    Click {
+        x: f64,
+        y: f64,
+    },
+    TypeText {
+        text: String,
+    },
+    ExtractValue {
+        value: String,
+    },
+    ClickCandidate {
+        index: u32,
+    },
+    TypeIntoCandidate {
+        index: u32,
+    },
+    ExtractFromCandidate {
+        index: u32,
+    },
     ChallengeSolved,
+    /// Stringly on the wire; mapped to the typed `ChallengeType` below with
+    /// an unknown kind failing the proposal rather than coercing.
+    ChallengeDetected {
+        challenge_type: String,
+        region: Option<RegionBody>,
+        #[serde(default)]
+        blocking: bool,
+    },
+    NoChallengeDetected,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RegionBody {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
 }
 
 impl HttpVisionAssist {
@@ -219,6 +250,53 @@ impl VisionAssist for HttpVisionAssist {
             ActionBody::ChallengeSolved => {
                 return Err(provider_error(format!(
                     "vision challengeSolved action is incompatible with intent {}",
+                    request.intent_kind
+                )));
+            }
+            ActionBody::ChallengeDetected {
+                challenge_type,
+                region,
+                blocking,
+            } if request.intent_kind == "detectChallenge" => {
+                let challenge_type: types::ChallengeType =
+                    serde_json::from_value(serde_json::Value::String(challenge_type))
+                        .map_err(|_| provider_error("vision detected an unknown challenge type"))?;
+                let region = region
+                    .map(|region| {
+                        if region.x.is_finite()
+                            && region.y.is_finite()
+                            && region.width.is_finite()
+                            && region.height.is_finite()
+                        {
+                            Ok(types::ChallengeRegion {
+                                x: region.x,
+                                y: region.y,
+                                width: region.width,
+                                height: region.height,
+                            })
+                        } else {
+                            Err(provider_error("vision challenge region is not finite"))
+                        }
+                    })
+                    .transpose()?;
+                VisionAction::ChallengeDetected {
+                    challenge_type,
+                    region,
+                    blocking,
+                }
+            }
+            ActionBody::ChallengeDetected { .. } => {
+                return Err(provider_error(format!(
+                    "vision challengeDetected action is incompatible with intent {}",
+                    request.intent_kind
+                )));
+            }
+            ActionBody::NoChallengeDetected if request.intent_kind == "detectChallenge" => {
+                VisionAction::NoChallengeDetected
+            }
+            ActionBody::NoChallengeDetected => {
+                return Err(provider_error(format!(
+                    "vision noChallengeDetected action is incompatible with intent {}",
                     request.intent_kind
                 )));
             }

@@ -274,6 +274,10 @@ export interface ExtractField { name: string; purpose: string; hints?: IntentHin
  * extraction evidence rather than failing the whole command.
  */
 export interface ExtractIntent { purpose: string; fields: ExtractField[]; }
+/** Read-only challenge classification (captchas, verification widgets). Never acts on the page. */
+export interface ChallengeRegion { x: number; y: number; width: number; height: number }
+export interface DetectChallengeHints { region?: ChallengeRegion; timeoutMs?: number }
+export interface DetectChallengeIntent { purpose: string; hints?: DetectChallengeHints }
 export type IntentCommand =
   | { kind: "locate"; input: LocateIntent }
   | { kind: "fill"; input: FillIntent }
@@ -282,7 +286,8 @@ export type IntentCommand =
   | { kind: "waitForState"; input: WaitForStateIntent }
   | { kind: "follow"; input: FollowIntent }
   | { kind: "dismissObstruction"; input: DismissObstructionIntent }
-  | { kind: "extract"; input: ExtractIntent };
+  | { kind: "extract"; input: ExtractIntent }
+  | { kind: "detectChallenge"; input: DetectChallengeIntent };
 
 /**
  * Nested command wire shape:

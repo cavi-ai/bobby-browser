@@ -1608,6 +1608,33 @@ fn intent_commands() -> Vec<Value> {
                 &["purpose"],
             ),
         ),
+        tagged_input(
+            "detectChallenge",
+            object(
+                json!({
+                    "purpose":string(1, 256),
+                    "hints":{
+                        "type":"object",
+                        "properties":{
+                            "timeoutMs":{"type":"integer","minimum":1,"maximum":MAX_TIMEOUT_MS},
+                            "region":{
+                                "type":"object",
+                                "properties":{
+                                    "x":{"type":"number"},
+                                    "y":{"type":"number"},
+                                    "width":{"type":"number"},
+                                    "height":{"type":"number"}
+                                },
+                                "required":["x","y","width","height"],
+                                "additionalProperties":false
+                            }
+                        },
+                        "additionalProperties":false
+                    }
+                }),
+                &["purpose"],
+            ),
+        ),
     ]
 }
 
@@ -2237,6 +2264,46 @@ fn evidence_variants() -> Vec<Value> {
             "structuredExtraction",
             json!({"pageId":id(),"value":any_value(),"truncated":{"type":"boolean"}}),
             &["pageId", "value", "truncated"],
+        ),
+        // `Evidence::ChallengeDetection`: the enum camelCases its own variant
+        // fields (`detection`, `priorKind`); the inner ChallengeDetection
+        // type carries no rename, so its fields stay snake_case.
+        tagged_fields(
+            "challengeDetection",
+            json!({
+                "detection":nullable(object(
+                    json!({
+                        "challenge_type":{"enum":[
+                            "recaptchaV2Checkbox",
+                            "recaptchaV3",
+                            "textCaptcha",
+                            "imageGridCaptcha",
+                            "mfaCodeEntry"
+                        ]},
+                        "confidence":{"type":"number"},
+                        "region":object(
+                            json!({
+                                "x":{"type":"number"},
+                                "y":{"type":"number"},
+                                "width":{"type":"number"},
+                                "height":{"type":"number"}
+                            }),
+                            &["x","y","width","height"]
+                        ),
+                        "blocking":{"type":"boolean"},
+                        "hints":object(
+                            json!({
+                                "target_field_purpose":string(0, 1024),
+                                "instruction_text":string(0, 4096)
+                            }),
+                            &[]
+                        )
+                    }),
+                    &["challenge_type", "confidence", "blocking"]
+                )),
+                "priorKind":string(1, 128)
+            }),
+            &["detection"],
         ),
         tagged_fields(
             "intentExecution",

@@ -112,11 +112,20 @@ class ProposeResponse:
             "typeIntoCandidate",
             "extractFromCandidate",
         )
-        if kind not in ("click", "typeText", "extractValue", "challengeSolved", *candidate_kinds):
+        detect_kinds = ("challengeDetected", "noChallengeDetected")
+        if kind not in ("click", "typeText", "extractValue", "challengeSolved", *candidate_kinds, *detect_kinds):
             raise ValueError(f"invalid action kind: {kind}")
         if kind == "challengeSolved":
             if set(self.action) != {"kind"}:
                 raise ValueError("challengeSolved must contain only kind")
+        if kind == "challengeDetected":
+            if not set(self.action) <= {"kind", "challengeType", "region", "blocking"}:
+                raise ValueError("challengeDetected carries unknown fields")
+            if not isinstance(self.action.get("challengeType"), str):
+                raise ValueError("challengeDetected requires a challengeType string")
+        if kind == "noChallengeDetected":
+            if set(self.action) != {"kind"}:
+                raise ValueError("noChallengeDetected must contain only kind")
         if kind == "click":
             if set(self.action) != {"kind", "x", "y"}:
                 raise ValueError("click must contain only kind, x, and y")
@@ -167,6 +176,8 @@ class VisionProvider(ABC):
         '{"confidence": 0.0..1.0, "action": {"kind": "typeIntoCandidate", "index": integer}}\n'
         '{"confidence": 0.0..1.0, "action": {"kind": "extractFromCandidate", "index": integer}}\n'
         '{"confidence": 0.0..1.0, "action": {"kind": "challengeSolved"}}\n'
+        '{"confidence": 0.0..1.0, "action": {"kind": "challengeDetected", "challengeType": string, "blocking": boolean, "region": {"x": number, "y": number, "width": number, "height": number} (optional)}}\n'
+        '{"confidence": 0.0..1.0, "action": {"kind": "noChallengeDetected"}}\n'
         "When candidates are listed, select only by zero-based index: "
         "clickCandidate for locate/submitAndVerify/follow/dismissObstruction, "
         "typeIntoCandidate for fill/type, extractFromCandidate for extract. "
@@ -178,7 +189,13 @@ class VisionProvider(ABC):
         "checkboxes and verify buttons are small, so pick coordinates inside "
         "their borders. Only return challengeSolved when the screenshot shows "
         "the solved state (for a checkbox challenge, a visible green "
-        "checkmark). Click coordinates are CSS pixels relative to the "
+        "checkmark). For detectChallenge requests, never click and never "
+        "solve: classify the page and return challengeDetected with "
+        "challengeType one of recaptchaV2Checkbox, recaptchaV3, textCaptcha, "
+        "imageGridCaptcha, mfaCodeEntry (blocking=true when the widget "
+        "prevents the task, region optional), or noChallengeDetected when the "
+        "page carries no captcha or verification widget. Click coordinates "
+        "are CSS pixels relative to the "
         "screenshot image. Do not include markdown fences, comments, or any "
         "text outside the JSON object."
     )
@@ -287,8 +304,15 @@ class VisionProvider(ABC):
             raise ValueError("unknown vision action fields")
 
         normalized = {"kind": kind}
-        if kind == "challengeSolved":
-            pass  # terminal signal; carries no payload
+        if kind in ("challengeSolved", "noChallengeDetected"):
+            pass  # terminal/classification signal; carries no payload
+        elif kind == "challengeDetected":
+            normalized["challengeType"] = str(
+                action.get("challengeType", action.get("challenge_type", ""))
+            )
+            if action.get("region") is not None:
+                normalized["region"] = action.get("region")
+            normalized["blocking"] = bool(action.get("blocking", False))
         elif kind == "click":
             # Models emit coordinates variously: {x, y}, {coordinate: [x, y]},
             # {position: {x, y}}, {clickX, clickY}, or list-typed values like
@@ -347,6 +371,8 @@ class VisionProvider(ABC):
             "type_into_candidate": "typeIntoCandidate",
             "extract_from_candidate": "extractFromCandidate",
             "challenge_solved": "challengeSolved",
+            "challenge_detected": "challengeDetected",
+            "no_challenge_detected": "noChallengeDetected",
         }.get(kind, kind)
 
     @staticmethod
@@ -358,6 +384,8 @@ class VisionProvider(ABC):
             "clickCandidate": {"kind", "index"},
             "typeIntoCandidate": {"kind", "index"},
             "extractFromCandidate": {"kind", "index"},
+            "challengeDetected": {"kind", "challengeType", "challenge_type", "region", "blocking"},
+            "noChallengeDetected": {"kind"},
             "challengeSolved": {"kind"},
         }.get(kind)
 

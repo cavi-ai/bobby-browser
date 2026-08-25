@@ -25,6 +25,7 @@ pub enum IntentMetricKind {
     Follow,
     Dismiss,
     SolveChallenge,
+    DetectChallenge,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

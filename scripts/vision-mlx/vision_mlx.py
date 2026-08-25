@@ -156,6 +156,8 @@ class VisionModel:
             '{"confidence": 0.0..1.0, "action": {"kind": "typeIntoCandidate", "index": integer}}\n'
             '{"confidence": 0.0..1.0, "action": {"kind": "extractFromCandidate", "index": integer}}\n'
             '{"confidence": 0.0..1.0, "action": {"kind": "challengeSolved"}}\n'
+            '{"confidence": 0.0..1.0, "action": {"kind": "challengeDetected", "challengeType": string, "blocking": boolean, "region": {"x": number, "y": number, "width": number, "height": number} (optional)}}\n'
+            '{"confidence": 0.0..1.0, "action": {"kind": "noChallengeDetected"}}\n'
             "When candidates are listed, select only by zero-based index: "
             "clickCandidate for locate/submitAndVerify/follow/dismissObstruction, "
             "typeIntoCandidate for fill/type, extractFromCandidate for extract. "
