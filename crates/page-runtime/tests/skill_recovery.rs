@@ -746,3 +746,318 @@ async fn checkpoint_authority_mismatch_fails_before_pool_replacement() {
     assert_eq!(mutations.load(Ordering::SeqCst), 1);
     assert_eq!(launches.load(Ordering::SeqCst), 1);
 }
+
+/// Stuck-click fixture for the SolveChallenge rung: clicks never satisfy the
+/// postcondition, so the ladder always climbs past the interaction retry.
+/// `capture_screenshot` flips the URL — the moment the widget clears, the
+/// blocked page becomes reachable.
+struct ChallengeFactory {
+    current_url: Arc<Mutex<String>>,
+}
+
+struct ChallengeWorker {
+    id: WorkerId,
+    profile: PathBuf,
+    current_url: Arc<Mutex<String>>,
+}
+
+#[async_trait]
+impl WorkerFactory for ChallengeFactory {
+    async fn launch(&self, _: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
+        Ok(Arc::new(ChallengeWorker {
+            id: WorkerId::new(),
+            profile: PathBuf::from("/profiles/challenge-test"),
+            current_url: Arc::clone(&self.current_url),
+        }))
+    }
+}
+
+#[async_trait]
+impl BrowserWorker for ChallengeWorker {
+    fn worker_id(&self) -> WorkerId {
+        self.id.clone()
+    }
+
+    fn profile_dir(&self) -> &Path {
+        &self.profile
+    }
+
+    async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
+        Ok(())
+    }
+
+    async fn navigate(
+        &self,
+        _: &PageId,
+        command: &NavigateCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        *self.current_url.lock().await = command.url.clone();
+        Ok(vec![Evidence::Navigation {
+            url: command.url.clone(),
+            title: "Challenge fixture".into(),
+        }])
+    }
+
+    async fn inspect(
+        &self,
+        _: &PageId,
+        command: &InspectCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Ok(vec![Evidence::Inspection {
+            selector: command.selector.clone(),
+            url: self.current_url.lock().await.clone(),
+            title: "Challenge fixture".into(),
+            text: String::new(),
+            html: None,
+        }])
+    }
+
+    async fn click(
+        &self,
+        _: &PageId,
+        command: &ClickCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Ok(vec![Evidence::Element {
+            selector: command.selector.clone(),
+            text: None,
+        }])
+    }
+
+    async fn type_text(
+        &self,
+        _: &PageId,
+        _: &TypeTextCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        unreachable!("the challenge fixture only executes clicks")
+    }
+
+    async fn capture_screenshot(
+        &self,
+        _: &PageId,
+        _: &types::CaptureScreenshotCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        *self.current_url.lock().await = "https://example.test/done".into();
+        Ok(vec![Evidence::Screenshot {
+            artifact_id: "shot-1".into(),
+            media_type: "image/png".into(),
+            width: 1,
+            height: 1,
+            bytes: 3,
+            sha256: "abc".into(),
+        }])
+    }
+
+    async fn screenshot_bytes(&self, _: &PageId) -> Result<Vec<u8>, CommandError> {
+        Ok(b"png".to_vec())
+    }
+
+    async fn close(&self) -> Result<(), CommandError> {
+        Ok(())
+    }
+}
+
+/// Always proposes challengeSolved at full confidence: the widget clears on
+/// the first proposal.
+struct SolveVision;
+
+#[async_trait]
+impl intent_engine::VisionAssist for SolveVision {
+    async fn propose(
+        &self,
+        _: intent_engine::VisionProposeRequest,
+    ) -> Result<intent_engine::VisionProposal, CommandError> {
+        Ok(intent_engine::VisionProposal {
+            confidence: 0.99,
+            action: intent_engine::VisionAction::ChallengeSolved,
+        })
+    }
+}
+
+fn stuck_click_envelope(session_id: SessionId, page_id: PageId) -> CommandEnvelope {
+    CommandEnvelope {
+        schema_version: CommandEnvelope::SCHEMA_VERSION,
+        command_id: CommandId::new(),
+        workflow_id: WorkflowId::new(),
+        attempt_id: AttemptId::new(),
+        session_id,
+        page_id: Some(page_id),
+        deadline: Utc::now() + Duration::seconds(5),
+        command: RuntimeCommand::Primitive(PrimitiveCommand::Click(ClickCommand {
+            selector: "#blocked-target".into(),
+            target: None,
+            boundary: false,
+            expected_url: Some("https://example.test/done".into()),
+            modifiers: Vec::new(),
+        })),
+    }
+}
+
+#[tokio::test]
+async fn solve_challenge_rung_declines_without_a_gate_and_the_ladder_climbs_on() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path().join("unused-checkpoints"))
+        .await
+        .unwrap();
+    let journal = Arc::new(
+        JsonlJournal::open(root.path().join("challenge-journal.jsonl"))
+            .await
+            .unwrap(),
+    );
+    let current_url = Arc::new(Mutex::new("https://example.test/start".to_string()));
+    let pool = Arc::new(WorkerPool::new(
+        1,
+        Arc::new(ChallengeFactory {
+            current_url: Arc::clone(&current_url),
+        }),
+    ));
+    let runtime = page_runtime::PageRuntime::new(journal, Arc::clone(&pool));
+    let session_id = SessionId::new();
+    let page = runtime
+        .open(OpenPageRequest {
+            session_id: session_id.clone(),
+        })
+        .await;
+    let strategy = SkillZigZagZig::new(
+        skill_state_without_checkpoint(session_id.clone()),
+        1_000,
+        [],
+    )
+    .unwrap();
+    // No with_session_gate: the coordinator must not escalate beyond what
+    // the session proved, so the solve rung declines and the ladder climbs.
+    let coordinator = SkillRecoveryCoordinator::new(
+        runtime,
+        strategy,
+        RecoveryCoordinator::new(store),
+        Arc::clone(&pool),
+    )
+    .unwrap();
+    let envelope = stuck_click_envelope(session_id, page.id.clone());
+
+    let execution = coordinator
+        .execute_with_adaptation(&envelope, page)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        execution
+            .tactic_evidence
+            .iter()
+            .map(|item| (item.tactic, item.effect))
+            .collect::<Vec<_>>(),
+        vec![
+            (SkillTactic::ObserveAgain, SkillTacticEffect::Observed),
+            (
+                SkillTactic::ResolveSemanticTarget,
+                SkillTacticEffect::ReResolved
+            ),
+            (
+                SkillTactic::ChangeInteractionMethod,
+                SkillTacticEffect::CommandRetried
+            ),
+            (
+                SkillTactic::SolveChallenge,
+                SkillTacticEffect::ChallengeSolveAttempted
+            ),
+        ]
+    );
+    assert!(matches!(
+        execution.skill_outcome,
+        SkillOutcome::Failed {
+            failure: SkillFailure::StrategyExhausted,
+            ..
+        }
+    ));
+    assert!(matches!(
+        execution.command_outcome,
+        CommandOutcome::RetryableFailure { .. }
+    ));
+    // The declined solve never touched the page: no screenshot, no flip.
+    assert_eq!(*current_url.lock().await, "https://example.test/start");
+}
+
+#[tokio::test]
+async fn solve_challenge_rung_clears_the_block_and_completes_the_stuck_command() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path().join("unused-checkpoints"))
+        .await
+        .unwrap();
+    let journal = Arc::new(
+        JsonlJournal::open(root.path().join("challenge-journal.jsonl"))
+            .await
+            .unwrap(),
+    );
+    let pool = Arc::new(WorkerPool::new(
+        1,
+        Arc::new(ChallengeFactory {
+            current_url: Arc::new(Mutex::new("https://example.test/start".into())),
+        }),
+    ));
+    let adaptive =
+        page_runtime::AdaptivePageEngine::browser_only().with_vision_assist(Arc::new(SolveVision));
+    let runtime =
+        page_runtime::PageRuntime::new_adaptive(journal, Arc::clone(&pool), None, adaptive);
+    let session_id = SessionId::new();
+    let page = runtime
+        .open(OpenPageRequest {
+            session_id: session_id.clone(),
+        })
+        .await;
+    let strategy = SkillZigZagZig::new(
+        skill_state_without_checkpoint(session_id.clone()),
+        1_000,
+        [],
+    )
+    .unwrap();
+    let coordinator = SkillRecoveryCoordinator::new(
+        runtime,
+        strategy,
+        RecoveryCoordinator::new(store),
+        Arc::clone(&pool),
+    )
+    .unwrap()
+    .with_session_gate(page_runtime::SessionGate {
+        vision: page_runtime::VisionGate {
+            session_ok: true,
+            capability_ok: true,
+        },
+        ..page_runtime::SessionGate::default()
+    });
+    let envelope = stuck_click_envelope(session_id, page.id.clone());
+
+    let execution = coordinator
+        .execute_with_adaptation(&envelope, page)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        execution
+            .tactic_evidence
+            .iter()
+            .map(|item| item.tactic)
+            .collect::<Vec<_>>(),
+        vec![
+            SkillTactic::ObserveAgain,
+            SkillTactic::ResolveSemanticTarget,
+            SkillTactic::ChangeInteractionMethod,
+            SkillTactic::SolveChallenge,
+        ]
+    );
+    assert!(matches!(
+        execution.command_outcome,
+        CommandOutcome::Completed { ref evidence, .. }
+        if evidence.iter().any(|item| matches!(item, Evidence::Inspection { url, .. } if url == "https://example.test/done"))
+    ));
+    assert!(matches!(
+        execution.skill_outcome,
+        SkillOutcome::Adapted {
+            tactic: SkillTactic::SolveChallenge,
+            ..
+        }
+    ));
+    // Tactic evidence is operator-facing: the private selector and the
+    // page URL must never leak into it.
+    let tactic_json = serde_json::to_string(&execution.tactic_evidence).unwrap();
+    assert!(!tactic_json.contains("blocked-target"));
+    assert!(!tactic_json.contains("example.test"));
+}
