@@ -18,6 +18,56 @@ const runs = readFileSync(runsFile, "utf8")
   .filter(Boolean)
   .map((line) => JSON.parse(line));
 
+const PROVENANCE_KEYS = [
+  "repoHead",
+  "repoDirty",
+  "sourceStateSha256",
+  "claudeCliVersion",
+  "nodeVersion",
+  "platform",
+  "taskSetSha256",
+  "runnerSetSha256",
+  "bobbyBinarySha256",
+  "requestedModel",
+  "timeboxSeconds",
+  "startupToolset",
+  "claudeIsolation",
+] as const;
+
+function validProvenance(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return PROVENANCE_KEYS.every((key) => {
+    const field = record[key];
+    if (key === "timeboxSeconds") {
+      return Number.isFinite(field) && Number(field) > 0;
+    }
+    if (key === "repoDirty") return typeof field === "boolean";
+    return typeof field === "string" && field.length > 0 && field !== "unavailable";
+  });
+}
+
+function validCallBreakdown(run: Record<string, unknown>): boolean {
+  const keys = [
+    "toolCalls",
+    "bobbyToolCalls",
+    "hostToolCalls",
+    "discoveryToolCalls",
+  ];
+  if (!keys.every((key) => Number.isFinite(run[key]) && Number(run[key]) >= 0)) {
+    return false;
+  }
+  return (
+    Number(run.toolCalls) ===
+      Number(run.bobbyToolCalls) + Number(run.hostToolCalls) &&
+    Number(run.discoveryToolCalls) <= Number(run.hostToolCalls)
+  );
+}
+
+function provenanceKey(value: Record<string, unknown>): string {
+  return JSON.stringify(PROVENANCE_KEYS.map((key) => value[key]));
+}
+
 if (process.argv[2] === "check") {
   // Regression gate: one complete bobby invocation against the committed
   // baseline. Pass must hold; wall time <= 2x baseline; errors <= +3.
@@ -31,9 +81,16 @@ if (process.argv[2] === "check") {
     process.exit(1);
   }
   const latest = new Map<string, any>();
-  for (const run of bobbyRuns.filter((run) => run.batchId === latestBatchId)) {
+  const latestRuns = bobbyRuns.filter((run) => run.batchId === latestBatchId);
+  for (const run of latestRuns) {
     latest.set(run.task, run);
   }
+  const batchProvenance = latestRuns.find((run) =>
+    validProvenance(run.provenance),
+  )?.provenance;
+  const batchProvenanceKey = validProvenance(batchProvenance)
+    ? provenanceKey(batchProvenance)
+    : null;
   let failures = 0;
   for (const [task, base] of Object.entries(
     baseline.tasks as Record<string, any>,
@@ -51,6 +108,24 @@ if (process.argv[2] === "check") {
       run.toolErrors < 0
     ) {
       console.log(`INVALID ${task}: missing numeric wallMs or toolErrors`);
+      failures += 1;
+      continue;
+    }
+    if (!validCallBreakdown(run)) {
+      console.log(`INVALID ${task}: missing call breakdown`);
+      failures += 1;
+      continue;
+    }
+    if (!validProvenance(run.provenance)) {
+      console.log(`INVALID ${task}: missing benchmark provenance`);
+      failures += 1;
+      continue;
+    }
+    if (
+      batchProvenanceKey === null ||
+      provenanceKey(run.provenance) !== batchProvenanceKey
+    ) {
+      console.log(`INVALID ${task}: provenance differs within batch`);
       failures += 1;
       continue;
     }
@@ -85,6 +160,13 @@ for (const run of runs) {
 const mean = (xs: number[]) =>
   xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0;
 
+const completeMean = (list: any[], key: string): string => {
+  const values = list
+    .map((item) => Number(item[key]))
+    .filter((value) => Number.isFinite(value) && value >= 0);
+  return values.length === list.length ? mean(values).toFixed(1) : "-";
+};
+
 const EASE_KEYS = ["navigate", "click", "fill", "extract"] as const;
 
 console.log(
@@ -94,6 +176,9 @@ console.log(
     "pass%",
     "time s",
     "calls",
+    "bobby",
+    "host",
+    "discover",
     "err%",
     "tokens",
     ...EASE_KEYS,
@@ -115,6 +200,9 @@ for (const [tool, list] of [...byTool.entries()].sort()) {
       ((passes / list.length) * 100).toFixed(0),
       mean(list.map((r) => r.wallMs / 1000)).toFixed(1),
       mean(list.map((r) => r.toolCalls)).toFixed(1),
+      completeMean(list, "bobbyToolCalls"),
+      completeMean(list, "hostToolCalls"),
+      completeMean(list, "discoveryToolCalls"),
       (
         (list.reduce((a, r) => a + r.toolErrors, 0) /
           Math.max(

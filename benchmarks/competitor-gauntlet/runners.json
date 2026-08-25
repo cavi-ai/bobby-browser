@@ -1,6 +1,6 @@
 {
   "bobby": {
-    "description": "bobby-browser MCP (stdio gateway, managed Chromium for repeatability). Runs the default explore toolset \u2014 the standard loop needs no toolset_select since the base-controls batch.",
+    "description": "bobby-browser MCP (stdio gateway, managed Chromium for repeatability). Runs the default explore toolset \u2014 the standard form loop needs no toolset_select.",
     "mcpServers": {
       "bobby": {
         "command": "${BOBBY_MCP_COMMAND}",
@@ -21,7 +21,7 @@
         "command": "npx",
         "args": [
           "-y",
-          "@playwright/mcp@latest"
+          "@playwright/mcp@0.0.79"
         ]
       }
     }
@@ -33,7 +33,7 @@
         "command": "npx",
         "args": [
           "-y",
-          "chrome-devtools-mcp@latest"
+          "chrome-devtools-mcp@1.7.0"
         ]
       }
     }
