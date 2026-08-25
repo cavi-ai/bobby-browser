@@ -154,6 +154,20 @@ pub struct FormControlValidity {
     pub described_by: Vec<String>,
 }
 
+/// Compact, value-free repair evidence for a control that rejected a form
+/// submission. Carries the semantic target and browser validity without the
+/// rest of the form snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FormValidationIssue {
+    pub control_id: String,
+    pub control_kind: FormControlKind,
+    pub accessible_name: Option<String>,
+    pub target: Option<FormControlTarget>,
+    pub validity: FormControlValidity,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

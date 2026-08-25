@@ -705,7 +705,7 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
     let evidence_variants = recover_schema["$defs"]["Evidence"]["oneOf"]
         .as_array()
         .unwrap();
-    assert_eq!(evidence_variants.len(), 27, "{evidence_variants:?}");
+    assert_eq!(evidence_variants.len(), 29, "{evidence_variants:?}");
     let evidence_kinds = evidence_variants
         .iter()
         .map(|variant| variant["properties"]["kind"]["const"].as_str().unwrap())
@@ -719,11 +719,19 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
         "{evidence_kinds:?}"
     );
     assert!(
+        evidence_kinds.contains(&"formValidation"),
+        "{evidence_kinds:?}"
+    );
+    assert!(
         evidence_kinds.contains(&"controlAction"),
         "{evidence_kinds:?}"
     );
     assert!(evidence_kinds.contains(&"emulation"), "{evidence_kinds:?}");
     assert!(evidence_kinds.contains(&"extraction"), "{evidence_kinds:?}");
+    assert!(
+        evidence_kinds.contains(&"submitSettlement"),
+        "{evidence_kinds:?}"
+    );
 
     assert_eq!(
         checkpoint_schema["inputSchema"]["$defs"]["WorkflowCheckpoint"]["properties"]["evidence"]

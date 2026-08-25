@@ -1895,7 +1895,11 @@ async fn download_url_materializes_requested_file_below_downloads_root() {
         Evidence::Download { saved_to, .. } => saved_to.clone(),
         _ => None,
     });
-    assert_eq!(saved_to.as_deref(), Some("atlas-operations.csv"));
+    assert_eq!(
+        saved_to.as_deref(),
+        Some(destination.to_string_lossy().as_ref()),
+        "savedTo must echo the exact validated saveAs destination"
+    );
 
     assert_eq!(
         std::fs::read(destination).unwrap(),

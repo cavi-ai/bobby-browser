@@ -14,6 +14,10 @@ use types::{
 struct CallLog {
     clicks: Vec<ClickCommand>,
     waits: Vec<WaitForCommand>,
+    inspections: u32,
+    inspection_evidence: Vec<Evidence>,
+    validation_issues: Vec<types::FormValidationIssue>,
+    post_settlement_calls: Vec<&'static str>,
 }
 
 struct FakeBrowser {
@@ -90,6 +94,22 @@ impl IntentBrowser for FakeBrowser {
             return Err(error.clone());
         }
         Ok(self.wait_evidence.clone())
+    }
+
+    async fn inspect_settled_page(&self, _page_id: &PageId) -> Result<Vec<Evidence>, CommandError> {
+        let mut calls = self.calls.lock().expect("call log");
+        calls.post_settlement_calls.push("inspect");
+        calls.inspections += 1;
+        Ok(calls.inspection_evidence.clone())
+    }
+
+    async fn validation_issues(
+        &self,
+        _page_id: &PageId,
+    ) -> Result<Vec<types::FormValidationIssue>, CommandError> {
+        let mut calls = self.calls.lock().expect("call log");
+        calls.post_settlement_calls.push("validation");
+        Ok(calls.validation_issues.clone())
     }
 
     async fn capture_screenshot(
@@ -203,6 +223,116 @@ async fn submit_and_verify_clicks_boundary_then_waits() {
     assert!(evidence
         .iter()
         .any(|item| matches!(item, Evidence::Resolution { .. })));
+}
+
+#[tokio::test]
+async fn network_quiet_submit_returns_settled_inspection_without_failing_validation() {
+    let calls = Arc::new(Mutex::new(CallLog {
+        inspection_evidence: vec![Evidence::Inspection {
+            selector: None,
+            url: "https://example.test/apply".into(),
+            title: "Apply".into(),
+            text: "Email is required".into(),
+            html: None,
+        }],
+        validation_issues: vec![types::FormValidationIssue {
+            control_id: "email".into(),
+            control_kind: types::FormControlKind::Email,
+            accessible_name: Some("Email".into()),
+            target: Some(types::FormControlTarget {
+                role: "textbox".into(),
+                accessible_name: "Email".into(),
+                ordinal: None,
+                frame_path: Vec::new(),
+                shadow_path: Vec::new(),
+            }),
+            validity: types::FormControlValidity {
+                will_validate: true,
+                valid: false,
+                flags: vec![types::FormValidityFlag::ValueMissing],
+                message: Some("Email is required".into()),
+                described_by: Vec::new(),
+            },
+        }],
+        ..CallLog::default()
+    }));
+    let expected_state = WaitForCommand {
+        condition: WaitCondition::NetworkQuiet {
+            idle_ms: 250,
+            max_in_flight: 0,
+            ignore_url_substrings: Vec::new(),
+            ignore_resource_types: Vec::new(),
+            ignore_long_lived: true,
+        },
+        timeout_ms: 5_000,
+    };
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![button("Submit")]),
+        calls: Arc::clone(&calls),
+        click_evidence: vec![Evidence::Element {
+            selector: "#Submit".into(),
+            text: None,
+        }],
+        click_error: None,
+        wait_evidence: vec![Evidence::Wait {
+            condition: expected_state.condition.clone(),
+            elapsed_ms: 300,
+            observations: 2,
+            excluded_classes: Vec::new(),
+            observed: None,
+        }],
+        wait_error: None,
+    };
+
+    let outcome = IntentEngine::execute(
+        &submit("Submit", Some("button"), expected_state),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("expected settled Completed outcome, got {outcome:?}");
+    };
+    let log = calls.lock().expect("call log");
+    assert_eq!(
+        log.clicks.len(),
+        1,
+        "boundary click must remain exactly once"
+    );
+    assert_eq!(log.waits.len(), 1);
+    assert_eq!(log.inspections, 1);
+    assert_eq!(
+        log.post_settlement_calls,
+        ["inspect", "validation"],
+        "the inspection must let the settled UI render before validation is classified"
+    );
+    drop(log);
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::SubmitSettlement {
+            outcome: types::SubmitSettlementOutcome::ValidationRejected
+        }
+    )));
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::FormValidation { issues }
+            if issues.len() == 1
+                && issues[0].accessible_name.as_deref() == Some("Email")
+                && issues[0].validity.message.as_deref() == Some("Email is required")
+    )));
+    assert!(evidence.iter().any(
+        |item| matches!(item, Evidence::Inspection { text, .. } if text == "Email is required")
+    ));
+    let record = evidence.iter().find_map(|item| match item {
+        Evidence::IntentExecution { record } => Some(record),
+        _ => None,
+    });
+    assert_eq!(
+        record.expect("IntentExecution evidence").verification,
+        "validationRejected"
+    );
 }
 
 #[tokio::test]

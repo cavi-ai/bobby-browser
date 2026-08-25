@@ -50,6 +50,44 @@ async fn complete_form_fills_fields_in_order_without_submitting() {
     assert_eq!(calls.lock().unwrap().type_text.len(), 2);
 }
 
+#[tokio::test]
+async fn complete_form_ignores_incompatible_label_when_control_has_the_same_name() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![
+            candidate("full-name-label", None, "Full name", BTreeMap::new()),
+            textbox("Full name"),
+        ]),
+        calls: Arc::clone(&calls),
+        type_text_evidence: vec![Evidence::Element {
+            selector: String::new(),
+            text: Some("Ada Lovelace".into()),
+        }],
+        upload_evidence: vec![],
+    };
+    let outcome = IntentEngine::execute(
+        &IntentCommand::CompleteForm(CompleteFormIntent {
+            purpose: "complete customer onboarding".into(),
+            fields: vec![CompleteFormField {
+                name: "Full name".into(),
+                purpose: "customer full name".into(),
+                hints: IntentHints::default(),
+                value: ControlAction::SetText {
+                    value: "Ada Lovelace".into(),
+                    clear_first: true,
+                },
+            }],
+        }),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    assert!(matches!(outcome, IntentOutcome::Completed { .. }));
+    assert_eq!(calls.lock().unwrap().type_text.len(), 1);
+}
+
 #[derive(Default)]
 struct CallLog {
     control_action: Vec<ControlActionCommand>,

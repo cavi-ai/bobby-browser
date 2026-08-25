@@ -10,10 +10,10 @@
 //! Phases follow the runtime's working loop:
 //!
 //! - [`Toolset::Explore`]: observation, lifecycle, navigation, and the base
-//!   controls (click, type, upload, dialog, download). Only the heavyweight
-//!   `intent_*` family, escape hatches, and niche mutations stay out, so a
-//!   client that defers schemas for hidden tools pays no discovery round trip
-//!   before its first click.
+//!   controls (click, type, upload, dialog, download), whole-form completion,
+//!   and verified submit. The remaining heavyweight `intent_*` tools, escape
+//!   hatches, and niche mutations stay out, so the common form loop needs no
+//!   phase switch while the startup catalog remains bounded.
 //! - [`Toolset::Act`]: the primitives that change the page, plus the
 //!   `command_execute` / `evaluate_javascript` escape hatches.
 //! - [`Toolset::Intent`]: the `intent_*` family.
@@ -162,6 +162,11 @@ const EXPLORE: &[&str] = &[
     "upload_files",
     "dialog",
     "download_url",
+    // These two intents close the standard form loop. Keeping them in explore
+    // avoids a phase switch that otherwise hides the primitives the agent just
+    // used, while the remaining intent family stays in the intent phase.
+    "intent_complete_form",
+    "intent_submit_and_verify",
 ];
 
 /// Raw primitives. `command_execute` is the escape hatch for a caller minting
@@ -352,11 +357,11 @@ mod tests {
         }
     }
 
-    /// Explore covers the standard loop — observation, navigation, and the
-    /// base controls — but never the intent family, escape hatches, or niche
-    /// mutations.
+    /// Explore covers the standard loop — observation, navigation, base
+    /// controls, whole-form completion, and verified submit — but never the
+    /// remaining intent family, escape hatches, or niche mutations.
     #[test]
-    fn the_explore_phase_advertises_base_controls_but_no_intent_or_escape_hatch() {
+    fn the_explore_phase_advertises_the_agent_loop_but_no_escape_hatch() {
         for tool in [
             "click",
             "click_and_wait_for_popup",
@@ -365,15 +370,18 @@ mod tests {
             "upload_files",
             "dialog",
             "download_url",
+            "intent_complete_form",
+            "intent_submit_and_verify",
         ] {
             assert!(
                 Toolset::Explore.advertises(tool),
-                "explore omits the base control {tool}"
+                "explore omits the agent-loop tool {tool}"
             );
         }
         for tool in [
             "intent_fill",
-            "intent_submit_and_verify",
+            "intent_locate",
+            "intent_extract",
             "cookie_set",
             "cookie_delete",
             "evaluate_javascript",

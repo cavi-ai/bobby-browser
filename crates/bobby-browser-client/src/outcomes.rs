@@ -230,6 +230,14 @@ pub enum CommandOutcome {
 /// on non-ASCII pages.
 pub const MAX_WAIT_OBSERVED_CHARS: usize = 512;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum SubmitSettlementOutcome {
+    Settled,
+    ValidationRejected,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(
@@ -265,6 +273,12 @@ pub enum Evidence {
         text: String,
         html: Option<String>,
     },
+    /// Result of a boundary submit that used `networkQuiet` as its
+    /// postcondition. This classifies the settled page without requiring the
+    /// caller to predict confirmation copy or risk a second submit.
+    SubmitSettlement {
+        outcome: SubmitSettlementOutcome,
+    },
     Element {
         selector: String,
         text: Option<String>,
@@ -292,9 +306,10 @@ pub enum Evidence {
         path: String,
         bytes: u64,
         sha256: String,
-        /// Where the file landed below the configured downloads root, when a
-        /// `saveAs` destination was requested. Relative on purpose: enough to
-        /// verify the landing, never an absolute host path.
+        /// The exact caller-supplied destination after it passed the configured
+        /// downloads-root policy. Absolute input is echoed as absolute; relative
+        /// input remains relative. The runtime never discovers or exposes a path
+        /// the caller did not already provide.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         saved_to: Option<String>,
     },
@@ -350,6 +365,9 @@ pub enum Evidence {
     },
     FormSnapshot {
         snapshot: crate::FormSnapshot,
+    },
+    FormValidation {
+        issues: Vec<crate::FormValidationIssue>,
     },
     ControlAction {
         action: ControlActionEvidence,

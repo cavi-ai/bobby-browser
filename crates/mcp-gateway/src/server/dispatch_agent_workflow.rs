@@ -16,6 +16,16 @@ const CLEANUP_DEADLINE_SECONDS: i64 = 30;
 const DEFAULT_WORKFLOW_OBSERVE_MAX_NODES: u32 = 256;
 const DEFAULT_WORKFLOW_OBSERVE_MAX_CONTROLS: u32 = 128;
 
+fn project_observation_outcome(mut outcome: Value, detail: EvidenceDetail) -> Value {
+    if detail == EvidenceDetail::Full || outcome["status"] != "completed" {
+        return outcome;
+    }
+    if let Some(evidence) = outcome.get_mut("evidence").and_then(Value::as_array_mut) {
+        evidence.retain(|item| item.get("kind").and_then(Value::as_str) != Some("executionPath"));
+    }
+    outcome
+}
+
 #[derive(Clone, Debug)]
 struct CleanupResult {
     page_closed: bool,
@@ -148,6 +158,7 @@ impl Server {
         if !input.goal_within_scalar_bound() {
             return invalid_params_reason(id, "malformedArguments");
         }
+        let evidence_detail = input.evidence_detail.unwrap_or(EvidenceDetail::Compact);
 
         let handle = input.workflow_handle;
         let binding = match self.workflow_handles.resolve(&handle) {
@@ -251,6 +262,7 @@ impl Server {
         else {
             return interface_error_response(id, workflow_internal_error(&context));
         };
+        let observation_outcome = project_observation_outcome(observation_outcome, evidence_detail);
         let form_snapshot = if status == "completed" && input.include_forms {
             match self
                 .runtime
@@ -1160,6 +1172,45 @@ mod tests {
         span::{Attributes, Id, Record},
         Event, Metadata, Subscriber,
     };
+
+    #[test]
+    fn compact_observation_keeps_accessibility_and_drops_transport_evidence() {
+        let raw = json!({
+            "status":"completed",
+            "commandId":"018f0000-0000-7000-8000-000000000010",
+            "evidence":[
+                {"kind":"accessibilitySnapshot","pageId":"018f0000-0000-7000-8000-000000000011","nodes":[],"truncated":false},
+                {"kind":"executionPath","path":"chromium","reason":"ineligibleCommand","stateVersion":0,"elapsedMs":2,"bytes":null,"sha256":null}
+            ]
+        });
+
+        let compact = project_observation_outcome(raw, EvidenceDetail::Compact);
+
+        assert_eq!(compact["status"], "completed");
+        assert_eq!(compact["evidence"].as_array().expect("evidence").len(), 1);
+        assert_eq!(compact["evidence"][0]["kind"], "accessibilitySnapshot");
+    }
+
+    #[test]
+    fn compact_observation_preserves_failures_and_full_mode() {
+        let failed = json!({
+            "status":"failed",
+            "evidence":[{"kind":"executionPath","path":"chromium"}]
+        });
+        let completed = json!({
+            "status":"completed",
+            "evidence":[{"kind":"executionPath","path":"chromium"}]
+        });
+
+        assert_eq!(
+            project_observation_outcome(failed.clone(), EvidenceDetail::Compact),
+            failed
+        );
+        assert_eq!(
+            project_observation_outcome(completed.clone(), EvidenceDetail::Full),
+            completed
+        );
+    }
 
     #[derive(Debug)]
     struct RecordedWarning {

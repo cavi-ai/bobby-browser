@@ -79,11 +79,25 @@ The flat browser tools (`navigate` … `evaluate_javascript` /
 server-generated) and return the same `CommandOutcome` shape as
 `command_execute`, including artifact / accessibility evidence.
 
+`download_url.saveAs` may be relative to the configured downloads root or an
+absolute file path directly under it. A completed download echoes that exact
+validated input as `savedTo`; together with `sha256`, this is authoritative
+landing and integrity evidence and does not require a shell check.
+The advertised `maxBytes.maximum` is the effective runtime
+`[http].max_download_bytes` value. Values outside `1..=maximum` fail before
+network access with `invalidRequest` naming the exact limit; URL and
+destination-policy failures remain `networkPolicyDenied`.
+
 `control_action` accepts semantic `target` forms from `a11y_snapshot` and
 `form_snapshot`, and one of `setText`, `setChecked`, `selectOne`,
 `selectMany`, `setFiles`, `clear`, or `activate`. It returns typed reread
 evidence; file paths and password values are never returned. `setFiles`
 additionally requires `file:upload` at runtime.
+
+Compact `intent_complete_form` evidence retains conditional
+`revealedControls`, so their semantic targets can be used immediately. A
+`networkQuiet` submit rejected by client-side validation returns compact,
+value-free `formValidation` issues for the same repair loop.
 
 `selectOne` and `selectMany` match by option value first and then visible label
 (trimmed, case-insensitive) when no value matches.
@@ -208,6 +222,12 @@ Use `workflow_observe` for compact retained-first context:
   }
 }
 ```
+
+Successful live observations default to `evidenceDetail: "compact"`, which
+returns the accessibility evidence while leaving transport diagnostics in the
+event stream. Pass `evidenceDetail: "full"` when debugging. For content work,
+scope `target` to `{ "role": "main" }` to avoid paying repeatedly for site
+navigation; omit the target when the task needs that navigation.
 
 Its `structuredContent` reports `source: "retained"` when a `page:read`
 context answer is available; otherwise it reports `source: "live"` with a
@@ -405,11 +425,11 @@ agent that only needs part of the surface can narrow it with `toolset_select`:
 
 | Phase | Contains | Payload |
 |---|---|---|
-| `explore` | read the page, navigate, wait, and the base controls (`click`, `type_text`, `control_action`, `upload_files`, `dialog`, `download_url`) — the standard loop with no `toolset_select` first (default) | ~63 KB |
-| `act` | escape hatches (`command_execute`, `evaluate_javascript`, `emulate`), niche mutations, and job tools | ~67 KB |
-| `intent` | the `intent_*` family and `extract_structured` | ~72 KB |
-| `verify` | evidence, checkpoints, recovery, job tools | ~40 KB |
-| `full` | everything the principal's capabilities allow (including jobs when a job port is attached) | ~124 KB |
+| `explore` | read the page, navigate, wait, base controls (`click`, `type_text`, `control_action`, `upload_files`, `dialog`, `download_url`), plus `intent_complete_form` and `intent_submit_and_verify` — the standard form loop with no `toolset_select` first (default) | ~76 KB |
+| `act` | escape hatches (`command_execute`, `evaluate_javascript`, `emulate`), niche mutations, and job tools | ~69 KB |
+| `intent` | the `intent_*` family and `extract_structured` | ~74 KB |
+| `verify` | evidence, checkpoints, recovery, job tools | ~41 KB |
+| `full` | everything the principal's capabilities allow (including jobs when a job port is attached) | ~127 KB |
 
 Session/page lifecycle, `runtime_info`, `toolset_select`, `workflow_start`, and
 `workflow_observe` appear in every phase. This includes servers configured to

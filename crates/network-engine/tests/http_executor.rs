@@ -35,6 +35,28 @@ fn expect_error(result: Result<HttpCandidate, types::CommandError>) -> types::Co
 }
 
 #[tokio::test]
+async fn download_limit_rejection_names_the_configured_maximum_as_invalid_input() {
+    let command = DownloadUrlCommand {
+        url: "https://example.test/report.bin".into(),
+        expected_content_type: None,
+        max_bytes: 65,
+        save_as: None,
+    };
+
+    let error = expect_error(
+        DirectHttpExecutor::new(policy())
+            .download(&snapshot("https://example.test/".into()), &command)
+            .await,
+    );
+
+    assert_eq!(error.code, types::ErrorCode::InvalidRequest);
+    assert_eq!(
+        error.message,
+        "maxBytes must be between 1 and 64 for this runtime"
+    );
+}
+
+#[tokio::test]
 async fn inspects_static_selector_and_reports_state() {
     let site = spawn().await;
     let candidate = DirectHttpExecutor::new(policy())

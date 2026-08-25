@@ -4862,6 +4862,10 @@ fn accessibility_candidates(nodes: &[types::AccessibilityNode]) -> Vec<Candidate
             if let Some(value) = node.value.as_deref().filter(|value| !value.is_empty()) {
                 text.push(value);
             }
+            let mut attributes = std::collections::BTreeMap::new();
+            if node.invalid == Some(true) {
+                attributes.insert("aria-invalid".into(), "true".into());
+            }
             candidates.push(Candidate {
                 id: format!("firefox-a11y-{}", candidates.len()),
                 css: None,
@@ -4870,7 +4874,7 @@ fn accessibility_candidates(nodes: &[types::AccessibilityNode]) -> Vec<Candidate
                 name: node.name.clone(),
                 label: None,
                 text: text.join(" "),
-                attributes: Default::default(),
+                attributes,
                 state: CandidateState {
                     attached: true,
                     visible: true,
@@ -4885,6 +4889,31 @@ fn accessibility_candidates(nodes: &[types::AccessibilityNode]) -> Vec<Candidate
     let mut candidates = Vec::new();
     collect(nodes, &mut candidates);
     candidates
+}
+
+#[cfg(test)]
+mod accessibility_candidate_tests {
+    use super::accessibility_candidates;
+
+    #[test]
+    fn invalid_accessibility_nodes_preserve_validation_metadata() {
+        let nodes = [types::AccessibilityNode {
+            role: Some("textbox".into()),
+            name: Some("Postal code".into()),
+            invalid: Some(true),
+            ..Default::default()
+        }];
+
+        let candidates = accessibility_candidates(&nodes);
+
+        assert_eq!(
+            candidates[0]
+                .attributes
+                .get("aria-invalid")
+                .map(String::as_str),
+            Some("true")
+        );
+    }
 }
 
 fn accessibility_contains_form_control(nodes: &[types::AccessibilityNode]) -> bool {

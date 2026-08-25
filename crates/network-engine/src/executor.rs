@@ -17,6 +17,7 @@ use types::{
 use url::Url;
 
 use crate::document::inspect_document;
+use crate::eligibility::download_limit_error;
 use crate::state::{HttpCookie, HttpStateSnapshot, ResponseStateDelta};
 use crate::{DestinationPolicy, NetworkPolicy};
 
@@ -155,9 +156,7 @@ impl DirectHttpExecutor {
         command: &DownloadUrlCommand,
     ) -> Result<HttpCandidate, CommandError> {
         if command.max_bytes == 0 || command.max_bytes > self.network.max_download_bytes as u64 {
-            return Err(policy_error(
-                "download byte limit is outside the configured range",
-            ));
+            return Err(download_limit_error(self.network.max_download_bytes));
         }
         let limit = usize::try_from(command.max_bytes).unwrap_or(usize::MAX);
         let response = self.execute(snapshot, &command.url, limit).await?;

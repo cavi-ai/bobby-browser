@@ -112,7 +112,7 @@ pub struct McpConfig {
     /// Toolset phase a connection starts in: `full` (default), `explore`,
     /// `act`, `intent`, or `verify`. A narrow phase cuts the `tools/list`
     /// handshake substantially -- the full surface is ~127 KB, `explore` is
-    /// ~42 KB -- which the agent would otherwise pay before its first call.
+    /// ~76 KB -- which the agent would otherwise pay before its first call.
     /// Hidden tools stay callable, and the agent can widen with
     /// `toolset_select` at any time. `BOBBY_MCP_TOOLSET` overrides this.
     #[serde(default)]
