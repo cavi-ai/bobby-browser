@@ -371,7 +371,10 @@ Live JSON Schemas for tool arguments are defined in
 `crates/mcp-gateway/src/schema.rs` (for example `session_create` requires
 `profile` and accepts an optional `executionPolicy`, including the
 `visionNode` selector that names a `[nodes.<name>]` vision node for this
-session; `page_open` takes `sessionId` and optional `url`; `command_execute`
+session, plus an optional `zigzagzig` godmode flag — advertised only to
+principals holding both `browser:fingerprint` and `browser:humanize`, since
+a godmode session forces both and the creation gate refuses it otherwise;
+`page_open` takes `sessionId` and optional `url`; `command_execute`
 takes `envelope` and optional `idempotencyKey`). Each tool advertises only the `$defs` its own
 arguments reach, so schemas stay self-contained without carrying the whole
 type system. MCP argument names are camelCase even where
