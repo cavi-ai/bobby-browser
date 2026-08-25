@@ -76,6 +76,7 @@ fn ladder_is_ordered_bounded_and_never_replays_uncertain_mutation() {
         SkillTactic::ObserveAgain,
         SkillTactic::ResolveSemanticTarget,
         SkillTactic::ChangeInteractionMethod,
+        SkillTactic::SolveChallenge,
         SkillTactic::ReconcileCheckpoint,
         SkillTactic::FreshGhostSession,
         SkillTactic::SelectCompatibleEngine,
@@ -162,6 +163,7 @@ fn restart_tactics_require_a_checkpoint_and_engine_selection_requires_an_alterna
         SkillTactic::ObserveAgain,
         SkillTactic::ResolveSemanticTarget,
         SkillTactic::ChangeInteractionMethod,
+        SkillTactic::SolveChallenge,
     ]);
     state.effective_profile =
         Some(types::SkillProfile::new("1.0.0", SkillBrowserEngine::Firefox, [], "digest").unwrap());
@@ -175,6 +177,7 @@ fn restart_tactics_require_a_checkpoint_and_engine_selection_requires_an_alterna
         SkillTactic::ObserveAgain,
         SkillTactic::ResolveSemanticTarget,
         SkillTactic::ChangeInteractionMethod,
+        SkillTactic::SolveChallenge,
         SkillTactic::ReconcileCheckpoint,
         SkillTactic::FreshGhostSession,
     ]);
@@ -233,6 +236,7 @@ fn record_outcome_rejects_tampered_checkpoint_metadata_without_mutating_state() 
         SkillTactic::ObserveAgain,
         SkillTactic::ResolveSemanticTarget,
         SkillTactic::ChangeInteractionMethod,
+        SkillTactic::SolveChallenge,
     ]);
     attach_verified_checkpoint(&mut state);
     let mut engine =
@@ -381,6 +385,7 @@ fn engine_selection_is_canonical_and_proof_bound() {
         SkillTactic::ObserveAgain,
         SkillTactic::ResolveSemanticTarget,
         SkillTactic::ChangeInteractionMethod,
+        SkillTactic::SolveChallenge,
         SkillTactic::ReconcileCheckpoint,
         SkillTactic::FreshGhostSession,
     ]);
