@@ -197,6 +197,7 @@ fn every_skill_contract_variant_round_trips_through_json() {
         SkillTactic::ObserveAgain,
         SkillTactic::ResolveSemanticTarget,
         SkillTactic::ChangeInteractionMethod,
+        SkillTactic::SolveChallenge,
         SkillTactic::ReconcileCheckpoint,
         SkillTactic::FreshGhostSession,
         SkillTactic::SelectCompatibleEngine,
@@ -207,6 +208,12 @@ fn every_skill_contract_variant_round_trips_through_json() {
             tactic
         );
     }
+    // The wire name is the contract: the ladder tactic shares it with the
+    // intent kind so journals read consistently across both surfaces.
+    assert_eq!(
+        serde_json::to_value(SkillTactic::SolveChallenge).unwrap(),
+        serde_json::json!("solveChallenge")
+    );
 
     for engine in [
         SkillBrowserEngine::Firefox,

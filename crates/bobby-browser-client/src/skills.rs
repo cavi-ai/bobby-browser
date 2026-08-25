@@ -77,6 +77,11 @@ pub enum SkillTactic {
     ObserveAgain,
     ResolveSemanticTarget,
     ChangeInteractionMethod,
+    /// Solve a human-verification challenge blocking the page, in place,
+    /// through the vision loop. Cheap and non-destructive: no checkpoint
+    /// authority, no session replacement. Fails closed when no challenge
+    /// is present, so a challenge-free page costs one bounded attempt.
+    SolveChallenge,
     ReconcileCheckpoint,
     FreshGhostSession,
     SelectCompatibleEngine,
