@@ -26,8 +26,8 @@ pub struct VisionSolveOptions {
     pub page: Option<String>,
     pub node: String,
     pub timeout_ms: u64,
-    /// ZigZagZig mode: humanized input timing + fingerprint spoofing on the
-    /// session that drives the solve.
+    /// ZigZagZig mode: every session capability on — humanized input timing,
+    /// fingerprint spoofing, and JS evaluation alongside vision assist.
     pub zigzagzig: bool,
     pub base_url: String,
     pub bearer: String,
@@ -85,9 +85,12 @@ fn open_session_and_page(options: &VisionSolveOptions) -> Result<(SessionId, Pag
     let policy = ExecutionPolicy {
         vision_assist: true,
         vision_node: Some(options.node.clone()),
+        // ZigZagZig is the everything-on mode: humanized timing, fingerprint
+        // spoofing, and JS evaluation alongside the vision assist the solve
+        // loop needs. Without the flag the session is vision-only.
+        javascript_evaluation: options.zigzagzig,
         fingerprint: options.zigzagzig,
         humanize: options.zigzagzig,
-        ..ExecutionPolicy::default()
     };
     let session = post(
         options,
