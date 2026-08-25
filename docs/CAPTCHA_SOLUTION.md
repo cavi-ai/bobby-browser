@@ -71,6 +71,18 @@ malformed JSON (`"x": 298, 684}` with no `y` key).
   session's proven gate (`SkillRecoveryCoordinator::with_session_gate`),
   then re-observes the original postcondition. A session without vision
   assist declines the rung fail-closed and climbs on.
+- **Phase 7: DetectChallenge** — done (2026-08-25). The architecture's
+  first box is real: `IntentCommand::DetectChallenge` (Replayable —
+  read-only) classifies a page through the same vision gates and
+  prior-enriched prompt as the solve loop, and reports
+  `Evidence::ChallengeDetection { detection, prior_kind }` — `Some` is a
+  typed classification, `None` is a provably clean page. No confidence
+  floor: acting is what the floor protects, and the caller choosing
+  whether to solve needs the model's honest uncertainty. The prior never
+  blends into the answer (zero-false-positive discipline); it enriches
+  the prompt and is reported for transparency. CLI: `bobby vision detect`.
+  The ladder's solve rung consuming detection for smarter eligibility
+  remains future work.
 - **Phase 5: Learning** — done (2026-08-18). `SiteContext.challenges`
   holds per-site solve counters (success/failure + day-precision stamp,
   same privacy discipline as intent stats); promotion routes

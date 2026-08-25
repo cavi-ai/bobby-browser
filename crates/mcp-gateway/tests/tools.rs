@@ -652,7 +652,7 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
             .as_array()
             .unwrap()
             .len(),
-        9
+        10
     );
 
     // In `tools/list`, `command_execute` must advertise the envelope command as
@@ -705,7 +705,7 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
     let evidence_variants = recover_schema["$defs"]["Evidence"]["oneOf"]
         .as_array()
         .unwrap();
-    assert_eq!(evidence_variants.len(), 27, "{evidence_variants:?}");
+    assert_eq!(evidence_variants.len(), 28, "{evidence_variants:?}");
     let evidence_kinds = evidence_variants
         .iter()
         .map(|variant| variant["properties"]["kind"]["const"].as_str().unwrap())

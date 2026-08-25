@@ -359,6 +359,15 @@ pub enum Evidence {
         value: serde_json::Value,
         truncated: bool,
     },
+    /// A challenge classification from `detectChallenge`: `Some` is a
+    /// detected challenge, `None` is a provably clean page. `prior_kind`
+    /// records the site prior that enriched the prompt when one existed —
+    /// transparency, never a blended answer.
+    ChallengeDetection {
+        detection: Option<crate::challenges::ChallengeDetection>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prior_kind: Option<String>,
+    },
     CookieState {
         page_id: Option<PageId>,
         cookies: Vec<crate::CookieRecord>,

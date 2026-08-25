@@ -120,6 +120,21 @@ impl VisionTrainingExample {
                 crate::wire::VisionAction::ChallengeSolved => {
                     serde_json::json!({"kind": "challengeSolved"})
                 }
+                crate::wire::VisionAction::ChallengeDetected {
+                    challenge_type,
+                    region,
+                    blocking,
+                } => {
+                    serde_json::json!({
+                        "kind": "challengeDetected",
+                        "challengeType": challenge_type,
+                        "region": region,
+                        "blocking": blocking,
+                    })
+                }
+                crate::wire::VisionAction::NoChallengeDetected => {
+                    serde_json::json!({"kind": "noChallengeDetected"})
+                }
             };
             serde_json::json!({
                 "confidence": r.confidence,

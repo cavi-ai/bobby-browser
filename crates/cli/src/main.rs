@@ -460,6 +460,29 @@ enum VisionCommands {
         #[command(flatten)]
         common: JobsCommonArgs,
     },
+    /// Classify a challenge on a page without acting (read-only detection)
+    Detect {
+        /// What to look for, e.g. "check for a captcha blocking signup"
+        #[arg(long)]
+        purpose: String,
+        /// Create a fresh session and navigate here before detecting
+        #[arg(long)]
+        url: Option<String>,
+        /// Act on an existing session (requires --page; skips creation)
+        #[arg(long)]
+        session: Option<String>,
+        /// Act on an existing page (requires --session)
+        #[arg(long)]
+        page: Option<String>,
+        /// Vision node the session escalates to
+        #[arg(long, default_value = "vision")]
+        node: String,
+        /// Detection budget in milliseconds
+        #[arg(long, default_value_t = 15_000)]
+        timeout_ms: u64,
+        #[command(flatten)]
+        common: JobsCommonArgs,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -831,6 +854,27 @@ pub async fn run() -> Result<()> {
                     node,
                     timeout_ms,
                     zigzagzig,
+                    base_url,
+                    bearer,
+                })?;
+            }
+            VisionCommands::Detect {
+                purpose,
+                url,
+                session,
+                page,
+                node,
+                timeout_ms,
+                common,
+            } => {
+                let (base_url, bearer) = prepare_jobs_client(&common)?;
+                vision_solve::detect(vision_solve::VisionDetectOptions {
+                    purpose,
+                    url,
+                    session,
+                    page,
+                    node,
+                    timeout_ms,
                     base_url,
                     bearer,
                 })?;
