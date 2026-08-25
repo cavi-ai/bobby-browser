@@ -41,6 +41,11 @@ pub enum GroundTruth {
         purpose: String,
         ordinal: Option<usize>,
     },
+    Extract {
+        selector: &'static str,
+        purpose: String,
+        ordinal: Option<usize>,
+    },
 }
 
 impl GroundTruth {
@@ -48,6 +53,7 @@ impl GroundTruth {
         match self {
             Self::Click { selector, .. } => selector,
             Self::TypeText { selector, .. } => selector,
+            Self::Extract { selector, .. } => selector,
         }
     }
 
@@ -55,6 +61,7 @@ impl GroundTruth {
         match self {
             Self::Click { purpose, .. } => purpose,
             Self::TypeText { purpose, .. } => purpose,
+            Self::Extract { purpose, .. } => purpose,
         }
     }
 
@@ -62,6 +69,18 @@ impl GroundTruth {
         match self {
             Self::Click { ordinal, .. } => *ordinal,
             Self::TypeText { ordinal, .. } => *ordinal,
+            Self::Extract { ordinal, .. } => *ordinal,
+        }
+    }
+
+    /// The intent kind the production engine would record for this action
+    /// (engine.rs: fill/extract/locate). Used to be hardcoded "locate",
+    /// which made the corpus's action-mix analytics meaningless (§6.3).
+    fn intent_kind(&self) -> &'static str {
+        match self {
+            Self::Click { .. } => "locate",
+            Self::TypeText { .. } => "fill",
+            Self::Extract { .. } => "extract",
         }
     }
 }
@@ -137,12 +156,13 @@ impl CorpusCollector {
         let action = match truth {
             GroundTruth::Click { .. } => json!({"kind": "click"}),
             GroundTruth::TypeText { text, .. } => json!({"kind": "typeText", "text": text}),
+            GroundTruth::Extract { .. } => json!({"kind": "extractValue"}),
         };
 
         self.records.push(json!({
             "image_b64": image_b64,
             "purpose": truth.purpose(),
-            "intent_kind": "locate",
+            "intent_kind": truth.intent_kind(),
             "stuck": "targetMissing",
             "context_url": url,
             "context_candidates": candidates
