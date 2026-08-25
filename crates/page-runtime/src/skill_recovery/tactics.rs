@@ -535,6 +535,39 @@ impl SkillRecoveryCoordinator {
                     Ok(TacticProgress::Outcome(outcome, effect))
                 }
             }
+            SkillTactic::SolveChallenge => {
+                // In-place solve: run the vision loop against the stuck page,
+                // then re-observe the ORIGINAL postcondition. A completed
+                // solve only means the widget cleared — if the page did not
+                // move, climb. A failed solve (vision gates closed, no
+                // challenge present) is a bounded dud, so it also climbs
+                // rather than failing the command the way an Err would.
+                let budget_ms = tactic_budget(decision, envelope)?.as_millis() as u64;
+                let mut solve = envelope.clone();
+                solve.command =
+                    RuntimeCommand::Intent(IntentCommand::SolveChallenge(SolveChallengeIntent {
+                        purpose: format!(
+                            "solve the human-verification challenge blocking this page so that {}",
+                            expected_postcondition(&envelope.command)
+                        ),
+                        hints: SolveChallengeHints {
+                            region: None,
+                            timeout_ms: budget_ms,
+                        },
+                    }));
+                let effect = SkillTacticEffect::ChallengeSolveAttempted;
+                let solve_outcome = self
+                    .runtime
+                    .execute_with_session_gate(solve, self.session_gate.clone())
+                    .await;
+                if let CommandOutcome::Completed { .. } = solve_outcome {
+                    let observed = self.observe_postcondition(envelope, page).await?;
+                    if observed.0 {
+                        return Ok(TacticProgress::Completed(observed.1, effect));
+                    }
+                }
+                Ok(TacticProgress::Continue(effect))
+            }
             SkillTactic::ReconcileCheckpoint => {
                 if !reconcile_observed {
                     let observed = self.observe_postcondition(envelope, page).await?;
