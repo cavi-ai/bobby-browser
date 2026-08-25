@@ -394,6 +394,21 @@ async fn grow_customer_update_corpus() -> TestResult<()> {
                 .await?;
             runtime.select_one("Customer priority", "high").await?;
 
+            // Extract capture: read back the chosen value from the combobox
+            // (interactive, so it is inside the candidate window — §6.3).
+            collector
+                .capture(
+                    &runtime,
+                    &GroundTruth::Extract {
+                        selector: "select[aria-label='Customer priority']",
+                        purpose: "Read the chosen customer priority".into(),
+                        ordinal: None,
+                    },
+                    "customer-update",
+                    &step("read_priority"),
+                )
+                .await?;
+
             collector
                 .capture(
                     &runtime,
@@ -414,7 +429,7 @@ async fn grow_customer_update_corpus() -> TestResult<()> {
         },
     )
     .await?;
-    assert_eq!(count, 5 * runs_per_journey());
+    assert_eq!(count, 6 * runs_per_journey());
     Ok(())
 }
 
@@ -524,6 +539,21 @@ async fn grow_onboarding_corpus() -> TestResult<()> {
                 .type_text("input[aria-label='Postal code']", "10001")
                 .await?;
 
+            // Extract capture: read back the entered value from the textbox
+            // (interactive, so it is inside the candidate window — §6.3).
+            collector
+                .capture(
+                    &runtime,
+                    &GroundTruth::Extract {
+                        selector: "input[aria-label='Postal code']",
+                        purpose: "Read the entered postal code".into(),
+                        ordinal: None,
+                    },
+                    "onboarding",
+                    &step("read_postal_code"),
+                )
+                .await?;
+
             collector
                 .capture(
                     &runtime,
@@ -549,7 +579,7 @@ async fn grow_onboarding_corpus() -> TestResult<()> {
         },
     )
     .await?;
-    assert_eq!(count, 9 * runs_per_journey());
+    assert_eq!(count, 10 * runs_per_journey());
     Ok(())
 }
 
