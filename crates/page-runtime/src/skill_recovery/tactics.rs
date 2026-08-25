@@ -542,17 +542,81 @@ impl SkillRecoveryCoordinator {
                 // move, climb. A failed solve (vision gates closed, no
                 // challenge present) is a bounded dud, so it also climbs
                 // rather than failing the command the way an Err would.
-                let budget_ms = tactic_budget(decision, envelope)?.as_millis() as u64;
+                let budget = tactic_budget(decision, envelope)?;
+                let started = std::time::Instant::now();
+
+                // Detection first: a provably clean page at or above the
+                // confidence floor skips the whole solve spend and climbs.
+                // A failed, timed-out, or uncertain detection never blocks
+                // the solve — the rung degrades to the blind attempt, which
+                // is exactly what an uninstrumented page got before. The
+                // pre-check is capped at a third of the rung's budget: even
+                // a fully uncooperative detector leaves the solve its shot.
+                let mut solve_purpose = format!(
+                    "solve the human-verification challenge blocking this page so that {}",
+                    expected_postcondition(&envelope.command)
+                );
+                let mut solve_region = None;
+                let mut detect = envelope.clone();
+                detect.command =
+                    RuntimeCommand::Intent(IntentCommand::DetectChallenge(DetectChallengeIntent {
+                        purpose: format!(
+                            "check whether a human-verification challenge blocks this page so that {}",
+                            expected_postcondition(&envelope.command)
+                        ),
+                        hints: DetectChallengeHints {
+                            region: None,
+                            timeout_ms: (budget.as_millis() as u64 / 3).clamp(1, 15_000),
+                        },
+                    }));
+                if let CommandOutcome::Completed { evidence, .. } = self
+                    .runtime
+                    .execute_with_session_gate(detect, self.session_gate.clone())
+                    .await
+                {
+                    if let Some(Evidence::ChallengeDetection {
+                        confidence,
+                        detection,
+                        ..
+                    }) = evidence
+                        .iter()
+                        .find(|item| matches!(item, Evidence::ChallengeDetection { .. }))
+                    {
+                        match detection {
+                            None if *confidence >= intent_engine::VISION_CONFIDENCE_FLOOR => {
+                                return Ok(TacticProgress::Continue(
+                                    SkillTacticEffect::ChallengeDetectionClean,
+                                ));
+                            }
+                            Some(found) => {
+                                if let Ok(kind) = serde_json::to_value(found.challenge_type) {
+                                    if let Some(kind) = kind.as_str() {
+                                        solve_purpose = format!(
+                                            "solve the {kind} challenge blocking this page so that {}",
+                                            expected_postcondition(&envelope.command)
+                                        );
+                                    }
+                                }
+                                solve_region = found.region;
+                            }
+                            // Clean but uncertain: the model is not sure, so
+                            // the solve still gets its shot.
+                            None => {}
+                        }
+                    }
+                }
+
+                let remaining_ms = budget
+                    .as_millis()
+                    .saturating_sub(started.elapsed().as_millis())
+                    .max(1) as u64;
                 let mut solve = envelope.clone();
                 solve.command =
                     RuntimeCommand::Intent(IntentCommand::SolveChallenge(SolveChallengeIntent {
-                        purpose: format!(
-                            "solve the human-verification challenge blocking this page so that {}",
-                            expected_postcondition(&envelope.command)
-                        ),
+                        purpose: solve_purpose,
                         hints: SolveChallengeHints {
-                            region: None,
-                            timeout_ms: budget_ms,
+                            region: solve_region,
+                            timeout_ms: remaining_ms,
                         },
                     }));
                 let effect = SkillTacticEffect::ChallengeSolveAttempted;

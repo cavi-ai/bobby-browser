@@ -12,9 +12,9 @@ use tokio::sync::Mutex;
 use types::{
     AttemptId, CheckpointId, CheckpointInvariant, ClickCommand, CommandClass, CommandEnvelope,
     CommandError, CommandId, CommandOutcome, ErrorCode, ErrorLayer, Evidence, InspectCommand,
-    NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand, RuntimeCommand, SessionId,
-    SkillCheckpointProof, SkillEvidenceRef, SkillFailure, SkillOutcome, SkillSessionState,
-    SkillTactic, TypeTextCommand, WorkerId, WorkflowCheckpoint, WorkflowId,
+    NavigateCommand, OpenPageRequest, PageId, PageState, PrimitiveCommand, RuntimeCommand,
+    SessionId, SkillCheckpointProof, SkillEvidenceRef, SkillFailure, SkillOutcome,
+    SkillSessionState, SkillTactic, TypeTextCommand, WorkerId, WorkflowCheckpoint, WorkflowId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
 use workflow_journal::JsonlJournal;
@@ -858,14 +858,79 @@ impl BrowserWorker for ChallengeWorker {
 
 /// Always proposes challengeSolved at full confidence: the widget clears on
 /// the first proposal.
+/// Answers by intent kind: a challenge is present for detect, solved for
+/// solve. The detection-first rung consults both.
 struct SolveVision;
 
 #[async_trait]
 impl intent_engine::VisionAssist for SolveVision {
     async fn propose(
         &self,
-        _: intent_engine::VisionProposeRequest,
+        request: intent_engine::VisionProposeRequest,
     ) -> Result<intent_engine::VisionProposal, CommandError> {
+        let action = if request.intent_kind == "detectChallenge" {
+            intent_engine::VisionAction::ChallengeDetected {
+                challenge_type: types::ChallengeType::RecaptchaV2Checkbox,
+                region: None,
+                blocking: true,
+            }
+        } else {
+            intent_engine::VisionAction::ChallengeSolved
+        };
+        Ok(intent_engine::VisionProposal {
+            confidence: 0.99,
+            action,
+        })
+    }
+}
+
+/// Reports a provably clean page at full confidence — the rung must skip
+/// the solve spend entirely. Tracks how often each intent kind was asked
+/// so the test can prove the solve never ran.
+struct CleanPageVision {
+    detect_calls: AtomicUsize,
+    solve_calls: AtomicUsize,
+}
+
+#[async_trait]
+impl intent_engine::VisionAssist for CleanPageVision {
+    async fn propose(
+        &self,
+        request: intent_engine::VisionProposeRequest,
+    ) -> Result<intent_engine::VisionProposal, CommandError> {
+        if request.intent_kind == "detectChallenge" {
+            self.detect_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(intent_engine::VisionProposal {
+                confidence: 0.99,
+                action: intent_engine::VisionAction::NoChallengeDetected,
+            })
+        } else {
+            self.solve_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(intent_engine::VisionProposal {
+                confidence: 0.99,
+                action: intent_engine::VisionAction::ChallengeSolved,
+            })
+        }
+    }
+}
+
+/// Detection always errors: the rung must degrade to the blind solve.
+struct DeafDetectVision;
+
+#[async_trait]
+impl intent_engine::VisionAssist for DeafDetectVision {
+    async fn propose(
+        &self,
+        request: intent_engine::VisionProposeRequest,
+    ) -> Result<intent_engine::VisionProposal, CommandError> {
+        if request.intent_kind == "detectChallenge" {
+            return Err(CommandError {
+                code: ErrorCode::VisionAssistFailed,
+                message: "provider dud".into(),
+                layer: types::ErrorLayer::Page,
+                retryable: false,
+            });
+        }
         Ok(intent_engine::VisionProposal {
             confidence: 0.99,
             action: intent_engine::VisionAction::ChallengeSolved,
@@ -1060,4 +1125,125 @@ async fn solve_challenge_rung_clears_the_block_and_completes_the_stuck_command()
     let tactic_json = serde_json::to_string(&execution.tactic_evidence).unwrap();
     assert!(!tactic_json.contains("blocked-target"));
     assert!(!tactic_json.contains("example.test"));
+}
+
+async fn detection_rung_fixture(
+    vision: Arc<dyn intent_engine::VisionAssist>,
+    per_tactic_budget_ms: u64,
+) -> (SkillRecoveryCoordinator, CommandEnvelope, PageState) {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path().join("unused-checkpoints"))
+        .await
+        .unwrap();
+    let journal = Arc::new(
+        JsonlJournal::open(root.path().join("challenge-journal.jsonl"))
+            .await
+            .unwrap(),
+    );
+    let pool = Arc::new(WorkerPool::new(
+        1,
+        Arc::new(ChallengeFactory {
+            current_url: Arc::new(Mutex::new("https://example.test/start".into())),
+        }),
+    ));
+    let adaptive = page_runtime::AdaptivePageEngine::browser_only().with_vision_assist(vision);
+    let runtime =
+        page_runtime::PageRuntime::new_adaptive(journal, Arc::clone(&pool), None, adaptive);
+    let session_id = SessionId::new();
+    let page = runtime
+        .open(OpenPageRequest {
+            session_id: session_id.clone(),
+        })
+        .await;
+    let strategy = SkillZigZagZig::new(
+        skill_state_without_checkpoint(session_id.clone()),
+        per_tactic_budget_ms,
+        [],
+    )
+    .unwrap();
+    let coordinator = SkillRecoveryCoordinator::new(
+        runtime,
+        strategy,
+        RecoveryCoordinator::new(store),
+        Arc::clone(&pool),
+    )
+    .unwrap()
+    .with_session_gate(page_runtime::SessionGate {
+        vision: page_runtime::VisionGate {
+            session_ok: true,
+            capability_ok: true,
+        },
+        ..page_runtime::SessionGate::default()
+    });
+    std::mem::forget(root);
+    (
+        coordinator,
+        stuck_click_envelope(session_id, page.id.clone()),
+        page,
+    )
+}
+
+#[tokio::test]
+async fn solve_challenge_rung_skips_the_solve_on_a_provably_clean_page() {
+    let vision = Arc::new(CleanPageVision {
+        detect_calls: AtomicUsize::new(0),
+        solve_calls: AtomicUsize::new(0),
+    });
+    let (coordinator, envelope, page) = detection_rung_fixture(
+        vision.clone() as Arc<dyn intent_engine::VisionAssist>,
+        1_000,
+    )
+    .await;
+
+    let execution = coordinator
+        .execute_with_adaptation(&envelope, page)
+        .await
+        .unwrap();
+
+    // The clean answer skips the solve spend; the rung reports the skip and
+    // the ladder climbs on (no checkpoint state, so exhaustion follows).
+    let rung = execution
+        .tactic_evidence
+        .iter()
+        .find(|item| item.tactic == SkillTactic::SolveChallenge)
+        .expect("the solve rung must run");
+    assert_eq!(rung.effect, SkillTacticEffect::ChallengeDetectionClean);
+    assert_eq!(vision.detect_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        vision.solve_calls.load(Ordering::SeqCst),
+        0,
+        "a provably clean page must not spend a solve"
+    );
+    assert!(matches!(
+        execution.skill_outcome,
+        SkillOutcome::Failed {
+            failure: SkillFailure::StrategyExhausted,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn solve_challenge_rung_degrades_to_the_blind_solve_when_detection_fails() {
+    let (coordinator, envelope, page) =
+        detection_rung_fixture(Arc::new(DeafDetectVision), 10_000).await;
+
+    let execution = coordinator
+        .execute_with_adaptation(&envelope, page)
+        .await
+        .unwrap();
+
+    // Detection errored every round, but the blind solve still ran and the
+    // screenshot-side-effect cleared the block: the stuck click completes.
+    assert!(matches!(
+        execution.command_outcome,
+        CommandOutcome::Completed { ref evidence, .. }
+        if evidence.iter().any(|item| matches!(item, Evidence::Inspection { url, .. } if url == "https://example.test/done"))
+    ));
+    let rung = execution
+        .tactic_evidence
+        .iter()
+        .find(|item| item.tactic == SkillTactic::SolveChallenge)
+        .expect("the solve rung must run");
+    assert_eq!(rung.effect, SkillTacticEffect::ChallengeSolveAttempted);
 }

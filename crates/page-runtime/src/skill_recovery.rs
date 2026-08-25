@@ -8,11 +8,12 @@ use skill_runtime::{SkillStateStore, SkillStateStoreError, SkillTrigger, SkillZi
 use tokio::sync::Mutex;
 use types::{
     CommandClass, CommandEnvelope, CommandError, CommandId, CommandOutcome, CommandPhase,
-    ErrorCode, ErrorLayer, Evidence, InspectCommand, IntentCommand, NavigateCommand, PageState,
-    PrimitiveCommand, RecoveryCommandIdentity, RecoveryDecision, RecoveryReceipt,
-    RecoveryReceiptState, RuntimeCommand, SkillBrowserEngine, SkillCommandIdentity, SkillDecision,
-    SkillEvidenceRef, SkillFailure, SkillIssuedDecision, SkillOutcome, SkillTactic,
-    SolveChallengeHints, SolveChallengeIntent, TargetSpec, WaitUntil, WorkflowCheckpoint,
+    DetectChallengeHints, DetectChallengeIntent, ErrorCode, ErrorLayer, Evidence, InspectCommand,
+    IntentCommand, NavigateCommand, PageState, PrimitiveCommand, RecoveryCommandIdentity,
+    RecoveryDecision, RecoveryReceipt, RecoveryReceiptState, RuntimeCommand, SkillBrowserEngine,
+    SkillCommandIdentity, SkillDecision, SkillEvidenceRef, SkillFailure, SkillIssuedDecision,
+    SkillOutcome, SkillTactic, SolveChallengeHints, SolveChallengeIntent, TargetSpec, WaitUntil,
+    WorkflowCheckpoint,
 };
 use worker_pool::{EnginePreference, WorkerPool};
 use workflow_journal::JournalRecord;
@@ -67,6 +68,10 @@ pub enum SkillTacticEffect {
     /// not the outcome — success is judged by re-observing the stuck
     /// command's postcondition, same as `CommandRetried`.
     ChallengeSolveAttempted,
+    /// Detection ran first and reported a provably clean page at or above
+    /// the confidence floor, so the rung skipped the solve spend entirely.
+    /// A clean-but-uncertain answer still degrades to the blind solve.
+    ChallengeDetectionClean,
     CheckpointResumed,
     SessionReplaced,
     EngineReplaced,

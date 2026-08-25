@@ -81,8 +81,16 @@ malformed JSON (`"x": 298, 684}` with no `y` key).
   whether to solve needs the model's honest uncertainty. The prior never
   blends into the answer (zero-false-positive discipline); it enriches
   the prompt and is reported for transparency. CLI: `bobby vision detect`.
-  The ladder's solve rung consuming detection for smarter eligibility
-  remains future work.
+- **Phase 7b: Detection-aware ladder rung** — done (2026-08-25). The
+  `/zigzagzig` solve rung now runs detection first: a provably clean page
+  at or above the confidence floor skips the solve spend entirely
+  (`SkillTacticEffect::ChallengeDetectionClean`); a typed detection
+  narrows the solve prompt (kind + region); a failed, timed-out, or
+  uncertain detection degrades to the blind solve. The pre-check is
+  capped at a third of the rung's budget so a fully uncooperative
+  detector still leaves the solve its shot. `Evidence::ChallengeDetection`
+  gained a top-level `confidence` so a clean answer's certainty is
+  visible to exactly this gate.
 - **Phase 5: Learning** — done (2026-08-18). `SiteContext.challenges`
   holds per-site solve counters (success/failure + day-precision stamp,
   same privacy discipline as intent stats); promotion routes
