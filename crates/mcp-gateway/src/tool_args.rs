@@ -29,6 +29,10 @@ pub(crate) struct SessionCreateArgs {
     pub(crate) proxy: Option<String>,
     #[serde(default)]
     pub(crate) execution_policy: types::ExecutionPolicy,
+    /// Godmode session: every capability forced on, and page-bound commands
+    /// run under the ZigZagZig recovery ladder. Off by default.
+    #[serde(default)]
+    pub(crate) zigzagzig: bool,
 }
 
 #[derive(Deserialize)]
@@ -39,6 +43,10 @@ pub(crate) struct WorkflowStartArgs {
     pub(crate) proxy: Option<String>,
     #[serde(default)]
     pub(crate) execution_policy: types::ExecutionPolicy,
+    /// Godmode session: every capability forced on, and page-bound commands
+    /// run under the ZigZagZig recovery ladder. Off by default.
+    #[serde(default)]
+    pub(crate) zigzagzig: bool,
     #[serde(default)]
     pub(crate) url: Option<String>,
 }

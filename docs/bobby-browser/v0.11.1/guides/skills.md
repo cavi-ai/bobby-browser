@@ -30,8 +30,10 @@ broker routes.
 
 The **ladder itself** is reachable in production one way: create the session
 with `zigzagzig: true` (`POST /v1/sessions`, TypeScript SDK
-`CreateSessionRequest.zigzagzig`). A godmode session runs every page-bound
-command under the ladder below — no slash command needed.
+`CreateSessionRequest.zigzagzig`, or MCP `session_create` / `workflow_start`
+with `zigzagzig: true` — advertised only to principals holding both
+`browser:fingerprint` and `browser:humanize`). A godmode session runs every
+page-bound command under the ladder below — no slash command needed.
 
 Public clients automate with primitives and intents via
 [HTTP](../surfaces/http-api.md), [MCP tools](../surfaces/mcp-tools.md), or the

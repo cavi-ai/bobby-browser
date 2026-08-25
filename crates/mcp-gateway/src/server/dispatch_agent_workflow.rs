@@ -346,8 +346,7 @@ impl Server {
             profile: input.profile,
             proxy: input.proxy,
             execution_policy: input.execution_policy,
-            // MCP godmode opt-in is a follow-up; agents run plain for now.
-            zigzagzig: false,
+            zigzagzig: input.zigzagzig,
         };
         let (setup_sender, setup_receiver) = oneshot::channel();
 

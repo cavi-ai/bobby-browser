@@ -461,6 +461,64 @@ async fn fingerprint_and_humanize_policies_require_their_capabilities() {
 }
 
 #[tokio::test]
+async fn zigzagzig_sessions_require_the_fingerprint_and_humanize_capabilities() {
+    // Godmode forces fingerprint + humanize server-side, so it stands in for
+    // both grants at the creation gate: a principal missing either
+    // capability gets no flagged session at all.
+    let base = [
+        Capability::SessionRead,
+        Capability::SessionWrite,
+        Capability::PageWrite,
+        Capability::BrowserMutate,
+    ];
+    for extra in [
+        vec![],
+        vec![Capability::BrowserFingerprint],
+        vec![Capability::BrowserHumanize],
+    ] {
+        let (api, handle) =
+            authenticated_with(RuntimeService::default(), base.into_iter().chain(extra)).await;
+        let error = api
+            .create_session(
+                handle.context(expiry(), None),
+                CreateSessionRequest {
+                    profile: "godmode-denied".into(),
+                    proxy: None,
+                    execution_policy: Default::default(),
+                    zigzagzig: true,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, InterfaceErrorCode::MissingCapability);
+    }
+
+    let (api, handle) = authenticated_with(
+        RuntimeService::default(),
+        base.into_iter()
+            .chain([Capability::BrowserFingerprint, Capability::BrowserHumanize]),
+    )
+    .await;
+    let session = api
+        .create_session(
+            handle.context(expiry(), None),
+            CreateSessionRequest {
+                profile: "godmode".into(),
+                proxy: None,
+                execution_policy: Default::default(),
+                zigzagzig: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(session.zigzagzig);
+    assert!(session.execution_policy.fingerprint);
+    assert!(session.execution_policy.humanize);
+    assert!(session.execution_policy.vision_assist);
+    assert!(session.execution_policy.javascript_evaluation);
+}
+
+#[tokio::test]
 async fn runtime_errors_are_mapped_without_dispatch_outcome_flattening() {
     let (api, handle) = authenticated(RuntimeService::default()).await;
     let session = api

@@ -127,11 +127,13 @@ impl AuthenticatedRuntime {
         // are double-gated like `vision:assist`: the session opt-in is not enough,
         // the principal must also hold the matching capability. Must run before the
         // session exists so a denied principal cannot materialize a flagged session.
-        if req.execution_policy.fingerprint {
+        // `zigzagzig` forces both flags server-side, so it stands in for each
+        // grant — a principal missing either capability gets no godmode session.
+        if req.execution_policy.fingerprint || req.zigzagzig {
             self.authorization
                 .require_capability(ctx, Capability::BrowserFingerprint)?;
         }
-        if req.execution_policy.humanize {
+        if req.execution_policy.humanize || req.zigzagzig {
             self.authorization
                 .require_capability(ctx, Capability::BrowserHumanize)?;
         }

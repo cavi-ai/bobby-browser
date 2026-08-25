@@ -46,7 +46,8 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                         "visionNode":string(1, 128)
                     }),
                     &[]
-                )
+                ),
+                "zigzagzig":{"type":"boolean"}
             }),
             vec!["profile"],
         ),
@@ -64,6 +65,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                     }),
                     &[]
                 ),
+                "zigzagzig":{"type":"boolean"},
                 "url": string(1, MAX_URL_BYTES)
             }),
             vec!["profile"],
@@ -556,6 +558,16 @@ pub(crate) fn advertised_tool_schema_for_capabilities(
             }
             if !capabilities.contains(types::Capability::BrowserHumanize) {
                 policy.remove("humanize");
+            }
+        }
+        // Godmode forces fingerprint + humanize server-side, so it requires
+        // both capabilities at creation. A principal missing either must not
+        // see the flag it cannot use.
+        if !capabilities.contains(types::Capability::BrowserFingerprint)
+            || !capabilities.contains(types::Capability::BrowserHumanize)
+        {
+            if let Some(properties) = schema["properties"].as_object_mut() {
+                properties.remove("zigzagzig");
             }
         }
     }
@@ -2836,6 +2848,30 @@ mod tests {
             let shown = &shown["properties"]["executionPolicy"]["properties"];
             assert!(shown.get("fingerprint").is_some(), "{name}");
             assert!(shown.get("humanize").is_some(), "{name}");
+        }
+    }
+
+    #[test]
+    fn zigzagzig_visibility_requires_both_browser_capabilities() {
+        let fingerprint_only = types::CapabilitySet::new([types::Capability::BrowserFingerprint]);
+        let humanize_only = types::CapabilitySet::new([types::Capability::BrowserHumanize]);
+        let both = types::CapabilitySet::new([
+            types::Capability::BrowserFingerprint,
+            types::Capability::BrowserHumanize,
+        ]);
+        for name in ["session_create", "workflow_start"] {
+            for capabilities in [&fingerprint_only, &humanize_only] {
+                let schema = advertised_tool_schema_for_capabilities(name, capabilities);
+                assert!(
+                    schema["properties"].get("zigzagzig").is_none(),
+                    "{name} hides godmode from a principal missing one capability"
+                );
+            }
+            let schema = advertised_tool_schema_for_capabilities(name, &both);
+            assert!(
+                schema["properties"].get("zigzagzig").is_some(),
+                "{name} shows godmode to a principal holding both capabilities"
+            );
         }
     }
 }

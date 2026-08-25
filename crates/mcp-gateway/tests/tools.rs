@@ -888,6 +888,67 @@ async fn session_create_without_execution_policy_denies_javascript_evaluation_by
 }
 
 #[tokio::test]
+async fn session_create_with_zigzagzig_creates_a_godmode_session() {
+    let server = fixture_server(vec![
+        Capability::SessionWrite,
+        Capability::BrowserFingerprint,
+        Capability::BrowserHumanize,
+    ])
+    .await;
+    let response = server
+        .handle_message(request(
+            63,
+            "tools/call",
+            json!({
+                "name":"session_create",
+                "arguments":{"profile":"godmode","zigzagzig":true}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    let session = &response["result"]["structuredContent"];
+    assert_eq!(session["zigzagzig"], true, "{response}");
+    assert_eq!(
+        session["execution_policy"]["fingerprint"], true,
+        "{response}"
+    );
+    assert_eq!(session["execution_policy"]["humanize"], true, "{response}");
+    assert_eq!(
+        session["execution_policy"]["visionAssist"], true,
+        "{response}"
+    );
+    assert_eq!(
+        session["execution_policy"]["javascriptEvaluation"], true,
+        "{response}"
+    );
+}
+
+#[tokio::test]
+async fn session_create_with_zigzagzig_requires_the_browser_capabilities() {
+    // Godmode forces fingerprint + humanize server-side, so a principal
+    // missing either capability is refused before the session exists.
+    let server = fixture_server(vec![Capability::SessionWrite]).await;
+    let response = server
+        .handle_message(request(
+            64,
+            "tools/call",
+            json!({
+                "name":"session_create",
+                "arguments":{"profile":"godmode-denied","zigzagzig":true}
+            }),
+        ))
+        .await
+        .unwrap();
+    let text = response.to_string();
+    assert!(
+        text.contains("missingCapability")
+            && (text.contains("browser:fingerprint") || text.contains("browser:humanize")),
+        "{response}"
+    );
+}
+
+#[tokio::test]
 async fn session_create_rejects_a_named_vision_node_when_runtime_has_no_provider() {
     let server = fixture_server(vec![Capability::SessionWrite]).await;
     let response = server
