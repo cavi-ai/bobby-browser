@@ -342,6 +342,32 @@ async fn grow_customer_update_corpus() -> TestResult<()> {
                 .type_text("input[aria-label='Search customers']", "Atlas")
                 .await?;
 
+            // Ambiguous negative: satisfied by both the searchbox (type
+            // it) and the Search button (execute it); the contract answer
+            // is -1 (§4m). One phrasing per run — repeating a single
+            // phrasing N times digs a point attractor that swallows
+            // legitimate near-boundary tasks (measured in §4n).
+            const AMBIGUOUS_SEARCH: [&str; 10] = [
+                "Search for Atlas",
+                "Find the Atlas customer",
+                "Look up Atlas",
+                "Search Atlas in customers",
+                "Do the Atlas search",
+                "Locate Atlas in the list",
+                "Query for Atlas",
+                "Hunt down the Atlas record",
+                "Pull up Atlas",
+                "Run Atlas through search",
+            ];
+            collector
+                .capture_negative(
+                    &runtime,
+                    AMBIGUOUS_SEARCH[run_idx % AMBIGUOUS_SEARCH.len()],
+                    "customer-update",
+                    &step("search_ambiguous"),
+                )
+                .await?;
+
             collector
                 .capture(
                     &runtime,
@@ -394,6 +420,21 @@ async fn grow_customer_update_corpus() -> TestResult<()> {
                 .await?;
             runtime.select_one("Customer priority", "high").await?;
 
+            // Extract capture: read back the chosen value from the combobox
+            // (interactive, so it is inside the candidate window — §6.3).
+            collector
+                .capture(
+                    &runtime,
+                    &GroundTruth::Extract {
+                        selector: "select[aria-label='Customer priority']",
+                        purpose: "Read the chosen customer priority".into(),
+                        ordinal: None,
+                    },
+                    "customer-update",
+                    &step("read_priority"),
+                )
+                .await?;
+
             collector
                 .capture(
                     &runtime,
@@ -414,7 +455,7 @@ async fn grow_customer_update_corpus() -> TestResult<()> {
         },
     )
     .await?;
-    assert_eq!(count, 5 * runs_per_journey());
+    assert_eq!(count, 7 * runs_per_journey());
     Ok(())
 }
 
@@ -524,6 +565,21 @@ async fn grow_onboarding_corpus() -> TestResult<()> {
                 .type_text("input[aria-label='Postal code']", "10001")
                 .await?;
 
+            // Extract capture: read back the entered value from the textbox
+            // (interactive, so it is inside the candidate window — §6.3).
+            collector
+                .capture(
+                    &runtime,
+                    &GroundTruth::Extract {
+                        selector: "input[aria-label='Postal code']",
+                        purpose: "Read the entered postal code".into(),
+                        ordinal: None,
+                    },
+                    "onboarding",
+                    &step("read_postal_code"),
+                )
+                .await?;
+
             collector
                 .capture(
                     &runtime,
@@ -549,7 +605,7 @@ async fn grow_onboarding_corpus() -> TestResult<()> {
         },
     )
     .await?;
-    assert_eq!(count, 9 * runs_per_journey());
+    assert_eq!(count, 10 * runs_per_journey());
     Ok(())
 }
 
@@ -702,6 +758,32 @@ async fn grow_documents_corpus() -> TestResult<()> {
         runtime
             .wait_visible("input[aria-label='Customer document']")
             .await?;
+
+        // Ambiguous negative: satisfied by both the file chooser and the
+        // upload submit on the pre-choice page; the contract answer is -1
+        // (§4m boundary-ambiguity lever). One phrasing per run — see §4n
+        // for why a repeated phrasing backfires.
+        const AMBIGUOUS_UPLOAD: [&str; 10] = [
+            "Upload the document",
+            "Attach the customer file",
+            "Send the document",
+            "Add the file to the form",
+            "Upload the customer document now",
+            "Get the document into the system",
+            "Submit the customer file",
+            "Provide the document",
+            "Put the document in",
+            "Process the document upload",
+        ];
+        collector
+            .capture_negative(
+                &runtime,
+                AMBIGUOUS_UPLOAD[run_idx % AMBIGUOUS_UPLOAD.len()],
+                "documents",
+                &step("upload_ambiguous"),
+            )
+            .await?;
+
         collector
             .capture(
                 &runtime,
@@ -743,7 +825,7 @@ async fn grow_documents_corpus() -> TestResult<()> {
         Ok(runtime)
     })
     .await?;
-    assert_eq!(count, 2 * runs_per_journey());
+    assert_eq!(count, 3 * runs_per_journey());
     Ok(())
 }
 

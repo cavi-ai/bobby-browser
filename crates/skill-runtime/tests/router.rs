@@ -45,7 +45,7 @@ async fn public_router_parses_registers_and_activates_zigzagzig_durably() {
 
     assert_eq!(receipt.alias, "/zigzagzig");
     assert_eq!(receipt.skill_name, "SkillZigZagZig");
-    assert_eq!(receipt.skill_version, "1.0.0");
+    assert_eq!(receipt.skill_version, "1.1.0");
     assert!(matches!(receipt.outcome, SkillOutcome::Applied { .. }));
     assert_eq!(
         store
@@ -54,7 +54,7 @@ async fn public_router_parses_registers_and_activates_zigzagzig_durably() {
             .active_versions
             .get("SkillZigZagZig")
             .map(String::as_str),
-        Some("1.0.0")
+        Some("1.1.0")
     );
     let strategy = zigzagzig.strategy(&session_id).await.unwrap();
     assert_eq!(strategy.session_state().session_id, session_id);

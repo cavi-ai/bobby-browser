@@ -60,10 +60,13 @@ ZigZagZig applies a bounded recovery ladder to the original postcondition:
 1. retry read-only observation;
 2. resolve the semantic target again;
 3. change the interaction method;
-4. reconcile the verified checkpoint;
-5. start a fresh Ghost session;
-6. choose another compatible engine;
-7. restart from the last durable boundary.
+4. solve a blocking human-verification challenge in place (the vision
+   `solveChallenge` loop, gated on the session's proven capabilities — a
+   session without vision assist declines this rung and climbs on);
+5. reconcile the verified checkpoint;
+6. start a fresh Ghost session;
+7. choose another compatible engine;
+8. restart from the last durable boundary.
 
 Each tactic consumes the existing workflow deadline and tactic budget. A
 mutation with an unknown effect is never blindly replayed: Bobby inspects or

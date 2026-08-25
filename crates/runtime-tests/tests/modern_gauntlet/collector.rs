@@ -41,6 +41,11 @@ pub enum GroundTruth {
         purpose: String,
         ordinal: Option<usize>,
     },
+    Extract {
+        selector: &'static str,
+        purpose: String,
+        ordinal: Option<usize>,
+    },
 }
 
 impl GroundTruth {
@@ -48,6 +53,7 @@ impl GroundTruth {
         match self {
             Self::Click { selector, .. } => selector,
             Self::TypeText { selector, .. } => selector,
+            Self::Extract { selector, .. } => selector,
         }
     }
 
@@ -55,6 +61,7 @@ impl GroundTruth {
         match self {
             Self::Click { purpose, .. } => purpose,
             Self::TypeText { purpose, .. } => purpose,
+            Self::Extract { purpose, .. } => purpose,
         }
     }
 
@@ -62,6 +69,18 @@ impl GroundTruth {
         match self {
             Self::Click { ordinal, .. } => *ordinal,
             Self::TypeText { ordinal, .. } => *ordinal,
+            Self::Extract { ordinal, .. } => *ordinal,
+        }
+    }
+
+    /// The intent kind the production engine would record for this action
+    /// (engine.rs: fill/extract/locate). Used to be hardcoded "locate",
+    /// which made the corpus's action-mix analytics meaningless (§6.3).
+    fn intent_kind(&self) -> &'static str {
+        match self {
+            Self::Click { .. } => "locate",
+            Self::TypeText { .. } => "fill",
+            Self::Extract { .. } => "extract",
         }
     }
 }
@@ -137,12 +156,13 @@ impl CorpusCollector {
         let action = match truth {
             GroundTruth::Click { .. } => json!({"kind": "click"}),
             GroundTruth::TypeText { text, .. } => json!({"kind": "typeText", "text": text}),
+            GroundTruth::Extract { .. } => json!({"kind": "extractValue"}),
         };
 
         self.records.push(json!({
             "image_b64": image_b64,
             "purpose": truth.purpose(),
-            "intent_kind": "locate",
+            "intent_kind": truth.intent_kind(),
             "stuck": "targetMissing",
             "context_url": url,
             "context_candidates": candidates
@@ -154,6 +174,76 @@ impl CorpusCollector {
             "success": true,
             "journey": journey,
             "step": step,
+        }));
+        Ok(())
+    }
+
+    /// Capture one abstain-labeled negative: a purpose that is genuinely
+    /// ambiguous over the current candidate window — two or more in-window
+    /// elements plausibly satisfy it, none uniquely. Distinct from an
+    /// empty window (§4i poison: nothing to select is not signal); the
+    /// contract answer here is -1 ("If nothing fits, reply -1"; §4e names
+    /// ambiguity as abstain-worthy). The empty-window guard below keeps
+    /// the poison class out at collection time.
+    pub async fn capture_negative(
+        &mut self,
+        runtime: &ModernRuntime,
+        purpose: &str,
+        journey: &str,
+        step: &str,
+    ) -> TestResult<()> {
+        let snapshot = runtime
+            .submit(PrimitiveCommand::AccessibilitySnapshot(
+                AccessibilitySnapshotCommand {
+                    max_nodes: Some(1024),
+                    target: None,
+                },
+            ))
+            .await?;
+        let candidates = extract_candidates(&snapshot)?;
+        if candidates.is_empty() {
+            return Err(format!(
+                "capture_negative at step {step}: empty candidate window is §4i poison, not ambiguity signal"
+            )
+            .into());
+        }
+
+        // URL parity with positive records and production negatives: the
+        // V1 prompt emits PAGE when a URL is present, and a negative
+        // without one would skew the class's prompt shape.
+        let inspection = runtime
+            .submit(PrimitiveCommand::Inspect(InspectCommand {
+                selector: Some("body".into()),
+                target: None,
+                include_html: false,
+            }))
+            .await?;
+        let url = inspection.iter().find_map(|item| {
+            if let Evidence::Inspection { url, .. } = item {
+                Some(url.clone())
+            } else {
+                None
+            }
+        });
+
+        let image_b64 = capture_screenshot_b64(runtime).await?;
+
+        self.records.push(json!({
+            "image_b64": image_b64,
+            "purpose": purpose,
+            "intent_kind": "locate",
+            "stuck": "targetAmbiguous",
+            "context_url": url,
+            "context_candidates": candidates
+                .iter()
+                .map(|c| json!({"role": c.role, "name": c.name}))
+                .collect::<Vec<_>>(),
+            "target_index": Value::Null,
+            "model_response": {"confidence": 0.0, "action": {"kind": "click"}},
+            "success": false,
+            "journey": journey,
+            "step": step,
+            "outcome_stage": "scriptedAmbiguous",
         }));
         Ok(())
     }
