@@ -83,6 +83,7 @@ async fn session_owns_worker_from_creation_through_delete() {
             profile: "default".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -111,6 +112,7 @@ async fn thirty_two_warm_sessions_remain_addressable_with_eight_active_slots() {
                     profile: format!("warm-{index}"),
                     proxy: None,
                     execution_policy: Default::default(),
+                    zigzagzig: false,
                 }),
             )
             .await
@@ -193,6 +195,7 @@ async fn failed_release_keeps_the_session_registered_for_retry() {
             profile: "default".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();

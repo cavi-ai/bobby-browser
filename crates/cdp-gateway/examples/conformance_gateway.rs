@@ -19,6 +19,7 @@ async fn main() {
                 profile: "conformance".into(),
                 proxy: None,
                 execution_policy: Default::default(),
+                zigzagzig: false,
             },
         )
         .await

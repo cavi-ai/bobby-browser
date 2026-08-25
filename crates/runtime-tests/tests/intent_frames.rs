@@ -94,6 +94,7 @@ async fn intent_locate_resolves_inside_an_iframe_without_a_frame_path() {
             profile: "intent-frames".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -330,6 +331,7 @@ async fn page_scoped_text_wait_matches_body_text() {
             profile: "text-wait".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -440,6 +442,7 @@ async fn intent_submit_with_text_expected_state_observes_the_confirmation() {
             profile: "text-expect".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -723,6 +726,7 @@ async fn documents_page_with_preview(seed: &str) -> DocumentsPageProbe {
             profile: seed.into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -884,6 +888,7 @@ async fn control_action_reports_revealed_conditional_controls() {
             profile: "revealed-controls".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -1004,6 +1009,7 @@ async fn a11y_snapshot_exposes_link_urls() {
             profile: "a11y-link-urls".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();

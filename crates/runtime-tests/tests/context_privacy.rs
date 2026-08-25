@@ -146,6 +146,7 @@ async fn typed_values_never_reach_the_context_store() {
             profile: "canary-profile".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();

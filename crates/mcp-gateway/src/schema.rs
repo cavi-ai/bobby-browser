@@ -2410,7 +2410,10 @@ fn session_state() -> Value {
                     "visionNode":string(1, 128)
                 }),
                 &[]
-            )
+            ),
+            // Present iff true (`skip_serializing_if`), so optional here is
+            // exact, and the godmode bit costs no schema bytes when off.
+            "zigzagzig":{"type":"boolean"}
         }),
         &[
             "id",
@@ -2935,7 +2938,12 @@ fn discriminated_object(tag: &str, discriminant: &str, fields: Value, required: 
 }
 
 fn string(min: usize, max: usize) -> Value {
-    json!({"type":"string","minLength":min,"maxLength":max})
+    // minLength:0 is the JSON Schema default — emitting it is pure bytes.
+    if min == 0 {
+        json!({"type":"string","maxLength":max})
+    } else {
+        json!({"type":"string","minLength":min,"maxLength":max})
+    }
 }
 
 fn timeout_ms() -> Value {

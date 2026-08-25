@@ -812,6 +812,7 @@ async fn session_list_round_trips_through_its_output_schema() {
         created_at: Utc::now(),
         last_used_at: Utc::now(),
         execution_policy: ExecutionPolicy::default(),
+        zigzagzig: false,
     }])
     .unwrap();
     let value = serde_json::json!({"sessions": sessions});

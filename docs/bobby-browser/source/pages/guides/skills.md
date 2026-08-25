@@ -17,7 +17,7 @@ command lifecycle, policy checks, deadlines, or evidence rules.
 
 ## Not a public API today
 
-Internal skills are **not** exposed on:
+Internal skills are **not** exposed as commands on:
 
 - HTTP (`/v1/*`)
 - MCP tools (`command_execute` and friends)
@@ -27,6 +27,11 @@ Do not treat skill router aliases (`/ghost`, `/zigzagzig`) as public user
 commands for application integrations. Those aliases exist in the in-process
 skill router for runtime tests (for example `bobby_skill_recovery`), not as
 broker routes.
+
+The **ladder itself** is reachable in production one way: create the session
+with `zigzagzig: true` (`POST /v1/sessions`, TypeScript SDK
+`CreateSessionRequest.zigzagzig`). A godmode session runs every page-bound
+command under the ladder below — no slash command needed.
 
 Public clients automate with primitives and intents via
 [HTTP](../surfaces/http-api.md), [MCP tools](../surfaces/mcp-tools.md), or the

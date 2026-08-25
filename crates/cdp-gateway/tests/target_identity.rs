@@ -23,6 +23,7 @@ async fn discovery_and_connection_share_stable_per_page_opaque_targets() {
                 created_at: now,
                 last_used_at: now,
                 execution_policy: types::ExecutionPolicy::default(),
+                zigzagzig: false,
             },
             SessionState {
                 id: SessionId::new(),
@@ -32,6 +33,7 @@ async fn discovery_and_connection_share_stable_per_page_opaque_targets() {
                 created_at: now,
                 last_used_at: now,
                 execution_policy: types::ExecutionPolicy::default(),
+                zigzagzig: false,
             },
         ],
     });

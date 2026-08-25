@@ -296,6 +296,7 @@ async fn broker_disconnect_after_durable_executing_rebuilds_without_guessing() {
                 profile: "broker-loss".into(),
                 proxy: None,
                 execution_policy: Default::default(),
+                zigzagzig: false,
             })
             .unwrap(),
         )
@@ -534,6 +535,7 @@ async fn cdp_websocket_loss_after_durable_executing_rebuilds_exactly() {
             profile: "cdp-loss".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -674,6 +676,7 @@ async fn daemon_rebuild_uses_durable_phases_and_never_guesses_after_browser_disp
                 profile: "release-recovery".into(),
                 proxy: None,
                 execution_policy: Default::default(),
+                zigzagzig: false,
             })
             .await
             .unwrap();
@@ -743,6 +746,7 @@ async fn result_prepared_abort_rebuilds_from_durable_artifact_state() {
             profile: "result-prepared".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -807,6 +811,7 @@ async fn worker_generation_replacement_mid_command_rebuilds_without_guessing() {
             profile: "replace".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -902,6 +907,7 @@ async fn installed_chromium_daemon_abort_rebuilds_from_the_same_durable_journal(
             profile: "chrome-daemon-recovery".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();

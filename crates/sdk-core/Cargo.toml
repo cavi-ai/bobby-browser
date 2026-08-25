@@ -25,6 +25,9 @@ intent-engine = { path = "../intent-engine", version = "0.11.1" }
 network-engine = { path = "../network-engine", version = "0.11.1" }
 worker-pool = { path = "../worker-pool", version = "0.11.1" }
 workflow-journal = { path = "../workflow-journal", version = "0.11.1" }
+skill-runtime = { path = "../skill-runtime", version = "0.11.1" }
+sha2.workspace = true
+hex.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

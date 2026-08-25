@@ -193,6 +193,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
             profile: "workflow-primary".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -207,6 +208,7 @@ async fn completes_dynamic_form_with_durable_evidence() {
             profile: "workflow-secondary".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();

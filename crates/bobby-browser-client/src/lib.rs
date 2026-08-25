@@ -29,6 +29,7 @@
 //!             profile: "default".into(),
 //!             proxy: None,
 //!             execution_policy: Default::default(),
+//!             zigzagzig: false,
 //!         },
 //!         None,
 //!     )

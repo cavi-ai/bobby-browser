@@ -99,6 +99,7 @@ async fn eight_inspections_complete_with_a_peak_of_four_and_no_browser_dispatch(
                 profile: format!("capacity-{index}"),
                 proxy: None,
                 execution_policy: Default::default(),
+                zigzagzig: false,
             })
             .await
             .unwrap();
