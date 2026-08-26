@@ -435,6 +435,11 @@ Session/page lifecycle, `runtime_info`, `toolset_select`, `workflow_start`, and
 `workflow_observe` appear in every phase. This includes servers configured to
 start directly in `act`, `intent`, or `verify`.
 
+Clients that defer tool schemas should load `workflow_start`,
+`workflow_observe`, `intent_complete_form`, and `intent_submit_and_verify`
+together for the standard form loop. All four are available in the startup
+`explore` phase, so no phase switch is needed.
+
 Selecting a phase emits `notifications/tools/list_changed`; re-read
 `tools/list` after calling it. Selecting the phase already in effect emits
 nothing.

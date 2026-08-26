@@ -3413,10 +3413,23 @@ async fn initialize_carries_agent_instructions() {
         "instructions too long: {}",
         instructions.len()
     );
-    assert!(instructions.contains("toolset_select"), "{instructions}");
     assert!(instructions.contains("error.repair"), "{instructions}");
     assert!(instructions.contains("autoCheckpoint"), "{instructions}");
-    assert!(instructions.contains("workflow_start"), "{instructions}");
+    for tool in [
+        "workflow_start",
+        "workflow_observe",
+        "intent_complete_form",
+        "intent_submit_and_verify",
+    ] {
+        assert!(
+            instructions.contains(tool),
+            "initialize instructions must advertise the complete standard form loop together: missing {tool}: {instructions}"
+        );
+    }
+    assert!(
+        instructions.contains("load") && instructions.contains("together"),
+        "deferred-schema hosts need one-round loading guidance: {instructions}"
+    );
 }
 
 #[tokio::test]

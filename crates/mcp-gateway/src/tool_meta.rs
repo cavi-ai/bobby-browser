@@ -184,7 +184,7 @@ pub(crate) fn tool_description(name: &str) -> &'static str {
         "command_execute" => "Execute one bounded browser command envelope naming its own capability and evidence. Requires browser:mutate, plus whatever the wrapped command needs. Produces the same evidence as the named command it wraps. On failure with deadlineOutOfRange, set the envelope's deadline within the allowed window and resubmit.",
         "intent_locate" => "Locate an element by described purpose and hints, without acting on it (Replayable). Requires browser:mutate and intent:execute. Produces resolution evidence with the matched target's fingerprint. On failure with targetNotFound or targetAmbiguous, narrow the purpose or hints and retry.",
         "intent_fill" => "Fill one described form control and verify the value (Reconciliable). Requires browser:mutate and intent:execute. Produces fill evidence carrying the browser's own validity state. On failure with verificationFailed, read the retained validation message and re-fill; on targetNotFound, take a fresh a11y_snapshot and pass the new target.",
-        "intent_complete_form" => "Fill ordered named fields in one verified intent; never submits. Requires browser:mutate and intent:execute. Prefer over repeated intent_fill calls. Success defaults evidenceDetail=compact and keeps revealed controls. On failure, prior fields remain filled; retry only remaining fields.",
+        "intent_complete_form" => "Fill ordered named fields in one verified intent; never submits. Requires browser:mutate and intent:execute. Prefer over repeated intent_fill calls. Fields resolve just-in-time: include conditional fields after their revealer even if absent. Success defaults evidenceDetail=compact. On failure, prior fields remain filled; retry only remaining fields.",
         "intent_submit_and_verify" => "Submit once and verify post-state. Requires browser:mutate and intent:execute. Unknown copy: networkQuiet returns inspection and submitSettlement=settled|validationRejected; rejection includes formValidation issues, so do not inspect or blindly resubmit. Use text/url for known success. On failure with needsReconciliation call recovery_status.",
         "intent_wait_for_state" => "Wait for a described page state to hold (Replayable). Requires browser:mutate and intent:execute. Produces wait evidence with elapsed time and observation count. On failure with waitConditionTimedOut, confirm the condition still matches page state via inspect, then retry with a longer timeout.",
         "intent_follow" => "Activate a described link or control and verify the destination (Boundary when boundary is true, else Reconciliable). Requires browser:mutate and intent:execute. When boundary is true, autoCheckpoint defaults true and mints the checkpoint in that call; pass false to author your own. On failure with needsReconciliation, do not retry -- call recovery_status; on targetNotFound, snapshot again.",
@@ -212,6 +212,12 @@ mod tests {
         assert!(
             complete.contains("evidenceDetail=compact"),
             "whole-form intent must advertise compact success evidence"
+        );
+        assert!(
+            complete.contains("just-in-time")
+                && complete.contains("conditional fields")
+                && complete.contains("absent"),
+            "whole-form intent must explain that ordered conditional fields resolve against fresh page state"
         );
 
         let submit = tool_description("intent_submit_and_verify");

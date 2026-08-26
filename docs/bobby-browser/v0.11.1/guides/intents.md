@@ -153,6 +153,11 @@ at the first failure and retains evidence for fields already attempted
 (including a `completeFormField` configuration evidence entry per field name).
 It never submits — use `submitAndVerify` (Boundary) afterward.
 
+Resolution is just-in-time, so the list may include conditional fields that do
+not exist when the form is first observed. Put each conditional field after the
+field that reveals it; the engine resolves it against the updated page state
+without requiring a second `completeForm` call.
+
 `name` is the stable audit label for field evidence and, when `hints` is
 empty, the exact accessible-name fallback. Explicit `hints` from
 `form_snapshot` (normally `role` and `accessibleName`) override that fallback.
