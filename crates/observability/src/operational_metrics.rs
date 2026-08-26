@@ -124,7 +124,7 @@ pub struct OperationalMetrics {
 
 struct OperationalMetricsInner {
     started_at: Instant,
-    intent_kind: [AtomicU64; 9],
+    intent_kind: [AtomicU64; 10],
     resolution_source: [AtomicU64; 4],
     context: [AtomicU64; 5],
     prefill: [AtomicU64; 5],
@@ -234,6 +234,7 @@ impl OperationalMetrics {
                 follow: intent_kind[6],
                 dismiss: intent_kind[7],
                 solve_challenge: intent_kind[8],
+                detect_challenge: intent_kind[9],
                 deterministic: resolution_source[0],
                 context: resolution_source[1],
                 vision_prefill: resolution_source[2],

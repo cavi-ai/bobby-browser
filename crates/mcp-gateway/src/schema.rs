@@ -2292,11 +2292,13 @@ fn evidence_variants() -> Vec<Value> {
             &["pageId", "value", "truncated"],
         ),
         // `Evidence::ChallengeDetection`: the enum camelCases its own variant
-        // fields (`detection`, `priorKind`); the inner ChallengeDetection
-        // type carries no rename, so its fields stay snake_case.
+        // fields (`confidence`, `detection`, `priorKind`); the inner
+        // ChallengeDetection type carries no rename, so its fields stay
+        // snake_case.
         tagged_fields(
             "challengeDetection",
             json!({
+                "confidence":{"type":"number"},
                 "detection":nullable(object(
                     json!({
                         "challenge_type":{"enum":[
@@ -2329,7 +2331,7 @@ fn evidence_variants() -> Vec<Value> {
                 )),
                 "priorKind":string(1, 128)
             }),
-            &["detection"],
+            &["confidence", "detection"],
         ),
         tagged_fields(
             "intentExecution",

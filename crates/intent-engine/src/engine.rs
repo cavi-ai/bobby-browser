@@ -2615,6 +2615,7 @@ async fn execute_detect_challenge(
         let mut evidence = Vec::new();
         evidence.append(&mut screenshot_evidence);
         evidence.push(Evidence::ChallengeDetection {
+            confidence: proposal.confidence,
             detection,
             prior_kind: challenge_prior.clone(),
         });

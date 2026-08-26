@@ -378,10 +378,13 @@ pub enum Evidence {
         truncated: bool,
     },
     /// A challenge classification from `detectChallenge`: `Some` is a
-    /// detected challenge, `None` is a provably clean page. `prior_kind`
-    /// records the site prior that enriched the prompt when one existed —
-    /// transparency, never a blended answer.
+    /// detected challenge, `None` is a provably clean page. `confidence` is
+    /// the model's confidence in its answer either way — a caller gating a
+    /// solve spend on a clean answer needs it. `prior_kind` records the site
+    /// prior that enriched the prompt when one existed — transparency, never
+    /// a blended answer.
     ChallengeDetection {
+        confidence: f32,
         detection: Option<crate::challenges::ChallengeDetection>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prior_kind: Option<String>,

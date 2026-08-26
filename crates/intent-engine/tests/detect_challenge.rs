@@ -188,6 +188,7 @@ fn detection_evidence(
         Evidence::ChallengeDetection {
             detection,
             prior_kind,
+            ..
         } => Some((detection.clone(), prior_kind.clone())),
         _ => None,
     })

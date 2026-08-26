@@ -139,15 +139,25 @@ impl BrowserWorker for ChallengeWorker {
     }
 }
 
-/// Always proposes challengeSolved at full confidence.
+/// Answers by intent kind: a challenge is present for detect, solved for
+/// solve. The detection-first rung consults both.
 struct SolveVision;
 
 #[async_trait]
 impl VisionAssist for SolveVision {
-    async fn propose(&self, _: VisionProposeRequest) -> Result<VisionProposal, CommandError> {
+    async fn propose(&self, request: VisionProposeRequest) -> Result<VisionProposal, CommandError> {
+        let action = if request.intent_kind == "detectChallenge" {
+            intent_engine::VisionAction::ChallengeDetected {
+                challenge_type: types::ChallengeType::RecaptchaV2Checkbox,
+                region: None,
+                blocking: true,
+            }
+        } else {
+            intent_engine::VisionAction::ChallengeSolved
+        };
         Ok(VisionProposal {
             confidence: 0.99,
-            action: intent_engine::VisionAction::ChallengeSolved,
+            action,
         })
     }
 }
