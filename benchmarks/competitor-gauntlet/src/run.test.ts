@@ -80,6 +80,12 @@ test("provenance fingerprints the exact benchmark inputs", () => {
   const directory = mkdtempSync(path.join(tmpdir(), "bobby-run-provenance-"));
   const bobby = path.join(directory, "bobby");
   writeFileSync(bobby, "current-bobby-binary");
+  const gitStatus = spawnSync("git", ["status", "--porcelain=v1"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+  assert.equal(gitStatus.status, 0, gitStatus.stderr);
+  const expectedRepoDirty = gitStatus.stdout.trim().length > 0;
 
   const result = spawnSync(
     process.execPath,
@@ -107,7 +113,7 @@ test("provenance fingerprints the exact benchmark inputs", () => {
     createHash("sha256").update(value).digest("hex");
   assert.deepEqual(provenance, {
     repoHead: provenance.repoHead,
-    repoDirty: true,
+    repoDirty: expectedRepoDirty,
     sourceStateSha256: provenance.sourceStateSha256,
     claudeCliVersion: provenance.claudeCliVersion,
     nodeVersion: process.version,
