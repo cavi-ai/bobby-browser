@@ -91,6 +91,22 @@ malformed JSON (`"x": 298, 684}` with no `y` key).
   detector still leaves the solve its shot. `Evidence::ChallengeDetection`
   gained a top-level `confidence` so a clean answer's certainty is
   visible to exactly this gate.
+
+## Deferred, with reasons
+
+- **Text captcha typing** — the solve loop stays click-only. Focused
+  element typing needs JS→Element handle plumbing in the vendored
+  chromium driver (`ResolvedTarget` construction is locator-machinery
+  deep, and a `data-*` stamping shortcut would leak a page-visible
+  attribute — a stealth regression). No gauntlet target exists to prove
+  the path against: the gauntlet's only captcha is reCAPTCHA. Revisit
+  when a text-captcha gauntlet level exists.
+- **Engine-swap rung in production** — `SelectCompatibleEngine` stays
+  ineligible by contract: production builds a single-factory
+  `WorkerPool` (`ChromiumWorkerFactory`), and `BrowserWorkerSelector`
+  (the multi-engine registry) is test-only today. Plumbing the session
+  engine into skill state would be inert until a multi-engine production
+  pool exists; the rung lights up automatically once it does.
 - **Phase 5: Learning** — done (2026-08-18). `SiteContext.challenges`
   holds per-site solve counters (success/failure + day-precision stamp,
   same privacy discipline as intent stats); promotion routes
