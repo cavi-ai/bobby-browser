@@ -149,13 +149,33 @@ fn button(name: &str) -> Candidate {
     }
 }
 
+fn typed_button(name: &str, button_type: &str) -> Candidate {
+    let mut candidate = button(name);
+    candidate
+        .attributes
+        .insert("type".into(), button_type.into());
+    candidate
+}
+
 fn submit(purpose: &str, role: Option<&str>, expected_state: WaitForCommand) -> IntentCommand {
-    IntentCommand::SubmitAndVerify(SubmitAndVerifyIntent {
-        purpose: purpose.into(),
-        hints: IntentHints {
+    submit_with_hints(
+        purpose,
+        IntentHints {
             role: role.map(str::to_owned),
             ..IntentHints::default()
         },
+        expected_state,
+    )
+}
+
+fn submit_with_hints(
+    purpose: &str,
+    hints: IntentHints,
+    expected_state: WaitForCommand,
+) -> IntentCommand {
+    IntentCommand::SubmitAndVerify(SubmitAndVerifyIntent {
+        purpose: purpose.into(),
+        hints,
         expected_state,
     })
 }
@@ -223,6 +243,223 @@ async fn submit_and_verify_clicks_boundary_then_waits() {
     assert!(evidence
         .iter()
         .any(|item| matches!(item, Evidence::Resolution { .. })));
+}
+
+#[tokio::test]
+async fn submit_and_verify_uses_unique_submit_button_for_descriptive_purpose() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let expected_state = thanks_wait();
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![
+            typed_button("Create customer", "submit"),
+            typed_button("Cancel", "button"),
+        ]),
+        calls: Arc::clone(&calls),
+        click_evidence: vec![Evidence::Element {
+            selector: "#Create customer".into(),
+            text: None,
+        }],
+        click_error: None,
+        wait_evidence: vec![Evidence::Wait {
+            condition: expected_state.condition.clone(),
+            elapsed_ms: 12,
+            observations: 1,
+            excluded_classes: Vec::new(),
+            observed: None,
+        }],
+        wait_error: None,
+    };
+
+    let outcome = IntentEngine::execute(
+        &submit(
+            "Submit onboarding form and verify success",
+            None,
+            expected_state,
+        ),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, IntentOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
+    let log = calls.lock().expect("call log");
+    assert_eq!(log.clicks.len(), 1);
+    assert_eq!(
+        log.clicks[0]
+            .target
+            .as_ref()
+            .and_then(|target| target.accessible_name.as_deref()),
+        Some("Create customer")
+    );
+}
+
+#[tokio::test]
+async fn descriptive_submit_purpose_never_clicks_a_sole_unrelated_button() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![typed_button("Cancel", "button")]),
+        calls: Arc::clone(&calls),
+        click_evidence: Vec::new(),
+        click_error: None,
+        wait_evidence: Vec::new(),
+        wait_error: None,
+    };
+
+    let outcome = IntentEngine::execute(
+        &submit(
+            "Submit onboarding form and verify success",
+            None,
+            thanks_wait(),
+        ),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, IntentOutcome::Failed { .. }),
+        "{outcome:?}"
+    );
+    let log = calls.lock().expect("call log");
+    assert!(log.clicks.is_empty(), "unrelated button was clicked");
+    assert!(log.waits.is_empty(), "verification ran without a submit");
+}
+
+#[tokio::test]
+async fn descriptive_submit_purpose_ignores_a_disabled_semantic_match() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let mut disabled = typed_button("Submit onboarding form", "button");
+    disabled.state.enabled = false;
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![disabled, typed_button("Create customer", "submit")]),
+        calls: Arc::clone(&calls),
+        click_evidence: vec![Evidence::Element {
+            selector: "#Create customer".into(),
+            text: None,
+        }],
+        click_error: None,
+        wait_evidence: vec![Evidence::Wait {
+            condition: thanks_wait().condition,
+            elapsed_ms: 12,
+            observations: 1,
+            excluded_classes: Vec::new(),
+            observed: None,
+        }],
+        wait_error: None,
+    };
+
+    let outcome = IntentEngine::execute(
+        &submit("Submit onboarding form", None, thanks_wait()),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, IntentOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
+    let log = calls.lock().expect("call log");
+    assert_eq!(log.clicks.len(), 1);
+    assert_eq!(
+        log.clicks[0]
+            .target
+            .as_ref()
+            .and_then(|target| target.accessible_name.as_deref()),
+        Some("Create customer")
+    );
+}
+
+#[tokio::test]
+async fn descriptive_submit_purpose_fails_closed_for_multiple_submit_controls() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![
+            typed_button("Create customer", "submit"),
+            typed_button("Save draft", "submit"),
+        ]),
+        calls: Arc::clone(&calls),
+        click_evidence: Vec::new(),
+        click_error: None,
+        wait_evidence: Vec::new(),
+        wait_error: None,
+    };
+
+    let outcome = IntentEngine::execute(
+        &submit("Submit onboarding form", None, thanks_wait()),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, IntentOutcome::Failed { .. }),
+        "{outcome:?}"
+    );
+    let log = calls.lock().expect("call log");
+    assert!(log.clicks.is_empty(), "ambiguous submit was clicked");
+}
+
+#[tokio::test]
+async fn explicit_submit_accessible_name_remains_authoritative() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![
+            typed_button("Cancel", "button"),
+            typed_button("Create customer", "submit"),
+        ]),
+        calls: Arc::clone(&calls),
+        click_evidence: vec![Evidence::Element {
+            selector: "#Cancel".into(),
+            text: None,
+        }],
+        click_error: None,
+        wait_evidence: vec![Evidence::Wait {
+            condition: thanks_wait().condition,
+            elapsed_ms: 12,
+            observations: 1,
+            excluded_classes: Vec::new(),
+            observed: None,
+        }],
+        wait_error: None,
+    };
+
+    let outcome = IntentEngine::execute(
+        &submit_with_hints(
+            "Use the caller-selected action",
+            IntentHints {
+                role: Some("button".into()),
+                accessible_name: Some("Cancel".into()),
+                ..IntentHints::default()
+            },
+            thanks_wait(),
+        ),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, IntentOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
+    let log = calls.lock().expect("call log");
+    assert_eq!(log.clicks.len(), 1);
+    assert_eq!(
+        log.clicks[0]
+            .target
+            .as_ref()
+            .and_then(|target| target.accessible_name.as_deref()),
+        Some("Cancel")
+    );
 }
 
 #[tokio::test]

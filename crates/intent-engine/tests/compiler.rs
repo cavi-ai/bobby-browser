@@ -76,7 +76,7 @@ fn compile_complete_form_uses_field_name_when_target_hints_are_empty() {
 }
 
 #[test]
-fn compile_submit_without_hints_targets_the_exact_button_name() {
+fn compile_submit_without_hints_keeps_purpose_descriptive() {
     let expected_state = WaitForCommand {
         condition: WaitCondition::NetworkQuiet {
             idle_ms: 250,
@@ -98,7 +98,7 @@ fn compile_submit_without_hints_targets_the_exact_button_name() {
     };
 
     assert_eq!(target.role.as_deref(), Some("button"));
-    assert_eq!(target.accessible_name.as_deref(), Some("Create customer"));
+    assert_eq!(target.accessible_name, None);
     assert_eq!(target.text, None);
 }
 
