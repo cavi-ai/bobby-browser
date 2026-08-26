@@ -436,6 +436,8 @@ impl AcpServer {
                     profile: "acp".into(),
                     proxy: None,
                     execution_policy: Default::default(),
+                    // ACP sessions run plain: no godmode ladder.
+                    zigzagzig: false,
                 },
             )
             .await
@@ -1009,6 +1011,7 @@ mod tests {
                 created_at: now,
                 last_used_at: now,
                 execution_policy: request.execution_policy,
+                zigzagzig: false,
             })
         }
 

@@ -8,11 +8,11 @@ use skill_runtime::{SkillStateStore, SkillStateStoreError, SkillTrigger, SkillZi
 use tokio::sync::Mutex;
 use types::{
     CommandClass, CommandEnvelope, CommandError, CommandId, CommandOutcome, CommandPhase,
-    ErrorCode, ErrorLayer, Evidence, InspectCommand, NavigateCommand, PageState, PrimitiveCommand,
-    RecoveryCommandIdentity, RecoveryDecision, RecoveryReceipt, RecoveryReceiptState,
-    RuntimeCommand, SkillBrowserEngine, SkillCommandIdentity, SkillDecision, SkillEvidenceRef,
-    SkillFailure, SkillIssuedDecision, SkillOutcome, SkillTactic, TargetSpec, WaitUntil,
-    WorkflowCheckpoint,
+    ErrorCode, ErrorLayer, Evidence, InspectCommand, IntentCommand, NavigateCommand, PageState,
+    PrimitiveCommand, RecoveryCommandIdentity, RecoveryDecision, RecoveryReceipt,
+    RecoveryReceiptState, RuntimeCommand, SkillBrowserEngine, SkillCommandIdentity, SkillDecision,
+    SkillEvidenceRef, SkillFailure, SkillIssuedDecision, SkillOutcome, SkillTactic,
+    SolveChallengeHints, SolveChallengeIntent, TargetSpec, WaitUntil, WorkflowCheckpoint,
 };
 use worker_pool::{EnginePreference, WorkerPool};
 use workflow_journal::JournalRecord;
@@ -63,6 +63,10 @@ pub enum SkillTacticEffect {
     Observed,
     ReResolved,
     CommandRetried,
+    /// The vision solve loop ran against the page. Describes the attempt,
+    /// not the outcome — success is judged by re-observing the stuck
+    /// command's postcondition, same as `CommandRetried`.
+    ChallengeSolveAttempted,
     CheckpointResumed,
     SessionReplaced,
     EngineReplaced,
@@ -94,6 +98,12 @@ pub struct SkillRecoveryCoordinator {
     skill_state: Arc<SkillStateStore>,
     recovery: RecoveryCoordinator,
     workers: Arc<WorkerPool>,
+    /// The session's proven capabilities, carried into tactic executions
+    /// that need them (the SolveChallenge tactic's vision gates). Default
+    /// is all-off: a coordinator built without one degrades every gated
+    /// tactic to its fail-closed path instead of escalating beyond what
+    /// the session proved.
+    session_gate: crate::SessionGate,
     execution_gate: Arc<Mutex<()>>,
     stabilization_gate: Arc<Mutex<()>>,
     #[cfg(feature = "test-support")]
@@ -146,11 +156,21 @@ impl SkillRecoveryCoordinator {
             skill_state,
             recovery,
             workers,
+            session_gate: crate::SessionGate::default(),
             execution_gate: Arc::new(Mutex::new(())),
             stabilization_gate: Arc::new(Mutex::new(())),
             #[cfg(feature = "test-support")]
             preflight_observer: None,
         })
+    }
+
+    /// Carries the session's proven gate into tactic executions. Without
+    /// this the SolveChallenge tactic always declines at the vision gate;
+    /// with it the solve runs with exactly the privileges the session
+    /// already proved — never more.
+    pub fn with_session_gate(mut self, gate: crate::SessionGate) -> Self {
+        self.session_gate = gate;
+        self
     }
 
     #[doc(hidden)]

@@ -256,6 +256,8 @@ pub fn validate_backend_result(
         VisionAction::TypeIntoCandidate { .. } => "type_into_candidate",
         VisionAction::ExtractFromCandidate { .. } => "extract_from_candidate",
         VisionAction::ChallengeSolved => "challenge_solved",
+        VisionAction::ChallengeDetected { .. } => "challenge_detected",
+        VisionAction::NoChallengeDetected => "no_challenge_detected",
     };
     if !packet
         .allowed_actions
@@ -372,6 +374,18 @@ pub enum VisionAction {
     /// verification widget) is now in a solved state. Only valid for the
     /// `solveChallenge` intent; carries no payload.
     ChallengeSolved,
+    /// The model classifies a challenge on the page. Only valid for the
+    /// `detectChallenge` intent — detection never acts, so the payload is
+    /// the whole answer.
+    ChallengeDetected {
+        challenge_type: types::ChallengeType,
+        region: Option<types::ChallengeRegion>,
+        blocking: bool,
+    },
+    /// The model asserts the page carries no challenge. Only valid for the
+    /// `detectChallenge` intent; a clean page is a first-class answer, not
+    /// an absence of one.
+    NoChallengeDetected,
 }
 
 pub fn proposal_sha256(proposal: &VisionProposal) -> String {
@@ -405,6 +419,24 @@ pub fn proposal_sha256(proposal: &VisionProposal) -> String {
         }
         VisionAction::ChallengeSolved => {
             hasher.update(b"challengeSolved");
+        }
+        VisionAction::ChallengeDetected {
+            challenge_type,
+            region,
+            blocking,
+        } => {
+            hasher.update(b"challengeDetected");
+            hasher.update(serde_json::to_vec(challenge_type).unwrap_or_default());
+            if let Some(region) = region {
+                hasher.update(region.x.to_le_bytes());
+                hasher.update(region.y.to_le_bytes());
+                hasher.update(region.width.to_le_bytes());
+                hasher.update(region.height.to_le_bytes());
+            }
+            hasher.update([u8::from(*blocking)]);
+        }
+        VisionAction::NoChallengeDetected => {
+            hasher.update(b"noChallengeDetected");
         }
     }
     hex::encode(hasher.finalize())

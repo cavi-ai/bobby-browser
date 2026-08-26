@@ -16,6 +16,7 @@ use page_runtime::{
 };
 use page_runtime::{RecoveryCoordinator, RecoveryError};
 use session_manager::SessionManager;
+use sha2::Digest;
 use types::{
     AttemptId, CommandEnvelope, CommandError, CommandId, CommandOutcome, CreateSessionRequest,
     ErrorCode, ErrorLayer, Evidence, NavigateCommand, NavigationRequest, NavigationResult,
@@ -28,6 +29,22 @@ use workflow_journal::JsonlJournal;
 mod interface;
 
 pub use interface::AuthenticatedRuntime;
+
+/// Per-tactic budget for the production ZigZagZig ladder. Sized for the
+/// solve rung (the solver's own default timeout is 30s); the contract
+/// clamps each tactic to the envelope's remaining deadline.
+const ZIGZAGZIG_TACTIC_BUDGET_MS: u64 = 30_000;
+
+/// The ladder failing to START is an internal runtime condition, never a
+/// page fault: the caller sees a plain command failure, not a bypass.
+fn zigzagzig_unavailable(reason: &str) -> CommandError {
+    CommandError {
+        code: ErrorCode::Internal,
+        message: format!("zigzagzig ladder unavailable: {reason}"),
+        layer: ErrorLayer::Workflow,
+        retryable: false,
+    }
+}
 
 /// The unauthenticated application service is not a public interface adapter.
 ///
@@ -43,6 +60,9 @@ pub struct RuntimeService {
     pub sessions: SessionManager,
     pub pages: PageRuntime,
     recovery: Option<RecoveryCoordinator>,
+    /// Worker pool for the ZigZagZig recovery ladder. Present in every
+    /// production build; `None` only for hand-built test services.
+    workers: Option<Arc<worker_pool::WorkerPool>>,
     started_at: std::time::Instant,
     in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// Nodes this runtime can reach. Empty by default, so a `RuntimeService`
@@ -87,6 +107,7 @@ impl RuntimeService {
             sessions,
             pages,
             recovery: None,
+            workers: None,
             nodes: Arc::new(NodeRegistry::default()),
             vision_assist_configured: false,
             vision_provider_configured: false,
@@ -105,6 +126,7 @@ impl RuntimeService {
             sessions,
             pages,
             recovery: Some(recovery),
+            workers: None,
             nodes: Arc::new(NodeRegistry::default()),
             vision_assist_configured: false,
             vision_provider_configured: false,
@@ -112,6 +134,14 @@ impl RuntimeService {
             started_at: std::time::Instant::now(),
             in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+
+    /// The worker pool the ZigZagZig recovery ladder executes against.
+    /// `None` keeps zigzagzig sessions on the plain command path — the
+    /// ladder declines to run without a pool rather than guessing.
+    pub fn with_workers(mut self, workers: Arc<worker_pool::WorkerPool>) -> Self {
+        self.workers = Some(workers);
+        self
     }
 
     fn with_vision_state(mut self, assist: bool, provider: bool) -> Self {
@@ -316,8 +346,9 @@ impl RuntimeService {
         if let Some(observer) = observer {
             pages = pages.with_execution_phase_observer(observer);
         }
-        let sessions = SessionManager::new(workers);
+        let sessions = SessionManager::new(workers.clone());
         Ok(Self::with_recovery(sessions, pages, recovery)
+            .with_workers(workers)
             .with_nodes(nodes)
             .with_vision_state(vision_assist_present, provider_present)
             .with_operational_metrics(operational_metrics))
@@ -512,15 +543,26 @@ impl RuntimeService {
         // One session lookup for the whole policy. An absent session means every
         // flag is false: no vision escalation, fingerprint spoofing, or
         // humanized input.
-        let policy = self
-            .sessions
-            .get(&envelope.session_id)
-            .await
+        let session = self.sessions.get(&envelope.session_id).await;
+        let policy = session
+            .as_ref()
             .map(|session| session.execution_policy.clone())
             .unwrap_or_default();
+        let zigzagzig = session
+            .as_ref()
+            .map(|session| session.zigzagzig)
+            .unwrap_or(false);
         let vision = match &envelope.command {
             RuntimeCommand::Intent(_) => VisionGate {
                 session_ok: policy.vision_assist || one_shot_session_ok,
+                capability_ok: vision_capability_ok,
+            },
+            // A godmode session's ladder issues intents internally (the
+            // solve rung), so its primitives carry the session's vision
+            // grants. Both grants are still required — policy AND caller
+            // capability — the same deny-by-default contract as intents.
+            RuntimeCommand::Primitive(_) if zigzagzig => VisionGate {
+                session_ok: policy.vision_assist,
                 capability_ok: vision_capability_ok,
             },
             RuntimeCommand::Primitive(_) => VisionGate::default(),
@@ -552,13 +594,124 @@ impl RuntimeService {
             _ => None,
         };
         let _in_flight = InFlightGuard::acquire(Arc::clone(&self.in_flight));
-        let outcome = self.pages.execute_with_session_gate(envelope, gate).await;
+        let ladder_ready = zigzagzig
+            && envelope.page_id.is_some()
+            && self.recovery.is_some()
+            && self.workers.is_some();
+        let outcome = if ladder_ready {
+            // Godmode path: the command runs under the ZigZagZig recovery
+            // ladder with the session's proven gate. A ladder-construction
+            // failure is a plain command failure, never a silent bypass.
+            // Boxed: the ladder future is huge (the whole climb lives in
+            // one type), and inlining it would grow every submit's frame.
+            match Box::pin(self.execute_with_zigzagzig(&envelope, gate)).await {
+                Ok(execution) => execution.command_outcome,
+                Err(error) => CommandOutcome::Failed {
+                    command_id: envelope.command_id.clone(),
+                    error,
+                    evidence: Vec::new(),
+                },
+            }
+        } else {
+            self.pages.execute_with_session_gate(envelope, gate).await
+        };
         if matches!(outcome, CommandOutcome::Completed { .. }) {
             if let Some((session_id, page_id)) = closed_page {
                 let _ = self.sessions.remove_page(&session_id, &page_id).await;
             }
         }
         outcome
+    }
+
+    /// Runs one command under the ZigZagZig recovery ladder.
+    ///
+    /// The ladder scopes per command: every stuck command gets a fresh
+    /// full climb bounded by the envelope's own deadline, while durable
+    /// receipts and checkpoints keep cross-attempt settlement exact. The
+    /// workflow's durable checkpoint, when one exists, is minted into a
+    /// fresh proof so the checkpoint-bearing rungs are eligible.
+    async fn execute_with_zigzagzig(
+        &self,
+        envelope: &CommandEnvelope,
+        gate: SessionGate,
+    ) -> Result<page_runtime::SkillRecoveryExecution, CommandError> {
+        let recovery = self
+            .recovery
+            .clone()
+            .ok_or_else(|| zigzagzig_unavailable("the runtime has no recovery coordinator"))?;
+        let workers = self
+            .workers
+            .clone()
+            .ok_or_else(|| zigzagzig_unavailable("the runtime has no worker pool"))?;
+        let page_id = envelope
+            .page_id
+            .clone()
+            .ok_or_else(|| zigzagzig_unavailable("the command has no page identity"))?;
+        let page =
+            self.pages.get(&page_id).await.map_err(|error| {
+                zigzagzig_unavailable(&format!("page state unreadable: {error}"))
+            })?;
+
+        // Mint a fresh proof from the workflow's durable checkpoint. Proofs
+        // are decision-time artifacts by contract (max-age minutes), so the
+        // ladder never trusts a caller-supplied one.
+        let (last_checkpoint_id, verified_checkpoint) =
+            match recovery.load_checkpoint(&envelope.workflow_id).await {
+                Ok(checkpoint) => {
+                    let digest = hex::encode(sha2::Sha256::digest(
+                        serde_json::to_vec(&checkpoint).unwrap_or_default(),
+                    ));
+                    let proof = types::SkillEvidenceRef::new("workflow-checkpoint", digest)
+                        .ok()
+                        .and_then(|attestation| {
+                            types::SkillCheckpointProof::new(
+                                checkpoint.checkpoint_id.clone(),
+                                envelope.session_id.clone(),
+                                chrono::Utc::now(),
+                                attestation,
+                            )
+                            .ok()
+                        });
+                    match proof {
+                        Some(proof) => (Some(checkpoint.checkpoint_id.clone()), Some(proof)),
+                        None => (None, None),
+                    }
+                }
+                Err(_) => (None, None),
+            };
+
+        let state = types::SkillSessionState::new(
+            envelope.session_id.clone(),
+            std::collections::BTreeMap::from([(
+                skill_runtime::SkillZigZagZig::NAME.to_string(),
+                skill_runtime::SkillZigZagZig::VERSION.to_string(),
+            )]),
+            // No engine profile is plumbed into skill state yet, so the
+            // engine-swap rung stays ineligible; every other rung works.
+            None,
+            last_checkpoint_id,
+            verified_checkpoint,
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            envelope.deadline,
+        )
+        .map_err(|error| zigzagzig_unavailable(&format!("invalid ladder state: {error}")))?;
+        let strategy = skill_runtime::SkillZigZagZig::new(
+            state,
+            ZIGZAGZIG_TACTIC_BUDGET_MS,
+            std::iter::empty(),
+        )
+        .map_err(|error| zigzagzig_unavailable(&format!("ladder strategy rejected: {error:?}")))?;
+        let coordinator = page_runtime::SkillRecoveryCoordinator::new(
+            self.pages.clone(),
+            strategy,
+            recovery,
+            workers,
+        )?
+        .with_session_gate(gate);
+        coordinator.execute_with_adaptation(envelope, page).await
     }
 
     /// Save a checkpoint whose evidence the caller has already verified.

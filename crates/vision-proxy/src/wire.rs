@@ -76,6 +76,30 @@ pub enum VisionAction {
     /// is in a solved state. Carries no payload.
     #[serde(alias = "challenge_solved")]
     ChallengeSolved,
+    /// Classification answer for a `detectChallenge` request: the model sees
+    /// a challenge. Stringly typed here; the runtime maps the kind onto its
+    /// typed enum and fails the proposal on an unknown one.
+    #[serde(alias = "challenge_detected")]
+    ChallengeDetected {
+        challenge_type: String,
+        #[serde(default)]
+        region: Option<ChallengeRegionWire>,
+        #[serde(default)]
+        blocking: bool,
+    },
+    /// Classification answer for a `detectChallenge` request: the page is
+    /// clean. A first-class answer, not an absence of one.
+    #[serde(alias = "no_challenge_detected")]
+    NoChallengeDetected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChallengeRegionWire {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
 #[derive(Debug, Clone, Deserialize)]

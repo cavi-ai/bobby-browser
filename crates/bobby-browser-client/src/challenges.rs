@@ -46,6 +46,39 @@ pub struct ChallengeDetectionHints {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DetectChallengeIntent {
+    pub purpose: String,
+    #[serde(default)]
+    pub hints: DetectChallengeHints,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct DetectChallengeHints {
+    /// Restrict classification to a page region (CSS pixels, viewport-relative).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<ChallengeRegion>,
+    /// Deadline for the whole detection, including provider retries.
+    #[serde(default = "default_detect_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+impl Default for DetectChallengeHints {
+    fn default() -> Self {
+        Self {
+            region: None,
+            timeout_ms: default_detect_timeout_ms(),
+        }
+    }
+}
+
+fn default_detect_timeout_ms() -> u64 {
+    15_000
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SolveChallengeIntent {
     pub purpose: String,
     #[serde(default)]

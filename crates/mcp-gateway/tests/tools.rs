@@ -652,7 +652,7 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
             .as_array()
             .unwrap()
             .len(),
-        9
+        10
     );
 
     // In `tools/list`, `command_execute` must advertise the envelope command as
@@ -705,7 +705,7 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
     let evidence_variants = recover_schema["$defs"]["Evidence"]["oneOf"]
         .as_array()
         .unwrap();
-    assert_eq!(evidence_variants.len(), 29, "{evidence_variants:?}");
+    assert_eq!(evidence_variants.len(), 30, "{evidence_variants:?}");
     let evidence_kinds = evidence_variants
         .iter()
         .map(|variant| variant["properties"]["kind"]["const"].as_str().unwrap())
@@ -891,6 +891,67 @@ async fn session_create_without_execution_policy_denies_javascript_evaluation_by
     assert_eq!(response["result"]["isError"], false, "{response}");
     assert_eq!(
         response["result"]["structuredContent"]["execution_policy"]["javascriptEvaluation"], false,
+        "{response}"
+    );
+}
+
+#[tokio::test]
+async fn session_create_with_zigzagzig_creates_a_godmode_session() {
+    let server = fixture_server(vec![
+        Capability::SessionWrite,
+        Capability::BrowserFingerprint,
+        Capability::BrowserHumanize,
+    ])
+    .await;
+    let response = server
+        .handle_message(request(
+            63,
+            "tools/call",
+            json!({
+                "name":"session_create",
+                "arguments":{"profile":"godmode","zigzagzig":true}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    let session = &response["result"]["structuredContent"];
+    assert_eq!(session["zigzagzig"], true, "{response}");
+    assert_eq!(
+        session["execution_policy"]["fingerprint"], true,
+        "{response}"
+    );
+    assert_eq!(session["execution_policy"]["humanize"], true, "{response}");
+    assert_eq!(
+        session["execution_policy"]["visionAssist"], true,
+        "{response}"
+    );
+    assert_eq!(
+        session["execution_policy"]["javascriptEvaluation"], true,
+        "{response}"
+    );
+}
+
+#[tokio::test]
+async fn session_create_with_zigzagzig_requires_the_browser_capabilities() {
+    // Godmode forces fingerprint + humanize server-side, so a principal
+    // missing either capability is refused before the session exists.
+    let server = fixture_server(vec![Capability::SessionWrite]).await;
+    let response = server
+        .handle_message(request(
+            64,
+            "tools/call",
+            json!({
+                "name":"session_create",
+                "arguments":{"profile":"godmode-denied","zigzagzig":true}
+            }),
+        ))
+        .await
+        .unwrap();
+    let text = response.to_string();
+    assert!(
+        text.contains("missingCapability")
+            && (text.contains("browser:fingerprint") || text.contains("browser:humanize")),
         "{response}"
     );
 }

@@ -428,6 +428,7 @@ async fn fingerprint_and_humanize_policies_require_their_capabilities() {
                     profile: "policy-gated".into(),
                     proxy: None,
                     execution_policy: policy,
+                    zigzagzig: false,
                 },
             )
             .await
@@ -452,10 +453,69 @@ async fn fingerprint_and_humanize_policies_require_their_capabilities() {
                 humanize: true,
                 ..ExecutionPolicy::default()
             },
+            zigzagzig: false,
         },
     )
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn zigzagzig_sessions_require_the_fingerprint_and_humanize_capabilities() {
+    // Godmode forces fingerprint + humanize server-side, so it stands in for
+    // both grants at the creation gate: a principal missing either
+    // capability gets no flagged session at all.
+    let base = [
+        Capability::SessionRead,
+        Capability::SessionWrite,
+        Capability::PageWrite,
+        Capability::BrowserMutate,
+    ];
+    for extra in [
+        vec![],
+        vec![Capability::BrowserFingerprint],
+        vec![Capability::BrowserHumanize],
+    ] {
+        let (api, handle) =
+            authenticated_with(RuntimeService::default(), base.into_iter().chain(extra)).await;
+        let error = api
+            .create_session(
+                handle.context(expiry(), None),
+                CreateSessionRequest {
+                    profile: "godmode-denied".into(),
+                    proxy: None,
+                    execution_policy: Default::default(),
+                    zigzagzig: true,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, InterfaceErrorCode::MissingCapability);
+    }
+
+    let (api, handle) = authenticated_with(
+        RuntimeService::default(),
+        base.into_iter()
+            .chain([Capability::BrowserFingerprint, Capability::BrowserHumanize]),
+    )
+    .await;
+    let session = api
+        .create_session(
+            handle.context(expiry(), None),
+            CreateSessionRequest {
+                profile: "godmode".into(),
+                proxy: None,
+                execution_policy: Default::default(),
+                zigzagzig: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(session.zigzagzig);
+    assert!(session.execution_policy.fingerprint);
+    assert!(session.execution_policy.humanize);
+    assert!(session.execution_policy.vision_assist);
+    assert!(session.execution_policy.javascript_evaluation);
 }
 
 #[tokio::test]
@@ -468,6 +528,7 @@ async fn runtime_errors_are_mapped_without_dispatch_outcome_flattening() {
                 profile: "interface-test".into(),
                 proxy: None,
                 execution_policy: Default::default(),
+                zigzagzig: false,
             },
         )
         .await
@@ -543,6 +604,7 @@ async fn authenticated_session_creation_populates_the_trusted_ownership_authorit
                 profile: "owned-session".into(),
                 proxy: None,
                 execution_policy: Default::default(),
+                zigzagzig: false,
             },
         )
         .await
@@ -599,6 +661,7 @@ async fn session_owned_runtime_hides_and_rejects_another_principals_session() {
                 profile: "owner".into(),
                 proxy: None,
                 execution_policy: Default::default(),
+                zigzagzig: false,
             },
         )
         .await
@@ -768,6 +831,7 @@ async fn full_ownership_registry_refuses_before_runtime_session_dispatch() {
                 profile: "must-not-dispatch".into(),
                 proxy: None,
                 execution_policy: Default::default(),
+                zigzagzig: false,
             },
         )
         .await
@@ -790,6 +854,7 @@ async fn runtime_session_failure_releases_the_ownership_reservation() {
                 profile: "fails-once".into(),
                 proxy: None,
                 execution_policy: Default::default(),
+                zigzagzig: false,
             },
         )
         .await
@@ -801,6 +866,7 @@ async fn runtime_session_failure_releases_the_ownership_reservation() {
                 profile: "reservation-reused".into(),
                 proxy: None,
                 execution_policy: Default::default(),
+                zigzagzig: false,
             },
         )
         .await
@@ -825,6 +891,7 @@ async fn forced_finalize_failure_rolls_back_the_live_session_and_worker() {
                 profile: "rollback-finalize".into(),
                 proxy: None,
                 execution_policy: Default::default(),
+                zigzagzig: false,
             },
         )
         .await
@@ -1231,6 +1298,7 @@ async fn evaluate_javascript_is_policy_denied_when_session_has_not_opted_in() {
             profile: "default".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -1258,6 +1326,7 @@ async fn evaluate_javascript_clears_the_session_policy_gate_when_opted_in() {
                 vision_assist: false,
                 ..types::ExecutionPolicy::default()
             },
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -1286,6 +1355,7 @@ async fn evaluate_javascript_without_capability_is_denied_before_the_session_gat
                 vision_assist: false,
                 ..types::ExecutionPolicy::default()
             },
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -1324,6 +1394,7 @@ async fn evaluate_javascript_with_capability_but_js_off_session_is_policy_denied
             profile: "default".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -1390,6 +1461,7 @@ async fn locate_intent_without_intent_execute_capability_is_denied_before_dispat
             profile: "default".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -1455,6 +1527,7 @@ async fn fill_files_intent_without_file_upload_capability_is_denied_before_dispa
             profile: "default".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -1489,6 +1562,7 @@ async fn complete_form_files_without_file_upload_capability_is_denied_before_dis
             profile: "default".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -1530,6 +1604,7 @@ async fn locate_intent_does_not_require_vision_assist_upfront() {
                 vision_assist: false,
                 ..types::ExecutionPolicy::default()
             },
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -1585,6 +1660,7 @@ async fn cancelling_a_dispatched_command_releases_the_in_flight_count() {
             profile: "cancelled-dispatch".into(),
             proxy: None,
             execution_policy: ExecutionPolicy::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -1650,6 +1726,7 @@ async fn one_shot_vision_consent_applies_to_exactly_one_command() {
             profile: "one-shot".into(),
             proxy: None,
             execution_policy: ExecutionPolicy::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -1701,6 +1778,7 @@ async fn one_shot_vision_consent_requires_the_principal_capability() {
             profile: "one-shot-denied".into(),
             proxy: None,
             execution_policy: ExecutionPolicy::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -1736,6 +1814,7 @@ async fn one_shot_consent_is_part_of_the_idempotency_identity() {
             profile: "one-shot-idempotency".into(),
             proxy: None,
             execution_policy: ExecutionPolicy::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -1813,6 +1892,7 @@ fn request_profile(profile: &str) -> CreateSessionRequest {
         profile: profile.into(),
         proxy: None,
         execution_policy: Default::default(),
+        zigzagzig: false,
     }
 }
 
@@ -1827,6 +1907,7 @@ async fn vision_enabled_session_is_rejected_when_runtime_has_no_provider() {
                 vision_assist: true,
                 ..ExecutionPolicy::default()
             },
+            zigzagzig: false,
         })
         .await
         .unwrap_err();

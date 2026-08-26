@@ -354,6 +354,8 @@ impl CdpGateway {
                         profile: "default".to_owned(),
                         proxy: None,
                         execution_policy: types::ExecutionPolicy::default(),
+                        // CDP automation runs plain: no godmode ladder.
+                        zigzagzig: false,
                     },
                 )
                 .await

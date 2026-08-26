@@ -15,10 +15,15 @@ use types::{
 
 use crate::{Skill, SkillContext, SkillStateStore, SkillStateStoreError};
 
-const LADDER: [SkillTactic; 7] = [
+const LADDER: [SkillTactic; 8] = [
     SkillTactic::ObserveAgain,
     SkillTactic::ResolveSemanticTarget,
     SkillTactic::ChangeInteractionMethod,
+    // In-place and non-destructive: try the vision solve loop before any
+    // checkpoint-bearing or session-replacing tactic. A challenge-free page
+    // fails closed inside the solver's own budget, so this slot is safe to
+    // climb through on any stuck command.
+    SkillTactic::SolveChallenge,
     SkillTactic::ReconcileCheckpoint,
     SkillTactic::FreshGhostSession,
     SkillTactic::SelectCompatibleEngine,
@@ -198,7 +203,9 @@ fn store_failure(_error: SkillStateStoreError) -> SkillFailure {
 impl SkillZigZagZig {
     pub const NAME: &'static str = "SkillZigZagZig";
     pub const ALIAS: &'static str = "/zigzagzig";
-    pub const VERSION: &'static str = "1.0.0";
+    /// 1.1.0 adds the `SolveChallenge` ladder tactic (additive contract
+    /// change: v1.0.0 states deserialize, the new rung is simply unattempted).
+    pub const VERSION: &'static str = "1.1.0";
 
     pub fn new(
         state: SkillSessionState,

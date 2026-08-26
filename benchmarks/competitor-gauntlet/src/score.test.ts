@@ -21,6 +21,7 @@ function record(task: string, batchId: string) {
     batchId,
     tool: "bobby",
     task,
+    model: "claude-opus-5",
     pass: true,
     wallMs: 1_000,
     toolCalls: 10,
@@ -148,4 +149,27 @@ test("check rejects mixed provenance inside one batch", () => {
 
   assert.equal(result.status, 1, result.stderr);
   assert.match(result.stdout, /INVALID onboarding: provenance differs within batch/);
+});
+
+test("check rejects a run without a transcript-derived actual model", () => {
+  const current = taskIds.map((task) => record(task, "current"));
+  delete (current[0] as Partial<ReturnType<typeof record>>).model;
+
+  const result = check(current);
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stdout, /INVALID customer-update: actual model is missing/);
+});
+
+test("check rejects an actual model that differs from the requested model", () => {
+  const current = taskIds.map((task) => record(task, "current"));
+  current[1].model = "claude-sonnet-4-6";
+
+  const result = check(current);
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(
+    result.stdout,
+    /INVALID onboarding: actual model claude-sonnet-4-6 differs from requested model claude-opus-5/,
+  );
 });

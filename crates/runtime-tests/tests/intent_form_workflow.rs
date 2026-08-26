@@ -169,6 +169,7 @@ async fn intent_form_workflow_is_deterministic_on_live_chromium() {
             profile: "intent-form".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();

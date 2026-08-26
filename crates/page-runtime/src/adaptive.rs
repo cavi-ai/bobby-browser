@@ -121,7 +121,7 @@ fn settlement_validation_issues(
     aria_invalid: &[dom_engine::Candidate],
 ) -> Vec<types::FormValidationIssue> {
     const MAX_ISSUES: usize = 512;
-    let visible_aria_names = aria_invalid
+    let visible_aria_invalid = aria_invalid
         .iter()
         .filter(|candidate| candidate.state.attached && candidate.state.visible)
         .filter(|candidate| {
@@ -130,7 +130,6 @@ fn settlement_validation_issues(
                 .get("aria-invalid")
                 .is_some_and(|value| value.eq_ignore_ascii_case("true"))
         })
-        .filter_map(|candidate| candidate.name.as_deref())
         .collect::<Vec<_>>();
     let mut issues = Vec::new();
 
@@ -145,8 +144,9 @@ fn settlement_validation_issues(
             .chain(snapshot.unowned_controls.iter())
         {
             let aria_rejected = control.accessible_name.as_deref().is_some_and(|name| {
-                visible_aria_names
+                visible_aria_invalid
                     .iter()
+                    .filter_map(|candidate| candidate.name.as_deref())
                     .any(|candidate_name| candidate_name.eq_ignore_ascii_case(name))
             });
             if !control.validity.valid || aria_rejected {
@@ -166,6 +166,36 @@ fn settlement_validation_issues(
                     return issues;
                 }
             }
+        }
+    }
+
+    for candidate in visible_aria_invalid {
+        let already_described = issues.iter().any(|issue| {
+            issue.control_id == candidate.id
+                || issue.accessible_name.as_deref().is_some_and(|issue_name| {
+                    candidate.name.as_deref().is_some_and(|candidate_name| {
+                        issue_name.eq_ignore_ascii_case(candidate_name)
+                    })
+                })
+        });
+        if already_described {
+            continue;
+        }
+        issues.push(types::FormValidationIssue {
+            control_id: candidate.id.clone(),
+            control_kind: types::FormControlKind::Other,
+            accessible_name: candidate.name.clone(),
+            target: None,
+            validity: types::FormControlValidity {
+                will_validate: false,
+                valid: false,
+                flags: vec![types::FormValidityFlag::CustomError],
+                message: None,
+                described_by: Vec::new(),
+            },
+        });
+        if issues.len() == MAX_ISSUES {
+            break;
         }
     }
 
@@ -1432,6 +1462,9 @@ fn record_intent_metrics(
         types::IntentCommand::DismissObstruction(_) => observability::IntentMetricKind::Dismiss,
         types::IntentCommand::Extract(_) => observability::IntentMetricKind::Extract,
         types::IntentCommand::SolveChallenge(_) => observability::IntentMetricKind::SolveChallenge,
+        types::IntentCommand::DetectChallenge(_) => {
+            observability::IntentMetricKind::DetectChallenge
+        }
     };
     let evidence = match outcome {
         IntentOutcome::Completed { evidence } | IntentOutcome::Failed { evidence, .. } => evidence,
@@ -1958,7 +1991,18 @@ mod tests {
             settlement_validation_issues(&form_snapshot_evidence(false, true), &[]).len(),
             1
         );
-        assert!(settlement_validation_issues(&[], std::slice::from_ref(&aria_invalid)).is_empty());
+        let mut unnamed_aria_invalid = aria_invalid;
+        unnamed_aria_invalid.id = "unnamed-invalid".into();
+        unnamed_aria_invalid.name = None;
+        let unmatched = settlement_validation_issues(&[], &[unnamed_aria_invalid]);
+        assert_eq!(
+            unmatched.len(),
+            1,
+            "a visible aria-invalid control must reject settlement even when the bounded form snapshot cannot describe it"
+        );
+        assert_eq!(unmatched[0].control_id, "unnamed-invalid");
+        assert_eq!(unmatched[0].accessible_name, None);
+        assert!(!unmatched[0].validity.valid);
     }
 
     #[cfg(unix)]

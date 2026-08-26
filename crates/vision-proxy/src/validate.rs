@@ -20,6 +20,10 @@ pub enum ValidateError {
     CandidateIntentMismatch,
     #[error("challengeSolved is only valid for a solveChallenge request")]
     ChallengeIntentMismatch,
+    #[error("detection actions are only valid for a detectChallenge request")]
+    DetectIntentMismatch,
+    #[error("challenge region coordinates are not finite")]
+    NonFiniteRegion,
     #[error("candidate action index is outside the request candidate list")]
     CandidateIndexOutOfRange,
 }
@@ -41,6 +45,18 @@ pub fn validate_proposal(proposal: &ProposeResponse) -> Result<(), ValidateError
             Ok(())
         }
         VisionAction::ChallengeSolved => Ok(()),
+        VisionAction::ChallengeDetected { region, .. } => match region {
+            Some(region)
+                if !(region.x.is_finite()
+                    && region.y.is_finite()
+                    && region.width.is_finite()
+                    && region.height.is_finite()) =>
+            {
+                Err(ValidateError::NonFiniteRegion)
+            }
+            _ => Ok(()),
+        },
+        VisionAction::NoChallengeDetected => Ok(()),
     }
 }
 
@@ -54,6 +70,16 @@ pub fn validate_proposal_for_request(
     // request; any other intent receiving it is an upstream confusion.
     if matches!(proposal.action, VisionAction::ChallengeSolved) && intent_kind != "solveChallenge" {
         return Err(ValidateError::ChallengeIntentMismatch);
+    }
+    // Detection answers are the whole point of a detect request and noise
+    // anywhere else; a detect request receiving anything else is equally
+    // confused.
+    let is_detect_action = matches!(
+        proposal.action,
+        VisionAction::ChallengeDetected { .. } | VisionAction::NoChallengeDetected
+    );
+    if is_detect_action != (intent_kind == "detectChallenge") {
+        return Err(ValidateError::DetectIntentMismatch);
     }
     let (index, compatible) = match proposal.action {
         VisionAction::ClickCandidate { index } => (

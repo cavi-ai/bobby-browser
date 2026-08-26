@@ -139,6 +139,7 @@ async fn dismiss_obstruction_removes_banner_on_live_chromium() {
             profile: "intent-dismiss".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -192,6 +193,7 @@ async fn dismiss_obstruction_reports_stuck_when_banner_persists_on_live_chromium
             profile: "intent-dismiss-stuck".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();

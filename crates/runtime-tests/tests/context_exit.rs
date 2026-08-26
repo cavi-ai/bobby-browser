@@ -98,6 +98,7 @@ impl Station {
                 profile: "northstar-profile".into(),
                 proxy: None,
                 execution_policy: Default::default(),
+                zigzagzig: false,
             })
             .await
             .unwrap();

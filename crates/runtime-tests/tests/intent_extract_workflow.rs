@@ -147,6 +147,7 @@ async fn extract_reads_text_href_and_attribute_fields_on_live_chromium() {
             profile: "intent-extract".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -239,6 +240,7 @@ async fn extract_reports_missing_field_without_failing_the_whole_command_on_live
             profile: "intent-extract-partial".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();

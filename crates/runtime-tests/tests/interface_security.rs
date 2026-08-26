@@ -872,6 +872,7 @@ async fn principal_isolation(harness: &ChromeRuntimeHarness) -> SecurityResult {
                 profile: "principal-owner".into(),
                 proxy: None,
                 execution_policy: Default::default(),
+                zigzagzig: false,
             },
         )
         .await

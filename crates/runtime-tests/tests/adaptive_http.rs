@@ -194,6 +194,7 @@ async fn adaptive_http() {
             profile: "adaptive-http-live".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -208,6 +209,7 @@ async fn adaptive_http() {
             profile: "adaptive-http-stranger".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();

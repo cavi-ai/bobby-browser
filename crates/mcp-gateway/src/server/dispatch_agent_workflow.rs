@@ -358,6 +358,7 @@ impl Server {
             profile: input.profile,
             proxy: input.proxy,
             execution_policy: input.execution_policy,
+            zigzagzig: input.zigzagzig,
         };
         let (setup_sender, setup_receiver) = oneshot::channel();
 
@@ -1431,6 +1432,7 @@ mod tests {
             created_at: now,
             last_used_at: now,
             execution_policy: types::ExecutionPolicy::default(),
+            zigzagzig: false,
         };
         let runtime = Arc::new(ExpiredRequestRuntime {
             session,
@@ -1451,6 +1453,7 @@ mod tests {
                 profile: "expired-request".into(),
                 proxy: None,
                 execution_policy: types::ExecutionPolicy::default(),
+                zigzagzig: false,
             },
             None,
             types::WorkflowId::new(),
@@ -1581,6 +1584,7 @@ mod tests {
             created_at: now,
             last_used_at: now,
             execution_policy: types::ExecutionPolicy::default(),
+            zigzagzig: false,
         };
         let runtime = Arc::new(ExpiredRequestRuntime {
             session,
@@ -1708,6 +1712,7 @@ mod tests {
             created_at: now,
             last_used_at: now,
             execution_policy: types::ExecutionPolicy::default(),
+            zigzagzig: false,
         };
         let page = types::PageState {
             id: types::PageId(uuid::Uuid::from_u128(707)),
@@ -1738,6 +1743,7 @@ mod tests {
                 profile: "direct-cleanup-reply".into(),
                 proxy: None,
                 execution_policy: types::ExecutionPolicy::default(),
+                zigzagzig: false,
             },
             None,
             workflow_id.clone(),
@@ -1865,6 +1871,7 @@ mod tests {
             created_at: now,
             last_used_at: now,
             execution_policy: types::ExecutionPolicy::default(),
+            zigzagzig: false,
         };
         let page = types::PageState {
             id: types::PageId(uuid::Uuid::from_u128(710)),

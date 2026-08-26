@@ -2,8 +2,9 @@
 //! keeping the response inside the 131,072-byte budget.
 //!
 //! [`Toolset::Explore`] is the default so the first `tools/list` covers the
-//! standard working loop (~58 KiB): observe, navigate, and act with the base
-//! control primitives. An agent widens with `toolset_select` (or starts on
+//! standard working loop (~76 KiB): observe, navigate, act with the base
+//! control primitives, complete a form, and submit it once with verification.
+//! An agent widens with `toolset_select` (or starts on
 //! `full` via `BOBBY_MCP_TOOLSET` / `[mcp] startup_toolset`), which also emits
 //! `notifications/tools/list_changed` so the client re-reads.
 //!
@@ -35,8 +36,8 @@ pub enum Toolset {
     /// Everything the principal's capabilities allow.
     Full,
     /// Default: the standard working loop — observation, lifecycle,
-    /// navigation, and the base control primitives. The `intent_*` family and
-    /// escape hatches stay out.
+    /// navigation, base controls, whole-form completion, and verified submit.
+    /// The remaining `intent_*` tools and escape hatches stay out.
     #[default]
     Explore,
     Act,

@@ -44,6 +44,10 @@ pub enum IntentPlan {
         purpose: String,
         timeout_ms: u64,
     },
+    DetectChallenge {
+        purpose: String,
+        timeout_ms: u64,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -203,6 +207,13 @@ pub fn compile_intent(command: &IntentCommand) -> Result<IntentPlan, CompileErro
         IntentCommand::SolveChallenge(intent) => {
             let purpose = validate_purpose(&intent.purpose)?;
             Ok(IntentPlan::SolveChallenge {
+                purpose: purpose.into(),
+                timeout_ms: intent.hints.timeout_ms.max(1),
+            })
+        }
+        IntentCommand::DetectChallenge(intent) => {
+            let purpose = validate_purpose(&intent.purpose)?;
+            Ok(IntentPlan::DetectChallenge {
                 purpose: purpose.into(),
                 timeout_ms: intent.hints.timeout_ms.max(1),
             })

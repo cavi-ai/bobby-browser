@@ -44,8 +44,16 @@ inside a `CommandEnvelope` (`schemaVersion: 2`). TypeScript helpers:
 | `fill` | Reconciliable |
 | `completeForm` | Reconciliable |
 | `dismissObstruction` | Reconciliable |
+| `solveChallenge` | Reconciliable |
+| `detectChallenge` | Replayable |
 | `submitAndVerify` | Boundary |
 | `follow` | Boundary if `boundary: true`, else Reconciliable |
+
+`solveChallenge` drives the vision solve loop against a captcha or
+verification widget (see `bobby vision solve`); `detectChallenge` only
+classifies — screenshot in, `challengeDetection` evidence out, never an
+action on the page. Detection is opt-in per call: nothing scans pages
+automatically.
 
 ## Envelope examples
 
@@ -323,6 +331,24 @@ await client.submit(
 Note: `ExtractValueKind` (`text`, `attribute`, `href`) is separate from fill and control operations.
 
 `ExtractValueKind`: `text`, `attribute` (+ `attribute` name), `href`.
+
+### DetectChallenge (Replayable)
+
+```ts
+await client.submit(
+  intentEnvelope(meta, {
+    kind: "detectChallenge",
+    input: { purpose: "check for a captcha blocking signup", hints: { timeoutMs: 15_000 } },
+  }),
+  { idempotencyKey: crypto.randomUUID() },
+);
+```
+
+Completed evidence carries `{ kind: "challengeDetection", detection, priorKind? }`:
+`detection` is the classified challenge (`challenge_type`, `confidence`,
+`blocking`, optional `region`) or `null` when the page is provably clean;
+`priorKind` names the site prior that enriched the prompt when one existed.
+Detection carries no confidence floor — acting is what the floor protects.
 
 ## Vision double-gate
 

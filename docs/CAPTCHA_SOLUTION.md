@@ -60,11 +60,29 @@ malformed JSON (`"x": 298, 684}` with no `y` key).
 - **Phase 4: CLI & ZigZagZig** — done (2026-08-18). `bobby vision solve
   --purpose … [--url … | --session … --page …] [--node vision]
   [--timeout-ms 120000] [--zigzagzig]` submits the intent over `/v1`;
-  `--zigzagzig` creates the session with humanize + fingerprint.
+  `--zigzagzig` creates the session with every capability on (humanize +
+  fingerprint + JS evaluation + vision assist).
   Smoke-tested live against the gauntlet Level 2 page over authenticated
-  HTTP (green checkmark confirmed from the final artifact). Adding a
-  solve tactic to the skill-runtime `/zigzagzig` ladder is a skill-contract
-  change, deliberately left for PR review.
+  HTTP (green checkmark confirmed from the final artifact).
+- **Phase 4b: Ladder solve tactic** — done (2026-08-24). `SkillTactic::
+  SolveChallenge` joined the `/zigzagzig` recovery ladder at rung 4 (skill
+  v1.1.0): after observe/re-resolve/retry and before any checkpoint-bearing
+  tactic, the coordinator runs the vision solve loop in place with the
+  session's proven gate (`SkillRecoveryCoordinator::with_session_gate`),
+  then re-observes the original postcondition. A session without vision
+  assist declines the rung fail-closed and climbs on.
+- **Phase 7: DetectChallenge** — done (2026-08-25). The architecture's
+  first box is real: `IntentCommand::DetectChallenge` (Replayable —
+  read-only) classifies a page through the same vision gates and
+  prior-enriched prompt as the solve loop, and reports
+  `Evidence::ChallengeDetection { detection, prior_kind }` — `Some` is a
+  typed classification, `None` is a provably clean page. No confidence
+  floor: acting is what the floor protects, and the caller choosing
+  whether to solve needs the model's honest uncertainty. The prior never
+  blends into the answer (zero-false-positive discipline); it enriches
+  the prompt and is reported for transparency. CLI: `bobby vision detect`.
+  The ladder's solve rung consuming detection for smarter eligibility
+  remains future work.
 - **Phase 5: Learning** — done (2026-08-18). `SiteContext.challenges`
   holds per-site solve counters (success/failure + day-precision stamp,
   same privacy discipline as intent stats); promotion routes

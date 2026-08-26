@@ -17,7 +17,7 @@ command lifecycle, policy checks, deadlines, or evidence rules.
 
 ## Not a public API today
 
-Internal skills are **not** exposed on:
+Internal skills are **not** exposed as commands on:
 
 - HTTP (`/v1/*`)
 - MCP tools (`command_execute` and friends)
@@ -27,6 +27,13 @@ Do not treat skill router aliases (`/ghost`, `/zigzagzig`) as public user
 commands for application integrations. Those aliases exist in the in-process
 skill router for runtime tests (for example `bobby_skill_recovery`), not as
 broker routes.
+
+The **ladder itself** is reachable in production one way: create the session
+with `zigzagzig: true` (`POST /v1/sessions`, TypeScript SDK
+`CreateSessionRequest.zigzagzig`, or MCP `session_create` / `workflow_start`
+with `zigzagzig: true` — advertised only to principals holding both
+`browser:fingerprint` and `browser:humanize`). A godmode session runs every
+page-bound command under the ladder below — no slash command needed.
 
 Public clients automate with primitives and intents via
 [HTTP](../surfaces/http-api.md), [MCP tools](../surfaces/mcp-tools.md), or the
@@ -60,10 +67,13 @@ ZigZagZig applies a bounded recovery ladder to the original postcondition:
 1. retry read-only observation;
 2. resolve the semantic target again;
 3. change the interaction method;
-4. reconcile the verified checkpoint;
-5. start a fresh Ghost session;
-6. choose another compatible engine;
-7. restart from the last durable boundary.
+4. solve a blocking human-verification challenge in place (the vision
+   `solveChallenge` loop, gated on the session's proven capabilities — a
+   session without vision assist declines this rung and climbs on);
+5. reconcile the verified checkpoint;
+6. start a fresh Ghost session;
+7. choose another compatible engine;
+8. restart from the last durable boundary.
 
 Each tactic consumes the existing workflow deadline and tactic budget. A
 mutation with an unknown effect is never blindly replayed: Bobby inspects or

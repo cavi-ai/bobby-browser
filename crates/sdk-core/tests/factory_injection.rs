@@ -108,6 +108,7 @@ async fn build_with_worker_factory_consumes_the_injected_factory() {
             profile: "injected".into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();
@@ -139,6 +140,7 @@ async fn injected_vision_assist_counts_as_a_configured_provider() {
                 vision_assist: true,
                 ..Default::default()
             },
+            zigzagzig: false,
         })
         .await
         .expect("an injected vision provider satisfies the explicit opt-in");

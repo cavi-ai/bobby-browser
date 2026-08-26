@@ -86,6 +86,7 @@ async fn websocket_drains_generation_teardown_events_before_target_disappears() 
             created_at: now,
             last_used_at: now,
             execution_policy: types::ExecutionPolicy::default(),
+            zigzagzig: false,
         }],
     });
     let authority = Arc::new(AuthorityStore::in_memory());

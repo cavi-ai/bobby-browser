@@ -154,6 +154,21 @@ pub fn raw_action(action: &VisionAction) -> serde_json::Value {
         VisionAction::ChallengeSolved => {
             serde_json::json!({"kind": "challengeSolved"})
         }
+        VisionAction::ChallengeDetected {
+            challenge_type,
+            region,
+            blocking,
+        } => {
+            serde_json::json!({
+                "kind": "challengeDetected",
+                "challengeType": serde_json::to_value(challenge_type).unwrap_or_default(),
+                "region": region,
+                "blocking": blocking,
+            })
+        }
+        VisionAction::NoChallengeDetected => {
+            serde_json::json!({"kind": "noChallengeDetected"})
+        }
     }
 }
 

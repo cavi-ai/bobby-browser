@@ -46,7 +46,8 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                         "visionNode":string(1, 128)
                     }),
                     &[]
-                )
+                ),
+                "zigzagzig":{"type":"boolean"}
             }),
             vec!["profile"],
         ),
@@ -64,6 +65,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                     }),
                     &[]
                 ),
+                "zigzagzig":{"type":"boolean"},
                 "url": string(1, MAX_URL_BYTES)
             }),
             vec!["profile"],
@@ -558,6 +560,16 @@ pub(crate) fn advertised_tool_schema_for_capabilities(
             }
             if !capabilities.contains(types::Capability::BrowserHumanize) {
                 policy.remove("humanize");
+            }
+        }
+        // Godmode forces fingerprint + humanize server-side, so it requires
+        // both capabilities at creation. A principal missing either must not
+        // see the flag it cannot use.
+        if !capabilities.contains(types::Capability::BrowserFingerprint)
+            || !capabilities.contains(types::Capability::BrowserHumanize)
+        {
+            if let Some(properties) = schema["properties"].as_object_mut() {
+                properties.remove("zigzagzig");
             }
         }
     }
@@ -1612,6 +1624,33 @@ fn intent_commands() -> Vec<Value> {
                 &["purpose"],
             ),
         ),
+        tagged_input(
+            "detectChallenge",
+            object(
+                json!({
+                    "purpose":string(1, 256),
+                    "hints":{
+                        "type":"object",
+                        "properties":{
+                            "timeoutMs":{"type":"integer","minimum":1,"maximum":MAX_TIMEOUT_MS},
+                            "region":{
+                                "type":"object",
+                                "properties":{
+                                    "x":{"type":"number"},
+                                    "y":{"type":"number"},
+                                    "width":{"type":"number"},
+                                    "height":{"type":"number"}
+                                },
+                                "required":["x","y","width","height"],
+                                "additionalProperties":false
+                            }
+                        },
+                        "additionalProperties":false
+                    }
+                }),
+                &["purpose"],
+            ),
+        ),
     ]
 }
 
@@ -2252,6 +2291,46 @@ fn evidence_variants() -> Vec<Value> {
             json!({"pageId":id(),"value":any_value(),"truncated":{"type":"boolean"}}),
             &["pageId", "value", "truncated"],
         ),
+        // `Evidence::ChallengeDetection`: the enum camelCases its own variant
+        // fields (`detection`, `priorKind`); the inner ChallengeDetection
+        // type carries no rename, so its fields stay snake_case.
+        tagged_fields(
+            "challengeDetection",
+            json!({
+                "detection":nullable(object(
+                    json!({
+                        "challenge_type":{"enum":[
+                            "recaptchaV2Checkbox",
+                            "recaptchaV3",
+                            "textCaptcha",
+                            "imageGridCaptcha",
+                            "mfaCodeEntry"
+                        ]},
+                        "confidence":{"type":"number"},
+                        "region":object(
+                            json!({
+                                "x":{"type":"number"},
+                                "y":{"type":"number"},
+                                "width":{"type":"number"},
+                                "height":{"type":"number"}
+                            }),
+                            &["x","y","width","height"]
+                        ),
+                        "blocking":{"type":"boolean"},
+                        "hints":object(
+                            json!({
+                                "target_field_purpose":string(0, 1024),
+                                "instruction_text":string(0, 4096)
+                            }),
+                            &[]
+                        )
+                    }),
+                    &["challenge_type", "confidence", "blocking"]
+                )),
+                "priorKind":string(1, 128)
+            }),
+            &["detection"],
+        ),
         tagged_fields(
             "intentExecution",
             json!({"record":{"$ref":"#/$defs/ExecutionRecord"}}),
@@ -2436,7 +2515,10 @@ fn session_state() -> Value {
                     "visionNode":string(1, 128)
                 }),
                 &[]
-            )
+            ),
+            // Present iff true (`skip_serializing_if`), so optional here is
+            // exact, and the godmode bit costs no schema bytes when off.
+            "zigzagzig":{"type":"boolean"}
         }),
         &[
             "id",
@@ -2885,6 +2967,30 @@ mod tests {
             assert!(shown.get("humanize").is_some(), "{name}");
         }
     }
+
+    #[test]
+    fn zigzagzig_visibility_requires_both_browser_capabilities() {
+        let fingerprint_only = types::CapabilitySet::new([types::Capability::BrowserFingerprint]);
+        let humanize_only = types::CapabilitySet::new([types::Capability::BrowserHumanize]);
+        let both = types::CapabilitySet::new([
+            types::Capability::BrowserFingerprint,
+            types::Capability::BrowserHumanize,
+        ]);
+        for name in ["session_create", "workflow_start"] {
+            for capabilities in [&fingerprint_only, &humanize_only] {
+                let schema = advertised_tool_schema_for_capabilities(name, capabilities);
+                assert!(
+                    schema["properties"].get("zigzagzig").is_none(),
+                    "{name} hides godmode from a principal missing one capability"
+                );
+            }
+            let schema = advertised_tool_schema_for_capabilities(name, &both);
+            assert!(
+                schema["properties"].get("zigzagzig").is_some(),
+                "{name} shows godmode to a principal holding both capabilities"
+            );
+        }
+    }
 }
 
 /// Must match `types::FormControlState`'s `tag = "kind"` serde output.
@@ -2985,7 +3091,12 @@ fn discriminated_object(tag: &str, discriminant: &str, fields: Value, required: 
 }
 
 fn string(min: usize, max: usize) -> Value {
-    json!({"type":"string","minLength":min,"maxLength":max})
+    // minLength:0 is the JSON Schema default — emitting it is pure bytes.
+    if min == 0 {
+        json!({"type":"string","maxLength":max})
+    } else {
+        json!({"type":"string","minLength":min,"maxLength":max})
+    }
 }
 
 fn timeout_ms() -> Value {

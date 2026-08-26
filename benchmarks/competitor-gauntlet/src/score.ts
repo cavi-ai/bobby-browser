@@ -121,6 +121,18 @@ if (process.argv[2] === "check") {
       failures += 1;
       continue;
     }
+    if (typeof run.model !== "string" || run.model.length === 0) {
+      console.log(`INVALID ${task}: actual model is missing`);
+      failures += 1;
+      continue;
+    }
+    if (run.model !== run.provenance.requestedModel) {
+      console.log(
+        `INVALID ${task}: actual model ${run.model} differs from requested model ${run.provenance.requestedModel}`,
+      );
+      failures += 1;
+      continue;
+    }
     if (
       batchProvenanceKey === null ||
       provenanceKey(run.provenance) !== batchProvenanceKey

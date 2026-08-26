@@ -73,6 +73,7 @@ impl Server {
                             profile: input.profile,
                             proxy: input.proxy,
                             execution_policy: input.execution_policy,
+                            zigzagzig: input.zigzagzig,
                         },
                     )
                     .await

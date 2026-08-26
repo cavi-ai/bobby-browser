@@ -95,6 +95,7 @@ async fn session_page(runtime: &RuntimeService, profile: &str) -> (SessionId, Pa
             profile: profile.into(),
             proxy: None,
             execution_policy: Default::default(),
+            zigzagzig: false,
         })
         .await
         .unwrap();
