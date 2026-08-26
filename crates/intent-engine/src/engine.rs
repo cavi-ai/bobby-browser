@@ -124,17 +124,26 @@ pub trait IntentBrowser: Send + Sync {
         command: &WaitForCommand,
     ) -> Result<Vec<Evidence>, CommandError>;
 
+    /// Inspect the page after a soft submit postcondition settles. The full
+    /// runtime implements this with its bounded page inspection; fakes and
+    /// alternate runtimes may omit it without changing older intent behavior.
+    async fn inspect_settled_page(&self, _page_id: &PageId) -> Result<Vec<Evidence>, CommandError> {
+        Ok(Vec::new())
+    }
+
     async fn capture_screenshot(
         &self,
         page_id: &PageId,
         command: &CaptureScreenshotCommand,
     ) -> Result<(Vec<u8>, Vec<Evidence>), CommandError>;
 
-    /// True when the page still shows client-side validation markers
-    /// (`[aria-invalid=true]`). Used after soft waits (e.g. networkQuiet) so
-    /// submit-and-verify does not report `completed` on a rejected form.
-    async fn validation_errors_visible(&self, _page_id: &PageId) -> Result<bool, CommandError> {
-        Ok(false)
+    /// Compact, value-free invalid-control evidence after a soft submit wait.
+    /// An empty vector means the settled page did not retain a rejected form.
+    async fn validation_issues(
+        &self,
+        _page_id: &PageId,
+    ) -> Result<Vec<types::FormValidationIssue>, CommandError> {
+        Ok(Vec::new())
     }
 }
 
@@ -442,7 +451,6 @@ async fn execute_locate(
             );
         }
     };
-
     let decision = match resolve_candidates(&target, &candidates, &ResolutionPolicy::default()) {
         Ok(decision) => decision,
         Err(error) => {
@@ -709,6 +717,21 @@ async fn execute_fill(
                 )),
             );
         }
+    };
+    // Labels and wrapper nodes often share a control's accessible name. They
+    // must not make a fill ambiguous when exactly one gathered candidate can
+    // perform the requested typed action. Preserve the original pool when no
+    // candidate is compatible so the existing action-mismatch diagnostic is
+    // still available instead of degrading it to target-not-found.
+    let compatible_candidates = candidates
+        .iter()
+        .filter(|candidate| compatible(&value, candidate))
+        .cloned()
+        .collect::<Vec<_>>();
+    let candidates = if compatible_candidates.is_empty() {
+        candidates
+    } else {
+        compatible_candidates
     };
 
     let decision = match resolve_candidates(&target, &candidates, &ResolutionPolicy::default()) {
@@ -1278,37 +1301,20 @@ async fn execute_submit_and_verify(
         }
     };
 
-    // Soft waits (networkQuiet alone) can succeed while the server rejected
-    // the submit and left aria-invalid markers on the form. That must not
-    // report status:completed — agents would skip the re-entry path.
+    // A network-quiet postcondition is deliberately copy-independent. Once it
+    // settles, return the bounded post-submit inspection and classify visible
+    // client-side validation as a recoverable outcome. The boundary click has
+    // already happened exactly once, so a validation rejection is data for the
+    // caller to repair, not a tool error that could invite a blind resubmit.
+    let mut settlement_verification = "submitted";
     if matches!(expected_state.condition, WaitCondition::NetworkQuiet { .. }) {
-        match browser.validation_errors_visible(page_id).await {
-            Ok(true) => {
-                return IntentOutcome::Failed {
-                    error: CommandError {
-                        code: ErrorCode::VerificationFailed,
-                        message: "submit wait was networkQuiet-only but the page still shows aria-invalid validation markers; strengthen expectedState or re-fill the rejected fields"
-                            .into(),
-                        layer: ErrorLayer::Page,
-                        retryable: false,
-                    },
-                    evidence: {
-                        let mut evidence = vec![resolution];
-                        evidence.append(&mut click_evidence);
-                        evidence.append(&mut wait_evidence);
-                        evidence.push(intent_evidence(execution_record(
-                            "submitAndVerify",
-                            purpose,
-                            plan_summary,
-                            vec![candidate_evidence],
-                            None,
-                            "verifyFailed",
-                        )));
-                        evidence
-                    },
-                };
-            }
-            Ok(false) => {}
+        // Inspect first. Network-idle can become true just before the browser
+        // commits the response-driven DOM update; the bounded inspection is a
+        // page round trip that observes that render before validation is
+        // classified. Checking aria-invalid first can read the rejected form
+        // that is about to be replaced by a success state.
+        let mut inspection_evidence = match browser.inspect_settled_page(page_id).await {
+            Ok(evidence) => evidence,
             Err(error) => {
                 return IntentOutcome::Failed {
                     error,
@@ -1322,13 +1328,49 @@ async fn execute_submit_and_verify(
                             plan_summary,
                             vec![candidate_evidence],
                             None,
+                            "inspectFailed",
+                        )));
+                        evidence
+                    },
+                };
+            }
+        };
+        let validation_issues = match browser.validation_issues(page_id).await {
+            Ok(issues) => issues,
+            Err(error) => {
+                return IntentOutcome::Failed {
+                    error,
+                    evidence: {
+                        let mut evidence = vec![resolution];
+                        evidence.append(&mut click_evidence);
+                        evidence.append(&mut wait_evidence);
+                        evidence.append(&mut inspection_evidence);
+                        evidence.push(intent_evidence(execution_record(
+                            "submitAndVerify",
+                            purpose,
+                            plan_summary,
+                            vec![candidate_evidence],
+                            None,
                             "verifyFailed",
                         )));
                         evidence
                     },
                 };
             }
+        };
+        let outcome = if validation_issues.is_empty() {
+            types::SubmitSettlementOutcome::Settled
+        } else {
+            settlement_verification = "validationRejected";
+            types::SubmitSettlementOutcome::ValidationRejected
+        };
+        wait_evidence.push(Evidence::SubmitSettlement { outcome });
+        if !validation_issues.is_empty() {
+            wait_evidence.push(Evidence::FormValidation {
+                issues: validation_issues,
+            });
         }
+        wait_evidence.append(&mut inspection_evidence);
     }
 
     let wait_elapsed_ms = wait_evidence.iter().find_map(|item| match item {
@@ -1345,7 +1387,7 @@ async fn execute_submit_and_verify(
         plan_summary,
         vec![candidate_evidence],
         wait_elapsed_ms,
-        "submitted",
+        settlement_verification,
     )));
     IntentOutcome::Completed { evidence }
 }

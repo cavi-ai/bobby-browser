@@ -116,6 +116,92 @@ struct WorkerIntentBrowser<'a> {
     lease: &'a WorkerLease,
 }
 
+fn settlement_validation_issues(
+    evidence: &[Evidence],
+    aria_invalid: &[dom_engine::Candidate],
+) -> Vec<types::FormValidationIssue> {
+    const MAX_ISSUES: usize = 512;
+    let visible_aria_invalid = aria_invalid
+        .iter()
+        .filter(|candidate| candidate.state.attached && candidate.state.visible)
+        .filter(|candidate| {
+            candidate
+                .attributes
+                .get("aria-invalid")
+                .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+        })
+        .collect::<Vec<_>>();
+    let mut issues = Vec::new();
+
+    for snapshot in evidence.iter().filter_map(|item| match item {
+        Evidence::FormSnapshot { snapshot } => Some(snapshot),
+        _ => None,
+    }) {
+        for control in snapshot
+            .forms
+            .iter()
+            .flat_map(|form| form.controls.iter())
+            .chain(snapshot.unowned_controls.iter())
+        {
+            let aria_rejected = control.accessible_name.as_deref().is_some_and(|name| {
+                visible_aria_invalid
+                    .iter()
+                    .filter_map(|candidate| candidate.name.as_deref())
+                    .any(|candidate_name| candidate_name.eq_ignore_ascii_case(name))
+            });
+            if !control.validity.valid || aria_rejected {
+                let mut validity = control.validity.clone();
+                if aria_rejected && validity.valid {
+                    validity.valid = false;
+                    validity.flags.push(types::FormValidityFlag::CustomError);
+                }
+                issues.push(types::FormValidationIssue {
+                    control_id: control.id.clone(),
+                    control_kind: control.control_kind,
+                    accessible_name: control.accessible_name.clone(),
+                    target: control.target.clone(),
+                    validity,
+                });
+                if issues.len() == MAX_ISSUES {
+                    return issues;
+                }
+            }
+        }
+    }
+
+    for candidate in visible_aria_invalid {
+        let already_described = issues.iter().any(|issue| {
+            issue.control_id == candidate.id
+                || issue.accessible_name.as_deref().is_some_and(|issue_name| {
+                    candidate.name.as_deref().is_some_and(|candidate_name| {
+                        issue_name.eq_ignore_ascii_case(candidate_name)
+                    })
+                })
+        });
+        if already_described {
+            continue;
+        }
+        issues.push(types::FormValidationIssue {
+            control_id: candidate.id.clone(),
+            control_kind: types::FormControlKind::Other,
+            accessible_name: candidate.name.clone(),
+            target: None,
+            validity: types::FormControlValidity {
+                will_validate: false,
+                valid: false,
+                flags: vec![types::FormValidityFlag::CustomError],
+                message: None,
+                described_by: Vec::new(),
+            },
+        });
+        if issues.len() == MAX_ISSUES {
+            break;
+        }
+    }
+
+    issues
+}
+
 #[async_trait]
 impl IntentBrowser for WorkerIntentBrowser<'_> {
     async fn collect_candidates(
@@ -187,7 +273,22 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         self.lease.worker().wait_for(page_id, command).await
     }
 
-    async fn validation_errors_visible(&self, page_id: &PageId) -> Result<bool, CommandError> {
+    async fn inspect_settled_page(&self, page_id: &PageId) -> Result<Vec<Evidence>, CommandError> {
+        self.lease
+            .worker()
+            .inspect(page_id, &types::InspectCommand::default())
+            .await
+    }
+
+    async fn validation_issues(
+        &self,
+        page_id: &PageId,
+    ) -> Result<Vec<types::FormValidationIssue>, CommandError> {
+        let evidence = self
+            .lease
+            .worker()
+            .form_snapshot(page_id, Some(512))
+            .await?;
         let probe = TargetSpec {
             css: Some("[aria-invalid='true']".into()),
             ..TargetSpec::default()
@@ -197,7 +298,7 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
             .worker()
             .collect_candidates(page_id, &probe)
             .await?;
-        Ok(!candidates.is_empty())
+        Ok(settlement_validation_issues(&evidence, &candidates))
     }
 
     async fn capture_screenshot(
@@ -272,6 +373,7 @@ pub struct CommittedDownload {
 struct DownloadDestination {
     root: SecureDownloadRoot,
     filename: String,
+    reported_path: String,
     staging_id: String,
 }
 
@@ -349,6 +451,7 @@ impl DownloadDestination {
         Ok(Self {
             root,
             filename,
+            reported_path: save_as.to_owned(),
             staging_id,
         })
     }
@@ -1168,7 +1271,7 @@ impl AdaptivePageEngine {
                         let mut saved_to: Option<String> = None;
                         let download = match download_destination {
                             Some(destination) => {
-                                saved_to = Some(destination.filename.clone());
+                                saved_to = Some(destination.reported_path.clone());
                                 Some(destination.stage(&bytes).await?)
                             }
                             None => None,
@@ -1749,7 +1852,158 @@ async fn extract_structured(
 
 #[cfg(test)]
 mod tests {
-    use super::{metadata_name, staging_name, truncate_utf8, SecureDownloadRoot, StagingCleanup};
+    use super::{
+        metadata_name, settlement_validation_issues, staging_name, truncate_utf8,
+        SecureDownloadRoot, StagingCleanup,
+    };
+
+    fn form_control() -> types::FormControl {
+        types::FormControl {
+            id: "postal-code".into(),
+            form_id: Some("form-1".into()),
+            group_id: None,
+            target: None,
+            control_kind: types::FormControlKind::Text,
+            accessible_name: Some("Postal code".into()),
+            label: None,
+            description: None,
+            placeholder: None,
+            autocomplete: None,
+            state: types::FormControlState::Empty,
+            constraints: types::FormControlConstraints {
+                required: false,
+                read_only: false,
+                disabled: false,
+                pattern: None,
+                min_length: None,
+                max_length: None,
+                min: None,
+                max: None,
+                step: None,
+                multiple: false,
+                accept: Vec::new(),
+            },
+            validity: types::FormControlValidity {
+                will_validate: true,
+                valid: true,
+                flags: Vec::new(),
+                message: None,
+                described_by: Vec::new(),
+            },
+            options: Vec::new(),
+            supported_operations: vec![types::FormControlOperation::SetText],
+        }
+    }
+
+    fn form_snapshot_evidence(valid: bool, with_control: bool) -> Vec<types::Evidence> {
+        vec![types::Evidence::FormSnapshot {
+            snapshot: types::FormSnapshot {
+                schema_version: types::FORM_SNAPSHOT_SCHEMA_VERSION,
+                page_id: types::PageId::new(),
+                forms: vec![types::FormDescriptor {
+                    id: "form-1".into(),
+                    target: None,
+                    accessible_name: Some("Customer onboarding".into()),
+                    description: None,
+                    groups: Vec::new(),
+                    controls: if with_control {
+                        let mut control = form_control();
+                        control.validity.valid = valid;
+                        if !valid {
+                            control.validity.flags = vec![types::FormValidityFlag::ValueMissing];
+                            control.validity.message = Some("Postal code is required".into());
+                        }
+                        vec![control]
+                    } else {
+                        Vec::new()
+                    },
+                    submit_control_ids: Vec::new(),
+                    reset_control_ids: Vec::new(),
+                    validity: types::FormValidity {
+                        valid,
+                        invalid_control_ids: if valid {
+                            Vec::new()
+                        } else {
+                            vec!["postal-code".into()]
+                        },
+                    },
+                }],
+                unowned_controls: Vec::new(),
+                truncated: false,
+            },
+        }]
+    }
+
+    #[test]
+    fn submit_validation_classifier_returns_only_actionable_invalid_controls() {
+        let mut aria_invalid_attributes = std::collections::BTreeMap::new();
+        aria_invalid_attributes.insert("aria-invalid".into(), "true".into());
+        let aria_invalid = dom_engine::Candidate {
+            id: "postal-code".into(),
+            css: Some("#postal-code".into()),
+            test_id: None,
+            role: Some("textbox".into()),
+            name: Some("Postal code".into()),
+            label: None,
+            text: String::new(),
+            attributes: aria_invalid_attributes,
+            state: dom_engine::CandidateState {
+                attached: true,
+                visible: true,
+                enabled: true,
+            },
+            frame_path: Vec::new(),
+        };
+        let mut healthy_control = form_control();
+        healthy_control.id = "full-name".into();
+        healthy_control.accessible_name = Some("Full name".into());
+        let healthy_candidate = dom_engine::Candidate {
+            id: "full-name".into(),
+            css: Some("#full-name".into()),
+            test_id: None,
+            role: Some("textbox".into()),
+            name: Some("Full name".into()),
+            label: None,
+            text: String::new(),
+            attributes: Default::default(),
+            state: dom_engine::CandidateState {
+                attached: true,
+                visible: true,
+                enabled: true,
+            },
+            frame_path: Vec::new(),
+        };
+        assert!(settlement_validation_issues(&form_snapshot_evidence(true, false), &[]).is_empty());
+        let mut evidence = form_snapshot_evidence(true, true);
+        let types::Evidence::FormSnapshot { snapshot } = &mut evidence[0] else {
+            unreachable!("form snapshot evidence")
+        };
+        snapshot.forms[0].controls.push(healthy_control);
+        let aria_issues =
+            settlement_validation_issues(&evidence, &[aria_invalid.clone(), healthy_candidate]);
+        assert_eq!(aria_issues.len(), 1);
+        assert_eq!(
+            aria_issues[0].accessible_name.as_deref(),
+            Some("Postal code")
+        );
+        assert!(!aria_issues[0].validity.valid);
+        assert_eq!(
+            settlement_validation_issues(&form_snapshot_evidence(false, true), &[]).len(),
+            1
+        );
+        let mut unnamed_aria_invalid = aria_invalid;
+        unnamed_aria_invalid.id = "unnamed-invalid".into();
+        unnamed_aria_invalid.name = None;
+        let unmatched = settlement_validation_issues(&[], &[unnamed_aria_invalid]);
+        assert_eq!(
+            unmatched.len(),
+            1,
+            "a visible aria-invalid control must reject settlement even when the bounded form snapshot cannot describe it"
+        );
+        assert_eq!(unmatched[0].control_id, "unnamed-invalid");
+        assert_eq!(unmatched[0].accessible_name, None);
+        assert!(!unmatched[0].validity.valid);
+    }
 
     #[cfg(unix)]
     #[test]

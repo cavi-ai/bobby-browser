@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -48,6 +49,91 @@ async fn complete_form_fills_fields_in_order_without_submitting() {
     .await;
     assert!(matches!(outcome, IntentOutcome::Completed { .. }));
     assert_eq!(calls.lock().unwrap().type_text.len(), 2);
+}
+
+#[tokio::test]
+async fn complete_form_ignores_incompatible_label_when_control_has_the_same_name() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![
+            candidate("full-name-label", None, "Full name", BTreeMap::new()),
+            textbox("Full name"),
+        ]),
+        calls: Arc::clone(&calls),
+        type_text_evidence: vec![Evidence::Element {
+            selector: String::new(),
+            text: Some("Ada Lovelace".into()),
+        }],
+        upload_evidence: vec![],
+    };
+    let outcome = IntentEngine::execute(
+        &IntentCommand::CompleteForm(CompleteFormIntent {
+            purpose: "complete customer onboarding".into(),
+            fields: vec![CompleteFormField {
+                name: "Full name".into(),
+                purpose: "customer full name".into(),
+                hints: IntentHints::default(),
+                value: ControlAction::SetText {
+                    value: "Ada Lovelace".into(),
+                    clear_first: true,
+                },
+            }],
+        }),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    assert!(matches!(outcome, IntentOutcome::Completed { .. }));
+    assert_eq!(calls.lock().unwrap().type_text.len(), 1);
+}
+
+#[tokio::test]
+async fn complete_form_resolves_conditional_fields_after_their_revealer() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let browser = RevealingFormBrowser {
+        billing_revealed: AtomicBool::new(false),
+        calls: Arc::clone(&calls),
+    };
+    let select = |name: &str, value: &str| CompleteFormField {
+        name: name.into(),
+        purpose: format!("select {name}"),
+        hints: IntentHints::default(),
+        value: ControlAction::SelectOne {
+            value: value.into(),
+        },
+    };
+
+    let outcome = IntentEngine::execute(
+        &IntentCommand::CompleteForm(CompleteFormIntent {
+            purpose: "configure subscription".into(),
+            fields: vec![select("Plan", "growth"), select("Billing cycle", "annual")],
+        }),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    assert!(matches!(outcome, IntentOutcome::Completed { .. }));
+    let log = calls.lock().expect("call log");
+    assert!(matches!(
+        log.control_action.as_slice(),
+        [
+            ControlActionCommand {
+                target: first,
+                action: ControlAction::SelectOne { value: first_value },
+            },
+            ControlActionCommand {
+                target: second,
+                action: ControlAction::SelectOne { value: second_value },
+            },
+        ] if first.accessible_name == "Plan"
+            && first_value == "growth"
+            && second.accessible_name == "Billing cycle"
+            && second_value == "annual"
+    ));
 }
 
 #[derive(Default)]
@@ -152,6 +238,111 @@ impl IntentBrowser for FakeBrowser {
                 operation,
                 target: command.target.clone(),
                 state,
+                validity: FormControlValidity {
+                    will_validate: true,
+                    valid: true,
+                    flags: Vec::new(),
+                    message: None,
+                    described_by: Vec::new(),
+                },
+                node_replaced: false,
+                revealed_controls: Vec::new(),
+            },
+        }])
+    }
+
+    async fn wait_for(
+        &self,
+        _page_id: &PageId,
+        _command: &WaitForCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported("wait_for"))
+    }
+
+    async fn capture_screenshot(
+        &self,
+        _page_id: &PageId,
+        _command: &CaptureScreenshotCommand,
+    ) -> Result<(Vec<u8>, Vec<Evidence>), CommandError> {
+        Err(unsupported("capture_screenshot"))
+    }
+}
+
+struct RevealingFormBrowser {
+    billing_revealed: AtomicBool,
+    calls: Arc<Mutex<CallLog>>,
+}
+
+#[async_trait]
+impl IntentBrowser for RevealingFormBrowser {
+    async fn collect_candidates(
+        &self,
+        _page_id: &PageId,
+        _target: &TargetSpec,
+    ) -> Result<Vec<Candidate>, CommandError> {
+        let mut candidates = vec![combobox("Plan")];
+        if self.billing_revealed.load(Ordering::SeqCst) {
+            candidates.push(combobox("Billing cycle"));
+        }
+        Ok(candidates)
+    }
+
+    async fn click(
+        &self,
+        _page_id: &PageId,
+        _command: &ClickCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported("click"))
+    }
+
+    async fn click_xy(
+        &self,
+        _page_id: &PageId,
+        _x: f64,
+        _y: f64,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported("click_xy"))
+    }
+
+    async fn type_text(
+        &self,
+        _page_id: &PageId,
+        _command: &TypeTextCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported("type_text"))
+    }
+
+    async fn upload_files(
+        &self,
+        _page_id: &PageId,
+        _command: &UploadFilesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported("upload_files"))
+    }
+
+    async fn control_action(
+        &self,
+        _page_id: &PageId,
+        command: &ControlActionCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.calls
+            .lock()
+            .expect("call log")
+            .control_action
+            .push(command.clone());
+        let ControlAction::SelectOne { value } = &command.action else {
+            return Err(unsupported("control_action"));
+        };
+        if command.target.accessible_name == "Plan" && value == "growth" {
+            self.billing_revealed.store(true, Ordering::SeqCst);
+        }
+        Ok(vec![Evidence::ControlAction {
+            action: ControlActionEvidence {
+                operation: FormControlOperation::SelectOne,
+                target: command.target.clone(),
+                state: FormControlState::Selection {
+                    values: vec![value.clone()],
+                },
                 validity: FormControlValidity {
                     will_validate: true,
                     valid: true,

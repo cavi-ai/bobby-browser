@@ -78,6 +78,12 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
+                let evidence_detail = input.evidence_detail.unwrap_or(EvidenceDetail::Compact);
+                let field_names = input
+                    .fields
+                    .iter()
+                    .map(|field| field.name.clone())
+                    .collect::<Vec<_>>();
                 let intent = types::IntentCommand::CompleteForm(types::CompleteFormIntent {
                     purpose: input.purpose,
                     fields: input.fields,
@@ -94,7 +100,11 @@ impl Server {
                     intent,
                 );
                 pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
-                self.submit_envelope(context, envelope).await
+                self.submit_envelope(context, envelope)
+                    .await
+                    .map(|outcome| {
+                        project_complete_form_outcome(outcome, evidence_detail, &field_names)
+                    })
             }
             "intent_submit_and_verify" => {
                 let input: IntentSubmitAndVerifyArgs = match bounded_parse(call.arguments) {
@@ -231,5 +241,150 @@ impl Server {
             _ => unreachable!("dispatch_intents received a tool it does not own"),
         };
         self.finish_tool(id, result).await
+    }
+}
+
+fn project_complete_form_outcome(
+    mut outcome: Value,
+    detail: EvidenceDetail,
+    field_names: &[String],
+) -> Value {
+    if detail == EvidenceDetail::Full || outcome["status"] != "completed" {
+        return outcome;
+    }
+
+    const MAX_SUMMARY_NAMES: usize = 8;
+    let shown = field_names
+        .iter()
+        .take(MAX_SUMMARY_NAMES)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let remainder = field_names.len().saturating_sub(MAX_SUMMARY_NAMES);
+    let suffix = if remainder == 0 {
+        String::new()
+    } else {
+        format!(", +{remainder} more")
+    };
+    let value = format!("filled {} fields: {shown}{suffix}", field_names.len());
+    let revealed_controls = outcome["evidence"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| {
+            item["kind"] == "controlAction"
+                && item["action"]["revealedControls"]
+                    .as_array()
+                    .is_some_and(|controls| !controls.is_empty())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut evidence = vec![json!({
+        "kind": "configuration",
+        "name": "completeForm",
+        "value": value,
+    })];
+    evidence.extend(revealed_controls);
+    outcome["evidence"] = Value::Array(evidence);
+    outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_complete_form_outcome_keeps_result_identity_and_summarizes_evidence() {
+        let raw = json!({
+            "status": "completed",
+            "commandId": "018f0000-0000-7000-8000-000000000001",
+            "evidence": [
+                {"kind":"configuration","name":"completeFormField","value":"email"},
+                {"kind":"resolution","target":{},"fingerprint":{},"candidates":[],"bestMatchAuthorized":false},
+                {"kind":"controlAction","action":{}},
+                {"kind":"intentExecution","record":{}}
+            ]
+        });
+
+        let compact = project_complete_form_outcome(
+            raw,
+            EvidenceDetail::Compact,
+            &["email".into(), "country".into()],
+        );
+
+        assert_eq!(compact["status"], "completed");
+        assert_eq!(compact["commandId"], "018f0000-0000-7000-8000-000000000001");
+        assert_eq!(
+            compact["evidence"],
+            json!([{
+                "kind":"configuration",
+                "name":"completeForm",
+                "value":"filled 2 fields: email, country"
+            }])
+        );
+    }
+
+    #[test]
+    fn compact_complete_form_outcome_preserves_revealed_conditional_controls() {
+        let raw = json!({
+            "status": "completed",
+            "commandId": "018f0000-0000-7000-8000-000000000004",
+            "evidence": [
+                {
+                    "kind":"controlAction",
+                    "action":{
+                        "operation":"selectOne",
+                        "target":{"role":"combobox","accessibleName":"Plan","ordinal":null,"framePath":[],"shadowPath":[]},
+                        "state":{"kind":"selection","values":["business"]},
+                        "validity":{"willValidate":true,"valid":true,"flags":[],"message":null,"describedBy":[]},
+                        "nodeReplaced":false,
+                        "revealedControls":[{
+                            "controlKind":"text",
+                            "accessibleName":"Company name",
+                            "target":{"role":"textbox","accessibleName":"Company name","ordinal":null,"framePath":[],"shadowPath":[]}
+                        }]
+                    }
+                }
+            ]
+        });
+
+        let compact = project_complete_form_outcome(raw, EvidenceDetail::Compact, &["plan".into()]);
+
+        assert_eq!(compact["evidence"].as_array().expect("evidence").len(), 2);
+        assert_eq!(compact["evidence"][0]["name"], "completeForm");
+        assert_eq!(compact["evidence"][1]["kind"], "controlAction");
+        assert_eq!(
+            compact["evidence"][1]["action"]["revealedControls"][0]["accessibleName"],
+            "Company name"
+        );
+    }
+
+    #[test]
+    fn compact_complete_form_outcome_preserves_failure_evidence_for_repair() {
+        let raw = json!({
+            "status": "failed",
+            "commandId": "018f0000-0000-7000-8000-000000000002",
+            "error": {"code":"targetNotFound"},
+            "evidence": [{"kind":"configuration","name":"completeFormField","value":"email"}]
+        });
+
+        assert_eq!(
+            project_complete_form_outcome(raw.clone(), EvidenceDetail::Compact, &["email".into()]),
+            raw
+        );
+    }
+
+    #[test]
+    fn full_complete_form_outcome_preserves_all_success_evidence() {
+        let raw = json!({
+            "status": "completed",
+            "commandId": "018f0000-0000-7000-8000-000000000003",
+            "evidence": [{"kind":"intentExecution","record":{}}]
+        });
+
+        assert_eq!(
+            project_complete_form_outcome(raw.clone(), EvidenceDetail::Full, &["email".into()]),
+            raw
+        );
     }
 }

@@ -161,6 +161,23 @@ at the first failure and retains evidence for fields already attempted
 (including a `completeFormField` configuration evidence entry per field name).
 It never submits — use `submitAndVerify` (Boundary) afterward.
 
+Resolution is just-in-time, so the list may include conditional fields that do
+not exist when the form is first observed. Put each conditional field after the
+field that reveals it; the engine resolves it against the updated page state
+without requiring a second `completeForm` call.
+
+`name` is the stable audit label for field evidence and, when `hints` is
+empty, the exact accessible-name fallback. Explicit `hints` from
+`form_snapshot` (normally `role` and `accessibleName`) override that fallback.
+
+The named MCP tool defaults `evidenceDetail` to `compact` on success and
+returns one filled-field summary. Full per-field evidence remains in runtime
+events; pass `evidenceDetail: "full"` when diagnosing. Failures always retain
+their detailed evidence so the caller can repair only the remaining fields.
+Compact success evidence also retains any `revealedControls` created by a
+conditional selection, including semantic targets that can be used without a
+new form snapshot.
+
 Constraints (compile / SDK reject before dispatch):
 
 - `fields` non-empty, at most 128
@@ -218,6 +235,24 @@ await client.submit(
   { idempotencyKey: crypto.randomUUID() },
 );
 ```
+
+With no hints, submit targeting defaults to the exact button named by
+`purpose`, avoiding ancestor-text ambiguity. Explicit button hints from the
+current snapshot remain authoritative.
+
+When the confirmation copy or redirect is known, use a `text` or `url`
+`expectedState` to prove that exact success state. When it is not known, use a
+`networkQuiet` expected state. After the exactly-once boundary click settles,
+the same call returns bounded `inspection` evidence and a
+`submitSettlement` outcome:
+
+- `settled` — the page settled with no visible `aria-invalid` controls
+- `validationRejected` — correct the fields in compact `formValidation`
+  evidence; each issue carries the control id, kind, accessible name, semantic
+  target, and browser validity, but never its value or the rest of the form
+  snapshot; do not blindly resubmit
+
+No follow-up inspect is needed for the network-quiet path.
 
 ### WaitForState (Replayable)
 

@@ -123,10 +123,20 @@ pub fn compile_intent(command: &IntentCommand) -> Result<IntentPlan, CompileErro
                     return Err(CompileError::DuplicateFieldName(field.name.clone()));
                 }
                 let purpose = validate_purpose(&field.purpose)?;
+                let fallback_hints;
+                let hints = if targeting_hints_are_empty(&field.hints) {
+                    fallback_hints = IntentHints {
+                        accessible_name: Some(field.name.trim().to_owned()),
+                        ..IntentHints::default()
+                    };
+                    &fallback_hints
+                } else {
+                    &field.hints
+                };
                 fields.push(CompleteFormFieldPlan {
                     name: field.name.clone(),
                     purpose: purpose.into(),
-                    target: compile_target(purpose, &field.hints)?,
+                    target: compile_target(purpose, hints)?,
                     value: field.value.clone(),
                 });
             }
@@ -134,8 +144,19 @@ pub fn compile_intent(command: &IntentCommand) -> Result<IntentPlan, CompileErro
         }
         IntentCommand::SubmitAndVerify(intent) => {
             let purpose = validate_purpose(&intent.purpose)?;
+            let fallback_hints;
+            let hints = if targeting_hints_are_empty(&intent.hints) {
+                fallback_hints = IntentHints {
+                    role: Some("button".into()),
+                    accessible_name: Some(purpose.to_owned()),
+                    ..IntentHints::default()
+                };
+                &fallback_hints
+            } else {
+                &intent.hints
+            };
             Ok(IntentPlan::SubmitAndVerify {
-                target: compile_target(purpose, &intent.hints)?,
+                target: compile_target(purpose, hints)?,
                 expected_state: intent.expected_state.clone(),
             })
         }
@@ -245,7 +266,7 @@ fn compile_target_with_purpose_fallback(
     };
 
     match &name_hint {
-        Some(TextMatch::Exact(name)) if hints.role.is_some() => {
+        Some(TextMatch::Exact(name)) => {
             target.accessible_name = Some(name.clone());
         }
         Some(matcher) => {
@@ -264,4 +285,14 @@ fn compile_target_with_purpose_fallback(
     }
 
     Ok(target)
+}
+
+fn targeting_hints_are_empty(hints: &IntentHints) -> bool {
+    hints.role.is_none()
+        && hints.near_text.is_none()
+        && hints.accessible_name.is_none()
+        && hints.ordinal.is_none()
+        && hints.frame_path.is_empty()
+        && hints.shadow_path.is_empty()
+        && !hints.allow_best_match
 }

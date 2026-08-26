@@ -80,6 +80,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                 "maxNodes": {"type":"integer","minimum":1,"maximum":2048},
                 "includeForms": {"type":"boolean"},
                 "maxControls": {"type":"integer","minimum":1,"maximum":512},
+                "evidenceDetail":{"type":"string","enum":["compact","full"]},
                 "target": {"type":"object","description":"Scope the observation to one region's subtree (same shape as a11y_snapshot.target) instead of the whole page"}
             }),
             vec!["workflowHandle"],
@@ -392,7 +393,8 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         ),
         "intent_complete_form" => (
             intent_properties(json!({
-                "fields":nonempty_array(json!({"$ref":"#/$defs/CompleteFormField"}), MAX_COLLECTION_ITEMS)
+                "fields":nonempty_array(json!({"$ref":"#/$defs/CompleteFormField"}), MAX_COLLECTION_ITEMS),
+                "evidenceDetail":{"type":"string","enum":["compact","full"]}
             })),
             intent_required(&["purpose", "fields"]),
         ),
@@ -572,6 +574,19 @@ pub(crate) fn advertised_tool_schema_for_capabilities(
         }
     }
     schema
+}
+
+pub(crate) fn apply_runtime_tool_limits(name: &str, schema: &mut Value, max_download_bytes: usize) {
+    if name != "download_url" {
+        return;
+    }
+    let maximum = json!(max_download_bytes);
+    schema["properties"]["maxBytes"]["maximum"] = maximum.clone();
+    if let Some(branches) = schema.get_mut("oneOf").and_then(Value::as_array_mut) {
+        for branch in branches {
+            branch["properties"]["maxBytes"]["maximum"] = maximum.clone();
+        }
+    }
 }
 
 /// Adds the handle alternative only to the advertised schema. The dispatcher
@@ -1440,6 +1455,7 @@ fn definitions() -> Value {
         "FormControlTarget": form_control_target(),
         "FormControlState": {"oneOf": form_control_state_variants()},
         "FormControlValidity": form_control_validity(),
+        "FormValidationIssue": form_validation_issue(),
         "FormOption": form_option()
     })
 }
@@ -2117,6 +2133,11 @@ fn evidence_variants() -> Vec<Value> {
             &["selector", "url", "title", "text", "html"],
         ),
         tagged_fields(
+            "submitSettlement",
+            json!({"outcome":{"type":"string","enum":["settled","validationRejected"]}}),
+            &["outcome"],
+        ),
+        tagged_fields(
             "element",
             json!({"selector":string(0,MAX_STRING_BYTES),"text":nullable(string(0,MAX_STRING_BYTES))}),
             &["selector", "text"],
@@ -2143,7 +2164,7 @@ fn evidence_variants() -> Vec<Value> {
         ),
         tagged_fields(
             "download",
-            json!({"filename":string(1,MAX_STRING_BYTES),"path":string(1,MAX_STRING_BYTES),"bytes":{"type":"integer","minimum":0},"sha256":sha256()}),
+            json!({"filename":string(1,MAX_STRING_BYTES),"path":string(1,MAX_STRING_BYTES),"bytes":{"type":"integer","minimum":0},"sha256":sha256(),"savedTo":string(1,4096)}),
             &["filename", "path", "bytes", "sha256"],
         ),
         tagged_fields(
@@ -2212,6 +2233,11 @@ fn evidence_variants() -> Vec<Value> {
             "formSnapshot",
             json!({"snapshot":any_value()}),
             &["snapshot"],
+        ),
+        tagged_fields(
+            "formValidation",
+            json!({"issues":array(json!({"$ref":"#/$defs/FormValidationIssue"}), 512)}),
+            &["issues"],
         ),
         tagged_fields("controlAction", json!({"action":any_value()}), &["action"]),
         tagged_fields(
@@ -2687,6 +2713,30 @@ fn form_control() -> Value {
             "validity",
             "options",
             "supportedOperations",
+        ],
+    )
+}
+
+/// Must match `types::FormValidationIssue`.
+fn form_validation_issue() -> Value {
+    object(
+        json!({
+            "controlId":string(1, 128),
+            "controlKind":{"type":"string","enum":[
+                "text","email","password","search","number","checkbox","radio","switch",
+                "selectOne","selectMultiple","date","time","dateTimeLocal","range","file",
+                "contentEditable","combobox","listbox","submit","reset","other"
+            ]},
+            "accessibleName":nullable(string(0, 2048)),
+            "target":nullable(json!({"$ref":"#/$defs/FormControlTarget"})),
+            "validity":{"$ref":"#/$defs/FormControlValidity"}
+        }),
+        &[
+            "controlId",
+            "controlKind",
+            "accessibleName",
+            "target",
+            "validity",
         ],
     )
 }

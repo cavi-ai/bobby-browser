@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+### Added
+
+- `intent_submit_and_verify` with a `networkQuiet` postcondition returns a
+  `submitSettlement` classification and value-free `formValidation` repair
+  evidence, so callers can distinguish a settled submission from client-side
+  rejection without repeating the boundary click.
+- The agent benchmark records separate Bobby, host, discovery, bookkeeping,
+  and shell call counts together with reproducibility fingerprints for the
+  source tree, task set, runner set, binary, CLI, and requested model.
+
+### Changed
+
+- The default MCP `explore` phase includes `intent_complete_form` and
+  `intent_submit_and_verify`. Initialization guidance tells deferred-schema
+  clients to load those tools with `workflow_start` and `workflow_observe` for
+  the standard form loop.
+- Successful `intent_complete_form` responses default to compact evidence;
+  pass `evidenceDetail: "full"` to retain the complete per-field success
+  evidence. Failure evidence and newly revealed conditional controls remain
+  available in compact mode.
+- Download `savedTo` evidence echoes the exact caller-supplied destination
+  after downloads-root policy validation. An invalid `maxBytes` request is now
+  rejected as `invalidRequest` with the configured range.
+- The agent benchmark gate requires a complete, internally consistent latest
+  batch and rejects missing or mismatched transcript-derived model identity.
+
+### Fixed
+
+- `completeForm` resolves every ordered field against current page state, so a
+  field placed after its revealer can be completed in the same intent.
+- A visible `aria-invalid="true"` control rejects network-quiet settlement even
+  when its accessible name is absent or it falls outside the bounded form
+  snapshot; the exactly-once submit is never misreported as settled.
+
 ## 0.11.1 - 2026-08-22
 
 ### Fixed

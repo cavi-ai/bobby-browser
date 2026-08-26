@@ -705,7 +705,7 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
     let evidence_variants = recover_schema["$defs"]["Evidence"]["oneOf"]
         .as_array()
         .unwrap();
-    assert_eq!(evidence_variants.len(), 28, "{evidence_variants:?}");
+    assert_eq!(evidence_variants.len(), 30, "{evidence_variants:?}");
     let evidence_kinds = evidence_variants
         .iter()
         .map(|variant| variant["properties"]["kind"]["const"].as_str().unwrap())
@@ -719,11 +719,19 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
         "{evidence_kinds:?}"
     );
     assert!(
+        evidence_kinds.contains(&"formValidation"),
+        "{evidence_kinds:?}"
+    );
+    assert!(
         evidence_kinds.contains(&"controlAction"),
         "{evidence_kinds:?}"
     );
     assert!(evidence_kinds.contains(&"emulation"), "{evidence_kinds:?}");
     assert!(evidence_kinds.contains(&"extraction"), "{evidence_kinds:?}");
+    assert!(
+        evidence_kinds.contains(&"submitSettlement"),
+        "{evidence_kinds:?}"
+    );
 
     assert_eq!(
         checkpoint_schema["inputSchema"]["$defs"]["WorkflowCheckpoint"]["properties"]["evidence"]
@@ -3466,10 +3474,23 @@ async fn initialize_carries_agent_instructions() {
         "instructions too long: {}",
         instructions.len()
     );
-    assert!(instructions.contains("toolset_select"), "{instructions}");
     assert!(instructions.contains("error.repair"), "{instructions}");
     assert!(instructions.contains("autoCheckpoint"), "{instructions}");
-    assert!(instructions.contains("workflow_start"), "{instructions}");
+    for tool in [
+        "workflow_start",
+        "workflow_observe",
+        "intent_complete_form",
+        "intent_submit_and_verify",
+    ] {
+        assert!(
+            instructions.contains(tool),
+            "initialize instructions must advertise the complete standard form loop together: missing {tool}: {instructions}"
+        );
+    }
+    assert!(
+        instructions.contains("load") && instructions.contains("together"),
+        "deferred-schema hosts need one-round loading guidance: {instructions}"
+    );
 }
 
 #[tokio::test]

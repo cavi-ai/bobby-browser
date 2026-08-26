@@ -63,6 +63,8 @@ pub(crate) struct WorkflowObserveArgs {
     pub(crate) include_forms: bool,
     #[serde(default)]
     pub(crate) max_controls: Option<u32>,
+    #[serde(default)]
+    pub(crate) evidence_detail: Option<EvidenceDetail>,
     /// Scope the observation to one region's subtree (same shape as
     /// `a11y_snapshot.target`) instead of the whole page's chrome.
     #[serde(default)]
@@ -216,9 +218,17 @@ intent_args!(IntentFillArgs {
     value: types::ControlAction,
 });
 
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum EvidenceDetail {
+    Compact,
+    Full,
+}
+
 intent_args!(IntentCompleteFormArgs {
     purpose: String,
     fields: Vec<types::CompleteFormField>,
+    evidence_detail: Option<EvidenceDetail>,
 });
 
 intent_args!(IntentSubmitAndVerifyArgs {

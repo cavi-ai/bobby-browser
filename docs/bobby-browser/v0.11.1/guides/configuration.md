@@ -86,11 +86,11 @@ bytes already paid for. Starting narrow can:
 
 | Phase | `tools/list` |
 |---|---|
-| `full` | ~124 KB |
-| `explore` | ~63 KB |
-| `verify` | ~40 KB |
-| `act` | ~67 KB |
-| `intent` | ~72 KB |
+| `full` | ~127 KB |
+| `explore` | ~76 KB |
+| `verify` | ~41 KB |
+| `act` | ~69 KB |
+| `intent` | ~74 KB |
 
 Narrowing changes only what is *advertised*. Hidden tools stay callable, and
 every phase keeps session/page lifecycle plus `toolset_select`, so an agent
@@ -107,6 +107,9 @@ startup_toolset = "intent"
 Controls egress from the runtime (downloads, fetches), not the broker listen
 socket: `allow_loopback`, `allow_private_network`, redirect/body/timeout caps,
 `max_concurrent_requests`. Defaults deny private/loopback egress.
+`max_download_bytes` defaults to `67108864` (64 MiB) and is projected into the
+MCP `download_url.maxBytes` schema at startup, so clients can select a valid
+bound without probing the policy.
 
 ## `[vision]`
 

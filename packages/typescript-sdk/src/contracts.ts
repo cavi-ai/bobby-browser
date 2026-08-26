@@ -103,12 +103,13 @@ export type Evidence =
   | { kind: "executionPath"; path: ExecutionPath; reason: ExecutionReason; stateVersion: number; elapsedMs: number; bytes: number | null; sha256: string | null; finalUrl?: string; contentType?: string; status?: number; redirectChain?: string[] }
   | { kind: "navigation"; url: string; title: string }
   | { kind: "inspection"; selector: string | null; url: string; title: string; text: string; html: string | null }
+  | { kind: "submitSettlement"; outcome: "settled" | "validationRejected" }
   | { kind: "element"; selector: string; text: string | null }
   | { kind: "upload"; selector: string; paths: string[] }
   | { kind: "page"; pageId: Id; url: string; title: string }
   | { kind: "pages"; pages: PageEvidence[] }
   | { kind: "popup"; openerPageId: Id; pageId: Id; url: string; title: string }
-  | { kind: "download"; filename: string; path: string; bytes: number; sha256: string }
+  | { kind: "download"; filename: string; path: string; bytes: number; sha256: string; savedTo?: string }
   | { kind: "configuration"; name: string; value: string }
   | { kind: "resolution"; target: TargetSpec; fingerprint: TargetFingerprint; candidates: CandidateEvidence[]; bestMatchAuthorized: boolean }
   | { kind: "wait"; condition: WaitCondition; elapsedMs: number; observations: number; excludedClasses?: string[] }
@@ -117,6 +118,7 @@ export type Evidence =
   | { kind: "javaScriptResult"; value: JsonValue; truncated: boolean }
   | { kind: "accessibilitySnapshot"; pageId: Id; nodes: AccessibilityNode[]; truncated: boolean }
   | { kind: "formSnapshot"; snapshot: FormSnapshot }
+  | { kind: "formValidation"; issues: FormValidationIssue[] }
   | { kind: "controlAction"; action: ControlActionEvidence }
   | { kind: "intentExecution"; record: ExecutionRecord }
   | { kind: "humanization"; engine: string; actions: number; synthesizedMs: number }
@@ -179,6 +181,7 @@ export interface FormControlTarget { role: string; accessibleName: string; ordin
 export type FormControlState = { kind: "empty" } | { kind: "text"; value: string } | { kind: "redacted"; present: boolean } | { kind: "checked"; checked: boolean } | { kind: "selection"; values: string[] } | { kind: "files"; count: number };
 export interface FormControlConstraints { required: boolean; readOnly: boolean; disabled: boolean; pattern: string | null; minLength: number | null; maxLength: number | null; min: string | null; max: string | null; step: string | null; multiple: boolean; accept: string[]; }
 export interface FormControlValidity { willValidate: boolean; valid: boolean; flags: FormValidityFlag[]; message: string | null; describedBy: string[]; }
+export interface FormValidationIssue { controlId: string; controlKind: FormControlKind; accessibleName: string | null; target: FormControlTarget | null; validity: FormControlValidity; }
 export interface FormOption { value: string; label: string; disabled: boolean; selected: boolean; groupLabel: string | null; }
 export interface FormControl { id: string; formId: string | null; groupId: string | null; target: FormControlTarget | null; controlKind: FormControlKind; accessibleName: string | null; label: string | null; description: string | null; placeholder: string | null; autocomplete: string | null; state: FormControlState; constraints: FormControlConstraints; validity: FormControlValidity; options: FormOption[]; supportedOperations: FormControlOperation[]; }
 export interface FormGroup { id: string; label: string | null; description: string | null; controlIds: string[]; }
@@ -200,7 +203,8 @@ export type ControlAction =
   | { kind: "clear" }
   | { kind: "activate" };
 export interface ControlActionCommand { target: FormControlTarget; action: ControlAction; }
-export interface ControlActionEvidence { operation: FormControlOperation; target: FormControlTarget; state: FormControlState; validity: FormControlValidity; nodeReplaced: boolean; }
+export interface RevealedControl { controlKind: FormControlKind; accessibleName?: string; target?: FormControlTarget; }
+export interface ControlActionEvidence { operation: FormControlOperation; target: FormControlTarget; state: FormControlState; validity: FormControlValidity; nodeReplaced: boolean; revealedControls?: RevealedControl[]; }
 export interface ClickAndWaitForPopupCommand { selector: string; target: TargetSpec | null; timeoutMs: number; }
 export interface ClickAndWaitForDownloadCommand { selector: string; target: TargetSpec | null; timeoutMs: number; }
 export interface WaitForCommand { condition: WaitCondition; timeoutMs: number; }

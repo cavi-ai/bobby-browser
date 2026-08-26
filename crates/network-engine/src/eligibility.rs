@@ -46,8 +46,8 @@ impl EligibilityPolicy {
                 if download.max_bytes == 0
                     || download.max_bytes > self.network.max_download_bytes as u64
                 {
-                    return EligibilityDecision::Denied(policy_error(
-                        "download byte limit is outside the configured range",
+                    return EligibilityDecision::Denied(download_limit_error(
+                        self.network.max_download_bytes,
                     ));
                 }
 
@@ -87,6 +87,15 @@ pub(crate) fn policy_error(message: impl Into<String>) -> CommandError {
     CommandError {
         code: ErrorCode::NetworkPolicyDenied,
         message: message.into(),
+        layer: ErrorLayer::Network,
+        retryable: false,
+    }
+}
+
+pub(crate) fn download_limit_error(max_download_bytes: usize) -> CommandError {
+    CommandError {
+        code: ErrorCode::InvalidRequest,
+        message: format!("maxBytes must be between 1 and {max_download_bytes} for this runtime"),
         layer: ErrorLayer::Network,
         retryable: false,
     }

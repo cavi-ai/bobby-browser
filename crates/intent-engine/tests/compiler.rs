@@ -2,7 +2,8 @@ use intent_engine::{compile_intent, CompileError, IntentPlan};
 use types::{
     CompleteFormField, CompleteFormIntent, ControlAction, DismissObstructionIntent, ExtractField,
     ExtractIntent, ExtractValueKind, FillIntent, FollowIntent, IntentCommand, IntentHints,
-    LocateIntent, TextMatch, WaitCondition, WaitForCommand, WaitForStateIntent, WaitUntil,
+    LocateIntent, SubmitAndVerifyIntent, TextMatch, WaitCondition, WaitForCommand,
+    WaitForStateIntent, WaitUntil,
 };
 
 #[test]
@@ -46,6 +47,59 @@ fn compile_complete_form_preserves_order_and_rejects_duplicate_names() {
     }))
     .unwrap_err();
     assert!(matches!(error, CompileError::DuplicateFieldName(name) if name == "name"));
+}
+
+#[test]
+fn compile_complete_form_uses_field_name_when_target_hints_are_empty() {
+    let plan = compile_intent(&IntentCommand::CompleteForm(CompleteFormIntent {
+        purpose: "complete customer onboarding".into(),
+        fields: vec![CompleteFormField {
+            name: "Full name".into(),
+            purpose: "customer full name".into(),
+            hints: IntentHints::default(),
+            value: ControlAction::SetText {
+                value: "Ada Lovelace".into(),
+                clear_first: true,
+            },
+        }],
+    }))
+    .expect("compile");
+    let IntentPlan::CompleteForm { fields } = plan else {
+        panic!("expected complete form")
+    };
+
+    assert_eq!(
+        fields[0].target.accessible_name.as_deref(),
+        Some("Full name")
+    );
+    assert_eq!(fields[0].target.text, None);
+}
+
+#[test]
+fn compile_submit_without_hints_targets_the_exact_button_name() {
+    let expected_state = WaitForCommand {
+        condition: WaitCondition::NetworkQuiet {
+            idle_ms: 250,
+            max_in_flight: 0,
+            ignore_url_substrings: Vec::new(),
+            ignore_resource_types: Vec::new(),
+            ignore_long_lived: true,
+        },
+        timeout_ms: 5_000,
+    };
+    let plan = compile_intent(&IntentCommand::SubmitAndVerify(SubmitAndVerifyIntent {
+        purpose: "Create customer".into(),
+        hints: IntentHints::default(),
+        expected_state,
+    }))
+    .expect("compile");
+    let IntentPlan::SubmitAndVerify { target, .. } = plan else {
+        panic!("expected submit and verify")
+    };
+
+    assert_eq!(target.role.as_deref(), Some("button"));
+    assert_eq!(target.accessible_name.as_deref(), Some("Create customer"));
+    assert_eq!(target.text, None);
 }
 
 #[test]

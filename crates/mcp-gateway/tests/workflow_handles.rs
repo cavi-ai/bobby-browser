@@ -125,6 +125,10 @@ async fn download_url_save_as_materializes_through_the_mcp_boundary() {
         "{response}"
     );
     assert_eq!(
+        response["result"]["structuredContent"]["evidence"][0]["savedTo"], "report.csv",
+        "relative saveAs must remain relative at the MCP boundary"
+    );
+    assert_eq!(
         tokio::fs::read(live.downloads_dir.join("report.csv"))
             .await
             .expect("saveAs output exists"),

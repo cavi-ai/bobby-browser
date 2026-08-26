@@ -1,6 +1,7 @@
 SHELL := /bin/bash
 REPO_ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 SERVICE := $(REPO_ROOT)scripts/dev/service.sh
+AGENT_EVAL_MODEL ?= claude-opus-5
 
 .DEFAULT_GOAL := help
 
@@ -165,7 +166,7 @@ behavioral-e2e:
 agent-eval:
 	cargo build -p bobby-browser -p mcp-gateway -p gauntlet-server
 	pnpm --filter @cavi-ai/bobby-gauntlet build
-	BOBBY_MCP_COMMAND=$(REPO_ROOT)target/debug/bobby pnpm --dir benchmarks/competitor-gauntlet run run -- --tool bobby --timebox-seconds 300
+	BOBBY_MCP_COMMAND=$(REPO_ROOT)target/debug/bobby pnpm --dir benchmarks/competitor-gauntlet run run -- --tool bobby --timebox-seconds 300 --model $(AGENT_EVAL_MODEL)
 	pnpm --dir benchmarks/competitor-gauntlet run score check
 
 behavioral-dogfood:

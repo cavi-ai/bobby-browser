@@ -285,6 +285,35 @@ async fn create_session_page(server: &Server) -> (SessionId, PageId) {
     (session_id, page_id)
 }
 
+#[tokio::test]
+async fn download_tool_advertises_the_runtime_configured_byte_limit() {
+    let (server, _root) = fixture().await;
+    let listed = server
+        .handle_message(request(2, "tools/list", json!({})))
+        .await
+        .expect("tools/list response");
+    let download = listed["result"]["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .find(|tool| tool["name"] == "download_url")
+        .expect("download_url is advertised");
+
+    for branch in download["inputSchema"]["oneOf"]
+        .as_array()
+        .expect("workflow scope branches")
+    {
+        assert_eq!(branch["properties"]["maxBytes"]["maximum"], 4096);
+    }
+    assert!(
+        download["description"]
+            .as_str()
+            .expect("description")
+            .contains("advertised maximum"),
+        "description must direct agents to the configured schema limit: {download}"
+    );
+}
+
 async fn create_session(server: &Server) -> SessionId {
     let session = server
         .handle_message(request(

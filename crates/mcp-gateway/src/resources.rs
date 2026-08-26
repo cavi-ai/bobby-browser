@@ -95,6 +95,10 @@ impl ArtifactResources {
         resources
     }
 
+    pub(crate) fn max_download_bytes(&self) -> usize {
+        self.max_download_bytes
+    }
+
     async fn register_trusted(
         &self,
         session_id: SessionId,

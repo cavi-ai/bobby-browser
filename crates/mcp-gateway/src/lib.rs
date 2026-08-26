@@ -30,10 +30,12 @@ mod workflow_handles;
 ///
 /// Kept under ~500 characters so it does not push connect payloads.
 pub const INITIALIZE_INSTRUCTIONS: &str = "\
-Start with workflow_start using profile \"default\" and an optional url, then \
-call workflow_observe. Startup tools/list is explore; call toolset_select \
-(act|intent|verify|full) and re-read tools/list for broader tools. Failures \
-carry error.repair {action,doc} — follow action. Boundary intents default \
+Start with workflow_start, then workflow_observe. If schemas are deferred, load \
+workflow_start, \
+workflow_observe, intent_complete_form, and intent_submit_and_verify together; \
+all are in startup explore. Complete-form fields resolve just-in-time, so include \
+conditional fields after their revealer even if initially absent. Failures carry \
+error.repair {action,doc} — follow action. Boundary intents default \
 autoCheckpoint true. Stuck: bobby://failure-taxonomy, bobby://job-handlers.";
 
 #[doc(hidden)]

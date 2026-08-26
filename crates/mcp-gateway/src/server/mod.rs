@@ -32,7 +32,7 @@ use crate::protocol::{
 use crate::resources::{static_resource_body, static_resources};
 use crate::schema::{
     advertised_tool_output_schema, advertised_tool_schema_for_capabilities,
-    validate_tool_arguments, MAX_RECOVERABLE_WORKFLOWS,
+    apply_runtime_tool_limits, validate_tool_arguments, MAX_RECOVERABLE_WORKFLOWS,
 };
 use crate::tool_args::*;
 use crate::tool_meta::{required_capabilities, required_operation, tool_description};
@@ -644,7 +644,12 @@ impl Server {
                 .iter()
                 .all(|capability| capabilities.contains(*capability))
             {
-                let input_schema = advertised_tool_schema_for_capabilities(name, &capabilities);
+                let mut input_schema = advertised_tool_schema_for_capabilities(name, &capabilities);
+                apply_runtime_tool_limits(
+                    name,
+                    &mut input_schema,
+                    self.resources.max_download_bytes(),
+                );
                 tools.push(json!({
                     "name": name,
                     "title": tool_title(name),

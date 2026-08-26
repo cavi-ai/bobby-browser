@@ -151,7 +151,7 @@ pub(crate) fn tool_description(name: &str) -> &'static str {
         "session_list" => "List browser sessions visible to this principal, each with its profile and open-page count. Requires session:read.",
         "page_list" => "List open pages in an owned session, each with its id, URL, and title. Requires browser:mutate.",
         "inspect" => "Read a page's visible text, optionally scoped to one element by selector or target (a scoped control returns its value), with HTML on request. Whole-page reads do not include form field values -- use form_snapshot for those. Requires browser:mutate.",
-        "a11y_snapshot" => "Capture a compact accessibility tree for a page, capped at 2048 nodes, with command-ready targets on actionable nodes. Pass target to scope the tree to one form or dialog instead of re-reading the whole page. Descends one level into same-process iframes; in-frame targets carry their frame hop. Links carry their url. Requires browser:mutate.",
+        "a11y_snapshot" => "Capture a compact accessibility tree with command-ready targets, capped at 2048 nodes. Pass target to scope it to one form or dialog. Same-process iframe targets include their frame hop; use the in-frame target directly. Links include their URL. Requires browser:mutate.",
         "form_snapshot" => "Read a bounded, engine-neutral inventory of a page's form controls with each control's current state: text values, checked, selection, file count (passwords redacted, no selectors). Requires page:read. Use it to verify what a fill or submit actually landed.",
         "screenshot" => "Capture a screenshot artifact of a page's viewport, full page, or one element. Requires browser:mutate.",
         "events_read" => "Read retained events after a cursor. Requires session:read. It blocks until a newer event or deadline; notifications/bobby/event pushes the same frames. On failure, resume from the last cursor.",
@@ -160,7 +160,7 @@ pub(crate) fn tool_description(name: &str) -> &'static str {
         "checkpoint_save" => "Persist a verified checkpoint from evidenceRefs. Requires recovery:write. Save before Boundary commands with pinned boundary IDs. On failure, confirm each referenced command completed.",
         "workflow_recover" => "Recover from the last verified checkpoint. Requires recovery:write. Returns resume, restart, or reconciliation evidence. On failure with notFound, verify session ownership with session_list.",
         "workflow_start" => "Create and bind a browser session, page, and retained workflow, optionally navigating to url. This is the canonical first browser call. Requires session:read, session:write, page:write. On failure, inspect session_list.",
-        "workflow_observe" => "Observe retained or live accessibility evidence. Requires browser:mutate; forms require page:read. Pass target to observe one region instead of the whole page.",
+        "workflow_observe" => "Observe retained or live accessibility evidence. Requires browser:mutate; forms require page:read. Pass target role=main to omit repeated site chrome. Live observations default evidenceDetail=compact; pass full for diagnostics.",
         "session_create" => "Create a browser session with a profile, optional proxy, and execution policy. Requires session:write. Produces the session's id and initial state. On failure with resourceExhausted, this principal already holds its session limit -- close an idle one first.",
         "session_close" => "Close a session and release its pages, workers, and artifacts. Requires session:write. Destructive: in-flight commands on the session are cancelled. On failure, the session may already be closed -- confirm with session_list.",
         "page_open" => "Open a page, optionally navigating it. Requires page:write and browser:mutate when URL is set. Returns page and navigation state. On failure with notFound, check session_list.",
@@ -178,14 +178,14 @@ pub(crate) fn tool_description(name: &str) -> &'static str {
         "cookie_set" => "Store cookies on a page's jar. Requires browser:mutate. Produces the updated cookie-jar state. On failure with invalidRequest, more than 128 cookies were passed in one call -- split into batches of 128 or fewer.",
         "cookie_delete" => "Delete cookies from a page's jar by origin and optionally by name. Requires browser:mutate. Destructive: matching cookies are removed immediately. On failure with notFound, the page id is stale -- call page_list for current ids.",
         "extract_structured" => "Extract schema-shaped JSON from a page via the configured vision provider. Requires browser:mutate and vision:assist. Produces structured-extraction evidence with the schema-shaped value. On failure with visionAssistDenied, the session's vision policy or provider isn't enabled -- read the page with inspect or a11y_snapshot instead.",
-        "download_url" => "Download a URL as a digest-verified artifact within maxBytes. Requires browser:mutate and file:download. Optional saveAs atomically creates a non-existing file directly below the configured downloads root; outside paths and overwrites fail before fetching; savedTo names the landed file. On failure with networkPolicyDenied, enable the matching HTTP policy, or click an existing page link.",
+        "download_url" => "Download URL within maxBytes. Requires browser:mutate and file:download. The advertised maximum is configured. Pass absolute saveAs; savedTo echoes it and sha256 proves integrity, so no shell check is needed. Escapes/overwrites fail pre-fetch. On failure, obey the maximum or repair URL policy.",
         "upload_files" => "Set files on a file input from the runtime's configured upload roots. Accepts selector, target, or a controlId returned by form_snapshot. Requires browser:mutate and file:upload. Produces upload evidence naming the selector and resolved paths. On failure with policyDenied, the path is outside the configured upload roots -- pass a path under an allowed root.",
         "evaluate_javascript" => "Evaluate a JavaScript expression on a page, optionally awaiting its promise. Requires browser:mutate and javascript:evaluate. Produces the returned value, or notes truncation. On failure with policyDenied, the session's execution policy forbids evaluation -- use a11y_snapshot and the intent_* tools instead.",
         "command_execute" => "Execute one bounded browser command envelope naming its own capability and evidence. Requires browser:mutate, plus whatever the wrapped command needs. Produces the same evidence as the named command it wraps. On failure with deadlineOutOfRange, set the envelope's deadline within the allowed window and resubmit.",
         "intent_locate" => "Locate an element by described purpose and hints, without acting on it (Replayable). Requires browser:mutate and intent:execute. Produces resolution evidence with the matched target's fingerprint. On failure with targetNotFound or targetAmbiguous, narrow the purpose or hints and retry.",
         "intent_fill" => "Fill one described form control and verify the value (Reconciliable). Requires browser:mutate and intent:execute. Produces fill evidence carrying the browser's own validity state. On failure with verificationFailed, read the retained validation message and re-fill; on targetNotFound, take a fresh a11y_snapshot and pass the new target.",
-        "intent_complete_form" => "Fill an ordered list of named form fields as one intent, verifying each before the next; never submits (Reconciliable). Requires browser:mutate and intent:execute. Produces per-field resolution and fill evidence in order. On failure with verificationFailed, targetNotFound, or intentActionMismatch on one field, the fields before it are already filled -- re-run with only the remaining fields.",
-        "intent_submit_and_verify" => "Submit a form and verify the expected state (Boundary). Requires browser:mutate and intent:execute. autoCheckpoint defaults true; pass false and pin commandId/attemptId via checkpoint_save first for invariants. expectedState must name post-submit-only content: a pre-holding condition fails with expectedStatePreSatisfied, no click. On failure with needsReconciliation, call recovery_status.",
+        "intent_complete_form" => "Fill ordered named fields in one verified intent; never submits. Requires browser:mutate and intent:execute. Prefer over repeated intent_fill calls. Fields resolve just-in-time: include conditional fields after their revealer even if absent. Success defaults evidenceDetail=compact. On failure, prior fields remain filled; retry only remaining fields.",
+        "intent_submit_and_verify" => "Submit once and verify post-state. Requires browser:mutate and intent:execute. Unknown copy: networkQuiet returns inspection and submitSettlement=settled|validationRejected; rejection includes formValidation issues, so do not inspect or blindly resubmit. Use text/url for known success. On failure with needsReconciliation call recovery_status.",
         "intent_wait_for_state" => "Wait for a described page state to hold (Replayable). Requires browser:mutate and intent:execute. Produces wait evidence with elapsed time and observation count. On failure with waitConditionTimedOut, confirm the condition still matches page state via inspect, then retry with a longer timeout.",
         "intent_follow" => "Activate a described link or control and verify the destination (Boundary when boundary is true, else Reconciliable). Requires browser:mutate and intent:execute. When boundary is true, autoCheckpoint defaults true and mints the checkpoint in that call; pass false to author your own. On failure with needsReconciliation, do not retry -- call recovery_status; on targetNotFound, snapshot again.",
         "intent_dismiss_obstruction" => "Dismiss a popup, overlay, or cookie banner blocking the page (Reconciliable). Requires browser:mutate and intent:execute. Produces resolution and dismissal evidence. On failure with obstructionSuspected, the obstruction is still present after the attempt -- take a fresh a11y_snapshot to find another dismissal control.",
@@ -195,5 +195,52 @@ pub(crate) fn tool_description(name: &str) -> &'static str {
         "job_status" => "Read one owned job by id. Requires job:read. Same as GET /v1/jobs/{job}. On failure with notFound, the id is unknown or not owned.",
         "job_cancel" => "Cancel one owned job by id. Requires job:cancel. Same as DELETE /v1/jobs/{job}. On failure with notFound, the id is unknown or not owned.",
         _ => "Runtime operation.",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tool_description;
+
+    #[test]
+    fn form_intents_describe_the_compact_verified_loop() {
+        let complete = tool_description("intent_complete_form");
+        assert!(
+            complete.contains("Prefer over repeated intent_fill calls"),
+            "whole-form intent must advertise its round-trip advantage"
+        );
+        assert!(
+            complete.contains("evidenceDetail=compact"),
+            "whole-form intent must advertise compact success evidence"
+        );
+        assert!(
+            complete.contains("just-in-time")
+                && complete.contains("conditional fields")
+                && complete.contains("absent"),
+            "whole-form intent must explain that ordered conditional fields resolve against fresh page state"
+        );
+
+        let submit = tool_description("intent_submit_and_verify");
+        assert!(
+            submit.contains("Submit once")
+                && submit.contains("submitSettlement=settled|validationRejected")
+                && submit.contains("do not inspect or blindly resubmit"),
+            "verified submit must identify the exactly-once settled stopping condition"
+        );
+    }
+
+    #[test]
+    fn iframe_and_download_descriptions_identify_terminal_evidence() {
+        let snapshot = tool_description("a11y_snapshot");
+        assert!(
+            snapshot.contains("use the in-frame target directly"),
+            "iframe targets must discourage a redundant second discovery pass"
+        );
+
+        let download = tool_description("download_url");
+        assert!(
+            download.contains("no shell check is needed"),
+            "digest-verified saved downloads must identify terminal evidence"
+        );
     }
 }

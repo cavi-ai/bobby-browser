@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendFileSync,
@@ -37,6 +37,8 @@ When the task is complete (or you are giving up), your final message must end wi
 {"selfReport":{"navigate":1,"click":1,"fill":1,"extract":1,"blockers":"...","bottlenecks":"..."}}
 \`\`\`
 Score each of navigate/click/fill/extract 1-5 for how easy the tooling made that action (5 = effortless, 1 = could not do it; score 0 for actions the task never needed). In "blockers" list anything that stopped or nearly stopped you; in "bottlenecks" what slowed you down. Be honest and specific — this report is the point of the exercise.`;
+const CLAUDE_ISOLATION =
+  "strict-mcp,project-settings,no-skills,no-chrome,no-persistence";
 
 interface TaskAssert {
   path: string;
@@ -89,19 +91,7 @@ async function runClaude(
   workDir: string,
   timeboxMs: number,
 ): Promise<{ events: any[]; timedOut: boolean }> {
-  const args = [
-    "-p",
-    prompt,
-    "--output-format",
-    "stream-json",
-    "--verbose",
-    "--dangerously-skip-permissions",
-  ];
-  if (exists(path.join(workDir, ".mcp.json"))) {
-    args.push("--mcp-config", path.join(workDir, ".mcp.json"));
-  }
-  const model = arg("model");
-  if (model) args.push("--model", model);
+  const args = buildClaudeArgs(prompt, workDir);
   const proc = spawn("claude", args, {
     cwd: workDir,
     stdio: ["ignore", "pipe", "inherit"],
@@ -132,6 +122,32 @@ async function runClaude(
   return { events, timedOut };
 }
 
+function buildClaudeArgs(prompt: string, workDir: string): string[] {
+  const args = [
+    "-p",
+    prompt,
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--dangerously-skip-permissions",
+    "--setting-sources",
+    "project",
+    "--disable-slash-commands",
+    "--no-chrome",
+    "--no-session-persistence",
+  ];
+  if (exists(path.join(workDir, ".mcp.json"))) {
+    args.push(
+      "--strict-mcp-config",
+      "--mcp-config",
+      path.join(workDir, ".mcp.json"),
+    );
+  }
+  const model = arg("model");
+  if (model) args.push("--model", model);
+  return args;
+}
+
 function exists(p: string): boolean {
   try {
     readFileSync(p);
@@ -141,18 +157,114 @@ function exists(p: string): boolean {
   }
 }
 
+function sha256File(p: string): string {
+  try {
+    return createHash("sha256").update(readFileSync(p)).digest("hex");
+  } catch {
+    return "unavailable";
+  }
+}
+
+function commandOutput(command: string, args: string[]): string {
+  const result = spawnSync(command, args, {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+  return result.status === 0
+    ? String(result.stdout).trim() || "unavailable"
+    : "unavailable";
+}
+
+function collectSourceState(): { repoDirty: boolean; sourceStateSha256: string } {
+  const status = spawnSync("git", ["status", "--porcelain=v1"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+  const diff = spawnSync("git", ["diff", "--binary", "HEAD", "--", "."], {
+    cwd: repoRoot,
+  });
+  const untracked = spawnSync(
+    "git",
+    ["ls-files", "--others", "--exclude-standard", "-z"],
+    { cwd: repoRoot },
+  );
+  if (status.status !== 0 || diff.status !== 0 || untracked.status !== 0) {
+    return { repoDirty: true, sourceStateSha256: "unavailable" };
+  }
+
+  const hash = createHash("sha256");
+  hash.update("tracked\0").update(diff.stdout);
+  const untrackedPaths = untracked.stdout
+    .toString("utf8")
+    .split("\0")
+    .filter(Boolean)
+    .sort();
+  for (const relativePath of untrackedPaths) {
+    hash.update("untracked\0").update(relativePath).update("\0");
+    hash.update(readFileSync(path.join(repoRoot, relativePath)));
+  }
+  return {
+    repoDirty: String(status.stdout).trim().length > 0,
+    sourceStateSha256: hash.digest("hex"),
+  };
+}
+
+function resolveBobbyCommand(): string {
+  const repoBobby = path.join(repoRoot, "target/release/bobby");
+  return process.env.BOBBY_MCP_COMMAND ??
+    (exists(repoBobby) ? repoBobby : "bobby");
+}
+
+function collectProvenance(
+  bobbyCommand: string,
+  requestedModel: string,
+  timeboxSeconds: number,
+) {
+  const sourceState = collectSourceState();
+  return {
+    repoHead: commandOutput("git", ["rev-parse", "HEAD"]),
+    ...sourceState,
+    claudeCliVersion: commandOutput("claude", ["--version"]),
+    nodeVersion: process.version,
+    platform: `${process.platform}-${process.arch}`,
+    taskSetSha256: sha256File(path.join(harnessDir, "tasks.json")),
+    runnerSetSha256: sha256File(path.join(harnessDir, "runners.json")),
+    bobbyBinarySha256: sha256File(bobbyCommand),
+    requestedModel,
+    timeboxSeconds,
+    startupToolset: "explore",
+    claudeIsolation: CLAUDE_ISOLATION,
+  };
+}
+
 function summarize(events: any[]) {
   let toolCalls = 0;
+  let bobbyToolCalls = 0;
+  let discoveryToolCalls = 0;
+  let taskBookkeepingCalls = 0;
+  let shellToolCalls = 0;
   let toolErrors = 0;
   let inputTokens = 0;
   let outputTokens = 0;
   let resultText = "";
   let model: string | undefined;
+  const toolCallBreakdown = new Map<string, number>();
   for (const event of events) {
     if (event.type === "assistant") {
       model ??= event.message?.model;
       for (const block of event.message?.content ?? []) {
-        if (block.type === "tool_use") toolCalls += 1;
+        if (block.type !== "tool_use") continue;
+        toolCalls += 1;
+        const name = String(block.name ?? "unknown");
+        toolCallBreakdown.set(name, (toolCallBreakdown.get(name) ?? 0) + 1);
+        if (name.startsWith("mcp__bobby__")) bobbyToolCalls += 1;
+        if (name === "ToolSearch") discoveryToolCalls += 1;
+        if (["TaskCreate", "TaskUpdate", "TaskGet", "TaskList"].includes(name)) {
+          taskBookkeepingCalls += 1;
+        }
+        if (["Bash", "Read", "Write", "Edit", "Glob", "Grep"].includes(name)) {
+          shellToolCalls += 1;
+        }
       }
     } else if (event.type === "user") {
       for (const block of event.message?.content ?? []) {
@@ -165,7 +277,24 @@ function summarize(events: any[]) {
       model ??= event.model;
     }
   }
-  return { toolCalls, toolErrors, inputTokens, outputTokens, resultText, model };
+  return {
+    toolCalls,
+    bobbyToolCalls,
+    hostToolCalls: toolCalls - bobbyToolCalls,
+    discoveryToolCalls,
+    taskBookkeepingCalls,
+    shellToolCalls,
+    toolErrors,
+    inputTokens,
+    outputTokens,
+    resultText,
+    model,
+    toolCallBreakdown: Object.fromEntries(
+      [...toolCallBreakdown.entries()].sort(([left], [right]) =>
+        left.localeCompare(right),
+      ),
+    ),
+  };
 }
 
 function parseSelfReport(text: string): unknown {
@@ -213,7 +342,8 @@ async function main() {
   const toolName = arg("tool");
   const taskId = arg("task");
   const runs = Number(arg("runs", "1"));
-  const timeboxMs = Number(arg("timebox-seconds", "480")) * 1000;
+  const timeboxSeconds = Number(arg("timebox-seconds", "480"));
+  const timeboxMs = timeboxSeconds * 1000;
   const batchId = randomUUID();
   if (!toolName) {
     console.error(
@@ -236,6 +366,12 @@ async function main() {
   }
   mkdirSync(resultsDir, { recursive: true });
   mkdirSync(path.join(resultsDir, "transcripts"), { recursive: true });
+  const bobbyCommand = resolveBobbyCommand();
+  const provenance = collectProvenance(
+    bobbyCommand,
+    arg("model", "default") ?? "default",
+    timeboxSeconds,
+  );
 
   for (const tool of toolNames) {
     const runner = runners[tool];
@@ -260,10 +396,6 @@ async function main() {
         const mcpConfig = { mcpServers: structuredClone(runner.mcpServers) };
         // Prefer the repo's own release build for the bobby runner — the
         // benchmark should measure this checkout, not a stale installed binary.
-        const repoBobby = path.join(repoRoot, "target/release/bobby");
-        const bobbyCommand =
-          process.env.BOBBY_MCP_COMMAND ??
-          (exists(repoBobby) ? repoBobby : "bobby");
         // Per-run config: allow loopback (gauntlet-server is 127.0.0.1) and
         // keep upload_roots relative to workDir. HttpConfig is partial-override
         // safe (#[serde(default)]); still write a complete enough file that
@@ -292,7 +424,8 @@ async function main() {
               "",
               "[mcp]",
               // Measure the default experience: explore advertises the
-              // standard loop (observe, navigate, base controls), which is
+              // standard loop (observe, navigate, base controls, form batch,
+              // and verified submit), which is
               // what a user who never touches toolset_select gets.
               'startup_toolset = "explore"',
               "",
@@ -362,9 +495,16 @@ async function main() {
           failures: outcome.failures,
           wallMs,
           toolCalls: summary.toolCalls,
+          bobbyToolCalls: summary.bobbyToolCalls,
+          hostToolCalls: summary.hostToolCalls,
+          discoveryToolCalls: summary.discoveryToolCalls,
+          taskBookkeepingCalls: summary.taskBookkeepingCalls,
+          shellToolCalls: summary.shellToolCalls,
+          toolCallBreakdown: summary.toolCallBreakdown,
           toolErrors: summary.toolErrors,
           inputTokens: summary.inputTokens,
           outputTokens: summary.outputTokens,
+          provenance,
           selfReport: parseSelfReport(summary.resultText),
           transcript: path.relative(repoRoot, transcriptFile),
         };
@@ -382,4 +522,26 @@ async function main() {
   }
 }
 
-await main();
+const transcriptToSummarize = arg("summarize-transcript");
+const printProvenance = arg("print-provenance");
+const printClaudeArgsWorkDir = arg("print-claude-args");
+if (transcriptToSummarize) {
+  const events = JSON.parse(readFileSync(transcriptToSummarize, "utf8"));
+  console.log(JSON.stringify(summarize(events)));
+} else if (printProvenance) {
+  console.log(
+    JSON.stringify(
+      collectProvenance(
+        resolveBobbyCommand(),
+        arg("model", "default") ?? "default",
+        Number(arg("timebox-seconds", "480")),
+      ),
+    ),
+  );
+} else if (printClaudeArgsWorkDir) {
+  console.log(
+    JSON.stringify(buildClaudeArgs("benchmark prompt", printClaudeArgsWorkDir)),
+  );
+} else {
+  await main();
+}

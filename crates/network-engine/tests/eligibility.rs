@@ -100,6 +100,27 @@ fn rejects_unsafe_urls_and_download_limits() {
 }
 
 #[test]
+fn download_limit_rejection_names_the_configured_maximum_as_invalid_input() {
+    let command = PrimitiveCommand::DownloadUrl(DownloadUrlCommand {
+        url: "https://example.test/report.bin".into(),
+        expected_content_type: None,
+        max_bytes: 2 * 1_048_576 + 1,
+        save_as: None,
+    });
+
+    let EligibilityDecision::Denied(error) = policy().classify(&command, "https://example.test/")
+    else {
+        panic!("oversized download limit must be denied")
+    };
+
+    assert_eq!(error.code, types::ErrorCode::InvalidRequest);
+    assert_eq!(
+        error.message,
+        "maxBytes must be between 1 and 2097152 for this runtime"
+    );
+}
+
+#[test]
 fn routes_empty_or_malformed_inspect_selectors_to_chromium() {
     for selector in ["", "   ", "#", "div[", "a,,b"] {
         assert_chromium(
