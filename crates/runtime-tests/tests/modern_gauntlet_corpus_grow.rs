@@ -368,6 +368,64 @@ async fn grow_customer_update_corpus() -> TestResult<()> {
                 )
                 .await?;
 
+            // Contrastive pair (§4n): the SAME post-typing snapshot gets
+            // both disambiguated resolutions — the fill ("...lookup box"
+            // → searchbox) and the execution ("...button" → Search). The
+            // model learns which noun resolves the boundary.
+            const DISAMBIGUATED_TYPE_SEARCH: [&str; 10] = [
+                "Put 'Atlas' in the lookup box",
+                "Key 'Atlas' into the finder field",
+                "Type 'Atlas' into the customer search box",
+                "Enter 'Atlas' in the client finder",
+                "Write 'Atlas' in the search input",
+                "Fill the lookup field with 'Atlas'",
+                "Add 'Atlas' to the customer search field",
+                "Input 'Atlas' in the finder box",
+                "Place 'Atlas' into the client search field",
+                "Type the name 'Atlas' into the lookup",
+            ];
+            collector
+                .capture(
+                    &runtime,
+                    &GroundTruth::TypeText {
+                        selector: "input[aria-label='Search customers']",
+                        text: "Atlas",
+                        purpose: DISAMBIGUATED_TYPE_SEARCH
+                            [run_idx % DISAMBIGUATED_TYPE_SEARCH.len()]
+                        .into(),
+                        ordinal: None,
+                    },
+                    "customer-update",
+                    &step("type_search_disambiguated"),
+                )
+                .await?;
+            const DISAMBIGUATED_CLICK_SEARCH: [&str; 10] = [
+                "Execute the search with the button",
+                "Push the search execution button",
+                "Press the search button",
+                "Click the control that executes the lookup",
+                "Run the search by pressing the button",
+                "Push the button to search",
+                "Trigger the customer search with the button",
+                "Activate the search button",
+                "Use the button to run the lookup",
+                "Fire off the search with the button",
+            ];
+            collector
+                .capture(
+                    &runtime,
+                    &GroundTruth::Click {
+                        selector: "form[aria-label='Customer search'] button",
+                        purpose: DISAMBIGUATED_CLICK_SEARCH
+                            [run_idx % DISAMBIGUATED_CLICK_SEARCH.len()]
+                        .into(),
+                        ordinal: None,
+                    },
+                    "customer-update",
+                    &step("click_search_disambiguated"),
+                )
+                .await?;
+
             collector
                 .capture(
                     &runtime,
@@ -420,6 +478,56 @@ async fn grow_customer_update_corpus() -> TestResult<()> {
                 .await?;
             runtime.select_one("Customer priority", "high").await?;
 
+            // Priority boundary pair (§4n): post-select, these phrasings
+            // are satisfied by re-opening the combobox or committing with
+            // Save → -1; the paired positive names the resolution.
+            const AMBIGUOUS_PRIORITY: [&str; 10] = [
+                "Set the customer priority",
+                "Update the priority",
+                "Change the priority to high",
+                "Apply the priority choice",
+                "Make the priority high",
+                "Set priority for this customer",
+                "Adjust the priority",
+                "Use the high priority",
+                "Confirm the priority",
+                "Finish the priority update",
+            ];
+            collector
+                .capture_negative(
+                    &runtime,
+                    AMBIGUOUS_PRIORITY[run_idx % AMBIGUOUS_PRIORITY.len()],
+                    "customer-update",
+                    &step("priority_ambiguous"),
+                )
+                .await?;
+            const DISAMBIGUATED_SAVE_PRIORITY: [&str; 10] = [
+                "Save the new priority setting",
+                "Store the priority change with the save button",
+                "Persist the priority using the save control",
+                "Apply the priority change with the save button",
+                "Write the new priority via the save control",
+                "Confirm the priority change with the save button",
+                "Record the priority by pressing save",
+                "Update the priority with the save control",
+                "Commit the priority change",
+                "Save the updated customer priority",
+            ];
+            collector
+                .capture(
+                    &runtime,
+                    &GroundTruth::Click {
+                        selector: "form[aria-label='Update customer priority'] button",
+                        purpose: DISAMBIGUATED_SAVE_PRIORITY
+                            [run_idx % DISAMBIGUATED_SAVE_PRIORITY.len()]
+                        .into(),
+                        ordinal: None,
+                    },
+                    "customer-update",
+                    &step("save_priority_disambiguated"),
+                )
+                .await?;
+
             // Extract capture: read back the chosen value from the combobox
             // (interactive, so it is inside the candidate window — §6.3).
             collector
@@ -455,7 +563,7 @@ async fn grow_customer_update_corpus() -> TestResult<()> {
         },
     )
     .await?;
-    assert_eq!(count, 7 * runs_per_journey());
+    assert_eq!(count, 11 * runs_per_journey());
     Ok(())
 }
 
@@ -784,6 +892,37 @@ async fn grow_documents_corpus() -> TestResult<()> {
             )
             .await?;
 
+        // Contrastive pair (§4n): the SAME pre-choice snapshot also gets
+        // the disambiguated positive, so the model can learn which noun
+        // ("file picker" vs the ambiguous phrasing) resolves the boundary
+        // instead of learning "this region ≈ abstain". Phrasings rotate —
+        // a fixed positive phrasing digs an accept well as narrow as the
+        // attractor it pairs against (§4o).
+        const DISAMBIGUATED_CHOOSER: [&str; 10] = [
+            "Open the file picker for the customer document",
+            "Bring up the file dialog for the document",
+            "Browse files using the document picker",
+            "Open the document file dialog",
+            "Pick the file via the chooser button",
+            "Bring up the file selector for the document",
+            "Choose a file using the picker",
+            "Open the picker to select the customer file",
+            "Use the file input to choose the document",
+            "Select a document through the file chooser",
+        ];
+        collector
+            .capture(
+                &runtime,
+                &GroundTruth::Click {
+                    selector: "input[aria-label='Customer document']",
+                    purpose: DISAMBIGUATED_CHOOSER[run_idx % DISAMBIGUATED_CHOOSER.len()].into(),
+                    ordinal: None,
+                },
+                "documents",
+                &step("choose_file_disambiguated"),
+            )
+            .await?;
+
         collector
             .capture(
                 &runtime,
@@ -825,7 +964,7 @@ async fn grow_documents_corpus() -> TestResult<()> {
         Ok(runtime)
     })
     .await?;
-    assert_eq!(count, 3 * runs_per_journey());
+    assert_eq!(count, 4 * runs_per_journey());
     Ok(())
 }
 
