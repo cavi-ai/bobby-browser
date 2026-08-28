@@ -788,7 +788,12 @@ async fn cdp_lifetime(fixture: &BoundaryFixture) -> SecurityResult {
             if revoke {
                 Utc::now() + Duration::minutes(5)
             } else {
-                Utc::now() + Duration::milliseconds(100)
+                // Unlike the HTTP/MCP passes (which spawn while valid and
+                // delay only the body), the CDP pass must complete
+                // `version` + `upgrade` — both of which verify the token —
+                // before the expiry. 100ms raced loaded CI runners; 500ms
+                // keeps the mid-connection semantics with margin.
+                Utc::now() + Duration::milliseconds(500)
             },
         )
         .await?;
@@ -817,7 +822,7 @@ async fn cdp_lifetime(fixture: &BoundaryFixture) -> SecurityResult {
                 .await
                 .map_err(|error| format!("{error:?}"))?;
         } else {
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
         }
         let response = connection
             .dispatch(CdpRequest::new(1, "Target.getTargets", json!({})))
