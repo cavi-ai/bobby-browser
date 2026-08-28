@@ -114,7 +114,7 @@ fn adaptive_http_download_preserves_requested_save_path() {
 #[test]
 fn adaptive_http_execution_path_evidence_is_stable_and_round_trips() {
     let evidence = Evidence::ExecutionPath {
-        path: ExecutionPath::ChromiumFallback,
+        path: ExecutionPath::BrowserFallback,
         reason: ExecutionReason::JavascriptRequired,
         state_version: 7,
         elapsed_ms: 12,
@@ -127,9 +127,22 @@ fn adaptive_http_execution_path_evidence_is_stable_and_round_trips() {
     };
 
     let value = serde_json::to_value(&evidence).unwrap();
-    assert_eq!(value["path"], "chromiumFallback");
+    assert_eq!(value["path"], "browserFallback");
     let round_tripped: Evidence = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(serde_json::to_value(round_tripped).unwrap(), value);
+}
+
+/// Journals recorded before the rename still replay: the engine-shaped names
+/// deserialize onto the strategy-shaped variants.
+#[test]
+fn legacy_chromium_execution_path_names_still_deserialize() {
+    for (legacy, expected) in [
+        ("chromium", ExecutionPath::Browser),
+        ("chromiumFallback", ExecutionPath::BrowserFallback),
+    ] {
+        let path: ExecutionPath = serde_json::from_value(serde_json::json!(legacy)).unwrap();
+        assert_eq!(path, expected);
+    }
 }
 
 #[test]

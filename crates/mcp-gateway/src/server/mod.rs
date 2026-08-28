@@ -48,10 +48,22 @@ mod dispatch_workflow;
 mod tool_dispatch;
 
 const MAX_RESOURCE_ENCODED_BYTES: usize = 768 * 1024;
-/// Only error messages with this prefix may cross the MCP boundary verbatim:
-/// they are written by the runtime as operator-actionable diagnostics and
-/// contain no secrets. Everything else is redacted to the canonical code.
+/// Only the error text starting at this marker may cross the MCP boundary
+/// verbatim: it is written by the runtime as an operator-actionable diagnostic
+/// and contains no secrets. Everything else is redacted to the canonical code.
 pub(crate) const BROWSER_LAUNCH_DIAGNOSTIC_PREFIX: &str = "browser launch failed:";
+
+/// Extract the allowlisted browser-launch diagnostic from an interface error
+/// message. The marker is not always at index 0: `map_runtime_error` wraps the
+/// runtime detail with a code-shaped lead-in ("runtime request is invalid: …"),
+/// so an anchored match silently redacted the one diagnostic the allowlist
+/// exists to pass. Everything before the marker is dropped, so only the
+/// allowlisted sentence crosses.
+pub(crate) fn browser_launch_diagnostic(message: &str) -> Option<String> {
+    message
+        .find(BROWSER_LAUNCH_DIAGNOSTIC_PREFIX)
+        .map(|index| message[index..].to_owned())
+}
 const MAX_PENDING_CANCELLATIONS: usize = 1024;
 /// How many notification frames `serve` may have queued for the writer before it
 /// stops pulling more off the subscription. See the comment at its use site.
@@ -1475,7 +1487,7 @@ fn interface_error_response(id: Value, mut interface_error: types::InterfaceErro
         .ok()
         .and_then(|value| value.as_str().map(ToOwned::to_owned))
         .unwrap_or_else(|| "internal".to_owned());
-    let diagnostic = match interface_error.required_capability {
+    let mut diagnostic = match interface_error.required_capability {
         Some(capability) => format!(
             "Runtime interface error: {code} (requires {})",
             capability.as_str()
@@ -1484,10 +1496,14 @@ fn interface_error_response(id: Value, mut interface_error: types::InterfaceErro
     };
     // MCP clients are external agents: the message may carry secrets, so only
     // an allowlisted, operator-actionable diagnostic crosses this boundary.
-    let safe_diagnostic = interface_error
-        .message
-        .starts_with(BROWSER_LAUNCH_DIAGNOSTIC_PREFIX)
-        .then(|| interface_error.message.clone());
+    let safe_diagnostic = browser_launch_diagnostic(&interface_error.message);
+    // Hosts commonly render only `error.message`, so an allowlisted diagnostic
+    // parked in `data` reaches no one. Carry it on the message too, or the
+    // agent sees a bare code that blames its arguments for an environment fault.
+    if let Some(safe_diagnostic) = safe_diagnostic.as_deref() {
+        diagnostic.push_str(": ");
+        diagnostic.push_str(safe_diagnostic);
+    }
     interface_error.message = "runtime interface request failed".to_owned();
     let repair = if safe_diagnostic.is_some() {
         Some(crate::repair::browser_launch_repair())
@@ -1886,10 +1902,65 @@ mod tests {
     }
 
     #[test]
+    fn wrapped_browser_launch_diagnostic_crosses_the_boundary_with_its_repair() {
+        let response = interface_error_response(
+            json!(10),
+            types::InterfaceError {
+                code: types::InterfaceErrorCode::InvalidRequest,
+                layer: types::ErrorLayer::Interface,
+                message: "runtime request is invalid: browser launch failed: paired profile has no browser target discovery; run `bobby doctor`".to_owned(),
+                correlation_id: types::CorrelationId::new(),
+                command_id: None,
+                retryable: false,
+                retry_after_ms: None,
+                reconciliation_required: false,
+                required_capability: None,
+            },
+        );
+        let diagnostic = response["error"]["data"]["diagnostic"]
+            .as_str()
+            .expect("browser-launch diagnostic crosses");
+        assert!(diagnostic.contains("no browser target discovery"));
+        let action = response["error"]["data"]["repair"]["action"]
+            .as_str()
+            .expect("repair action");
+        assert!(action.contains("bobby doctor"), "{action}");
+        assert!(!action.contains("Fix the named argument"), "{action}");
+        assert!(response["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("no browser target discovery"));
+    }
+
+    #[test]
+    fn text_before_the_browser_launch_marker_is_dropped() {
+        let secret = "planted-secret-diagnostic";
+        let response = interface_error_response(
+            json!(11),
+            types::InterfaceError {
+                code: types::InterfaceErrorCode::InvalidRequest,
+                layer: types::ErrorLayer::Interface,
+                message: format!("{secret}: browser launch failed: endpoint refused"),
+                correlation_id: types::CorrelationId::new(),
+                command_id: None,
+                retryable: false,
+                retry_after_ms: None,
+                reconciliation_required: false,
+                required_capability: None,
+            },
+        );
+        assert!(!response.to_string().contains(secret));
+        assert_eq!(
+            response["error"]["data"]["diagnostic"],
+            json!("browser launch failed: endpoint refused")
+        );
+    }
+
+    #[test]
     fn interface_error_message_never_carries_a_non_allowlisted_raw_message() {
         let secret = "internal stack trace with a leaked token";
         let response = interface_error_response(
-            json!(10),
+            json!(12),
             types::InterfaceError {
                 code: types::InterfaceErrorCode::Internal,
                 layer: types::ErrorLayer::Interface,
@@ -1905,5 +1976,10 @@ mod tests {
         let message = response["error"]["message"].as_str().unwrap();
         assert!(!message.contains(secret), "{message}");
         assert!(!response.to_string().contains(secret));
+    }
+
+    #[test]
+    fn messages_without_the_marker_carry_no_diagnostic() {
+        assert!(browser_launch_diagnostic("runtime interface request failed").is_none());
     }
 }

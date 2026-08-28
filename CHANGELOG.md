@@ -18,6 +18,9 @@
   `intent_submit_and_verify`. Initialization guidance tells deferred-schema
   clients to load those tools with `workflow_start` and `workflow_observe` for
   the standard form loop.
+- `Evidence::ExecutionPath.path` names the strategy, not an engine: `chromium`
+  and `chromiumFallback` are now `browser` and `browserFallback`. The old names
+  still deserialize so recorded journals replay unchanged.
 - Successful `intent_complete_form` responses default to compact evidence;
   pass `evidenceDetail: "full"` to retain the complete per-field success
   evidence. Failure evidence and newly revealed conditional controls remain
@@ -35,6 +38,15 @@
 - A visible `aria-invalid="true"` control rejects network-quiet settlement even
   when its accessible name is absent or it falls outside the bounded form
   snapshot; the exactly-once submit is never misreported as settled.
+- A Firefox profile relaunched on a different BiDi port is reachable again: the
+  enrolled endpoint is a snapshot, so a refused connection now retries against
+  the profile's own `WebDriverBiDiServer.json`.
+- The stdio gateway ends the shared Firefox BiDi session on exit, preventing a
+  stale session from blocking later launches with `Maximum number of active sessions`.
+- Browser-launch failures expose their allowlisted cause with an environment-shaped
+  repair even when the runtime prefixes the diagnostic.
+- `scripts/dev/firefox-start.sh` accepts pretty-printed endpoint files and a
+  macOS-relaunched Firefox whose listening process has a different pid.
 
 ## 0.11.1 - 2026-08-22
 
@@ -160,7 +172,6 @@
 - `a11y_snapshot_descends_into_iframes` waits for `input[type=file]` to attach before snapshotting. The documents route builds its form in the SPA bundle, so `DOMContentLoaded` can precede the input.
 - A companion-server bind failure names the address and the operating system error. The caller flattens the error through `to_string()`, so the operator saw `failed to bind companion server` with neither the port nor `Address already in use`.
 - A solve screenshot that fails while the page is still alive costs one attempt instead of ending the solve. A renderer crash-and-recover surfaced as a terminal capture failure mid-solve; a genuinely dead page still fails every attempt and the deadline reports it.
-
 ## 0.9.0 - 2026-08-12
 
 ### Added

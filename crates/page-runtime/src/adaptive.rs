@@ -1111,7 +1111,7 @@ impl AdaptivePageEngine {
             return browser_execute(
                 envelope,
                 lease,
-                ExecutionPath::Chromium,
+                ExecutionPath::Browser,
                 ExecutionReason::IneligibleCommand,
                 0,
             )
@@ -1132,7 +1132,7 @@ impl AdaptivePageEngine {
                 return browser_execute(
                     envelope,
                     lease,
-                    ExecutionPath::Chromium,
+                    ExecutionPath::Browser,
                     ExecutionReason::PageMutated,
                     0,
                 )
@@ -1150,7 +1150,7 @@ impl AdaptivePageEngine {
                     browser_execute(
                         envelope,
                         lease,
-                        ExecutionPath::ChromiumFallback,
+                        ExecutionPath::BrowserFallback,
                         ExecutionReason::PolicyRequired,
                         0,
                     )
@@ -1159,8 +1159,8 @@ impl AdaptivePageEngine {
                     Err(error.into())
                 }
             }
-            EligibilityDecision::Chromium(reason) => {
-                browser_execute(envelope, lease, ExecutionPath::Chromium, reason, 0).await
+            EligibilityDecision::Browser(reason) => {
+                browser_execute(envelope, lease, ExecutionPath::Browser, reason, 0).await
             }
             EligibilityDecision::DirectHttp(reason) => {
                 let download_destination = match command {
@@ -1197,7 +1197,7 @@ impl AdaptivePageEngine {
                                 return browser_execute(
                                     envelope,
                                     lease,
-                                    ExecutionPath::ChromiumFallback,
+                                    ExecutionPath::BrowserFallback,
                                     ExecutionReason::PolicyRequired,
                                     version,
                                 )
@@ -1217,7 +1217,7 @@ impl AdaptivePageEngine {
                             browser_execute(
                                 envelope,
                                 lease,
-                                ExecutionPath::ChromiumFallback,
+                                ExecutionPath::BrowserFallback,
                                 fallback_reason,
                                 version,
                             )
@@ -1838,7 +1838,7 @@ async fn extract_structured(
         truncated: false,
     });
     evidence.push(execution_evidence(
-        ExecutionPath::Chromium,
+        ExecutionPath::Browser,
         ExecutionReason::IneligibleCommand,
         0,
         ExecutionMetrics::browser(None, None),

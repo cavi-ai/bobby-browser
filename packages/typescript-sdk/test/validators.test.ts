@@ -39,7 +39,7 @@ function target(): unknown {
 function evidenceFixtures(): unknown[] {
   return [
     { kind: "executionPath", path: "directHttp", reason: "eligibleStaticDocument", stateVersion: 0, elapsedMs: 1, bytes: null, sha256: null },
-    { kind: "executionPath", path: "chromiumFallback", reason: "javascriptRequired", stateVersion: 2, elapsedMs: 3, bytes: 4, sha256: SHA, finalUrl: "https://example.test/", contentType: "text/html", status: 200, redirectChain: ["https://example.test/"] },
+    { kind: "executionPath", path: "browserFallback", reason: "javascriptRequired", stateVersion: 2, elapsedMs: 3, bytes: 4, sha256: SHA, finalUrl: "https://example.test/", contentType: "text/html", status: 200, redirectChain: ["https://example.test/"] },
     { kind: "navigation", url: "https://example.test/", title: "Example" },
     { kind: "inspection", selector: null, url: "https://example.test/", title: "Example", text: "body", html: null },
     { kind: "element", selector: "#save", text: null },

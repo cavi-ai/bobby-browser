@@ -41,7 +41,7 @@ async fn run() -> anyhow::Result<()> {
     config.validate().map_err(anyhow::Error::msg)?;
     let (selection, _source) = firefox_companion::selection::resolve_browser_selection()?;
     let factory = firefox_companion::selection::compose_worker_factory(&config, selection)?;
-    let runtime = RuntimeService::build_with_worker_factory(&config, factory)
+    let runtime = RuntimeService::build_with_worker_factory(&config, Arc::clone(&factory))
         .await
         .map_err(anyhow::Error::new)?;
     if !handle.is_valid_at(Utc::now()) {
@@ -115,9 +115,14 @@ async fn run() -> anyhow::Result<()> {
             }
         })
     });
-    server
-        .serve(tokio::io::stdin(), tokio::io::stdout())
-        .await?;
+    let served = server.serve(tokio::io::stdin(), tokio::io::stdout()).await;
+    // Firefox's RemoteAgent allows one active WebDriver session per browser
+    // and keeps it past connection loss, so an unended session makes every
+    // later launch fail with "Maximum number of active sessions" until the
+    // browser restarts. `bobby serve` ends it on shutdown; stdio must too —
+    // it is the path agents actually run, and it exits on every host restart.
+    factory.shutdown().await;
+    served?;
     Ok(())
 }
 

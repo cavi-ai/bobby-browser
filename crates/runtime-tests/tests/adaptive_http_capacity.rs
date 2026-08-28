@@ -165,7 +165,7 @@ async fn eight_inspections_complete_with_a_peak_of_four_and_no_browser_dispatch(
         assert!(!evidence.iter().any(|item| matches!(
             item,
             Evidence::ExecutionPath {
-                path: ExecutionPath::Chromium | ExecutionPath::ChromiumFallback,
+                path: ExecutionPath::Browser | ExecutionPath::BrowserFallback,
                 ..
             }
         )));

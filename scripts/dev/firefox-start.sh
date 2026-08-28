@@ -87,11 +87,26 @@ listener_pids() {
   fi
 }
 
+# True when the two whitespace-separated pid lists share at least one pid.
+pids_intersect() {
+  local left right l r
+  left="$1"
+  right="$2"
+  [[ -n "$left" && -n "$right" ]] || return 1
+  for l in $left; do
+    for r in $right; do
+      [[ "$l" == "$r" ]] && return 0
+    done
+  done
+  return 1
+}
+
 endpoint_is_fresh() {
   local endpoint="$1"
   [[ -f "$endpoint" ]] || return 1
-  tr -d '[:space:]' <"$endpoint" \
-    | grep -Eq '"ws_port":'"$PORT"'([,}])'
+  # Firefox pretty-prints this file, so the port may be last on its line.
+  # Anchor on "not another digit" so :9224 never matches a :92240 endpoint.
+  grep -Eq '"ws_port"[[:space:]]*:[[:space:]]*'"$PORT"'([^0-9]|$)' "$endpoint"
 }
 
 print_startup_log() {
@@ -142,32 +157,49 @@ $(lsof "$profile/.parentlock" 2>/dev/null || true)"
   firefox_pid=$!
   disown || true
 
-  local i
-  for i in 1 2 3 4 5 6 7 8 9 10; do
-    if ! kill -0 "$firefox_pid" 2>/dev/null; then
-      set +e
-      wait "$firefox_pid"
-      status=$?
-      set -e
-      print_startup_log "$log_file"
-      die "Firefox exited during startup (status $status)"
-    fi
-
+  # A cold profile (extension install, first-run migration) regularly needs
+  # more than a few seconds to bind BiDi. A short wait reported failure while
+  # Firefox was still starting, and left it running behind the error.
+  local i deadline_ticks="${BOBBY_FIREFOX_START_TICKS:-60}" launcher_exited=false
+  for ((i = 1; i <= deadline_ticks; i++)); do
     pids="$(profile_lock_pids "$profile")"
     listener="$(listener_pids)"
+
+    # Ownership is "the process holding this profile's lock is the one
+    # listening", not "$firefox_pid is". On macOS the launched binary re-execs
+    # through the app bundle, so the browser ends up under a different pid and
+    # a pid-equality check never matched — the script waited out its whole
+    # deadline and reported failure against a healthy, listening Firefox.
     if endpoint_is_fresh "$endpoint" \
       && bidi_reachable \
-      && [[ " $pids " == *" $firefox_pid "* ]] \
-      && [[ " $listener " == *" $firefox_pid "* ]]; then
+      && pids_intersect "$pids" "$listener"; then
       log "BiDi listening on 127.0.0.1:$PORT"
       note "Next: Pair from the companion toolbar popup."
       note "Local agents use bobby mcp-stdio — bobby serve is optional (HTTP only)."
       return 0
     fi
+
+    # A zero-status launcher may be handing off to the app-bundle process on
+    # macOS. Keep the existing deadline available for that process to acquire
+    # the profile lock. A non-zero exit is a real startup failure.
+    if [[ "$launcher_exited" == false ]] && ! kill -0 "$firefox_pid" 2>/dev/null; then
+      set +e
+      wait "$firefox_pid"
+      status=$?
+      set -e
+      if ((status != 0)); then
+        print_startup_log "$log_file"
+        die "Firefox exited during startup (status $status)"
+      fi
+      launcher_exited=true
+    fi
     sleep 0.5
   done
 
   print_startup_log "$log_file"
+  if [[ "$launcher_exited" == true ]] && [[ -z "$(profile_lock_pids "$profile")" ]]; then
+    die "Firefox exited during startup (status 0) without establishing a BiDi endpoint on :$PORT"
+  fi
   die "Firefox is running but did not establish a fresh, owned BiDi endpoint on :$PORT"
 }
 

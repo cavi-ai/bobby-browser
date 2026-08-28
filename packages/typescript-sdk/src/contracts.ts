@@ -43,7 +43,7 @@ export const MAX_INTENT_PURPOSE_BYTES = 256 as const;
 /** Default timeout (ms) when `DismissObstructionIntent.timeoutMs` is omitted. */
 export const DEFAULT_DISMISS_OBSTRUCTION_TIMEOUT_MS = 5_000 as const;
 
-export type ExecutionPath = "directHttp" | "chromium" | "chromiumFallback";
+export type ExecutionPath = "directHttp" | "browser" | "browserFallback";
 export type ExecutionReason = "eligibleStaticDocument" | "eligibleExplicitDownload" | "ineligibleCommand" | "semanticTargetRequired" | "javascriptRequired" | "unsupportedContentType" | "stateConflict" | "policyRequired";
 export interface TargetSpec { css?: string | null; testId?: string | null; role?: string | null; accessibleName?: string | null; label?: string | null; text?: TextMatch | null; attributes?: Record<string, string>; framePath?: TargetSpec[]; shadowPath?: TargetSpec[]; ordinal?: number | null; allowBestMatch?: boolean; }
 export type TextMatch = { kind: "exact" | "contains" | "regex"; value: string };

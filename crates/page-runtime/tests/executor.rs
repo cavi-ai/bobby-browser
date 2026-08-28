@@ -1504,7 +1504,7 @@ async fn inspect_of_a_mutated_page_uses_the_browser_not_a_refetch() {
     assert!(evidence.iter().any(|item| matches!(
         item,
         Evidence::ExecutionPath {
-            path: ExecutionPath::Chromium,
+            path: ExecutionPath::Browser,
             reason: ExecutionReason::PageMutated,
             ..
         }
@@ -1586,7 +1586,7 @@ async fn failed_mutation_taints_the_page_before_the_next_inspect() {
     assert!(evidence.iter().any(|item| matches!(
         item,
         Evidence::ExecutionPath {
-            path: ExecutionPath::Chromium,
+            path: ExecutionPath::Browser,
             reason: ExecutionReason::PageMutated,
             ..
         }
@@ -1628,7 +1628,7 @@ async fn failed_navigation_taints_the_page_before_the_next_inspect() {
     assert!(evidence.iter().any(|item| matches!(
         item,
         Evidence::ExecutionPath {
-            path: ExecutionPath::Chromium,
+            path: ExecutionPath::Browser,
             reason: ExecutionReason::PageMutated,
             ..
         }
@@ -1741,7 +1741,7 @@ async fn semantic_inspect_routes_directly_to_chromium() {
     assert!(evidence.iter().any(|item| matches!(
         item,
         Evidence::ExecutionPath {
-            path: ExecutionPath::Chromium,
+            path: ExecutionPath::Browser,
             ..
         }
     )));
@@ -1782,7 +1782,7 @@ async fn unproven_replayable_inspect_falls_back_once() {
     assert!(evidence.iter().any(|item| matches!(
         item,
         Evidence::ExecutionPath {
-            path: ExecutionPath::ChromiumFallback,
+            path: ExecutionPath::BrowserFallback,
             ..
         }
     )));
