@@ -160,7 +160,7 @@ $(lsof "$profile/.parentlock" 2>/dev/null || true)"
   # A cold profile (extension install, first-run migration) regularly needs
   # more than a few seconds to bind BiDi. A short wait reported failure while
   # Firefox was still starting, and left it running behind the error.
-  local i deadline_ticks="${BOBBY_FIREFOX_START_TICKS:-60}"
+  local i deadline_ticks="${BOBBY_FIREFOX_START_TICKS:-60}" launcher_exited=false
   for ((i = 1; i <= deadline_ticks; i++)); do
     pids="$(profile_lock_pids "$profile")"
     listener="$(listener_pids)"
@@ -179,20 +179,27 @@ $(lsof "$profile/.parentlock" 2>/dev/null || true)"
       return 0
     fi
 
-    # Only a dead launcher *and* an unheld profile lock means startup failed;
-    # a dead launcher alone is the normal macOS re-exec.
-    if ! kill -0 "$firefox_pid" 2>/dev/null && [[ -z "${pids}" ]]; then
+    # A zero-status launcher may be handing off to the app-bundle process on
+    # macOS. Keep the existing deadline available for that process to acquire
+    # the profile lock. A non-zero exit is a real startup failure.
+    if [[ "$launcher_exited" == false ]] && ! kill -0 "$firefox_pid" 2>/dev/null; then
       set +e
       wait "$firefox_pid"
       status=$?
       set -e
-      print_startup_log "$log_file"
-      die "Firefox exited during startup (status $status)"
+      if ((status != 0)); then
+        print_startup_log "$log_file"
+        die "Firefox exited during startup (status $status)"
+      fi
+      launcher_exited=true
     fi
     sleep 0.5
   done
 
   print_startup_log "$log_file"
+  if [[ "$launcher_exited" == true ]] && [[ -z "$(profile_lock_pids "$profile")" ]]; then
+    die "Firefox exited during startup (status 0) without establishing a BiDi endpoint on :$PORT"
+  fi
   die "Firefox is running but did not establish a fresh, owned BiDi endpoint on :$PORT"
 }
 

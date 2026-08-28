@@ -1926,12 +1926,10 @@ mod tests {
             .expect("repair action");
         assert!(action.contains("bobby doctor"), "{action}");
         assert!(!action.contains("Fix the named argument"), "{action}");
-        assert!(
-            response["error"]["message"]
-                .as_str()
-                .expect("message")
-                .contains("no browser target discovery")
-        );
+        assert!(response["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("no browser target discovery"));
     }
 
     #[test]
