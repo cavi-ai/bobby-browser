@@ -22,6 +22,12 @@ test("transcript summary separates Bobby calls from host overhead", () => {
         type: "assistant",
         message: {
           model: "claude-opus-5",
+          usage: {
+            input_tokens: 5,
+            output_tokens: 10,
+            cache_read_input_tokens: 100,
+            cache_creation_input_tokens: 20,
+          },
           content: [
             { type: "tool_use", name: "ToolSearch" },
             { type: "tool_use", name: "TaskCreate" },
@@ -39,9 +45,21 @@ test("transcript summary separates Bobby calls from host overhead", () => {
         },
       },
       {
+        type: "assistant",
+        message: {
+          usage: {
+            input_tokens: 7,
+            output_tokens: 24,
+            cache_read_input_tokens: 60,
+            cache_creation_input_tokens: 8,
+          },
+          content: [],
+        },
+      },
+      {
         type: "result",
         result: "finished",
-        usage: { input_tokens: 12, output_tokens: 34 },
+        usage: { input_tokens: 7, output_tokens: 24 },
       },
     ]),
   );
@@ -61,8 +79,12 @@ test("transcript summary separates Bobby calls from host overhead", () => {
     taskBookkeepingCalls: 1,
     shellToolCalls: 2,
     toolErrors: 1,
+    // Aggregated across assistant turns, not the final result event's
+    // last-request-only usage: 5+7 in, 10+24 out, cache fields summed.
     inputTokens: 12,
     outputTokens: 34,
+    cacheReadTokens: 160,
+    cacheCreationTokens: 28,
     resultText: "finished",
     model: "claude-opus-5",
     toolCallBreakdown: {

@@ -10,7 +10,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { summarize } from "./summarize.js";
+import { usageTotals } from "./summarize.js";
 
 const harnessDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const repoRoot = path.resolve(harnessDir, "../..");
@@ -245,14 +245,17 @@ function summarize(events: any[]) {
   let taskBookkeepingCalls = 0;
   let shellToolCalls = 0;
   let toolErrors = 0;
-  let inputTokens = 0;
-  let outputTokens = 0;
   let resultText = "";
   let model: string | undefined;
   const toolCallBreakdown = new Map<string, number>();
+  // Token usage is aggregated over every assistant turn: the final `result`
+  // event's usage reflects only the last request, which undercounts a
+  // cache-heavy agent loop by orders of magnitude (see summarize.ts).
+  const usageTurns: Parameters<typeof usageTotals>[0] = [];
   for (const event of events) {
     if (event.type === "assistant") {
       model ??= event.message?.model;
+      usageTurns.push(event.message?.usage ?? {});
       for (const block of event.message?.content ?? []) {
         if (block.type !== "tool_use") continue;
         toolCalls += 1;
@@ -273,11 +276,10 @@ function summarize(events: any[]) {
       }
     } else if (event.type === "result") {
       resultText = event.result ?? "";
-      inputTokens = event.usage?.input_tokens ?? 0;
-      outputTokens = event.usage?.output_tokens ?? 0;
       model ??= event.model;
     }
   }
+  const usage = usageTotals(usageTurns);
   return {
     toolCalls,
     bobbyToolCalls,
@@ -286,8 +288,7 @@ function summarize(events: any[]) {
     taskBookkeepingCalls,
     shellToolCalls,
     toolErrors,
-    inputTokens,
-    outputTokens,
+    ...usage,
     resultText,
     model,
     toolCallBreakdown: Object.fromEntries(
