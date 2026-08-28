@@ -530,12 +530,28 @@ async fn grow_customer_update_corpus() -> TestResult<()> {
 
             // Extract capture: read back the chosen value from the combobox
             // (interactive, so it is inside the candidate window — §6.3).
+            // Phrasings rotate (§4o finding 4): without extract-side
+            // contrastive coverage on this snapshot, the priority
+            // boundary's ambiguous negatives swallow the extract task
+            // that shares the noun.
+            const READ_PRIORITY: [&str; 10] = [
+                "Read the chosen customer priority",
+                "Read off the selected priority value",
+                "Report the priority we picked",
+                "Tell me the current priority value",
+                "Read the priority from the dropdown",
+                "Get the priority shown in the selector",
+                "Read back the priority selection",
+                "What does the priority dropdown show",
+                "Read the priority field's value",
+                "Give me the value of the priority selector",
+            ];
             collector
                 .capture(
                     &runtime,
                     &GroundTruth::Extract {
                         selector: "select[aria-label='Customer priority']",
-                        purpose: "Read the chosen customer priority".into(),
+                        purpose: READ_PRIORITY[run_idx % READ_PRIORITY.len()].into(),
                         ordinal: None,
                     },
                     "customer-update",
