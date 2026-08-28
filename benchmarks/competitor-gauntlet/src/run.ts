@@ -10,6 +10,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { summarize } from "./summarize.js";
 
 const harnessDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const repoRoot = path.resolve(harnessDir, "../..");
@@ -505,6 +506,8 @@ async function main() {
           inputTokens: summary.inputTokens,
           outputTokens: summary.outputTokens,
           provenance,
+          cacheReadTokens: summary.cacheReadTokens,
+          cacheCreationTokens: summary.cacheCreationTokens,
           selfReport: parseSelfReport(summary.resultText),
           transcript: path.relative(repoRoot, transcriptFile),
         };

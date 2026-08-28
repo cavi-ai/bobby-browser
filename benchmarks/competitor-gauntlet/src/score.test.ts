@@ -116,9 +116,9 @@ test("score separates Bobby calls from host and discovery overhead", () => {
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.match(
     result.stdout,
-    /tool\truns\tpass%\ttime s\tcalls\tbobby\thost\tdiscover\terr%\ttokens/,
+    /tool\truns\tpass%\ttime s\tcalls\tbobby\thost\tdiscover\terr%\tin tok\tcache read tok\tcache create tok\tout tok/,
   );
-  assert.match(result.stdout, /bobby\t5\t100\t1\.0\t10\.0\t6\.0\t4\.0\t2\.0\t0\t300/);
+  assert.match(result.stdout, /bobby\t5\t100\t1\.0\t10\.0\t6\.0\t4\.0\t2\.0\t0\t100\t0\t0\t200/);
 });
 
 test("check rejects a latest batch without benchmark provenance", () => {

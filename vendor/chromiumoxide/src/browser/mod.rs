@@ -171,7 +171,16 @@ impl Browser {
 
             // extract the ws:
             let debug_ws_url = ws_url_from_output(child, timeout_fut).await?;
+            // The stderr reader returned with the URL must keep being drained:
+            // dropping it closes the read end of the pipe, and Chrome's
+            // subprocesses logging to a closed pipe die of EPIPE/SIGPIPE
+            // seconds after launch (observed as ResetWithoutClosingHandshake
+            // under command load). Drain and log instead.
+            if let Some(stderr) = child.stderr.take() {
+                spawn_stderr_drainer(stderr);
+            }
             let conn = Connection::<CdpEventMessage>::connect(&debug_ws_url).await?;
+            tracing::info!(target: "chromiumoxide", "browser devtools endpoint: {debug_ws_url}");
             Ok((debug_ws_url, conn))
         }
 
@@ -592,6 +601,41 @@ impl Drop for Browser {
     }
 }
 
+/// Drain the browser's stderr in the background so the pipe never closes
+/// while the browser writes to it, and surface the output in logs: the
+/// post-launch stderr carries crash reasons and helper errors that were
+/// previously lost when the reader was dropped.
+fn spawn_stderr_drainer(stderr: crate::async_process::ChildStderr) {
+    use futures::AsyncBufReadExt;
+    tracing::debug!(target: "chromiumoxide", "stderr drainer started");
+    std::thread::spawn(move || {
+        // A blocking wrapper around the async reader is not possible here, so
+        // run a tiny local runtime: the drainer is IO-bound and idle almost
+        // always, so the thread cost is negligible next to a wedged browser.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build();
+        let drain = async move {
+            let mut reader = futures::io::BufReader::new(stderr);
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                match reader.read_until(b'\n', &mut line).await {
+                    Ok(0) => break, // EOF: browser closed its stderr (or exited)
+                    Ok(_) => {
+                        let text = String::from_utf8_lossy(&line);
+                        tracing::debug!(target: "chromiumoxide::browser_stderr", "{}", text.trim_end());
+                    }
+                    Err(_) => break,
+                }
+            }
+        };
+        if let Ok(rt) = rt {
+            rt.block_on(drain);
+        }
+    });
+}
+
 /// Resolve devtools WebSocket URL from the provided browser process
 ///
 /// If an error occurs, it returns the browser's stderr output.
@@ -638,6 +682,16 @@ async fn ws_url_from_output(
                             Ok(line) => {
                                 if let Some((_, ws)) = line.rsplit_once("listening on ") {
                                     if ws.starts_with("ws") && ws.contains("devtools/browser") {
+                                        // Keep draining stderr in the background:
+                                        // the BufReader holds the only read end of
+                                        // the pipe, and dropping it closes the pipe
+                                        // while the browser and its subprocesses
+                                        // still write to it. A write to a closed
+                                        // pipe kills a helper with EPIPE/SIGPIPE,
+                                        // which surfaces later as
+                                        // ResetWithoutClosingHandshake during
+                                        // command load. Drain into logs instead.
+                                        spawn_stderr_drainer(buf.into_inner());
                                         return Ok(ws.trim().to_string());
                                     }
                                 }

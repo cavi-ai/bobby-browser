@@ -189,6 +189,7 @@ impl WorkerFactory for ChromiumWorkerFactory {
             id: worker_id,
             profile_dir,
             pid_registry_path,
+            debug_ws_url: Some(browser.websocket_address().clone()),
             upload_roots: self.config.upload_roots.clone(),
             download_dir,
             session_id: session_id.clone(),
@@ -274,6 +275,10 @@ struct ChromiumWorker {
     /// (`None` if we couldn't determine the child PID at launch). Removed
     /// once `close`/`terminate` confirms the browser process is gone.
     pid_registry_path: Option<PathBuf>,
+    /// The browser process's CDP websocket endpoint, captured at launch.
+    /// Lets `reconnect_live_process` reattach to the SAME process after a
+    /// transport-only failure, preserving all page state.
+    debug_ws_url: Option<String>,
     upload_roots: Vec<PathBuf>,
     download_dir: PathBuf,
     session_id: SessionId,
@@ -1054,6 +1059,107 @@ impl ChromiumWorker {
             }
         }
         Ok(())
+    }
+    /// Reattach to the same browser process after the CDP websocket died
+    /// without the process dying: check the child PID, connect a fresh
+    /// browser-level websocket, and re-register every still-live target
+    /// under its existing page id. State on the pages (typed values, DOM)
+    /// is untouched — only the transport is new.
+    ///
+    /// Returns Ok(evidence) when reattached; Err with the original shaped
+    /// error when the process is really gone (the caller then proceeds with
+    /// the relaunch path).
+    async fn reconnect_live_process_impl(&self) -> Result<Vec<Evidence>, CommandError> {
+        let Some(mut browser) = self.browser.lock().await.take() else {
+            return Err(closed_error());
+        };
+        // Abort the old handler: its websocket is dead either way.
+        if let Some(task) = self.handler_task.lock().await.take() {
+            task.abort();
+        }
+        // Process-alive verdict: prefer the child handle's exit status (no
+        // subprocess spawn); the PID registry is the fallback when the child
+        // was never readable.
+        let child_alive = match browser.get_mut_child() {
+            Some(child) => child.try_wait().ok().flatten().is_none(),
+            None => self
+                .pid_registry_path
+                .as_deref()
+                .and_then(|path| std::fs::read_to_string(path).ok())
+                .and_then(|text| text.trim().parse::<u32>().ok())
+                .and_then(process_registry::process_command_name)
+                .is_some_and(|name| name.contains("chrom")),
+        };
+        if !child_alive {
+            // Really dead: hand the browser back so the caller's relaunch
+            // path can register/unregister against it as before.
+            *self.browser.lock().await = Some(browser);
+            return Err(closed_error());
+        }
+        let Some(url) = &self.debug_ws_url else {
+            *self.browser.lock().await = Some(browser);
+            return Err(closed_error());
+        };
+        let (fresh, mut handler) = match Browser::connect(url.clone()).await {
+            Ok(pair) => pair,
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %self.session_id.0,
+                    worker_id = %self.id.0,
+                    "CDP reattach to live browser failed: {error}"
+                );
+                *self.browser.lock().await = Some(browser);
+                return Err(closed_error());
+            }
+        };
+        let handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
+        *self.handler_task.lock().await = Some(handler_task);
+        // Swap the fresh connection in, then reconcile the page registry.
+        // The old page handles reference the dead browser's channels: each
+        // tracked page is re-resolved against the live browser by target id.
+        // A target that died WITH the transport (renderer crash alongside the
+        // reset) is dropped, so page_handle reports a clean page_missing.
+        let tracked: Vec<(
+            PageId,
+            chromiumoxide::cdp::browser_protocol::target::TargetId,
+        )> = {
+            let pages = self.pages.lock().await;
+            pages
+                .iter()
+                .map(|(page_id, page)| (page_id.clone(), page.target_id().clone()))
+                .collect()
+        };
+        *self.browser.lock().await = Some(fresh);
+        {
+            let mut pages = self.pages.lock().await;
+            pages.clear();
+        }
+        {
+            let handle = self.browser_handle().await?;
+            for (page_id, target_id) in tracked {
+                match handle.get_page(target_id).await {
+                    Ok(live) => {
+                        self.register_page(page_id, live).await?;
+                    }
+                    Err(_) => {
+                        // Target lost with the transport: drop the page so
+                        // callers get notFound instead of a stale handle.
+                        self.unregister_page_state(&page_id, true).await;
+                    }
+                }
+            }
+        }
+        tracing::info!(
+            session_id = %self.session_id.0,
+            worker_id = %self.id.0,
+            "reattached to live browser after CDP transport reset; page state preserved"
+        );
+        Ok(vec![Evidence::Configuration {
+            name: "cdpReattach".into(),
+            value: "websocket reset with the browser process still alive; reattached \
+                    to the same process and page state is preserved"
+                .into(),
+        }])
     }
 }
 
@@ -2764,6 +2870,10 @@ return [role, name.slice(0, 200)];
         }
         close_result
     }
+
+    async fn reconnect_live_process(&self) -> Result<Vec<Evidence>, CommandError> {
+        self.reconnect_live_process_impl().await
+    }
 }
 
 fn validate_state_delta(
@@ -4269,6 +4379,7 @@ mod tests {
             id: WorkerId::new(),
             profile_dir: root.join("profile"),
             pid_registry_path: None,
+            debug_ws_url: None,
             upload_roots: Vec::new(),
             download_dir: root.join("downloads"),
             session_id: SessionId::new(),

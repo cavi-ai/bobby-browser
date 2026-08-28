@@ -438,6 +438,19 @@ pub trait BrowserWorker: Send + Sync {
     async fn terminate(&self) -> Result<(), CommandError> {
         self.close().await
     }
+    /// Try to reconnect to the SAME browser process after the CDP transport
+    /// died without the process dying (observed as websocket resets where
+    /// Chrome stays alive with its devtools endpoint still serving). A worker
+    /// that reattaches avoids the destructive alternative — retire worker,
+    /// relaunch browser, reopen page — which loses all page state (typed form
+    /// values, scroll, cookies the page set). Default: unsupported.
+    ///
+    /// Returns true when the worker now holds a live connection to the same
+    /// browser process, with previously tracked pages reattached so a retried
+    /// command lands on the page it targeted.
+    async fn reconnect_live_process(&self) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
 }
 
 fn unsupported_error() -> CommandError {

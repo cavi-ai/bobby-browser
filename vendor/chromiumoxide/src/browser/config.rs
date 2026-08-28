@@ -402,6 +402,17 @@ impl BrowserConfig {
             ));
         }
 
+        // Chrome logs almost nothing on stderr by default in headless mode,
+        // which makes post-launch websocket drops undiagnosable: the browser
+        // stays alive while the CDP socket resets, and the reason (target
+        // detach, DevTools client kick, GPU/renderer abort) never reaches the
+        // operator. Route Chrome's own log to stderr so the background stderr
+        // drainer captures it.
+        builder.args([
+            Arg::value("enable-logging", "stderr"),
+            Arg::value("log-level", "0"),
+        ]);
+
         if let Some((width, height)) = self.window_size {
             builder.arg(Arg::values("window-size", [width, height]));
         }

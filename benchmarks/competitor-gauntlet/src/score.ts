@@ -192,7 +192,10 @@ console.log(
     "host",
     "discover",
     "err%",
-    "tokens",
+    "in tok",
+    "cache read tok",
+    "cache create tok",
+    "out tok",
     ...EASE_KEYS,
   ].join("\t"),
 );
@@ -223,7 +226,10 @@ for (const [tool, list] of [...byTool.entries()].sort()) {
           )) *
         100
       ).toFixed(0),
-      mean(list.map((r) => r.inputTokens + r.outputTokens)).toFixed(0),
+      mean(list.map((r) => r.inputTokens ?? 0)).toFixed(0),
+      mean(list.map((r) => r.cacheReadTokens ?? 0)).toFixed(0),
+      mean(list.map((r) => r.cacheCreationTokens ?? 0)).toFixed(0),
+      mean(list.map((r) => r.outputTokens ?? 0)).toFixed(0),
       ...ease,
     ].join("\t"),
   );

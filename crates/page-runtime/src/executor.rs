@@ -300,7 +300,117 @@ impl PageRuntime {
                     || (page_state.is_some()
                         && failure.error.message == "browser page is not open");
                 let mut revived_execution = None;
+                let mut reattached_execution = None;
                 if browser_died && page_state.is_some() {
+                    let page = page_state.clone().expect("checked above");
+                    let lease = lease_slot.take().expect("lease before revive");
+                    // Transport-only death first: if the browser process is
+                    // still alive, reattach to it and keep every page — the
+                    // relaunch path below destroys page state (typed values
+                    // included) and reloads the URL.
+                    let reattached = match lease.worker().reconnect_live_process().await {
+                        Ok(_) => {
+                            tracing::info!(
+                                session_id = %envelope.session_id.0,
+                                command_id = %envelope.command_id.0,
+                                "CDP transport reset reattached to the live browser"
+                            );
+                            Some(lease)
+                        }
+                        Err(_) => {
+                            // Process really gone (or reconnect unsupported):
+                            // fall through to the relaunch revive path with
+                            // the lease returned for its existing take.
+                            lease_slot = Some(lease);
+                            None
+                        }
+                    };
+                    if let Some(reattached_lease) = reattached {
+                        tracing::info!(
+                            session_id = %envelope.session_id.0,
+                            command_id = %envelope.command_id.0,
+                            "CDP transport reset reattached to the live browser"
+                        );
+                        if envelope.command.class() == types::CommandClass::Replayable {
+                            self.adaptive
+                                .record_retry(observability::RetryClass::Transport);
+                            let remaining = (envelope.deadline - Utc::now())
+                                .to_std()
+                                .unwrap_or(StdDuration::ZERO);
+                            match tokio::time::timeout(
+                                remaining,
+                                self.adaptive.execute(
+                                    &envelope,
+                                    &reattached_lease,
+                                    Some(page),
+                                    &gate,
+                                ),
+                            )
+                            .await
+                            {
+                                Ok(Ok(retry_execution)) => {
+                                    let mut retry_execution = retry_execution;
+                                    retry_execution.evidence.push(reattach_evidence());
+                                    reattached_execution = Some(retry_execution);
+                                    lease_slot = Some(reattached_lease);
+                                }
+                                Ok(Err(retry_failure)) => {
+                                    return self
+                                        .finish_failure(
+                                            &envelope,
+                                            classify_failure(
+                                                &envelope,
+                                                retry_failure.error,
+                                                retry_failure.evidence,
+                                            ),
+                                        )
+                                        .await;
+                                }
+                                Err(_) => {
+                                    return self
+                                        .finish_failure(
+                                            &envelope,
+                                            classify_failure(
+                                                &envelope,
+                                                CommandError {
+                                                    code: ErrorCode::DeadlineExceeded,
+                                                    message: "command did not finish before its envelope deadline".into(),
+                                                    layer: ErrorLayer::Workflow,
+                                                    retryable: true,
+                                                },
+                                                Vec::new(),
+                                            ),
+                                        )
+                                        .await;
+                                }
+                            }
+                        } else {
+                            // Mutating command: the effect may or may not have
+                            // landed, so the caller decides what to do — but the
+                            // failure explains the reattach (page state survived,
+                            // connection restored) instead of implying the page
+                            // was lost. The next command lands on the same,
+                            // still-live page.
+                            let mut error = failure.error.clone();
+                            error.message = format!(
+                                "{} (CDP transport reset; reattached to the live browser — page state preserved, inspect before re-issuing)",
+                                error.message
+                            );
+                            error.retryable = true;
+                            return self
+                                .finish_failure(
+                                    &envelope,
+                                    classify_failure(&envelope, error, {
+                                        let mut evidence = failure.evidence.clone();
+                                        evidence.push(reattach_evidence());
+                                        evidence
+                                    }),
+                                )
+                                .await;
+                        }
+                    }
+                }
+                if reattached_execution.is_none() && browser_died && page_state.is_some() {
                     let page = page_state.clone().expect("checked above");
                     let lease = lease_slot.take().expect("lease before revive");
                     let failed_worker_id = lease.worker_id();
@@ -1165,6 +1275,16 @@ impl PageRuntime {
         promotion
             .record_outcome(url.as_deref(), evidence, success)
             .await;
+    }
+}
+
+/// Evidence that the CDP transport was reattached without losing the page.
+fn reattach_evidence() -> Evidence {
+    Evidence::Configuration {
+        name: "cdpReattach".into(),
+        value: "websocket reset with the browser process still alive; reattached to the \
+                same process and page state is preserved"
+            .into(),
     }
 }
 

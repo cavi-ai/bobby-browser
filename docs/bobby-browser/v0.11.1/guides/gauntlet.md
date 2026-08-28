@@ -65,12 +65,15 @@ When selecting bobby, the harness creates an isolated run workspace and writes
 - `upload_roots = ["./data/uploads"]`
 - `downloads_dir = "./downloads"`
 - `artifacts_dir = "./artifacts"`
+- `headless = true`
 - `[http] allow_loopback = true`
-- `[mcp] startup_toolset = "full"`
+- `[mcp] startup_toolset = "explore"`
 
 The fixture is staged at `./data/uploads/approved-upload.txt` in that workspace
 to satisfy upload policy, and `BOBBY_BROWSER_CONFIG` is pointed at that config.
-`BOBBY_MCP_TOOLSET` is also set to `full` for that runner.
+The default `explore` startup toolset is deliberate: it measures what a user
+who never touches `toolset_select` gets — observation, navigation, and the
+base controls, which cover every journey. `BOBBY_MCP_TOOLSET` is left unset.
 
 ## Standalone scenario server
 
