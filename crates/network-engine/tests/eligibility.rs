@@ -39,7 +39,7 @@ fn assert_direct(command: PrimitiveCommand) {
 fn assert_chromium(command: PrimitiveCommand, expected: ExecutionReason) {
     assert!(matches!(
         policy().classify(&command, "https://example.test/report"),
-        EligibilityDecision::Chromium(reason) if reason == expected
+        EligibilityDecision::Browser(reason) if reason == expected
     ));
 }
 

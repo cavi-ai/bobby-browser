@@ -2105,7 +2105,7 @@ fn evidence_variants() -> Vec<Value> {
         tagged_fields(
             "executionPath",
             json!({
-                "path":{"type":"string","enum":["directHttp","chromium","chromiumFallback"]},
+                "path":{"type":"string","enum":["directHttp","browser","browserFallback"]},
                 "reason":{"type":"string","enum":["eligibleStaticDocument","eligibleExplicitDownload","ineligibleCommand","semanticTargetRequired","javascriptRequired","unsupportedContentType","stateConflict","policyRequired","pageMutated"],"description":"Why the direct-HTTP fast path was or was not taken; ineligibleCommand means the command class runs in the browser and is not a failure."},
                 "stateVersion":{"type":"integer","minimum":0},"elapsedMs":{"type":"integer","minimum":0},
                 "bytes":nullable(json!({"type":"integer","minimum":0})),"sha256":nullable(sha256()),

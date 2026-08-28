@@ -184,8 +184,79 @@ EOF
   printf 'ok - default debug port does not collide with the CDP port\n'
 }
 
+# Firefox pretty-prints this file, leaving the port last on its line.
+test_accepts_a_pretty_printed_endpoint_file() {
+  make_fixture
+  trap cleanup_fixture RETURN
+
+  cat >"$BOBBY_FIREFOX_BIN" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$$" >"$FIXTURE/firefox.pid"
+touch "$PROFILE/.parentlock"
+printf '{\n  "ws_host": "127.0.0.1",\n  "ws_port": 9222\n}\n' >"$PROFILE/WebDriverBiDiServer.json"
+/bin/sleep 2
+EOF
+  chmod +x "$BOBBY_FIREFOX_BIN"
+  install_owned_listener_fakes
+
+  output="$($LAUNCHER start 2>&1)" \
+    || fail "pretty-printed endpoint was rejected: $output"
+  [[ "$output" == *"BiDi listening on 127.0.0.1:9222"* ]] \
+    || fail "pretty-printed endpoint did not report readiness: $output"
+  printf 'ok - accepts a pretty-printed endpoint file\n'
+}
+
+# The port match must not be a prefix match: :9222 is not :92220.
+test_rejects_an_endpoint_whose_port_only_shares_a_prefix() {
+  make_fixture
+  trap cleanup_fixture RETURN
+
+  cat >"$BOBBY_FIREFOX_BIN" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$$" >"$FIXTURE/firefox.pid"
+touch "$PROFILE/.parentlock"
+printf '{"ws_host":"127.0.0.1","ws_port":92220}\n' >"$PROFILE/WebDriverBiDiServer.json"
+/bin/sleep 2
+EOF
+  chmod +x "$BOBBY_FIREFOX_BIN"
+  install_owned_listener_fakes
+
+  if output="$($LAUNCHER start 2>&1)"; then
+    fail "an endpoint on :92220 was accepted for :9222"
+  fi
+  [[ "$output" == *"did not establish a fresh, owned BiDi endpoint"* ]] \
+    || fail "prefix-port failure was not explained: $output"
+  printf 'ok - rejects an endpoint whose port only shares a prefix\n'
+}
+
+# On macOS the launched binary re-execs through the app bundle, so the browser
+# holding the profile lock and the BiDi port is not the pid bash backgrounded.
+test_accepts_a_relaunched_browser_under_a_different_pid() {
+  make_fixture
+  trap cleanup_fixture RETURN
+
+  cat >"$BOBBY_FIREFOX_BIN" <<'EOF'
+#!/usr/bin/env bash
+/bin/sleep 2 &
+printf '%s\n' "$!" >"$FIXTURE/firefox.pid"
+touch "$PROFILE/.parentlock"
+printf '{"ws_host":"127.0.0.1","ws_port":9222}\n' >"$PROFILE/WebDriverBiDiServer.json"
+EOF
+  chmod +x "$BOBBY_FIREFOX_BIN"
+  install_owned_listener_fakes
+
+  output="$($LAUNCHER start 2>&1)" \
+    || fail "re-exec'd browser was rejected: $output"
+  [[ "$output" == *"BiDi listening on 127.0.0.1:9222"* ]] \
+    || fail "re-exec'd browser did not report readiness: $output"
+  printf 'ok - accepts a relaunched browser under a different pid\n'
+}
+
 test_rejects_foreign_listener_before_launch
 test_surfaces_early_exit_diagnostics
 test_default_debug_port_does_not_collide_with_cdp
 test_rejects_stale_endpoint_file
 test_accepts_fresh_endpoint_owned_by_launched_firefox
+test_accepts_a_pretty_printed_endpoint_file
+test_rejects_an_endpoint_whose_port_only_shares_a_prefix
+test_accepts_a_relaunched_browser_under_a_different_pid

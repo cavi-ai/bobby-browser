@@ -277,7 +277,7 @@ export function isEvidence(value: unknown): value is Evidence {
   switch (value.kind) {
     case "executionPath":
       return hasExactKeys(value, ["kind", "path", "reason", "stateVersion", "elapsedMs", "bytes", "sha256"], ["finalUrl", "contentType", "status", "redirectChain"])
-        && (value.path === "directHttp" || value.path === "chromium" || value.path === "chromiumFallback")
+        && (value.path === "directHttp" || value.path === "browser" || value.path === "browserFallback")
         && (value.reason === "eligibleStaticDocument" || value.reason === "eligibleExplicitDownload" || value.reason === "ineligibleCommand" || value.reason === "semanticTargetRequired" || value.reason === "javascriptRequired" || value.reason === "unsupportedContentType" || value.reason === "stateConflict" || value.reason === "policyRequired")
         && isSafeUnsigned(value.stateVersion)
         && isSafeUnsigned(value.elapsedMs)

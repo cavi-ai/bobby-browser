@@ -7,7 +7,8 @@ use crate::NetworkPolicy;
 #[derive(Debug)]
 pub enum EligibilityDecision {
     DirectHttp(ExecutionReason),
-    Chromium(ExecutionReason),
+    /// Needs a live browser, whichever engine the session holds.
+    Browser(ExecutionReason),
     Denied(CommandError),
 }
 
@@ -25,14 +26,14 @@ impl EligibilityPolicy {
         match command {
             PrimitiveCommand::Inspect(inspect) => {
                 if inspect.target.is_some() {
-                    return EligibilityDecision::Chromium(ExecutionReason::SemanticTargetRequired);
+                    return EligibilityDecision::Browser(ExecutionReason::SemanticTargetRequired);
                 }
                 if inspect
                     .selector
                     .as_deref()
                     .is_some_and(|selector| Selector::parse(selector).is_err())
                 {
-                    return EligibilityDecision::Chromium(ExecutionReason::IneligibleCommand);
+                    return EligibilityDecision::Browser(ExecutionReason::IneligibleCommand);
                 }
 
                 match validate_http_url(page_url) {
@@ -59,11 +60,11 @@ impl EligibilityPolicy {
                 }
             }
             // The catch-all below already routes `EvaluateJavaScript` (and every other
-            // command class) to Chromium — JavaScript evaluation always requires a live
-            // browser context and can never be satisfied by the direct-HTTP path.
+            // command class) to the browser — JavaScript evaluation always requires a
+            // live browser context and can never be satisfied by the direct-HTTP path.
             _ => {
                 let _class: CommandClass = command.class();
-                EligibilityDecision::Chromium(ExecutionReason::IneligibleCommand)
+                EligibilityDecision::Browser(ExecutionReason::IneligibleCommand)
             }
         }
     }

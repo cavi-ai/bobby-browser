@@ -243,7 +243,7 @@ async fn adaptive_http() {
         }),
     )
     .await;
-    path(&chromium_static, ExecutionPath::Chromium);
+    path(&chromium_static, ExecutionPath::Browser);
     let direct_static = submit(
         &runtime,
         &session.id,
@@ -276,7 +276,7 @@ async fn adaptive_http() {
         PrimitiveCommand::Inspect(InspectCommand::default()),
     )
     .await;
-    path(&dynamic, ExecutionPath::ChromiumFallback);
+    path(&dynamic, ExecutionPath::BrowserFallback);
     assert!(inspection_text(&dynamic).contains("rendered fixture"));
 
     println!("live phase: explicit direct download");
@@ -422,6 +422,6 @@ async fn adaptive_http() {
     );
 
     println!(
-        "adaptive HTTP live proof: directHttp static+download+recovered, chromiumFallback dynamic, workers=({pre_recovery_worker:?},{post_recovery_worker:?}), artifact={artifact_id}, sha256={sha256}"
+        "adaptive HTTP live proof: directHttp static+download+recovered, browserFallback dynamic, workers=({pre_recovery_worker:?},{post_recovery_worker:?}), artifact={artifact_id}, sha256={sha256}"
     );
 }

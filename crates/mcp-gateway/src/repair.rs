@@ -36,9 +36,7 @@ pub(crate) fn candidate_limit_repair() -> Value {
 }
 
 pub(crate) fn browser_launch_repair() -> Value {
-    json!({
-        "action": "run `bobby doctor`; another runtime (bobby serve/cdp/mcp-stdio or a stray mcp-gateway) may own the Firefox companion port (default 127.0.0.1:9876) or the BiDi endpoint; stop it or point this runtime at a free companionBind, then retry session_create"
-    })
+    repair("Environment problem, not a bad argument: run `bobby doctor`; another runtime (bobby serve/cdp/mcp-stdio or a stray mcp-gateway) may own the Firefox companion port (default 127.0.0.1:9876) or the BiDi endpoint. Stop it, start and Pair the companion if needed, or point this runtime at a free companionBind, then retry session_create.")
 }
 
 /// General repair for one `ErrorCode` or `InterfaceErrorCode` wire name

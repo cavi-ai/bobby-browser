@@ -306,11 +306,37 @@ impl ConfiguredFirefoxFactory {
                 return Ok(client.clone());
             }
         }
-        let client =
-            crate::BidiClient::connect_session(self.config.bidi_url.clone(), self.config.timeout)
-                .await?;
+        let client = self.connect_bidi().await?;
         *slot = Some(client.clone());
         Ok(client)
+    }
+
+    /// The enrolled `bidiUrl` is a snapshot of the port Firefox held when the
+    /// profile was paired, but Firefox binds its BiDi port per launch: a
+    /// restart on another port leaves the snapshot pointing at nothing, and
+    /// every session afterwards fails to connect with the enrollment looking
+    /// healthy. The profile's own `WebDriverBiDiServer.json` is the live
+    /// truth, so a refused connection retries against it once. Its parser
+    /// enforces the same loopback rule the enrolled URL is held to.
+    async fn connect_bidi(&self) -> Result<crate::BidiClient, CommandError> {
+        let configured = self.config.bidi_url.clone();
+        let error =
+            match crate::BidiClient::connect_session(configured.clone(), self.config.timeout).await
+            {
+                Ok(client) => return Ok(client),
+                Err(error) => error,
+            };
+        let Some(live) = live_endpoint_override(&self.config.profile_dir, &configured) else {
+            // No live endpoint file, or it agrees with the enrolled URL: the
+            // first failure is the real one.
+            return Err(error);
+        };
+        tracing::warn!(
+            configured = %configured,
+            live = %live,
+            "enrolled Firefox BiDi endpoint unreachable; retrying on the profile's live endpoint"
+        );
+        crate::BidiClient::connect_session(live, self.config.timeout).await
     }
 
     async fn start_server(&self) -> Result<FirefoxBootstrapAttempt, CommandError> {
@@ -495,6 +521,15 @@ impl Drop for FirefoxBootstrapAttempt {
 struct FileIdentity {
     device: u64,
     inode: u64,
+}
+
+/// The profile's live BiDi endpoint when it disagrees with the enrolled URL.
+/// `None` means there is nothing better to try: no endpoint file, an
+/// unreadable or non-loopback one, or one that already matches.
+fn live_endpoint_override(profile_dir: &Path, configured: &Url) -> Option<Url> {
+    crate::read_bidi_url_from_profile_dir(profile_dir)
+        .ok()
+        .filter(|live| live != configured)
 }
 
 fn companion_error(error: impl std::fmt::Display) -> CommandError {
@@ -1070,6 +1105,54 @@ pub fn persist_browser_selection(path: &Path, selection: &BrowserSelectionConfig
 mod tests {
     use super::*;
     use types::SessionId;
+
+    fn write_endpoint(profile_dir: &Path, port: u16) {
+        std::fs::write(
+            profile_dir.join("WebDriverBiDiServer.json"),
+            format!(r#"{{"ws_host":"127.0.0.1","ws_port":{port}}}"#),
+        )
+        .unwrap();
+    }
+
+    /// Firefox rebinds its BiDi port every launch, so the port frozen into
+    /// `browser-selection.json` at enrollment goes stale on the next restart.
+    #[test]
+    fn a_relaunched_profile_on_another_port_overrides_the_enrolled_url() {
+        let profile = tempfile::tempdir().unwrap();
+        write_endpoint(profile.path(), 9224);
+        let configured = Url::parse("ws://127.0.0.1:9222/session").unwrap();
+        assert_eq!(
+            live_endpoint_override(profile.path(), &configured)
+                .as_ref()
+                .map(Url::as_str),
+            Some("ws://127.0.0.1:9224/session")
+        );
+    }
+
+    #[test]
+    fn an_agreeing_or_absent_endpoint_file_yields_no_override() {
+        let profile = tempfile::tempdir().unwrap();
+        let configured = Url::parse("ws://127.0.0.1:9222/session").unwrap();
+        assert!(live_endpoint_override(profile.path(), &configured).is_none());
+        write_endpoint(profile.path(), 9222);
+        assert!(live_endpoint_override(profile.path(), &configured).is_none());
+    }
+
+    /// A malformed or non-loopback endpoint file must not become a connection
+    /// target: the original failure stands.
+    #[test]
+    fn an_unusable_endpoint_file_yields_no_override() {
+        let profile = tempfile::tempdir().unwrap();
+        let configured = Url::parse("ws://127.0.0.1:9222/session").unwrap();
+        std::fs::write(profile.path().join("WebDriverBiDiServer.json"), b"{").unwrap();
+        assert!(live_endpoint_override(profile.path(), &configured).is_none());
+        std::fs::write(
+            profile.path().join("WebDriverBiDiServer.json"),
+            br#"{"ws_host":"8.8.8.8","ws_port":9224}"#,
+        )
+        .unwrap();
+        assert!(live_endpoint_override(profile.path(), &configured).is_none());
+    }
 
     #[test]
     fn build_enrolled_browser_selection_matches_wire_shape() {

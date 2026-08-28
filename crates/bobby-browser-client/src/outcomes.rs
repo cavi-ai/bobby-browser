@@ -551,10 +551,17 @@ impl CommandOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
+/// Which strategy served a command: the direct-HTTP reader, or the live
+/// browser. The browser variants name the *strategy*, never an engine — a
+/// Firefox-companion run reports `browser`, and reporting `chromium` there
+/// contradicted the `browserExecution` evidence sitting beside it. The old
+/// wire names still deserialize so recorded journals keep replaying.
 pub enum ExecutionPath {
     DirectHttp,
-    Chromium,
-    ChromiumFallback,
+    #[serde(alias = "chromium")]
+    Browser,
+    #[serde(alias = "chromiumFallback")]
+    BrowserFallback,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
