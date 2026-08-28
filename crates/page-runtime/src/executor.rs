@@ -508,7 +508,7 @@ impl PageRuntime {
                         }
                     }
                 }
-                match revived_execution {
+                match reattached_execution.or(revived_execution) {
                     Some(revived_execution) => revived_execution,
                     None => {
                         return self
