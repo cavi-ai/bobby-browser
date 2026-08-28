@@ -1085,9 +1085,14 @@ async fn execute_submit_and_verify(
     target: TargetSpec,
     expected_state: WaitForCommand,
 ) -> IntentOutcome {
-    let purpose = match intent {
-        IntentCommand::SubmitAndVerify(submit) => Some(submit.purpose.clone()),
-        _ => None,
+    let (purpose, purpose_is_implicit_match) = match intent {
+        IntentCommand::SubmitAndVerify(submit) => (
+            Some(submit.purpose.clone()),
+            submit.hints.accessible_name.is_none()
+                && submit.hints.near_text.is_none()
+                && submit.hints.ordinal.is_none(),
+        ),
+        _ => (None, false),
     };
     let plan_summary = format!(
         "{} expected_state={}",
@@ -1131,6 +1136,19 @@ async fn execute_submit_and_verify(
                 ))],
             };
         }
+    };
+    let decision = if purpose_is_implicit_match {
+        purpose
+            .as_deref()
+            .and_then(|purpose| disambiguate_submit_by_purpose(&target, &candidates, purpose))
+            .unwrap_or_else(|| match decision {
+                ResolutionDecision::Resolved { evidence, .. } => ResolutionDecision::Ambiguous {
+                    candidates: vec![evidence],
+                },
+                unresolved => unresolved,
+            })
+    } else {
+        decision
     };
 
     let (candidate, candidate_evidence, best_match_authorized) = match decision {
@@ -1399,6 +1417,61 @@ fn post_navigation_context_loss(error: &CommandError) -> bool {
     let message = error.message.to_ascii_lowercase();
     message.contains("cannot find context with specified id")
         || message.contains("execution context was destroyed")
+}
+
+fn disambiguate_submit_by_purpose(
+    target: &TargetSpec,
+    candidates: &[Candidate],
+    purpose: &str,
+) -> Option<ResolutionDecision> {
+    let actionable_candidates = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.state.attached && candidate.state.visible && candidate.state.enabled
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if let Some(decision) = disambiguate_by_purpose(target, &actionable_candidates, purpose) {
+        return Some(decision);
+    }
+
+    let wanted_role = target.role.as_deref();
+    let submit_candidates = actionable_candidates
+        .iter()
+        .filter(|candidate| {
+            wanted_role.is_none_or(|wanted| {
+                candidate
+                    .role
+                    .as_deref()
+                    .is_some_and(|role| role.eq_ignore_ascii_case(wanted))
+            }) && candidate
+                .attributes
+                .get("type")
+                .is_some_and(|value| value.eq_ignore_ascii_case("submit"))
+        })
+        .collect::<Vec<_>>();
+    let [candidate] = submit_candidates.as_slice() else {
+        return None;
+    };
+
+    let mut reasons = Vec::new();
+    let mut score = 40;
+    if wanted_role.is_some() {
+        reasons.push("exactRole".into());
+        score += 30;
+    }
+    reasons.push("uniqueSubmitControl".into());
+    Some(ResolutionDecision::Resolved {
+        candidate: Box::new((*candidate).clone()),
+        evidence: types::CandidateEvidence {
+            role: candidate.role.clone(),
+            name: candidate.name.clone(),
+            score,
+            reasons,
+        },
+        best_match_authorized: false,
+    })
 }
 
 async fn execute_follow(

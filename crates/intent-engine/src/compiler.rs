@@ -144,19 +144,12 @@ pub fn compile_intent(command: &IntentCommand) -> Result<IntentPlan, CompileErro
         }
         IntentCommand::SubmitAndVerify(intent) => {
             let purpose = validate_purpose(&intent.purpose)?;
-            let fallback_hints;
-            let hints = if targeting_hints_are_empty(&intent.hints) {
-                fallback_hints = IntentHints {
-                    role: Some("button".into()),
-                    accessible_name: Some(purpose.to_owned()),
-                    ..IntentHints::default()
-                };
-                &fallback_hints
-            } else {
-                &intent.hints
-            };
+            let mut hints = intent.hints.clone();
+            if hints.role.is_none() {
+                hints.role = Some("button".into());
+            }
             Ok(IntentPlan::SubmitAndVerify {
-                target: compile_target(purpose, hints)?,
+                target: compile_locate_target(purpose, &hints)?,
                 expected_state: intent.expected_state.clone(),
             })
         }

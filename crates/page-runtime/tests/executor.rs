@@ -1017,6 +1017,7 @@ async fn submit_and_verify_requires_matching_checkpoint_before_boundary_act() {
         purpose: "Submit application".into(),
         hints: IntentHints {
             role: Some("button".into()),
+            accessible_name: Some("Submit".into()),
             ..IntentHints::default()
         },
         expected_state: WaitForCommand {
