@@ -26,22 +26,22 @@ class BobbyBrowser < Formula
   on_macos do
     on_arm do
       url "https://github.com/cavi-ai/bobby-browser/releases/download/v#{version}/bobby-browser-#{version}-macos-arm64.tar.gz"
-      sha256 "12376759666ae5340e9843b7b46ec8978b392c590c9af6a7659641cb4fd21dc0"
+      sha256 "5063be7515490213c5534dbe054b805d1db82015c83b9b23d1408b4f7018cdbf"
     end
     on_intel do
       url "https://github.com/cavi-ai/bobby-browser/releases/download/v#{version}/bobby-browser-#{version}-macos-x64.tar.gz"
-      sha256 "dc65396055197b39201ef61bc2d87580915f97c0fce48082b4317f6e1de4b92b"
+      sha256 "b702806a024a1dc289a1199462a12afb0b7e14ad3953af969bce9eb90f764865"
     end
   end
 
   on_linux do
     on_arm do
       url "https://github.com/cavi-ai/bobby-browser/releases/download/v#{version}/bobby-browser-#{version}-linux-arm64.tar.gz"
-      sha256 "97354b1ad25eaa869ba08971820cbcbb5f0477527f52040946309161f2fb7d0b"
+      sha256 "5b31678b076dcf372b8748e6edf4bf0f2bc7aaf590fc30d60e11a84b5c9d2945"
     end
     on_intel do
       url "https://github.com/cavi-ai/bobby-browser/releases/download/v#{version}/bobby-browser-#{version}-linux-x64.tar.gz"
-      sha256 "a15c6db9a41774239ba211d541a1a050b3bce93611fa702dd5b44bef86ba5343"
+      sha256 "2d14ae1a50038e4153183c1f2ceb4b1c9095b4a493d5a72e55805f09b1a533b5"
     end
   end
 
