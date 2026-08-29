@@ -39,6 +39,10 @@ enum DriverMode {
     /// First launch's page commands fail with a dead-browser error;
     /// replacements are healthy. Exercises command-path revival.
     DeadWorkerCommands,
+    /// First command fails with a dead-browser error, but the worker's
+    /// process is still alive, so the reattach path reconnects and the
+    /// replayed command succeeds without any relaunch.
+    TransportResetReattaches,
     /// Inspect reports a prefilled value with the typed text appended,
     /// simulating `clear_first: false` into a non-empty field.
     AppendPrefill,
@@ -129,6 +133,7 @@ struct FakeWorker {
     profile: PathBuf,
     events: Arc<Mutex<Vec<String>>>,
     mode: DriverMode,
+    reattached: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[async_trait]
@@ -138,6 +143,20 @@ impl BrowserWorker for FakeWorker {
     }
     fn profile_dir(&self) -> &Path {
         &self.profile
+    }
+    async fn reconnect_live_process(&self) -> Result<Vec<Evidence>, CommandError> {
+        if !matches!(self.mode, DriverMode::TransportResetReattaches) {
+            return Err(CommandError {
+                code: ErrorCode::BrowserCommandFailed,
+                message: "browser worker is closed".into(),
+                layer: ErrorLayer::Driver,
+                retryable: false,
+            });
+        }
+        self.reattached
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.events.lock().await.push("browser:reattach".into());
+        Ok(Vec::new())
     }
     async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
         if matches!(self.mode, DriverMode::DeadOnOpen) {
@@ -170,7 +189,10 @@ impl BrowserWorker for FakeWorker {
         command: &InspectCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         self.events.lock().await.push("browser:inspect".into());
-        if matches!(self.mode, DriverMode::DeadWorkerCommands) {
+        if matches!(self.mode, DriverMode::DeadWorkerCommands)
+            || (matches!(self.mode, DriverMode::TransportResetReattaches)
+                && !self.reattached.load(std::sync::atomic::Ordering::SeqCst))
+        {
             return Err(CommandError {
                 code: ErrorCode::BrowserCommandFailed,
                 message: "send failed because receiver is gone".into(),
@@ -228,7 +250,10 @@ impl BrowserWorker for FakeWorker {
         command: &ClickCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         self.events.lock().await.push("browser:click".into());
-        if matches!(self.mode, DriverMode::DeadWorkerCommands) {
+        if matches!(self.mode, DriverMode::DeadWorkerCommands)
+            || (matches!(self.mode, DriverMode::TransportResetReattaches)
+                && !self.reattached.load(std::sync::atomic::Ordering::SeqCst))
+        {
             return Err(CommandError {
                 code: ErrorCode::BrowserCommandFailed,
                 message: "send failed because receiver is gone".into(),
@@ -266,7 +291,10 @@ impl BrowserWorker for FakeWorker {
         command: &TypeTextCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         self.events.lock().await.push("browser:type_text".into());
-        if matches!(self.mode, DriverMode::DeadWorkerCommands) {
+        if matches!(self.mode, DriverMode::DeadWorkerCommands)
+            || (matches!(self.mode, DriverMode::TransportResetReattaches)
+                && !self.reattached.load(std::sync::atomic::Ordering::SeqCst))
+        {
             return Err(CommandError {
                 code: ErrorCode::BrowserCommandFailed,
                 message: "send failed because receiver is gone".into(),
@@ -288,7 +316,10 @@ impl BrowserWorker for FakeWorker {
             .lock()
             .await
             .push("browser:control_action".into());
-        if matches!(self.mode, DriverMode::DeadWorkerCommands) {
+        if matches!(self.mode, DriverMode::DeadWorkerCommands)
+            || (matches!(self.mode, DriverMode::TransportResetReattaches)
+                && !self.reattached.load(std::sync::atomic::Ordering::SeqCst))
+        {
             return Err(CommandError {
                 code: ErrorCode::BrowserCommandFailed,
                 message: "send failed because receiver is gone".into(),
@@ -363,7 +394,10 @@ impl BrowserWorker for FakeWorker {
         command: &WaitForCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         self.events.lock().await.push("browser:wait_for".into());
-        if matches!(self.mode, DriverMode::DeadWorkerCommands) {
+        if matches!(self.mode, DriverMode::DeadWorkerCommands)
+            || (matches!(self.mode, DriverMode::TransportResetReattaches)
+                && !self.reattached.load(std::sync::atomic::Ordering::SeqCst))
+        {
             return Err(CommandError {
                 code: ErrorCode::BrowserCommandFailed,
                 message: "send failed because receiver is gone".into(),
@@ -652,6 +686,7 @@ impl WorkerFactory for DeadThenFailFactory {
                 profile: PathBuf::from("/tmp/dead-then-fail-profile"),
                 events: self.events.clone(),
                 mode: DriverMode::DeadOnOpen,
+                reattached: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }));
         }
         Err(CommandError {
@@ -666,15 +701,15 @@ impl WorkerFactory for DeadThenFailFactory {
 #[async_trait]
 impl WorkerFactory for FakeFactory {
     async fn launch(&self, _: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
+        let launch = self
+            .launches
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         // DeadOnOpen/DeadWorkerCommands: only the first launch is dead;
         // replacements are healthy, so a revived session can open pages again.
         let mode = if matches!(
             self.mode,
             DriverMode::DeadOnOpen | DriverMode::DeadWorkerCommands
-        ) && self
-            .launches
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            > 0
+        ) && launch > 0
         {
             DriverMode::Succeed
         } else {
@@ -685,6 +720,7 @@ impl WorkerFactory for FakeFactory {
             profile: PathBuf::from("/tmp/fake-profile"),
             events: self.events.clone(),
             mode,
+            reattached: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }))
     }
 }
@@ -2751,6 +2787,67 @@ async fn a_dead_browser_revives_and_replays_a_replayable_command() {
     assert!(
         matches!(outcome, CommandOutcome::Completed { .. }),
         "replayable command must retry transparently after revival: {outcome:?}"
+    );
+}
+
+/// A websocket reset with the browser process still alive must reattach to
+/// the SAME worker (no relaunch, no page reload, no state loss) and replay
+/// the replayable command on the reattached connection.
+#[tokio::test]
+async fn a_transport_reset_reattaches_without_relaunching_the_browser() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let journal = Arc::new(RecordingJournal {
+        events: events.clone(),
+        fail_on: None,
+        pause_on: None,
+        paused: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
+    });
+    let launches = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let workers = Arc::new(WorkerPool::new(
+        8,
+        Arc::new(FakeFactory {
+            events: events.clone(),
+            mode: DriverMode::TransportResetReattaches,
+            launches: Arc::clone(&launches),
+        }),
+    ));
+    let runtime = page_runtime::PageRuntime::new(journal, workers);
+    let session = SessionId::new();
+    let page = runtime
+        .open_browser(session.clone())
+        .await
+        .expect("open_browser");
+
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page.id.clone(),
+            PrimitiveCommand::WaitFor(WaitForCommand {
+                condition: WaitCondition::NetworkQuiet {
+                    idle_ms: 100,
+                    max_in_flight: 0,
+                    ignore_url_substrings: Vec::new(),
+                    ignore_resource_types: Vec::new(),
+                    ignore_long_lived: false,
+                },
+                timeout_ms: 5_000,
+            }),
+        ))
+        .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "replayable command must succeed after a reattach: {outcome:?}"
+    );
+    let events = events.lock().await;
+    assert!(
+        events.contains(&"browser:reattach".to_string()),
+        "reattach path must run: {events:?}"
+    );
+    assert_eq!(
+        launches.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a reattach must never relaunch the browser"
     );
 }
 

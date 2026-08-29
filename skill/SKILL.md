@@ -134,6 +134,13 @@ the handle stops resolving.
    in the state you asked for — re-read (`inspect`, `a11y_snapshot`) instead
    of retrying blindly. `needsReconciliation` means stop and ask a human; do
    not replay the command.
+5. **Batch deferred-tool discovery in one search.** If your host defers MCP
+   tool schemas behind a tool search, issue ONE search selecting every tool
+   the task will need (`select:` accepts a comma-separated list) instead of
+   one search per primitive — each extra round trip is a full model turn.
+   The explore toolset already advertises the standard loop (observe,
+   navigate, click, type, upload, dialogs, downloads); search only for what
+   is genuinely missing.
 5. **Read before write.** On a site this runtime has seen before, ask
    `context_ask` first — a remembered answer (marked `persisted`) beats a
    snapshot. Otherwise take an `a11y_snapshot`, pass its targets straight
