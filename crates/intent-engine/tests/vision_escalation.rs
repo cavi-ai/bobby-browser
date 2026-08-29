@@ -1116,6 +1116,67 @@ async fn cache_miss_falls_through_to_live_escalation() {
 }
 
 #[tokio::test]
+async fn escalation_window_excludes_landmark_rows() {
+    // The production census includes landmark/structural rows (main, nav,
+    // region…) since the scoped a11y snapshot widened the role map. The
+    // adapter's training windows are actionable-role only; a landmark row
+    // shifts the prompt off distribution (measured: one `main` row flips
+    // the adapter to abstain). The window must gate them out.
+    let request_debug = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let assist = Arc::new(RecordingVision {
+        proposal: click_proposal(0.91),
+        request_debug: request_debug.clone(),
+    });
+    let browser = FakeBrowser {
+        screenshot_png: b"png".to_vec(),
+        candidates: vec![
+            form_candidate("app-main", "main", "Name  Continue Resume"),
+            form_candidate("name-field", "textbox", "Name"),
+            form_candidate("go", "button", "Continue"),
+            form_candidate("back", "button", "Resume"),
+        ],
+        click_xy_calls: Arc::new(AtomicUsize::new(0)),
+        ..FakeBrowser::default()
+    };
+    let page_id = PageId::new();
+    let intent = IntentCommand::Locate(LocateIntent {
+        purpose: "Proceed to checkout".into(), // matches nothing → escalate
+        hints: IntentHints::default(),
+    });
+
+    let outcome = IntentEngine::execute(
+        &intent,
+        &page_id,
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(assist),
+            proposals: None,
+            defer_escalation: false,
+            prompt_context: None,
+            corpus: None,
+            context_store: None,
+        },
+    )
+    .await;
+
+    let IntentOutcome::Completed { .. } = outcome else {
+        panic!("expected Completed, got {outcome:?}");
+    };
+    let requests = request_debug.lock().unwrap_or_else(|p| p.into_inner());
+    let request = requests.last().expect("vision was not consulted");
+    assert!(
+        !request.contains("Name  Continue Resume"),
+        "landmark row leaked into the vision window: {request}"
+    );
+    assert!(
+        request.contains("Continue") && request.contains("Resume"),
+        "actionable rows missing from the vision window: {request}"
+    );
+}
+
+#[tokio::test]
 async fn closed_gates_never_consult_the_cache() {
     for (session_ok, capability_ok) in [(true, false), (false, true)] {
         let proposals = Arc::new(FakeProposals {

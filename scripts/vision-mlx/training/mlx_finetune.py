@@ -323,6 +323,20 @@ def run_mlx_finetune(config: MLXFineTuneConfig) -> dict:
             "mode": "text-only LoRA (prompt carries page context; images stay on the Ollama path)",
         }
         (output_path / "metadata.json").write_text(json.dumps(metadata, indent=2))
+
+        # mlx_lm.load(adapter_path=...) requires adapter_config.json beside
+        # the weights; without it the serving path (v1_provider) cannot load
+        # the adapter at all. Write it at training time, not by hand later.
+        adapter_config = {
+            "fine_tune_type": "lora",
+            "num_layers": config.num_layers,
+            "lora_parameters": {
+                "rank": config.lora_rank,
+                "scale": config.lora_alpha,
+                "dropout": config.lora_dropout,
+            },
+        }
+        (output_path / "adapter_config.json").write_text(json.dumps(adapter_config, indent=2))
         print(f"\nAdapter saved: {adapter_file}")
         print(f"Metadata saved: {output_path / 'metadata.json'}")
         return metadata

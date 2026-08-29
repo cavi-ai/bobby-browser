@@ -516,7 +516,9 @@ async fn execute_locate(
             // (capped, score zero) so both the prompt and the corpus carry it.
             let near_misses = candidates
                 .iter()
-                .filter(|candidate| candidate.role.is_some() && candidate.name.is_some())
+                .filter(|candidate| {
+                    vision_window_eligible(candidate.role.as_deref(), candidate.name.as_deref())
+                })
                 .take(5)
                 .map(|candidate| types::CandidateEvidence {
                     role: candidate.role.clone(),
@@ -559,6 +561,29 @@ async fn execute_locate(
             .await
         }
     }
+}
+
+/// Roles the vision prompt window may carry — the actionable set the
+/// training corpus is built from. Landmark/structural rows (main,
+/// navigation, region, heading, …) are never valid selections, eat the
+/// top-5 window budget, and shift the prompt off the adapter's training
+/// distribution (measured: one `main` row flips the adapter to abstain
+/// on an otherwise-clean window).
+const VISION_WINDOW_ROLES: [&str; 10] = [
+    "button",
+    "link",
+    "textbox",
+    "combobox",
+    "checkbox",
+    "radio",
+    "tab",
+    "menuitem",
+    "searchbox",
+    "switch",
+];
+
+fn vision_window_eligible(role: Option<&str>, name: Option<&str>) -> bool {
+    name.is_some() && role.is_some_and(|role| VISION_WINDOW_ROLES.contains(&role))
 }
 
 fn disambiguate_by_purpose(
@@ -2032,7 +2057,9 @@ async fn escalate_extract_field_with_vision(
     // recollecting or accepting provider-authored text.
     let prompt_window = candidates
         .iter()
-        .filter(|candidate| candidate.role.is_some() && candidate.name.is_some())
+        .filter(|candidate| {
+            vision_window_eligible(candidate.role.as_deref(), candidate.name.as_deref())
+        })
         .take(5)
         .cloned()
         .collect::<Vec<_>>();
@@ -2972,13 +2999,14 @@ async fn escalate_with_vision(
         let block = context.get_or_insert_with(crate::VisionPromptContext::default);
         block.candidates = candidates
             .iter()
+            .filter(|candidate| {
+                vision_window_eligible(candidate.role.as_deref(), candidate.name.as_deref())
+            })
             .take(5)
-            .filter_map(|candidate| {
-                Some(crate::VisionPromptCandidate {
-                    role: candidate.role.clone()?,
-                    name: candidate.name.clone()?,
-                    ordinal: None,
-                })
+            .map(|candidate| crate::VisionPromptCandidate {
+                role: candidate.role.clone().expect("gated role"),
+                name: candidate.name.clone().expect("gated name"),
+                ordinal: None,
             })
             .collect();
     }
@@ -3105,11 +3133,13 @@ async fn escalate_with_vision(
     }
 
     // The model indexes into the exact list the prompt carried: top 5
-    // candidates with both role and name. Resolve against that same view.
+    // window-eligible candidates. Resolve against that same view.
     let prompt_candidates: Vec<types::CandidateEvidence> = candidates
         .iter()
+        .filter(|candidate| {
+            vision_window_eligible(candidate.role.as_deref(), candidate.name.as_deref())
+        })
         .take(5)
-        .filter(|candidate| candidate.role.is_some() && candidate.name.is_some())
         .cloned()
         .collect();
     let mut act_evidence = match execute_vision_action(
