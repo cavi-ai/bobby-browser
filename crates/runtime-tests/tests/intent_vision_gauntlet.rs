@@ -147,6 +147,37 @@ const SAVE_PRIORITY: [&str; 4] = [
 
 #[tokio::test]
 #[ignore = "requires installed Chrome and a running vision-proxy"]
+async fn probe_fill_and_select_outcomes() -> TestResult<()> {
+    require_harvest_env();
+    let server = ScenarioServer::start(ScenarioConfig::seeded("fill-probe")).await?;
+    let runtime = ModernRuntime::launch(&server, Journey::CustomerUpdate).await?;
+    runtime
+        .wait_visible("input[aria-label='Search customers']")
+        .await?;
+
+    let fill_outcome = runtime
+        .submit_intent(fill_text("Put 'Atlas' in the lookup box", "Atlas"))
+        .await;
+    println!("FILL outcome ok={}", fill_outcome.is_ok());
+    if let Err(error) = &fill_outcome {
+        println!("FILL error: {error}");
+    }
+
+    let select_outcome = runtime
+        .submit_intent(select_one_intent(
+            "Pick the high priority for this customer",
+            "high",
+        ))
+        .await;
+    println!("SELECT outcome ok={}", select_outcome.is_ok());
+    if let Err(error) = &select_outcome {
+        println!("SELECT error: {error}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome and a running vision-proxy"]
 async fn harvest_documents_positives() -> TestResult<()> {
     require_harvest_env();
     let before = corpus_record_count();

@@ -277,6 +277,73 @@ fn fill(purpose: &str, role: &str, value: ControlAction) -> IntentCommand {
 }
 
 #[tokio::test]
+async fn fill_not_found_escalates_with_a_ranked_window() {
+    // A fill that matches nothing must escalate with the page's plausible
+    // fields in the window. The fill path used to escalate with an EMPTY
+    // window — the model was asked to pick from nothing, correctly
+    // abstained, and the records were §4i poison.
+    let request_debug = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let assist = Arc::new(RecordingVision {
+        proposal: VisionProposal {
+            confidence: 0.95,
+            action: VisionAction::TypeIntoCandidate { index: 0 },
+        },
+        request_debug: request_debug.clone(),
+    });
+    let browser = FakeBrowser {
+        candidates: vec![
+            form_candidate("brand", "link", "Northstar Ops"),
+            form_candidate("search-field", "searchbox", "Search customers"),
+        ],
+        type_text_evidence: vec![Evidence::Element {
+            selector: "#search-field".into(),
+            text: Some("Atlas".into()),
+        }],
+        screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
+    };
+
+    let outcome = IntentEngine::execute(
+        &IntentCommand::Fill(FillIntent {
+            purpose: "Put 'Atlas' in the lookup box".into(), // no name match
+            hints: IntentHints::default(),
+            value: ControlAction::SetText {
+                value: "Atlas".into(),
+                clear_first: true,
+            },
+        }),
+        &PageId::new(),
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(assist),
+            proposals: None,
+            defer_escalation: false,
+            prompt_context: None,
+            corpus: None,
+            context_store: None,
+        },
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, IntentOutcome::Completed { .. }),
+        "expected completed fill via escalation, got {outcome:?}"
+    );
+    let requests = request_debug.lock().unwrap_or_else(|p| p.into_inner());
+    let request = requests.last().expect("vision was not consulted");
+    assert!(
+        request.contains("Search customers"),
+        "fill escalation window must carry the plausible field: {request}"
+    );
+    assert!(
+        !request.contains("runtime secret"),
+        "payload must never reach the provider"
+    );
+}
+
+#[tokio::test]
 async fn type_into_candidate_uses_runtime_text_without_disclosing_it_to_the_provider() {
     let request_debug = Arc::new(std::sync::Mutex::new(Vec::new()));
     let type_text_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
