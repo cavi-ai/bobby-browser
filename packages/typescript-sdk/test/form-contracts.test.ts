@@ -59,3 +59,37 @@ test("canonical form snapshot enforces byte and collection bounds", () => {
   assert.equal(isFormSnapshot(oversized), false);
   assert.equal(isFormSnapshot({ ...snapshot(), forms: Array.from({ length: 65 }, () => (snapshot().forms as unknown[])[0]) }), false);
 });
+
+test("slim wire shape omits default fields and still validates", () => {
+  // What the runtime emits after the form-snapshot slimming: default-value
+  // fields (label equal to accessibleName, null placeholder, empty options,
+  // unconstrained constraints, validity bits at their default) are absent.
+  const slimControl = {
+    id: "email-control",
+    formId: "account",
+    groupId: "identity",
+    target: { role: "textbox", accessibleName: "Email" },
+    controlKind: "email",
+    accessibleName: "Email",
+    autocomplete: "email",
+    state: { kind: "empty" },
+    constraints: { required: true, maxLength: 254 },
+    validity: { valid: true },
+    supportedOperations: ["setText", "clear"],
+  };
+  const slimSnapshot = {
+    schemaVersion: 1, pageId: ID, truncated: false, unownedControls: [], forms: [{
+      id: "account", target: null, accessibleName: "Account", description: null,
+      groups: [{ id: "identity", label: null, description: null, controlIds: ["email-control"] }], controls: [slimControl], submitControlIds: [], resetControlIds: [], validity: { valid: true, invalidControlIds: [] },
+    }],
+  };
+  assert.equal(isFormSnapshot(slimSnapshot), true);
+  // The slim shape must not open the door to garbage: unknown keys stay
+  // rejected, and a missing always-required field is still fatal.
+  assert.equal(isFormSnapshot({ ...slimSnapshot, forms: [{ ...(slimSnapshot.forms as Array<Record<string, unknown>>)[0]!, controls: [{ ...slimControl, mystery: true }] }] }), false);
+  assert.equal(
+    isFormSnapshot({ ...slimSnapshot, forms: [{ ...(slimSnapshot.forms as Array<Record<string, unknown>>)[0]!, controls: [{ id: "x", controlKind: "email", state: { kind: "empty" } }] }] }),
+    false,
+    "validity and supportedOperations stay required",
+  );
+});

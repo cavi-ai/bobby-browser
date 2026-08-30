@@ -330,8 +330,13 @@ fn normalize_control(
             .cloned(),
         target,
         control_kind: kind,
-        accessible_name: raw.accessible_name,
-        label: raw.label,
+        accessible_name: raw.accessible_name.clone(),
+        // A label identical to the accessible name carries no second fact:
+        // collapse it so the snapshot says the name once. A differing label
+        // survives (visible text vs. programmatic name).
+        label: raw
+            .label
+            .filter(|label| Some(label) != raw.accessible_name.as_ref()),
         description: raw.description,
         placeholder: raw.placeholder,
         autocomplete: raw.autocomplete,
@@ -1042,5 +1047,61 @@ mod tests {
         let mut cased = base.clone();
         cased.role = "ComboBox".into();
         assert!(target_specs_equivalent(&base, &cased));
+    }
+}
+
+#[cfg(test)]
+mod slim_tests {
+    use super::*;
+
+    /// An untouched text control serializes as a small object: the old shape
+    /// spent 741 bytes per control repeating `accessibleName` as `label`,
+    /// null-heavy constraints, and validity flags for a pristine form.
+    #[test]
+    fn an_untouched_text_control_stays_small() {
+        let control = FormControl {
+            id: "control-1".into(),
+            form_id: Some("form-1".into()),
+            group_id: None,
+            target: Some(types::FormControlTarget {
+                role: "textbox".into(),
+                accessible_name: "Full name".into(),
+                ordinal: None,
+                frame_path: Vec::new(),
+                shadow_path: Vec::new(),
+            }),
+            control_kind: types::FormControlKind::Text,
+            accessible_name: Some("Full name".into()),
+            label: None,
+            description: None,
+            placeholder: None,
+            autocomplete: Some("name".into()),
+            state: types::FormControlState::Empty,
+            constraints: types::FormControlConstraints {
+                required: true,
+                ..types::FormControlConstraints::default()
+            },
+            validity: types::FormControlValidity {
+                will_validate: true,
+                valid: false,
+                flags: vec![types::FormValidityFlag::ValueMissing],
+                message: Some("Please fill out this field.".into()),
+                described_by: Vec::new(),
+            },
+            options: Vec::new(),
+            supported_operations: vec![
+                types::FormControlOperation::SetText,
+                types::FormControlOperation::Clear,
+            ],
+        };
+        let serialized = serde_json::to_string(&control).unwrap();
+        assert!(
+            serialized.len() <= 400,
+            "untouched control serialized to {} bytes: {serialized}",
+            serialized.len()
+        );
+        // Round-trips: omitting default fields must not lose the payload.
+        let reparsed: types::FormControl = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(reparsed, control);
     }
 }
