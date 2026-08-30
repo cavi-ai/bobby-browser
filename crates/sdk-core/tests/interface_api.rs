@@ -1080,6 +1080,30 @@ fn upload_files_envelope() -> CommandEnvelope {
     }
 }
 
+fn solve_challenge_envelope() -> CommandEnvelope {
+    CommandEnvelope {
+        command: RuntimeCommand::Intent(types::IntentCommand::SolveChallenge(
+            types::SolveChallengeIntent {
+                purpose: "clear the recaptcha blocking the form".into(),
+                hints: types::SolveChallengeHints::default(),
+            },
+        )),
+        ..submit_request()
+    }
+}
+
+fn detect_challenge_envelope() -> CommandEnvelope {
+    CommandEnvelope {
+        command: RuntimeCommand::Intent(types::IntentCommand::DetectChallenge(
+            types::DetectChallengeIntent {
+                purpose: "check what blocks this page".into(),
+                hints: types::DetectChallengeHints::default(),
+            },
+        )),
+        ..submit_request()
+    }
+}
+
 fn download_url_envelope() -> CommandEnvelope {
     CommandEnvelope {
         command: RuntimeCommand::Primitive(types::PrimitiveCommand::DownloadUrl(
@@ -1203,6 +1227,36 @@ async fn download_url_without_file_download_capability_is_denied_before_dispatch
     assert_eq!(error.code, InterfaceErrorCode::MissingCapability);
     assert_eq!(error.required_capability, Some(Capability::FileDownload));
     assert_eq!(api.submit_dispatch_count(), 0);
+}
+
+#[tokio::test]
+async fn challenge_intents_require_vision_assist_beyond_intent_execute() {
+    for (name, envelope) in [
+        ("solve", solve_challenge_envelope()),
+        ("detect", detect_challenge_envelope()),
+    ] {
+        let (api, handle) = authenticated_with(
+            RuntimeService::default(),
+            [
+                Capability::SessionWrite,
+                Capability::PageWrite,
+                Capability::BrowserMutate,
+                Capability::IntentExecute,
+            ],
+        )
+        .await;
+        let context = handle.context(expiry(), None);
+
+        let error = api.submit(context, envelope).await.unwrap_err();
+
+        assert_eq!(
+            error.code,
+            InterfaceErrorCode::MissingCapability,
+            "{name} must gate on vision:assist before dispatch"
+        );
+        assert_eq!(error.required_capability, Some(Capability::VisionAssist));
+        assert_eq!(api.submit_dispatch_count(), 0, "{name} never dispatched");
+    }
 }
 
 #[tokio::test]

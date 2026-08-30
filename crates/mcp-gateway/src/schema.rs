@@ -138,27 +138,8 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                 "workflowId": id(),
                 "sessionId": id(),
                 "pageId": id(),
-                "target": {
-                    "type":"object",
-                    "additionalProperties":false,
-                    "properties":{
-                        "role":string(1,128),
-                        "accessibleName":string(1,2048),
-                        "ordinal":{"type":["integer","null"],"minimum":0,"maximum":2047},
-                        "framePath":array(any_value(),8),
-                        "shadowPath":array(any_value(),8)
-                    },
-                    "required":["role","accessibleName"]
-                },
-                "action": {"oneOf":[
-                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setText"},"value":string(0,4096),"clearFirst":{"type":"boolean","default":true,"description":"replace the current value; set false to append"}},"required":["kind","value"]},
-                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setChecked"},"checked":{"type":"boolean"}},"required":["kind","checked"]},
-                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"selectOne"},"value":string(0,4096)},"required":["kind","value"]},
-                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"selectMany"},"values":nonempty_array(string(0,4096),512)},"required":["kind","values"]},
-                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setFiles"},"paths":nonempty_array(string(1,4096),512)},"required":["kind","paths"]},
-                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"clear"}},"required":["kind"]},
-                    {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"activate"}},"required":["kind"]}
-                ]}
+                "target": {"$ref":"#/$defs/ControlTarget"},
+                "action": {"$ref":"#/$defs/ControlActionKind"}
             }),
             vec!["sessionId", "pageId", "target", "action"],
         ),
@@ -430,6 +411,18 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                 "fields":nonempty_array(json!({"$ref":"#/$defs/ExtractField"}), MAX_COLLECTION_ITEMS)
             })),
             intent_required(&["purpose", "fields"]),
+        ),
+        "intent_solve_challenge" => (
+            intent_properties(json!({
+                "hints": challenge_hints_schema("timeoutMs")
+            })),
+            intent_required(&["purpose"]),
+        ),
+        "intent_detect_challenge" => (
+            intent_properties(json!({
+                "hints": challenge_hints_schema("timeoutMs")
+            })),
+            intent_required(&["purpose"]),
         ),
         "command_execute" => (
             json!({
@@ -1295,6 +1288,22 @@ fn intent_properties(extra: Value) -> Value {
     properties
 }
 
+/// Hints object for the challenge intents: region plus the solver's own
+/// timeout (not the envelope deadline). Both intents share the shape, so one
+/// builder keeps them in step. The region object is shared through the
+/// `ChallengeRegion` definition — inlining it in both schemas doubled the
+/// cost for nothing.
+fn challenge_hints_schema(timeout_field: &'static str) -> Value {
+    json!({
+        "type":"object",
+        "additionalProperties":false,
+        "properties":{
+            "region":{"$ref":"#/$defs/ChallengeRegion"},
+            timeout_field: timeout_ms()
+        }
+    })
+}
+
 fn merge_properties(properties: &mut Value, extra: Value) {
     let Some(target) = properties.as_object_mut() else {
         return;
@@ -1367,6 +1376,25 @@ pub(crate) fn definitions_for_test() -> Value {
 fn definitions() -> Value {
     json!({
         "Id": {"type":"string","format":"uuid","minLength":36,"maxLength":36},
+        // Shared control_action shape: target plus one of seven action kinds.
+        // Extracted from the inline schema that alone made control_action the
+        // largest entry in tools/list.
+        "ControlTarget": object(json!({
+            "role":string(1,128),
+            "accessibleName":string(1,2048),
+            "ordinal":{"type":["integer","null"],"minimum":0,"maximum":2047},
+            "framePath":array(any_value(),8),
+            "shadowPath":array(any_value(),8)
+        }), &["role","accessibleName"]),
+        "ControlActionKind": {"oneOf":[
+            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setText"},"value":string(0,4096),"clearFirst":{"type":"boolean","default":true,"description":"replace the current value; set false to append"}},"required":["kind","value"]},
+            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setChecked"},"checked":{"type":"boolean"}},"required":["kind","checked"]},
+            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"selectOne"},"value":string(0,4096)},"required":["kind","value"]},
+            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"selectMany"},"values":nonempty_array(string(0,4096),512)},"required":["kind","values"]},
+            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setFiles"},"paths":nonempty_array(string(1,4096),512)},"required":["kind","paths"]},
+            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"clear"}},"required":["kind"]},
+            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"activate"}},"required":["kind"]}
+        ]},
         "CommandEnvelope": object(json!({
             "schemaVersion":{"type":"integer","const":2},
             "commandId":id(), "workflowId":id(), "attemptId":id(), "sessionId":id(),
@@ -1378,6 +1406,12 @@ fn definitions() -> Value {
         "PrimitiveCommand": {"oneOf": primitive_commands()},
         "IntentCommand": {"oneOf": intent_commands()},
         "IntentHints": intent_hints(),
+        "ChallengeRegion": object(json!({
+            "x":{"type":"number"},
+            "y":{"type":"number"},
+            "width":{"type":"number"},
+            "height":{"type":"number"}
+        }), &["x","y","width","height"]),
         "FillValue": {"oneOf": fill_values()},
         "CompleteFormField": complete_form_field(),
         "ExtractField": extract_field(),

@@ -759,6 +759,12 @@ fn command_extra_capabilities(command: &RuntimeCommand) -> Vec<Capability> {
         {
             vec![Capability::IntentExecute, Capability::FileUpload]
         }
+        RuntimeCommand::Intent(IntentCommand::DetectChallenge(_)) => {
+            vec![Capability::IntentExecute, Capability::VisionAssist]
+        }
+        RuntimeCommand::Intent(IntentCommand::SolveChallenge(_)) => {
+            vec![Capability::IntentExecute, Capability::VisionAssist]
+        }
         RuntimeCommand::Intent(_) => vec![Capability::IntentExecute],
     }
 }

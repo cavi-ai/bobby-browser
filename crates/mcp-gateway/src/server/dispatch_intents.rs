@@ -16,6 +16,8 @@ pub(super) const TOOLS: &[&str] = &[
     "intent_follow",
     "intent_dismiss_obstruction",
     "intent_extract",
+    "intent_solve_challenge",
+    "intent_detect_challenge",
 ];
 
 impl Server {
@@ -223,6 +225,52 @@ impl Server {
                 let intent = types::IntentCommand::Extract(types::ExtractIntent {
                     purpose: input.purpose,
                     fields: input.fields,
+                });
+                match apply_idempotency_key(&mut context, input.idempotency_key) {
+                    Ok(()) => {}
+                    Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
+                }
+                let (context, mut envelope) = intent_envelope(
+                    context,
+                    input.session_id,
+                    input.page_id,
+                    input.workflow_id,
+                    intent,
+                );
+                pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
+                self.submit_envelope(context, envelope).await
+            }
+            "intent_solve_challenge" => {
+                let input: IntentSolveChallengeArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let intent = types::IntentCommand::SolveChallenge(types::SolveChallengeIntent {
+                    purpose: input.purpose,
+                    hints: input.hints.unwrap_or_default(),
+                });
+                match apply_idempotency_key(&mut context, input.idempotency_key) {
+                    Ok(()) => {}
+                    Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
+                }
+                let (context, mut envelope) = intent_envelope(
+                    context,
+                    input.session_id,
+                    input.page_id,
+                    input.workflow_id,
+                    intent,
+                );
+                pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
+                self.submit_envelope(context, envelope).await
+            }
+            "intent_detect_challenge" => {
+                let input: IntentDetectChallengeArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let intent = types::IntentCommand::DetectChallenge(types::DetectChallengeIntent {
+                    purpose: input.purpose,
+                    hints: input.hints.unwrap_or_default(),
                 });
                 match apply_idempotency_key(&mut context, input.idempotency_key) {
                     Ok(()) => {}

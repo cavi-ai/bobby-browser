@@ -492,7 +492,8 @@ every capability `required_capabilities` names for it (`crates/mcp-gateway/src/s
   (+ `vision:assist`), `download_url` (+ `file:download`), `upload_files`
   (+ `file:upload`), `control_action` with a `setFiles` action
   (+ `file:upload`), `evaluate_javascript` (+ `javascript:evaluate`), and all
-  eight `intent_*` tools (+ `intent:execute`).
+  ten `intent_*` tools (+ `intent:execute`; the two challenge intents also
+  require `vision:assist` -- see `intent:execute` below).
 - Note: `command_execute` is a tool name, not a capability string -- it is
   advertised in `tools/list` on `browser:mutate` alone, but that is not a way
   around the gates above. Whatever extra capability the *wrapped* command
@@ -506,6 +507,9 @@ every capability `required_capabilities` names for it (`crates/mcp-gateway/src/s
   - `extractStructured`: `vision:assist`.
   - every intent: `intent:execute`; a `fill` whose value is `setFiles`, or a
     `completeForm` with any `setFiles` field, additionally needs `file:upload`.
+  - `solveChallenge` and `detectChallenge`: `intent:execute` plus
+    `vision:assist` -- a principal without the vision capability can never
+    complete them, so the gate carries it instead of failing at the engine.
   - every other primitive: nothing beyond `browser:mutate`.
 - `file:upload` -- gates `upload_files` (with `browser:mutate`), among
   others: `control_action` with a `setFiles` action and file-carrying intent
@@ -516,8 +520,11 @@ every capability `required_capabilities` names for it (`crates/mcp-gateway/src/s
 - `javascript:evaluate` -- gates `evaluate_javascript` (with `browser:mutate`).
 - `intent:execute` -- gates `intent_locate`, `intent_fill`,
   `intent_complete_form`, `intent_submit_and_verify`, `intent_wait_for_state`,
-  `intent_follow`, `intent_dismiss_obstruction`, `intent_extract` (each also
-  with `browser:mutate`). See `bobby://intents` for what each one does.
+  `intent_follow`, `intent_dismiss_obstruction`, `intent_extract`
+  (`intent_detect_challenge` and `intent_solve_challenge` also require
+  `vision:assist`; the challenge tools also gate on the session's
+  `executionPolicy.visionAssist` at the engine) -- each also with
+  `browser:mutate`. See `bobby://intents` for what each one does.
 - `vision:assist` -- gates `extract_structured` (with `browser:mutate`) up
   front. It is also half of a deny-by-default double gate on the
   vision-fallback resolution path inside every `intent_*` tool: holding the
@@ -619,11 +626,6 @@ the signal:
 - `notFound` / `resourceExhausted` / `internal` -- see their entries below;
   the RPC-layer and command-layer meanings are called out there.
 
-
-Repair actions below are the general pattern for each code; where a specific
-tool's own description gives a more precise repair, that tool description
-wins for that tool.
-
 ## `NeedsReconciliation` -- an outcome, not an error code
 
 `CommandOutcome::NeedsReconciliation` means the runtime cannot say whether a
@@ -651,7 +653,13 @@ tools most likely to produce it.
 - `notFound` -- a resource named inside an already-accepted command turns out
   to be stale once the command actually runs -- most commonly a page id that
   is no longer open (nearly every per-page primitive shares one "page not
-  found" check). Repair: re-list with `page_list` and use a current id. A
+  found" check, surfacing as the message "browser page is not open").
+  Repair: re-list with `page_list` and use a current id. If the page id
+  reported by `workflow_observe` or `workflow_start` is reported missing on
+  the very next command, the browser target was lost and re-registered:
+  reattach (in-page state preserved) or a relaunch (state wiped, page
+  reloaded to its last URL) already happened -- re-observe, then continue
+  with current ids. A
   *session* this principal doesn't own, or that doesn't exist, is caught
   earlier than that -- before any command outcome is produced -- and answers
   as a top-level JSON-RPC error rather than inside a tool's structured
@@ -718,9 +726,21 @@ tools most likely to produce it.
 - `shadowRootUnavailable` -- a step in the target's shadow path named a host
   with no attached shadow root the engine can reach. Repair: re-resolve the
   target; the element may not have attached a shadow root yet.
-- `targetDetached` -- the element existed at resolution time but was no
-  longer connected to the DOM by the time the engine acted on it. Repair:
-  re-resolve the target -- the page changed underneath the call.
+- `targetDetached` -- two distinct situations share this code; read the
+  message to tell them apart:
+  - *The whole browser transport died* ("the browser target is gone",
+    "send failed because receiver is gone", "browser process was killed"):
+    the CDP websocket reset or the browser process died. The runtime
+    reattaches to a still-live browser itself (`cdpReattach` evidence --
+    page state, including typed form values, is preserved) or relaunches
+    and reloads the page's last URL when the process is really dead.
+    Repair: none needed before the next command -- but a relaunch did wipe
+    in-page state, so re-observe (`workflow_observe`, `form_snapshot`)
+    before replaying anything that already ran. After a reattach, state is
+    intact: re-issue only the command that failed.
+  - *The element went stale*: it existed at resolution time but was no
+    longer connected to the DOM by the time the engine acted. Repair:
+    re-resolve the target -- the page changed underneath the call.
 - `targetObscured` -- **Firefox-engine only.** The Firefox companion's
   pointer preflight hit-tests the resolved element's center and finds a
   different element on top of it there. There is no equivalent preflight in
@@ -927,7 +947,7 @@ receives `notifications/tools/list_changed`, but no event frames at all
 
 const INTENTS_BODY: &str = r#"# Intent commands
 
-Eight `IntentCommand` variants (`crates/types/src/commands.rs`) sit above the
+Ten `IntentCommand` variants (`crates/types/src/commands.rs`) sit above the
 primitive browser actions. Each MCP `intent_*` tool wraps exactly one
 variant; `IntentCommand::class` fixes its recovery behavior.
 
@@ -939,8 +959,22 @@ variant; `IntentCommand::class` fixes its recovery behavior.
 | `Fill` | `intent_fill` | Reconciliable |
 | `CompleteForm` | `intent_complete_form` | Reconciliable |
 | `DismissObstruction` | `intent_dismiss_obstruction` | Reconciliable |
+| `DetectChallenge` | `intent_detect_challenge` | Replayable |
+| `SolveChallenge` | `intent_solve_challenge` | Reconciliable |
 | `SubmitAndVerify` | `intent_submit_and_verify` | Boundary |
 | `Follow` | `intent_follow` | Boundary if `boundary: true`, else Reconciliable |
+
+The two challenge intents are the captcha path:
+`intent_detect_challenge` is read-only classification (screenshot in,
+`challengeDetection` evidence out -- a provably clean page is a
+first-class answer, not a failure); `intent_solve_challenge` drives the
+vision solve loop until the widget clears or `timeoutMs` elapses. Both
+require `browser:mutate` + `intent:execute` + `vision:assist`, plus the
+session's `executionPolicy.visionAssist` -- the capability alone is not
+enough. The runtime never bypasses a challenge: when the loop cannot
+clear it, surface the page to the operator. `intent_detect_challenge` is
+advertised in the explore phase so a stuck agent can name its blocker
+without a phase switch.
 
 On managed Chromium, intent resolution auto-descends one level into
 iframes (the gather stamps each in-frame candidate with a re-resolvable
@@ -1215,7 +1249,7 @@ pub(crate) fn static_resources() -> &'static [(&'static str, &'static str, &'sta
         (
             INTENTS_URI,
             "Intents",
-            "The eight intent commands, their execution class, and when to reach for one over a primitive.",
+            "The ten intent commands, their execution class, and when to reach for one over a primitive.",
         ),
         (
             PRIMITIVES_URI,
