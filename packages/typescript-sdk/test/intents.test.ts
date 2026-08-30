@@ -5,6 +5,8 @@ import { DEFAULT_DISMISS_OBSTRUCTION_TIMEOUT_MS, MAX_INTENT_PURPOSE_BYTES } from
 import {
   assertIntentPurpose,
   completeFormRuntimeCommand,
+  detectChallengeEnvelope,
+  detectChallengeRuntimeCommand,
   dismissObstructionEnvelope,
   dismissObstructionRuntimeCommand,
   extractEnvelope,
@@ -15,6 +17,8 @@ import {
   intentHintsFromAccessibilityTarget,
   locateEnvelope,
   locateRuntimeCommand,
+  solveChallengeEnvelope,
+  solveChallengeRuntimeCommand,
   submitAndVerifyEnvelope,
   waitForStateEnvelope,
 } from "../src/intents.js";
@@ -397,6 +401,53 @@ test("extractEnvelope builds a full CommandEnvelope with an attribute field", ()
       },
     },
   });
+});
+
+test("challenge intent builders emit the exact nested wire shape", () => {
+  const detect = detectChallengeRuntimeCommand({ purpose: "check what blocks this page" });
+  assert.deepEqual(detect, {
+    kind: "intent",
+    input: {
+      kind: "detectChallenge",
+      input: {
+        purpose: "check what blocks this page",
+        // Default budget mirrors the runtime's 15s detect default; region
+        // stays absent unless the caller narrows the search.
+        hints: { timeoutMs: 15_000 },
+      },
+    },
+  });
+  const solve = solveChallengeRuntimeCommand({
+    purpose: "clear the recaptcha blocking the form",
+    hints: { region: { x: 10, y: 20, width: 300, height: 150 }, timeoutMs: 45_000 },
+  });
+  assert.deepEqual(solve, {
+    kind: "intent",
+    input: {
+      kind: "solveChallenge",
+      input: {
+        purpose: "clear the recaptcha blocking the form",
+        hints: { region: { x: 10, y: 20, width: 300, height: 150 }, timeoutMs: 45_000 },
+      },
+    },
+  });
+});
+
+test("challenge envelopes carry the meta ids end to end", () => {
+  const detect = detectChallengeEnvelope(META, "check what blocks this page");
+  assert.equal(detect.commandId, META.commandId);
+  assert.equal(detect.workflowId, META.workflowId);
+  assert.equal(detect.attemptId, META.attemptId);
+  assert.equal(detect.sessionId, META.sessionId);
+  assert.equal(detect.pageId, META.pageId);
+  assert.equal(detect.command.kind, "intent");
+  const solve = solveChallengeEnvelope(META, "clear the recaptcha");
+  assert.equal(solve.commandId, META.commandId);
+  assert.equal(
+    solve.command.kind === "intent" && solve.command.input.kind === "solveChallenge",
+    true,
+    "solve envelope wraps a solveChallenge intent command",
+  );
 });
 
 test("assertIntentPurpose enforces the 256-byte bound", () => {
