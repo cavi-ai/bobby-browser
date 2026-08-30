@@ -44,6 +44,59 @@ for purpose in [
     "Submit the staged customer document",
 ]:
     STEP_BY_PURPOSE[purpose] = ("Upload document", "click", "click_upload")
+for purpose in [
+    "Put 'Maya Chen' in the name field",
+    "Type 'Maya Chen' where the name goes",
+    "Enter 'Maya Chen' for the contact name",
+    "Fill in 'Maya Chen' as the name",
+]:
+    STEP_BY_PURPOSE[purpose] = ("Full name", "typeText", "type_full_name")
+for purpose in [
+    "Type 'maya@atlas.example' into the email field",
+    "Put 'maya@atlas.example' in the email box",
+    "Enter the email 'maya@atlas.example'",
+    "Fill in 'maya@atlas.example' for email",
+]:
+    STEP_BY_PURPOSE[purpose] = ("Work email", "typeText", "type_work_email")
+for purpose in [
+    "Enter 'Atlas Labs' as the company",
+    "Type 'Atlas Labs' in the company field",
+    "Put 'Atlas Labs' where the company goes",
+    "Fill in 'Atlas Labs' as the organization",
+]:
+    STEP_BY_PURPOSE[purpose] = ("Company name", "typeText", "type_company")
+for purpose in [
+    "Put '02110' in the postal box",
+    "Type '02110' into the postal field",
+    "Enter '02110' for the postal code area",
+    "Fill in '02110' in the postal slot",
+    "Enter '10001' in the postal code box",
+    "Put '10001' in the postal field",
+    "Type '10001' into the postal box",
+    "Correct the postal code to '10001'",
+]:
+    STEP_BY_PURPOSE[purpose] = ("Postal code", "typeText", "type_postal_code")
+for purpose in [
+    "Pick the growth plan",
+    "Choose growth for the plan",
+    "Select the growth tier",
+    "Go with the growth plan",
+]:
+    STEP_BY_PURPOSE[purpose] = ("Plan", "click", "select_plan")
+for purpose in [
+    "Choose annual billing",
+    "Pick the annual billing cycle",
+    "Set billing to annual",
+    "Select annual for the billing cycle",
+]:
+    STEP_BY_PURPOSE[purpose] = ("Billing cycle", "click", "select_billing")
+for purpose in [
+    "Create the customer account",
+    "Create the new customer",
+    "Register the customer now",
+    "Create this customer record",
+]:
+    STEP_BY_PURPOSE[purpose] = ("Create customer", "click", "submit_form")
 
 
 def relabel(record):
