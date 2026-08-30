@@ -910,6 +910,13 @@ fn gauntlet_vision_config() -> config::VisionConfig {
                 std::env::var("BOBBY_GAUNTLET_VISION_TOKEN_ENV")
                     .unwrap_or_else(|_| "BOBBY_VISION_TOKEN".to_string()),
             ),
+            // Engine-side corpus: every escalation's terminal outcome lands
+            // here (verified clicks carry the resolved target index). Set
+            // BOBBY_GAUNTLET_VISION_CORPUS_DIR for harvest runs.
+            corpus_dir: std::env::var("BOBBY_GAUNTLET_VISION_CORPUS_DIR")
+                .ok()
+                .filter(|dir| !dir.trim().is_empty())
+                .map(std::path::PathBuf::from),
             // Local vision models need far longer than the 15s default for a
             // full-viewport screenshot proposal.
             timeout_ms: 120_000,

@@ -514,19 +514,11 @@ async fn execute_locate(
             // model should see them: a stuck escalation with no candidate
             // list asks the model to pick blind. Attach the near-miss set
             // (capped, score zero) so both the prompt and the corpus carry it.
-            let near_misses = candidates
-                .iter()
-                .filter(|candidate| {
-                    vision_window_eligible(candidate.role.as_deref(), candidate.name.as_deref())
-                })
-                .take(5)
-                .map(|candidate| types::CandidateEvidence {
-                    role: candidate.role.clone(),
-                    name: candidate.name.clone(),
-                    score: 0,
-                    reasons: vec!["noMatch".into()],
-                })
-                .collect();
+            // The window is purpose-ranked: DOM order puts sidebar chrome
+            // ahead of the page's actionable content and truncates the target
+            // out of the top 5 (measured: every live harvest step abstained
+            // because its target never entered the window).
+            let near_misses = ranked_near_miss_window(&candidates, purpose.as_deref());
             stuck_outcome(
                 StuckReport {
                     intent_kind: "locate",
@@ -584,6 +576,61 @@ const VISION_WINDOW_ROLES: [&str; 10] = [
 
 fn vision_window_eligible(role: Option<&str>, name: Option<&str>) -> bool {
     name.is_some() && role.is_some_and(|role| VISION_WINDOW_ROLES.contains(&role))
+}
+
+/// Purpose-token overlap ranking for the near-miss window. The runtime does
+/// not know the target on a stuck step; ranking by lexical plausibility
+/// floats rows that share a token with the purpose (role text included, so
+/// "…the button…" lifts button rows) above unrelated chrome, and keeps DOM
+/// order on ties. The training corpus's windows always contain the target;
+/// this approximates that distribution without pretending to know it.
+fn ranked_near_miss_window(
+    candidates: &[Candidate],
+    purpose: Option<&str>,
+) -> Vec<types::CandidateEvidence> {
+    const STOPWORDS: [&str; 12] = [
+        "the", "and", "for", "with", "that", "this", "into", "your", "now", "off", "out", "put",
+    ];
+    let tokens = purpose
+        .map(|purpose| {
+            purpose
+                .split(|c: char| !c.is_alphanumeric())
+                .map(str::to_lowercase)
+                .filter(|token| token.len() > 2 && !STOPWORDS.contains(&token.as_str()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut scored = candidates
+        .iter()
+        .filter(|candidate| {
+            vision_window_eligible(candidate.role.as_deref(), candidate.name.as_deref())
+        })
+        .map(|candidate| {
+            let haystack = format!(
+                "{} {}",
+                candidate.role.as_deref().unwrap_or_default(),
+                candidate.name.as_deref().unwrap_or_default()
+            )
+            .to_lowercase();
+            let score = tokens
+                .iter()
+                .filter(|token| haystack.contains(token.as_str()))
+                .count();
+            (score, candidate)
+        })
+        .collect::<Vec<_>>();
+    // Stable sort: equal scores keep DOM order.
+    scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+    scored
+        .into_iter()
+        .take(5)
+        .map(|(_, candidate)| types::CandidateEvidence {
+            role: candidate.role.clone(),
+            name: candidate.name.clone(),
+            score: 0,
+            reasons: vec!["noMatch".into()],
+        })
+        .collect()
 }
 
 fn disambiguate_by_purpose(
