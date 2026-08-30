@@ -90,14 +90,16 @@ class MlxV1Provider(VisionProvider):
         action_kind = ACTION_BY_INTENT.get(request.intent_kind)
         if action_kind is None:
             if request.intent_kind not in CLICK_INTENT_KINDS:
-                return self._abstention()
+                return self._abstention(request.intent_kind)
             action_kind = "clickCandidate"
 
         if index is None or index < 0 or index >= n_candidates:
             # Abstain (or out-of-range noise treated as abstention, per the
             # wire contract): zero confidence fails the runtime floor, which
-            # is the fallback path.
-            return self._abstention()
+            # is the fallback path. The action KIND must stay intent-mapped:
+            # the proxy validator rejects a clickCandidate on a fill/extract
+            # intent as incompatible, turning a clean abstain into a 502.
+            return self._abstention(request.intent_kind)
 
         return ProposeResponse(
             confidence=0.95,
@@ -105,10 +107,10 @@ class MlxV1Provider(VisionProvider):
         )
 
     @staticmethod
-    def _abstention() -> ProposeResponse:
+    def _abstention(intent_kind: str) -> ProposeResponse:
         return ProposeResponse(
             confidence=0.0,
-            action={"kind": "clickCandidate", "index": 0},
+            action={"kind": ACTION_BY_INTENT.get(intent_kind, "clickCandidate"), "index": 0},
         )
 
     def extract(self, schema: dict, content: str, purpose: Optional[str]) -> dict:
