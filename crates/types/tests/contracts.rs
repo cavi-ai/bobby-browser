@@ -1472,6 +1472,9 @@ fn control_action_contract_is_closed_reconciliable_and_secret_safe() {
         action: ControlAction::SetChecked { checked: true },
     });
     assert_eq!(command.class(), CommandClass::Reconciliable);
+    // The slim target shape omits ordinal/framePath/shadowPath when they
+    // carry their default — absent means "no extra hint", not a different
+    // wire contract.
     assert_eq!(
         serde_json::to_value(&command).unwrap(),
         json!({
@@ -1479,10 +1482,7 @@ fn control_action_contract_is_closed_reconciliable_and_secret_safe() {
             "input": {
                 "target": {
                     "role": "checkbox",
-                    "accessibleName": "Terms",
-                    "ordinal": null,
-                    "framePath": [],
-                    "shadowPath": []
+                    "accessibleName": "Terms"
                 },
                 "action": {"kind": "setChecked", "checked": true}
             }

@@ -36,11 +36,11 @@ pub struct SemanticTargetSegment {
 pub struct FormControlTarget {
     pub role: String,
     pub accessible_name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ordinal: Option<usize>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub frame_path: Vec<SemanticTargetSegment>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shadow_path: Vec<SemanticTargetSegment>,
 }
 
@@ -110,21 +110,50 @@ pub enum FormControlOperation {
     Activate,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields, default)]
 pub struct FormControlConstraints {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub required: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub read_only: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_length: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_length: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub multiple: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accept: Vec<String>,
+}
+
+impl FormControlConstraints {
+    /// True when the control carries no interesting constraint: an agent
+    /// reading `required`/`readOnly`/`disabled` as absent can assume defaults.
+    pub fn is_default(&self) -> bool {
+        !self.required
+            && !self.read_only
+            && !self.disabled
+            && self.pattern.is_none()
+            && self.min_length.is_none()
+            && self.max_length.is_none()
+            && self.min.is_none()
+            && self.max.is_none()
+            && self.step.is_none()
+            && !self.multiple
+            && self.accept.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -147,10 +176,16 @@ pub enum FormValidityFlag {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FormControlValidity {
+    /// Always serialized: a bool whose default is `true` cannot use
+    /// `serde(default)` + skip (absent would decode to `false`, flipping the
+    /// meaning on round-trip). `false` is rare but load-bearing.
     pub will_validate: bool,
     pub valid: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub flags: Vec<FormValidityFlag>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub described_by: Vec<String>,
 }
 
@@ -174,8 +209,11 @@ pub struct FormValidationIssue {
 pub struct FormOption {
     pub value: String,
     pub label: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disabled: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub selected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_label: Option<String>,
 }
 
@@ -184,18 +222,31 @@ pub struct FormOption {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FormControl {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub form_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<FormControlTarget>,
     pub control_kind: FormControlKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accessible_name: Option<String>,
+    /// Only serialized when it differs from `accessibleName` — the builder
+    /// collapses the label onto the accessible name at snapshot time, so a
+    /// fresh empty form costs ~200 bytes per control instead of ~740.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autocomplete: Option<String>,
     pub state: FormControlState,
+    #[serde(default, skip_serializing_if = "FormControlConstraints::is_default")]
     pub constraints: FormControlConstraints,
     pub validity: FormControlValidity,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<FormOption>,
     pub supported_operations: Vec<FormControlOperation>,
 }

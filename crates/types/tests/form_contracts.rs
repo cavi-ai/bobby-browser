@@ -2,6 +2,11 @@ use serde_json::{json, Value};
 use types::{FormSnapshot, FORM_SNAPSHOT_SCHEMA_VERSION};
 
 fn valid_snapshot() -> Value {
+    // The canonical wire shape after slimming: fields carrying their default
+    // (label identical to accessibleName, null description/placeholder,
+    // empty flags/options, unconstrained constraints, default ordinal and
+    // frame/shadow paths) are absent. Old full payloads still deserialize:
+    // every slimmed field is optional on input.
     json!({
         "schemaVersion": 1,
         "pageId": "00000000-0000-4000-8000-000000000001",
@@ -22,39 +27,25 @@ fn valid_snapshot() -> Value {
                 "groupId": "group-contact",
                 "target": {
                     "role": "textbox",
-                    "accessibleName": "Email address",
-                    "ordinal": null,
-                    "framePath": [],
-                    "shadowPath": []
+                    "accessibleName": "Email address"
                 },
                 "controlKind": "email",
                 "accessibleName": "Email address",
-                "label": "Email address",
                 "description": "Use a work address",
                 "placeholder": "name@example.com",
                 "autocomplete": "email",
                 "state": { "kind": "text", "value": "ada@example.test" },
                 "constraints": {
                     "required": true,
-                    "readOnly": false,
-                    "disabled": false,
                     "pattern": "[^@]+@[^@]+",
                     "minLength": 3,
-                    "maxLength": 254,
-                    "min": null,
-                    "max": null,
-                    "step": null,
-                    "multiple": false,
-                    "accept": []
+                    "maxLength": 254
                 },
                 "validity": {
                     "willValidate": true,
                     "valid": true,
-                    "flags": [],
-                    "message": null,
                     "describedBy": ["Use a work address"]
                 },
-                "options": [],
                 "supportedOperations": ["setText", "clear"]
             }, {
                 "id": "password",
@@ -62,79 +53,29 @@ fn valid_snapshot() -> Value {
                 "groupId": "group-contact",
                 "target": {
                     "role": "textbox",
-                    "accessibleName": "Password",
-                    "ordinal": null,
-                    "framePath": [],
-                    "shadowPath": []
+                    "accessibleName": "Password"
                 },
                 "controlKind": "password",
                 "accessibleName": "Password",
-                "label": "Password",
-                "description": null,
-                "placeholder": null,
                 "autocomplete": "current-password",
                 "state": { "kind": "redacted", "present": true },
                 "constraints": {
                     "required": true,
-                    "readOnly": false,
-                    "disabled": false,
-                    "pattern": null,
-                    "minLength": 8,
-                    "maxLength": null,
-                    "min": null,
-                    "max": null,
-                    "step": null,
-                    "multiple": false,
-                    "accept": []
+                    "minLength": 8
                 },
-                "validity": {
-                    "willValidate": true,
-                    "valid": true,
-                    "flags": [],
-                    "message": null,
-                    "describedBy": []
-                },
-                "options": [],
+                "validity": { "willValidate": true, "valid": true },
                 "supportedOperations": ["setText", "clear"]
             }, {
                 "id": "submit",
                 "formId": "form-1",
-                "groupId": null,
                 "target": {
                     "role": "button",
-                    "accessibleName": "Continue",
-                    "ordinal": null,
-                    "framePath": [],
-                    "shadowPath": []
+                    "accessibleName": "Continue"
                 },
                 "controlKind": "submit",
                 "accessibleName": "Continue",
-                "label": null,
-                "description": null,
-                "placeholder": null,
-                "autocomplete": null,
                 "state": { "kind": "empty" },
-                "constraints": {
-                    "required": false,
-                    "readOnly": false,
-                    "disabled": false,
-                    "pattern": null,
-                    "minLength": null,
-                    "maxLength": null,
-                    "min": null,
-                    "max": null,
-                    "step": null,
-                    "multiple": false,
-                    "accept": []
-                },
-                "validity": {
-                    "willValidate": false,
-                    "valid": true,
-                    "flags": [],
-                    "message": null,
-                    "describedBy": []
-                },
-                "options": [],
+                "validity": { "willValidate": false, "valid": true },
                 "supportedOperations": ["activate"]
             }],
             "submitControlIds": ["submit"],
@@ -155,7 +96,32 @@ fn canonical_form_snapshot_round_trips_exactly_and_preserves_redacted_presence()
     let snapshot: FormSnapshot = serde_json::from_value(expected.clone()).unwrap();
 
     assert_eq!(FORM_SNAPSHOT_SCHEMA_VERSION, 1);
-    assert_eq!(serde_json::to_value(snapshot).unwrap(), expected);
+    let serialized = serde_json::to_value(snapshot).unwrap();
+    if serialized != expected {
+        json_diff(&serialized, &expected, String::new());
+        panic!("serialized form snapshot differs from the canonical fixture");
+    }
+}
+
+fn json_diff(serialized: &serde_json::Value, expected: &serde_json::Value, path: String) {
+    use serde_json::Value;
+    match (serialized, expected) {
+        (Value::Object(a), Value::Object(b)) => {
+            for (key, bv) in b {
+                match a.get(key) {
+                    None => println!("MISSING {path}.{key}: fixture={bv}"),
+                    Some(av) => json_diff(av, bv, format!("{path}.{key}")),
+                }
+            }
+            for (key, av) in a {
+                if b.get(key).is_none() {
+                    println!("EXTRA {path}.{key}: serialized={av}");
+                }
+            }
+        }
+        (a, b) if a != b => println!("DIFF {path}: serialized={a} fixture={b}"),
+        _ => {}
+    }
 }
 
 #[test]

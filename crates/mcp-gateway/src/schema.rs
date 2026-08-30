@@ -2701,7 +2701,10 @@ fn form_descriptor() -> Value {
     )
 }
 
-/// Must match `types::FormControl`.
+/// Must match `types::FormControl`. Fields the runtime omits when they carry
+/// their default (constraints on an unconstrained control, `label` equal to
+/// `accessibleName`, empty `options`, null `placeholder`…) are not required:
+/// only the identity and state an agent always needs are.
 fn form_control() -> Value {
     object(
         json!({
@@ -2733,19 +2736,9 @@ fn form_control() -> Value {
         }),
         &[
             "id",
-            "formId",
-            "groupId",
-            "target",
             "controlKind",
-            "accessibleName",
-            "label",
-            "description",
-            "placeholder",
-            "autocomplete",
             "state",
-            "constraints",
             "validity",
-            "options",
             "supportedOperations",
         ],
     )
@@ -3074,7 +3067,7 @@ fn form_control_validity() -> Value {
             "message":nullable(string(0, 1024)),
             "describedBy":array(string(0, MAX_STRING_BYTES), 512)
         }),
-        &["willValidate", "valid", "flags", "message", "describedBy"],
+        &["valid"],
     )
 }
 
@@ -3088,7 +3081,7 @@ fn form_option() -> Value {
             "selected":{"type":"boolean"},
             "groupLabel":nullable(string(0, MAX_STRING_BYTES))
         }),
-        &["value", "label", "disabled", "selected", "groupLabel"],
+        &["value", "label"],
     )
 }
 
