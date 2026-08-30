@@ -30,6 +30,8 @@ import json
 import sys
 from collections import Counter, defaultdict
 
+from mlx_finetune import normalize_corpus_example
+
 ACTIONABLE_ROLES = frozenset(
     [
         "button",
@@ -171,7 +173,10 @@ def main():
     args = parser.parse_args()
 
     with open(args.input) as f:
-        rows = [json.loads(line) for line in f if line.strip()]
+        # Engine records are camelCase, scripted records snake_case; the
+        # trainer normalizes both, and the lint must see what the trainer
+        # sees.
+        rows = [normalize_corpus_example(json.loads(line)) for line in f if line.strip()]
 
     errors, warnings = lint(rows)
     for warning in warnings:

@@ -1177,6 +1177,71 @@ async fn escalation_window_excludes_landmark_rows() {
 }
 
 #[tokio::test]
+async fn near_miss_window_is_purpose_ranked() {
+    // DOM order on a real page puts sidebar chrome first; an unranked top-5
+    // window truncates the page's actionable content out of the prompt and
+    // the model correctly abstains on a target it cannot see. The window
+    // must float rows that share a token with the purpose.
+    let request_debug = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let assist = Arc::new(RecordingVision {
+        proposal: click_proposal(0.91),
+        request_debug: request_debug.clone(),
+    });
+    let browser = FakeBrowser {
+        screenshot_png: b"png".to_vec(),
+        candidates: vec![
+            form_candidate("brand", "link", "Northstar Ops"),
+            form_candidate("nav-overview", "link", "Overview"),
+            form_candidate("nav-customers", "link", "Customers"),
+            form_candidate("nav-onboarding", "link", "Onboarding"),
+            form_candidate("nav-documents", "link", "Documents"),
+            form_candidate("nav-integrations", "link", "Integrations"),
+            form_candidate("nav-reports", "link", "Reports"),
+            form_candidate("search-field", "searchbox", "Search customers"),
+            form_candidate("search-go", "button", "Search"),
+        ],
+        click_xy_calls: Arc::new(AtomicUsize::new(0)),
+        ..FakeBrowser::default()
+    };
+    let page_id = PageId::new();
+    let intent = IntentCommand::Locate(LocateIntent {
+        purpose: "Push the button to search".into(),
+        hints: IntentHints::default(),
+    });
+
+    let outcome = IntentEngine::execute(
+        &intent,
+        &page_id,
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(assist),
+            proposals: None,
+            defer_escalation: false,
+            prompt_context: None,
+            corpus: None,
+            context_store: None,
+        },
+    )
+    .await;
+
+    let IntentOutcome::Completed { .. } = outcome else {
+        panic!("expected Completed, got {outcome:?}");
+    };
+    let requests = request_debug.lock().unwrap_or_else(|p| p.into_inner());
+    let request = requests.last().expect("vision was not consulted");
+    assert!(
+        request.contains("Search customers"),
+        "the purpose-relevant row must enter the window: {request}"
+    );
+    assert!(
+        !request.contains("Onboarding"),
+        "sidebar chrome must not fill the window: {request}"
+    );
+}
+
+#[tokio::test]
 async fn closed_gates_never_consult_the_cache() {
     for (session_ok, capability_ok) in [(true, false), (false, true)] {
         let proposals = Arc::new(FakeProposals {
