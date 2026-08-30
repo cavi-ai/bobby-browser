@@ -68,6 +68,16 @@ pub(crate) fn required_capabilities(name: &str) -> Option<&'static [types::Capab
             types::Capability::BrowserMutate,
             types::Capability::IntentExecute,
         ]),
+        // The challenge intents need the vision provider by construction: a
+        // principal without vision:assist can never complete them, so the
+        // gate carries it up front instead of failing at the engine after
+        // the screenshot. Declaring it here also keeps the tools out of a
+        // tools/list response the principal could never serve.
+        "intent_detect_challenge" | "intent_solve_challenge" => Some(&[
+            types::Capability::BrowserMutate,
+            types::Capability::IntentExecute,
+            types::Capability::VisionAssist,
+        ]),
         "events_read" | "runtime_info" | "session_list" => Some(&[types::Capability::SessionRead]),
         "context_ask" => Some(&[types::Capability::PageRead]),
         "context_neighbors" => Some(&[types::Capability::ContextRead]),
@@ -190,6 +200,8 @@ pub(crate) fn tool_description(name: &str) -> &'static str {
         "intent_follow" => "Activate a described link or control and verify the destination (Boundary when boundary is true, else Reconciliable). Requires browser:mutate and intent:execute. When boundary is true, autoCheckpoint defaults true and mints the checkpoint in that call; pass false to author your own. On failure with needsReconciliation, do not retry -- call recovery_status; on targetNotFound, snapshot again.",
         "intent_dismiss_obstruction" => "Dismiss a popup, overlay, or cookie banner blocking the page (Reconciliable). Requires browser:mutate and intent:execute. Produces resolution and dismissal evidence. On failure with obstructionSuspected, the obstruction is still present after the attempt -- take a fresh a11y_snapshot to find another dismissal control.",
         "intent_extract" => "Read named fields off the page without mutating it (Replayable). Requires browser:mutate and intent:execute. Produces one extraction result per named field, with a resolution path and error code for any that failed. On failure with notFound, the session or page id is stale -- call page_list; a single unresolved field is reported per field, not as a call failure.",
+        "intent_detect_challenge" => "Classify a captcha or verification challenge without acting (Replayable). Requires browser:mutate, intent:execute, and vision:assist (plus the session's visionAssist policy). Produces challengeDetection evidence: type, confidence, blocking; a clean page is a first-class answer. On failure with visionAssistDenied, enable the session policy first; otherwise snapshot again after the page changes.",
+        "intent_solve_challenge" => "Drive the vision solve loop until the challenge is cleared or timeoutMs elapses (Reconciliable). Requires browser:mutate, intent:execute, and vision:assist (plus visionAssist policy). Detect first when the kind is unclear. On failure with visionAssistFailed, the provider misread the challenge: retry once, then surface the page to the operator -- the runtime never bypasses a challenge.",
         "network_log" => "Dump the page's recorded network log as a HAR artifact, then clear the buffer unless clear is false. Recording starts at the first call on a page (it reports networkRecordingStarted): call it once before the traffic you want. Requires browser:mutate. Produces HAR-artifact evidence (entries, bytes, checksum). On failure (verificationFailed, browserCommandFailed, internal) retry; not caller-fixable.",
         "job_submit" => "Submit a built-in job: echo; sleep (ms, default 1000, cap 30000); http_probe (url, HEAD|GET, timeoutMs); http_wait (url, timeoutMs/intervalMs/probeTimeoutMs, contains); or http_fetch (url, GET, contains/maxBodyBytes/timeoutMs). Requires job:submit. Same as POST /v1/jobs. On failure after submission, use job_status on the returned id; unknown names fail asynchronously, so do not resubmit.",
         "job_status" => "Read one owned job by id. Requires job:read. Same as GET /v1/jobs/{job}. On failure with notFound, the id is unknown or not owned.",

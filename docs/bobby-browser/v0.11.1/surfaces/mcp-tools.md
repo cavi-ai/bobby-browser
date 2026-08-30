@@ -42,11 +42,13 @@ Tools are advertised only when the principal holds the required capability.
 | `form_snapshot` | `page:read` | Read the canonical bounded form inventory with sensitive-value redaction and no selectors, DOM IDs, or raw HTML (`maxControls` optional, 1…512; default 512) |
 | `inspect` | `browser:mutate` | Read page state, optionally element-scoped |
 | `intent_complete_form` | `browser:mutate` + `intent:execute` | Apply an ordered list of named fields as one intent; never submits (Reconciliable) |
+| `intent_detect_challenge` | `browser:mutate` + `intent:execute` + `vision:assist` | Classify a captcha/human-verification challenge without acting (Replayable; `challengeDetection` evidence; a clean page is a first-class answer) |
 | `intent_dismiss_obstruction` | `browser:mutate` + `intent:execute` | Dismiss a popup, overlay, or cookie banner (Reconciliable) |
 | `intent_extract` | `browser:mutate` + `intent:execute` | Read named fields without mutating (Replayable) |
 | `intent_fill` | `browser:mutate` + `intent:execute` | Fill one described control and verify the value (Reconciliable) |
 | `intent_follow` | `browser:mutate` + `intent:execute` | Activate a link/control and verify the destination (Boundary when `boundary: true`) |
 | `intent_locate` | `browser:mutate` + `intent:execute` | Locate an element by described purpose (Replayable) |
+| `intent_solve_challenge` | `browser:mutate` + `intent:execute` + `vision:assist` | Drive the vision solve loop against a captcha/verification widget until cleared or `timeoutMs` (Reconciliable) |
 | `intent_submit_and_verify` | `browser:mutate` + `intent:execute` | Submit and verify the expected state (Boundary) |
 | `intent_wait_for_state` | `browser:mutate` + `intent:execute` | Wait for a described page state (Replayable) |
 | `job_cancel` | `job:cancel` | Cancel one owned job by id |
@@ -355,7 +357,7 @@ entries are gated by `artifact:read`):
 |---|---|
 | `bobby://capabilities` | What each capability gates, including double gates not visible in `tools/list` |
 | `bobby://failure-taxonomy` | Error codes, protocol-layer rejections, and the repair action for each |
-| `bobby://intents` | The eight intent tools: preconditions, class, and verification |
+| `bobby://intents` | The ten intent tools: preconditions, class, verification, and the captcha path |
 | `bobby://primitives` | The flat browser tools and the commands they mint |
 
 Captured screenshots and downloads also become readable `artifact://<id>`

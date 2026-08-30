@@ -159,7 +159,7 @@ async fn every_narrow_phase_is_materially_cheaper_than_full() {
             narrowed * 100 / full
         );
         // Two thirds, not half: `intent` is the largest narrow phase because
-        // the eight `intent_*` schemas are 5-6 KB each and cannot be dropped
+        // the ten `intent_*` schemas are 4-6 KB each and cannot be dropped
         // from it. The other two phases land well under half.
         assert!(
             narrowed * 3 <= full * 2,

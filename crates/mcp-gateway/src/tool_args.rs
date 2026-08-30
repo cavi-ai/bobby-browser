@@ -262,6 +262,16 @@ intent_args!(IntentExtractArgs {
     fields: Vec<types::ExtractField>,
 });
 
+intent_args!(IntentSolveChallengeArgs {
+    purpose: String,
+    hints: Option<types::SolveChallengeHints>,
+});
+
+intent_args!(IntentDetectChallengeArgs {
+    purpose: String,
+    hints: Option<types::DetectChallengeHints>,
+});
+
 page_scoped_args!(NavigateArgs {
     url: String,
     wait_until: Option<types::WaitUntil>,

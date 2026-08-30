@@ -174,7 +174,11 @@ fn fill_and_submit_form(arguments: &Value) -> Option<Value> {
          proves the submit landed. If the outcome is needsReconciliation, do NOT retry it -- \
          the submit may have already landed. Instead call recovery_status with the workflowId \
          and follow workflow_recover if a checkpoint exists (see bobby://failure-taxonomy for \
-         the full repair). The call only counts as landed when the outcome is completed."
+         the full repair). If any step is blocked by a captcha or verification widget, call \
+         intent_detect_challenge (explore toolset, read-only) to confirm, then \
+         intent_solve_challenge once the kind is confirmed -- both need the session's \
+         visionAssist policy and the vision:assist capability. The call only counts as \
+         landed when the outcome is completed."
     );
     Some(json!({
         "description": "Fill and submit a form, checkpointing before the boundary submit.",

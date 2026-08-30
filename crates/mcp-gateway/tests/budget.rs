@@ -282,6 +282,8 @@ const READ_ONLY: &[&str] = &[
     "intent_locate",
     "intent_wait_for_state",
     "intent_extract",
+    // Classification only: screenshot in, evidence out, never an action.
+    "intent_detect_challenge",
     "job_status",
     "workflow_observe",
 ];

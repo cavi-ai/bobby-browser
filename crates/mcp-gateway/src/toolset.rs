@@ -168,6 +168,10 @@ const EXPLORE: &[&str] = &[
     // used, while the remaining intent family stays in the intent phase.
     "intent_complete_form",
     "intent_submit_and_verify",
+    // Read-only challenge detection: a stuck agent learns "this is a captcha"
+    // without a phase switch or any page mutation. The solve loop itself
+    // stays in the intent phase.
+    "intent_detect_challenge",
 ];
 
 /// Raw primitives. `command_execute` is the escape hatch for a caller minting
@@ -202,6 +206,8 @@ const INTENT: &[&str] = &[
     "intent_follow",
     "intent_dismiss_obstruction",
     "intent_extract",
+    "intent_solve_challenge",
+    "intent_detect_challenge",
     "extract_structured",
     "navigate",
     "wait_for",
@@ -251,11 +257,13 @@ pub const EVERY_TOOL: &[&str] = &[
     "form_snapshot",
     "inspect",
     "intent_complete_form",
+    "intent_detect_challenge",
     "intent_dismiss_obstruction",
     "intent_extract",
     "intent_fill",
     "intent_follow",
     "intent_locate",
+    "intent_solve_challenge",
     "intent_submit_and_verify",
     "intent_wait_for_state",
     "job_cancel",

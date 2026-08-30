@@ -23,6 +23,7 @@ pub(crate) fn tool_annotations(name: &str) -> Value {
             | "toolset_select"
             | "wait_for"
             | "intent_locate"
+            | "intent_detect_challenge"
             | "intent_wait_for_state"
             | "intent_extract"
             | "job_status"
@@ -99,11 +100,13 @@ pub(crate) fn tool_title(name: &str) -> &'static str {
         "form_snapshot" => "Form snapshot",
         "inspect" => "Inspect page",
         "intent_complete_form" => "Complete form",
+        "intent_detect_challenge" => "Detect challenge",
         "intent_dismiss_obstruction" => "Dismiss obstruction",
         "intent_extract" => "Extract fields",
         "intent_fill" => "Fill control",
         "intent_follow" => "Follow link",
         "intent_locate" => "Locate element",
+        "intent_solve_challenge" => "Solve challenge",
         "intent_submit_and_verify" => "Submit and verify",
         "intent_wait_for_state" => "Wait for state",
         "job_cancel" => "Cancel job",

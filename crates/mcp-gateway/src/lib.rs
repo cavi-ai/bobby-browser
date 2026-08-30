@@ -31,12 +31,11 @@ mod workflow_handles;
 /// Kept under ~500 characters so it does not push connect payloads.
 pub const INITIALIZE_INSTRUCTIONS: &str = "\
 Start with workflow_start, then workflow_observe. If schemas are deferred, load \
-workflow_start, \
-workflow_observe, intent_complete_form, and intent_submit_and_verify together; \
-all are in startup explore. Complete-form fields resolve just-in-time, so include \
-conditional fields after their revealer even if initially absent. Failures carry \
-error.repair {action,doc} — follow action. Boundary intents default \
-autoCheckpoint true. Stuck: bobby://failure-taxonomy, bobby://job-handlers.";
+them in ONE tool search. Complete-form fields resolve just-in-time: include \
+conditional fields after their revealer even if absent. Blocked by a captcha? \
+intent_detect_challenge (explore) then intent_solve_challenge. Failures carry \
+error.repair {action,doc} — follow it. Boundary intents default autoCheckpoint \
+true. Stuck: bobby://failure-taxonomy, bobby://job-handlers.";
 
 #[doc(hidden)]
 pub fn schema_for_test(name: &str) -> serde_json::Value {
