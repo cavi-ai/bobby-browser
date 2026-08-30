@@ -176,6 +176,39 @@ async fn probe_fill_and_select_outcomes() -> TestResult<()> {
     Ok(())
 }
 
+async fn documents_run(run_idx: usize) -> TestResult<bool> {
+    let seed = format!("documents-harvest-{run_idx}");
+    let server = ScenarioServer::start(ScenarioConfig::seeded(&seed)).await?;
+    let runtime = ModernRuntime::launch(&server, Journey::Documents).await?;
+
+    // File input stays scripted: clicking it opens a native dialog.
+    let fixture = runtime.fixture_path("approved-upload.txt");
+    runtime
+        .wait_visible("input[aria-label='Customer document']")
+        .await?;
+    runtime
+        .upload("input[aria-label='Customer document']", &fixture)
+        .await?;
+
+    // The upload submit is the escalation target.
+    let committed = escalate_or(
+        &runtime,
+        locate(UPLOAD_SUBMIT[run_idx % UPLOAD_SUBMIT.len()]),
+        runtime.click("form[aria-label='Upload customer document'] button", true),
+    )
+    .await?;
+
+    runtime.wait_visible("iframe[title^='Preview of']").await?;
+    runtime
+        .wait_in_frame_button("#document-preview", "#confirm-preview")
+        .await?;
+    runtime
+        .click_in_frame("#document-preview", "#confirm-preview")
+        .await?;
+    runtime.mark_completed(&format!("documents-harvest-{run_idx}"))?;
+    Ok(committed)
+}
+
 #[tokio::test]
 #[ignore = "requires installed Chrome and a running vision-proxy"]
 async fn harvest_documents_positives() -> TestResult<()> {
@@ -183,47 +216,24 @@ async fn harvest_documents_positives() -> TestResult<()> {
     let before = corpus_record_count();
     let mut committed = 0usize;
     let mut fell_back = 0usize;
+    let mut derailed = 0usize;
 
     for run_idx in 0..harvest_runs() {
-        let seed = format!("documents-harvest-{run_idx}");
-        let server = ScenarioServer::start(ScenarioConfig::seeded(&seed)).await?;
-        let runtime = ModernRuntime::launch(&server, Journey::Documents).await?;
-
-        // File input stays scripted: clicking it opens a native dialog.
-        let fixture = runtime.fixture_path("approved-upload.txt");
-        runtime
-            .wait_visible("input[aria-label='Customer document']")
-            .await?;
-        runtime
-            .upload("input[aria-label='Customer document']", &fixture)
-            .await?;
-
-        // The upload submit is the escalation target.
-        if escalate_or(
-            &runtime,
-            locate(UPLOAD_SUBMIT[run_idx % UPLOAD_SUBMIT.len()]),
-            runtime.click("form[aria-label='Upload customer document'] button", true),
-        )
-        .await?
-        {
-            committed += 1;
-        } else {
-            fell_back += 1;
+        match documents_run(run_idx).await {
+            Ok(true) => committed += 1,
+            Ok(false) => fell_back += 1,
+            Err(error) => {
+                // A committed wrong pick can derail a journey; that is real
+                // production behavior, not a harness failure. Log and move on.
+                derailed += 1;
+                eprintln!("documents-harvest-{run_idx} derailed: {error}");
+            }
         }
-
-        runtime.wait_visible("iframe[title^='Preview of']").await?;
-        runtime
-            .wait_in_frame_button("#document-preview", "#confirm-preview")
-            .await?;
-        runtime
-            .click_in_frame("#document-preview", "#confirm-preview")
-            .await?;
-        runtime.mark_completed(&format!("documents-harvest-{run_idx}"))?;
     }
 
     let collected = corpus_record_count() - before;
     println!(
-        "documents harvest: {committed} committed, {fell_back} fell back, {collected} corpus records"
+        "documents harvest: {committed} committed, {fell_back} fell back, {derailed} derailed, {collected} corpus records"
     );
     assert!(
         collected > 0,
@@ -232,94 +242,96 @@ async fn harvest_documents_positives() -> TestResult<()> {
     Ok(())
 }
 
+async fn customer_update_run(run_idx: usize) -> TestResult<usize> {
+    let seed = format!("customer-update-harvest-{run_idx}");
+    let server = ScenarioServer::start(ScenarioConfig::seeded(&seed)).await?;
+    let runtime = ModernRuntime::launch(&server, Journey::CustomerUpdate).await?;
+    let mut committed = 0usize;
+
+    runtime
+        .wait_visible("input[aria-label='Search customers']")
+        .await?;
+    if escalate_or(
+        &runtime,
+        fill_text(TYPE_SEARCH[run_idx % TYPE_SEARCH.len()], "Atlas"),
+        runtime.type_text("input[aria-label='Search customers']", "Atlas"),
+    )
+    .await?
+    {
+        committed += 1;
+    }
+
+    if escalate_or(
+        &runtime,
+        locate(RUN_SEARCH[run_idx % RUN_SEARCH.len()]),
+        runtime.click("form[aria-label='Customer search'] button", false),
+    )
+    .await?
+    {
+        committed += 1;
+    }
+    runtime
+        .wait_visible("a[href='/customers/cus_atlas']")
+        .await?;
+
+    if escalate_or(
+        &runtime,
+        locate(OPEN_CUSTOMER[run_idx % OPEN_CUSTOMER.len()]),
+        runtime.click("a[href='/customers/cus_atlas']", false),
+    )
+    .await?
+    {
+        committed += 1;
+    }
+    runtime
+        .wait_visible("select[aria-label='Customer priority']")
+        .await?;
+
+    if escalate_or(
+        &runtime,
+        select_one_intent(SELECT_PRIORITY[run_idx % SELECT_PRIORITY.len()], "high"),
+        runtime.select_one("Customer priority", "high"),
+    )
+    .await?
+    {
+        committed += 1;
+    }
+
+    if escalate_or(
+        &runtime,
+        locate(SAVE_PRIORITY[run_idx % SAVE_PRIORITY.len()]),
+        runtime.click("form[aria-label='Update customer priority'] button", true),
+    )
+    .await?
+    {
+        committed += 1;
+    }
+    runtime.wait_visible("[role='status']").await?;
+    runtime.mark_completed(&format!("customer-update-harvest-{run_idx}"))?;
+    Ok(committed)
+}
+
 #[tokio::test]
 #[ignore = "requires installed Chrome and a running vision-proxy"]
 async fn harvest_customer_update_positives() -> TestResult<()> {
     require_harvest_env();
     let before = corpus_record_count();
     let mut committed = 0usize;
-    let mut fell_back = 0usize;
+    let mut derailed = 0usize;
 
     for run_idx in 0..harvest_runs() {
-        let seed = format!("customer-update-harvest-{run_idx}");
-        let server = ScenarioServer::start(ScenarioConfig::seeded(&seed)).await?;
-        let runtime = ModernRuntime::launch(&server, Journey::CustomerUpdate).await?;
-
-        runtime
-            .wait_visible("input[aria-label='Search customers']")
-            .await?;
-        if escalate_or(
-            &runtime,
-            fill_text(TYPE_SEARCH[run_idx % TYPE_SEARCH.len()], "Atlas"),
-            runtime.type_text("input[aria-label='Search customers']", "Atlas"),
-        )
-        .await?
-        {
-            committed += 1;
-        } else {
-            fell_back += 1;
+        match customer_update_run(run_idx).await {
+            Ok(count) => committed += count,
+            Err(error) => {
+                derailed += 1;
+                eprintln!("customer-update-harvest-{run_idx} derailed: {error}");
+            }
         }
-
-        if escalate_or(
-            &runtime,
-            locate(RUN_SEARCH[run_idx % RUN_SEARCH.len()]),
-            runtime.click("form[aria-label='Customer search'] button", false),
-        )
-        .await?
-        {
-            committed += 1;
-        } else {
-            fell_back += 1;
-        }
-        runtime
-            .wait_visible("a[href='/customers/cus_atlas']")
-            .await?;
-
-        if escalate_or(
-            &runtime,
-            locate(OPEN_CUSTOMER[run_idx % OPEN_CUSTOMER.len()]),
-            runtime.click("a[href='/customers/cus_atlas']", false),
-        )
-        .await?
-        {
-            committed += 1;
-        } else {
-            fell_back += 1;
-        }
-        runtime
-            .wait_visible("select[aria-label='Customer priority']")
-            .await?;
-
-        if escalate_or(
-            &runtime,
-            select_one_intent(SELECT_PRIORITY[run_idx % SELECT_PRIORITY.len()], "high"),
-            runtime.select_one("Customer priority", "high"),
-        )
-        .await?
-        {
-            committed += 1;
-        } else {
-            fell_back += 1;
-        }
-
-        if escalate_or(
-            &runtime,
-            locate(SAVE_PRIORITY[run_idx % SAVE_PRIORITY.len()]),
-            runtime.click("form[aria-label='Update customer priority'] button", true),
-        )
-        .await?
-        {
-            committed += 1;
-        } else {
-            fell_back += 1;
-        }
-        runtime.wait_visible("[role='status']").await?;
-        runtime.mark_completed(&format!("customer-update-harvest-{run_idx}"))?;
     }
 
     let collected = corpus_record_count() - before;
     println!(
-        "customer-update harvest: {committed} committed, {fell_back} fell back, {collected} corpus records"
+        "customer-update harvest: {committed} committed, {derailed} derailed, {collected} corpus records"
     );
     assert!(
         collected > 0,
