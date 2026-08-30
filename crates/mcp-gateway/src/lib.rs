@@ -30,9 +30,9 @@ mod workflow_handles;
 ///
 /// Kept under ~500 characters so it does not push connect payloads.
 pub const INITIALIZE_INSTRUCTIONS: &str = "\
-Start with workflow_start, then workflow_observe. If schemas are deferred, load \
-them in ONE tool search. Complete-form fields resolve just-in-time: include \
-conditional fields after their revealer even if absent. Blocked by a captcha? \
+Start with workflow_start, then workflow_observe. Form loop: intent_complete_form, then \
+intent_submit_and_verify. Deferred schemas? load them in ONE tool search together. Fields \
+resolve just-in-time: include conditional fields after their revealer. Captcha? \
 intent_detect_challenge (explore) then intent_solve_challenge. Failures carry \
 error.repair {action,doc} — follow it. Boundary intents default autoCheckpoint \
 true. Stuck: bobby://failure-taxonomy, bobby://job-handlers.";
