@@ -795,6 +795,13 @@ async fn execute_fill(
     // perform the requested typed action. Preserve the original pool when no
     // candidate is compatible so the existing action-mismatch diagnostic is
     // still available instead of degrading it to target-not-found.
+    //
+    // The pool swap is for RESOLUTION only. The escalation window below must
+    // carry the full (ranked) census: the adapter trains on full-page
+    // windows, and a compatible-only window (often a single row) is so far
+    // off that distribution that the model abstains on its only option.
+    // Act-time compatibility still fails closed on an incompatible pick.
+    let window_candidates = candidates.clone();
     let compatible_candidates = candidates
         .iter()
         .filter(|candidate| compatible(&value, candidate))
@@ -835,13 +842,18 @@ async fn execute_fill(
             best_match_authorized,
         } => (candidate, evidence, best_match_authorized),
         ResolutionDecision::NotFound => {
+            // Fill escalations must carry the same purpose-ranked window as
+            // locate: an empty window asks the model to pick from nothing,
+            // and it correctly abstains — those records are the §4i poison
+            // class, not selection signal.
+            let near_misses = ranked_near_miss_window(&window_candidates, purpose.as_deref());
             return stuck_outcome(
                 StuckReport {
                     intent_kind: "fill",
                     kind: StuckKind::TargetMissing,
                     purpose,
                     plan_summary,
-                    candidates: Vec::new(),
+                    candidates: near_misses,
                     verification: "targetNotFound",
                     fill_payload: fill_payload.clone(),
                 },
