@@ -145,6 +145,62 @@ const SAVE_PRIORITY: [&str; 4] = [
     "Apply the priority change with the save control",
 ];
 
+const FULL_NAME: [&str; 4] = [
+    "Put 'Maya Chen' in the name field",
+    "Type 'Maya Chen' where the name goes",
+    "Enter 'Maya Chen' for the contact name",
+    "Fill in 'Maya Chen' as the name",
+];
+
+const WORK_EMAIL: [&str; 4] = [
+    "Type 'maya@atlas.example' into the email field",
+    "Put 'maya@atlas.example' in the email box",
+    "Enter the email 'maya@atlas.example'",
+    "Fill in 'maya@atlas.example' for email",
+];
+
+const COMPANY: [&str; 4] = [
+    "Enter 'Atlas Labs' as the company",
+    "Type 'Atlas Labs' in the company field",
+    "Put 'Atlas Labs' where the company goes",
+    "Fill in 'Atlas Labs' as the organization",
+];
+
+const POSTAL: [&str; 4] = [
+    "Put '02110' in the postal box",
+    "Type '02110' into the postal field",
+    "Enter '02110' for the postal code area",
+    "Fill in '02110' in the postal slot",
+];
+
+const POSTAL_FIX: [&str; 4] = [
+    "Enter '10001' in the postal code box",
+    "Put '10001' in the postal field",
+    "Type '10001' into the postal box",
+    "Correct the postal code to '10001'",
+];
+
+const PLAN: [&str; 4] = [
+    "Pick the growth plan",
+    "Choose growth for the plan",
+    "Select the growth tier",
+    "Go with the growth plan",
+];
+
+const BILLING: [&str; 4] = [
+    "Choose annual billing",
+    "Pick the annual billing cycle",
+    "Set billing to annual",
+    "Select annual for the billing cycle",
+];
+
+const SUBMIT: [&str; 4] = [
+    "Create the customer account",
+    "Create the new customer",
+    "Register the customer now",
+    "Create this customer record",
+];
+
 #[tokio::test]
 #[ignore = "requires installed Chrome and a running vision-proxy"]
 async fn probe_fill_and_select_outcomes() -> TestResult<()> {
@@ -309,6 +365,155 @@ async fn customer_update_run(run_idx: usize) -> TestResult<usize> {
     runtime.wait_visible("[role='status']").await?;
     runtime.mark_completed(&format!("customer-update-harvest-{run_idx}"))?;
     Ok(committed)
+}
+
+// The nine-step run is split in two: one giant async fn composes one giant
+// future type (every inline fallback future lands in the same state
+// machine), which overflows the tokio worker stack. Split fns keep each
+// composed future small.
+async fn onboarding_fields(runtime: &ModernRuntime, run_idx: usize) -> TestResult<usize> {
+    let mut committed = 0usize;
+
+    runtime
+        .wait_visible("input[aria-label='Full name']")
+        .await?;
+    for (phrasings, selector, value) in [
+        (&FULL_NAME[..], "input[aria-label='Full name']", "Maya Chen"),
+        (
+            &WORK_EMAIL[..],
+            "input[aria-label='Work email']",
+            "maya@atlas.example",
+        ),
+        (
+            &COMPANY[..],
+            "input[aria-label='Company name']",
+            "Atlas Labs",
+        ),
+        (&POSTAL[..], "input[aria-label='Postal code']", "02110"),
+    ] {
+        if escalate_or(
+            runtime,
+            fill_text(phrasings[run_idx % phrasings.len()], value),
+            runtime.type_text(selector, value),
+        )
+        .await?
+        {
+            committed += 1;
+        }
+    }
+
+    if escalate_or(
+        runtime,
+        select_one_intent(PLAN[run_idx % PLAN.len()], "growth"),
+        runtime.select_one("Plan", "growth"),
+    )
+    .await?
+    {
+        committed += 1;
+    }
+
+    runtime
+        .wait_visible("select[aria-label='Billing cycle']")
+        .await?;
+    if escalate_or(
+        runtime,
+        select_one_intent(BILLING[run_idx % BILLING.len()], "annual"),
+        runtime.select_one("Billing cycle", "annual"),
+    )
+    .await?
+    {
+        committed += 1;
+    }
+    Ok(committed)
+}
+
+async fn onboarding_submit(
+    runtime: &ModernRuntime,
+    run_idx: usize,
+    mut committed: usize,
+) -> TestResult<usize> {
+    // First submit: the scripted scenario rejects the first postal code
+    // once, so the rejection screen is the expected outcome either way.
+    if escalate_or(
+        runtime,
+        locate(SUBMIT[run_idx % SUBMIT.len()]),
+        runtime.click(
+            "form[aria-label='Customer onboarding'] button[type='submit']",
+            true,
+        ),
+    )
+    .await?
+    {
+        committed += 1;
+    }
+    runtime
+        .wait_visible("input[aria-label='Postal code'][aria-invalid='true']")
+        .await?;
+
+    if escalate_or(
+        runtime,
+        fill_text(POSTAL_FIX[run_idx % POSTAL_FIX.len()], "10001"),
+        runtime.type_text("input[aria-label='Postal code']", "10001"),
+    )
+    .await?
+    {
+        committed += 1;
+    }
+
+    if escalate_or(
+        runtime,
+        locate(SUBMIT[run_idx % SUBMIT.len()]),
+        runtime.click(
+            "form[aria-label='Customer onboarding'] button[type='submit']",
+            true,
+        ),
+    )
+    .await?
+    {
+        committed += 1;
+    }
+    runtime
+        .wait_visible("form[aria-label='Customer onboarding'] [role='status']")
+        .await?;
+    runtime.mark_completed(&format!("onboarding-harvest-{run_idx}"))?;
+    Ok(committed)
+}
+
+async fn onboarding_run(run_idx: usize) -> TestResult<usize> {
+    let seed = format!("onboarding-harvest-{run_idx}");
+    let server = ScenarioServer::start(ScenarioConfig::seeded(&seed)).await?;
+    let runtime = ModernRuntime::launch(&server, Journey::Onboarding).await?;
+    let committed = onboarding_fields(&runtime, run_idx).await?;
+    onboarding_submit(&runtime, run_idx, committed).await
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome and a running vision-proxy"]
+async fn harvest_onboarding_positives() -> TestResult<()> {
+    require_harvest_env();
+    let before = corpus_record_count();
+    let mut committed = 0usize;
+    let mut derailed = 0usize;
+
+    for run_idx in 0..harvest_runs() {
+        match onboarding_run(run_idx).await {
+            Ok(count) => committed += count,
+            Err(error) => {
+                derailed += 1;
+                eprintln!("onboarding-harvest-{run_idx} derailed: {error}");
+            }
+        }
+    }
+
+    let collected = corpus_record_count() - before;
+    println!(
+        "onboarding harvest: {committed} committed, {derailed} derailed, {collected} corpus records"
+    );
+    assert!(
+        collected > 0,
+        "harvest produced no corpus records; the engine-side corpus path is broken"
+    );
+    Ok(())
 }
 
 #[tokio::test]
