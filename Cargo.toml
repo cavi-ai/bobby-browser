@@ -59,7 +59,7 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 chromiumoxide = { package = "bobby-chromiumoxide", version = "0.9.1", path = "vendor/chromiumoxide" }
 futures = "0.3"
-jsonschema = "0.50"
+jsonschema = "0.52"
 libc = "0.2"
 psl = "2.1.223"
 schemars = { version = "1", features = ["derive", "uuid1", "chrono04"] }
