@@ -9,7 +9,8 @@ MCP surfaces when the principal holds `intent:execute`.
 
 MCP exposes one tool per intent (`intent_locate`, `intent_fill`,
 `intent_complete_form`, `intent_submit_and_verify`, `intent_wait_for_state`,
-`intent_follow`, `intent_dismiss_obstruction`, `intent_extract`). They take
+`intent_follow`, `intent_dismiss_obstruction`, `intent_extract`,
+`intent_solve_challenge`, `intent_detect_challenge`). They take
 `sessionId` / `pageId` / the intent's own fields, plus optional `workflowId`
 and `idempotencyKey`, and build the envelope server-side — see
 [MCP tools](../surfaces/mcp-tools.md).
@@ -25,7 +26,8 @@ need the escape hatch, submit via `POST /v1/commands` / `command_execute` /
 inside a `CommandEnvelope` (`schemaVersion: 2`). TypeScript helpers:
 `locateEnvelope`, `fillEnvelope`, `submitAndVerifyEnvelope`,
 `waitForStateEnvelope`, `followEnvelope`, `dismissObstructionEnvelope`,
-`extractEnvelope`. Multi-field forms use `completeFormRuntimeCommand` with
+`extractEnvelope`, `solveChallengeEnvelope`, `detectChallengeEnvelope`.
+Multi-field forms use `completeFormRuntimeCommand` with
 `intentEnvelope` (no dedicated `*Envelope` helper yet).
 
 ## Command classes

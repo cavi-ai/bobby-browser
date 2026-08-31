@@ -282,6 +282,18 @@ export interface ExtractIntent { purpose: string; fields: ExtractField[]; }
 export interface ChallengeRegion { x: number; y: number; width: number; height: number }
 export interface DetectChallengeHints { region?: ChallengeRegion; timeoutMs?: number }
 export interface DetectChallengeIntent { purpose: string; hints?: DetectChallengeHints }
+/**
+ * Vision solve loop against a captcha or verification widget. Reconciliable:
+ * an interrupted attempt is inspectable, and the runtime never bypasses a
+ * challenge — when the loop cannot clear it, surface the page to the operator.
+ * Requires `vision:assist` plus the session's `visionAssist` policy.
+ */
+export interface SolveChallengeHints { region?: ChallengeRegion; timeoutMs?: number }
+export interface SolveChallengeIntent { purpose: string; hints?: SolveChallengeHints }
+/** Default challenge-solve budget (mirrors the runtime's 30s solve default). */
+export const DEFAULT_SOLVE_CHALLENGE_TIMEOUT_MS = 30_000 as const;
+/** Default challenge-detection budget (mirrors the runtime's 15s detect default). */
+export const DEFAULT_DETECT_CHALLENGE_TIMEOUT_MS = 15_000 as const;
 export type IntentCommand =
   | { kind: "locate"; input: LocateIntent }
   | { kind: "fill"; input: FillIntent }
@@ -291,7 +303,8 @@ export type IntentCommand =
   | { kind: "follow"; input: FollowIntent }
   | { kind: "dismissObstruction"; input: DismissObstructionIntent }
   | { kind: "extract"; input: ExtractIntent }
-  | { kind: "detectChallenge"; input: DetectChallengeIntent };
+  | { kind: "detectChallenge"; input: DetectChallengeIntent }
+  | { kind: "solveChallenge"; input: SolveChallengeIntent };
 
 /**
  * Nested command wire shape:

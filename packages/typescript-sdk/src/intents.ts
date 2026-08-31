@@ -8,12 +8,16 @@
  * `{ kind: "intent", input: { kind: "locate", input: { … } } }`.
  */
 import {
+  DEFAULT_DETECT_CHALLENGE_TIMEOUT_MS,
   DEFAULT_DISMISS_OBSTRUCTION_TIMEOUT_MS,
+  DEFAULT_SOLVE_CHALLENGE_TIMEOUT_MS,
   MAX_INTENT_PURPOSE_BYTES,
   type CommandEnvelope,
   type CompleteFormIntent,
   type AccessibilityTarget,
   type ControlAction,
+  type DetectChallengeHints,
+  type DetectChallengeIntent,
   type DismissObstructionIntent,
   type ExtractField,
   type ExtractIntent,
@@ -23,6 +27,8 @@ import {
   type IntentHints,
   type LocateIntent,
   type RuntimeCommand,
+  type SolveChallengeHints,
+  type SolveChallengeIntent,
   type SubmitAndVerifyIntent,
   type WaitCondition,
   type WaitForStateIntent,
@@ -321,4 +327,58 @@ export function extractEnvelope(
   fields: ExtractField[],
 ): CommandEnvelope {
   return intentEnvelope(meta, extractRuntimeCommand({ purpose, fields }));
+}
+
+/**
+ * Build a `detectChallenge` intent command (Replayable, read-only):
+ * screenshot in, `challengeDetection` evidence out — a provably clean page
+ * is a first-class answer. Never acts on the page.
+ */
+export function detectChallengeRuntimeCommand(input: DetectChallengeIntent): RuntimeCommand {
+  assertIntentPurpose(input.purpose);
+  const hints: DetectChallengeHints = {
+    timeoutMs: input.hints?.timeoutMs ?? DEFAULT_DETECT_CHALLENGE_TIMEOUT_MS,
+    ...(input.hints?.region ? { region: input.hints.region } : {}),
+  };
+  return {
+    kind: "intent",
+    input: { kind: "detectChallenge", input: { purpose: input.purpose, hints } },
+  };
+}
+
+/** Build a `solveChallenge` intent command (Reconciliable vision solve loop). */
+export function solveChallengeRuntimeCommand(input: SolveChallengeIntent): RuntimeCommand {
+  assertIntentPurpose(input.purpose);
+  const hints: SolveChallengeHints = {
+    timeoutMs: input.hints?.timeoutMs ?? DEFAULT_SOLVE_CHALLENGE_TIMEOUT_MS,
+    ...(input.hints?.region ? { region: input.hints.region } : {}),
+  };
+  return {
+    kind: "intent",
+    input: { kind: "solveChallenge", input: { purpose: input.purpose, hints } },
+  };
+}
+
+/** Convenience: {@link detectChallengeRuntimeCommand} + {@link intentEnvelope}. */
+export function detectChallengeEnvelope(
+  meta: IntentEnvelopeMeta,
+  purpose: string,
+  options?: { hints?: DetectChallengeHints },
+): CommandEnvelope {
+  return intentEnvelope(
+    meta,
+    detectChallengeRuntimeCommand({ purpose, hints: options?.hints }),
+  );
+}
+
+/** Convenience: {@link solveChallengeRuntimeCommand} + {@link intentEnvelope}. */
+export function solveChallengeEnvelope(
+  meta: IntentEnvelopeMeta,
+  purpose: string,
+  options?: { hints?: SolveChallengeHints },
+): CommandEnvelope {
+  return intentEnvelope(
+    meta,
+    solveChallengeRuntimeCommand({ purpose, hints: options?.hints }),
+  );
 }
