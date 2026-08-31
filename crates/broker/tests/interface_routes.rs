@@ -313,7 +313,7 @@ async fn streamed_oversize_bodies_are_rejected_before_runtime_dispatch() {
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn body_collection_obeys_deadline_and_releases_the_in_flight_permit() {
     let interface = InterfaceConfig {
         max_connections: 1,
@@ -325,13 +325,13 @@ async fn body_collection_obeys_deadline_and_releases_the_in_flight_permit() {
     )
     .await;
     let delayed = futures_util::stream::once(async {
-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         Ok::<_, Infallible>(Bytes::from_static(br#"{"profile":"late","proxy":null}"#))
     });
     let mut request = authorized("POST", "/v1/sessions", &token, Body::from_stream(delayed));
     request.headers_mut().insert(
         "x-deadline",
-        (Utc::now() + Duration::milliseconds(150))
+        (Utc::now() + Duration::seconds(5))
             .to_rfc3339_opts(SecondsFormat::Millis, true)
             .parse()
             .unwrap(),
