@@ -79,7 +79,8 @@ CSS selector or test ID is accepted by this primitive.
 
 Build envelopes with helpers from the package (`locateEnvelope`,
 `fillEnvelope`, `submitAndVerifyEnvelope`, `waitForStateEnvelope`,
-`followEnvelope`, `dismissObstructionEnvelope`, `extractEnvelope`) and pass
+`followEnvelope`, `dismissObstructionEnvelope`, `extractEnvelope`,
+`detectChallengeEnvelope`, `solveChallengeEnvelope`) and pass
 them to `submit`. Over MCP, prefer the dedicated `intent_*` tools (same
 semantics; server-minted envelopes). Multi-field verified forms use
 `completeFormRuntimeCommand` plus `intentEnvelope`. Fill and `completeForm`

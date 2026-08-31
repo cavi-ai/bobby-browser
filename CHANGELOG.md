@@ -2,8 +2,47 @@
 
 ## Unreleased
 
+## 0.12.0 - 2026-08-31
+
 ### Added
 
+- Captcha and human-verification challenges are reachable over MCP: two new
+  tools, `intent_detect_challenge` (Replayable, read-only, advertised in
+  `explore` so a stuck agent can name its blocker without a phase switch) and
+  `intent_solve_challenge` (Reconciliable, drives the vision solve loop until
+  cleared or `timeoutMs`). Both gate on `browser:mutate` + `intent:execute` +
+  `vision:assist` up front, so a principal without vision is refused at the
+  gate rather than the engine. `bobby://intents` now documents ten intents,
+  including the captcha path.
+- `DetectChallenge` intent (Replayable): classifies a challenge without acting
+  on the page, returning a typed `challengeDetection` — type, confidence,
+  blocking, optional region — or a provably clean page as a first-class answer.
+  A known prior kind enriches the prompt and is reported for transparency
+  without blending into the answer. CLI: `bobby vision detect`.
+- `SolveChallenge` tactic at rung 4 of the ZigZagZig recovery ladder, after the
+  read-only tactics and before any checkpoint-bearing or session-replacing one.
+  It runs the vision solve loop in place with the session's proven gate, then
+  re-checks the original postcondition, so a solve that did not move the page
+  counts as a climb, not a success. A session without vision assist declines
+  the rung fail-closed.
+- `zigzagzig` (godmode) sessions: `session_create` and `workflow_start` accept
+  `zigzagzig: true`, forcing fingerprint and humanize server-side and routing
+  page-bound commands through the recovery ladder. The creation gate stands in
+  for `browser:fingerprint` + `browser:humanize`, refusing a principal missing
+  either before any session materializes, and the flag is hidden from clients
+  that lack them.
+- The ladder's solve rung runs detection first: a provably clean page skips the
+  solve budget, and a typed detection narrows the solve prompt and feeds its
+  region into the hints. `detect_challenge` now appears in metrics snapshots.
+- TypeScript SDK: `detectChallengeRuntimeCommand` /
+  `solveChallengeRuntimeCommand` and the `detectChallengeEnvelope` /
+  `solveChallengeEnvelope` helpers emit the canonical wire shape, with
+  `DetectChallengeIntent` / `SolveChallengeIntent` / `SolveChallengeHints`
+  contracts and the `DEFAULT_DETECT_CHALLENGE_TIMEOUT_MS` (15s) /
+  `DEFAULT_SOLVE_CHALLENGE_TIMEOUT_MS` (30s) constants.
+- A worker reattaches to a live browser process when the CDP transport dies,
+  preserving page state — typed values, scroll, cookies — instead of a
+  destructive relaunch; the executor tries transport-reattach before relaunch.
 - `intent_submit_and_verify` with a `networkQuiet` postcondition returns a
   `submitSettlement` classification and value-free `formValidation` repair
   evidence, so callers can distinguish a settled submission from client-side
@@ -14,6 +53,20 @@
 
 ### Changed
 
+- The bundled `config.toml` sets the MLX vision provider to
+  `mlx-community/Qwen3.5-27B-4bit`, matching the default already shipped for
+  `bobby install` / `bobby vision connect` in 0.11.0 (the file still pinned the
+  superseded `Qwen2.5-VL-3B`), and adds a commented `[vision.providers.ollama]`
+  example.
+- `form_snapshot` output omits default-valued fields: an untouched control
+  drops from 741 to 422 bytes, and `workflow_observe(includeForms)` no longer
+  re-sends redundant defaults on every observation. The change is output-only —
+  old payloads still deserialize, the `form_control` output schema requires
+  only `id`, `controlKind`, `state`, `validity`, and `supportedOperations`, and
+  TypeScript SDK contracts make the slimmed fields optional.
+- The `targetDetached` failure taxonomy separates whole-browser transport loss
+  (reattach preserves state, relaunch wipes it) from a stale element, and
+  `notFound` documents the "browser page is not open" shape.
 - The default MCP `explore` phase includes `intent_complete_form` and
   `intent_submit_and_verify`. Initialization guidance tells deferred-schema
   clients to load those tools with `workflow_start` and `workflow_observe` for
@@ -33,6 +86,17 @@
 
 ### Fixed
 
+- A successful reattach replay no longer falls through to the failure path: a
+  transport reset that reattached and replayed used to still report the
+  original dead-browser error. A reattach never relaunches the browser.
+- `submit_and_verify` with a descriptive `purpose` and no explicit targeting
+  hints resolves the submit control by purpose — disambiguating among
+  actionable candidates and, failing that, a unique submit-typed control —
+  instead of requiring the accessible name to equal the purpose string. An
+  unresolved purpose stays ambiguous rather than firing on a guess.
+- A `fill` intent that cannot find its target escalates with a real candidate
+  window and abstains cleanly — recorded, below floor — instead of erroring at
+  the vision proxy with a 502; an act-time incompatible pick still fails closed.
 - `completeForm` resolves every ordered field against current page state, so a
   field placed after its revealer can be completed in the same intent.
 - A visible `aria-invalid="true"` control rejects network-quiet settlement even
@@ -47,6 +111,7 @@
   repair even when the runtime prefixes the diagnostic.
 - `scripts/dev/firefox-start.sh` accepts pretty-printed endpoint files and a
   macOS-relaunched Firefox whose listening process has a different pid.
+- `Formula/bobby-browser.rb` carries the v0.11.1 asset digests.
 
 ## 0.11.1 - 2026-08-22
 

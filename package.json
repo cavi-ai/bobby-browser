@@ -1,7 +1,7 @@
 {
   "name": "bobby-browser",
   "description": "Browser automation runtime with authenticated, capability-scoped control surfaces designed for agentic workflows",
-  "version": "0.11.1",
+  "version": "0.12.0",
   "author": "Sasan Sotoodehfar",
   "license": "MIT",
   "repository": {
