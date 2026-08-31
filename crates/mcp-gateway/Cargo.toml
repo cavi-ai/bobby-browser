@@ -18,28 +18,28 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-observability = { path = "../observability", version = "0.11.1" }
+observability = { path = "../observability", version = "0.12.0" }
 tracing.workspace = true
 uuid.workspace = true
-types = { path = "../types", version = "0.11.1" }
-interface-core = { path = "../interface-core", version = "0.11.1" }
-sdk-core = { path = "../sdk-core", version = "0.11.1" }
-config = { path = "../config", version = "0.11.1" }
-artifact-store = { path = "../artifact-store", version = "0.11.1" }
-firefox-companion = { path = "../firefox-companion", version = "0.11.1" }
+types = { path = "../types", version = "0.12.0" }
+interface-core = { path = "../interface-core", version = "0.12.0" }
+sdk-core = { path = "../sdk-core", version = "0.12.0" }
+config = { path = "../config", version = "0.12.0" }
+artifact-store = { path = "../artifact-store", version = "0.12.0" }
+firefox-companion = { path = "../firefox-companion", version = "0.12.0" }
 async-trait.workspace = true
-task-scheduler = { path = "../task-scheduler", version = "0.11.1" }
-network-engine = { path = "../network-engine", version = "0.11.1" }
+task-scheduler = { path = "../task-scheduler", version = "0.12.0" }
+network-engine = { path = "../network-engine", version = "0.12.0" }
 
 [dev-dependencies]
-types = { path = "../types", version = "0.11.1", features = ["schema"] }
+types = { path = "../types", version = "0.12.0", features = ["schema"] }
 schemars.workspace = true
 jsonschema.workspace = true
 async-trait.workspace = true
 tempfile.workspace = true
-checkpoint-store = { path = "../checkpoint-store", version = "0.11.1" }
-dom-engine = { path = "../dom-engine", version = "0.11.1" }
-page-runtime = { path = "../page-runtime", version = "0.11.1" }
-session-manager = { path = "../session-manager", version = "0.11.1" }
-worker-pool = { path = "../worker-pool", version = "0.11.1" }
-workflow-journal = { path = "../workflow-journal", version = "0.11.1" }
+checkpoint-store = { path = "../checkpoint-store", version = "0.12.0" }
+dom-engine = { path = "../dom-engine", version = "0.12.0" }
+page-runtime = { path = "../page-runtime", version = "0.12.0" }
+session-manager = { path = "../session-manager", version = "0.12.0" }
+worker-pool = { path = "../worker-pool", version = "0.12.0" }
+workflow-journal = { path = "../workflow-journal", version = "0.12.0" }

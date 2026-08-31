@@ -147,6 +147,24 @@ inspection and debugging.
 The former top-level `vision-proxy` command remains a hidden compatibility
 alias for scripts. New user workflows should use the `bobby vision` commands.
 
+### `bobby vision detect` / `bobby vision solve`
+
+`detect` classifies a captcha or human-verification challenge on a page without
+acting on it; `solve` drives the vision solve loop against one until it clears
+or the budget runs out. Both take a `--purpose` and target either a fresh
+session (`--url`) or an existing one (`--session` with `--page`).
+
+```bash
+bobby vision detect --purpose "check for a captcha blocking signup" --url https://example.com
+bobby vision solve --purpose "solve the reCAPTCHA challenge" --session <id> --page <id>
+```
+
+`detect` is read-only and defaults to a 15s budget (`--timeout-ms`); `solve`
+mutates the page and defaults to 120s. Add `--zigzagzig` to `solve` for
+humanized input timing and fingerprint spoofing. `--node` selects the vision
+node the session escalates to (default `vision`). Both require the session to
+hold `vision:assist`.
+
 ### `bobby openshell`
 
 NVIDIA OpenShell host: write the pack, and mint or revoke one agent-scoped
