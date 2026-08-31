@@ -20,7 +20,7 @@
   },
   "devDependencies": {
     "@cavi-ai/bobby-browser": "workspace:*",
-    "@types/node": "26.2.0",
+    "@types/node": "26.4.0",
     "playwright-core": "1.62.1",
     "puppeteer-core": "25.8.0",
     "typescript": "7.0.2"
