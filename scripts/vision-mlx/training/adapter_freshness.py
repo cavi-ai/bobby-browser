@@ -44,6 +44,11 @@ SUITES = {
             # band, not the best run.
             "element_accuracy": 0.98,
             "abstain_recall_production": 1.0,
+            # Singleton research classes (boundary probes, real-site absent
+            # probes) flap by construction at n=1-2 per phrasing; the floor
+            # proves the class is alive without pretending a coin flip is a
+            # regression.
+            "abstain_recall_singletons": 0.5,
             "abstain_precision": 0.95,
         },
     },
