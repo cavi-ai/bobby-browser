@@ -75,9 +75,18 @@ class CorpusLintTests(unittest.TestCase):
         self.assertTrue(any("success is not False" in e for e in errors))
 
     def test_starved_negative_class_is_an_error(self):
-        rows = [record(step=f"s{i}") for i in range(20)] + [negative("vague")]
+        rows = [record(step=f"s{i}") for i in range(45)] + [
+            negative(f"vague {i}") for i in range(5)
+        ]
         errors, _ = lint(rows)
         self.assertTrue(any("outside the healthy band" in e for e in errors))
+
+    def test_small_corpus_skips_the_balance_band(self):
+        # CI smoke corpora (one grow run per journey) have few negatives;
+        # presence is asserted, proportions are not.
+        rows = [record(step=f"s{i}") for i in range(12)] + [negative("vague")]
+        errors, _ = lint(rows)
+        self.assertEqual(errors, [])
 
     def test_no_negatives_is_an_error(self):
         rows = [record(step=f"s{i}") for i in range(10)]

@@ -156,7 +156,13 @@ def lint(rows: list) -> tuple:
 
     if negatives == 0 and len(rows) >= 10:
         errors.append("no abstain-labeled negatives; the abstain class is untrained")
-    elif negatives > 0 and len(rows) >= 10:
+    elif (
+        negatives > 0
+        and negatives >= 5
+        and positives >= 20
+        # The ratio band is a training-scale check; small CI smoke corpora
+        # (one grow run per journey) only prove the class exists.
+    ):
         ratio = positives / negatives
         if not MIN_POS_PER_NEG <= ratio <= MAX_POS_PER_NEG:
             errors.append(
