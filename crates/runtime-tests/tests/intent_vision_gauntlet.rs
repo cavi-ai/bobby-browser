@@ -105,7 +105,7 @@ fn corpus_record_count() -> usize {
 
 const UPLOAD_SUBMIT: [&str; 4] = [
     "Upload the staged document to the server",
-    "Send the staged file now",
+    "Send the staged document off",
     "Push the staged document upload through",
     "Submit the staged customer document",
 ];

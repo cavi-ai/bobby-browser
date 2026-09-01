@@ -39,7 +39,7 @@ for purpose in [
     STEP_BY_PURPOSE[purpose] = ("Customer priority", "click", "select_priority")
 for purpose in [
     "Upload the staged document to the server",
-    "Send the staged file now",
+    "Send the staged document off",
     "Push the staged document upload through",
     "Submit the staged customer document",
 ]:
@@ -129,6 +129,45 @@ def relabel(record):
     }
 
 
+def validate_positives(records):
+    """Drop harvest positives whose verified pick was the wrong element.
+
+    The runtime's verification proves the action LANDED, not that it was
+    right for the purpose: a committed wrong pick (e.g. a nav link instead
+    of the submit button) verifies as success=True with a valid target
+    index. Against the scripted step mapping those records are poison —
+    they would teach the model the wrong target. Only records whose
+    purpose has a known scripted target are checked; unknown purposes pass
+    through (they may come from other journeys).
+    """
+    kept = []
+    dropped = []
+    for record in records:
+        purpose = record.get("purpose")
+        mapping = STEP_BY_PURPOSE.get(purpose)
+        if mapping is None or record.get("success") is not True:
+            kept.append(record)
+            continue
+        candidates = (
+            record.get("contextCandidates") or record.get("context_candidates") or []
+        )
+        index = (
+            record.get("targetIndex")
+            if "targetIndex" in record
+            else record.get("target_index")
+        )
+        picked = (
+            candidates[index].get("name")
+            if isinstance(index, int) and 0 <= index < len(candidates)
+            else None
+        )
+        if picked == mapping[0]:
+            kept.append(record)
+        else:
+            dropped.append((purpose, mapping[0], picked))
+    return kept, dropped
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True, help="harvest corpus JSONL (engine records)")
@@ -136,15 +175,19 @@ def main():
     args = parser.parse_args()
 
     relabeled = []
+    validated_positives = []
     skipped = 0
+    dropped_wrong = []
     with open(args.input) as f:
         for line in f:
             if not line.strip():
                 continue
             record = json.loads(line)
             # Only abstain/failure records need relabeling; verified
-            # positives already carry their target index.
+            # positives are validated against the scripted target — a
+            # mechanically-verified wrong pick is poison (§4w lesson).
             if record.get("success") is not False:
+                validated_positives.append(record)
                 continue
             out = relabel(record)
             if out is None:
@@ -152,10 +195,19 @@ def main():
             else:
                 relabeled.append(out)
 
+    validated_positives, dropped_wrong = validate_positives(validated_positives)
     with open(args.output, "w") as f:
-        for record in relabeled:
+        # Output = validated production positives (as captured) + relabeled
+        # ground truth; both are fit for the corpus, negatives stay out.
+        for record in validated_positives + relabeled:
             f.write(json.dumps(record) + "\n")
-    print(f"relabeled {len(relabeled)} production-window records (skipped {skipped} unmappable)")
+    for purpose, wanted, picked in dropped_wrong:
+        print(f"dropped wrong pick: {purpose!r} picked {picked!r}, wanted {wanted!r}")
+    print(
+        f"relabeled {len(relabeled)} production-window records "
+        f"(skipped {skipped} unmappable); validated {len(validated_positives)} "
+        f"positives ({len(dropped_wrong)} wrong picks dropped)"
+    )
 
 
 if __name__ == "__main__":
