@@ -35,17 +35,21 @@ const SITES: &[(&str, &str, &[&str])] = &[
         &[
             "Open the comments on the first post",
             "Sort the posts by new",
+            "Open the second post's title",
         ],
     ),
     (
         "x",
         "https://x.com/rustlang",
-        &["Open the first pinned or latest post"],
+        &["Open the first pinned or latest post", "Open the posts tab"],
     ),
     (
+        // Login wall: "Sign in" exists on the wall (should commit), the
+        // posts tab does not (must abstain). The pair tests discrimination
+        // on the hardest realistic page class.
         "linkedin",
         "https://www.linkedin.com/company/rust-lang/",
-        &["Open the posts tab"],
+        &["Open the posts tab", "Sign in"],
     ),
 ];
 
