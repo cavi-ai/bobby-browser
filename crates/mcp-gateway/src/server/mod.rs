@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     future::Future,
     io,
     pin::Pin,
@@ -128,6 +128,15 @@ pub struct Server {
     in_flight: Mutex<BTreeMap<String, Arc<Notify>>>,
     pending_cancellations: Mutex<BTreeSet<String>>,
     workflow_handles: Arc<WorkflowHandles>,
+    /// Boundary submits that completed per workflow within the current
+    /// handle generation: workflowId -> [(generation, commandId)]. A second
+    /// `intent_submit_and_verify` against a recorded workflow is refused
+    /// (`boundaryAlreadyExecuted`) unless the caller passes `reSubmit` --
+    /// the structural guard against the double-submit hazard where an agent
+    /// re-verifies by re-clicking. In-memory by design: a gateway restart
+    /// also invalidates every workflow handle, so the ledger cannot outlive
+    /// the bindings it protects.
+    boundary_executions: Mutex<HashMap<types::WorkflowId, Vec<(u64, types::CommandId)>>>,
     shutting_down: AtomicBool,
     /// The phase this connection's `tools/list` is scoped to. Per connection,
     /// not per principal: two agents on the same bearer can be in different
@@ -182,6 +191,7 @@ impl Server {
             in_flight: Mutex::new(BTreeMap::new()),
             pending_cancellations: Mutex::new(BTreeSet::new()),
             workflow_handles: Arc::new(WorkflowHandles::new()),
+            boundary_executions: Mutex::new(HashMap::new()),
             shutting_down: AtomicBool::new(false),
             toolset: std::sync::Mutex::new(crate::toolset::Toolset::from_env().unwrap_or_default()),
             jobs: None,
@@ -286,6 +296,7 @@ impl Server {
             // work from the previous session runs to completion.
             self.pending_cancellations.lock().await.clear();
             self.workflow_handles.reset();
+            self.boundary_executions.lock().await.clear();
             *lifecycle = Lifecycle::AwaitingInitializedNotification;
             return id.map(|id| {
                 success(
@@ -991,6 +1002,89 @@ impl Server {
                 "isError":is_error
             }),
         )
+    }
+
+    /// Record that a Boundary submit completed within a workflow at the
+    /// current handle generation. Only completed outcomes are recorded: a
+    /// rejected or failed submit leaves no effect to protect, so the
+    /// fix-and-resubmit flow stays open.
+    async fn record_boundary_execution(
+        &self,
+        workflow_id: &types::WorkflowId,
+        command_id: &types::CommandId,
+    ) {
+        let generation = self.workflow_handles.generation();
+        self.boundary_executions
+            .lock()
+            .await
+            .entry(workflow_id.clone())
+            .or_default()
+            .push((generation, command_id.clone()));
+    }
+
+    /// The most recent completed Boundary submit for this workflow in the
+    /// current generation, if any. Records from earlier generations are
+    /// invisible: a re-`initialize` invalidates the workflow handles those
+    /// submits belonged to.
+    async fn prior_boundary_execution(
+        &self,
+        workflow_id: &types::WorkflowId,
+    ) -> Option<types::CommandId> {
+        let generation = self.workflow_handles.generation();
+        self.boundary_executions
+            .lock()
+            .await
+            .get(workflow_id)
+            .and_then(|records| {
+                records
+                    .iter()
+                    .rev()
+                    .find(|(recorded_generation, _)| *recorded_generation == generation)
+                    .map(|(_, command_id)| command_id.clone())
+            })
+    }
+
+    /// The structured refusal for a second Boundary submit against a
+    /// workflow whose first one already completed. Shaped like a command
+    /// outcome so `tool_success` attaches the repair and marks `isError`.
+    async fn boundary_already_executed_response(
+        &self,
+        id: Value,
+        workflow_id: &types::WorkflowId,
+        prior_command_id: &types::CommandId,
+    ) -> Value {
+        let command_id = types::CommandId::new();
+        let failure = json!({
+            "status": "failed",
+            "commandId": command_id,
+            "error": {
+                "code": "boundaryAlreadyExecuted",
+                "message": format!(
+                    "a Boundary submit for workflow {} already completed (commandId {}); its effect is on record and a second submit would double-apply it",
+                    workflow_id.0,
+                    prior_command_id.0
+                ),
+                "layer": "workflow",
+                "retryable": false,
+                "priorCommandId": prior_command_id,
+            },
+            "evidence": [],
+        });
+        self.tool_success(id, failure).await
+    }
+
+    /// Seed the boundary ledger directly. The recording path in the submit
+    /// arm only fires for outcomes the executor produced, which needs a live
+    /// browser journey; tests seed the ledger to exercise the guard and the
+    /// refusal response.
+    #[doc(hidden)]
+    pub async fn record_boundary_execution_for_test(
+        &self,
+        workflow_id: &types::WorkflowId,
+        command_id: &types::CommandId,
+    ) {
+        self.record_boundary_execution(workflow_id, command_id)
+            .await;
     }
 
     /// One call for a Boundary command: mint the checkpoint, then run it.

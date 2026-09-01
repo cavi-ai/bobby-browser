@@ -382,7 +382,8 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         "intent_submit_and_verify" => (
             intent_properties(json!({
                 "expectedState":{"$ref":"#/$defs/WaitForCommand"},
-                "autoCheckpoint":{"type":"boolean"}
+                "autoCheckpoint":{"type":"boolean"},
+                "reSubmit":{"type":"boolean","description":"Submit despite a prior completed submit for this workflow (boundaryAlreadyExecuted)."}
             })),
             intent_required(&["purpose", "expectedState"]),
         ),
@@ -2409,7 +2410,7 @@ fn error_code() -> Value {
         "httpTransferFailed","httpStateConflict","httpEquivalenceUnproven",
         "intentCompileFailed","intentActionMismatch","obstructionSuspected",
         "visionAssistDenied","visionAssistFailed","targetObscured","targetOutOfBounds",
-        "expectedStatePreSatisfied"
+        "expectedStatePreSatisfied","boundaryAlreadyExecuted"
     ]})
 }
 

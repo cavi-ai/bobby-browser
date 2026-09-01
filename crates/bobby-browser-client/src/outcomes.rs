@@ -657,6 +657,10 @@ pub enum ErrorCode {
     // `submitAndVerify`'s expected state already held before the submit ran,
     // so a post-act pass would prove nothing (static-copy matcher).
     ExpectedStatePreSatisfied,
+    // A Boundary submit already completed within this workflow; running
+    // another would double-apply the effect unless the caller explicitly
+    // acknowledges the prior one (`reSubmit`).
+    BoundaryAlreadyExecuted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

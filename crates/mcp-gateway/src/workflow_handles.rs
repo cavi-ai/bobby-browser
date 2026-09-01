@@ -132,6 +132,14 @@ impl WorkflowHandles {
         }
     }
 
+    /// The current handle generation. Callers key per-workflow bookkeeping
+    /// (boundary-submit ledgers) on it: a re-`initialize` bumps the
+    /// generation, so records from the previous connection's workflows go
+    /// stale in one comparison instead of needing their own invalidation walk.
+    pub(crate) fn generation(&self) -> u64 {
+        self.lock_state().generation
+    }
+
     pub(crate) fn reserve(
         self: &Arc<Self>,
     ) -> Result<WorkflowHandleReservation, WorkflowHandleError> {

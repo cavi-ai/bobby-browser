@@ -765,6 +765,14 @@ tools most likely to produce it.
   a post-act pass would prove nothing (the matcher hit static page copy).
   The click was not performed. Repair: strengthen `expectedState` to
   content that only appears after the submit, then resubmit.
+- `boundaryAlreadyExecuted` -- `intent_submit_and_verify` only: a Boundary
+  submit for this workflow already completed, and the runtime refuses a
+  second one because the effect would double-apply. This is a guard, not a
+  failure of your call: nothing ran. The error names the prior submit's
+  `commandId` -- inspect that outcome's evidence (it carries the
+  post-act state you were about to verify) or call `recovery_status`.
+  Repair: pass `reSubmit: true` only when a second effect is genuinely
+  intended; otherwise treat the prior submit as the one that landed.
 - `screenshotCaptureFailed` -- either the underlying browser capture call
   (screenshot or PDF print) failed at the driver level, or the captured
   bytes failed to write to the local artifact store afterward. Repair:
