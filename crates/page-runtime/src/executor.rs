@@ -289,9 +289,10 @@ impl PageRuntime {
             Ok(Ok(execution)) => execution,
             Ok(Err(failure)) => {
                 // A killed browser (SIGKILL under host pressure, reset CDP
-                // socket) otherwise wedges every later call on the session at
-                // a permanent "browser page is not open". Revive once: retire
-                // the dead worker, relaunch, reopen the page at its last URL.
+                // or Firefox BiDi socket) otherwise wedges every later call
+                // on the session at a permanent "browser page is not open".
+                // Revive once: retire the dead worker, relaunch, reopen the
+                // page at its last URL.
                 // Replayable commands retry transparently; anything else fails
                 // with the revival noted so the *next* call lands on a live
                 // page. The runtime already validated the page id, so a
@@ -313,7 +314,7 @@ impl PageRuntime {
                             tracing::info!(
                                 session_id = %envelope.session_id.0,
                                 command_id = %envelope.command_id.0,
-                                "CDP transport reset reattached to the live browser"
+                                "transport reset reattached to the live browser"
                             );
                             Some(lease)
                         }
@@ -326,11 +327,6 @@ impl PageRuntime {
                         }
                     };
                     if let Some(reattached_lease) = reattached {
-                        tracing::info!(
-                            session_id = %envelope.session_id.0,
-                            command_id = %envelope.command_id.0,
-                            "CDP transport reset reattached to the live browser"
-                        );
                         if envelope.command.class() == types::CommandClass::Replayable {
                             self.adaptive
                                 .record_retry(observability::RetryClass::Transport);

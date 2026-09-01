@@ -729,11 +729,14 @@ tools most likely to produce it.
 - `targetDetached` -- two distinct situations share this code; read the
   message to tell them apart:
   - *The whole browser transport died* ("the browser target is gone",
-    "send failed because receiver is gone", "browser process was killed"):
-    the CDP websocket reset or the browser process died. The runtime
-    reattaches to a still-live browser itself (`cdpReattach` evidence --
-    page state, including typed form values, is preserved) or relaunches
-    and reloads the page's last URL when the process is really dead.
+    "send failed because receiver is gone", "browser process was killed",
+    "Firefox BiDi connection closed"):
+    the CDP or Firefox BiDi websocket reset, or the browser process died.
+    The runtime reattaches to a still-live browser itself (`cdpReattach`
+    evidence -- page state, including typed form values, is preserved) or
+    relaunches and reloads the page's last URL when the process is really
+    dead. Firefox reconnects the BiDi socket without `session.new` so the
+    existing WebDriver session and tabs stay intact.
     Repair: none needed before the next command -- but a relaunch did wipe
     in-page state, so re-observe (`workflow_observe`, `form_snapshot`)
     before replaying anything that already ran. After a reattach, state is
@@ -1172,7 +1175,10 @@ the `BrowserWorker` default, which refuses with `browserCommandFailed`
 retryable failure -- use a named tool instead. `clickAndWaitForPopup` and
 `clickAndWaitForDownload` are implemented on both Chromium
 (`crates/worker-pool/src/chromium.rs`) and Firefox
-(`crates/firefox-companion/src/worker.rs`).
+(`crates/firefox-companion/src/worker.rs`). `networkQuiet` waits are
+implemented on both engines: Chromium via CDP Network events, Firefox via
+the same BiDi `network.beforeRequestSent` / `network.responseCompleted` /
+`network.fetchError` stream used for HAR.
 "#;
 
 const JOB_HANDLERS_BODY: &str = r#"# Built-in job handlers

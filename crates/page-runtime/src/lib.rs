@@ -65,16 +65,7 @@ impl PageRuntime {
     }
 
     pub fn new(journal: Arc<dyn CommandJournal>, workers: Arc<WorkerPool>) -> Self {
-        Self {
-            inner: Arc::default(),
-            journal: Some(journal),
-            workers: Some(workers),
-            checkpoints: None,
-            adaptive: AdaptivePageEngine::browser_only(),
-            phase_observer: None,
-            context: Arc::new(ContextGraph::new()),
-            promotion: None,
-        }
+        Self::new_adaptive(journal, workers, None, AdaptivePageEngine::browser_only())
     }
 
     pub fn new_with_checkpoints(
@@ -82,16 +73,12 @@ impl PageRuntime {
         workers: Arc<WorkerPool>,
         checkpoints: CheckpointStore,
     ) -> Self {
-        Self {
-            inner: Arc::default(),
-            journal: Some(journal),
-            workers: Some(workers),
-            checkpoints: Some(checkpoints),
-            adaptive: AdaptivePageEngine::browser_only(),
-            phase_observer: None,
-            context: Arc::new(ContextGraph::new()),
-            promotion: None,
-        }
+        Self::new_adaptive(
+            journal,
+            workers,
+            Some(checkpoints),
+            AdaptivePageEngine::browser_only(),
+        )
     }
 
     pub fn new_adaptive(
@@ -141,20 +128,15 @@ impl PageRuntime {
     /// graph (`[vision].prefill`). Off by default; when off, the intent path
     /// is byte-identical to before.
     pub fn with_vision_prefill_enabled(mut self) -> Self {
-        self.adaptive = self
-            .adaptive
-            .clone()
-            .with_vision_prefill(self.context.clone());
+        self.adaptive =
+            std::mem::take(&mut self.adaptive).with_vision_prefill(self.context.clone());
         self
     }
 
     /// Attaches this runtime's context graph to the adaptive engine so
     /// escalation prompts carry the recent-commands block.
     pub fn with_context_graph_attached(mut self) -> Self {
-        self.adaptive = self
-            .adaptive
-            .clone()
-            .with_context_graph(self.context.clone());
+        self.adaptive = std::mem::take(&mut self.adaptive).with_context_graph(self.context.clone());
         self
     }
 

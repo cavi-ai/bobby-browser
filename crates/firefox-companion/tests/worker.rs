@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     path::PathBuf,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -44,6 +44,7 @@ struct FakeBidi {
     titles: Mutex<HashMap<String, String>>,
     closed_titles: Mutex<Vec<String>>,
     transport_closes: AtomicUsize,
+    dead: AtomicBool,
     events: broadcast::Sender<BidiEvent>,
 }
 
@@ -74,6 +75,7 @@ impl FakeBidi {
             titles: Mutex::new(HashMap::new()),
             closed_titles: Mutex::new(Vec::new()),
             transport_closes: AtomicUsize::new(0),
+            dead: AtomicBool::new(false),
             events,
         })
     }
@@ -137,6 +139,10 @@ impl FakeBidi {
         self.transport_closes.load(Ordering::SeqCst)
     }
 
+    fn kill(&self) {
+        self.dead.store(true, Ordering::Release);
+    }
+
     fn emit(&self, method: &str, params: Value) {
         self.events
             .send(BidiEvent {
@@ -150,6 +156,14 @@ impl FakeBidi {
 #[async_trait]
 impl BidiTransport for FakeBidi {
     async fn send(&self, method: &str, params: Value) -> Result<Value, CommandError> {
+        if self.dead.load(Ordering::Acquire) {
+            return Err(CommandError {
+                code: ErrorCode::BrowserCommandFailed,
+                message: "Firefox BiDi connection closed".into(),
+                layer: ErrorLayer::Driver,
+                retryable: true,
+            });
+        }
         let mut calls = self.calls.lock().await;
         calls.push(BidiCall {
             method: method.into(),
@@ -311,6 +325,11 @@ impl BidiTransport for FakeBidi {
 
     fn subscribe_events(&self) -> Option<broadcast::Receiver<BidiEvent>> {
         Some(self.events.subscribe())
+    }
+
+    async fn reconnect_live(&self) -> Result<(), CommandError> {
+        self.dead.store(false, Ordering::Release);
+        Ok(())
     }
 
     async fn close(&self) -> Result<(), CommandError> {
@@ -2527,6 +2546,174 @@ async fn wait_for_url_uses_exact_bounded_matcher_semantics() {
             ..
         }]
     ));
+}
+
+fn network_quiet_wait(timeout_ms: u64) -> WaitForCommand {
+    WaitForCommand {
+        condition: WaitCondition::NetworkQuiet {
+            idle_ms: 20,
+            max_in_flight: 0,
+            ignore_url_substrings: Vec::new(),
+            ignore_resource_types: Vec::new(),
+            ignore_long_lived: false,
+        },
+        timeout_ms,
+    }
+}
+
+#[tokio::test]
+async fn wait_for_network_quiet_times_out_while_a_page_request_is_in_flight() {
+    let bidi = FakeBidi::new(vec![Ok(json!({"context": "ctx-quiet"}))]);
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    bidi.emit(
+        "network.beforeRequestSent",
+        json!({
+            "context": "ctx-quiet",
+            "request": {
+                "request": "req-1",
+                "url": "https://example.test/api",
+                "destination": "empty",
+                "initiatorType": "fetch"
+            }
+        }),
+    );
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let error = worker
+        .wait_for(&page, &network_quiet_wait(120))
+        .await
+        .expect_err("in-flight fetch must block networkQuiet");
+    assert_eq!(error.code, ErrorCode::WaitConditionTimedOut);
+}
+
+#[tokio::test]
+async fn wait_for_network_quiet_settles_after_the_in_flight_request_completes() {
+    let bidi = FakeBidi::new(vec![Ok(json!({"context": "ctx-quiet"}))]);
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    bidi.emit(
+        "network.beforeRequestSent",
+        json!({
+            "context": "ctx-quiet",
+            "request": {
+                "request": "req-1",
+                "url": "https://example.test/api",
+                "destination": "empty",
+                "initiatorType": "fetch"
+            }
+        }),
+    );
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    bidi.emit(
+        "network.responseCompleted",
+        json!({
+            "context": "ctx-quiet",
+            "request": {"request": "req-1"}
+        }),
+    );
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let evidence = worker
+        .wait_for(&page, &network_quiet_wait(200))
+        .await
+        .expect("completed fetch must allow networkQuiet");
+    assert!(matches!(
+        evidence.as_slice(),
+        [Evidence::Wait {
+            observations: 1..,
+            ..
+        }]
+    ));
+}
+
+#[tokio::test]
+async fn wait_for_network_quiet_ignores_filtered_in_flight_urls() {
+    let bidi = FakeBidi::new(vec![Ok(json!({"context": "ctx-quiet"}))]);
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    bidi.emit(
+        "network.beforeRequestSent",
+        json!({
+            "context": "ctx-quiet",
+            "request": {
+                "request": "req-analytics",
+                "url": "https://cdn.example.test/analytics.js",
+                "destination": "script",
+                "initiatorType": "script"
+            }
+        }),
+    );
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let evidence = worker
+        .wait_for(
+            &page,
+            &WaitForCommand {
+                condition: WaitCondition::NetworkQuiet {
+                    idle_ms: 20,
+                    max_in_flight: 0,
+                    ignore_url_substrings: vec!["analytics".into()],
+                    ignore_resource_types: Vec::new(),
+                    ignore_long_lived: false,
+                },
+                timeout_ms: 200,
+            },
+        )
+        .await
+        .expect("ignored analytics request must not block networkQuiet");
+    assert!(matches!(&evidence[0], Evidence::Wait { .. }));
+}
+
+#[tokio::test]
+async fn reconnect_live_process_resubscribes_and_keeps_the_page() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "ctx-reattach"})),
+        Ok(json!({"result": {"type": "string", "value": "https://example.test/kept"}})),
+    ]);
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+    bidi.kill();
+
+    let evidence = BrowserWorker::reconnect_live_process(&worker)
+        .await
+        .expect("Firefox must reattach without relaunching");
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::Configuration { name, .. } if name == "cdpReattach"
+    )));
+
+    let wait = worker
+        .wait_for(
+            &page,
+            &WaitForCommand {
+                condition: WaitCondition::Url {
+                    matcher: TextMatch::Contains("/kept".into()),
+                },
+                timeout_ms: 100,
+            },
+        )
+        .await
+        .expect("page state must survive BiDi reattach");
+    assert!(matches!(&wait[0], Evidence::Wait { .. }));
+
+    let subscribes = bidi
+        .calls()
+        .await
+        .into_iter()
+        .filter(|call| call.method == "session.subscribe")
+        .count();
+    assert!(
+        subscribes >= 2,
+        "reattach must re-issue session.subscribe, got {subscribes}"
+    );
 }
 
 #[tokio::test]

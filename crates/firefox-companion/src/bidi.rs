@@ -50,11 +50,12 @@ pub struct BidiEvent {
 
 #[derive(Clone)]
 pub struct BidiClient {
-    commands: mpsc::Sender<WriterCommand>,
+    commands: Arc<Mutex<mpsc::Sender<WriterCommand>>>,
     shared: Arc<SharedState>,
     permits: Arc<Semaphore>,
     events: broadcast::Sender<BidiEvent>,
     timeout: Duration,
+    url: Url,
 }
 
 struct SharedState {
@@ -184,11 +185,12 @@ impl BidiClient {
         tokio::spawn(reader_task(reader, Arc::clone(&shared), events.clone()));
 
         Ok(Self {
-            commands,
+            commands: Arc::new(Mutex::new(commands)),
             shared,
             permits: Arc::new(Semaphore::new(COMMAND_CAPACITY)),
             events,
             timeout,
+            url,
         })
     }
 
@@ -239,7 +241,8 @@ impl BidiClient {
             method: method.to_owned(),
             params,
         };
-        let sent = tokio::time::timeout_at(deadline, self.commands.send(outbound)).await;
+        let commands = self.commands.lock().await.clone();
+        let sent = tokio::time::timeout_at(deadline, commands.send(outbound)).await;
         drop(enqueue);
         match sent {
             Ok(Ok(())) => {}
@@ -322,6 +325,50 @@ impl BidiClient {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_none()
     }
+
+    /// Open a new WebSocket to the same BiDi URL without `session.new`.
+    /// RemoteAgent keeps the WebDriver session after a dropped socket.
+    pub async fn reconnect_live(&self) -> Result<(), CommandError> {
+        if self.is_alive() {
+            return Ok(());
+        }
+        if terminal_error(&self.shared).is_some_and(|error| error.message.contains("client closed"))
+        {
+            return Err(transport_failure("Firefox BiDi client closed").error());
+        }
+        let (socket, _) = tokio::time::timeout(self.timeout, connect_async(self.url.as_str()))
+            .await
+            .map_err(|_| deadline_error("BiDi reconnection deadline exceeded"))?
+            .map_err(|error| {
+                transport_failure(format!("failed to reconnect to Firefox BiDi: {error}")).error()
+            })?;
+        let (writer, reader) = socket.split();
+        let (commands, command_rx) = mpsc::channel(COMMAND_CAPACITY);
+        {
+            let mut terminal = self
+                .shared
+                .terminal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *terminal = None;
+        }
+        self.shared.closing.store(false, Ordering::Release);
+        let _ = self.shared.close_signal.send(false);
+        *self.shared.writer_result.lock().await = None;
+        *self.commands.lock().await = commands;
+        tokio::spawn(writer_task(
+            writer,
+            command_rx,
+            self.shared.close_signal.subscribe(),
+            Arc::clone(&self.shared),
+        ));
+        tokio::spawn(reader_task(
+            reader,
+            Arc::clone(&self.shared),
+            self.events.clone(),
+        ));
+        Ok(())
+    }
 }
 
 /// A worker handle onto a profile-wide shared BiDi session. Firefox's
@@ -353,6 +400,10 @@ impl BidiTransport for SharedBiDiTransport {
     async fn close(&self) -> Result<(), CommandError> {
         Ok(())
     }
+
+    async fn reconnect_live(&self) -> Result<(), CommandError> {
+        self.client.reconnect_live().await
+    }
 }
 
 #[async_trait]
@@ -365,6 +416,18 @@ pub trait BidiTransport: Send + Sync {
 
     async fn close(&self) -> Result<(), CommandError> {
         Ok(())
+    }
+
+    /// Reconnect the WebSocket without `session.new`. Firefox RemoteAgent
+    /// keeps the WebDriver session alive after a dropped socket; a new session
+    /// would hit the one-session limit. Default: unsupported.
+    async fn reconnect_live(&self) -> Result<(), CommandError> {
+        Err(CommandError {
+            code: ErrorCode::BrowserCommandFailed,
+            message: "Firefox BiDi reconnect is not supported by this transport".into(),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        })
     }
 }
 
@@ -379,6 +442,10 @@ impl BidiTransport for BidiClient {
     }
     async fn close(&self) -> Result<(), CommandError> {
         BidiClient::close(self).await
+    }
+
+    async fn reconnect_live(&self) -> Result<(), CommandError> {
+        BidiClient::reconnect_live(self).await
     }
 }
 
@@ -750,16 +817,21 @@ mod tests {
         }
     }
 
+    fn test_bidi_url() -> Url {
+        Url::parse("ws://127.0.0.1:1/session").expect("static test url")
+    }
+
     fn test_client() -> (BidiClient, mpsc::Receiver<WriterCommand>) {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         (
             BidiClient {
-                commands,
+                commands: Arc::new(Mutex::new(commands)),
                 shared: Arc::new(test_shared()),
                 permits: Arc::new(Semaphore::new(COMMAND_CAPACITY)),
                 events,
                 timeout: Duration::from_secs(1),
+                url: test_bidi_url(),
             },
             receiver,
         )
@@ -918,11 +990,12 @@ mod tests {
         let shared = Arc::new(test_shared());
         let permits = Arc::new(Semaphore::new(COMMAND_CAPACITY));
         let client = BidiClient {
-            commands,
+            commands: Arc::new(Mutex::new(commands)),
             shared: Arc::clone(&shared),
             permits: Arc::clone(&permits),
             events,
             timeout: Duration::from_secs(2),
+            url: test_bidi_url(),
         };
         let ready_polled = Arc::new(Notify::new());
         let allow_close = Arc::new(AtomicBool::new(false));
@@ -962,7 +1035,7 @@ mod tests {
                     .await
             }));
         }
-        while client.commands.capacity() != 0 {
+        while client.commands.lock().await.capacity() != 0 {
             tokio::task::yield_now().await;
         }
         for task in abandoned {

@@ -3341,6 +3341,18 @@ fn is_closed_page_message(message: &str) -> bool {
         || message.contains("Session with given id not found")
         || message.contains("oneshot canceled")
         || message.contains(TARGET_GONE_MESSAGE)
+        || is_firefox_bidi_transport_dead(message)
+}
+
+fn is_firefox_bidi_transport_dead(message: &str) -> bool {
+    message.contains("Firefox BiDi")
+        && !message.contains("client closed")
+        && (message.contains("connection closed")
+            || message.contains("connection ended")
+            || message.contains("disconnected")
+            || message.contains("command channel closed")
+            || message.contains("command capacity closed")
+            || message.contains("response channel closed"))
 }
 
 fn wait_should_retry_replaced_context(error: &CommandError) -> bool {
@@ -4569,6 +4581,11 @@ mod tests {
         assert!(!is_closed_page_message(
             "connection temporarily unavailable"
         ));
+        assert!(is_closed_page_message("Firefox BiDi connection closed"));
+        assert!(is_closed_page_message(
+            "Firefox BiDi reader disconnected: connection reset"
+        ));
+        assert!(!is_closed_page_message("Firefox BiDi client closed"));
     }
 
     #[test]

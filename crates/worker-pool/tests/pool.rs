@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use types::{
-    ClickCommand, CommandError, Evidence, InspectCommand, NavigateCommand, PageId, SessionId,
-    TypeTextCommand, WorkerId,
+    ClickCommand, CommandError, ErrorCode, Evidence, InspectCommand, NavigateCommand, PageId,
+    SessionId, TypeTextCommand, WorkerId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
 
@@ -553,4 +553,19 @@ async fn release_waits_for_the_last_shared_lease_before_cleanup() {
 #[tokio::test]
 async fn cancelled_invalidate_session_still_finishes_factory_cleanup() {
     cancellation_does_not_stop_cleanup(true).await;
+}
+
+#[tokio::test]
+async fn element_at_point_default_is_unsupported_not_empty_identity() {
+    let worker = FakeWorker {
+        id: WorkerId::new(),
+        profile: PathBuf::from("element-at-point"),
+        terminations: Arc::new(AtomicUsize::new(0)),
+    };
+    let error = worker
+        .element_at_point(&PageId::new(), 0.0, 0.0)
+        .await
+        .expect_err("unsupported workers must not report empty identity");
+    assert_eq!(error.code, ErrorCode::BrowserCommandFailed);
+    assert!(error.message.contains("not supported"));
 }

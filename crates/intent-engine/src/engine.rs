@@ -83,14 +83,20 @@ pub trait IntentBrowser: Send + Sync {
 
     /// Accessible identity (role, name) of the interactive element at a
     /// viewport point, used by the vision corpus collector to ground a
-    /// verified click back onto the candidate list. Default: unsupported.
+    /// verified click back onto the candidate list. Default: unsupported
+    /// (`browserCommandFailed`), not `Ok(None)`.
     async fn element_at_point(
         &self,
         _page_id: &PageId,
         _x: f64,
         _y: f64,
     ) -> Result<Option<(String, String)>, CommandError> {
-        Ok(None)
+        Err(CommandError {
+            code: ErrorCode::BrowserCommandFailed,
+            message: "browser primitive is not supported by this worker".into(),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        })
     }
 
     async fn type_text(

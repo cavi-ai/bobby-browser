@@ -864,9 +864,52 @@ impl RuntimeService {
                     ready_state: "interactive".into(),
                 })
             }
-            outcome => Err(RuntimeError::Internal(format!(
-                "navigation command failed: {outcome:?}"
-            ))),
+            outcome => Err(map_navigation_failure(outcome)),
+        }
+    }
+}
+
+fn map_navigation_failure(outcome: CommandOutcome) -> RuntimeError {
+    match outcome {
+        CommandOutcome::Completed { .. } => {
+            RuntimeError::Internal("navigation evidence missing".into())
+        }
+        CommandOutcome::Failed { error, .. }
+        | CommandOutcome::RetryableFailure { error, .. }
+        | CommandOutcome::NeedsReconciliation { error, .. }
+        | CommandOutcome::PolicyDenied { error, .. }
+        | CommandOutcome::ResourceExhausted { error, .. } => {
+            RuntimeError::Internal(format!("navigation command failed: {}", error.message))
+        }
+        CommandOutcome::Restarted { reason, .. } => {
+            RuntimeError::Internal(format!("navigation command failed: {reason}"))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_navigation_failure;
+    use types::{CommandError, CommandId, CommandOutcome, ErrorCode, ErrorLayer, RuntimeError};
+
+    #[test]
+    fn navigation_failure_uses_the_command_error_message_not_debug() {
+        let outcome = CommandOutcome::Failed {
+            command_id: CommandId::new(),
+            error: CommandError {
+                code: ErrorCode::WaitConditionTimedOut,
+                message: "wait condition was not satisfied within 100ms".into(),
+                layer: ErrorLayer::Page,
+                retryable: true,
+            },
+            evidence: Vec::new(),
+        };
+        match map_navigation_failure(outcome) {
+            RuntimeError::Internal(message) => {
+                assert!(message.contains("wait condition was not satisfied within 100ms"));
+                assert!(!message.contains("Failed {"));
+            }
+            other => panic!("expected Internal, got {other:?}"),
         }
     }
 }
