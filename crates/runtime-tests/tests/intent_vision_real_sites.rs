@@ -36,12 +36,18 @@ const SITES: &[(&str, &str, &[&str])] = &[
             "Open the comments on the first post",
             "Sort the posts by new",
             "Open the second post's title",
+            "Open the community wiki",
+            "Message the moderators",
         ],
     ),
     (
         "x",
         "https://x.com/rustlang",
-        &["Open the first pinned or latest post", "Open the posts tab"],
+        &[
+            "Open the first pinned or latest post",
+            "Open the posts tab",
+            "Open the media tab",
+        ],
     ),
     (
         // Login wall: "Sign in" exists on the wall (should commit), the
@@ -49,7 +55,12 @@ const SITES: &[(&str, &str, &[&str])] = &[
         // on the hardest realistic page class.
         "linkedin",
         "https://www.linkedin.com/company/rust-lang/",
-        &["Open the posts tab", "Sign in"],
+        &[
+            "Open the posts tab",
+            "Sign in",
+            "Open the jobs tab",
+            "Follow the company",
+        ],
     ),
 ];
 

@@ -359,18 +359,29 @@ def v1_metrics(predictions: list, examples: list) -> dict:
     # corpus scale). The gate floors them separately.
     neg_prod_total = 0
     neg_prod_abstained = 0
+    # Singleton research classes (scripted ambiguous boundaries, real-site
+    # absent-target probes) flap between retrains the way every singleton
+    # class does; they are reported separately so the mass class (real
+    # production rejections) holds the hard floor.
+    neg_singleton_total = 0
+    neg_singleton_abstained = 0
 
     for p, e in zip(predictions, examples):
         pred = p.get("prediction")
         index = None if pred is None else pred.get("action", {}).get("index")
         if e.get("negative") or e.get("target_index") is None:
             neg_total += 1
-            is_ambiguous = e.get("outcome_stage") == "scriptedAmbiguous"
-            if not is_ambiguous:
+            stage = e.get("outcome_stage")
+            is_singleton_class = stage in ("scriptedAmbiguous", "realSiteAbsent")
+            if is_singleton_class:
+                neg_singleton_total += 1
+            else:
                 neg_prod_total += 1
             if index == -1:
                 neg_abstained += 1
-                if not is_ambiguous:
+                if is_singleton_class:
+                    neg_singleton_abstained += 1
+                else:
                     neg_prod_abstained += 1
             continue
         pos_total += 1
@@ -393,6 +404,9 @@ def v1_metrics(predictions: list, examples: list) -> dict:
         "abstain_recall": neg_abstained / neg_total if neg_total else None,
         "abstain_recall_production": (
             neg_prod_abstained / neg_prod_total if neg_prod_total else None
+        ),
+        "abstain_recall_singletons": (
+            neg_singleton_abstained / neg_singleton_total if neg_singleton_total else None
         ),
         "abstain_precision": (
             neg_abstained / (neg_abstained + pos_abstained)
