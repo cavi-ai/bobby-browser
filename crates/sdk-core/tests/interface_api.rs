@@ -1043,8 +1043,11 @@ async fn elapsed_deadline_waiter_never_dispatches_and_reservation_can_be_abandon
     )
     .await;
     let request = submit_request();
+    // Deadline sits far past the 20ms parked-check below so a loaded runner
+    // cannot stretch that sleep past the deadline and finish the waiter early;
+    // the waiter still self-expires with DeadlineExceeded when it elapses.
     let context = handle.context(
-        Utc::now() + Duration::milliseconds(50),
+        Utc::now() + Duration::seconds(2),
         Some(IdempotencyKey::try_from("deadline-waiter").unwrap()),
     );
     let permit = hold_reservation(&store, &context, &request).await;
@@ -1058,7 +1061,6 @@ async fn elapsed_deadline_waiter_never_dispatches_and_reservation_can_be_abandon
         !waiter.is_finished(),
         "request must be waiting on the reservation"
     );
-    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
 
     let error = waiter.await.unwrap().unwrap_err();
     assert_eq!(error.code, InterfaceErrorCode::DeadlineExceeded);
