@@ -31,6 +31,8 @@ function record(task: string, batchId: string) {
     toolErrors: 0,
     inputTokens: 100,
     outputTokens: 200,
+    cacheReadTokens: 100_000,
+    cacheCreationTokens: 5_000,
     provenance: {
       repoHead: "1111111111111111111111111111111111111111",
       repoDirty: false,
@@ -118,7 +120,7 @@ test("score separates Bobby calls from host and discovery overhead", () => {
     result.stdout,
     /tool\truns\tpass%\ttime s\tcalls\tbobby\thost\tdiscover\terr%\tin tok\tcache read tok\tcache create tok\tout tok/,
   );
-  assert.match(result.stdout, /bobby\t5\t100\t1\.0\t10\.0\t6\.0\t4\.0\t2\.0\t0\t100\t0\t0\t200/);
+  assert.match(result.stdout, /bobby\t5\t100\t1\.0\t10\.0\t6\.0\t4\.0\t2\.0\t0\t100\t100000\t5000\t200/);
 });
 
 test("check rejects a latest batch without benchmark provenance", () => {
@@ -172,4 +174,59 @@ test("check rejects an actual model that differs from the requested model", () =
     result.stdout,
     /INVALID onboarding: actual model claude-sonnet-4-6 differs from requested model claude-opus-5/,
   );
+});
+
+test("check aggregates a multi-run batch: every run must pass, means face thresholds", () => {
+  const runs = taskIds.flatMap((task) => [
+    record(task, "current"),
+    { ...record(task, "current"), wallMs: 3_000 },
+  ]);
+
+  const result = check(runs);
+
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  // Mean wall of 1s+3s = 2s per task; the OK line names the run count.
+  assert.match(result.stdout, /OK   customer-update: 2s errors=0 cacheR=100000 cacheC=5000 calls=10\.0 \(n=2\)/);
+});
+
+test("check fails a multi-run batch when any single run fails", () => {
+  const runs = taskIds.flatMap((task) => [
+    record(task, "current"),
+    { ...record(task, "current"), pass: task !== "documents" },
+  ]);
+
+  const result = check(runs);
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stdout, /FAIL documents: baseline passes, 1\/2 run\(s\) did not/);
+});
+
+test("check enforces the baseline token budget on mean cache-read", () => {
+  const runs = taskIds.map((task) => ({
+    ...record(task, "current"),
+    cacheReadTokens: 900_000,
+  }));
+
+  const result = check(runs);
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(
+    result.stdout,
+    /BUDGET customer-update: cacheRead 900000 > 700000/,
+  );
+});
+
+test("check enforces the call budget on the mean across runs", () => {
+  const runs = taskIds.flatMap((task) => [
+    { ...record(task, "current"), toolCalls: 20, bobbyToolCalls: 12, hostToolCalls: 8 },
+    record(task, "current"),
+  ]);
+
+  const result = check(runs);
+
+  // Mean (20+10)/2 = 15 stays under the 16-call cap: the budget faces the
+  // batch mean, not the worst run, so no breach fires.
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.equal(result.stdout.includes("BUDGET"), false, result.stdout);
+  assert.match(result.stdout, /calls=15\.0 \(n=2\)/);
 });
