@@ -1298,13 +1298,25 @@ async fn execute_submit_and_verify(
     // the agent would trust a submit that may never have landed. Url,
     // document, and networkQuiet states legitimately pre-hold, so they skip
     // this check. Fail without clicking.
+    //
+    // The 2s window is a settle budget, not a retry: page-scoped text reads
+    // race the SPA's own data fetch, and a matcher against static copy only
+    // shows itself once the app has rendered. A static-copy matcher matches
+    // at the FIRST poll (~50ms) — misuse is caught fast; the full window is
+    // paid only by correctly-scoped matchers whose state genuinely does not
+    // pre-hold, which is the ~1.25s price of not verifying against content
+    // that was still loading. Measured in the --runs 3 gauntlet batch: a
+    // 750ms window let a static "Atlas" matcher through on a slow-rendering
+    // customer page, the submit "verified" nothing, and the agent re-ran the
+    // Boundary submit (boundary-once now refuses that, but the first line of
+    // defense is a pre-check that outlives the render).
     if matches!(
         expected_state.condition,
         WaitCondition::Text { .. } | WaitCondition::Element { .. } | WaitCondition::Value { .. }
     ) {
         let pre_check = WaitForCommand {
             condition: expected_state.condition.clone(),
-            timeout_ms: 750,
+            timeout_ms: 2_000,
         };
         if browser.wait_for(page_id, &pre_check).await.is_ok() {
             return IntentOutcome::Failed {
