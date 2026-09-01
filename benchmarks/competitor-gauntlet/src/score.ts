@@ -70,20 +70,44 @@ function provenanceKey(value: Record<string, unknown>): string {
 
 if (process.argv[2] === "check") {
   // Regression gate: one complete bobby invocation against the committed
-  // baseline. Pass must hold; wall time <= 2x baseline; errors <= +3.
+  // baseline. Pass must hold; wall time <= 2x baseline; errors <= +3;
+  // token/call budgets (when the baseline carries them) must hold. A batch
+  // may carry several runs per task (`--runs N`): every run must pass and
+  // the aggregates (mean wall/tokens, worst errors) face the thresholds, so
+  // a lucky single run cannot green the gate and one flaky run cannot hide
+  // behind two good ones.
   const baseline = JSON.parse(
     readFileSync(path.join(harnessDir, "baseline.json"), "utf8"),
   );
+  const budget = (baseline.budget ?? null) as Record<string, number> | null;
+  if (budget !== null) {
+    const keys = [
+      "perTaskCacheReadTokens",
+      "perTaskCacheCreationTokens",
+      "perTaskToolCalls",
+    ];
+    for (const key of keys) {
+      if (
+        !Number.isFinite(budget[key]) ||
+        Number(budget[key]) <= 0
+      ) {
+        console.error(`baseline budget.${key} must be a positive number`);
+        process.exit(1);
+      }
+    }
+  }
   const bobbyRuns = runs.filter((run) => run.tool === "bobby");
   const latestBatchId = bobbyRuns.at(-1)?.batchId;
   if (typeof latestBatchId !== "string" || latestBatchId.length === 0) {
     console.error("latest bobby result has no batchId — rerun src/run.ts");
     process.exit(1);
   }
-  const latest = new Map<string, any>();
+  const latest = new Map<string, any[]>();
   const latestRuns = bobbyRuns.filter((run) => run.batchId === latestBatchId);
   for (const run of latestRuns) {
-    latest.set(run.task, run);
+    const list = latest.get(run.task) ?? [];
+    list.push(run);
+    latest.set(run.task, list);
   }
   const batchProvenance = latestRuns.find((run) =>
     validProvenance(run.provenance),
@@ -95,68 +119,121 @@ if (process.argv[2] === "check") {
   for (const [task, base] of Object.entries(
     baseline.tasks as Record<string, any>,
   )) {
-    const run = latest.get(task);
-    if (!run) {
+    const taskRuns = latest.get(task);
+    if (!taskRuns || taskRuns.length === 0) {
       console.log(`MISS ${task}: no bobby run recorded`);
       failures += 1;
       continue;
     }
-    if (
-      !Number.isFinite(run.wallMs) ||
-      run.wallMs < 0 ||
-      !Number.isFinite(run.toolErrors) ||
-      run.toolErrors < 0
-    ) {
-      console.log(`INVALID ${task}: missing numeric wallMs or toolErrors`);
-      failures += 1;
-      continue;
+    for (const run of taskRuns) {
+      if (
+        !Number.isFinite(run.wallMs) ||
+        run.wallMs < 0 ||
+        !Number.isFinite(run.toolErrors) ||
+        run.toolErrors < 0
+      ) {
+        console.log(`INVALID ${task}: missing numeric wallMs or toolErrors`);
+        failures += 1;
+        continue;
+      }
+      if (!validCallBreakdown(run)) {
+        console.log(`INVALID ${task}: missing call breakdown`);
+        failures += 1;
+        continue;
+      }
+      if (!validProvenance(run.provenance)) {
+        console.log(`INVALID ${task}: missing benchmark provenance`);
+        failures += 1;
+        continue;
+      }
+      if (typeof run.model !== "string" || run.model.length === 0) {
+        console.log(`INVALID ${task}: actual model is missing`);
+        failures += 1;
+        continue;
+      }
+      if (run.model !== run.provenance.requestedModel) {
+        console.log(
+          `INVALID ${task}: actual model ${run.model} differs from requested model ${run.provenance.requestedModel}`,
+        );
+        failures += 1;
+        continue;
+      }
+      if (
+        batchProvenanceKey === null ||
+        provenanceKey(run.provenance) !== batchProvenanceKey
+      ) {
+        console.log(`INVALID ${task}: provenance differs within batch`);
+        failures += 1;
+        continue;
+      }
     }
-    if (!validCallBreakdown(run)) {
-      console.log(`INVALID ${task}: missing call breakdown`);
-      failures += 1;
-      continue;
-    }
-    if (!validProvenance(run.provenance)) {
-      console.log(`INVALID ${task}: missing benchmark provenance`);
-      failures += 1;
-      continue;
-    }
-    if (typeof run.model !== "string" || run.model.length === 0) {
-      console.log(`INVALID ${task}: actual model is missing`);
-      failures += 1;
-      continue;
-    }
-    if (run.model !== run.provenance.requestedModel) {
+    if (taskRuns.some((run) => !run.pass)) {
+      const failed = taskRuns.filter((run) => !run.pass).length;
       console.log(
-        `INVALID ${task}: actual model ${run.model} differs from requested model ${run.provenance.requestedModel}`,
+        `FAIL ${task}: baseline passes, ${failed}/${taskRuns.length} run(s) did not`,
       );
       failures += 1;
       continue;
     }
-    if (
-      batchProvenanceKey === null ||
-      provenanceKey(run.provenance) !== batchProvenanceKey
-    ) {
-      console.log(`INVALID ${task}: provenance differs within batch`);
-      failures += 1;
-      continue;
-    }
-    const wall = run.wallMs / 1000;
-    if (!run.pass) {
-      console.log(`FAIL ${task}: baseline passes, this run did not`);
-      failures += 1;
-    } else if (wall > base.wallSeconds * 2) {
+    const wallMean =
+      taskRuns.reduce((sum, run) => sum + run.wallMs / 1000, 0) /
+      taskRuns.length;
+    const errorsWorst = Math.max(...taskRuns.map((run) => run.toolErrors));
+    if (wallMean > base.wallSeconds * 2) {
       console.log(
-        `SLOW ${task}: ${wall.toFixed(0)}s vs baseline ${base.wallSeconds}s (>2x)`,
+        `SLOW ${task}: mean ${wallMean.toFixed(0)}s over ${taskRuns.length} run(s) vs baseline ${base.wallSeconds}s (>2x)`,
       );
       failures += 1;
-    } else if (run.toolErrors > base.toolErrors + 3) {
+    } else if (errorsWorst > base.toolErrors + 3) {
       console.log(
-        `ERRORS ${task}: ${run.toolErrors} vs baseline ${base.toolErrors} (+3 slack)`,
+        `ERRORS ${task}: worst ${errorsWorst} vs baseline ${base.toolErrors} (+3 slack)`,
       );
       failures += 1;
+    } else if (budget && !Number.isFinite(taskRuns[0].cacheReadTokens)) {
+      console.log(
+        `INVALID ${task}: budget gate set but cacheReadTokens missing — rerun with the current run.ts`,
+      );
+      failures += 1;
+    } else if (budget) {
+      const cacheReadMean =
+        taskRuns.reduce((sum, run) => sum + Number(run.cacheReadTokens), 0) /
+        taskRuns.length;
+      const cacheCreationMean =
+        taskRuns.reduce(
+          (sum, run) => sum + Number(run.cacheCreationTokens ?? 0),
+          0,
+        ) / taskRuns.length;
+      const callsMean =
+        taskRuns.reduce((sum, run) => sum + Number(run.toolCalls), 0) /
+        taskRuns.length;
+      const breaches: string[] = [];
+      if (cacheReadMean > budget.perTaskCacheReadTokens) {
+        breaches.push(
+          `cacheRead ${cacheReadMean.toFixed(0)} > ${budget.perTaskCacheReadTokens}`,
+        );
+      }
+      if (cacheCreationMean > budget.perTaskCacheCreationTokens) {
+        breaches.push(
+          `cacheCreate ${cacheCreationMean.toFixed(0)} > ${budget.perTaskCacheCreationTokens}`,
+        );
+      }
+      if (callsMean > budget.perTaskToolCalls) {
+        breaches.push(`calls ${callsMean.toFixed(1)} > ${budget.perTaskToolCalls}`);
+      }
+      if (breaches.length > 0) {
+        console.log(
+          `BUDGET ${task}: ${breaches.join("; ")} (mean over ${taskRuns.length} run(s))`,
+        );
+        failures += 1;
+      } else {
+        console.log(
+          `OK   ${task}: ${wallMean.toFixed(0)}s errors=${errorsWorst} cacheR=${cacheReadMean.toFixed(0)} cacheC=${cacheCreationMean.toFixed(0)} calls=${callsMean.toFixed(1)} (n=${taskRuns.length})`,
+        );
+      }
     } else {
-      console.log(`OK   ${task}: ${wall.toFixed(0)}s errors=${run.toolErrors}`);
+      console.log(
+        `OK   ${task}: ${wallMean.toFixed(0)}s errors=${errorsWorst} (n=${taskRuns.length})`,
+      );
     }
   }
   process.exit(failures === 0 ? 0 : 1);

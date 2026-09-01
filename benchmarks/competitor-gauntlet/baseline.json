@@ -1,5 +1,5 @@
 {
-  "note": "bobby-only gauntlet baseline, measured on main at 1688938 after the explore/a11y friction batch (2026-08-10). score check evaluates only the latest invocation batch and requires every baseline task; pass must hold, wall time <= 2x, tool errors <= +3. Update deliberately when the product improves or the app changes; never to sneak a regression through.",
+  "note": "bobby-only gauntlet baseline, measured on main at 1688938 after the explore/a11y friction batch (2026-08-10). score check evaluates only the latest invocation batch and requires every baseline task; pass must hold, wall time <= 2x, tool errors <= +3, and (with --runs N) every run must pass while the mean faces the thresholds. The budget block caps mean per-task token/call economics — the PRD's 'call economics measurable but not enforced' gap — with ~40% headroom over the measured 480K cache-read / 32K cache-create / 9.6 calls (claude-opus-5, 2026-09-01). Update deliberately when the product improves or the app changes; never to sneak a regression through.",
   "measuredAt": "2026-08-10",
   "tasks": {
     "customer-update": { "pass": true, "wallSeconds": 43, "toolErrors": 0 },
@@ -7,5 +7,10 @@
     "documents": { "pass": true, "wallSeconds": 45, "toolErrors": 0 },
     "authorization": { "pass": true, "wallSeconds": 48, "toolErrors": 0 },
     "report-recovery": { "pass": true, "wallSeconds": 50, "toolErrors": 0 }
+  },
+  "budget": {
+    "perTaskCacheReadTokens": 700000,
+    "perTaskCacheCreationTokens": 70000,
+    "perTaskToolCalls": 16
   }
 }
