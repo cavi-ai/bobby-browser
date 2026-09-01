@@ -188,6 +188,16 @@ jobs:
       - name: Northstar end-to-end release gate
         run: cargo test -p runtime-tests --locked --test modern_gauntlet_e2e -- --test-threads=1
 
+      - name: Vision corpus contract smoke
+        # One grow run per journey produces a small fresh corpus; the lint
+        # enforces the pipeline's invariants (actionable-role windows, no
+        # empty windows, target indices in range, abstain class present) so
+        # collector/engine drift fails at PR time, not at research time.
+        run: |
+          BOBBY_CORPUS_RUNS_PER_JOURNEY=1 cargo test -p runtime-tests --locked --test modern_gauntlet_corpus_grow -- --test-threads=1
+          cat target/vision-corpus/*.jsonl > /tmp/ci-corpus.jsonl
+          python3 scripts/vision-mlx/training/corpus_lint.py --input /tmp/ci-corpus.jsonl
+
       - name: Upload Northstar failure evidence
         if: failure()
         uses: actions/upload-artifact@v6
