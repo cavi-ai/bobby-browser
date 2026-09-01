@@ -152,6 +152,50 @@ async fn rejects_a_line_it_cannot_decode_at_the_current_schema_version() {
 }
 
 #[tokio::test]
+async fn inspect_reports_torn_tail_without_truncating() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("commands.jsonl");
+    let command_id = CommandId::new();
+    let journal = JsonlJournal::open(&path).await.unwrap();
+    journal
+        .append(record(&command_id, CommandPhase::Accepted))
+        .await
+        .unwrap();
+    drop(journal);
+
+    let mut file = tokio::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .await
+        .unwrap();
+    file.write_all(br#"{"sequence":1,"recordedAt":"#)
+        .await
+        .unwrap();
+    file.flush().await.unwrap();
+    drop(file);
+
+    let before = tokio::fs::read(&path).await.unwrap();
+    let health = JsonlJournal::inspect(&path).await.unwrap();
+    assert!(health.exists);
+    assert!(health.torn_tail);
+    assert_eq!(health.records, 1);
+    assert_eq!(health.corrupt_line, None);
+    let after = tokio::fs::read(&path).await.unwrap();
+    assert_eq!(before, after);
+}
+
+#[tokio::test]
+async fn inspect_missing_file_is_empty_health() {
+    let dir = tempfile::tempdir().unwrap();
+    let health = JsonlJournal::inspect(dir.path().join("nope.jsonl"))
+        .await
+        .unwrap();
+    assert!(!health.exists);
+    assert_eq!(health.bytes, 0);
+    assert!(!health.torn_tail);
+}
+
+#[tokio::test]
 async fn serializes_concurrent_appends_with_unique_sequences() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("commands.jsonl");

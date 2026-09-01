@@ -66,6 +66,17 @@ pub struct JournalScan {
     pub incompatible_records: usize,
 }
 
+/// Read-only health of a journal file. Never truncates or creates the path.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JournalHealth {
+    pub exists: bool,
+    pub bytes: u64,
+    pub records: usize,
+    pub torn_tail: bool,
+    pub incompatible_records: usize,
+    pub corrupt_line: Option<usize>,
+}
+
 /// Enough of a journal line to classify one this build cannot decode.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -146,6 +157,41 @@ impl JsonlJournal {
             recovered_torn_tail: scan.torn_tail,
         })
     }
+
+    /// Probe journal health without truncating a torn tail or creating the file.
+    pub async fn inspect(path: impl AsRef<Path>) -> Result<JournalHealth, JournalError> {
+        let path = path.as_ref();
+        let bytes = match tokio::fs::read(path).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(JournalHealth::default());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let bytes_len = bytes.len() as u64;
+        match scan_bytes(&bytes, None) {
+            Ok(Scan { scan, .. }) => Ok(JournalHealth {
+                exists: true,
+                bytes: bytes_len,
+                records: scan.records.len(),
+                torn_tail: scan.torn_tail,
+                incompatible_records: scan.incompatible_records,
+                corrupt_line: None,
+            }),
+            Err(JournalError::Corrupt { line }) => {
+                let records = count_records_before_corrupt(&bytes);
+                Ok(JournalHealth {
+                    exists: true,
+                    bytes: bytes_len,
+                    records,
+                    torn_tail: !bytes.is_empty() && !bytes.ends_with(b"\n"),
+                    incompatible_records: 0,
+                    corrupt_line: Some(line),
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
 }
 
 #[async_trait]
@@ -194,7 +240,33 @@ async fn scan_path(path: &Path, filter: Option<&CommandId>) -> Result<Scan, Jour
     };
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).await?;
+    scan_bytes(&bytes, filter)
+}
 
+fn count_records_before_corrupt(bytes: &[u8]) -> usize {
+    let complete_len = if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+        bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |at| at + 1)
+    } else {
+        bytes.len()
+    };
+    let mut records = 0;
+    for line in bytes[..complete_len].split(|byte| *byte == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        if serde_json::from_slice::<JournalRecord>(line).is_ok() {
+            records += 1;
+            continue;
+        }
+        break;
+    }
+    records
+}
+
+fn scan_bytes(bytes: &[u8], filter: Option<&CommandId>) -> Result<Scan, JournalError> {
     let torn_tail = !bytes.is_empty() && !bytes.ends_with(b"\n");
     let complete_len = if torn_tail {
         bytes
