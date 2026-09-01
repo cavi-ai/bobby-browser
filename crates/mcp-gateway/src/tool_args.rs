@@ -236,6 +236,10 @@ intent_args!(IntentSubmitAndVerifyArgs {
     hints: Option<types::IntentHints>,
     expected_state: types::WaitForCommand,
     auto_checkpoint: Option<bool>,
+    // Acknowledge a prior completed submit for this workflow and submit
+    // anyway. Absent/false: a second Boundary submit against the same
+    // workflow is refused with `boundaryAlreadyExecuted`.
+    re_submit: Option<bool>,
 });
 
 intent_args!(IntentWaitForStateArgs {

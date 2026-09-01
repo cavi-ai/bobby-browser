@@ -4272,3 +4272,98 @@ async fn auto_checkpoint_refuses_the_submit_when_the_checkpoint_cannot_be_saved(
         .unwrap();
     assert!(without["error"].is_null(), "{without}");
 }
+
+/// Boundary-once: after a completed submit, a second `intent_submit_and_verify`
+/// against the same workflow is refused with `boundaryAlreadyExecuted` (naming
+/// the prior commandId), unless the caller passes `reSubmit: true`.
+#[tokio::test]
+async fn a_second_boundary_submit_against_a_completed_workflow_is_refused() {
+    let server = Server::new(Arc::new(authenticated_with_intents().await));
+    initialize(&server).await;
+
+    let workflow = types::WorkflowId::new();
+    let prior = types::CommandId::new();
+    server
+        .record_boundary_execution_for_test(&workflow, &prior)
+        .await;
+
+    let submit = |re_submit: Option<bool>| {
+        let mut arguments = json!({
+            "sessionId":SessionId::new().0.to_string(),
+            "pageId":types::PageId::new().0.to_string(),
+            "workflowId":workflow.0.to_string(),
+            "purpose":"submit the application",
+            "expectedState":{
+                "condition":{"kind":"document","ready":"interactive"},
+                "timeoutMs":1000
+            }
+        });
+        if let Some(value) = re_submit {
+            arguments["reSubmit"] = json!(value);
+        }
+        json!({"name":"intent_submit_and_verify","arguments":arguments})
+    };
+
+    let refused = server
+        .handle_message(request(120, "tools/call", submit(None)))
+        .await
+        .unwrap();
+    let outcome = &refused["result"]["structuredContent"];
+    assert_eq!(outcome["status"], "failed", "{refused}");
+    assert_eq!(
+        outcome["error"]["code"], "boundaryAlreadyExecuted",
+        "{refused}"
+    );
+    assert_eq!(
+        outcome["error"]["priorCommandId"],
+        prior.0.to_string(),
+        "the refusal must name the prior submit so the agent inspects it: {refused}"
+    );
+    assert_eq!(refused["result"]["isError"], json!(true), "{refused}");
+    assert!(
+        refused["result"]["structuredContent"]["error"]["repair"]["action"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("reSubmit"),
+        "the repair must point at the reSubmit escape hatch: {refused}"
+    );
+
+    // reSubmit acknowledges the prior submit and proceeds: it reaches the
+    // runtime, whose own failure (no such page/session) is NOT a refusal.
+    let acknowledged = server
+        .handle_message(request(121, "tools/call", submit(Some(true))))
+        .await
+        .unwrap();
+    let outcome = &acknowledged["result"]["structuredContent"];
+    assert_ne!(
+        outcome["error"]["code"], "boundaryAlreadyExecuted",
+        "reSubmit must clear the guard: {acknowledged}"
+    );
+
+    // A different workflow was never recorded: the guard does not fire.
+    let other = server
+        .handle_message(request(122, "tools/call", submit_other_workflow()))
+        .await
+        .unwrap();
+    let outcome = &other["result"]["structuredContent"];
+    assert_ne!(
+        outcome["error"]["code"], "boundaryAlreadyExecuted",
+        "the guard is workflow-scoped: {other}"
+    );
+}
+
+fn submit_other_workflow() -> serde_json::Value {
+    json!({
+        "name":"intent_submit_and_verify",
+        "arguments":{
+            "sessionId":SessionId::new().0.to_string(),
+            "pageId":types::PageId::new().0.to_string(),
+            "workflowId":types::WorkflowId::new().0.to_string(),
+            "purpose":"submit an unrelated form",
+            "expectedState":{
+                "condition":{"kind":"document","ready":"interactive"},
+                "timeoutMs":1000
+            }
+        }
+    })
+}

@@ -113,6 +113,22 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
+                // Boundary-once guard: a completed Boundary submit for this
+                // workflow means its effect is on record, and another submit
+                // would double-apply it. The failure that started the
+                // fix-and-resubmit flow does NOT record here (only completed
+                // outcomes do), so the legitimate rejected-then-corrected
+                // flow stays open. `reSubmit` is the explicit escape hatch.
+                if let Some(workflow_id) = &input.workflow_id {
+                    if !input.re_submit.unwrap_or(false) {
+                        if let Some(prior) = self.prior_boundary_execution(workflow_id).await {
+                            return self
+                                .boundary_already_executed_response(id, workflow_id, &prior)
+                                .await;
+                        }
+                    }
+                }
+                let boundary_workflow_id = input.workflow_id.clone();
                 let intent = types::IntentCommand::SubmitAndVerify(types::SubmitAndVerifyIntent {
                     purpose: input.purpose,
                     hints: input.hints.unwrap_or_default(),
@@ -130,12 +146,49 @@ impl Server {
                     intent,
                 );
                 pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
-                if input.auto_checkpoint.unwrap_or(true) {
+                let boundary_command_id = envelope.command_id.clone();
+                // Keyed on the caller-supplied workflow id only: an omitted
+                // workflowId resolves to the envelope default, which must
+                // never become a collision point for unrelated ad-hoc
+                // submits. No threaded workflow, no ledger protection (and
+                // no guard) -- documented in the failure taxonomy.
+                let result = if input.auto_checkpoint.unwrap_or(true) {
                     self.submit_envelope_with_auto_checkpoint(context, envelope)
                         .await
                 } else {
                     self.submit_envelope(context, envelope).await
+                };
+                // Record the completed-or-possibly-landed Boundary submit so
+                // a second one is refused. Semantics by outcome:
+                // - completed: effect landed.
+                // - needsReconciliation: effect may have landed; the caller
+                //   must reconcile, never replay.
+                // - failed + verificationFailed: the click landed but the
+                //   expected state was not proven. Re-running would
+                //   double-apply.
+                // Everything else (resolution failures, actFailed,
+                // retryableFailure, policyDenied) means nothing landed, so
+                // the fix-and-resubmit flow stays open.
+                if let Some(workflow_id) = boundary_workflow_id {
+                    let landed = match &result {
+                        Ok(value) => {
+                            let status = value.get("status").and_then(Value::as_str);
+                            let code = value
+                                .get("error")
+                                .and_then(|error| error.get("code"))
+                                .and_then(Value::as_str);
+                            matches!(status, Some("completed") | Some("needsReconciliation"))
+                                || (matches!(status, Some("failed"))
+                                    && code == Some("verificationFailed"))
+                        }
+                        Err(_) => false,
+                    };
+                    if landed {
+                        self.record_boundary_execution(&workflow_id, &boundary_command_id)
+                            .await;
+                    }
                 }
+                result
             }
             "intent_wait_for_state" => {
                 let input: IntentWaitForStateArgs = match bounded_parse(call.arguments) {

@@ -89,6 +89,9 @@ pub(crate) fn repair_for_code(code: &str) -> Option<Value> {
         "expectedStatePreSatisfied" => {
             "The expected state held before the act ran, so passing proves nothing. Strengthen expectedState to content that only appears after the act (a confirmation id, status change, or new element), then resubmit."
         }
+        "boundaryAlreadyExecuted" => {
+            "A Boundary submit for this workflow already completed and its effect is on record (the error names the prior commandId). Inspect that outcome's evidence or recovery_status instead of resubmitting; pass reSubmit: true only when a second effect is genuinely intended."
+        }
         "screenshotCaptureFailed" => {
             "Retry; if it persists, the page, engine, or artifact store may be in a bad state."
         }

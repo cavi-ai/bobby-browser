@@ -298,6 +298,10 @@ fn new_target_failures_have_stable_error_codes() {
         serde_json::to_value(types::ErrorCode::ExpectedStatePreSatisfied).unwrap(),
         json!("expectedStatePreSatisfied")
     );
+    assert_eq!(
+        serde_json::to_value(types::ErrorCode::BoundaryAlreadyExecuted).unwrap(),
+        json!("boundaryAlreadyExecuted")
+    );
 }
 
 #[test]
