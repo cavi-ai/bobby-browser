@@ -112,11 +112,39 @@ fn workflow_call_class(name: &str) -> observability::WorkflowCallClass {
     }
 }
 
+/// The submit's control identity, from the caller's hints. `None` when the
+/// caller supplied no usable hints — a purpose-text key would false-positive
+/// on rephrasings and miss synonym targets, so hints-less submits fail open
+/// (no guard, no record) and the taxonomy documents that.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ControlIdentity {
+    role: String,
+    accessible_name: String,
+    ordinal: Option<usize>,
+}
+
+fn control_identity(hints: &types::IntentHints) -> Option<ControlIdentity> {
+    let role = hints.role.as_deref()?.trim();
+    let accessible_name = hints.accessible_name.as_deref()?.trim();
+    if role.is_empty() || accessible_name.is_empty() {
+        return None;
+    }
+    Some(ControlIdentity {
+        role: role.to_ascii_lowercase(),
+        accessible_name: accessible_name.to_ascii_lowercase(),
+        ordinal: hints.ordinal,
+    })
+}
+
 /// MCP JSON-RPC server for one authenticated principal.
 ///
 /// Holds the runtime interface, capability guard, event store, and tool catalog.
 /// Construct with [`Self::new`] and drive I/O through [`Self::serve`] or
 /// [`Self::handle_message`].
+/// Ledger key: (workflow, control identity). The control identity is
+/// `None` for hints-less submits, which the ledger does not guard.
+pub(crate) type BoundaryLedgerKey = (types::WorkflowId, Option<ControlIdentity>);
+
 pub struct Server {
     runtime: Arc<dyn RuntimeInterface>,
     handle: CapabilityHandle,
@@ -128,15 +156,14 @@ pub struct Server {
     in_flight: Mutex<BTreeMap<String, Arc<Notify>>>,
     pending_cancellations: Mutex<BTreeSet<String>>,
     workflow_handles: Arc<WorkflowHandles>,
-    /// Boundary submits that completed per workflow within the current
-    /// handle generation: workflowId -> [(generation, commandId)]. A second
-    /// `intent_submit_and_verify` against a recorded workflow is refused
-    /// (`boundaryAlreadyExecuted`) unless the caller passes `reSubmit` --
-    /// the structural guard against the double-submit hazard where an agent
-    /// re-verifies by re-clicking. In-memory by design: a gateway restart
-    /// also invalidates every workflow handle, so the ledger cannot outlive
-    /// the bindings it protects.
-    boundary_executions: Mutex<HashMap<types::WorkflowId, Vec<(u64, types::CommandId)>>>,
+    /// Boundary submits that completed per (workflow, control) within the
+    /// current handle generation: (workflowId, controlIdentity) ->
+    /// [(generation, commandId)]. The control identity is the caller's
+    /// submit hints (role + accessibleName + ordinal) — one workflow
+    /// legitimately contains several Boundary submits against different
+    /// controls (a search submit, then a save), so the ledger must not key
+    /// on the workflow alone.
+    boundary_executions: Mutex<HashMap<BoundaryLedgerKey, Vec<(u64, types::CommandId)>>>,
     shutting_down: AtomicBool,
     /// The phase this connection's `tools/list` is scoped to. Per connection,
     /// not per principal: two agents on the same bearer can be in different
@@ -1010,14 +1037,14 @@ impl Server {
     /// fix-and-resubmit flow stays open.
     async fn record_boundary_execution(
         &self,
-        workflow_id: &types::WorkflowId,
+        key: &BoundaryLedgerKey,
         command_id: &types::CommandId,
     ) {
         let generation = self.workflow_handles.generation();
         self.boundary_executions
             .lock()
             .await
-            .entry(workflow_id.clone())
+            .entry(key.clone())
             .or_default()
             .push((generation, command_id.clone()));
     }
@@ -1026,15 +1053,12 @@ impl Server {
     /// current generation, if any. Records from earlier generations are
     /// invisible: a re-`initialize` invalidates the workflow handles those
     /// submits belonged to.
-    async fn prior_boundary_execution(
-        &self,
-        workflow_id: &types::WorkflowId,
-    ) -> Option<types::CommandId> {
+    async fn prior_boundary_execution(&self, key: &BoundaryLedgerKey) -> Option<types::CommandId> {
         let generation = self.workflow_handles.generation();
         self.boundary_executions
             .lock()
             .await
-            .get(workflow_id)
+            .get(key)
             .and_then(|records| {
                 records
                     .iter()
@@ -1060,7 +1084,7 @@ impl Server {
             "error": {
                 "code": "boundaryAlreadyExecuted",
                 "message": format!(
-                    "a Boundary submit for workflow {} already completed (commandId {}); its effect is on record and a second submit would double-apply it",
+                    "a Boundary submit for workflow {} against this control already completed (commandId {}); its effect is on record and a second submit would double-apply it",
                     workflow_id.0,
                     prior_command_id.0
                 ),
@@ -1076,15 +1100,21 @@ impl Server {
     /// Seed the boundary ledger directly. The recording path in the submit
     /// arm only fires for outcomes the executor produced, which needs a live
     /// browser journey; tests seed the ledger to exercise the guard and the
-    /// refusal response.
+    /// refusal response. `None` control identity mirrors a hints-less submit
+    /// (no guard, no record).
     #[doc(hidden)]
     pub async fn record_boundary_execution_for_test(
         &self,
         workflow_id: &types::WorkflowId,
+        hints: serde_json::Value,
         command_id: &types::CommandId,
     ) {
-        self.record_boundary_execution(workflow_id, command_id)
-            .await;
+        let hints: types::IntentHints = serde_json::from_value(hints).unwrap();
+        self.record_boundary_execution(
+            &(workflow_id.clone(), control_identity(&hints)),
+            command_id,
+        )
+        .await;
     }
 
     /// One call for a Boundary command: mint the checkpoint, then run it.
