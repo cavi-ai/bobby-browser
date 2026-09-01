@@ -353,14 +353,25 @@ def v1_metrics(predictions: list, examples: list) -> dict:
     pos_abstained = 0
     neg_total = 0
     neg_abstained = 0
+    # Split the abstain class: production negatives (real escalations,
+    # load-bearing) vs scripted ambiguous singletons (boundary research;
+    # their recall flaps 66-100% between identical-config retrains at this
+    # corpus scale). The gate floors them separately.
+    neg_prod_total = 0
+    neg_prod_abstained = 0
 
     for p, e in zip(predictions, examples):
         pred = p.get("prediction")
         index = None if pred is None else pred.get("action", {}).get("index")
         if e.get("negative") or e.get("target_index") is None:
             neg_total += 1
+            is_ambiguous = e.get("outcome_stage") == "scriptedAmbiguous"
+            if not is_ambiguous:
+                neg_prod_total += 1
             if index == -1:
                 neg_abstained += 1
+                if not is_ambiguous:
+                    neg_prod_abstained += 1
             continue
         pos_total += 1
         if index == -1:
@@ -380,6 +391,9 @@ def v1_metrics(predictions: list, examples: list) -> dict:
         "element_accuracy": answered_correct / answered_scored if answered_scored else 0.0,
         "abstain_rate_positive": pos_abstained / pos_total if pos_total else 0.0,
         "abstain_recall": neg_abstained / neg_total if neg_total else None,
+        "abstain_recall_production": (
+            neg_prod_abstained / neg_prod_total if neg_prod_total else None
+        ),
         "abstain_precision": (
             neg_abstained / (neg_abstained + pos_abstained)
             if (neg_abstained + pos_abstained) else None
