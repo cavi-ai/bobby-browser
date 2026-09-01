@@ -48,9 +48,23 @@ use worker_pool::{resolve_upload_paths, BrowserWorker, WorkerFactory};
 
 use crate::bidi::{BidiClient, BidiEvent, BidiTransport, SharedBiDiTransport};
 use crate::generate_session_seed;
+use crate::network_quiet::FirefoxNetworkQuiet;
 
 const COMPANION_SANDBOX: &str = "automation-runtime-companion";
 const DEFAULT_NAVIGATION_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn session_subscribe_params() -> Value {
+    json!({"events": [
+        "browsingContext.contextCreated",
+        "browsingContext.contextDestroyed",
+        "browsingContext.downloadWillBegin",
+        "browsingContext.downloadEnd",
+        "browsingContext.userPromptOpened",
+        "network.beforeRequestSent",
+        "network.responseCompleted",
+        "network.fetchError"
+    ]})
+}
 const MAX_TYPE_CODEPOINTS: usize = 4_096;
 const MAX_OBSERVATION_BYTES: usize = 1024 * 1024 - 64 * 1024;
 const MAX_SCREENSHOT_BYTES: usize = 16 * 1024 * 1024;
@@ -593,6 +607,7 @@ pub struct FirefoxCompanionWorker {
     page_cleanups: Arc<RwLock<HashMap<PageId, OpenPageCleanup>>>,
     pending_prompts: Arc<RwLock<HashMap<String, PendingPrompt>>>,
     har_recorder: Arc<worker_pool::HarRecorder>,
+    network_quiet: Arc<AsyncMutex<FirefoxNetworkQuiet>>,
     closed: AtomicBool,
     lifecycle: AsyncMutex<()>,
     shutdown: Arc<WorkerShutdown>,
@@ -1195,10 +1210,7 @@ impl FirefoxCompanionWorker {
             )
         })?;
         let subscription = transport
-            .send(
-                "session.subscribe",
-                json!({"events": ["browsingContext.contextCreated", "browsingContext.contextDestroyed", "browsingContext.downloadWillBegin", "browsingContext.downloadEnd", "browsingContext.userPromptOpened", "network.beforeRequestSent", "network.responseCompleted", "network.fetchError"]}),
-            )
+            .send("session.subscribe", session_subscribe_params())
             .await?;
         if !subscription.is_object() {
             return Err(driver_error(
@@ -1215,6 +1227,8 @@ impl FirefoxCompanionWorker {
         let har_pending = Arc::new(RwLock::new(HashMap::<String, worker_pool::HarEntry>::new()));
         let har_recorder_task = Arc::clone(&har_recorder);
         let har_pending_task = Arc::clone(&har_pending);
+        let network_quiet = Arc::new(AsyncMutex::new(FirefoxNetworkQuiet::default()));
+        let network_quiet_task = Arc::clone(&network_quiet);
         let cleanup_pages = Arc::clone(&pages);
         let cleanup_registry = Arc::clone(&page_cleanups);
         let cleanup_transport = Arc::clone(&transport);
@@ -1225,6 +1239,7 @@ impl FirefoxCompanionWorker {
                 match events.recv().await {
                     Ok(event) if event.method == "browsingContext.contextDestroyed" => {
                         if let Some(context) = event.params.get("context").and_then(Value::as_str) {
+                            network_quiet_task.lock().await.drop_context(context);
                             let removals =
                                 mark_destroyed_context(&cleanup_pages, &cleanup_registry, context)
                                     .await;
@@ -1236,6 +1251,10 @@ impl FirefoxCompanionWorker {
                         }
                     }
                     Ok(event) if event.method == "network.beforeRequestSent" => {
+                        network_quiet_task
+                            .lock()
+                            .await
+                            .observe_event(&event.method, &event.params);
                         let id = event
                             .params
                             .pointer("/request/request")
@@ -1272,6 +1291,10 @@ impl FirefoxCompanionWorker {
                         }
                     }
                     Ok(event) if event.method == "network.responseCompleted" => {
+                        network_quiet_task
+                            .lock()
+                            .await
+                            .observe_event(&event.method, &event.params);
                         let id = event
                             .params
                             .pointer("/request/request")
@@ -1304,6 +1327,10 @@ impl FirefoxCompanionWorker {
                         }
                     }
                     Ok(event) if event.method == "network.fetchError" => {
+                        network_quiet_task
+                            .lock()
+                            .await
+                            .observe_event(&event.method, &event.params);
                         let id = event
                             .params
                             .pointer("/request/request")
@@ -1384,6 +1411,7 @@ impl FirefoxCompanionWorker {
             page_cleanups,
             pending_prompts,
             har_recorder,
+            network_quiet,
             closed: AtomicBool::new(false),
             lifecycle: AsyncMutex::new(()),
             shutdown: Arc::new(WorkerShutdown {
@@ -3943,10 +3971,12 @@ impl BrowserWorker for FirefoxCompanionWorker {
         let started = Instant::now();
         let deadline = started + Duration::from_millis(command.timeout_ms);
         let mut observations = 0;
+        let mut quiet_since = None;
         loop {
             observations += 1;
             // Parity with Chromium: a Url wait reports what it read, an
             // Element wait matches on presence and has no value to report.
+            let mut excluded_classes = Vec::new();
             let (satisfied, observed) = match &command.condition {
                 WaitCondition::Url { matcher } => {
                     let context = self.context(page_id).await?;
@@ -4114,12 +4144,29 @@ impl BrowserWorker for FirefoxCompanionWorker {
                         Some(bound_observed(&state)),
                     )
                 }
-                _ => {
-                    return Err(driver_error(
-                        ErrorCode::InvalidRequest,
-                        "Firefox wait condition is not supported",
-                        false,
-                    ))
+                WaitCondition::NetworkQuiet {
+                    idle_ms,
+                    max_in_flight,
+                    ignore_url_substrings,
+                    ignore_resource_types,
+                    ignore_long_lived,
+                } => {
+                    let context = self.context(page_id).await?;
+                    let filters = worker_pool::NetworkQuietFilters {
+                        ignore_url_substrings,
+                        ignore_resource_types,
+                        ignore_long_lived: *ignore_long_lived,
+                    };
+                    let (in_flight, excluded) =
+                        self.network_quiet.lock().await.snapshot(&context, &filters);
+                    excluded_classes = excluded;
+                    if in_flight <= *max_in_flight {
+                        let since = quiet_since.get_or_insert_with(Instant::now);
+                        (since.elapsed() >= Duration::from_millis(*idle_ms), None)
+                    } else {
+                        quiet_since = None;
+                        (false, None)
+                    }
                 }
             };
             if satisfied {
@@ -4127,7 +4174,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                     condition: command.condition.clone(),
                     elapsed_ms: started.elapsed().as_millis() as u64,
                     observations,
-                    excluded_classes: Vec::new(),
+                    excluded_classes,
                     observed,
                 }]);
             }
@@ -4834,6 +4881,31 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 )
             })?;
         Ok(vec![self.evidence(InteractionPath::EngineNative)])
+    }
+
+    async fn reconnect_live_process(&self) -> Result<Vec<Evidence>, CommandError> {
+        self.transport.reconnect_live().await?;
+        let subscription = self
+            .transport
+            .send("session.subscribe", session_subscribe_params())
+            .await?;
+        if !subscription.is_object() {
+            return Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox BiDi session.subscribe result was not an object",
+                false,
+            ));
+        }
+        tracing::info!(
+            worker_id = %self.id.0,
+            "reattached to live Firefox after BiDi transport reset; page state preserved"
+        );
+        Ok(vec![Evidence::Configuration {
+            name: "cdpReattach".into(),
+            value: "websocket reset with the browser process still alive; reattached \
+                    to the same process and page state is preserved"
+                .into(),
+        }])
     }
 
     async fn close(&self) -> Result<(), CommandError> {

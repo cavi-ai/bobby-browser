@@ -31,6 +31,9 @@ pub use form_snapshot::{
     form_snapshot_expression_with_limit, target_specs_equivalent, validate_control_action,
 };
 pub use har::{har_document, HarEntry, HarRecorder};
+pub use network_quiet::{
+    counted_in_flight, map_bidi_network_type, NetworkQuietFilters, NetworkQuietState,
+};
 pub use selection::{
     BrowserWorkerSelector, EnginePreference, FactoryRegistration, RequiredCapabilities,
     SelectedWorkerFactory, DEFAULT_REPLACEMENT_CLEANUP_TIMEOUT,
@@ -383,14 +386,15 @@ pub trait BrowserWorker: Send + Sync {
     /// Used by the vision corpus collector to ground a verified click back to
     /// the candidate list. Runs on the worker's internal DOM channel (the same
     /// path as the targeting bounds probes), never through the policy-gated
-    /// `evaluate_javascript` primitive. Default: unsupported, `Ok(None)`.
+    /// `evaluate_javascript` primitive. Default: unsupported — not `Ok(None)`,
+    /// which would look like "nothing at this point."
     async fn element_at_point(
         &self,
         _page_id: &PageId,
         _x: f64,
         _y: f64,
     ) -> Result<Option<(String, String)>, CommandError> {
-        Ok(None)
+        Err(unsupported_error())
     }
     async fn set_focus_emulation(
         &self,
@@ -438,16 +442,18 @@ pub trait BrowserWorker: Send + Sync {
     async fn terminate(&self) -> Result<(), CommandError> {
         self.close().await
     }
-    /// Try to reconnect to the SAME browser process after the CDP transport
-    /// died without the process dying (observed as websocket resets where
-    /// Chrome stays alive with its devtools endpoint still serving). A worker
-    /// that reattaches avoids the destructive alternative — retire worker,
-    /// relaunch browser, reopen page — which loses all page state (typed form
-    /// values, scroll, cookies the page set). Default: unsupported.
+    /// Try to reconnect to the SAME browser process after the CDP or Firefox
+    /// BiDi transport died without the process dying (websocket resets where
+    /// Chrome's DevTools endpoint is still serving, or Firefox RemoteAgent
+    /// kept the WebDriver session). Firefox must reconnect the socket without
+    /// `session.new` or it hits the one-session limit. A worker that reattaches
+    /// avoids the destructive alternative — retire worker, relaunch browser,
+    /// reopen page — which loses all page state (typed form values, scroll,
+    /// cookies the page set). Default: unsupported.
     ///
-    /// Returns true when the worker now holds a live connection to the same
-    /// browser process, with previously tracked pages reattached so a retried
-    /// command lands on the page it targeted.
+    /// Returns `cdpReattach` evidence when the worker now holds a live
+    /// connection to the same browser process, with previously tracked pages
+    /// reattached so a retried command lands on the page it targeted.
     async fn reconnect_live_process(&self) -> Result<Vec<Evidence>, CommandError> {
         Err(unsupported_error())
     }

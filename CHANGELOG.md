@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Added
+
+- Firefox `wait_for` implements `networkQuiet` from the BiDi
+  `network.beforeRequestSent` / `responseCompleted` / `fetchError` stream
+  already used for HAR, with the same idle / max-in-flight / ignore filters
+  as Chromium.
+- Firefox live-process reattach reconnects the BiDi websocket without
+  `session.new`, so typed values survive a transport drop the same way a
+  Chromium CDP reattach does.
+
+### Changed
+
+- `RuntimeService::navigate` reports the command error message, not `Debug`
+  of the whole outcome.
+- `element_at_point` defaults to unsupported (`browserCommandFailed`), not
+  `Ok(None)`.
+
 ## 0.12.0 - 2026-08-31
 
 ### Added

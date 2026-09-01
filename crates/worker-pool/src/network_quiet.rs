@@ -53,7 +53,18 @@ impl NetworkQuietState {
         url: String,
         resource_type: NetworkResourceType,
     ) {
-        let id = request_id_key(request_id);
+        self.upsert_id(request_id_key(request_id), url, resource_type);
+    }
+
+    pub fn upsert_websocket(&mut self, request_id: &RequestId, url: String) {
+        self.upsert_id(
+            request_id_key(request_id),
+            url,
+            NetworkResourceType::WebSocket,
+        );
+    }
+
+    pub fn upsert_id(&mut self, id: String, url: String, resource_type: NetworkResourceType) {
         if self.completed_before_start.remove(&id) {
             return;
         }
@@ -72,26 +83,13 @@ impl NetworkQuietState {
         );
     }
 
-    pub fn upsert_websocket(&mut self, request_id: &RequestId, url: String) {
-        let id = request_id_key(request_id);
-        if self.completed_before_start.remove(&id) {
-            return;
-        }
-        self.requests.insert(
-            id,
-            InFlightRequest {
-                url,
-                resource_type: NetworkResourceType::WebSocket,
-                started_at: Instant::now(),
-                is_websocket: true,
-            },
-        );
+    pub fn remove(&mut self, request_id: &RequestId) {
+        self.remove_id(&request_id_key(request_id));
     }
 
-    pub fn remove(&mut self, request_id: &RequestId) {
-        let id = request_id_key(request_id);
-        if self.requests.remove(&id).is_none() {
-            self.completed_before_start.insert(id);
+    pub fn remove_id(&mut self, id: &str) {
+        if self.requests.remove(id).is_none() {
+            self.completed_before_start.insert(id.to_owned());
         }
     }
 
@@ -259,6 +257,43 @@ pub fn parse_resource_type(raw: &str) -> NetworkResourceType {
     NetworkResourceType::from_str(raw).unwrap_or(NetworkResourceType::Other)
 }
 
+/// Maps WebDriver BiDi `destination` / `initiatorType` onto the same resource
+/// types Chromium's Network domain uses, so `networkQuiet` filters match.
+pub fn map_bidi_network_type(
+    destination: Option<&str>,
+    initiator_type: Option<&str>,
+) -> NetworkResourceType {
+    let destination = destination.unwrap_or("").to_ascii_lowercase();
+    let initiator = initiator_type.unwrap_or("").to_ascii_lowercase();
+    if initiator == "websocket" || destination == "websocket" {
+        return NetworkResourceType::WebSocket;
+    }
+    if initiator == "eventsource" {
+        return NetworkResourceType::EventSource;
+    }
+    if initiator == "xmlhttprequest" {
+        return NetworkResourceType::Xhr;
+    }
+    if initiator == "fetch" {
+        return NetworkResourceType::Fetch;
+    }
+    if initiator == "preflight" {
+        return NetworkResourceType::Preflight;
+    }
+    match destination.as_str() {
+        "document" | "frame" | "iframe" => NetworkResourceType::Document,
+        "style" => NetworkResourceType::Stylesheet,
+        "image" => NetworkResourceType::Image,
+        "audio" | "video" => NetworkResourceType::Media,
+        "font" => NetworkResourceType::Font,
+        "script" => NetworkResourceType::Script,
+        "track" => NetworkResourceType::TextTrack,
+        "manifest" => NetworkResourceType::Manifest,
+        "report" => NetworkResourceType::CspViolationReport,
+        _ => NetworkResourceType::Other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,5 +423,33 @@ mod tests {
         );
         assert_eq!(state.requests().count(), 0);
         assert!(state.completed_before_start.is_empty());
+    }
+
+    #[test]
+    fn bidi_destination_and_initiator_map_onto_chromium_resource_types() {
+        assert_eq!(
+            map_bidi_network_type(Some("script"), Some("parser")),
+            NetworkResourceType::Script
+        );
+        assert_eq!(
+            map_bidi_network_type(Some("empty"), Some("fetch")),
+            NetworkResourceType::Fetch
+        );
+        assert_eq!(
+            map_bidi_network_type(Some(""), Some("xmlhttprequest")),
+            NetworkResourceType::Xhr
+        );
+        assert_eq!(
+            map_bidi_network_type(None, Some("websocket")),
+            NetworkResourceType::WebSocket
+        );
+        assert_eq!(
+            map_bidi_network_type(Some("image"), None),
+            NetworkResourceType::Image
+        );
+        assert_eq!(
+            map_bidi_network_type(Some("unknown"), None),
+            NetworkResourceType::Other
+        );
     }
 }
