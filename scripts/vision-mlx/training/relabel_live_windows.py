@@ -31,12 +31,33 @@ for purpose in [
 ]:
     STEP_BY_PURPOSE[purpose] = ("Search customers", "typeText", "type_search")
 for purpose in [
+    "Push the button to search",
+    "Fire off the customer search",
+    "Execute the lookup with the button",
+    "Trigger the search now",
+]:
+    STEP_BY_PURPOSE[purpose] = ("Search", "click", "run_search")
+for purpose in [
+    "Bring up the Atlas Labs record",
+    "Open the Atlas Labs page",
+    "Go to the Atlas Labs customer",
+    "Pull up the Atlas Labs account",
+]:
+    STEP_BY_PURPOSE[purpose] = ("Atlas Labs", "click", "open_customer")
+for purpose in [
     "Pick the high priority for this customer",
     "Set the priority dropdown to high",
     "Choose high in the priority selector",
     "Mark the customer priority as high",
 ]:
     STEP_BY_PURPOSE[purpose] = ("Customer priority", "click", "select_priority")
+for purpose in [
+    "Store the priority change with the save button",
+    "Commit the new priority setting",
+    "Save the updated customer priority",
+    "Apply the priority change with the save control",
+]:
+    STEP_BY_PURPOSE[purpose] = ("Save priority", "click", "save_priority")
 for purpose in [
     "Upload the staged document to the server",
     "Send the staged document off",

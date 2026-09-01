@@ -126,6 +126,7 @@ def normalize_corpus_example(example: dict) -> dict:
         ("contextCandidates", "context_candidates"),
         ("targetIndex", "target_index"),
         ("modelResponse", "model_response"),
+        ("outcomeStage", "outcome_stage"),
     ):
         if camel in example and snake in example and example[camel] != example[snake]:
             raise ValueError(f"conflicting {camel}/{snake} fields")

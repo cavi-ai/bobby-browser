@@ -81,9 +81,9 @@ jobs:
         # 0.3.1 while the last sdk-v* tag was 0.3.0 because nothing checked.
         run: python3 scripts/check-version-agreement.py
 
-      - name: Vision experiment evaluator regressions
+      - name: Vision experiment regressions
         working-directory: scripts/vision-mlx/training
-        run: python3 -m unittest test_evaluate_adapter.py
+        run: python3 -m unittest test_evaluate_adapter.py test_corpus_lint.py test_relabel_live_windows.py
 
       - name: Firefox launcher regressions
         run: scripts/dev/firefox-start.test.sh
@@ -196,7 +196,7 @@ jobs:
         run: |
           BOBBY_CORPUS_RUNS_PER_JOURNEY=1 cargo test -p runtime-tests --locked --test modern_gauntlet_corpus_grow -- --test-threads=1
           cat target/vision-corpus/*.jsonl > /tmp/ci-corpus.jsonl
-          python3 scripts/vision-mlx/training/corpus_lint.py --input /tmp/ci-corpus.jsonl
+          python3 scripts/vision-mlx/training/corpus_lint.py --input /tmp/ci-corpus.jsonl --skip-balance
 
       - name: Upload Northstar failure evidence
         if: failure()

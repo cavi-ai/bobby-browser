@@ -281,6 +281,29 @@ class MixedActionEvaluationTests(unittest.TestCase):
 
         self.assertEqual(result["abstain_recall"], 0.0)
 
+    def test_v1_excludes_camel_case_scripted_ambiguous_from_production_recall(self):
+        result = v1_metrics(
+            [
+                {"prediction": {"action": {"kind": "v1", "index": 0}}},
+                {"prediction": {"action": {"kind": "v1", "index": -1}}},
+            ],
+            [
+                {
+                    "success": False,
+                    "outcomeStage": "scriptedAmbiguous",
+                    "targetIndex": None,
+                },
+                {
+                    "success": False,
+                    "outcomeStage": "visionRejectionFloor",
+                    "targetIndex": None,
+                },
+            ],
+        )
+
+        self.assertEqual(result["abstain_recall"], 0.5)
+        self.assertEqual(result["abstain_recall_production"], 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

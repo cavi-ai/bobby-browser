@@ -66,7 +66,7 @@ MIN_POS_PER_NEG = 2.0
 MAX_POS_PER_NEG = 8.0
 
 
-def lint(rows: list) -> tuple:
+def lint(rows: list, *, check_balance: bool = True) -> tuple:
     errors = []
     warnings = []
 
@@ -156,13 +156,7 @@ def lint(rows: list) -> tuple:
 
     if negatives == 0 and len(rows) >= 10:
         errors.append("no abstain-labeled negatives; the abstain class is untrained")
-    elif (
-        negatives > 0
-        and negatives >= 5
-        and positives >= 20
-        # The ratio band is a training-scale check; small CI smoke corpora
-        # (one grow run per journey) only prove the class exists.
-    ):
+    elif negatives > 0 and check_balance:
         ratio = positives / negatives
         if not MIN_POS_PER_NEG <= ratio <= MAX_POS_PER_NEG:
             errors.append(
@@ -176,6 +170,11 @@ def lint(rows: list) -> tuple:
 def main():
     parser = argparse.ArgumentParser(description="Lint a Bobby vision corpus")
     parser.add_argument("--input", required=True, help="corpus JSONL")
+    parser.add_argument(
+        "--skip-balance",
+        action="store_true",
+        help="skip the training-scale class balance check for smoke corpora",
+    )
     args = parser.parse_args()
 
     with open(args.input) as f:
@@ -184,7 +183,7 @@ def main():
         # sees.
         rows = [normalize_corpus_example(json.loads(line)) for line in f if line.strip()]
 
-    errors, warnings = lint(rows)
+    errors, warnings = lint(rows, check_balance=not args.skip_balance)
     for warning in warnings:
         print(f"warning: {warning}")
     for error in errors:
