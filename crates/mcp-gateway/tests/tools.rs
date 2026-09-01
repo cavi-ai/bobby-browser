@@ -4273,26 +4273,33 @@ async fn auto_checkpoint_refuses_the_submit_when_the_checkpoint_cannot_be_saved(
     assert!(without["error"].is_null(), "{without}");
 }
 
-/// Boundary-once: after a completed submit, a second `intent_submit_and_verify`
-/// against the same workflow is refused with `boundaryAlreadyExecuted` (naming
-/// the prior commandId), unless the caller passes `reSubmit: true`.
+/// Boundary-once, per (workflow, control): after a completed submit, a second
+/// `intent_submit_and_verify` against the SAME control is refused with
+/// `boundaryAlreadyExecuted` (naming the prior commandId), unless the caller
+/// passes `reSubmit: true`. A different control in the same workflow (a
+/// search submit, then a save) is a legitimate distinct Boundary and passes.
 #[tokio::test]
-async fn a_second_boundary_submit_against_a_completed_workflow_is_refused() {
+async fn a_second_boundary_submit_against_the_same_control_is_refused() {
     let server = Server::new(Arc::new(authenticated_with_intents().await));
     initialize(&server).await;
 
     let workflow = types::WorkflowId::new();
     let prior = types::CommandId::new();
     server
-        .record_boundary_execution_for_test(&workflow, &prior)
+        .record_boundary_execution_for_test(
+            &workflow,
+            serde_json::json!({"role": "button", "accessibleName": "Save priority"}),
+            &prior,
+        )
         .await;
 
-    let submit = |re_submit: Option<bool>| {
+    let submit = |re_submit: Option<bool>, hints: serde_json::Value| {
         let mut arguments = json!({
             "sessionId":SessionId::new().0.to_string(),
             "pageId":types::PageId::new().0.to_string(),
             "workflowId":workflow.0.to_string(),
             "purpose":"submit the application",
+            "hints":hints,
             "expectedState":{
                 "condition":{"kind":"document","ready":"interactive"},
                 "timeoutMs":1000
@@ -4303,9 +4310,11 @@ async fn a_second_boundary_submit_against_a_completed_workflow_is_refused() {
         }
         json!({"name":"intent_submit_and_verify","arguments":arguments})
     };
+    let save_hints = json!({"role": "button", "accessibleName": "Save priority"});
+    let search_hints = json!({"role": "button", "accessibleName": "Search"});
 
     let refused = server
-        .handle_message(request(120, "tools/call", submit(None)))
+        .handle_message(request(120, "tools/call", submit(None, save_hints.clone())))
         .await
         .unwrap();
     let outcome = &refused["result"]["structuredContent"];
@@ -4331,7 +4340,7 @@ async fn a_second_boundary_submit_against_a_completed_workflow_is_refused() {
     // reSubmit acknowledges the prior submit and proceeds: it reaches the
     // runtime, whose own failure (no such page/session) is NOT a refusal.
     let acknowledged = server
-        .handle_message(request(121, "tools/call", submit(Some(true))))
+        .handle_message(request(121, "tools/call", submit(Some(true), save_hints)))
         .await
         .unwrap();
     let outcome = &acknowledged["result"]["structuredContent"];
@@ -4349,6 +4358,18 @@ async fn a_second_boundary_submit_against_a_completed_workflow_is_refused() {
     assert_ne!(
         outcome["error"]["code"], "boundaryAlreadyExecuted",
         "the guard is workflow-scoped: {other}"
+    );
+
+    // A different control in the SAME workflow is a legitimate second
+    // Boundary submit (search, then save): the guard does not fire.
+    let search = server
+        .handle_message(request(123, "tools/call", submit(None, search_hints)))
+        .await
+        .unwrap();
+    let outcome = &search["result"]["structuredContent"];
+    assert_ne!(
+        outcome["error"]["code"], "boundaryAlreadyExecuted",
+        "one workflow may hold several Boundary submits against different controls: {search}"
     );
 }
 

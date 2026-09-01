@@ -113,22 +113,32 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
-                // Boundary-once guard: a completed Boundary submit for this
-                // workflow means its effect is on record, and another submit
-                // would double-apply it. The failure that started the
-                // fix-and-resubmit flow does NOT record here (only completed
-                // outcomes do), so the legitimate rejected-then-corrected
-                // flow stays open. `reSubmit` is the explicit escape hatch.
-                if let Some(workflow_id) = &input.workflow_id {
+                // Boundary-once guard, per (workflow, control): a completed
+                // Boundary submit for this control means its effect is on
+                // record, and another submit against it would double-apply.
+                // One workflow legitimately holds several Boundary submits
+                // against different controls (a search submit, then a save),
+                // so the ledger never keys on the workflow alone. Submits
+                // without resolvable control hints fail open -- a purpose-
+                // text key would false-positive on rephrasings. The failure
+                // that started the fix-and-resubmit flow does NOT record, so
+                // the legitimate rejected-then-corrected flow stays open.
+                // `reSubmit` is the explicit escape hatch.
+                let boundary_key = input.workflow_id.clone().map(|workflow_id| {
+                    (
+                        workflow_id,
+                        control_identity(&input.hints.clone().unwrap_or_default()),
+                    )
+                });
+                if let Some(key) = &boundary_key {
                     if !input.re_submit.unwrap_or(false) {
-                        if let Some(prior) = self.prior_boundary_execution(workflow_id).await {
+                        if let Some(prior) = self.prior_boundary_execution(key).await {
                             return self
-                                .boundary_already_executed_response(id, workflow_id, &prior)
+                                .boundary_already_executed_response(id, &key.0, &prior)
                                 .await;
                         }
                     }
                 }
-                let boundary_workflow_id = input.workflow_id.clone();
                 let intent = types::IntentCommand::SubmitAndVerify(types::SubmitAndVerifyIntent {
                     purpose: input.purpose,
                     hints: input.hints.unwrap_or_default(),
@@ -169,7 +179,7 @@ impl Server {
                 // Everything else (resolution failures, actFailed,
                 // retryableFailure, policyDenied) means nothing landed, so
                 // the fix-and-resubmit flow stays open.
-                if let Some(workflow_id) = boundary_workflow_id {
+                if let Some(boundary_key) = &boundary_key {
                     let landed = match &result {
                         Ok(value) => {
                             let status = value.get("status").and_then(Value::as_str);
@@ -184,7 +194,7 @@ impl Server {
                         Err(_) => false,
                     };
                     if landed {
-                        self.record_boundary_execution(&workflow_id, &boundary_command_id)
+                        self.record_boundary_execution(boundary_key, &boundary_command_id)
                             .await;
                     }
                 }
