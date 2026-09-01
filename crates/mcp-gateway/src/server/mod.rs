@@ -1053,10 +1053,7 @@ impl Server {
     /// current generation, if any. Records from earlier generations are
     /// invisible: a re-`initialize` invalidates the workflow handles those
     /// submits belonged to.
-    async fn prior_boundary_execution(
-        &self,
-        key: &BoundaryLedgerKey,
-    ) -> Option<types::CommandId> {
+    async fn prior_boundary_execution(&self, key: &BoundaryLedgerKey) -> Option<types::CommandId> {
         let generation = self.workflow_handles.generation();
         self.boundary_executions
             .lock()
