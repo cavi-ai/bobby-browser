@@ -4388,3 +4388,39 @@ fn submit_other_workflow() -> serde_json::Value {
         }
     })
 }
+
+/// Hints-less submits carry no control identity: they are neither guarded
+/// nor recorded, so two hints-less submits in one workflow both complete
+/// (the search-then-save flow without named controls).
+#[tokio::test]
+async fn hints_less_submits_are_neither_guarded_nor_recorded() {
+    let server = Server::new(Arc::new(authenticated_with_intents().await));
+    initialize(&server).await;
+
+    let arguments = json!({
+        "name":"intent_submit_and_verify",
+        "arguments":{
+            "sessionId":SessionId::new().0.to_string(),
+            "pageId":types::PageId::new().0.to_string(),
+            "workflowId":types::WorkflowId::new().0.to_string(),
+            "purpose":"submit whatever form is here",
+            "expectedState":{
+                "condition":{"kind":"document","ready":"interactive"},
+                "timeoutMs":1000
+            }
+        }
+    });
+
+    for (index, id) in [130u64, 131, 132].into_iter().enumerate() {
+        let response = server
+            .handle_message(request(id, "tools/call", arguments.clone()))
+            .await
+            .unwrap();
+        let outcome = &response["result"]["structuredContent"];
+        assert_ne!(
+            outcome["error"]["code"], "boundaryAlreadyExecuted",
+            "hints-less submit #{index} must not be refused: {response}"
+        );
+        continue;
+    }
+}

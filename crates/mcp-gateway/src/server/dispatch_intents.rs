@@ -119,17 +119,19 @@ impl Server {
                 // One workflow legitimately holds several Boundary submits
                 // against different controls (a search submit, then a save),
                 // so the ledger never keys on the workflow alone. Submits
-                // without resolvable control hints fail open -- a purpose-
-                // text key would false-positive on rephrasings. The failure
-                // that started the fix-and-resubmit flow does NOT record, so
-                // the legitimate rejected-then-corrected flow stays open.
+                // whose hints do not name a role + accessibleName have no
+                // key at all: they are neither guarded nor recorded (a
+                // purpose-text key would false-positive on rephrasings, and
+                // keying them on the workflow alone is the search-vs-save
+                // false positive this guard shipped with). The failure that
+                // started the fix-and-resubmit flow does NOT record, so the
+                // legitimate rejected-then-corrected flow stays open.
                 // `reSubmit` is the explicit escape hatch.
-                let boundary_key = input.workflow_id.clone().map(|workflow_id| {
-                    (
-                        workflow_id,
-                        control_identity(&input.hints.clone().unwrap_or_default()),
-                    )
-                });
+                let boundary_key = input
+                    .workflow_id
+                    .clone()
+                    .zip(control_identity(&input.hints.clone().unwrap_or_default()))
+                    .map(|(workflow_id, control)| (workflow_id, Some(control)));
                 if let Some(key) = &boundary_key {
                     if !input.re_submit.unwrap_or(false) {
                         if let Some(prior) = self.prior_boundary_execution(key).await {
