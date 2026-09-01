@@ -289,7 +289,7 @@ For `text` and `value`, role-based (`role: main|RootWebArea|document|application
 `css: body|html|:root` targets read `document.body.innerText` so async confirmation text
 checks align with whole-page assertions.
 
-Firefox supports `text`, `value`, `document`, `url`, and `element`. `networkQuiet` is Chromium-only.
+Firefox supports `text`, `value`, `document`, `url`, `element`, and `networkQuiet`.
 
 ### Follow
 

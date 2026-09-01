@@ -146,8 +146,7 @@ also registers `window.open` targets into the current session page graph for
 For `text` and `value` waits, role-scoped targets with `main|RootWebArea|document|application|generic|body`
 or `css: body|html|:root` resolve against `document.body.innerText` via page evaluation.
 
-Firefox handles `text`, `value`, `document`, `url`, and `element`; `networkQuiet` is
-currently Chromium-only.
+Firefox handles `text`, `value`, `document`, `url`, `element`, and `networkQuiet`.
 
 ## Workflow continuity
 
