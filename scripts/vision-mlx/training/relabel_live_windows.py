@@ -118,6 +118,12 @@ for purpose in [
     "Create this customer record",
 ]:
     STEP_BY_PURPOSE[purpose] = ("Create customer", "click", "submit_form")
+for purpose in ["Open the awards page"]:
+    STEP_BY_PURPOSE[purpose] = ("Awards", "click", "absent_probe")
+for purpose in ["Open the likes tab"]:
+    STEP_BY_PURPOSE[purpose] = ("Likes", "click", "absent_probe")
+for purpose in ["Open the learning tab"]:
+    STEP_BY_PURPOSE[purpose] = ("Learning", "click", "absent_probe")
 
 
 def relabel(record):

@@ -38,6 +38,7 @@ const SITES: &[(&str, &str, &[&str])] = &[
             "Open the second post's title",
             "Open the community wiki",
             "Message the moderators",
+            "Open the awards page",
         ],
     ),
     (
@@ -47,6 +48,7 @@ const SITES: &[(&str, &str, &[&str])] = &[
             "Open the first pinned or latest post",
             "Open the posts tab",
             "Open the media tab",
+            "Open the likes tab",
         ],
     ),
     (
