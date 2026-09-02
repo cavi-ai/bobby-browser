@@ -53,18 +53,22 @@ Health: `GET http://<host>:<port>/healthz`.
 
 ### `bobby doctor`
 
-Local setup checks (config load, browser selection, engine satisfiability,
-bootstrap presence, storage dirs, Firefox/Chromium on PATH, optional `/healthz`).
+Read-only setup checks (config load, browser selection, engine satisfiability,
+bootstrap presence, storage dirs, journal/corpus/context health, sidecar
+versions, Firefox/Chromium on PATH, optional `/healthz`). Plain `bobby doctor`
+does not rewrite bootstrap capabilities or create directories.
 
 | Flag | Meaning |
 |---|---|
 | `--config <path>` | Same as `serve` |
 | `--bootstrap-env <path>` | Same as `serve` |
-| `--skip-health` | Do not probe `/healthz` (default: probe) |
-| `--fix` | Repair safe Bobby-owned state, readiness-test the selected provider, then run doctor again |
+| `--skip-health` | Do not probe `/healthz` or `GET /v1/runtime` (default: probe) |
+| `--json` | Print a versioned JSON report on stdout (no human lines) |
+| `--fix` | Repair safe Bobby-owned state, create missing storage dirs, readiness-test the selected provider, then run doctor again |
 | `--download-model` | With `--fix`, explicitly allow downloading the already-selected MLX model |
 
-Exit code `1` if any **fail** checks; warnings alone exit `0`.
+Exit code `1` if any **fail** checks; warnings alone exit `0`. A `next:` line
+(JSON: `nextAction`) names the first repair command when something is wrong.
 
 In an interactive terminal, `ok`, `warn`, and `fail` are green, yellow, and
 red. Repair results use cyan, green, yellow, or red according to outcome.
@@ -72,11 +76,17 @@ Piped output and `NO_COLOR=1 bobby doctor` remain plain and keep the same text
 labels, so color is never required to understand a result.
 
 `--fix` is conservative and idempotent. It can heal an existing unrestricted
-bootstrap capability set, normalize the selected provider into Bobby's
-canonical vision node, and readiness-test that selected provider. It does not
-choose a provider/model, overwrite a custom endpoint, persist secrets, install
-system packages, or leave a daemon running. A missing MLX cache remains an
-action item unless `--download-model` gives explicit consent for the download.
+bootstrap capability set, create missing storage parent directories, normalize
+the selected provider into Bobby's canonical vision node, and readiness-test
+that selected provider. It does not choose a provider/model, overwrite a custom
+endpoint, persist secrets, install system packages, or leave a daemon running.
+A missing MLX cache remains an action item unless `--download-model` gives
+explicit consent for the download.
+
+If `/healthz` is unreachable, the `healthz` check is **ok** with detail
+`not running` (start `bobby serve` when you want a live runtime). `--json`
+with `--fix` still prints repair labels on stderr; stdout is the post-fix
+report.
 
 ### `bobby jobs`
 

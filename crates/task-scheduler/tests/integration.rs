@@ -845,8 +845,7 @@ fn inspect_reports_torn_tail_without_truncating() {
     }
 
     let before = std::fs::read(&path).unwrap();
-    let health = rt
-        .block_on(async { JournalJobStore::inspect(&path).await.unwrap() });
+    let health = rt.block_on(async { JournalJobStore::inspect(&path).await.unwrap() });
     assert!(health.exists);
     assert!(health.torn_tail);
     assert_eq!(health.corrupt_line, None);
