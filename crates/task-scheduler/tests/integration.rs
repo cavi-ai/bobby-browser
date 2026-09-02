@@ -819,6 +819,54 @@ fn journal_torn_tail() {
 }
 
 #[test]
+fn inspect_reports_torn_tail_without_truncating() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("jobs.jsonl");
+    let rt = runtime();
+
+    rt.block_on(async {
+        let scheduler = JobScheduler::open_journal(SchedulerConfig::default(), &path)
+            .await
+            .unwrap();
+        scheduler
+            .submit(JobConfig::new("keep".to_string(), serde_json::json!({})))
+            .await
+            .unwrap();
+    });
+
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        write!(f, "{{\"schemaVersion\":1,\"sequence\":99,\"recordedAt\":").unwrap();
+        f.flush().unwrap();
+    }
+
+    let before = std::fs::read(&path).unwrap();
+    let health = rt
+        .block_on(async { JournalJobStore::inspect(&path).await.unwrap() });
+    assert!(health.exists);
+    assert!(health.torn_tail);
+    assert_eq!(health.corrupt_line, None);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn inspect_missing_scheduler_journal_is_empty_health() {
+    let dir = tempfile::tempdir().unwrap();
+    let health = runtime().block_on(async {
+        JournalJobStore::inspect(dir.path().join("nope.jsonl"))
+            .await
+            .unwrap()
+    });
+    assert!(!health.exists);
+    assert_eq!(health.bytes, 0);
+    assert!(!health.torn_tail);
+}
+
+#[test]
 fn cancel_aborts_running() {
     let mut scheduler = JobScheduler::new(
         SchedulerConfig::default()

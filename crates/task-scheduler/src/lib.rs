@@ -20,7 +20,7 @@ pub use job::{Job, JobConfig, JobError, JobId, JobPriority, JobStatus};
 pub use queue::{JobQueue, RetryConfig};
 pub use scheduler::{JobHandler, JobScheduler};
 pub use store::{
-    JobEvent, JobStore, JournalJobStore, JournalRecord, MemoryJobStore, StoreError,
+    JobEvent, JobStore, JournalHealth, JournalJobStore, JournalRecord, MemoryJobStore, StoreError,
     JOURNAL_SCHEMA_VERSION,
 };
 

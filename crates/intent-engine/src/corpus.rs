@@ -63,6 +63,16 @@ pub struct CorpusModelResponse {
     pub action: serde_json::Value,
 }
 
+/// Read-only health of a vision corpus JSONL file. Never creates or rewrites the path.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CorpusHealth {
+    pub exists: bool,
+    pub bytes: u64,
+    pub records: usize,
+    pub torn_tail: bool,
+    pub corrupt_line: Option<usize>,
+}
+
 /// Appends corpus records to `<dir>/vision-corpus.jsonl`.
 #[derive(Debug, Clone)]
 pub struct VisionCorpus {
@@ -88,6 +98,51 @@ impl VisionCorpus {
         if let Err(error) = append_line(&self.path, &line) {
             tracing::warn!(%error, path = %self.path.display(), "vision.corpus_write_failed");
         }
+    }
+
+    /// Probe corpus health without creating directories or rewriting the file.
+    pub fn inspect(path: impl AsRef<Path>) -> std::io::Result<CorpusHealth> {
+        let path = path.as_ref();
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(CorpusHealth::default());
+            }
+            Err(error) => return Err(error),
+        };
+        let torn_tail = !bytes.is_empty() && !bytes.ends_with(b"\n");
+        let complete_len = if torn_tail {
+            bytes
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map_or(0, |at| at + 1)
+        } else {
+            bytes.len()
+        };
+        let mut records = 0;
+        let mut corrupt_line = None;
+        for (index, line) in bytes[..complete_len]
+            .split(|byte| *byte == b'\n')
+            .enumerate()
+        {
+            if line.is_empty() {
+                continue;
+            }
+            match serde_json::from_slice::<serde_json::Value>(line) {
+                Ok(serde_json::Value::Object(_)) => records += 1,
+                _ => {
+                    corrupt_line = Some(index + 1);
+                    break;
+                }
+            }
+        }
+        Ok(CorpusHealth {
+            exists: true,
+            bytes: bytes.len() as u64,
+            records,
+            torn_tail,
+            corrupt_line,
+        })
     }
 }
 
@@ -223,5 +278,26 @@ mod tests {
         let candidates = vec![candidate("button", "Save")];
         let resolved = ("button".into(), "Delete".into());
         assert_eq!(match_resolved(&candidates, &resolved), None);
+    }
+
+    #[test]
+    fn inspect_counts_records_and_leaves_bytes_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vision-corpus.jsonl");
+        std::fs::write(&path, "{\"ok\":true}\n{\"ok\":true}\n").unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let health = VisionCorpus::inspect(&path).unwrap();
+        assert_eq!(health.records, 2);
+        assert!(!health.torn_tail);
+        assert_eq!(health.corrupt_line, None);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn inspect_missing_corpus_is_empty_health() {
+        let dir = tempfile::tempdir().unwrap();
+        let health = VisionCorpus::inspect(dir.path().join("nope.jsonl")).unwrap();
+        assert!(!health.exists);
+        assert_eq!(health.bytes, 0);
     }
 }
