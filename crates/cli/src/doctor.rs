@@ -75,7 +75,7 @@ pub(crate) struct DoctorFixReport {
 }
 
 impl DoctorFixReport {
-    pub(crate) fn render(&self) {
+    pub(crate) fn render_actions(&self) {
         let color = DoctorColorMode::Auto.enabled();
         for action in &self.actions {
             let label = match action.status {
@@ -96,6 +96,10 @@ impl DoctorFixReport {
                 eprintln!("[{label}] {}: {}", action.name, action.detail);
             }
         }
+    }
+
+    pub(crate) fn render(&self) {
+        self.render_actions();
         self.post_fix.render();
     }
 }
@@ -228,6 +232,28 @@ pub(crate) fn run_doctor_fix(options: DoctorFixOptions) -> Result<DoctorFixRepor
         }
     }
 
+    if let Ok(config) = AppConfig::load(&config_path) {
+        for (name, dir) in configured_storage_dirs(&config) {
+            let existed = dir.is_dir();
+            match std::fs::create_dir_all(&dir) {
+                Ok(()) => actions.push(DoctorFixAction {
+                    status: if existed {
+                        DoctorFixStatus::Noop
+                    } else {
+                        DoctorFixStatus::Fixed
+                    },
+                    name: name.to_string(),
+                    detail: format!("ensured {}", dir.display()),
+                }),
+                Err(error) => actions.push(DoctorFixAction {
+                    status: DoctorFixStatus::Failed,
+                    name: name.to_string(),
+                    detail: format!("{}: {error}", dir.display()),
+                }),
+            }
+        }
+    }
+
     let post_fix = run_doctor(
         Some(config_path),
         Some(bootstrap_path),
@@ -290,6 +316,88 @@ pub(crate) struct DoctorCheck {
     pub(crate) detail: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DoctorNextAction {
+    pub(crate) command: String,
+    pub(crate) reason: String,
+}
+
+const GROUP_ORDER: [&str; 6] = [
+    "setup",
+    "browser",
+    "vision",
+    "persistence",
+    "runtime",
+    "openshell",
+];
+
+pub(crate) fn check_group(name: &str) -> &'static str {
+    if name.starts_with("openshell-") {
+        return "openshell";
+    }
+    if name.starts_with("vision-") || name == "javascript-session-gate" {
+        return "vision";
+    }
+    if name.starts_with("storage-")
+        || matches!(
+            name,
+            "context-store"
+                | "artifacts-dir"
+                | "command-journal"
+                | "scheduler-journal"
+                | "vision-corpus"
+        )
+    {
+        return "persistence";
+    }
+    if matches!(
+        name,
+        "healthz" | "mcp-handshake" | "job-handlers" | "jobs-queue"
+    ) {
+        return "runtime";
+    }
+    if name.starts_with("firefox-")
+        || matches!(
+            name,
+            "browser-selection"
+                | "engine-satisfiability"
+                | "firefox"
+                | "chromium"
+                | "companion-port"
+                | "cdp-listen"
+                | "cdp-port"
+        )
+    {
+        return "browser";
+    }
+    "setup"
+}
+
+fn ignored_for_next_action(name: &str) -> bool {
+    matches!(name, "healthz" | "job-handlers" | "firefox" | "chromium")
+}
+
+fn repair_command(name: &str) -> &'static str {
+    match name {
+        "bootstrap" => "bobby install",
+        "bootstrap-expiry" => "bobby init --force",
+        "mcp-gateway" | "acp-gateway" | "sidecar-version" => "bobby install --cli",
+        "firefox-enrollment" => "bobby install --companion",
+        "bootstrap-capabilities" => "bobby doctor --fix",
+        "config" => "fix config.toml",
+        "context-store" => "bobby context verify",
+        other if other.starts_with("storage-")
+            || matches!(
+                other,
+                "command-journal" | "scheduler-journal" | "vision-corpus"
+            ) =>
+        {
+            "bobby doctor --fix"
+        }
+        _ => "bobby doctor --fix",
+    }
+}
+
 /// Structured outcome of a `bobby doctor` run: every check in order, so the
 /// CLI can render it and tests can assert on it without capturing stderr.
 #[derive(Debug, Default)]
@@ -337,14 +445,87 @@ impl DoctorReport {
         self.checks.iter().find(|check| check.name == name)
     }
 
+    pub(crate) fn next_action(&self) -> Option<DoctorNextAction> {
+        if let Some(check) = self.checks.iter().find(|check| {
+            check.status == DoctorStatus::Fail && !ignored_for_next_action(&check.name)
+        }) {
+            return Some(DoctorNextAction {
+                command: repair_command(&check.name).to_string(),
+                reason: check.detail.clone(),
+            });
+        }
+        if let Some(check) = self.checks.iter().find(|check| {
+            check.name == "bootstrap" && check.status == DoctorStatus::Warn
+        }) {
+            return Some(DoctorNextAction {
+                command: "bobby install".to_string(),
+                reason: check.detail.clone(),
+            });
+        }
+        None
+    }
+
+    pub(crate) fn render_json_to(&self, writer: &mut dyn Write) -> std::io::Result<()> {
+        let next = self.next_action().map(|action| {
+            serde_json::json!({
+                "command": action.command,
+                "reason": action.reason,
+            })
+        });
+        let groups: Vec<serde_json::Value> = GROUP_ORDER
+            .iter()
+            .filter_map(|group_name| {
+                let checks: Vec<serde_json::Value> = self
+                    .checks
+                    .iter()
+                    .filter(|check| check_group(&check.name) == *group_name)
+                    .map(|check| {
+                        serde_json::json!({
+                            "status": check.status.label(),
+                            "name": check.name,
+                            "detail": check.detail,
+                        })
+                    })
+                    .collect();
+                if checks.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::json!({
+                        "name": group_name,
+                        "checks": checks,
+                    }))
+                }
+            })
+            .collect();
+        let body = serde_json::json!({
+            "version": 1,
+            "failures": self.failures(),
+            "warnings": self.warnings(),
+            "nextAction": next,
+            "groups": groups,
+        });
+        let encoded = serde_json::to_string_pretty(&body)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        writeln!(writer, "{encoded}")
+    }
+
     pub(crate) fn render_to(
         &self,
         writer: &mut dyn Write,
         color_mode: DoctorColorMode,
     ) -> std::io::Result<()> {
         let color = color_mode.enabled();
+        let mut last_group: Option<&str> = None;
         for check in &self.checks {
             if color {
+                let group = check_group(&check.name);
+                if last_group != Some(group) {
+                    if last_group.is_some() {
+                        writeln!(writer)?;
+                    }
+                    writeln!(writer, "{group}")?;
+                    last_group = Some(group);
+                }
                 writeln!(
                     writer,
                     "[{}{}\x1b[0m] {}: {}",
@@ -363,7 +544,12 @@ impl DoctorReport {
                 )?;
             }
         }
+        let next_line = match self.next_action() {
+            Some(action) => format!("next: {}", action.command),
+            None => "next: ok".to_string(),
+        };
         if color {
+            writeln!(writer, "{next_line}")?;
             let failure_ansi = if self.failures() == 0 {
                 "\x1b[32m"
             } else {
@@ -381,6 +567,7 @@ impl DoctorReport {
                 self.warnings()
             )
         } else {
+            writeln!(writer, "{next_line}")?;
             writeln!(
                 writer,
                 "doctor: {} failure(s), {} warning(s)",
@@ -841,6 +1028,34 @@ pub(crate) fn check_vision_acp(config: &AppConfig) -> Vec<DoctorCheck> {
     ]
 }
 
+fn configured_storage_dirs(config: &AppConfig) -> [(&'static str, PathBuf); 4] {
+    [
+        (
+            "storage-journal-dir",
+            config
+                .storage
+                .journal_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from(".")),
+        ),
+        (
+            "storage-scheduler-journal-dir",
+            config
+                .storage
+                .scheduler_journal_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from(".")),
+        ),
+        (
+            "storage-checkpoints-dir",
+            config.storage.checkpoints_dir.clone(),
+        ),
+        ("artifacts-dir", config.browser.artifacts_dir.clone()),
+    ]
+}
+
 fn push_doctor_check(report: &mut DoctorReport, check: DoctorCheck) {
     match check.status {
         DoctorStatus::Ok => report.ok(&check.name, check.detail),
@@ -1122,47 +1337,44 @@ pub(crate) fn run_doctor(
     // The bootstrap expiry is pinned into MCP client config and the stdio
     // gateway refuses to start once it passes, which a host reports only as a
     // dead server. Warn while there is still time to run `bobby init`.
-    // Heal stale capability lists first so doctor validates what serve/mcp will
-    // actually use after unrestricted-default heal.
     let bootstrap_path_for_heal = resolve_bootstrap_path(bootstrap_cli.clone()).ok();
     if let Some(path) = bootstrap_path_for_heal.as_ref() {
-        match bootstrap_local::ensure_unrestricted_bootstrap(path) {
-            Ok(heal) if heal.changed() => {
-                report.ok(
-                    "bootstrap-capabilities",
-                    format!(
-                        "healed {} missing default(s): {}",
-                        heal.added.len(),
-                        heal.added.join(", ")
-                    ),
-                );
-            }
-            Ok(_)
-                if path.exists()
-                    || std::env::var("AUTOMATION_RUNTIME_BOOTSTRAP_CAPABILITIES").is_ok() =>
-            {
-                report.ok(
-                    "bootstrap-capabilities",
-                    "current (matches defaults)".to_string(),
-                );
-            }
-            Ok(_) => {}
-            Err(error) => {
-                report.warn(
-                    "bootstrap-capabilities",
-                    format!("could not heal bootstrap capabilities ({error:#})"),
-                );
-            }
-        }
         if path.exists() {
             match bootstrap_local::load_bootstrap_capabilities_csv(path) {
-                Ok(caps) if !caps.split(',').any(|c| c.trim() == "browser:fingerprint") => {
-                    report.warn(
-                        "bootstrap-capabilities",
-                        "bootstrap still lacks browser:fingerprint after heal".to_string(),
-                    );
+                Ok(caps) => {
+                    let preset = bootstrap_local::read_bootstrap_preset(Some(path));
+                    let floor = bootstrap_local::capabilities_for_preset(preset);
+                    match bootstrap_local::union_capabilities_csv_with(&caps, floor) {
+                        Ok((_, added)) if added.is_empty() => {
+                            report.ok(
+                                "bootstrap-capabilities",
+                                "current (matches defaults)".to_string(),
+                            );
+                        }
+                        Ok((_, added)) => {
+                            report.warn(
+                                "bootstrap-capabilities",
+                                format!(
+                                    "missing default(s): {}; run `bobby doctor --fix`",
+                                    added.join(", ")
+                                ),
+                            );
+                        }
+                        Err(error) => {
+                            report.warn(
+                                "bootstrap-capabilities",
+                                format!("could not read capabilities ({error:#})"),
+                            );
+                        }
+                    }
+                    if !caps.split(',').any(|c| c.trim() == "browser:fingerprint") {
+                        report.warn(
+                            "bootstrap-capabilities",
+                            "bootstrap lacks browser:fingerprint; run `bobby doctor --fix`"
+                                .to_string(),
+                        );
+                    }
                 }
-                Ok(_) => {}
                 Err(error) => {
                     report.warn(
                         "bootstrap-capabilities",
@@ -1171,16 +1383,24 @@ pub(crate) fn run_doctor(
                 }
             }
         }
-    } else if let Ok(heal) = bootstrap_local::heal_process_env_capabilities() {
-        if heal.changed() {
-            report.ok(
-                "bootstrap-capabilities",
-                format!(
-                    "healed process env with {} missing default(s): {}",
-                    heal.added.len(),
-                    heal.added.join(", ")
-                ),
-            );
+    } else if let Ok(caps) = std::env::var("AUTOMATION_RUNTIME_BOOTSTRAP_CAPABILITIES") {
+        let preset = bootstrap_local::read_bootstrap_preset(None);
+        let floor = bootstrap_local::capabilities_for_preset(preset);
+        if let Ok((_, added)) = bootstrap_local::union_capabilities_csv_with(&caps, floor) {
+            if added.is_empty() {
+                report.ok(
+                    "bootstrap-capabilities",
+                    "current (matches defaults)".to_string(),
+                );
+            } else {
+                report.warn(
+                    "bootstrap-capabilities",
+                    format!(
+                        "missing default(s): {}; run `bobby doctor --fix`",
+                        added.join(", ")
+                    ),
+                );
+            }
         }
     }
 
@@ -1392,36 +1612,14 @@ pub(crate) fn run_doctor(
     }
 
     if let Some(config) = &config {
-        for (name, dir) in [
-            (
-                "storage-journal-dir",
-                config
-                    .storage
-                    .journal_path
-                    .parent()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| PathBuf::from(".")),
-            ),
-            (
-                "storage-scheduler-journal-dir",
-                config
-                    .storage
-                    .scheduler_journal_path
-                    .parent()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| PathBuf::from(".")),
-            ),
-            (
-                "storage-checkpoints-dir",
-                config.storage.checkpoints_dir.clone(),
-            ),
-            ("artifacts-dir", config.browser.artifacts_dir.clone()),
-        ] {
-            match std::fs::create_dir_all(&dir) {
-                Ok(()) => report.ok(name, dir.display().to_string()),
-                Err(error) => {
-                    report.fail(name, format!("{}: {error}", dir.display()));
-                }
+        for (name, dir) in configured_storage_dirs(config) {
+            if dir.is_dir() {
+                report.ok(name, dir.display().to_string());
+            } else {
+                report.fail(
+                    name,
+                    format!("{} missing; run `bobby doctor --fix`", dir.display()),
+                );
             }
         }
     }

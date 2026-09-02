@@ -266,6 +266,9 @@ enum CliCommand {
         /// Allow --fix to download the already-selected local MLX model
         #[arg(long, requires = "fix")]
         download_model: bool,
+        /// Print the report as JSON on stdout
+        #[arg(long)]
+        json: bool,
     },
     /// Print the current bootstrap bearer for SDK / HTTP / CDP clients
     Token {
@@ -796,6 +799,7 @@ pub async fn run() -> Result<()> {
             skip_health,
             fix,
             download_model,
+            json,
         } => {
             if fix {
                 let report = doctor::run_doctor_fix(doctor::DoctorFixOptions {
@@ -804,13 +808,24 @@ pub async fn run() -> Result<()> {
                     check_health: !skip_health,
                     download_model,
                 })?;
-                report.render();
+                if json {
+                    report.render_actions();
+                    report
+                        .post_fix
+                        .render_json_to(&mut std::io::stdout().lock())?;
+                } else {
+                    report.render();
+                }
                 if report.post_fix.failures() > 0 {
                     std::process::exit(1);
                 }
             } else {
                 let report = doctor::run_doctor(config, bootstrap_env, !skip_health)?;
-                report.render();
+                if json {
+                    report.render_json_to(&mut std::io::stdout().lock())?;
+                } else {
+                    report.render();
+                }
                 if report.failures() > 0 {
                     std::process::exit(1);
                 }
@@ -2551,7 +2566,7 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(output).unwrap(),
-            "[ok] config: loaded\n[warn] model: not loaded\n[fail] health: unreachable\ndoctor: 1 failure(s), 1 warning(s)\n"
+            "[ok] config: loaded\n[warn] model: not loaded\n[fail] health: unreachable\nnext: bobby doctor --fix\ndoctor: 1 failure(s), 1 warning(s)\n"
         );
     }
 
@@ -2609,6 +2624,91 @@ mod tests {
     #[test]
     fn doctor_cli_rejects_model_download_without_fix() {
         assert!(Cli::try_parse_from(["bobby", "doctor", "--download-model"]).is_err());
+    }
+
+    #[test]
+    fn doctor_cli_parses_json() {
+        let cli = Cli::try_parse_from(["bobby", "doctor", "--json"]).unwrap();
+        match cli.command {
+            Some(CliCommand::Doctor { json, fix, .. }) => {
+                assert!(json);
+                assert!(!fix);
+            }
+            _ => panic!("expected doctor command"),
+        }
+    }
+
+    #[test]
+    fn doctor_does_not_rewrite_bootstrap_capabilities() {
+        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
+        let _env = DoctorEnvGuard::clear();
+        let root = tempfile::tempdir().unwrap();
+        let config = doctor_config_fixture(root.path());
+        let bootstrap = root.path().join("bootstrap.env");
+        let material = bootstrap_local::generate_bootstrap(chrono::Duration::days(30)).unwrap();
+        bootstrap_local::write_bootstrap_env(&bootstrap, &material, true).unwrap();
+        let original = std::fs::read_to_string(&bootstrap).unwrap();
+        let stripped = original.replace(",browser:fingerprint", "");
+        assert_ne!(stripped, original);
+        std::fs::write(&bootstrap, &stripped).unwrap();
+
+        let report = run_doctor(Some(config), Some(bootstrap.clone()), false).unwrap();
+        assert_eq!(std::fs::read_to_string(&bootstrap).unwrap(), stripped);
+        assert_eq!(
+            report.check("bootstrap-capabilities").unwrap().status,
+            DoctorStatus::Warn
+        );
+    }
+
+    #[test]
+    fn doctor_does_not_create_missing_storage_dirs() {
+        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
+        let env = DoctorEnvGuard::clear();
+        env.set(
+            "AUTOMATION_RUNTIME_BROWSER_SELECTION",
+            r#"{"preference":{"mode":"managedChromium"}}"#,
+        );
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("not-created");
+        let config = root.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!(
+                r#"[storage]
+journal_path = "{0}/journal.jsonl"
+checkpoints_dir = "{0}/checkpoints"
+authority_path = "{0}/authority.json"
+scheduler_journal_path = "{0}/scheduler-jobs.jsonl"
+
+[browser]
+artifacts_dir = "{0}/artifacts"
+profiles_dir = "{1}/profiles"
+headless = true
+max_active = 1
+upload_roots = []
+downloads_dir = "{1}/downloads"
+max_artifact_bytes = 1048576
+max_screenshot_dimension = 1024
+max_js_result_bytes = 65536
+max_js_timeout_ms = 5000
+"#,
+                missing.display(),
+                root.path().display(),
+            ),
+        )
+        .unwrap();
+
+        let report = run_doctor(
+            Some(config),
+            Some(root.path().join("missing-bootstrap.env")),
+            false,
+        )
+        .unwrap();
+        assert!(!missing.exists());
+        assert_eq!(
+            report.check("storage-journal-dir").unwrap().status,
+            DoctorStatus::Fail
+        );
     }
 
     #[test]
@@ -3351,6 +3451,30 @@ model = "mlx-community/example-selected"
     }
 
     #[test]
+    fn doctor_json_includes_groups_and_null_next_when_healthy() {
+        let mut report = DoctorReport::default();
+        report.ok("config", "built-in defaults (no config file)".to_string());
+        report.ok("healthz", "not running".to_string());
+        let mut buf = Vec::new();
+        report.render_json_to(&mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["version"], 1);
+        assert_eq!(v["failures"], 0);
+        assert!(v["nextAction"].is_null());
+        assert_eq!(v["groups"][0]["name"], "setup");
+        assert_eq!(v["groups"][1]["name"], "runtime");
+    }
+
+    #[test]
+    fn doctor_next_action_prefers_first_fail() {
+        let mut report = DoctorReport::default();
+        report.warn("healthz", "down".to_string());
+        report.fail("bootstrap-expiry", "expired".to_string());
+        let next = report.next_action().unwrap();
+        assert_eq!(next.command, "bobby init --force");
+    }
+
+    #[test]
     fn bootstrap_expiry_check_fails_when_expired_warns_when_near_and_passes_beyond() {
         let expired = check_bootstrap_expiry(chrono::Utc::now() - chrono::Duration::hours(1));
         assert_eq!(expired.status, DoctorStatus::Fail);
@@ -3458,6 +3582,9 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
             root.display()
         );
         std::fs::write(&path, text).unwrap();
+        for dir in ["profiles", "downloads", "artifacts", "storage", "storage/checkpoints"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
         path
     }
 
