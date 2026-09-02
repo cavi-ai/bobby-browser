@@ -116,6 +116,68 @@ async fn ending_session_releases_the_single_session_slot_before_handoff() {
 }
 
 #[tokio::test]
+async fn session_connection_does_not_reuse_a_sessionless_socket_when_the_slot_is_taken() {
+    let (listener, url) = listener_url().await;
+    let server = tokio::spawn(async move {
+        let mut first = next_server_socket(&listener).await;
+        let session_new = recv_json(&mut first).await;
+        assert_eq!(session_new["method"], "session.new");
+        send_json(
+            &mut first,
+            json!({
+                "id": session_new["id"],
+                "type": "error",
+                "error": "session not created",
+                "message": "Maximum number of active sessions"
+            }),
+        )
+        .await;
+        drop(first);
+    });
+
+    let error = match BidiClient::connect_session(url, Duration::from_secs(1)).await {
+        Err(error) => error,
+        Ok(_) => panic!("a sessionless /session socket cannot own Firefox's leaked BiDi session"),
+    };
+    assert_eq!(error.code, ErrorCode::BrowserLaunchFailed);
+    assert!(
+        error
+            .message
+            .to_ascii_lowercase()
+            .contains("maximum number of active sessions"),
+        "{}",
+        error.message
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn session_status_reports_when_remote_agent_already_holds_the_slot() {
+    let (listener, url) = listener_url().await;
+    let server = tokio::spawn(async move {
+        let mut socket = server_socket(listener).await;
+        let status = recv_json(&mut socket).await;
+        assert_eq!(status["method"], "session.status");
+        send_json(
+            &mut socket,
+            json!({
+                "id": status["id"],
+                "type": "success",
+                "result": {"ready": false, "message": "Session already started"}
+            }),
+        )
+        .await;
+    });
+
+    assert!(
+        firefox_companion::bidi::session_slot_occupied(url, Duration::from_secs(1))
+            .await
+            .unwrap()
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn request_ids_are_monotonic_and_out_of_order_responses_stay_correlated() {
     let (listener, url) = listener_url().await;
     let server = tokio::spawn(async move {
