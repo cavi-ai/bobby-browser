@@ -30,6 +30,13 @@ inside a `CommandEnvelope` (`schemaVersion: 2`). TypeScript helpers:
 Multi-field forms use `completeFormRuntimeCommand` with
 `intentEnvelope` (no dedicated `*Envelope` helper yet).
 
+Rust callers get the same builders from `bobby-browser-client`
+(Supported tier): `locate_envelope`, `fill_envelope`,
+`submit_and_verify_envelope`, `wait_for_state_envelope`,
+`follow_envelope`, `dismiss_obstruction_envelope`, `extract_envelope`,
+`solve_challenge_envelope`, `detect_challenge_envelope`, plus the
+`*_runtime_command` builders and `intent_envelope` for the general case.
+
 ## Command classes
 
 | Class | Meaning |
