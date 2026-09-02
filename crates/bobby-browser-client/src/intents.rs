@@ -354,7 +354,7 @@ pub fn solve_challenge_envelope(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::{CompleteFormField, ExtractValueKind, WaitUntil};
+    use crate::commands::{CompleteFormField, WaitUntil};
     use crate::ids::PageId;
 
     fn meta() -> IntentEnvelopeMeta {
