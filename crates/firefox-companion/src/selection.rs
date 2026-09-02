@@ -618,17 +618,17 @@ fn is_firefox_command(command: &str) -> bool {
     lower.contains("firefox")
 }
 
-fn terminate_pid(pid: u32) {
+fn terminate_pid(_pid: u32) {
     #[cfg(unix)]
     unsafe {
-        libc::kill(pid as i32, libc::SIGTERM);
+        libc::kill(_pid as i32, libc::SIGTERM);
     }
 }
 
-fn kill_pid(pid: u32) {
+fn kill_pid(_pid: u32) {
     #[cfg(unix)]
     unsafe {
-        libc::kill(pid as i32, libc::SIGKILL);
+        libc::kill(_pid as i32, libc::SIGKILL);
     }
 }
 
