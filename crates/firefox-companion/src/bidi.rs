@@ -143,13 +143,30 @@ impl Drop for PendingGuard {
 impl BidiClient {
     pub async fn connect_session(url: Url, timeout: Duration) -> Result<Self, CommandError> {
         let client = Self::connect(url, timeout).await?;
-        client
+        match client
             .send(
                 "session.new",
                 serde_json::json!({"capabilities": {"alwaysMatch": {}}}),
             )
-            .await?;
-        Ok(client)
+            .await
+        {
+            Ok(_) => Ok(client),
+            Err(error) if session_slot_taken(&error) => {
+                // A new `/session` socket is sessionless. Firefox 155 never
+                // registers `/session/{id}` for BiDi-only sessions, so this
+                // connection cannot attach or session.end the leftover. Map
+                // to BrowserLaunchFailed so MCP allowlists the diagnostic;
+                // the factory recycles the enrolled profile and retries.
+                drop(client);
+                Err(CommandError {
+                    code: ErrorCode::BrowserLaunchFailed,
+                    message: error.message,
+                    layer: ErrorLayer::Driver,
+                    retryable: true,
+                })
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn connect(url: Url, timeout: Duration) -> Result<Self, CommandError> {
@@ -639,6 +656,21 @@ async fn handle_message(
         params,
     });
     Ok(())
+}
+
+/// Firefox RemoteAgent allows one WebDriver BiDi session. `session.status`
+/// reports `ready: false` when that slot is already held — including a leak
+/// after the owning socket died.
+pub async fn session_slot_occupied(url: Url, timeout: Duration) -> Result<bool, CommandError> {
+    let client = BidiClient::connect(url, timeout).await?;
+    let status = client.send("session.status", serde_json::json!({})).await?;
+    let _ = client.close().await;
+    Ok(status.get("ready").and_then(Value::as_bool) == Some(false))
+}
+
+pub(crate) fn session_slot_taken(error: &CommandError) -> bool {
+    let message = error.message.to_ascii_lowercase();
+    message.contains("session not created") && message.contains("maximum number of active sessions")
 }
 
 fn response_result(value: &Value) -> Result<Result<Value, CommandError>, TerminalFailure> {

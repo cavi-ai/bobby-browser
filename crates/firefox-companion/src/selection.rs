@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     sync::Arc,
     time::Duration,
 };
@@ -198,6 +199,7 @@ impl TryFrom<FirefoxCompanionConfig> for FirefoxRuntimeConfig {
 #[async_trait]
 impl WorkerFactory for ConfiguredFirefoxFactory {
     async fn launch(&self, session_id: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
+        self.ensure_bidi_slot().await?;
         let mut live_server = self.server.lock().await;
         if let Some(server) = live_server.as_ref() {
             server
@@ -326,6 +328,14 @@ impl ConfiguredFirefoxFactory {
                 Ok(client) => return Ok(client),
                 Err(error) => error,
             };
+        if crate::bidi::session_slot_taken(&error) {
+            tracing::warn!(
+                url = %configured,
+                "firefox BiDi session.new still blocked; recycling enrolled profile"
+            );
+            recycle_enrolled_firefox(&self.config).await?;
+            return crate::BidiClient::connect_session(configured, self.config.timeout).await;
+        }
         let Some(live) = live_endpoint_override(&self.config.profile_dir, &configured) else {
             // No live endpoint file, or it agrees with the enrolled URL: the
             // first failure is the real one.
@@ -337,6 +347,22 @@ impl ConfiguredFirefoxFactory {
             "enrolled Firefox BiDi endpoint unreachable; retrying on the profile's live endpoint"
         );
         crate::BidiClient::connect_session(live, self.config.timeout).await
+    }
+
+    async fn ensure_bidi_slot(&self) -> Result<(), CommandError> {
+        match crate::bidi::session_slot_occupied(self.config.bidi_url.clone(), self.config.timeout)
+            .await
+        {
+            Ok(false) => Ok(()),
+            Ok(true) => {
+                tracing::warn!(
+                    url = %self.config.bidi_url,
+                    "firefox BiDi session slot occupied; recycling enrolled profile"
+                );
+                recycle_enrolled_firefox(&self.config).await
+            }
+            Err(_) => Ok(()),
+        }
     }
 
     async fn start_server(&self) -> Result<FirefoxBootstrapAttempt, CommandError> {
@@ -530,6 +556,185 @@ fn live_endpoint_override(profile_dir: &Path, configured: &Url) -> Option<Url> {
     crate::read_bidi_url_from_profile_dir(profile_dir)
         .ok()
         .filter(|live| live != configured)
+}
+
+fn bidi_listen_port(url: &Url) -> Option<u16> {
+    url.port()
+}
+
+fn enrolled_firefox_bin() -> Option<PathBuf> {
+    const CANDIDATES: &[&str] = &[
+        "/Applications/Firefox Developer Edition.app/Contents/MacOS/firefox",
+        "/Applications/Firefox.app/Contents/MacOS/firefox",
+        "/Applications/Firefox Nightly.app/Contents/MacOS/firefox",
+    ];
+    CANDIDATES
+        .iter()
+        .map(PathBuf::from)
+        .find(|path| path.is_file())
+        .or_else(|| {
+            std::env::var_os("PATH").and_then(|paths| {
+                std::env::split_paths(&paths).find_map(|dir| {
+                    ["firefox", "firefox-developer-edition", "firefox-nightly"]
+                        .into_iter()
+                        .map(|name| dir.join(name))
+                        .find(|path| path.is_file())
+                })
+            })
+        })
+}
+
+fn tcp_listen_pids(port: u16) -> Vec<u32> {
+    let output = Command::new("lsof")
+        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse().ok())
+        .collect()
+}
+
+fn process_command(pid: u32) -> Option<String> {
+    let output = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let command = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if command.is_empty() {
+        None
+    } else {
+        Some(command)
+    }
+}
+
+fn is_firefox_command(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    lower.contains("firefox")
+}
+
+fn terminate_pid(_pid: u32) {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(_pid as i32, libc::SIGTERM);
+    }
+}
+
+fn kill_pid(_pid: u32) {
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(_pid as i32, libc::SIGKILL);
+    }
+}
+
+fn terminate_firefox_listeners(port: u16) -> Result<(), CommandError> {
+    for pid in tcp_listen_pids(port) {
+        let Some(command) = process_command(pid) else {
+            continue;
+        };
+        if !is_firefox_command(&command) {
+            return Err(companion_error(format!(
+                "Firefox BiDi port {port} is held by a non-Firefox process"
+            )));
+        }
+        terminate_pid(pid);
+    }
+    Ok(())
+}
+
+async fn wait_until_port_free(port: u16, timeout: Duration) -> Result<(), CommandError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining: Vec<u32> = tcp_listen_pids(port)
+            .into_iter()
+            .filter(|pid| process_command(*pid).is_some_and(|command| is_firefox_command(&command)))
+            .collect();
+        if remaining.is_empty() {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            for pid in remaining {
+                kill_pid(pid);
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if tcp_listen_pids(port).is_empty() {
+                return Ok(());
+            }
+            return Err(companion_error(
+                "Firefox did not release the BiDi port after recycle",
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+fn spawn_enrolled_firefox(bin: &Path, profile: &Path, port: u16) -> Result<(), CommandError> {
+    let mut command = Command::new(bin);
+    command
+        .arg("--no-remote")
+        .arg("--foreground")
+        .arg("--profile")
+        .arg(profile)
+        .arg(format!("--remote-debugging-port={port}"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let child = command
+        .spawn()
+        .map_err(|error| companion_error(format!("failed to recycle enrolled Firefox: {error}")))?;
+    std::mem::forget(child);
+    Ok(())
+}
+
+async fn wait_until_bidi_slot_free(url: &Url, timeout: Duration) -> Result<(), CommandError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let probe = timeout.min(Duration::from_secs(2));
+    loop {
+        match crate::bidi::session_slot_occupied(url.clone(), probe).await {
+            Ok(false) => return Ok(()),
+            Ok(true) => {}
+            Err(_) => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(companion_error(
+                "recycled Firefox did not accept a new BiDi session",
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Firefox BiDi-only sessions are not reconnectable after the owning socket
+/// dies: RemoteAgent keeps the slot, and a new `/session` socket is sessionless.
+/// The enrolled Bobby profile is dedicated automation Firefox, so recycling it
+/// (same profile, same remote-debugging port, no re-pair) is the recovery.
+async fn recycle_enrolled_firefox(config: &FirefoxRuntimeConfig) -> Result<(), CommandError> {
+    let port = bidi_listen_port(&config.bidi_url)
+        .ok_or_else(|| companion_error("Firefox BiDi URL is missing a port"))?;
+    let bin = enrolled_firefox_bin().ok_or_else(|| {
+        companion_error("Firefox binary not found to recycle the leaked BiDi session")
+    })?;
+    terminate_firefox_listeners(port)?;
+    wait_until_port_free(port, config.timeout).await?;
+    spawn_enrolled_firefox(&bin, &config.profile_dir, port)?;
+    wait_until_bidi_slot_free(&config.bidi_url, config.timeout).await
 }
 
 fn companion_error(error: impl std::fmt::Display) -> CommandError {
@@ -1136,6 +1341,20 @@ mod tests {
         assert!(live_endpoint_override(profile.path(), &configured).is_none());
         write_endpoint(profile.path(), 9222);
         assert!(live_endpoint_override(profile.path(), &configured).is_none());
+    }
+
+    #[test]
+    fn bidi_listen_port_reads_the_enrolled_websocket_port() {
+        let url = Url::parse("ws://127.0.0.1:9224/session").unwrap();
+        assert_eq!(bidi_listen_port(&url), Some(9224));
+    }
+
+    #[test]
+    fn firefox_command_match_does_not_treat_unrelated_listeners_as_the_profile() {
+        assert!(is_firefox_command(
+            "/Applications/Firefox Developer Edition.app/Contents/MacOS/firefox --profile /tmp/p"
+        ));
+        assert!(!is_firefox_command("chrome --remote-debugging-port=9224"));
     }
 
     /// A malformed or non-loopback endpoint file must not become a connection
