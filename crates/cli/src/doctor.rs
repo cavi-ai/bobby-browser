@@ -2141,37 +2141,40 @@ where
     }
 }
 
-fn record_jsonl_health(
-    report: &mut DoctorReport,
-    name: &str,
-    path: &Path,
+struct JsonlHealth {
     exists: bool,
     records: usize,
     bytes: u64,
     torn_tail: bool,
     incompatible_records: usize,
     corrupt_line: Option<usize>,
-) {
-    if !exists {
+}
+
+fn record_jsonl_health(report: &mut DoctorReport, name: &str, path: &Path, health: JsonlHealth) {
+    if !health.exists {
         report.ok(name, format!("{} · not created yet", path.display()));
         return;
     }
-    if let Some(line) = corrupt_line {
+    if let Some(line) = health.corrupt_line {
         report.fail(name, format!("corrupt line {line} in {}", path.display()));
         return;
     }
-    if torn_tail {
-        report.warn(
-            name,
-            format!("torn tail · {records} records · {bytes} bytes; run `bobby doctor --fix`"),
-        );
-        return;
-    }
-    if incompatible_records > 0 {
+    if health.torn_tail {
         report.warn(
             name,
             format!(
-                "{incompatible_records} incompatible records in {}",
+                "torn tail · {} records · {} bytes; run `bobby doctor --fix`",
+                health.records, health.bytes
+            ),
+        );
+        return;
+    }
+    if health.incompatible_records > 0 {
+        report.warn(
+            name,
+            format!(
+                "{} incompatible records in {}",
+                health.incompatible_records,
                 path.display()
             ),
         );
@@ -2179,7 +2182,12 @@ fn record_jsonl_health(
     }
     report.ok(
         name,
-        format!("{} · {records} records · {bytes} bytes", path.display()),
+        format!(
+            "{} · {} records · {} bytes",
+            path.display(),
+            health.records,
+            health.bytes
+        ),
     );
 }
 
@@ -2190,12 +2198,14 @@ fn record_command_journal(report: &mut DoctorReport, path: &Path) {
             report,
             "command-journal",
             path,
-            health.exists,
-            health.records,
-            health.bytes,
-            health.torn_tail,
-            health.incompatible_records,
-            health.corrupt_line,
+            JsonlHealth {
+                exists: health.exists,
+                records: health.records,
+                bytes: health.bytes,
+                torn_tail: health.torn_tail,
+                incompatible_records: health.incompatible_records,
+                corrupt_line: health.corrupt_line,
+            },
         ),
         Err(error) => report.fail("command-journal", format!("{error:#}")),
     }
@@ -2209,12 +2219,14 @@ fn record_scheduler_journal(report: &mut DoctorReport, path: &Path) {
             report,
             "scheduler-journal",
             path,
-            health.exists,
-            health.records,
-            health.bytes,
-            health.torn_tail,
-            health.incompatible_records,
-            health.corrupt_line,
+            JsonlHealth {
+                exists: health.exists,
+                records: health.records,
+                bytes: health.bytes,
+                torn_tail: health.torn_tail,
+                incompatible_records: health.incompatible_records,
+                corrupt_line: health.corrupt_line,
+            },
         ),
         Err(error) => report.fail("scheduler-journal", format!("{error:#}")),
     }
@@ -2226,12 +2238,14 @@ fn record_vision_corpus(report: &mut DoctorReport, path: &Path) {
             report,
             "vision-corpus",
             path,
-            health.exists,
-            health.records,
-            health.bytes,
-            health.torn_tail,
-            0,
-            health.corrupt_line,
+            JsonlHealth {
+                exists: health.exists,
+                records: health.records,
+                bytes: health.bytes,
+                torn_tail: health.torn_tail,
+                incompatible_records: 0,
+                corrupt_line: health.corrupt_line,
+            },
         ),
         Err(error) => report.fail("vision-corpus", format!("{error}")),
     }
