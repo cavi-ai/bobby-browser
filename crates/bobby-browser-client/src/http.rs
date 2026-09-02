@@ -7,8 +7,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    CommandEnvelope, CommandOutcome, CreateSessionRequest, OpenPageRequest, PageState, RuntimeInfo,
-    SessionId, SessionState, CURRENT_INTERFACE_VERSION,
+    CheckpointRequest, CommandEnvelope, CommandOutcome, CreateSessionRequest, FormSnapshot,
+    OpenPageRequest, PageId, PageState, RecoveryDecision, RecoveryStatus, RuntimeInfo, SessionId,
+    SessionState, WorkflowCheckpoint, WorkflowId, CURRENT_INTERFACE_VERSION,
 };
 
 /// Errors returned by [`BrowserRuntimeClient`].
@@ -251,6 +252,140 @@ impl BrowserRuntimeClient {
         serde_json::from_str(&text).map_err(|error| {
             ClientError::Protocol(format!("invalid JSON body: {error}")).redact(&self.bearer_token)
         })
+    }
+
+    /// Raw-bytes GET for binary endpoints (`GET /v1/artifacts/{id}`): no JSON
+    /// decoding, the response body is the artifact content.
+    async fn bytes(
+        &self,
+        path: &str,
+        options: Option<RequestOptions>,
+    ) -> Result<Vec<u8>, ClientError> {
+        let options = options.unwrap_or_default();
+        let timeout = options.timeout.unwrap_or(self.default_timeout);
+        let deadline =
+            Utc::now() + ChronoDuration::from_std(timeout).unwrap_or(ChronoDuration::seconds(30));
+        let correlation = options
+            .correlation_id
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let response = self
+            .http
+            .get(format!("{}{path}", self.base_url))
+            .timeout(timeout)
+            .header("authorization", format!("Bearer {}", self.bearer_token))
+            .header("x-interface-version", CURRENT_INTERFACE_VERSION)
+            .header("x-correlation-id", correlation)
+            .header("x-deadline", deadline.to_rfc3339())
+            .send()
+            .await
+            .map_err(|error| {
+                ClientError::Transport(error.to_string()).redact(&self.bearer_token)
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(ClientError::Http {
+                status: status.as_u16(),
+                message: text,
+            }
+            .redact(&self.bearer_token));
+        }
+        let body = response.bytes().await.map_err(|error| {
+            ClientError::Transport(error.to_string()).redact(&self.bearer_token)
+        })?;
+        Ok(body.to_vec())
+    }
+
+    /// `GET /v1/sessions/{session}/pages/{page}/forms` — semantic form snapshot.
+    ///
+    /// `max_controls` bounds the inventory (1..=512), mirroring the
+    /// TypeScript `formSnapshot(sessionId, pageId, { maxControls })`.
+    pub async fn form_snapshot(
+        &self,
+        session_id: &SessionId,
+        page_id: &PageId,
+        max_controls: Option<u32>,
+        options: Option<RequestOptions>,
+    ) -> Result<FormSnapshot, ClientError> {
+        if let Some(bound) = max_controls {
+            assert!(
+                (1..=512).contains(&bound),
+                "maxControls must be between 1 and 512"
+            );
+        }
+        let query = max_controls
+            .map(|bound| format!("?maxControls={bound}"))
+            .unwrap_or_default();
+        self.json(
+            Method::GET,
+            &format!(
+                "/v1/sessions/{}/pages/{}/forms{query}",
+                session_id.0, page_id.0
+            ),
+            None::<()>,
+            options,
+        )
+        .await
+    }
+
+    /// `POST /v1/checkpoints` — persist a workflow checkpoint.
+    pub async fn checkpoint(
+        &self,
+        input: &CheckpointRequest,
+        options: Option<RequestOptions>,
+    ) -> Result<WorkflowCheckpoint, ClientError> {
+        self.json(Method::POST, "/v1/checkpoints", Some(input), options)
+            .await
+    }
+
+    /// `GET /v1/recovery/{workflow}` — current recovery status for a workflow.
+    pub async fn recovery_status(
+        &self,
+        workflow_id: &WorkflowId,
+        options: Option<RequestOptions>,
+    ) -> Result<RecoveryStatus, ClientError> {
+        self.json(
+            Method::GET,
+            &format!("/v1/recovery/{}", workflow_id.0),
+            None::<()>,
+            options,
+        )
+        .await
+    }
+
+    /// `POST /v1/recovery/{workflow}` — resume, reconcile, or restart a
+    /// workflow. A `needsReconciliation` decision answers HTTP `409`, which
+    /// this method surfaces as `ClientError::Http` carrying the decision body.
+    pub async fn recover(
+        &self,
+        workflow_id: &WorkflowId,
+        options: Option<RequestOptions>,
+    ) -> Result<RecoveryDecision, ClientError> {
+        self.json(
+            Method::POST,
+            &format!("/v1/recovery/{}", workflow_id.0),
+            None::<()>,
+            options,
+        )
+        .await
+    }
+
+    /// `GET /v1/artifacts/{id}` — fetch a digest-verified artifact's content.
+    pub async fn artifact(
+        &self,
+        artifact_id: &str,
+        options: Option<RequestOptions>,
+    ) -> Result<Vec<u8>, ClientError> {
+        assert!(
+            !artifact_id.is_empty()
+                && artifact_id.len() <= 128
+                && artifact_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() || byte == b'-'),
+            "artifact id must be 1..=128 hex or dash characters"
+        );
+        self.bytes(&format!("/v1/artifacts/{artifact_id}"), options)
+            .await
     }
 }
 

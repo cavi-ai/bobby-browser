@@ -311,3 +311,14 @@ pub enum RecoveryDecision {
         evidence: Vec<Evidence>,
     },
 }
+
+/// `POST /v1/checkpoints` request body: the checkpoint plus the command ids
+/// whose evidence the runtime resolves from its own journal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct CheckpointRequest {
+    pub checkpoint: WorkflowCheckpoint,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_refs: Vec<CommandId>,
+}
