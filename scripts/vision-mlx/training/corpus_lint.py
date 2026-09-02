@@ -53,12 +53,13 @@ REQUIRED_FIELDS = [
     "purpose",
     "intent_kind",
     "context_candidates",
-    "target_index",
     "model_response",
     "success",
     "journey",
     "step",
 ]
+# The engine's corpus schema omits target_index entirely on abstentions
+# (skip_serializing_if Option::is_none); absence reads as None downstream.
 
 # abstain recall is healthy around 4:1; outside this band the negative
 # class is either starved or drowning the positives.
