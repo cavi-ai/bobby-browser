@@ -65,6 +65,9 @@ REQUIRED_FIELDS = [
 # class is either starved or drowning the positives.
 MIN_POS_PER_NEG = 2.0
 MAX_POS_PER_NEG = 8.0
+# Above this absolute negative mass the class is not starved regardless of
+# ratio — positive volume scales with steps x runs, negative volume does not.
+MIN_NEGATIVE_MASS = 60
 
 
 def lint(rows: list, *, check_balance: bool = True) -> tuple:
@@ -159,10 +162,23 @@ def lint(rows: list, *, check_balance: bool = True) -> tuple:
         errors.append("no abstain-labeled negatives; the abstain class is untrained")
     elif negatives > 0 and check_balance:
         ratio = positives / negatives
-        if not MIN_POS_PER_NEG <= ratio <= MAX_POS_PER_NEG:
-            errors.append(
-                f"positive:negative ratio {ratio:.1f}:1 outside the healthy band "
-                f"[{MIN_POS_PER_NEG}:{1}, {MAX_POS_PER_NEG}:1] ({positives}/{negatives})"
+        # The ratio band guards against a starved or drowned abstain class
+        # at training scale. Above a healthy absolute negative mass, the
+        # upper bound relaxes to a warning: positive volume scales with
+        # steps x runs while negative volume does not, so a large corpus
+        # naturally drifts past 8:1 without the class being starved.
+        if negatives < MIN_NEGATIVE_MASS:
+            if not MIN_POS_PER_NEG <= ratio <= MAX_POS_PER_NEG:
+                errors.append(
+                    f"positive:negative ratio {ratio:.1f}:1 outside the healthy "
+                    f"band [{MIN_POS_PER_NEG}:{1}, {MAX_POS_PER_NEG}:1] "
+                    f"({positives}/{negatives})"
+                )
+        elif ratio > MAX_POS_PER_NEG * 1.5:
+            warnings.append(
+                f"positive:negative ratio {ratio:.1f}:1 with {negatives} "
+                "negatives — healthy mass, but the abstain region may thin "
+                "as positives scale"
             )
 
     return errors, warnings
