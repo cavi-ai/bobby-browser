@@ -4044,6 +4044,51 @@ endpoint_url = "http://127.0.0.1:8080/propose"
     }
 
     #[test]
+    fn doctor_fix_rotates_expired_agent_bootstrap() {
+        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
+        let env = DoctorEnvGuard::clear();
+        env.set(
+            "AUTOMATION_RUNTIME_BROWSER_SELECTION",
+            r#"{"preference":{"mode":"managedChromium"}}"#,
+        );
+        let root = tempfile::tempdir().unwrap();
+        let config = doctor_config_fixture(root.path());
+        let bootstrap = root.path().join("bootstrap.env");
+        let material = bootstrap_local::generate_bootstrap_for_preset(
+            chrono::Duration::hours(-1),
+            bootstrap_local::BootstrapPreset::Agent,
+        )
+        .unwrap();
+        bootstrap_local::write_bootstrap_env(&bootstrap, &material, true).unwrap();
+        let old_token = material.bearer().to_string();
+
+        let report = run_doctor_fix(DoctorFixOptions {
+            config: Some(config),
+            bootstrap_env: Some(bootstrap.clone()),
+            check_health: false,
+            download_model: false,
+        })
+        .unwrap();
+
+        let after = std::fs::read_to_string(&bootstrap).unwrap();
+        assert!(!after.contains(&old_token), "token must rotate");
+        assert!(after.contains("bobby-bootstrap-preset: agent"));
+        assert!(
+            !after.contains("authority:admin"),
+            "agent preset must not widen"
+        );
+        let loaded = bootstrap_local::load_startup_from_env_file(&bootstrap).unwrap();
+        assert!(loaded.expires_at() > chrono::Utc::now());
+        let action = report
+            .actions
+            .iter()
+            .find(|action| action.name == "bootstrap")
+            .unwrap();
+        assert_eq!(action.status, DoctorFixStatus::Fixed);
+        assert!(action.detail.contains("rotated"));
+    }
+
+    #[test]
     fn doctor_fix_generates_missing_private_credentials() {
         let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
         let _env = DoctorEnvGuard::clear();

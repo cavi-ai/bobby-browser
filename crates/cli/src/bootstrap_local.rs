@@ -205,6 +205,45 @@ pub fn write_bootstrap_env(path: &Path, material: &BootstrapMaterial, force: boo
         .with_context(|| format!("failed to write bootstrap env to {}", path.display()))
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RotateReport {
+    pub rotated: bool,
+}
+
+/// Replace token/principal/expiry when the file is expired. Preset marker and
+/// capability union (floor ∪ existing) stay. Missing or unexpired → no-op.
+pub fn rotate_expired_bootstrap(path: &Path, ttl: Duration) -> Result<RotateReport> {
+    if !path.exists() {
+        return Ok(RotateReport { rotated: false });
+    }
+    let preset = read_preset_marker_from_file(path)?.unwrap_or(BootstrapPreset::Unrestricted);
+    let fields = read_bootstrap_env_fields(path)?;
+    let expires_at = fields.expires_at.as_deref().with_context(|| {
+        format!(
+            "bootstrap env {} missing required key {ENV_EXPIRES_AT}",
+            path.display()
+        )
+    })?;
+    let expires_at = DateTime::parse_from_rfc3339(expires_at)
+        .with_context(|| {
+            format!(
+                "bootstrap env {} has invalid expiry {expires_at}",
+                path.display()
+            )
+        })?
+        .with_timezone(&Utc);
+    if expires_at > Utc::now() {
+        return Ok(RotateReport { rotated: false });
+    }
+    let existing = fields.capabilities.unwrap_or_default();
+    let (capabilities_csv, _) =
+        union_capabilities_csv_with(&existing, capabilities_for_preset(preset))?;
+    let mut material = generate_bootstrap_for_preset(ttl, preset)?;
+    material.capabilities_csv = capabilities_csv;
+    write_bootstrap_env(path, &material, true)?;
+    Ok(RotateReport { rotated: true })
+}
+
 /// Read the bootstrap preset from a dotenv comment or process env.
 /// Missing marker defaults to [`BootstrapPreset::Unrestricted`] (back-compat).
 pub fn read_bootstrap_preset(path: Option<&Path>) -> BootstrapPreset {

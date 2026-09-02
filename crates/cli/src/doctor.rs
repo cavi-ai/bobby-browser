@@ -111,19 +111,36 @@ pub(crate) fn run_doctor_fix(options: DoctorFixOptions) -> Result<DoctorFixRepor
 
     if bootstrap_path.exists() {
         match bootstrap_local::ensure_unrestricted_bootstrap(&bootstrap_path) {
-            Ok(heal) => actions.push(DoctorFixAction {
-                status: if heal.changed() {
-                    DoctorFixStatus::Fixed
-                } else {
-                    DoctorFixStatus::Noop
-                },
-                name: "bootstrap".to_string(),
-                detail: if heal.changed() {
-                    "healed the existing unrestricted capability set".to_string()
-                } else {
-                    "existing bootstrap already uses current capabilities".to_string()
-                },
-            }),
+            Ok(heal) => {
+                match bootstrap_local::rotate_expired_bootstrap(
+                    &bootstrap_path,
+                    chrono::Duration::days(bootstrap_local::DEFAULT_TTL_DAYS),
+                ) {
+                    Ok(rotate) if rotate.rotated => actions.push(DoctorFixAction {
+                        status: DoctorFixStatus::Fixed,
+                        name: "bootstrap".to_string(),
+                        detail: "rotated expired bootstrap credential".to_string(),
+                    }),
+                    Ok(_) => actions.push(DoctorFixAction {
+                        status: if heal.changed() {
+                            DoctorFixStatus::Fixed
+                        } else {
+                            DoctorFixStatus::Noop
+                        },
+                        name: "bootstrap".to_string(),
+                        detail: if heal.changed() {
+                            "healed the existing unrestricted capability set".to_string()
+                        } else {
+                            "existing bootstrap already uses current capabilities".to_string()
+                        },
+                    }),
+                    Err(error) => actions.push(DoctorFixAction {
+                        status: DoctorFixStatus::Failed,
+                        name: "bootstrap".to_string(),
+                        detail: error.to_string(),
+                    }),
+                }
+            }
             Err(error) => actions.push(DoctorFixAction {
                 status: DoctorFixStatus::Failed,
                 name: "bootstrap".to_string(),
