@@ -4,9 +4,10 @@ documentedVersion: 0.12.0
 
 # Troubleshooting
 
-Run `bobby doctor` first when something local fails to start. Use
-`--config` / `--bootstrap-env` to match how you launch `serve`. See
-[CLI reference](cli.md).
+Run `bobby doctor` first when something local fails to start. It is read-only:
+it reports, it does not rewrite bootstrap files or create storage directories.
+Use `--fix` for those repairs, and `--config` / `--bootstrap-env` to match how
+you launch `serve`. See [CLI reference](cli.md).
 
 ## Auth failures (`401`)
 

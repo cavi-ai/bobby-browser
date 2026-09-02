@@ -26,6 +26,17 @@ pub enum StoreError {
     Corrupt { line: usize },
 }
 
+/// Read-only health of a scheduler journal. Never truncates, compact, or creates the path.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JournalHealth {
+    pub exists: bool,
+    pub bytes: u64,
+    pub records: usize,
+    pub torn_tail: bool,
+    pub incompatible_records: usize,
+    pub corrupt_line: Option<usize>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum JobEvent {
@@ -297,6 +308,38 @@ impl JournalJobStore {
         Ok(store)
     }
 
+    /// Probe journal health without truncating, compacting, or creating the file.
+    pub async fn inspect(path: impl AsRef<Path>) -> Result<JournalHealth, StoreError> {
+        let path = path.as_ref();
+        let bytes = match tokio::fs::read(path).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(JournalHealth::default());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let bytes_len = bytes.len() as u64;
+        match scan_bytes(&bytes) {
+            Ok(scan) => Ok(JournalHealth {
+                exists: true,
+                bytes: bytes_len,
+                records: complete_line_count(&bytes),
+                torn_tail: scan.torn_tail,
+                incompatible_records: scan.incompatible_records,
+                corrupt_line: None,
+            }),
+            Err(StoreError::Corrupt { line }) => Ok(JournalHealth {
+                exists: true,
+                bytes: bytes_len,
+                records: complete_line_count(&bytes).saturating_sub(1),
+                torn_tail: !bytes.is_empty() && !bytes.ends_with(b"\n"),
+                incompatible_records: 0,
+                corrupt_line: Some(line),
+            }),
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn path(&self) -> &Path {
         self.path.as_ref()
     }
@@ -375,6 +418,24 @@ async fn truncate_torn_tail(path: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
+fn complete_len(bytes: &[u8]) -> usize {
+    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+        bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |at| at + 1)
+    } else {
+        bytes.len()
+    }
+}
+
+fn complete_line_count(bytes: &[u8]) -> usize {
+    bytes[..complete_len(bytes)]
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .count()
+}
+
 async fn scan_path(path: &Path) -> Result<Scan, StoreError> {
     let mut file = match File::open(path).await {
         Ok(file) => file,
@@ -390,7 +451,10 @@ async fn scan_path(path: &Path) -> Result<Scan, StoreError> {
     };
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).await?;
+    scan_bytes(&bytes)
+}
 
+fn scan_bytes(bytes: &[u8]) -> Result<Scan, StoreError> {
     let torn_tail = !bytes.is_empty() && !bytes.ends_with(b"\n");
     let complete_len = if torn_tail {
         bytes

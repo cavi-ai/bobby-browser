@@ -19,6 +19,10 @@ const MAX_BEARER_BYTES: usize = 505;
 
 #[tokio::main]
 async fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     if let Err(error) = run().await {
         eprintln!("acp gateway failed: {error}");
         std::process::exit(1);
