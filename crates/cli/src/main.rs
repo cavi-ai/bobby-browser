@@ -2514,9 +2514,9 @@ impl NativeHostEnroll for NativeHostFirefoxEnroll {
 mod tests {
     use super::doctor::{
         check_bootstrap_expiry, check_vision_acp, check_vision_provider, check_vision_upstream_key,
-        handshake_error_status, run_doctor, run_doctor_fix, vision_auth_discovery_check,
-        vision_endpoint_unreachable_detail, DoctorColorMode, DoctorFixOptions, DoctorFixStatus,
-        DoctorReport, DoctorStatus, BOOTSTRAP_EXPIRY_WARN_DAYS,
+        handshake_error_status, run_doctor, run_doctor_fix, sidecar_version_status,
+        vision_auth_discovery_check, vision_endpoint_unreachable_detail, DoctorColorMode,
+        DoctorFixOptions, DoctorFixStatus, DoctorReport, DoctorStatus, BOOTSTRAP_EXPIRY_WARN_DAYS,
     };
     use super::*;
     use auth_broker::{AuthCapabilities, AuthStrategy};
@@ -3512,7 +3512,7 @@ model = "mlx-community/example-selected"
     }
 
     impl DoctorEnvGuard {
-        const VARS: [&'static str; 8] = [
+        const VARS: [&'static str; 9] = [
             "AUTOMATION_RUNTIME_BROWSER_SELECTION",
             "AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN",
             "AUTOMATION_RUNTIME_BOOTSTRAP_PRINCIPAL",
@@ -3521,6 +3521,7 @@ model = "mlx-community/example-selected"
             "BOBBY_BROWSER_BOOTSTRAP_ENV",
             "BOBBY_VISION_TOKEN",
             "OPENAI_API_KEY",
+            "PATH",
         ];
 
         fn clear() -> Self {
@@ -3582,7 +3583,13 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
             root.display()
         );
         std::fs::write(&path, text).unwrap();
-        for dir in ["profiles", "downloads", "artifacts", "storage", "storage/checkpoints"] {
+        for dir in [
+            "profiles",
+            "downloads",
+            "artifacts",
+            "storage",
+            "storage/checkpoints",
+        ] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
         }
         path
@@ -4198,6 +4205,10 @@ api_key_env = "OPENAI_API_KEY"
             .unwrap()
             .detail
             .contains("bobby install --cli"));
+        assert!(
+            report.check("sidecar-version").is_none(),
+            "sidecar-version is omitted when both gateways are missing"
+        );
         match previous {
             Some(value) => unsafe { std::env::set_var("PATH", value) },
             None => unsafe { std::env::remove_var("PATH") },
@@ -4254,5 +4265,128 @@ port = 9333
         let check = report.check("cdp-listen").expect("cdp-listen check");
         assert_eq!(check.status, DoctorStatus::Ok);
         assert!(check.detail.contains("127.0.0.1:9333"));
+    }
+
+    #[test]
+    fn sidecar_version_status_omits_when_both_missing() {
+        assert!(sidecar_version_status("0.12.0", None, None).is_none());
+    }
+
+    #[test]
+    fn sidecar_version_status_fails_on_mismatch() {
+        let check = sidecar_version_status("0.12.0", Some("0.11.0"), Some("0.12.0")).unwrap();
+        assert_eq!(check.status, DoctorStatus::Fail);
+        assert_eq!(check.name, "sidecar-version");
+        assert!(check.detail.contains("0.11.0"));
+    }
+
+    #[test]
+    fn sidecar_version_status_ok_when_found_match() {
+        let check = sidecar_version_status("0.12.0", Some("0.12.0"), None).unwrap();
+        assert_eq!(check.status, DoctorStatus::Ok);
+        assert_eq!(check.name, "sidecar-version");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sidecar_version_reads_stdout_within_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-gateway");
+        std::fs::write(&script, "#!/bin/sh\necho 0.0.0\n").unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+        assert_eq!(onboarding::sidecar_version(&script).unwrap(), "0.0.0");
+    }
+
+    #[test]
+    fn doctor_warns_command_journal_torn_tail_without_rewriting() {
+        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
+        let env = DoctorEnvGuard::clear();
+        env.set(
+            "AUTOMATION_RUNTIME_BROWSER_SELECTION",
+            r#"{"preference":{"mode":"managedChromium"}}"#,
+        );
+        let root = tempfile::tempdir().unwrap();
+        let config = doctor_config_fixture(root.path());
+        let journal = root.path().join("storage/journal.jsonl");
+        let complete = concat!(
+            r#"{"sequence":0,"recordedAt":"2026-07-22T16:31:49.071530Z","commandId":"00000000-0000-4000-8000-000000000001","phase":"accepted","envelope":null,"outcome":null}"#,
+            "\n"
+        );
+        let mut bytes = complete.as_bytes().to_vec();
+        bytes.extend_from_slice(br#"{"sequence":1"#);
+        std::fs::write(&journal, &bytes).unwrap();
+
+        let report = run_doctor(
+            Some(config),
+            Some(root.path().join("missing-bootstrap.env")),
+            false,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&journal).unwrap(), bytes);
+        let check = report.check("command-journal").expect("command-journal");
+        assert_eq!(check.status, DoctorStatus::Warn);
+        assert!(check.detail.contains("torn"), "{check:?}");
+    }
+
+    #[test]
+    fn doctor_healthz_unreachable_is_ok_not_running() {
+        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
+        let env = DoctorEnvGuard::clear();
+        env.set(
+            "AUTOMATION_RUNTIME_BROWSER_SELECTION",
+            r#"{"preference":{"mode":"managedChromium"}}"#,
+        );
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let root = tempfile::tempdir().unwrap();
+        let config = doctor_config_fixture(root.path());
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        text = text.replace("port = 17987", &format!("port = {port}"));
+        std::fs::write(&config, text).unwrap();
+
+        let report = run_doctor(
+            Some(config),
+            Some(root.path().join("missing-bootstrap.env")),
+            true,
+        )
+        .unwrap();
+        let check = report.check("healthz").expect("healthz");
+        assert_eq!(check.status, DoctorStatus::Ok);
+        assert!(check.detail.contains("not running"), "{check:?}");
+        assert!(report.check("jobs-queue").is_none());
+    }
+
+    #[test]
+    fn doctor_fails_context_store_on_invalid_json() {
+        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
+        let env = DoctorEnvGuard::clear();
+        env.set(
+            "AUTOMATION_RUNTIME_BROWSER_SELECTION",
+            r#"{"preference":{"mode":"managedChromium"}}"#,
+        );
+        let root = tempfile::tempdir().unwrap();
+        let config = doctor_config_fixture(root.path());
+        std::fs::write(
+            &config,
+            format!(
+                "{}\n[context]\ndir = \"{}\"\n",
+                std::fs::read_to_string(&config).unwrap(),
+                root.path().join("context").display()
+            ),
+        )
+        .unwrap();
+        let profile = root.path().join("context").join("profile-a");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(profile.join("https___example.com.json"), b"not-json").unwrap();
+
+        let report = run_doctor(Some(config), None, false).unwrap();
+        let check = report.check("context-store").expect("context-store");
+        assert_eq!(check.status, DoctorStatus::Fail);
+        assert!(check.detail.contains("invalid JSON"), "{check:?}");
     }
 }

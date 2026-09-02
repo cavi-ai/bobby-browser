@@ -386,16 +386,44 @@ fn repair_command(name: &str) -> &'static str {
         "bootstrap-capabilities" => "bobby doctor --fix",
         "config" => "fix config.toml",
         "context-store" => "bobby context verify",
-        other if other.starts_with("storage-")
-            || matches!(
-                other,
-                "command-journal" | "scheduler-journal" | "vision-corpus"
-            ) =>
+        other
+            if other.starts_with("storage-")
+                || matches!(
+                    other,
+                    "command-journal" | "scheduler-journal" | "vision-corpus"
+                ) =>
         {
             "bobby doctor --fix"
         }
         _ => "bobby doctor --fix",
     }
+}
+
+pub(crate) fn sidecar_version_status(
+    bobby: &str,
+    mcp: Option<&str>,
+    acp: Option<&str>,
+) -> Option<DoctorCheck> {
+    if mcp.is_none() && acp.is_none() {
+        return None;
+    }
+    if let Some((name, version)) = [("mcp-gateway", mcp), ("acp-gateway", acp)]
+        .into_iter()
+        .find_map(|(name, version)| {
+            version.and_then(|version| (version != bobby).then_some((name, version)))
+        })
+    {
+        return Some(DoctorCheck {
+            status: DoctorStatus::Fail,
+            name: "sidecar-version".to_string(),
+            detail: format!("{name} {version} does not match bobby {bobby}"),
+        });
+    }
+    Some(DoctorCheck {
+        status: DoctorStatus::Ok,
+        name: "sidecar-version".to_string(),
+        detail: format!("matches bobby {bobby}"),
+    })
 }
 
 /// Structured outcome of a `bobby doctor` run: every check in order, so the
@@ -454,9 +482,11 @@ impl DoctorReport {
                 reason: check.detail.clone(),
             });
         }
-        if let Some(check) = self.checks.iter().find(|check| {
-            check.name == "bootstrap" && check.status == DoctorStatus::Warn
-        }) {
+        if let Some(check) = self
+            .checks
+            .iter()
+            .find(|check| check.name == "bootstrap" && check.status == DoctorStatus::Warn)
+        {
             return Some(DoctorNextAction {
                 command: "bobby install".to_string(),
                 reason: check.detail.clone(),
@@ -1205,6 +1235,7 @@ pub(crate) fn run_doctor(
                 let mut sites = 0_u64;
                 let mut bytes = 0_u64;
                 let mut locked = false;
+                let mut invalid_json: Option<PathBuf> = None;
                 if let Ok(mut entries) = std::fs::read_dir(&root) {
                     while let Some(Ok(profile)) = entries.next() {
                         if let Ok(mut files) = std::fs::read_dir(profile.path()) {
@@ -1216,21 +1247,33 @@ pub(crate) fn run_doctor(
                                 } else if name.ends_with(".json") {
                                     sites += 1;
                                     bytes += file.metadata().map(|m| m.len()).unwrap_or(0);
+                                    if invalid_json.is_none()
+                                        && !context_json_is_object(&file.path())
+                                    {
+                                        invalid_json = Some(file.path());
+                                    }
                                 }
                             }
                         }
                     }
                 }
-                let lock = if locked { "lock held" } else { "lock free" };
-                report.ok(
-                    "context-store",
-                    format!(
-                        "{} · {} site files · {} bytes · {lock}",
-                        root.display(),
-                        sites,
-                        bytes
-                    ),
-                );
+                if let Some(path) = invalid_json {
+                    report.fail(
+                        "context-store",
+                        format!("invalid JSON in {}", path.display()),
+                    );
+                } else {
+                    let lock = if locked { "lock held" } else { "lock free" };
+                    report.ok(
+                        "context-store",
+                        format!(
+                            "{} · {} site files · {} bytes · {lock}",
+                            root.display(),
+                            sites,
+                            bytes
+                        ),
+                    );
+                }
             }
             Some(root) => report.ok(
                 "context-store",
@@ -1494,11 +1537,21 @@ pub(crate) fn run_doctor(
 
     // Sidecar gateways must sit beside bobby (or on PATH) for mcp-stdio /
     // acp-stdio. Missing binaries are a warning with an install hint.
-    for (name, command) in [
-        ("mcp-gateway", onboarding::mcp_gateway_command()),
-        ("acp-gateway", onboarding::acp_gateway_command()),
+    let mcp_bin = onboarding::find_sidecar_binary(onboarding::mcp_gateway_command());
+    let acp_bin = onboarding::find_sidecar_binary(onboarding::acp_gateway_command());
+    for (name, command, path) in [
+        (
+            "mcp-gateway",
+            onboarding::mcp_gateway_command(),
+            mcp_bin.as_deref(),
+        ),
+        (
+            "acp-gateway",
+            onboarding::acp_gateway_command(),
+            acp_bin.as_deref(),
+        ),
     ] {
-        match onboarding::find_sidecar_binary(command) {
+        match path {
             Some(path) => report.ok(name, path.display().to_string()),
             None => report.warn(
                 name,
@@ -1507,6 +1560,16 @@ pub(crate) fn run_doctor(
                 ),
             ),
         }
+    }
+    match sidecar_versions(mcp_bin.as_deref(), acp_bin.as_deref()) {
+        Ok((mcp, acp)) => {
+            if let Some(check) =
+                sidecar_version_status(env!("CARGO_PKG_VERSION"), mcp.as_deref(), acp.as_deref())
+            {
+                push_doctor_check(&mut report, check);
+            }
+        }
+        Err(detail) => report.fail("sidecar-version", detail),
     }
 
     // MCP handshake: the stdio gateway an agent host launches must answer
@@ -1622,6 +1685,11 @@ pub(crate) fn run_doctor(
                 );
             }
         }
+        record_command_journal(&mut report, &config.storage.journal_path);
+        record_scheduler_journal(&mut report, &config.storage.scheduler_journal_path);
+        if let Some(dir) = &config.vision.corpus_dir {
+            record_vision_corpus(&mut report, &dir.join("vision-corpus.jsonl"));
+        }
     }
 
     let firefox = which_binary(&["firefox", "firefox-esr"])
@@ -1659,12 +1727,12 @@ pub(crate) fn run_doctor(
                 config.server.host, config.server.port
             );
             match probe_healthz(&url) {
-                Ok(()) => report.ok("healthz", format!("{url} responded")),
-                Err(error) => {
-                    report.warn(
-                        "healthz",
-                        format!("{url} not reachable ({error}); is `bobby serve` running?"),
-                    );
+                Ok(()) => {
+                    report.ok("healthz", format!("{url} responded"));
+                    record_jobs_queue(&mut report, config, bootstrap_path_for_heal.as_deref());
+                }
+                Err(_) => {
+                    report.ok("healthz", "not running".to_string());
                 }
             }
             let (cdp_check, cdp_state) = check_cdp_port(&config.cdp);
@@ -2029,6 +2097,203 @@ fn probe_firefox_bidi(endpoint: &str) -> std::result::Result<(), BidiProbeFailur
         )));
     }
     Ok(())
+}
+
+fn context_json_is_object(path: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    matches!(
+        serde_json::from_slice::<serde_json::Value>(&bytes),
+        Ok(serde_json::Value::Object(_))
+    )
+}
+
+fn sidecar_versions(
+    mcp: Option<&Path>,
+    acp: Option<&Path>,
+) -> Result<(Option<String>, Option<String>), String> {
+    let read = |path: Option<&Path>| match path {
+        None => Ok(None),
+        Some(path) => onboarding::sidecar_version(path)
+            .map(Some)
+            .map_err(|error| format!("{}: {error:#}", path.display())),
+    };
+    Ok((read(mcp)?, read(acp)?))
+}
+
+fn block_on_inspect<T, F>(fut: F) -> T
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
+        Err(_) => std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("inspect runtime")
+                .block_on(fut)
+        })
+        .join()
+        .expect("inspect thread panicked"),
+    }
+}
+
+fn record_jsonl_health(
+    report: &mut DoctorReport,
+    name: &str,
+    path: &Path,
+    exists: bool,
+    records: usize,
+    bytes: u64,
+    torn_tail: bool,
+    incompatible_records: usize,
+    corrupt_line: Option<usize>,
+) {
+    if !exists {
+        report.ok(name, format!("{} · not created yet", path.display()));
+        return;
+    }
+    if let Some(line) = corrupt_line {
+        report.fail(name, format!("corrupt line {line} in {}", path.display()));
+        return;
+    }
+    if torn_tail {
+        report.warn(
+            name,
+            format!("torn tail · {records} records · {bytes} bytes; run `bobby doctor --fix`"),
+        );
+        return;
+    }
+    if incompatible_records > 0 {
+        report.warn(
+            name,
+            format!(
+                "{incompatible_records} incompatible records in {}",
+                path.display()
+            ),
+        );
+        return;
+    }
+    report.ok(
+        name,
+        format!("{} · {records} records · {bytes} bytes", path.display()),
+    );
+}
+
+fn record_command_journal(report: &mut DoctorReport, path: &Path) {
+    let path_buf = path.to_path_buf();
+    match block_on_inspect(async move { workflow_journal::JsonlJournal::inspect(path_buf).await }) {
+        Ok(health) => record_jsonl_health(
+            report,
+            "command-journal",
+            path,
+            health.exists,
+            health.records,
+            health.bytes,
+            health.torn_tail,
+            health.incompatible_records,
+            health.corrupt_line,
+        ),
+        Err(error) => report.fail("command-journal", format!("{error:#}")),
+    }
+}
+
+fn record_scheduler_journal(report: &mut DoctorReport, path: &Path) {
+    let path_buf = path.to_path_buf();
+    match block_on_inspect(async move { task_scheduler::JournalJobStore::inspect(path_buf).await })
+    {
+        Ok(health) => record_jsonl_health(
+            report,
+            "scheduler-journal",
+            path,
+            health.exists,
+            health.records,
+            health.bytes,
+            health.torn_tail,
+            health.incompatible_records,
+            health.corrupt_line,
+        ),
+        Err(error) => report.fail("scheduler-journal", format!("{error:#}")),
+    }
+}
+
+fn record_vision_corpus(report: &mut DoctorReport, path: &Path) {
+    match intent_engine::VisionCorpus::inspect(path) {
+        Ok(health) => record_jsonl_health(
+            report,
+            "vision-corpus",
+            path,
+            health.exists,
+            health.records,
+            health.bytes,
+            health.torn_tail,
+            0,
+            health.corrupt_line,
+        ),
+        Err(error) => report.fail("vision-corpus", format!("{error}")),
+    }
+}
+
+fn record_jobs_queue(report: &mut DoctorReport, config: &AppConfig, bootstrap: Option<&Path>) {
+    let bootstrap = bootstrap.unwrap_or_else(|| Path::new(""));
+    let bearer = match crate::jobs_client::resolve_jobs_auth(None, bootstrap) {
+        Ok(bearer) => bearer,
+        Err(error) => {
+            report.warn(
+                "jobs-queue",
+                format!("no bearer to read runtime ({error:#})"),
+            );
+            return;
+        }
+    };
+    let url = match crate::v1_client::v1_url(
+        &format!("http://{}:{}", config.server.host, config.server.port),
+        "/v1/runtime",
+    ) {
+        Ok(url) => url,
+        Err(error) => {
+            report.warn("jobs-queue", format!("{error:#}"));
+            return;
+        }
+    };
+    match crate::v1_client::v1_request_with_limits(
+        crate::v1_client::V1Request {
+            method: reqwest::Method::GET,
+            url,
+            bearer,
+            body: None,
+            idempotency_key: None,
+        },
+        Duration::from_secs(1),
+        chrono::Duration::seconds(5),
+    ) {
+        Ok(response) if response.status.as_u16() == 401 => {
+            report.warn(
+                "jobs-queue",
+                "credential cannot read runtime (HTTP 401)".to_string(),
+            );
+        }
+        Ok(response) if response.status.is_success() => {
+            match serde_json::from_str::<types::RuntimeInfo>(&response.body) {
+                Ok(info) => report.ok(
+                    "jobs-queue",
+                    format!(
+                        "queued_jobs={} · sessions={} · uptime_ms={}",
+                        info.queued_jobs, info.active_sessions, info.uptime_ms
+                    ),
+                ),
+                Err(error) => report.warn("jobs-queue", format!("GET /v1/runtime: {error:#}")),
+            }
+        }
+        Ok(response) => report.warn(
+            "jobs-queue",
+            format!("GET /v1/runtime HTTP {}", response.status),
+        ),
+        Err(error) => report.warn("jobs-queue", format!("{error:#}")),
+    }
 }
 
 fn probe_healthz(url: &str) -> Result<()> {

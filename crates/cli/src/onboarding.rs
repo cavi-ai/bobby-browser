@@ -3,9 +3,10 @@
 //! entrypoint), and the `bobby install` interactive installer.
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use clap::ValueEnum;
@@ -135,6 +136,48 @@ fn resolve_sibling_or_path(command: &str) -> Result<PathBuf> {
 /// Absolute path to a sidecar binary next to bobby or on PATH, if present.
 pub fn find_sidecar_binary(command: &str) -> Option<PathBuf> {
     resolve_sibling_or_path(command).ok()
+}
+
+/// Print `CARGO_PKG_VERSION` from `binary --version`. 2s cap, argv only.
+pub fn sidecar_version(binary: &Path) -> Result<String> {
+    let mut child = Command::new(binary)
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("failed to spawn {}", binary.display()))?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stdout = String::new();
+                if let Some(mut pipe) = child.stdout.take() {
+                    pipe.read_to_string(&mut stdout)?;
+                }
+                if !status.success() {
+                    let mut stderr = String::new();
+                    if let Some(mut pipe) = child.stderr.take() {
+                        let _ = pipe.read_to_string(&mut stderr);
+                    }
+                    anyhow::bail!(
+                        "{} --version exited {status}: {}",
+                        binary.display(),
+                        stderr.trim()
+                    );
+                }
+                return Ok(stdout.trim().to_string());
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                anyhow::bail!("{} --version timed out after 2s", binary.display());
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 pub fn mcp_gateway_command() -> &'static str {
