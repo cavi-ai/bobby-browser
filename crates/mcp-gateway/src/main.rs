@@ -17,6 +17,10 @@ const MAX_BEARER_BYTES: usize = 505;
 
 #[tokio::main]
 async fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     // Stdout is the protocol channel, so the gateway can never use the
     // standard observability init; stderr logging activates only when the
     // operator sets RUST_LOG.
