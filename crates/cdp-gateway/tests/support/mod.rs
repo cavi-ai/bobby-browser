@@ -123,7 +123,13 @@ impl RuntimeInterface for AutoSessionRuntime {
         unreachable!()
     }
     async fn list_sessions(&self, _: RequestContext) -> InterfaceResult<Vec<SessionState>> {
-        Ok(self.session.lock().expect("session lock").clone().into_iter().collect())
+        Ok(self
+            .session
+            .lock()
+            .expect("session lock")
+            .clone()
+            .into_iter()
+            .collect())
     }
     async fn recovery_status(
         &self,
