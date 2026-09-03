@@ -793,6 +793,15 @@ impl CdpConnection {
                 }
                 Ok(json!({"browserContextIds": []}))
             }
+            Some(Handler::TargetCreateBrowserContext) => {
+                return CdpResponse::failure(
+                    &request,
+                    CdpError::new(
+                        CdpErrorCode::InvalidParams,
+                        "Target.createBrowserContext is not supported; use the auto-session page",
+                    ),
+                );
+            }
             Some(Handler::TargetSetDiscoverTargets) => {
                 let Some(params) = request.params.as_object() else {
                     return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "Target.setDiscoverTargets params must be an object"));

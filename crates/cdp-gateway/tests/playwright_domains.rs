@@ -243,6 +243,40 @@ async fn creating_a_target_without_a_runtime_session_names_where_sessions_come_f
 }
 
 #[tokio::test]
+async fn create_browser_context_is_registered_and_refuses_playwright_newpage() {
+    let authority = AuthorityStore::in_memory();
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid::Uuid::new_v4()),
+            [Capability::SessionRead, Capability::PageWrite],
+            Utc::now() + Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .expose_once();
+    let connection = CdpConnection::new(
+        authority.verify(&token).await.unwrap(),
+        Arc::new(support::StaticRuntime { sessions: vec![] }),
+        MethodRegistry::compiled(),
+    );
+
+    let response = connection
+        .dispatch(CdpRequest::new(1, "Target.createBrowserContext", json!({})))
+        .await;
+    let value = serde_json::to_value(response).unwrap();
+    let error = value["error"]["message"]
+        .as_str()
+        .expect("failure carries a message");
+    assert_ne!(
+        value["error"]["code"],
+        CdpErrorCode::MethodNotFound as i32,
+        "{value}"
+    );
+    assert!(error.contains("not supported"), "{error}");
+    assert!(error.contains("auto-session"), "{error}");
+}
+
+#[tokio::test]
 async fn puppeteer_target_manager_receives_tab_then_child_page_with_parent_routing() {
     let connection = page_creating_connection().await;
     let mut recorder = ProtocolRecorder(Vec::new());

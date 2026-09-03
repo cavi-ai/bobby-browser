@@ -46,6 +46,17 @@
       "puppeteerCovered": true
     },
     {
+      "name": "Target.createBrowserContext",
+      "requiredCapability": "session:read",
+      "parameterSchemaRevision": "playwright-newpage-unsupported-browser-context",
+      "translationFunction": "refuse_runtime_browser_context_create",
+      "scenarios": [
+        "playwright-connect-over-cdp"
+      ],
+      "playwrightCovered": true,
+      "puppeteerCovered": false
+    },
+    {
       "name": "Target.setDiscoverTargets",
       "requiredCapability": "session:read",
       "parameterSchemaRevision": "puppeteer-25.3.0-target-discovery",
