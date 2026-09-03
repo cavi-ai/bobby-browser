@@ -91,3 +91,33 @@ async fn discovery_and_connection_share_stable_per_page_opaque_targets() {
         assert!(connection.resolve_target(id).await.is_some());
     }
 }
+
+#[tokio::test]
+async fn json_list_auto_session_returns_a_page_before_websocket() {
+    let now = Utc::now();
+    let runtime = support::AutoSessionRuntime::empty();
+    let authority = Arc::new(AuthorityStore::in_memory());
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid::Uuid::new_v4()),
+            [
+                Capability::SessionRead,
+                Capability::SessionWrite,
+                Capability::PageWrite,
+            ],
+            now + Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .expose_once();
+    let gateway = CdpGateway::new(
+        authority,
+        runtime,
+        MethodRegistry::compiled(),
+        "ws://localhost",
+    );
+
+    let listed = gateway.list(Some(&token)).await.unwrap();
+
+    assert_eq!(listed.len(), 1);
+}
