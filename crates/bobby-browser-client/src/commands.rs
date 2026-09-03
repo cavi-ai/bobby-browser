@@ -229,7 +229,9 @@ pub struct DismissObstructionIntent {
 pub enum ExtractValueKind {
     #[default]
     Text,
-    Attribute { attribute: String },
+    Attribute {
+        attribute: String,
+    },
     Href,
 }
 
