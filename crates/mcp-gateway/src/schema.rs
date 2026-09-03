@@ -995,12 +995,11 @@ pub(crate) fn advertised_tool_output_schema(name: &str) -> Value {
             schema
         }
         _ => {
-            let mut schema = tool_output_schema(name);
-            schema
-                .as_object_mut()
-                .expect("output schema is an object")
-                .remove("$schema");
-            schema
+            // Command-outcome envelopes are identical across primitives and
+            // intents. Advertising the full shape on every tool duplicates
+            // ~700 bytes per catalog entry. tools/call still validates with
+            // `tool_output_schema`.
+            json!({"type": "object"})
         }
     }
 }
@@ -2849,6 +2848,14 @@ mod tests {
         );
         assert!(example.get("sessionId").is_none());
         assert!(example.get("pageId").is_none());
+    }
+
+    #[test]
+    fn advertised_click_output_schema_is_an_opaque_object() {
+        assert_eq!(
+            advertised_tool_output_schema("click"),
+            json!({"type": "object"})
+        );
     }
 
     #[test]
