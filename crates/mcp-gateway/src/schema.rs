@@ -706,6 +706,10 @@ fn tool_argument_example(name: &str) -> Option<Value> {
         "workflow_observe" => json!({
             "workflowHandle":"wf_0123456789abcdef0123456789abcdef"
         }),
+        "click" => json!({
+            "workflowHandle":"wf_0123456789abcdef0123456789abcdef",
+            "target":{"role":"link"}
+        }),
         _ => return None,
     })
 }
@@ -1697,7 +1701,7 @@ fn extract_field() -> Value {
             "hints":{"$ref":"#/$defs/IntentHints"},
             "value":{"$ref":"#/$defs/ExtractValueKind"}
         }),
-        &["name", "purpose", "value"],
+        &["name", "purpose"],
     )
 }
 
@@ -2817,6 +2821,34 @@ mod tests {
         .expect_err("duplicate modifiers must fail schema validation");
         assert_eq!(violation.pointer, "/modifiers");
         assert_eq!(violation.constraint, "uniqueItems");
+    }
+
+    #[test]
+    fn intent_extract_fields_do_not_require_a_value_kind() {
+        validate_tool_arguments(
+            "intent_extract",
+            &json!({
+                "sessionId": "10000000-0000-4000-8000-000000000001",
+                "pageId": "10000000-0000-4000-8000-000000000002",
+                "purpose": "read the saved status",
+                "fields": [{
+                    "name": "status",
+                    "purpose": "saved confirmation text"
+                }]
+            }),
+        )
+        .expect("extract fields default to text when value is omitted");
+    }
+
+    #[test]
+    fn advertised_click_example_uses_a_workflow_handle() {
+        let example = &advertised_tool_schema("click")["examples"][0];
+        assert_eq!(
+            example["workflowHandle"],
+            "wf_0123456789abcdef0123456789abcdef"
+        );
+        assert!(example.get("sessionId").is_none());
+        assert!(example.get("pageId").is_none());
     }
 
     #[test]

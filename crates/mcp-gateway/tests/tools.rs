@@ -2707,7 +2707,7 @@ async fn rejected_arguments_name_the_offending_field_and_constraint() {
                     "purpose":"product fields",
                     "fields":[
                         {"name":"title","purpose":"product title","value":{"kind":"text"}},
-                        {"name":"link","purpose":"product link"}
+                        {"name":"link"}
                     ]
                 }
             }),
@@ -2716,7 +2716,7 @@ async fn rejected_arguments_name_the_offending_field_and_constraint() {
         .unwrap();
     assert_eq!(
         nested["error"]["data"]["pointer"],
-        json!("/fields/1/value"),
+        json!("/fields/1/purpose"),
         "{nested}"
     );
     assert_eq!(nested["error"]["data"]["constraint"], json!("required"));
