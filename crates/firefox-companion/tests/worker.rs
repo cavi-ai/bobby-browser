@@ -2509,6 +2509,70 @@ async fn semantic_inspect_resolves_label_and_returns_sanitized_control_value() {
 }
 
 #[tokio::test]
+async fn semantic_inspect_text_contains_matches_visible_page_text() {
+    let bidi = FakeBidi::new(vec![Ok(json!({"context": "context-1"}))]);
+    let mut observed = observation();
+    observed.visible_text = "Hello\nSaved Ada Lovelace".into();
+    observed.controls.clear();
+    let observer = FakeObserver::new(observed);
+    let worker = worker(bidi, observer).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    let evidence = worker
+        .inspect(
+            &page,
+            &InspectCommand {
+                selector: None,
+                target: Some(types::TargetSpec {
+                    text: Some(TextMatch::Contains("Saved Ada Lovelace".into())),
+                    allow_best_match: true,
+                    ordinal: Some(0),
+                    ..Default::default()
+                }),
+                include_html: false,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::Inspection { text, .. } if text.contains("Saved Ada Lovelace")
+    )));
+}
+
+#[tokio::test]
+async fn semantic_inspect_text_contains_misses_when_visible_page_text_lacks_match() {
+    let bidi = FakeBidi::new(vec![Ok(json!({"context": "context-1"}))]);
+    let mut observed = observation();
+    observed.visible_text = "Hello".into();
+    observed.controls.clear();
+    let worker = worker(bidi, FakeObserver::new(observed)).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    let error = worker
+        .inspect(
+            &page,
+            &InspectCommand {
+                selector: None,
+                target: Some(types::TargetSpec {
+                    text: Some(TextMatch::Contains("Saved Ada Lovelace".into())),
+                    allow_best_match: true,
+                    ordinal: Some(0),
+                    ..Default::default()
+                }),
+                include_html: false,
+            },
+        )
+        .await
+        .expect_err("missing page text must not inspect as found");
+
+    assert_eq!(error.code, ErrorCode::TargetNotFound);
+}
+
+#[tokio::test]
 async fn raw_css_select_inspect_prefers_machine_value_over_visible_option_label() {
     let bidi = FakeBidi::new(vec![Ok(json!({"context": "context-1"}))]);
     let mut observed = observation();
