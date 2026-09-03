@@ -223,19 +223,14 @@ pub struct DismissObstructionIntent {
 
 /// Value to extract from a resolved field. `Href` is shorthand for
 /// `attribute = "href"`; other attributes use [`ExtractValueKind::Attribute`].
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ExtractValueKind {
+    #[default]
     Text,
     Attribute { attribute: String },
     Href,
-}
-
-impl Default for ExtractValueKind {
-    fn default() -> Self {
-        Self::Text
-    }
 }
 
 /// One named field within an [`ExtractIntent`], resolved independently of siblings.
