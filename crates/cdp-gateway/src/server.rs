@@ -1531,7 +1531,8 @@ impl CdpConnection {
                             Err(error) => CdpResponse::failure(&request, runtime_error(error)),
                         };
                     }
-                    if role == "link" && name != "Download fixture" {
+                    // Same-document links Click. Only the test-site target=_blank waits for a popup.
+                    if role == "link" && name == "Open details" {
                         let opener_target = match request.session_id.as_deref() {
                             Some(cdp_session) => self.resolve_identifier(IdentifierFamily::CdpSession, cdp_session).await,
                             None => None,
@@ -3036,4 +3037,218 @@ async fn send_json(outbound: &mpsc::Sender<Message>, value: impl Serialize) -> R
         .send(Message::Text(text.into()))
         .await
         .map_err(|_| ())
+}
+
+#[cfg(test)]
+mod playwright_semantic_click {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use chrono::{Duration, Utc};
+    use interface_core::{AuthorityStore, InterfaceResult, RuntimeInterface};
+    use serde_json::json;
+    use types::{
+        Capability, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest, Evidence,
+        OpenPageRequest, PageId, PageState, PrimitiveCommand, PrincipalId, RecoveryDecision,
+        RequestContext, RuntimeCommand, RuntimeInfo, SessionId, SessionState, WorkflowCheckpoint,
+        WorkflowId,
+    };
+
+    use crate::{CdpConnection, CdpRequest, MethodRegistry};
+
+    struct CapturingRuntime {
+        sessions: Vec<SessionState>,
+        submitted: Mutex<Vec<PrimitiveCommand>>,
+    }
+
+    #[async_trait]
+    impl RuntimeInterface for CapturingRuntime {
+        async fn runtime_info(&self, _: RequestContext) -> InterfaceResult<RuntimeInfo> {
+            unreachable!()
+        }
+        async fn list_sessions(&self, _: RequestContext) -> InterfaceResult<Vec<SessionState>> {
+            Ok(self.sessions.clone())
+        }
+        async fn recovery_status(
+            &self,
+            _: RequestContext,
+            _: WorkflowId,
+        ) -> InterfaceResult<types::RecoveryStatus> {
+            unreachable!()
+        }
+        async fn workflows_for_session(
+            &self,
+            _: RequestContext,
+            _: types::SessionId,
+            _: usize,
+        ) -> InterfaceResult<Vec<WorkflowId>> {
+            unreachable!()
+        }
+        async fn submit_with_auto_checkpoint(
+            &self,
+            _: RequestContext,
+            _: types::CommandEnvelope,
+        ) -> InterfaceResult<(types::CommandOutcome, types::CheckpointId)> {
+            unreachable!()
+        }
+        async fn delete_session(
+            &self,
+            _: RequestContext,
+            _: types::SessionId,
+        ) -> InterfaceResult<()> {
+            unreachable!()
+        }
+        async fn create_session(
+            &self,
+            _: RequestContext,
+            _: CreateSessionRequest,
+        ) -> InterfaceResult<SessionState> {
+            unreachable!()
+        }
+        async fn open_page(
+            &self,
+            _: RequestContext,
+            _: OpenPageRequest,
+        ) -> InterfaceResult<PageState> {
+            unreachable!()
+        }
+        async fn submit(
+            &self,
+            _: RequestContext,
+            envelope: CommandEnvelope,
+        ) -> InterfaceResult<CommandOutcome> {
+            let RuntimeCommand::Primitive(command) = envelope.command else {
+                panic!("expected primitive");
+            };
+            self.submitted.lock().unwrap().push(command);
+            Ok(CommandOutcome::Completed {
+                command_id: CommandId::new(),
+                evidence: Vec::new(),
+            })
+        }
+        async fn checkpoint(
+            &self,
+            _: RequestContext,
+            _: WorkflowCheckpoint,
+            _: Vec<Evidence>,
+        ) -> InterfaceResult<WorkflowCheckpoint> {
+            unreachable!()
+        }
+        async fn resolve_command_evidence(
+            &self,
+            _: RequestContext,
+            _: Vec<types::CommandId>,
+        ) -> InterfaceResult<Vec<Evidence>> {
+            unreachable!()
+        }
+        async fn recover(
+            &self,
+            _: RequestContext,
+            _: WorkflowId,
+        ) -> InterfaceResult<RecoveryDecision> {
+            unreachable!()
+        }
+    }
+
+    async fn attached_connection(runtime: Arc<CapturingRuntime>) -> (CdpConnection, String) {
+        let authority = AuthorityStore::in_memory();
+        let token = authority
+            .issue(
+                PrincipalId::from_uuid(uuid::Uuid::new_v4()),
+                [Capability::SessionRead, Capability::JavascriptEvaluate],
+                Utc::now() + Duration::minutes(5),
+            )
+            .await
+            .unwrap()
+            .expose_once();
+        let connection = CdpConnection::new(
+            authority.verify(&token).await.unwrap(),
+            runtime,
+            MethodRegistry::compiled(),
+        );
+        let attached = connection
+            .dispatch(CdpRequest::new(
+                1,
+                "Target.setAutoAttach",
+                json!({
+                    "autoAttach": true,
+                    "waitForDebuggerOnStart": true,
+                    "flatten": true
+                }),
+            ))
+            .await;
+        assert!(attached.error().is_none());
+        let session_id = connection
+            .drain_events()
+            .await
+            .into_iter()
+            .find(|event| event.method == "Target.attachedToTarget")
+            .and_then(|event| event.params["sessionId"].as_str().map(str::to_owned))
+            .expect("page CDP session");
+        (connection, session_id)
+    }
+
+    async fn check_element_states_click(
+        connection: &CdpConnection,
+        session_id: &str,
+        descriptor: &str,
+    ) -> crate::CdpResponse {
+        let utility = connection
+            .issue_remote_object(Some(session_id), "playwright-utility-script")
+            .await
+            .unwrap();
+        let element = connection
+            .issue_remote_object(Some(session_id), &format!("semantic-element:{descriptor}"))
+            .await
+            .unwrap();
+        let mut request = CdpRequest::new(
+            2,
+            "Runtime.callFunctionOn",
+            json!({
+                "functionDeclaration": "(utilityScript, ...args) => utilityScript.evaluate(...args)",
+                "objectId": utility,
+                "arguments": [
+                    {"value": null},
+                    {"value": null},
+                    {"objectId": element},
+                    {"value": "injected.checkElementStates(node, states)"}
+                ]
+            }),
+        );
+        request.session_id = Some(session_id.to_owned());
+        connection.dispatch(request).await
+    }
+
+    #[tokio::test]
+    async fn same_document_hash_link_click_submits_click_not_popup() {
+        let now = Utc::now();
+        let runtime = Arc::new(CapturingRuntime {
+            sessions: vec![SessionState {
+                id: SessionId::new(),
+                profile: "p".into(),
+                proxy: None,
+                page_ids: vec![PageId::new()],
+                created_at: now,
+                last_used_at: now,
+                execution_policy: types::ExecutionPolicy::default(),
+                zigzagzig: false,
+            }],
+            submitted: Mutex::new(Vec::new()),
+        });
+        let (connection, session_id) = attached_connection(runtime.clone()).await;
+        let response =
+            check_element_states_click(&connection, &session_id, "role:link:Continue to the form")
+                .await;
+        assert!(response.error().is_none(), "{:?}", response.error());
+        let submitted = runtime.submitted.lock().unwrap();
+        assert!(
+            matches!(
+                submitted.as_slice(),
+                [PrimitiveCommand::Click(click)]
+                    if click.target.as_ref().and_then(|target| target.accessible_name.as_deref())
+                        == Some("Continue to the form")
+            ),
+            "{submitted:?}"
+        );
+    }
 }
