@@ -260,7 +260,10 @@ impl CdpGateway {
     ) -> Result<Vec<TargetDescription>, DiscoveryError> {
         let handle = self.authenticate(bearer).await?;
         let ctx = handle.context(Utc::now() + Duration::seconds(30), None);
-        let runtime = (self.bind_runtime)(handle);
+        let runtime = (self.bind_runtime)(handle.clone());
+        if self.auto_session {
+            self.ensure_runtime_page(&handle, runtime.as_ref()).await;
+        }
         let sessions = runtime
             .list_sessions(ctx)
             .await
