@@ -232,6 +232,12 @@ pub enum ExtractValueKind {
     Href,
 }
 
+impl Default for ExtractValueKind {
+    fn default() -> Self {
+        Self::Text
+    }
+}
+
 /// One named field within an [`ExtractIntent`], resolved independently of siblings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -241,6 +247,7 @@ pub struct ExtractField {
     pub purpose: String,
     #[serde(default)]
     pub hints: IntentHints,
+    #[serde(default)]
     pub value: ExtractValueKind,
 }
 
