@@ -3234,6 +3234,45 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 ]);
             }
         }
+        if let Some(target) = command
+            .target
+            .as_ref()
+            .filter(|target| is_text_only_inspect_target(target))
+        {
+            let matcher = target.text.as_ref().expect("text-only inspect target");
+            let mut observation = self
+                .observer
+                .observe(
+                    &self.current_lease(),
+                    page_id,
+                    &InspectCommand {
+                        selector: None,
+                        target: None,
+                        include_html: command.include_html,
+                    },
+                )
+                .await?;
+            if !command.include_html {
+                observation.html = None;
+            }
+            if !bounded_text_matches(matcher, &observation.visible_text)? {
+                return Err(driver_error(
+                    ErrorCode::TargetNotFound,
+                    "Firefox semantic target was not found",
+                    false,
+                ));
+            }
+            return Ok(vec![
+                Evidence::Inspection {
+                    selector: None,
+                    url: observation.url,
+                    title: observation.title,
+                    text: observation.visible_text,
+                    html: observation.html,
+                },
+                self.evidence(InteractionPath::ExtensionApi),
+            ]);
+        }
         let semantic_target = command
             .target
             .as_ref()
@@ -5491,6 +5530,18 @@ fn is_page_scoped_role(role: &str) -> bool {
     ]
     .iter()
     .any(|name| role.eq_ignore_ascii_case(name))
+}
+
+fn is_text_only_inspect_target(target: &types::TargetSpec) -> bool {
+    target.text.is_some()
+        && nonempty_field(&target.css).is_none()
+        && nonempty_field(&target.test_id).is_none()
+        && nonempty_field(&target.role).is_none()
+        && nonempty_field(&target.accessible_name).is_none()
+        && nonempty_field(&target.label).is_none()
+        && target.attributes.is_empty()
+        && target.frame_path.is_empty()
+        && target.shadow_path.is_empty()
 }
 
 fn is_page_scoped_text_target(target: &types::TargetSpec) -> bool {
