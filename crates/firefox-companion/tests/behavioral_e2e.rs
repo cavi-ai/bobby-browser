@@ -138,6 +138,18 @@ impl BidiTransport for FakeBidi {
                 json!({"result": {"type": "string", "value": "{\"valid\":true,\"message\":\"\"}"}}),
             );
         }
+        if method == "script.evaluate"
+            && params["expression"]
+                .as_str()
+                .is_some_and(|expression| expression.contains("automationTypedControlValue"))
+        {
+            return Ok(json!({
+                "result": {
+                    "type": "string",
+                    "value": "{\"automationTypedControlValue\":\"Hi\"}"
+                }
+            }));
+        }
         if method == "script.callFunction" {
             if params["functionDeclaration"]
                 .as_str()
@@ -153,6 +165,17 @@ impl BidiTransport for FakeBidi {
                     "result": {
                         "type": "string",
                         "value": value
+                    }
+                }));
+            }
+            if params["functionDeclaration"]
+                .as_str()
+                .is_some_and(|declaration| declaration.contains("automationPointerBounds"))
+            {
+                return Ok(json!({
+                    "result": {
+                        "type": "string",
+                        "value": "{\"cx\":960,\"cy\":540,\"width\":1920,\"height\":1080}"
                     }
                 }));
             }

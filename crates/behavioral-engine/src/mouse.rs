@@ -28,6 +28,32 @@ pub struct MousePath {
     pub hover_dwell_ms: u64,
 }
 
+impl MousePath {
+    /// Keep every sample inside element-origin bounds that stay on-viewport.
+    ///
+    /// Firefox BiDi rejects `pointerMove` with `origin: element` when the
+    /// converted viewport coordinate is negative or past the far edge.
+    pub fn clamp_element_origin(&self, min_x: f64, max_x: f64, min_y: f64, max_y: f64) -> Self {
+        let min_x = min_x.min(0.0);
+        let max_x = max_x.max(0.0);
+        let min_y = min_y.min(0.0);
+        let max_y = max_y.max(0.0);
+        Self {
+            points: self
+                .points
+                .iter()
+                .map(|point| MousePoint {
+                    x: point.x.clamp(min_x, max_x),
+                    y: point.y.clamp(min_y, max_y),
+                    timestamp_ms: point.timestamp_ms,
+                })
+                .collect(),
+            duration_ms: self.duration_ms,
+            hover_dwell_ms: self.hover_dwell_ms,
+        }
+    }
+}
+
 /// Configuration for mouse movement simulation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

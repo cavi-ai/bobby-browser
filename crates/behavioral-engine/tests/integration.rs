@@ -148,6 +148,40 @@ fn bezier_approach_path_ends_near_origin() {
 }
 
 #[test]
+fn element_origin_clamp_keeps_left_edge_approach_on_viewport() {
+    use behavioral_engine::{MousePath, MousePoint};
+    let path = MousePath {
+        points: vec![
+            MousePoint {
+                x: -140.0,
+                y: 80.0,
+                timestamp_ms: 0,
+            },
+            MousePoint {
+                x: -4.4,
+                y: 40.0,
+                timestamp_ms: 40,
+            },
+            MousePoint {
+                x: 0.0,
+                y: 0.0,
+                timestamp_ms: 80,
+            },
+        ],
+        duration_ms: 80,
+        hover_dwell_ms: 12,
+    };
+    let clamped = path.clamp_element_origin(-9.0, 1900.0, -200.0, 800.0);
+    assert!(
+        clamped.points.iter().all(|point| point.x >= -9.0),
+        "clamped x left the viewport: {:?}",
+        clamped.points
+    );
+    assert_eq!(clamped.points.last().unwrap().x, 0.0);
+    assert_eq!(clamped.hover_dwell_ms, 12);
+}
+
+#[test]
 fn bezier_rejects_non_finite_inputs() {
     let sim = BezierMouseSimulator::new(MouseConfig::default());
     let mut random = SessionRandom::new(402);
