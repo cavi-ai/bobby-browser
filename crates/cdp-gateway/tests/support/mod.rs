@@ -11,12 +11,18 @@ use interface_core::{InterfaceResult, RuntimeInterface};
 use tokio::sync::Notify;
 use types::{
     CommandEnvelope, CommandOutcome, CreateSessionRequest, Evidence, OpenPageRequest, PageId,
-    PageMode, PageState, RecoveryDecision, RequestContext, RuntimeInfo, SessionId, SessionState,
-    WorkflowCheckpoint, WorkflowId,
+    PageMode, PageState, PrimitiveCommand, RecoveryDecision, RequestContext, RuntimeCommand,
+    RuntimeInfo, SessionId, SessionState, WorkflowCheckpoint, WorkflowId,
 };
 
 pub struct StaticRuntime {
     pub sessions: Vec<SessionState>,
+}
+
+/// Completes `Page.navigate` with the URL the client sent and a fixed title.
+pub struct NavigatingRuntime {
+    pub sessions: Vec<SessionState>,
+    pub title: String,
 }
 
 pub struct PageCreatingRuntime {
@@ -317,6 +323,87 @@ impl RuntimeInterface for StaticRuntime {
         _: CommandEnvelope,
     ) -> InterfaceResult<CommandOutcome> {
         unreachable!()
+    }
+    async fn checkpoint(
+        &self,
+        _: RequestContext,
+        _: WorkflowCheckpoint,
+        _: Vec<Evidence>,
+    ) -> InterfaceResult<WorkflowCheckpoint> {
+        unreachable!()
+    }
+    async fn resolve_command_evidence(
+        &self,
+        _: RequestContext,
+        _: Vec<types::CommandId>,
+    ) -> InterfaceResult<Vec<Evidence>> {
+        unreachable!()
+    }
+    async fn recover(&self, _: RequestContext, _: WorkflowId) -> InterfaceResult<RecoveryDecision> {
+        unreachable!()
+    }
+}
+
+#[async_trait]
+impl RuntimeInterface for NavigatingRuntime {
+    async fn runtime_info(&self, _: RequestContext) -> InterfaceResult<RuntimeInfo> {
+        unreachable!()
+    }
+    async fn list_sessions(&self, _: RequestContext) -> InterfaceResult<Vec<SessionState>> {
+        Ok(self.sessions.clone())
+    }
+    async fn recovery_status(
+        &self,
+        _: RequestContext,
+        _: WorkflowId,
+    ) -> InterfaceResult<types::RecoveryStatus> {
+        unreachable!()
+    }
+    async fn workflows_for_session(
+        &self,
+        _: RequestContext,
+        _: types::SessionId,
+        _: usize,
+    ) -> InterfaceResult<Vec<WorkflowId>> {
+        unreachable!()
+    }
+    async fn submit_with_auto_checkpoint(
+        &self,
+        _: RequestContext,
+        _: types::CommandEnvelope,
+    ) -> InterfaceResult<(types::CommandOutcome, types::CheckpointId)> {
+        unreachable!()
+    }
+    async fn delete_session(&self, _: RequestContext, _: types::SessionId) -> InterfaceResult<()> {
+        unreachable!()
+    }
+
+    async fn create_session(
+        &self,
+        _: RequestContext,
+        _: CreateSessionRequest,
+    ) -> InterfaceResult<SessionState> {
+        unreachable!()
+    }
+    async fn open_page(&self, _: RequestContext, _: OpenPageRequest) -> InterfaceResult<PageState> {
+        unreachable!()
+    }
+    async fn submit(
+        &self,
+        _: RequestContext,
+        envelope: CommandEnvelope,
+    ) -> InterfaceResult<CommandOutcome> {
+        let RuntimeCommand::Primitive(PrimitiveCommand::Navigate(command)) = envelope.command
+        else {
+            panic!("expected navigate");
+        };
+        Ok(CommandOutcome::Completed {
+            command_id: envelope.command_id,
+            evidence: vec![Evidence::Navigation {
+                url: command.url,
+                title: self.title.clone(),
+            }],
+        })
     }
     async fn checkpoint(
         &self,

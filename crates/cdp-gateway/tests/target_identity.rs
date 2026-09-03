@@ -2,7 +2,7 @@ mod support;
 
 use std::sync::Arc;
 
-use cdp_gateway::{CdpGateway, CdpRequest, MethodRegistry};
+use cdp_gateway::{CdpConnection, CdpGateway, CdpRequest, MethodRegistry};
 use chrono::{Duration, Utc};
 use interface_core::AuthorityStore;
 use serde_json::json;
@@ -120,4 +120,81 @@ async fn json_list_auto_session_returns_a_page_before_websocket() {
     let listed = gateway.list(Some(&token)).await.unwrap();
 
     assert_eq!(listed.len(), 1);
+}
+
+#[tokio::test]
+async fn page_target_info_uses_verified_navigation_title() {
+    let now = Utc::now();
+    let runtime = Arc::new(support::NavigatingRuntime {
+        sessions: vec![SessionState {
+            id: SessionId::new(),
+            profile: "p".into(),
+            proxy: None,
+            page_ids: vec![PageId::new()],
+            created_at: now,
+            last_used_at: now,
+            execution_policy: types::ExecutionPolicy::default(),
+            zigzagzig: false,
+        }],
+        title: "Bobby agent-benchmark fixture".into(),
+    });
+    let authority = AuthorityStore::in_memory();
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid::Uuid::new_v4()),
+            [
+                Capability::SessionRead,
+                Capability::PageRead,
+                Capability::PageWrite,
+            ],
+            now + Duration::minutes(5),
+        )
+        .await
+        .unwrap()
+        .expose_once();
+    let connection = CdpConnection::new(
+        authority.verify(&token).await.unwrap(),
+        runtime,
+        MethodRegistry::compiled(),
+    );
+    let attached = connection
+        .dispatch(CdpRequest::new(
+            1,
+            "Target.setAutoAttach",
+            json!({
+                "autoAttach": true,
+                "waitForDebuggerOnStart": true,
+                "flatten": true
+            }),
+        ))
+        .await;
+    assert!(attached.error().is_none(), "{:?}", attached.error());
+    let event = connection
+        .drain_events()
+        .await
+        .into_iter()
+        .find(|event| event.method == "Target.attachedToTarget")
+        .expect("page CDP session");
+    let session_id = event.params["sessionId"].as_str().unwrap().to_owned();
+    let target_id = event.params["targetInfo"]["targetId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let mut navigate =
+        CdpRequest::new(2, "Page.navigate", json!({"url": "http://127.0.0.1:8766/"}));
+    navigate.session_id = Some(session_id);
+    let navigated = connection.dispatch(navigate).await;
+    assert!(navigated.error().is_none(), "{:?}", navigated.error());
+
+    let info = connection
+        .dispatch(CdpRequest::new(
+            3,
+            "Target.getTargetInfo",
+            json!({"targetId": target_id}),
+        ))
+        .await;
+    let target = &info.result().unwrap()["targetInfo"];
+    assert_eq!(target["title"], "Bobby agent-benchmark fixture");
+    assert_eq!(target["url"], "http://127.0.0.1:8766/");
 }
