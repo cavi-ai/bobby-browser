@@ -708,21 +708,7 @@ fn tool_argument_example(name: &str) -> Option<Value> {
         }),
         "click" => json!({
             "workflowHandle":"wf_0123456789abcdef0123456789abcdef",
-            "target":{"role":"link","accessibleName":"Continue to the form"}
-        }),
-        "intent_complete_form" => json!({
-            "workflowHandle":"wf_0123456789abcdef0123456789abcdef",
-            "purpose":"fill the two-field details form",
-            "fields":[{
-                "name":"full-name",
-                "purpose":"enter the full name",
-                "value":{"kind":"setText","value":"Ada Lovelace"}
-            }]
-        }),
-        "intent_extract" => json!({
-            "workflowHandle":"wf_0123456789abcdef0123456789abcdef",
-            "purpose":"read the saved status",
-            "fields":[{"name":"status","purpose":"saved confirmation text"}]
+            "target":{"role":"link"}
         }),
         _ => return None,
     })
