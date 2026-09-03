@@ -917,17 +917,30 @@ impl CdpConnection {
                             CdpError::new(CdpErrorCode::InvalidParams, "invalid targetId"),
                         );
                     };
-                    if self
+                    let Some(page) = self
                         .resolve_identifier(IdentifierFamily::Target, target_id)
                         .await
-                        .is_none()
-                    {
+                    else {
                         return CdpResponse::failure(
                             &request,
                             CdpError::new(CdpErrorCode::InvalidParams, "unknown target"),
                         );
-                    }
-                    Ok(json!({"targetInfo": {"targetId": target_id, "type": "page", "title": "Automation Runtime", "url": "about:blank", "attached": true, "canAccessOpener": false}}))
+                    };
+                    let (url, title) = match self
+                        .runtime_session_for(IdentifierFamily::Target, target_id)
+                        .await
+                    {
+                        Some(runtime_session) => {
+                            self.targets
+                                .lock()
+                                .await
+                                .location(&runtime_session, &page)
+                        }
+                        None => (None, None),
+                    };
+                    let url = url.unwrap_or_else(|| "about:blank".into());
+                    let title = title.unwrap_or_else(|| url.clone());
+                    Ok(json!({"targetInfo": {"targetId": target_id, "type": "page", "title": title, "url": url, "attached": true, "canAccessOpener": false}}))
                 } else {
                     return CdpResponse::failure(
                         &request,
@@ -1352,6 +1365,10 @@ impl CdpConnection {
                 let expression = request.params["arguments"].as_array().and_then(|args| args.get(3))
                     .and_then(|arg| arg.get("value")).and_then(Value::as_str).unwrap_or("");
                 let evaluated_expression = find_serialized_string(serialized, "expression");
+                if matches!(expression.trim(), "() => document.title" | "document.title") {
+                    let title = self.verified_page_title(request.session_id.as_deref()).await;
+                    return CdpResponse::success(&request, json!({"result":{"type":"string","value":title}}));
+                }
                 if expression.contains("globalThis.eval(expression3)")
                     && evaluated_expression.is_some_and(|value| value.contains("window.innerWidth") && value.contains("window.innerHeight")) {
                     let object_id = match self.issue_remote_object(request.session_id.as_deref(), "viewport-poller").await {
@@ -2167,6 +2184,32 @@ impl CdpConnection {
         ))
     }
 
+    async fn verified_page_title(&self, cdp_session: Option<&str>) -> String {
+        let Some(cdp_session) = cdp_session else {
+            return String::new();
+        };
+        let Some(target_id) = self
+            .resolve_identifier(IdentifierFamily::CdpSession, cdp_session)
+            .await
+        else {
+            return String::new();
+        };
+        let Some(page) = self
+            .resolve_identifier(IdentifierFamily::Target, &target_id)
+            .await
+        else {
+            return String::new();
+        };
+        let Some(runtime_session) = self
+            .runtime_session_for(IdentifierFamily::Target, &target_id)
+            .await
+        else {
+            return String::new();
+        };
+        let (url, title) = self.targets.lock().await.location(&runtime_session, &page);
+        title.or(url).unwrap_or_default()
+    }
+
     async fn automation_runtime_identity(
         &self,
         cdp_session: Option<&str>,
@@ -2663,6 +2706,13 @@ impl TargetCatalog {
         entry.title = (!title.is_empty()).then(|| title.to_owned());
     }
 
+    fn location(&self, runtime_session: &str, page: &str) -> (Option<String>, Option<String>) {
+        self.by_page
+            .get(&(runtime_session.to_owned(), page.to_owned()))
+            .map(|entry| (entry.url.clone(), entry.title.clone()))
+            .unwrap_or((None, None))
+    }
+
     fn targets_for(&mut self, sessions: &[SessionState]) -> Vec<CatalogTarget> {
         let mut live = Vec::new();
         for session in sessions {
@@ -3123,10 +3173,17 @@ mod playwright_semantic_click {
             let RuntimeCommand::Primitive(command) = envelope.command else {
                 panic!("expected primitive");
             };
-            self.submitted.lock().unwrap().push(command);
+            self.submitted.lock().unwrap().push(command.clone());
+            let evidence = match &command {
+                PrimitiveCommand::Navigate(nav) => vec![Evidence::Navigation {
+                    url: nav.url.clone(),
+                    title: "Bobby agent-benchmark fixture".into(),
+                }],
+                _ => Vec::new(),
+            };
             Ok(CommandOutcome::Completed {
                 command_id: CommandId::new(),
-                evidence: Vec::new(),
+                evidence,
             })
         }
         async fn checkpoint(
@@ -3158,7 +3215,11 @@ mod playwright_semantic_click {
         let token = authority
             .issue(
                 PrincipalId::from_uuid(uuid::Uuid::new_v4()),
-                [Capability::SessionRead, Capability::JavascriptEvaluate],
+                [
+                    Capability::SessionRead,
+                    Capability::PageWrite,
+                    Capability::JavascriptEvaluate,
+                ],
                 Utc::now() + Duration::minutes(5),
             )
             .await
@@ -3252,6 +3313,60 @@ mod playwright_semantic_click {
                         == Some("Continue to the form")
             ),
             "{submitted:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn playwright_document_title_evaluate_returns_verified_title() {
+        let now = Utc::now();
+        let runtime = Arc::new(CapturingRuntime {
+            sessions: vec![SessionState {
+                id: SessionId::new(),
+                profile: "p".into(),
+                proxy: None,
+                page_ids: vec![PageId::new()],
+                created_at: now,
+                last_used_at: now,
+                execution_policy: types::ExecutionPolicy::default(),
+                zigzagzig: false,
+            }],
+            submitted: Mutex::new(Vec::new()),
+        });
+        let (connection, session_id) = attached_connection(runtime).await;
+        let mut navigate =
+            CdpRequest::new(2, "Page.navigate", json!({"url": "http://127.0.0.1:8766/"}));
+        navigate.session_id = Some(session_id.clone());
+        let navigated = connection.dispatch(navigate).await;
+        assert!(navigated.error().is_none(), "{:?}", navigated.error());
+
+        let utility = connection
+            .issue_remote_object(Some(&session_id), "playwright-utility-script")
+            .await
+            .unwrap();
+        let mut request = CdpRequest::new(
+            3,
+            "Runtime.callFunctionOn",
+            json!({
+                "functionDeclaration": "(utilityScript, ...args) => utilityScript.evaluate(...args)",
+                "objectId": utility,
+                "arguments": [
+                    {"value": null},
+                    {"value": true},
+                    {"value": true},
+                    {"value": "() => document.title"},
+                    {"value": 0}
+                ],
+                "returnByValue": true,
+                "awaitPromise": true,
+                "userGesture": true
+            }),
+        );
+        request.session_id = Some(session_id);
+        let response = connection.dispatch(request).await;
+        assert!(response.error().is_none(), "{:?}", response.error());
+        assert_eq!(
+            response.result().unwrap()["result"]["value"],
+            "Bobby agent-benchmark fixture"
         );
     }
 }
