@@ -113,6 +113,28 @@ pub(crate) fn bootstrap_injected_script(params: &Value) -> Result<Value, CdpErro
     )
 }
 
+/// Playwright rewrites any `Runtime.evaluate` / `Runtime.callFunctionOn`
+/// protocol error that is not a JavaScript exception into "Execution context
+/// was destroyed". Return Chromium-shaped `exceptionDetails` instead so the
+/// refuse stays readable.
+pub(crate) fn evaluate_exception_result(message: &str) -> Value {
+    json!({
+        "result": {"type": "undefined"},
+        "exceptionDetails": {
+            "exceptionId": 1,
+            "text": "Uncaught",
+            "lineNumber": 0,
+            "columnNumber": 0,
+            "exception": {
+                "type": "object",
+                "subtype": "error",
+                "className": "Error",
+                "description": message
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;

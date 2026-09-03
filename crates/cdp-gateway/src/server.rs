@@ -1222,6 +1222,9 @@ impl CdpConnection {
                     result["result"]["objectId"] = Value::String(opaque);
                     Ok(result)
                 }
+                Err(error) if error.message == "unrecognized bounded runtime bootstrap" => {
+                    Ok(domains::runtime::evaluate_exception_result(&error.message))
+                }
                 Err(error) => return CdpResponse::failure(&request, error),
             },
             Some(Handler::RuntimeReleaseObject) => {
@@ -1357,7 +1360,12 @@ impl CdpConnection {
                     == Some("(utilityScript, ...args) => utilityScript.evaluate(...args)")
                     && utility.as_deref() == Some("playwright-utility-script")
                     && request.params.get("arguments").and_then(Value::as_array).is_some_and(|args| args.len() <= 16);
-                if !valid_shape { return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "unrecognized semantic runtime call")); }
+                if !valid_shape {
+                    return CdpResponse::success(
+                        &request,
+                        domains::runtime::evaluate_exception_result("unrecognized semantic runtime call"),
+                    );
+                }
                 let serialized = &request.params["arguments"];
                 let locator_handle = self.resolve_serialized_object(serialized, request.session_id.as_deref(), "semantic-locator:").await;
                 let element_handle = self.resolve_serialized_object(serialized, request.session_id.as_deref(), "semantic-element:").await;
@@ -1619,7 +1627,10 @@ impl CdpConnection {
                     _ => None,
                 };
                 let Some((descriptor, target)) = semantic else {
-                    return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "unsupported semantic runtime call"));
+                    return CdpResponse::success(
+                        &request,
+                        domains::runtime::evaluate_exception_result("unsupported semantic runtime call"),
+                    );
                 };
                 let Some((session_id, page_id)) = self.runtime_identity(request.session_id.as_deref()).await else {
                     return CdpResponse::failure(&request, CdpError::new(CdpErrorCode::InvalidParams, "unknown runtime page"));
@@ -1709,13 +1720,13 @@ impl CdpConnection {
                         let mut events = vec![
                             CdpEvent { method:"Page.frameNavigated".into(), params:json!({"frame":{"id":target_id,"loaderId":loader_id,"url":final_url,"domainAndRegistry":"","securityOrigin":"","mimeType":"text/html","secureContextType":"SecureLocalhost","crossOriginIsolatedContextType":"NotIsolated","gatedAPIFeatures":[]},"type":"Navigation"}), session_id:request.session_id.clone() },
                             CdpEvent { method:"Runtime.executionContextsCleared".into(), params:json!({}), session_id:request.session_id.clone() },
-                            CdpEvent { method:"Runtime.executionContextCreated".into(), params:json!({"context":{"id":3,"origin":final_url,"name":"","uniqueId":Uuid::new_v4().simple().to_string(),"auxData":{"isDefault":true,"type":"default","frameId":target_id}}}), session_id:request.session_id.clone() },
+                            CdpEvent { method:"Runtime.executionContextCreated".into(), params:json!({"context":{"id":1,"origin":final_url,"name":"","uniqueId":Uuid::new_v4().simple().to_string(),"auxData":{"isDefault":true,"type":"default","frameId":target_id}}}), session_id:request.session_id.clone() },
                             CdpEvent { method:"Page.lifecycleEvent".into(), params:json!({"frameId":target_id,"loaderId":loader_id,"name":"init","timestamp":0}), session_id:request.session_id.clone() },
                             CdpEvent { method:"Page.lifecycleEvent".into(), params:json!({"frameId":target_id,"loaderId":loader_id,"name":"DOMContentLoaded","timestamp":0}), session_id:request.session_id.clone() },
                             CdpEvent { method:"Page.lifecycleEvent".into(), params:json!({"frameId":target_id,"loaderId":loader_id,"name":"load","timestamp":0}), session_id:request.session_id.clone() },
                         ];
                         if let Some(world_name) = world_name {
-                            events.insert(3, CdpEvent { method:"Runtime.executionContextCreated".into(), params:json!({"context":{"id":4,"origin":final_url,"name":world_name,"uniqueId":Uuid::new_v4().simple().to_string(),"auxData":{"isDefault":false,"type":"isolated","frameId":target_id}}}), session_id:request.session_id.clone() });
+                            events.insert(3, CdpEvent { method:"Runtime.executionContextCreated".into(), params:json!({"context":{"id":2,"origin":final_url,"name":world_name,"uniqueId":Uuid::new_v4().simple().to_string(),"auxData":{"isDefault":false,"type":"isolated","frameId":target_id}}}), session_id:request.session_id.clone() });
                         }
                         if let Err(error) = self.queue_events(events).await { return CdpResponse::failure(&request, error); }
                         self.record_interface_event("navigation.completed", json!({"evidence":evidence})).await;
@@ -3367,6 +3378,84 @@ mod playwright_semantic_click {
         assert_eq!(
             response.result().unwrap()["result"]["value"],
             "Bobby agent-benchmark fixture"
+        );
+    }
+
+    #[tokio::test]
+    async fn navigation_recreates_the_default_execution_context_as_id_1() {
+        let now = Utc::now();
+        let runtime = Arc::new(CapturingRuntime {
+            sessions: vec![SessionState {
+                id: SessionId::new(),
+                profile: "p".into(),
+                proxy: None,
+                page_ids: vec![PageId::new()],
+                created_at: now,
+                last_used_at: now,
+                execution_policy: types::ExecutionPolicy::default(),
+                zigzagzig: false,
+            }],
+            submitted: Mutex::new(Vec::new()),
+        });
+        let (connection, session_id) = attached_connection(runtime).await;
+        let mut enable = CdpRequest::new(2, "Runtime.enable", json!({}));
+        enable.session_id = Some(session_id.clone());
+        assert!(connection.dispatch(enable).await.error().is_none());
+        let _ = connection.drain_events().await;
+        let mut navigate =
+            CdpRequest::new(3, "Page.navigate", json!({"url": "http://127.0.0.1:8766/"}));
+        navigate.session_id = Some(session_id.clone());
+        let navigated = connection.dispatch(navigate).await;
+        assert!(navigated.error().is_none(), "{:?}", navigated.error());
+        let created = connection
+            .drain_events()
+            .await
+            .into_iter()
+            .filter(|event| event.method == "Runtime.executionContextCreated")
+            .collect::<Vec<_>>();
+        let default = created
+            .iter()
+            .find(|event| event.params["context"]["auxData"]["isDefault"] == true)
+            .expect("default context after navigate");
+        assert_eq!(default.params["context"]["id"], 1);
+
+        let mut evaluate = CdpRequest::new(
+            4,
+            "Runtime.evaluate",
+            json!({"expression": "1 + 1", "contextId": 1, "returnByValue": true}),
+        );
+        evaluate.session_id = Some(session_id.clone());
+        let refused = connection.dispatch(evaluate).await;
+        assert!(refused.error().is_none(), "{:?}", refused.error());
+        assert_eq!(
+            refused.result().unwrap()["exceptionDetails"]["exception"]["description"],
+            "unrecognized bounded runtime bootstrap"
+        );
+
+        let utility = connection
+            .issue_remote_object(Some(&session_id), "playwright-utility-script")
+            .await
+            .unwrap();
+        let mut call = CdpRequest::new(
+            5,
+            "Runtime.callFunctionOn",
+            json!({
+                "functionDeclaration": "(utilityScript, ...args) => utilityScript.evaluate(...args)",
+                "objectId": utility,
+                "arguments": [
+                    {"value": true},
+                    {"value": true},
+                    {"value": "() => 1 + 1"},
+                    {"value": "() => 1 + 1"}
+                ]
+            }),
+        );
+        call.session_id = Some(session_id);
+        let call_refused = connection.dispatch(call).await;
+        assert!(call_refused.error().is_none(), "{:?}", call_refused.error());
+        assert_eq!(
+            call_refused.result().unwrap()["exceptionDetails"]["exception"]["description"],
+            "unsupported semantic runtime call"
         );
     }
 }
