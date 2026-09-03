@@ -87,6 +87,7 @@ test("enroll nativeStatus frames are delivered and not treated as terminal auth"
   transport.start((message) => {
     received.push(message);
   });
+  transport.send(createEnrollProfileRequest());
 
   port.onMessage.emit({
     kind: "nativeStatus",
@@ -110,6 +111,21 @@ test("enroll nativeStatus frames are delivered and not treated as terminal auth"
     }).kind,
     "nativeStatus",
   );
+});
+
+test("native transport does not spawn a native host until the first outbound frame", () => {
+  const hosts: string[] = [];
+  const transport = new NativeCompanionTransport({
+    connectNative(hostName) {
+      hosts.push(hostName);
+      return new FakePort();
+    },
+  });
+
+  transport.start(() => {});
+  assert.deepEqual(hosts, []);
+  transport.send({ kind: "pong" });
+  assert.deepEqual(hosts, ["com.bobby_browser.companion"]);
 });
 
 test("native transport connects only to the approved host and enforces message direction", () => {
@@ -231,6 +247,7 @@ test("paired events are delivered and listener failures are contained", async ()
     });
     throw new Error("listener exploded");
   });
+  transport.send({ kind: "pong" });
 
   port.onMessage.emit({
     kind: "paired",
@@ -335,7 +352,7 @@ test("terminal invalid-auth status schedules a bounded cooldown reconnect", () =
     cancelReconnect() {},
   });
   transport.start(() => {});
-
+  transport.send({ kind: "pong" });
   port.onMessage.emit({
     kind: "nativeStatus",
     output: { state: "invalidAuth" },
@@ -368,6 +385,29 @@ test("failed native launches use bounded exponential backoff and reset after suc
     cancelReconnect() {},
   });
   transport.start(() => {});
+  transport.send({
+    kind: "pair",
+    input: {
+      protocolVersion: 1,
+      companionId: "companion-1",
+      profileId: "profile-1",
+      identity: {
+        engine: "firefox",
+        browserName: "Firefox",
+        browserVersion: "stable",
+        os: "macos",
+        profileLabel: "default-release",
+      },
+      capabilities: {
+        observe: true,
+        navigate: true,
+        nativeInput: false,
+        tabs: true,
+        frames: true,
+        nativeDialogs: false,
+      },
+    },
+  });
   while (attempts <= 7) {
     const callback = scheduled.shift();
     assert.ok(callback);
@@ -403,6 +443,7 @@ test("silent native ports do not reset reconnect backoff before a validated mess
     cancelReconnect() {},
   });
   transport.start(() => {});
+  transport.send({ kind: "pong" });
 
   for (let index = 0; index < 8; index += 1) {
     ports[index]?.onDisconnect.emit();
