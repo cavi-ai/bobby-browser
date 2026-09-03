@@ -273,6 +273,18 @@ impl BidiTransport for FakeBidi {
                 json!({"result": {"type": "string", "value": "{\"valid\":true,\"message\":\"\"}"}}),
             );
         }
+        if method == "script.evaluate"
+            && params["expression"]
+                .as_str()
+                .is_some_and(|expression| expression.contains("automationTypedControlValue"))
+        {
+            return Ok(json!({
+                "result": {
+                    "type": "string",
+                    "value": "{\"automationTypedControlValue\":\"Hi\"}"
+                }
+            }));
+        }
         if method == "script.callFunction" {
             if params["functionDeclaration"]
                 .as_str()
@@ -282,6 +294,17 @@ impl BidiTransport for FakeBidi {
                     "result": {
                         "type": "string",
                         "value": "{\"needed\":false,\"currentY\":0,\"targetY\":0,\"viewportHeight\":800,\"pageHeight\":800}"
+                    }
+                }));
+            }
+            if params["functionDeclaration"]
+                .as_str()
+                .is_some_and(|declaration| declaration.contains("automationPointerBounds"))
+            {
+                return Ok(json!({
+                    "result": {
+                        "type": "string",
+                        "value": "{\"cx\":960,\"cy\":540,\"width\":1920,\"height\":1080}"
                     }
                 }));
             }
@@ -2717,7 +2740,7 @@ async fn reconnect_live_process_resubscribes_and_keeps_the_page() {
 }
 
 #[tokio::test]
-async fn type_text_uses_native_focus_clear_and_key_sequences_without_content_evidence() {
+async fn type_text_uses_native_focus_clear_and_key_sequences_and_reads_typed_value() {
     let bidi = FakeBidi::new(vec![
         Ok(json!({"context": "context-1"})),
         Ok(json!({"result": {"type": "string", "value": "not-select"}})),
@@ -2768,9 +2791,14 @@ async fn type_text_uses_native_focus_clear_and_key_sequences_without_content_evi
     assert!(keys.iter().any(|action| action["value"] == "\u{e003}"));
     assert!(keys.iter().any(|action| action["value"] == "H"));
     assert!(keys.iter().any(|action| action["value"] == "i"));
-    assert!(!evidence.iter().any(|item| matches!(
+    assert!(evidence.iter().any(|item| matches!(
         item,
         Evidence::Element { text: Some(text), .. } if text == "Hi"
+    )));
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::Configuration { name, value }
+            if name == "typedControlKind" && value == "text"
     )));
     assert_engine_native(&evidence);
 }
@@ -2946,6 +2974,7 @@ async fn native_input_failure_does_not_fall_back_to_dom_click() {
             "script.evaluate",
             "script.evaluate",
             "script.evaluate",
+            "script.callFunction",
             "script.callFunction",
             "script.callFunction",
             "input.performActions"

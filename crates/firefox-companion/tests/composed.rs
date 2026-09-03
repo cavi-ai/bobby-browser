@@ -75,6 +75,18 @@ impl BidiTransport for BindingBidi {
             "script.evaluate"
                 if params["expression"]
                     .as_str()
+                    .is_some_and(|value| value.contains("automationTypedControlValue")) =>
+            {
+                Ok(json!({
+                    "result": {
+                        "type": "string",
+                        "value": "{\"automationTypedControlValue\":\"Hi\"}"
+                    }
+                }))
+            }
+            "script.evaluate"
+                if params["expression"]
+                    .as_str()
                     .is_some_and(|value| value.contains("HTMLSelectElement")) =>
             {
                 Ok(json!({"result": {"type": "string", "value": "not-select"}}))
@@ -94,6 +106,18 @@ impl BidiTransport for BindingBidi {
                     .is_some_and(|value| value.starts_with("document.querySelector(")) =>
             {
                 Ok(json!({"result": {"type": "node", "sharedId": "native-target"}}))
+            }
+            "script.callFunction"
+                if params["functionDeclaration"]
+                    .as_str()
+                    .is_some_and(|declaration| declaration.contains("automationPointerBounds")) =>
+            {
+                Ok(json!({
+                    "result": {
+                        "type": "string",
+                        "value": "{\"cx\":960,\"cy\":540,\"width\":1920,\"height\":1080}"
+                    }
+                }))
             }
             "script.callFunction" => Ok(json!({"result": {
                 "type": "node",

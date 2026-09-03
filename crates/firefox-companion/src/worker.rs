@@ -597,6 +597,26 @@ struct ScrollMetrics {
     viewport_height: f64,
 }
 
+#[derive(Debug, Deserialize)]
+struct PointerOriginBounds {
+    cx: f64,
+    cy: f64,
+    width: f64,
+    height: f64,
+}
+
+impl PointerOriginBounds {
+    fn element_origin_limits(&self) -> (f64, f64, f64, f64) {
+        let width = self.width.max(1.0);
+        let height = self.height.max(1.0);
+        let min_x = 1.0 - self.cx;
+        let max_x = width - 2.0 - self.cx;
+        let min_y = 1.0 - self.cy;
+        let max_y = height - 2.0 - self.cy;
+        (min_x, max_x, min_y, max_y)
+    }
+}
+
 pub struct FirefoxCompanionWorker {
     id: WorkerId,
     profile_dir: PathBuf,
@@ -1999,6 +2019,16 @@ impl FirefoxCompanionWorker {
         modifiers: &[types::ClickModifier],
     ) -> Result<(), CommandError> {
         let shared_id = self.preflight_pointer_target(context, shared_id).await?;
+        let bounds = self.pointer_origin_bounds(context, &shared_id).await?;
+        let (min_x, max_x, min_y, max_y) = bounds.element_origin_limits();
+        let clamped_path;
+        let mouse_path = match mouse_path {
+            Some(path) if !path.points.is_empty() => {
+                clamped_path = path.clamp_element_origin(min_x, max_x, min_y, max_y);
+                Some(&clamped_path)
+            }
+            other => other,
+        };
         let pointer_actions = match mouse_path {
             Some(path) if !path.points.is_empty() => {
                 let pointer_moves = self.pointer_moves_for_path(&path.points, &shared_id);
@@ -2285,6 +2315,37 @@ impl FirefoxCompanionWorker {
         }
     }
 
+    async fn pointer_origin_bounds(
+        &self,
+        context: &str,
+        shared_id: &str,
+    ) -> Result<PointerOriginBounds, CommandError> {
+        let response = self
+            .transport
+            .send(
+                "script.callFunction",
+                json!({
+                    "functionDeclaration": "function automationPointerBounds(element){if(!(element instanceof Element)||!element.isConnected)return JSON.stringify({cx:0,cy:0,width:0,height:0});const rect=element.getBoundingClientRect();const width=document.documentElement.clientWidth||window.innerWidth||1;const height=document.documentElement.clientHeight||window.innerHeight||1;return JSON.stringify({cx:rect.left+rect.width/2,cy:rect.top+rect.height/2,width,height});}",
+                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                    "arguments": [{"sharedId": shared_id}],
+                    "awaitPromise": false,
+                    "resultOwnership": "none",
+                }),
+            )
+            .await?;
+        let payload = response
+            .pointer("/result/value")
+            .and_then(Value::as_str)
+            .unwrap_or("{\"cx\":0,\"cy\":0,\"width\":0,\"height\":0}");
+        serde_json::from_str(payload).map_err(|_| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox pointer bounds probe returned an invalid result",
+                false,
+            )
+        })
+    }
+
     async fn bind_existing_popup(&self, context: &str) -> Result<(PageId, String), CommandError> {
         let page_id = PageId::new();
         let binding = self
@@ -2549,6 +2610,52 @@ fn require_remote_true(response: &Value, message: &'static str) -> Result<(), Co
         message,
         false,
     ))
+}
+
+async fn read_typed_control_value(
+    transport: &Arc<dyn BidiTransport>,
+    context: &str,
+    selector_json: &str,
+) -> Result<String, CommandError> {
+    let response = transport
+        .send(
+            "script.evaluate",
+            json!({
+                "expression": format!("(()=>{{const el=document.querySelector({selector_json});if(!el)throw new Error('target detached');const typed=el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement?el.value:(el.isContentEditable?String(el.innerText||el.textContent||''):(typeof el.value==='string'?el.value:''));return JSON.stringify({{automationTypedControlValue:String(typed).slice(0,8192)}});}})()"),
+                "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                "awaitPromise": false,
+                "resultOwnership": "none",
+            }),
+        )
+        .await?;
+    let encoded = response
+        .pointer("/result/value")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox typed-value probe returned an invalid result",
+                false,
+            )
+        })?;
+    let decoded: Value = serde_json::from_str(encoded).map_err(|_| {
+        driver_error(
+            ErrorCode::BrowserCommandFailed,
+            "Firefox typed-value probe returned malformed JSON",
+            false,
+        )
+    })?;
+    decoded
+        .get("automationTypedControlValue")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox typed-value probe omitted the control value",
+                false,
+            )
+        })
 }
 
 async fn form_control_validity_evidence(
@@ -3934,10 +4041,15 @@ impl BrowserWorker for FirefoxCompanionWorker {
         self.transport
             .send("input.performActions", bidi_actions)
             .await?;
+        let typed = read_typed_control_value(&self.transport, &context, &selector_json).await?;
         let mut evidence = vec![
             Evidence::Element {
                 selector: command.selector.clone(),
-                text: None,
+                text: Some(typed),
+            },
+            Evidence::Configuration {
+                name: "typedControlKind".into(),
+                value: "text".into(),
             },
             self.evidence(InteractionPath::EngineNative),
         ];
