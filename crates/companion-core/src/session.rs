@@ -956,32 +956,47 @@ impl SessionCoordinator {
         profile_id: &ProfileId,
         timeout: Duration,
     ) -> Result<Vec<BrowserTarget>, CompanionSessionError> {
-        tokio::time::timeout(timeout, async {
+        let wait = async {
             loop {
                 let notified = self.discovery_changed.notified();
-                if let Some(targets) = self.discovery_or_paired_session(profile_id).await {
-                    return Ok(targets);
+                if let Some(targets) = self.recorded_targets(profile_id).await {
+                    return targets;
                 }
                 notified.await;
             }
-        })
-        .await
-        .map_err(|_| CompanionSessionError::DiscoveryUnavailable)?
+        };
+        match tokio::time::timeout(timeout, wait).await {
+            Ok(targets) => Ok(targets),
+            Err(_) => self.synthesize_empty_if_paired(profile_id).await,
+        }
+    }
+
+    async fn recorded_targets(&self, profile_id: &ProfileId) -> Option<Vec<BrowserTarget>> {
+        self.state
+            .lock()
+            .await
+            .discoveries
+            .get(profile_id)
+            .map(|discovery| discovery.targets.clone())
     }
 
     /// A live pair is enough to attach. Firefox often starts on `about:blank`,
     /// which the companion does not publish, so `targetsDiscovered` never
-    /// arrives and the 30s wait used to fail while the websocket was already
-    /// paired.
-    async fn discovery_or_paired_session(
+    /// arrives and the wait used to fail while the websocket was already
+    /// paired. Wait for a real discovery first; synthesize empty only after
+    /// the caller deadline so in-flight `targetsDiscovered` is not replaced.
+    async fn synthesize_empty_if_paired(
         &self,
         profile_id: &ProfileId,
-    ) -> Option<Vec<BrowserTarget>> {
-        let mut state = self.state.lock().await;
-        if let Some(discovery) = state.discoveries.get(profile_id) {
-            return Some(discovery.targets.clone());
+    ) -> Result<Vec<BrowserTarget>, CompanionSessionError> {
+        if let Some(targets) = self.recorded_targets(profile_id).await {
+            return Ok(targets);
         }
-        let session = state.sessions.get(profile_id)?;
+        let mut state = self.state.lock().await;
+        let session = state
+            .sessions
+            .get(profile_id)
+            .ok_or(CompanionSessionError::DiscoveryUnavailable)?;
         let record = DiscoveryRecord {
             connection_id: session.connection_id,
             companion_id: session.companion_id.clone(),
@@ -991,7 +1006,7 @@ impl SessionCoordinator {
         tracing::warn!(
             "firefox companion paired with no targetsDiscovered; synthesizing empty discovery"
         );
-        Some(Vec::new())
+        Ok(Vec::new())
     }
 
     pub(crate) async fn active_grant(&self, profile_id: &ProfileId) -> Option<AttachmentGrant> {
