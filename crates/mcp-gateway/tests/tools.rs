@@ -3491,6 +3491,18 @@ async fn initialize_carries_agent_instructions() {
         instructions.contains("load") && instructions.contains("together"),
         "deferred-schema hosts need one-round loading guidance: {instructions}"
     );
+    assert!(
+        instructions.contains("workflowHandle"),
+        "initialize must name the handle-only path: {instructions}"
+    );
+    assert!(
+        instructions.contains("structuredContent"),
+        "initialize must name structuredContent before the next mutate: {instructions}"
+    );
+    assert!(
+        instructions.contains("ordinal"),
+        "initialize must tell agents to keep snapshot ordinal: {instructions}"
+    );
 }
 
 #[tokio::test]

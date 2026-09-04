@@ -54,9 +54,7 @@ calls. Rules that govern every call:
 - **Trim observation payloads when it counts.** `workflow_observe` and
   `intent_complete_form` default `evidenceDetail: "compact"` on success;
   pass `"full"` only when debugging.
-- Keep the returned `sessionId`/`pageId`/`workflowId` — they are the repair
-  path if the `workflowHandle` stops resolving (handles expire with the
-  server generation; explicit ids survive).
+- Pass the returned `workflowHandle` on later calls. `sessionId`/`pageId`/`workflowId` are the repair path if the handle stops resolving (handles expire with the server generation; explicit ids survive).
 
 ## Choosing the tool
 

@@ -30,12 +30,13 @@ mod workflow_handles;
 ///
 /// Kept under ~500 characters so it does not push connect payloads.
 pub const INITIALIZE_INSTRUCTIONS: &str = "\
-Start with workflow_start, then workflow_observe. Form loop: intent_complete_form, then \
-intent_submit_and_verify. Deferred schemas? load them in ONE tool search together. Fields \
-resolve just-in-time: include conditional fields after their revealer. Captcha? \
-intent_detect_challenge (explore) then intent_solve_challenge. Failures carry \
-error.repair {action,doc} — follow it. Boundary intents default autoCheckpoint \
-true. Stuck: bobby://failure-taxonomy, bobby://job-handlers.";
+Start with workflow_start; reuse workflowHandle (ids only if it dies). \
+Then workflow_observe. Form: intent_complete_form, then intent_submit_and_verify. \
+Pass snapshot target {role,accessibleName,ordinal} verbatim. Read structuredContent.status; \
+follow error.repair. Boundary intents default autoCheckpoint true. \
+Deferred schemas: load them in ONE tool search together. Captcha: \
+intent_detect_challenge then intent_solve_challenge. Stuck: \
+bobby://failure-taxonomy, bobby://job-handlers.";
 
 #[doc(hidden)]
 pub fn schema_for_test(name: &str) -> serde_json::Value {
