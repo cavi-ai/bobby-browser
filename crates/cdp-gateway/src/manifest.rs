@@ -15,6 +15,7 @@ pub(crate) enum Handler {
     PerformanceEnable,
     NetworkSetUserAgent,
     TargetGetBrowserContexts,
+    TargetCreateBrowserContext,
     TargetSetDiscoverTargets,
     TargetCreateTarget,
     BrowserGetVersion,
@@ -56,6 +57,7 @@ impl Handler {
             Self::PerformanceEnable => "configure_gateway_performance_metrics",
             Self::NetworkSetUserAgent => "validate_exact_current_user_agent_noop",
             Self::TargetGetBrowserContexts => "list_runtime_browser_contexts",
+            Self::TargetCreateBrowserContext => "refuse_runtime_browser_context_create",
             Self::TargetSetDiscoverTargets => "configure_gateway_target_discovery",
             Self::TargetCreateTarget => "open_runtime_page",
             Self::BrowserGetVersion => "runtime_info",
@@ -211,6 +213,10 @@ impl MethodRegistry {
             (
                 "Target.getBrowserContexts".to_owned(),
                 Handler::TargetGetBrowserContexts,
+            ),
+            (
+                "Target.createBrowserContext".to_owned(),
+                Handler::TargetCreateBrowserContext,
             ),
             (
                 "Target.setDiscoverTargets".to_owned(),
