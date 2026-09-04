@@ -44,7 +44,10 @@ async fn run() -> anyhow::Result<()> {
     })?;
     config.validate().map_err(anyhow::Error::msg)?;
     let (selection, _source) = firefox_companion::selection::resolve_browser_selection()?;
-    let factory = firefox_companion::selection::compose_worker_factory(&config, selection)?;
+    // Warm the companion like `bobby serve`: cold compose only binds for the
+    // first session's 30s discovery window, which never aligns with an
+    // already-paired extension's reconnect schedule.
+    let factory = firefox_companion::selection::compose_worker_factory_warm(&config, selection)?;
     let runtime = RuntimeService::build_with_worker_factory(&config, Arc::clone(&factory))
         .await
         .map_err(anyhow::Error::new)?;

@@ -297,10 +297,6 @@ export class CompanionBackground {
     this.#dependencies.transport.start((message) => this.receive(message));
     this.#started = true;
 
-    if (this.#dependencies.transport.isConnected && !this.#dependencies.transport.isConnected()) {
-      return this.#abortEnrollAfterHostStart("listenerUnavailable");
-    }
-
     try {
       this.#dependencies.transport.send(createEnrollProfileRequest());
     } catch {

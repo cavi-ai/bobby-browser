@@ -366,13 +366,25 @@ export class NativeCompanionTransport {
     this.#listener = listener;
     if (this.#running || this.#terminalAuth) return;
     this.#running = true;
-    this.#connect();
+    // Connect on the first outbound frame (pair or enrollProfile). Spawning
+    // the native host in start() races the pair payload: a dropped port
+    // reconnects without pairRequest and leaks Pair-less hosts that wait
+    // forever on stdin while the companion endpoint sits unused.
+    if (this.#pairRequest) this.#connect();
   }
 
   send(message: unknown): void {
     validateOutbound(message);
     if (isNativePairRequest(message)) this.#pairRequest = message;
-    if (!this.#port) throw new Error("native companion is not connected");
+    if (!this.#port) {
+      if (!this.#running) throw new Error("native companion is not connected");
+      this.#connect();
+      if (!this.#port) {
+        if (isNativePairRequest(message)) return;
+        throw new Error("native companion is not connected");
+      }
+      if (isNativePairRequest(message)) return;
+    }
     this.#port.postMessage(message);
   }
 
