@@ -199,9 +199,8 @@ impl TryFrom<FirefoxCompanionConfig> for FirefoxRuntimeConfig {
 #[async_trait]
 impl WorkerFactory for ConfiguredFirefoxFactory {
     async fn launch(&self, session_id: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
-        self.ensure_bidi_slot().await?;
-        let mut live_server = self.server.lock().await;
-        if let Some(server) = live_server.as_ref() {
+        let warmed = self.server.lock().await.clone();
+        if let Some(server) = warmed {
             server
                 .wait_for_discovery(&self.config.profile_id, self.config.timeout)
                 .await
@@ -212,13 +211,14 @@ impl WorkerFactory for ConfiguredFirefoxFactory {
                         "firefox companion discovery wait failed"
                     );
                 })?;
-            return self.launch_with_server(server, session_id).await;
+            self.ensure_bidi_slot().await?;
+            return self.launch_with_server(&server, session_id).await;
         }
 
         let attempt = self.start_server().await.inspect_err(|error| {
             tracing::warn!(error = %error.message, "firefox companion bootstrap failed");
         })?;
-        let server = attempt.server();
+        let server = attempt.server().clone();
         server
             .wait_for_discovery(&self.config.profile_id, self.config.timeout)
             .await
@@ -229,14 +229,15 @@ impl WorkerFactory for ConfiguredFirefoxFactory {
                     "firefox companion pairing timed out waiting for extension discovery"
                 );
             })?;
+        self.ensure_bidi_slot().await?;
         let worker = self
-            .launch_with_server(server, session_id)
+            .launch_with_server(&server, session_id)
             .await
             .inspect_err(|error| {
                 tracing::warn!(error = %error.message, "firefox companion worker launch failed");
             })?;
         let server = attempt.complete().map_err(companion_error)?;
-        *live_server = Some(server);
+        *self.server.lock().await = Some(server);
         Ok(worker)
     }
 

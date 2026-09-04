@@ -602,10 +602,15 @@ export class CompanionBackground {
     this.#targetIdsByRoute.clear();
     this.#tabLifecycles.clear();
     await this.#setFingerprintManagedByHost(true, undefined);
-    const targets = (await this.#dependencies.discoverTargets?.()) ?? [];
-    for (const target of targets) {
-      if (this.#targets.size >= MAX_PAGE_LEASES) break;
-      this.#registerTarget(target);
+    try {
+      const targets = (await this.#dependencies.discoverTargets?.()) ?? [];
+      for (const target of targets) {
+        if (this.#targets.size >= MAX_PAGE_LEASES) break;
+        this.#registerTarget(target);
+      }
+    } catch {
+      /* discovery is best-effort: about:blank and tabs.query failures must
+         still publish an empty targetsDiscovered so the runtime can attach */
     }
     this.#sendDiscovery();
     this.#resolveEnroll({ ok: true });
