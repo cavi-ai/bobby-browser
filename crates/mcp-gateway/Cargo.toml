@@ -18,28 +18,28 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-observability = { path = "../observability", version = "0.13.0" }
+observability.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-types = { path = "../types", version = "0.13.0" }
-interface-core = { path = "../interface-core", version = "0.13.0" }
-sdk-core = { path = "../sdk-core", version = "0.13.0" }
-config = { path = "../config", version = "0.13.0" }
-artifact-store = { path = "../artifact-store", version = "0.13.0" }
-firefox-companion = { path = "../firefox-companion", version = "0.13.0" }
+types.workspace = true
+interface-core.workspace = true
+sdk-core.workspace = true
+config.workspace = true
+artifact-store.workspace = true
+firefox-companion.workspace = true
 async-trait.workspace = true
-task-scheduler = { path = "../task-scheduler", version = "0.13.0" }
-network-engine = { path = "../network-engine", version = "0.13.0" }
+task-scheduler.workspace = true
+network-engine.workspace = true
 
 [dev-dependencies]
-types = { path = "../types", version = "0.13.0", features = ["schema"] }
+types = { workspace = true, features = ["schema"] }
 schemars.workspace = true
 jsonschema.workspace = true
 async-trait.workspace = true
 tempfile.workspace = true
-checkpoint-store = { path = "../checkpoint-store", version = "0.13.0" }
-dom-engine = { path = "../dom-engine", version = "0.13.0" }
-page-runtime = { path = "../page-runtime", version = "0.13.0" }
-session-manager = { path = "../session-manager", version = "0.13.0" }
-worker-pool = { path = "../worker-pool", version = "0.13.0" }
-workflow-journal = { path = "../workflow-journal", version = "0.13.0" }
+checkpoint-store.workspace = true
+dom-engine.workspace = true
+page-runtime.workspace = true
+session-manager.workspace = true
+worker-pool.workspace = true
+workflow-journal.workspace = true

@@ -102,6 +102,46 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 url = "2"
 uuid = { version = "1", features = ["serde", "v4", "macro-diagnostics"] }
 
+# Internal workspace crates
+acp-client = { path = "crates/acp-client" }
+acp-gateway = { path = "crates/acp-gateway" }
+artifact-store = { path = "crates/artifact-store" }
+auth-broker = { path = "crates/auth-broker" }
+behavioral-engine = { path = "crates/behavioral-engine" }
+bobby-browser = { path = "crates/cli" }
+bobby-browser-client = { path = "crates/bobby-browser-client" }
+broker = { path = "crates/broker" }
+cdp-gateway = { path = "crates/cdp-gateway" }
+checkpoint-store = { path = "crates/checkpoint-store" }
+companion-core = { path = "crates/companion-core" }
+companion-protocol = { path = "crates/companion-protocol" }
+config = { path = "crates/config" }
+context-store = { path = "crates/context-store" }
+dom-engine = { path = "crates/dom-engine" }
+fingerprinting = { path = "crates/fingerprinting" }
+firefox-companion = { path = "crates/firefox-companion" }
+gauntlet-server = { path = "crates/gauntlet-server" }
+intent-engine = { path = "crates/intent-engine" }
+interface-conformance = { path = "crates/interface-conformance" }
+interface-core = { path = "crates/interface-core" }
+js-engine = { path = "crates/js-engine" }
+mcp-gateway = { path = "crates/mcp-gateway" }
+network-engine = { path = "crates/network-engine" }
+node-registry = { path = "crates/node-registry" }
+observability = { path = "crates/observability" }
+page-runtime = { path = "crates/page-runtime" }
+release-gates = { path = "crates/release-gates" }
+runtime-tests = { path = "crates/runtime-tests" }
+sdk-core = { path = "crates/sdk-core" }
+session-manager = { path = "crates/session-manager" }
+skill-runtime = { path = "crates/skill-runtime" }
+task-scheduler = { path = "crates/task-scheduler" }
+test-site = { path = "crates/test-site" }
+types = { path = "crates/types" }
+vision-proxy = { path = "crates/vision-proxy" }
+worker-pool = { path = "crates/worker-pool" }
+workflow-journal = { path = "crates/workflow-journal" }
+
 # Build-artifact budget.
 #
 # `target/` reached 195 GB on this checkout: 111 GB of `debug/deps`, 71 GB of

@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 hex = { workspace = true }
-artifact-store = { path = "../artifact-store", version = "0.13.0" }
+artifact-store.workspace = true
 async-trait.workspace = true
 base64.workspace = true
 chrono.workspace = true
@@ -21,7 +21,7 @@ sha2.workspace = true
 subtle.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-types = { path = "../types", version = "0.13.0" }
+types.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

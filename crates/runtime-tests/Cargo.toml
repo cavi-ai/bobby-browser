@@ -9,44 +9,44 @@ publish = false
 
 [dependencies]
 hex = { workspace = true }
-artifact-store = { path = "../artifact-store" }
+artifact-store.workspace = true
 base64.workspace = true
 async-trait.workspace = true
 axum = { workspace = true, features = ["multipart"] }
-broker = { path = "../broker" }
-checkpoint-store = { path = "../checkpoint-store" }
-context-store = { path = "../context-store" }
-companion-protocol = { path = "../companion-protocol" }
-cdp-gateway = { path = "../cdp-gateway" }
+broker.workspace = true
+checkpoint-store.workspace = true
+context-store.workspace = true
+companion-protocol.workspace = true
+cdp-gateway.workspace = true
 chrono.workspace = true
-config = { path = "../config" }
+config.workspace = true
 futures-util.workspace = true
-intent-engine = { path = "../intent-engine" }
-interface-conformance = { path = "../interface-conformance" }
-interface-core = { path = "../interface-core" }
-firefox-companion = { path = "../firefox-companion" }
+intent-engine.workspace = true
+interface-conformance.workspace = true
+interface-core.workspace = true
+firefox-companion.workspace = true
 libc = "0.2"
-bobby-browser = { path = "../cli" }
-mcp-gateway = { path = "../mcp-gateway" }
-network-engine = { path = "../network-engine" }
-sdk-core = { path = "../sdk-core" }
-session-manager = { path = "../session-manager" }
-skill-runtime = { path = "../skill-runtime", features = ["test-support"] }
-page-runtime = { path = "../page-runtime", features = ["test-support"] }
-release-gates = { path = "../release-gates" }
+bobby-browser.workspace = true
+mcp-gateway.workspace = true
+network-engine.workspace = true
+sdk-core.workspace = true
+session-manager.workspace = true
+skill-runtime = { workspace = true, features = ["test-support"] }
+page-runtime = { workspace = true, features = ["test-support"] }
+release-gates.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
-test-site = { path = "../test-site" }
+test-site.workspace = true
 tokio.workspace = true
 tokio-tungstenite = "0.30"
 tower.workspace = true
-types = { path = "../types" }
+types.workspace = true
 url.workspace = true
 uuid.workspace = true
-workflow-journal = { path = "../workflow-journal" }
-worker-pool = { path = "../worker-pool" }
-fingerprinting = { path = "../fingerprinting" }
-gauntlet-server = { path = "../gauntlet-server" }
+workflow-journal.workspace = true
+worker-pool.workspace = true
+fingerprinting.workspace = true
+gauntlet-server.workspace = true

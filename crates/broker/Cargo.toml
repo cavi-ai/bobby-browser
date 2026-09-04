@@ -23,17 +23,17 @@ tower.workspace = true
 tracing.workspace = true
 url.workspace = true
 uuid.workspace = true
-types = { path = "../types", version = "0.13.0" }
-sdk-core = { path = "../sdk-core", version = "0.13.0" }
-config = { path = "../config", version = "0.13.0" }
-interface-core = { path = "../interface-core", version = "0.13.0" }
-artifact-store = { path = "../artifact-store", version = "0.13.0" }
-mcp-gateway = { path = "../mcp-gateway", version = "0.13.0" }
-cdp-gateway = { path = "../cdp-gateway", version = "0.13.0" }
-worker-pool = { path = "../worker-pool", version = "0.13.0" }
-task-scheduler = { path = "../task-scheduler", version = "0.13.0" }
-network-engine = { path = "../network-engine", version = "0.13.0" }
-observability = { path = "../observability", version = "0.13.0" }
+types.workspace = true
+sdk-core.workspace = true
+config.workspace = true
+interface-core.workspace = true
+artifact-store.workspace = true
+mcp-gateway.workspace = true
+cdp-gateway.workspace = true
+worker-pool.workspace = true
+task-scheduler.workspace = true
+network-engine.workspace = true
+observability.workspace = true
 
 futures-util.workspace = true
 

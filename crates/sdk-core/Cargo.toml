@@ -8,32 +8,32 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-artifact-store = { path = "../artifact-store", version = "0.13.0" }
+artifact-store.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
-checkpoint-store = { path = "../checkpoint-store", version = "0.13.0" }
-context-store = { path = "../context-store", version = "0.13.0" }
-node-registry = { path = "../node-registry", version = "0.13.0" }
-observability = { path = "../observability", version = "0.13.0" }
-config = { path = "../config", version = "0.13.0" }
-interface-core = { path = "../interface-core", version = "0.13.0" }
+checkpoint-store.workspace = true
+context-store.workspace = true
+node-registry.workspace = true
+observability.workspace = true
+config.workspace = true
+interface-core.workspace = true
 serde_json.workspace = true
-types = { path = "../types", version = "0.13.0" }
-session-manager = { path = "../session-manager", version = "0.13.0" }
-page-runtime = { path = "../page-runtime", version = "0.13.0" }
-intent-engine = { path = "../intent-engine", version = "0.13.0" }
-network-engine = { path = "../network-engine", version = "0.13.0" }
-worker-pool = { path = "../worker-pool", version = "0.13.0" }
-workflow-journal = { path = "../workflow-journal", version = "0.13.0" }
-skill-runtime = { path = "../skill-runtime", version = "0.13.0" }
+types.workspace = true
+session-manager.workspace = true
+page-runtime.workspace = true
+intent-engine.workspace = true
+network-engine.workspace = true
+worker-pool.workspace = true
+workflow-journal.workspace = true
+skill-runtime.workspace = true
 sha2.workspace = true
 hex.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-checkpoint-store = { path = "../checkpoint-store", version = "0.13.0" }
-context-store = { path = "../context-store", version = "0.13.0" }
-dom-engine = { path = "../dom-engine", version = "0.13.0" }
+checkpoint-store.workspace = true
+context-store.workspace = true
+dom-engine.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 uuid.workspace = true

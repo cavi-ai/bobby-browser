@@ -13,16 +13,16 @@ base64.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-dom-engine = { path = "../dom-engine", version = "0.13.0" }
+dom-engine.workspace = true
 hex.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 url.workspace = true
 tracing.workspace = true
-observability = { path = "../observability", version = "0.13.0" }
-types = { path = "../types", version = "0.13.0" }
-context-store = { path = "../context-store", version = "0.13.0" }
+observability.workspace = true
+types.workspace = true
+context-store.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

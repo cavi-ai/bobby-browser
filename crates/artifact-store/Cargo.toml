@@ -17,7 +17,7 @@ tokio.workspace = true
 tracing.workspace = true
 sha2.workspace = true
 uuid.workspace = true
-types = { path = "../types", version = "0.13.0" }
+types.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -21,8 +21,8 @@ sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-types = { path = "../types", version = "0.13.0" }
+types.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-test-site = { path = "../test-site", version = "0.13.0" }
+test-site.workspace = true

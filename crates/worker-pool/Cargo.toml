@@ -17,32 +17,32 @@ anyhow.workspace = true
 async-trait.workspace = true
 chromiumoxide.workspace = true
 chrono.workspace = true
-config = { path = "../config", version = "0.13.0" }
-behavioral-engine = { path = "../behavioral-engine", version = "0.13.0" }
-dom-engine = { path = "../dom-engine", version = "0.13.0" }
-fingerprinting = { path = "../fingerprinting", version = "0.13.0" }
-js-engine = { path = "../js-engine", version = "0.13.0" }
-network-engine = { path = "../network-engine", version = "0.13.0" }
+config.workspace = true
+behavioral-engine.workspace = true
+dom-engine.workspace = true
+fingerprinting.workspace = true
+js-engine.workspace = true
+network-engine.workspace = true
 futures.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-skill-runtime = { path = "../skill-runtime", version = "0.13.0" }
+skill-runtime.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-types = { path = "../types", version = "0.13.0" }
+types.workspace = true
 url.workspace = true
-artifact-store = { path = "../artifact-store", version = "0.13.0" }
-companion-protocol = { path = "../companion-protocol", version = "0.13.0" }
+artifact-store.workspace = true
+companion-protocol.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
-test-site = { path = "../test-site", version = "0.13.0" }
+test-site.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
