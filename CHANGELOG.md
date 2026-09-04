@@ -1,9 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.13.0 - 2026-09-04
 
 ### Added
 
+- `bobby doctor` command: read-only health checks with `--json` structured
+  output and a `next-action` recommendation. Inspects command journal,
+  scheduler journal, corpus, sidecar version, and store health.
+- `bobby doctor --fix` rotates an expired bootstrap token.
 - Firefox `wait_for` implements `networkQuiet` from the BiDi
   `network.beforeRequestSent` / `responseCompleted` / `fetchError` stream
   already used for HAR, with the same idle / max-in-flight / ignore filters
@@ -11,6 +15,26 @@
 - Firefox live-process reattach reconnects the BiDi websocket without
   `session.new`, so typed values survive a transport drop the same way a
   Chromium CDP reattach does.
+- Rust SDK: intent envelope builders (`locate_envelope`,
+  `fill_envelope`, `submit_and_verify_envelope`, etc.) mirror the
+  TypeScript SDK one-to-one, with purpose validation and unique-name
+  enforcement.
+- Rust SDK: client methods for the remaining `/v1` surface —
+  `form_snapshot`, `checkpoint`, `recovery_status`, `recover`, and
+  `artifact` with full reference verification (media-type, Content-Length,
+  byte cap, SHA-256 digest).
+- MCP `boundary-once` guard refuses a second `intent_submit_and_verify`
+  against a workflow whose Boundary submit already completed, keyed on
+  `(workflow, control identity)`. `reSubmit: true` is the explicit
+  acknowledgment path.
+- Agent benchmark gate enforces per-task token and call budgets from
+  `baseline.json` and aggregates multi-run batches (every run must pass;
+  mean wall/tokens face thresholds).
+- Vision corpus: harvest wrong-pick validation and split abstain recall
+  floors between production negatives (floor 1.0) and singleton research
+  classes (floor 0.5).
+- Real-sites probe harness with wall-discrimination pairs (LinkedIn,
+  Reddit) and expanded purpose table.
 
 ### Changed
 
@@ -18,6 +42,56 @@
   of the whole outcome.
 - `element_at_point` defaults to unsupported (`browserCommandFailed`), not
   `Ok(None)`.
+- MCP `extract` default value and handle examples are derived and formatted
+  correctly in tool schemas.
+- Advertised command-outcome schemas are no longer opaque — field-level
+  detail is visible in the schema.
+- MCP workflow handles are initialized before the first tool dispatch,
+  fixing the handle-first loop.
+
+### Fixed
+
+- `ExpectedStatePreSatisfied` pre-check widens to 2s (from 750ms),
+  outliving the SPA render race under concurrent browser instances.
+- `boundary-once` ledger keys per control identity, not per workflow — a
+  workflow with two distinct Boundary submits (search + save) no longer
+  false-positives.
+- Hints-less boundary submits are truly fail-open: no key, no ledger
+  entry, no collision between unnamed controls.
+- Candidate census survives exotic elements that serve non-string
+  `innerText`/`value`.
+- Real-sites purpose expansion and singleton recall split landed (missed
+  in prior branch switch).
+- Rust SDK `artifact()` verifies bodies against references with typed
+  protocol validation — the verification delta that missed #414 is landed.
+- Firefox: leaked BiDi session is recycled when `session.new` hits
+  "Maximum number of active sessions"; the factory detects the slot,
+  recycles the enrolled profile, and retries.
+- Firefox: typed-value evidence returns correct evidence and click bounds
+  are validated.
+- Firefox: CDP `inspect` with a text-only target resolves via page text
+  matching instead of failing.
+- Firefox: companion attach without `targetsDiscovered` — tab selection
+  falls back when the event is absent.
+- Firefox: companion attach without Pair-less host leak — native transport
+  cleans up on disconnect.
+- Firefox: document title is read correctly after the MCP handle-first
+  loop fix.
+- CDP: same-document hash-link click dispatches correctly instead of
+  waiting for a cross-document navigation.
+- CDP: `/json/list` provisions an auto-session when the gateway has none,
+  so Playwright and other clients that discover targets before connecting
+  find a usable target.
+- CDP: page title updates after navigate instead of returning the
+  pre-navigation value.
+- CDP: `Runtime.evaluate` is refused after navigate when the execution
+  context is stale, instead of hanging.
+- CDP: `Target.createBrowserContext` is honestly refused as unsupported
+  instead of silently failing.
+- SDK: deterministic deadline in elapsed-deadline waiter test — context
+  deadline widened to 2s so a loaded runner cannot stretch past it.
+- `Formula/bobby-browser.rb` sha256 digests updated for v0.12.0 release
+  assets.
 
 ## 0.12.0 - 2026-08-31
 

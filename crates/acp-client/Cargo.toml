@@ -11,17 +11,17 @@ publish = false
 hex = { workspace = true }
 agent-client-protocol.workspace = true
 async-trait.workspace = true
-auth-broker = { path = "../auth-broker", version = "0.12.0" }
+auth-broker.workspace = true
 base64.workspace = true
-intent-engine = { path = "../intent-engine", version = "0.12.0" }
-observability = { path = "../observability", version = "0.12.0" }
+intent-engine.workspace = true
+observability.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-types = { path = "../types", version = "0.12.0" }
+types.workspace = true
 
 [dev-dependencies]
-auth-broker = { path = "../auth-broker", version = "0.12.0" }
+auth-broker.workspace = true
 tempfile.workspace = true

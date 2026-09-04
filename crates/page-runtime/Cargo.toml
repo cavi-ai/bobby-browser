@@ -14,27 +14,27 @@ test-support = ["skill-runtime/test-support"]
 [dependencies]
 hex = { workspace = true }
 jsonschema.workspace = true
-artifact-store = { path = "../artifact-store", version = "0.12.0" }
+artifact-store.workspace = true
 async-trait.workspace = true
-checkpoint-store = { path = "../checkpoint-store", version = "0.12.0" }
+checkpoint-store.workspace = true
 chrono.workspace = true
-companion-protocol = { path = "../companion-protocol", version = "0.12.0" }
-context-store = { path = "../context-store", version = "0.12.0" }
-dom-engine = { path = "../dom-engine", version = "0.12.0" }
-intent-engine = { path = "../intent-engine", version = "0.12.0" }
-observability = { path = "../observability", version = "0.12.0" }
-network-engine = { path = "../network-engine", version = "0.12.0" }
+companion-protocol.workspace = true
+context-store.workspace = true
+dom-engine.workspace = true
+intent-engine.workspace = true
+observability.workspace = true
+network-engine.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-skill-runtime = { path = "../skill-runtime", version = "0.12.0" }
+skill-runtime.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-types = { path = "../types", version = "0.12.0" }
+types.workspace = true
 url.workspace = true
-worker-pool = { path = "../worker-pool", version = "0.12.0" }
-workflow-journal = { path = "../workflow-journal", version = "0.12.0" }
+worker-pool.workspace = true
+workflow-journal.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
