@@ -118,6 +118,31 @@ function discoveredTargetIds(transport: FakeTransport): string[] {
   return discoveries.at(-1)?.output.targets.map((target) => target.targetId).sort() ?? [];
 }
 
+test("paired still publishes discovery when discoverTargets throws", async () => {
+  const transport = new FakeTransport();
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => {
+      throw new Error("tabs.query failed");
+    },
+    async sendTabMessage() {
+      return {};
+    },
+    async navigateTab() {},
+    now: () => 1_000,
+  });
+  background.connect(CONNECT_OPTIONS);
+  await pair(background);
+  const discovered = transport.sent.filter(
+    (message): message is { kind: "targetsDiscovered" } =>
+      typeof message === "object" &&
+      message !== null &&
+      "kind" in message &&
+      message.kind === "targetsDiscovered",
+  );
+  assert.equal(discovered.length, 1);
+});
+
 test("discovery is not a grant and only an explicit UUID grant can route", async () => {
   const transport = new FakeTransport();
   const routed: unknown[] = [];

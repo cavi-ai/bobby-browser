@@ -604,6 +604,42 @@ async fn oversized_frame_closes_with_typed_secret_free_error() {
 }
 
 #[tokio::test]
+async fn wait_for_discovery_accepts_a_paired_session_without_targets() {
+    let server = CompanionServer::bind_loopback(loopback_config())
+        .await
+        .unwrap();
+    let code = server.registry().issue_pairing_code().await;
+    let input = PairingInput::firefox(code.clone());
+    let profile_id = input.profile_id.clone();
+    let mut socket = connect_with_bearer(server.local_addr(), &code)
+        .await
+        .unwrap();
+    send_request(
+        &mut socket,
+        &CompanionRequest::Pair(PairRequest {
+            protocol_version: PROTOCOL_VERSION,
+            pairing_code: code,
+            companion_id: input.companion_id,
+            profile_id: profile_id.clone(),
+            identity: input.identity,
+            capabilities: input.capabilities,
+        }),
+    )
+    .await;
+    assert!(matches!(
+        receive_event(&mut socket).await,
+        CompanionEvent::Paired { .. }
+    ));
+    let discovered = server
+        .wait_for_discovery(&profile_id, Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(discovered, Vec::<BrowserTarget>::new());
+    let grant = server.grant_discovered_targets(&profile_id).await.unwrap();
+    assert!(grant.pages.is_empty());
+}
+
+#[tokio::test]
 async fn authentication_error_does_not_echo_bearer() {
     let server = CompanionServer::bind_loopback(loopback_config())
         .await

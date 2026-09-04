@@ -360,6 +360,7 @@ impl SessionCoordinator {
         if let Some(previous) = previous {
             let _ = previous.outbound.send(Message::Close(None)).await;
         }
+        self.discovery_changed.notify_waiters();
         connection_id
     }
 
@@ -958,14 +959,7 @@ impl SessionCoordinator {
         tokio::time::timeout(timeout, async {
             loop {
                 let notified = self.discovery_changed.notified();
-                if let Some(targets) = self
-                    .state
-                    .lock()
-                    .await
-                    .discoveries
-                    .get(profile_id)
-                    .map(|discovery| discovery.targets.clone())
-                {
+                if let Some(targets) = self.discovery_or_paired_session(profile_id).await {
                     return Ok(targets);
                 }
                 notified.await;
@@ -973,6 +967,31 @@ impl SessionCoordinator {
         })
         .await
         .map_err(|_| CompanionSessionError::DiscoveryUnavailable)?
+    }
+
+    /// A live pair is enough to attach. Firefox often starts on `about:blank`,
+    /// which the companion does not publish, so `targetsDiscovered` never
+    /// arrives and the 30s wait used to fail while the websocket was already
+    /// paired.
+    async fn discovery_or_paired_session(
+        &self,
+        profile_id: &ProfileId,
+    ) -> Option<Vec<BrowserTarget>> {
+        let mut state = self.state.lock().await;
+        if let Some(discovery) = state.discoveries.get(profile_id) {
+            return Some(discovery.targets.clone());
+        }
+        let session = state.sessions.get(profile_id)?;
+        let record = DiscoveryRecord {
+            connection_id: session.connection_id,
+            companion_id: session.companion_id.clone(),
+            targets: Vec::new(),
+        };
+        state.discoveries.insert(profile_id.clone(), record);
+        tracing::warn!(
+            "firefox companion paired with no targetsDiscovered; synthesizing empty discovery"
+        );
+        Some(Vec::new())
     }
 
     pub(crate) async fn active_grant(&self, profile_id: &ProfileId) -> Option<AttachmentGrant> {
