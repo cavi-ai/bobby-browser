@@ -2851,6 +2851,23 @@ mod tests {
     }
 
     #[test]
+    fn advertised_challenge_intents_accept_a_workflow_handle() {
+        for name in ["intent_detect_challenge", "intent_solve_challenge"] {
+            let schema = advertised_tool_schema(name);
+            let branches = schema["oneOf"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{name} must advertise handle/id oneOf"));
+            assert!(
+                branches.iter().any(|branch| {
+                    branch["required"] == json!(["workflowHandle"])
+                        && branch["properties"]["sessionId"] == Value::Bool(false)
+                }),
+                "{name} must accept workflowHandle: {schema}"
+            );
+        }
+    }
+
+    #[test]
     fn advertised_click_output_schema_is_an_opaque_object() {
         assert_eq!(
             advertised_tool_output_schema("click"),

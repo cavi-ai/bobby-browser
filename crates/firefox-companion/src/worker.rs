@@ -2955,11 +2955,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
             .and_then(Value::as_str)
             .unwrap_or(&command.url)
             .to_owned();
-        let title = response
-            .get("title")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
+        let title = capture_context_title(&self.transport, &context).await?;
         Ok(vec![
             Evidence::Navigation { url, title },
             self.evidence(InteractionPath::EngineNative),

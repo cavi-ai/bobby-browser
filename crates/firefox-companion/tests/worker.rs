@@ -1509,6 +1509,24 @@ async fn open_page_and_navigate_map_to_bidi_context_commands() {
     assert!(calls.iter().any(|call| {
         call.method == "browsingContext.navigate" && call.params["wait"] == "interactive"
     }));
+    let title_evals = calls
+        .iter()
+        .filter(|call| {
+            call.method == "script.evaluate" && call.params["expression"] == "document.title"
+        })
+        .count();
+    assert!(
+        title_evals >= 2,
+        "navigate must read document.title; saw {title_evals} title evaluates: {calls:?}"
+    );
+    assert!(complete.iter().any(|item| matches!(
+        item,
+        Evidence::Navigation { title, .. } if title == "Original tab title"
+    )));
+    assert!(interactive.iter().any(|item| matches!(
+        item,
+        Evidence::Navigation { title, .. } if title == "Original tab title"
+    )));
     assert_engine_native(&complete);
     assert_engine_native(&interactive);
 }

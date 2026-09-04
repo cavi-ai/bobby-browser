@@ -41,6 +41,10 @@ pub(crate) const WORKFLOW_SCOPE_TOOLS: &[(&str, WorkflowScope)] = &[
     ("inspect", WorkflowScope::SessionPageWorkflow),
     ("intent_complete_form", WorkflowScope::SessionPageWorkflow),
     (
+        "intent_detect_challenge",
+        WorkflowScope::SessionPageWorkflow,
+    ),
+    (
         "intent_dismiss_obstruction",
         WorkflowScope::SessionPageWorkflow,
     ),
@@ -48,6 +52,7 @@ pub(crate) const WORKFLOW_SCOPE_TOOLS: &[(&str, WorkflowScope)] = &[
     ("intent_fill", WorkflowScope::SessionPageWorkflow),
     ("intent_follow", WorkflowScope::SessionPageWorkflow),
     ("intent_locate", WorkflowScope::SessionPageWorkflow),
+    ("intent_solve_challenge", WorkflowScope::SessionPageWorkflow),
     (
         "intent_submit_and_verify",
         WorkflowScope::SessionPageWorkflow,
