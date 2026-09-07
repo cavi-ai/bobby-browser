@@ -497,6 +497,18 @@ prefill = true
     }
 
     #[test]
+    fn vision_propose_budget_defaults_unset_and_parses() {
+        let config = super::VisionConfig::default();
+        assert_eq!(config.propose_budget_ms, None);
+        let parsed: super::AppConfig =
+            toml::from_str("[vision]\npropose_budget_ms = 1500\n").expect("parse propose budget");
+        assert_eq!(parsed.vision.propose_budget_ms, Some(1500));
+        let aliased: super::AppConfig =
+            toml::from_str("[vision]\nproposeBudgetMs = 1500\n").expect("parse camelCase alias");
+        assert_eq!(aliased.vision.propose_budget_ms, Some(1500));
+    }
+
+    #[test]
     fn vision_providers_table_loads_and_selects() {
         let text = r#"
 [vision]

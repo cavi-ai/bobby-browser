@@ -4,6 +4,14 @@
 
 ### Added
 
+- `[vision].propose_budget_ms`: an operator-set health budget for one vision
+  propose round-trip. `bobby doctor`'s vision probe warns when the measured
+  round-trip exceeds it (naming both numbers and the setting), and
+  `/v1/runtime` advertises it as `visionProposeBudgetMs`, so a caller can
+  judge the metrics latency histogram against the configured budget without
+  config access. Unset means no budget gate — `timeout_ms` stays the only
+  bound.
+
 - `bobby mcp-stdio` dumps the operational metrics snapshot to
   `BOBBY_METRICS_SNAPSHOT_PATH` when the host closes the session, when that
   env var is set. The snapshot is counters and histograms only — never

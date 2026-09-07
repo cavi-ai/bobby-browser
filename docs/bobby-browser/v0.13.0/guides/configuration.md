@@ -164,6 +164,7 @@ escalation is unavailable even when the bearer and session opt in.
 | `endpoint_url` | unset | Bobby → proxy URL — **https**, or **http only on loopback** |
 | `token_env` | unset | Env var name holding the loopback bearer (never store the token here) |
 | `timeout_ms` | `15000` | Per-proposal HTTP timeout |
+| `propose_budget_ms` | unset | Health budget for one propose round-trip: `bobby doctor`'s vision probe warns when the measured round-trip exceeds it, and `/v1/runtime` advertises it as `visionProposeBudgetMs`. Unset means no budget gate — `timeout_ms` stays the only bound. |
 | `provider` | unset | Active profile name under `[vision.providers]` |
 | `providers.<name>` | unset | Named OpenAI-compatible upstream profiles |
 
