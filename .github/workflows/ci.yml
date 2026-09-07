@@ -348,6 +348,11 @@ jobs:
         # conformance needs a real Chrome and runs on the chromium job.
         run: pnpm --filter @cavi-ai/bobby-interface-conformance test:unit
 
+      - name: Competitor gauntlet harness
+        # Browser-free unit tests for the benchmark runner/scorer itself —
+        # the measurement gate is only trustworthy if its harness is.
+        run: pnpm --filter @cavi-ai/competitor-gauntlet test
+
       - name: Docs artifact
         run: |
           pnpm docs:build

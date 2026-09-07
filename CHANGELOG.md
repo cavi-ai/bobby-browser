@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Added
+
+- `bobby mcp-stdio` dumps the operational metrics snapshot to
+  `BOBBY_METRICS_SNAPSHOT_PATH` when the host closes the session, when that
+  env var is set. The snapshot is counters and histograms only — never
+  prompts, values, or URLs. A dump failure is logged and never fails the
+  shutdown.
+- Competitor gauntlet run records carry `attribution`: the run's action
+  count and resolution sources (`deterministic` / `context` /
+  `visionPrefill` / `visionFallback`, from the bobby metrics snapshot), the
+  driving model's tier, and the interface failure taxonomy (error codes
+  counted from structured tool errors). Snapshot-derived fields are null
+  for non-bobby tools.
+- CI's node job runs the competitor gauntlet's browser-free unit tests, so
+  the measurement harness itself is gated.
+
 ### Fixed
 
 - `corpus_lint.py` no longer requires `target_index`: the engine omits the
