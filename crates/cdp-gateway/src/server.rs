@@ -3468,3 +3468,242 @@ mod playwright_semantic_click {
         );
     }
 }
+
+/// Direct contract tests for the dispatch chokepoint: `CdpConnection::dispatch`
+/// is the single funnel every CDP request passes through (validation, the
+/// in-flight semaphore, registry lookup, and the capability gate), so each
+/// gate gets a pinned test here instead of relying on indirect coverage.
+#[cfg(test)]
+mod dispatch_gates {
+    use std::sync::Arc;
+
+    use chrono::{Duration, Utc};
+    use interface_core::{AuthorityStore, InterfaceResult, RuntimeInterface};
+    use serde_json::json;
+    use types::{
+        Capability, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest, ErrorLayer,
+        Evidence, InterfaceError, InterfaceErrorCode, OpenPageRequest, PageState, PrincipalId,
+        RecoveryDecision, RequestContext, RuntimeInfo, SessionId, SessionState, WorkflowCheckpoint,
+        WorkflowId,
+    };
+
+    use crate::{CdpConnection, CdpErrorCode, CdpRequest, MethodRegistry};
+
+    /// Every gate under test rejects before a handler would touch the
+    /// runtime, so the stub only needs to exist.
+    struct GateStubRuntime;
+
+    fn unsupported() -> InterfaceError {
+        InterfaceError {
+            code: InterfaceErrorCode::UnsupportedOperation,
+            layer: ErrorLayer::Interface,
+            message: "gate stub".to_owned(),
+            correlation_id: types::CorrelationId::new(),
+            command_id: None,
+            retryable: false,
+            retry_after_ms: None,
+            reconciliation_required: false,
+            required_capability: None,
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeInterface for GateStubRuntime {
+        async fn runtime_info(&self, _: RequestContext) -> InterfaceResult<RuntimeInfo> {
+            Err(unsupported())
+        }
+        async fn list_sessions(&self, _: RequestContext) -> InterfaceResult<Vec<SessionState>> {
+            Err(unsupported())
+        }
+        async fn delete_session(&self, _: RequestContext, _: SessionId) -> InterfaceResult<()> {
+            Err(unsupported())
+        }
+        async fn create_session(
+            &self,
+            _: RequestContext,
+            _: CreateSessionRequest,
+        ) -> InterfaceResult<SessionState> {
+            Err(unsupported())
+        }
+        async fn open_page(
+            &self,
+            _: RequestContext,
+            _: OpenPageRequest,
+        ) -> InterfaceResult<PageState> {
+            Err(unsupported())
+        }
+        async fn submit(
+            &self,
+            _: RequestContext,
+            _: CommandEnvelope,
+        ) -> InterfaceResult<CommandOutcome> {
+            Err(unsupported())
+        }
+        async fn checkpoint(
+            &self,
+            _: RequestContext,
+            _: WorkflowCheckpoint,
+            _: Vec<Evidence>,
+        ) -> InterfaceResult<WorkflowCheckpoint> {
+            Err(unsupported())
+        }
+        async fn resolve_command_evidence(
+            &self,
+            _: RequestContext,
+            _: Vec<CommandId>,
+        ) -> InterfaceResult<Vec<Evidence>> {
+            Err(unsupported())
+        }
+        async fn recover(
+            &self,
+            _: RequestContext,
+            _: WorkflowId,
+        ) -> InterfaceResult<RecoveryDecision> {
+            Err(unsupported())
+        }
+        async fn recovery_status(
+            &self,
+            _: RequestContext,
+            _: WorkflowId,
+        ) -> InterfaceResult<types::RecoveryStatus> {
+            Err(unsupported())
+        }
+        async fn submit_with_auto_checkpoint(
+            &self,
+            _: RequestContext,
+            _: CommandEnvelope,
+        ) -> InterfaceResult<(CommandOutcome, types::CheckpointId)> {
+            Err(unsupported())
+        }
+        async fn workflows_for_session(
+            &self,
+            _: RequestContext,
+            _: SessionId,
+            _: usize,
+        ) -> InterfaceResult<Vec<WorkflowId>> {
+            Err(unsupported())
+        }
+    }
+
+    async fn connection_with(capabilities: Vec<Capability>) -> CdpConnection {
+        let authority = AuthorityStore::in_memory();
+        let token = authority
+            .issue(
+                PrincipalId::from_uuid(uuid::Uuid::new_v4()),
+                capabilities,
+                Utc::now() + Duration::minutes(5),
+            )
+            .await
+            .unwrap()
+            .expose_once();
+        CdpConnection::new(
+            authority.verify(&token).await.unwrap(),
+            Arc::new(GateStubRuntime),
+            MethodRegistry::compiled(),
+        )
+    }
+
+    const ALL_CAPS: &[Capability] = &[
+        Capability::SessionRead,
+        Capability::SessionWrite,
+        Capability::PageRead,
+        Capability::PageWrite,
+        Capability::BrowserMutate,
+        Capability::JavascriptEvaluate,
+    ];
+
+    #[tokio::test]
+    async fn unknown_method_is_method_not_found() {
+        let connection = connection_with(ALL_CAPS.to_vec()).await;
+        let response = connection
+            .dispatch(CdpRequest::new(1, "Bogus.method", json!({})))
+            .await;
+        let error = response.error().expect("unknown method must fail");
+        assert_eq!(error.code, CdpErrorCode::MethodNotFound as i32);
+    }
+
+    #[tokio::test]
+    async fn non_object_params_are_invalid_params() {
+        let connection = connection_with(ALL_CAPS.to_vec()).await;
+        let response = connection
+            .dispatch(CdpRequest::new(1, "Audits.enable", json!(null)))
+            .await;
+        let error = response.error().expect("non-object params must fail");
+        assert_eq!(error.code, CdpErrorCode::InvalidParams as i32);
+    }
+
+    #[tokio::test]
+    async fn missing_capability_fails_closed_before_any_handler_runs() {
+        // Audits.enable needs page:read; the token holds only session:read.
+        let connection = connection_with(vec![Capability::SessionRead]).await;
+        let response = connection
+            .dispatch(CdpRequest::new(1, "Audits.enable", json!({})))
+            .await;
+        let error = response.error().expect("missing capability must fail");
+        assert_eq!(error.code, CdpErrorCode::RuntimeFailure as i32);
+    }
+
+    #[tokio::test]
+    async fn enable_methods_accept_empty_params_and_reject_nonempty() {
+        let connection = connection_with(ALL_CAPS.to_vec()).await;
+        let accepted = connection
+            .dispatch(CdpRequest::new(1, "Audits.enable", json!({})))
+            .await;
+        assert!(accepted.error().is_none(), "{:?}", accepted.error());
+
+        let refused = connection
+            .dispatch(CdpRequest::new(
+                2,
+                "Audits.enable",
+                json!({"unexpected": true}),
+            ))
+            .await;
+        let error = refused.error().expect("nonempty enable params must fail");
+        assert_eq!(error.code, CdpErrorCode::InvalidParams as i32);
+    }
+
+    #[tokio::test]
+    async fn user_agent_noop_accepts_only_the_exact_runtime_agent() {
+        let connection = connection_with(ALL_CAPS.to_vec()).await;
+        let accepted = connection
+            .dispatch(CdpRequest::new(
+                1,
+                "Network.setUserAgentOverride",
+                json!({"userAgent": "AutomationRuntime/0.1"}),
+            ))
+            .await;
+        assert!(accepted.error().is_none(), "{:?}", accepted.error());
+
+        for (id, params) in [
+            (2, json!({"userAgent": "AutomationRuntime/0.2"})),
+            (
+                3,
+                json!({"userAgent": "AutomationRuntime/0.1", "extra": true}),
+            ),
+            (4, json!({})),
+        ] {
+            let refused = connection
+                .dispatch(CdpRequest::new(id, "Network.setUserAgentOverride", params))
+                .await;
+            let error = refused.error().expect("non-noop user-agent must fail");
+            assert_eq!(error.code, CdpErrorCode::InvalidParams as i32);
+        }
+    }
+
+    #[tokio::test]
+    async fn request_validation_rejects_zero_id_and_empty_method() {
+        let connection = connection_with(ALL_CAPS.to_vec()).await;
+        let zero_id = connection
+            .dispatch(CdpRequest::new(0, "Audits.enable", json!({})))
+            .await;
+        assert_eq!(
+            zero_id.error().expect("id 0 must fail").code,
+            CdpErrorCode::InvalidRequest as i32
+        );
+        let empty_method = connection.dispatch(CdpRequest::new(1, "", json!({}))).await;
+        assert_eq!(
+            empty_method.error().expect("empty method must fail").code,
+            CdpErrorCode::InvalidRequest as i32
+        );
+    }
+}
