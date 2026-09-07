@@ -10,6 +10,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { buildAttribution, readMetricsSnapshot } from "./attribution.js";
 import { usageTotals } from "./summarize.js";
 
 const harnessDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -456,6 +457,19 @@ async function main() {
           JSON.stringify(mcpConfig, null, 2),
         );
 
+        // The bobby runner asks the stdio gateway to dump its operational
+        // metrics snapshot when the session closes; the run record reads it
+        // back for action-count and resolution-source attribution.
+        const metricsSnapshotPath =
+          tool === "bobby" ? path.join(workDir, "metrics-snapshot.json") : null;
+        if (metricsSnapshotPath) {
+          const bobbyServer = mcpConfig.mcpServers["bobby"] as any;
+          bobbyServer.env = {
+            ...bobbyServer.env,
+            BOBBY_METRICS_SNAPSHOT_PATH: metricsSnapshotPath,
+          };
+        }
+
         const prompt =
           task.prompt
             .replace("{{url}}", entryUrl)
@@ -509,6 +523,13 @@ async function main() {
           provenance,
           cacheReadTokens: summary.cacheReadTokens,
           cacheCreationTokens: summary.cacheCreationTokens,
+          attribution: buildAttribution(
+            events,
+            metricsSnapshotPath
+              ? readMetricsSnapshot(metricsSnapshotPath)
+              : null,
+            summary.model ?? null,
+          ),
           selfReport: parseSelfReport(summary.resultText),
           transcript: path.relative(repoRoot, transcriptFile),
         };
