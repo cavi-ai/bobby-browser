@@ -23,6 +23,14 @@ pub struct RuntimeInfo {
     pub active_sessions: usize,
     pub queued_jobs: usize,
     pub uptime_ms: u64,
+    /// Operator-set health budget for one vision propose round-trip
+    /// (`[vision].propose_budget_ms`); absent when no budget is configured.
+    #[serde(
+        default,
+        rename = "visionProposeBudgetMs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub vision_propose_budget_ms: Option<u64>,
     #[serde(
         default,
         rename = "operationalMetrics",
