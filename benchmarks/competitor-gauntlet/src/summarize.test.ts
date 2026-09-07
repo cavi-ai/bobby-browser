@@ -43,6 +43,7 @@ test("summarize aggregates per-turn usage instead of trusting the final event", 
   const summary = summarize(events);
 
   assert.equal(summary.toolCalls, 2);
+  assert.equal(summary.bobbyToolCalls, 0);
   assert.equal(summary.toolErrors, 1);
   // The old implementation copied the final `result` usage (7 in / 30 out),
   // which reported a small fraction of the true cost.
@@ -68,6 +69,49 @@ test("summarize tolerates missing usage blocks and null token fields", () => {
   assert.equal(summary.cacheReadTokens, 0);
   assert.equal(summary.cacheCreationTokens, 0);
   assert.equal(summary.toolCalls, 1);
+});
+
+test("summarize counts Cursor tool_call events and camelCase usage once", () => {
+  const summary = summarize([
+    {
+      type: "assistant",
+      message: {
+        model: { id: "grok-4.6" },
+        content: [{ type: "tool_use", name: "mcp__bobby__click" }],
+      },
+    },
+    {
+      type: "tool_call",
+      name: "mcp__bobby__click",
+      status: "running",
+    },
+    {
+      type: "tool_call",
+      name: "mcp__bobby__click",
+      status: "completed",
+    },
+    {
+      type: "tool_call",
+      name: "shell",
+      status: "error",
+    },
+    {
+      type: "usage",
+      usage: { inputTokens: 11, outputTokens: 22, cacheReadTokens: 3, cacheWriteTokens: 4 },
+    },
+    { type: "result", result: "done", model: { id: "grok-4.6" } },
+  ]);
+
+  assert.equal(summary.toolCalls, 2);
+  assert.equal(summary.bobbyToolCalls, 1);
+  assert.equal(summary.hostToolCalls, 1);
+  assert.equal(summary.shellToolCalls, 1);
+  assert.equal(summary.toolErrors, 1);
+  assert.equal(summary.inputTokens, 11);
+  assert.equal(summary.outputTokens, 22);
+  assert.equal(summary.cacheReadTokens, 3);
+  assert.equal(summary.cacheCreationTokens, 4);
+  assert.equal(summary.model, "grok-4.6");
 });
 
 test("summarize keeps the first model name and the last result text", () => {

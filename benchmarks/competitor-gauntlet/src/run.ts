@@ -10,7 +10,17 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { usageTotals } from "./summarize.js";
+import { Agent, Cursor } from "@cursor/sdk";
+import {
+  bobbyGauntletToml,
+  buildCursorAgentOptions,
+  CURSOR_ISOLATION,
+  mcpJsonToCursorServers,
+  probeMlx,
+  resolveGrokModel,
+  VISION_ASSIST_PROMPT,
+} from "./driver.js";
+import { summarize } from "./summarize.js";
 
 const harnessDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const repoRoot = path.resolve(harnessDir, "../..");
@@ -40,6 +50,8 @@ When the task is complete (or you are giving up), your final message must end wi
 Score each of navigate/click/fill/extract 1-5 for how easy the tooling made that action (5 = effortless, 1 = could not do it; score 0 for actions the task never needed). In "blockers" list anything that stopped or nearly stopped you; in "bottlenecks" what slowed you down. Be honest and specific — this report is the point of the exercise.`;
 const CLAUDE_ISOLATION =
   "strict-mcp,project-settings,no-skills,no-chrome,no-persistence";
+const CURSOR_SDK_VERSION = "1.0.30";
+type AgentDriver = "claude" | "cursor";
 
 interface TaskAssert {
   path: string;
@@ -120,6 +132,45 @@ async function runClaude(
   });
   await new Promise((resolve) => proc.on("exit", resolve));
   clearTimeout(killer);
+  return { events, timedOut };
+}
+
+async function runCursor(
+  prompt: string,
+  workDir: string,
+  timeboxMs: number,
+  model: string,
+  mcpServers: ReturnType<typeof mcpJsonToCursorServers>,
+): Promise<{ events: any[]; timedOut: boolean }> {
+  const apiKey = process.env.CURSOR_API_KEY;
+  const options = buildCursorAgentOptions({
+    workDir,
+    model,
+    mcpServers,
+    ...(apiKey ? { apiKey } : {}),
+  });
+  await using agent = await Agent.create(options);
+  const run = await agent.send(prompt);
+  const events: any[] = [];
+  let timedOut = false;
+  const killer = setTimeout(() => {
+    timedOut = true;
+    void run.cancel();
+  }, timeboxMs);
+  try {
+    for await (const event of run.stream()) {
+      events.push(event);
+    }
+    const result = await run.wait();
+    events.push({
+      type: "result",
+      result: result.result ?? "",
+      model: result.model,
+      usage: result.usage,
+    });
+  } finally {
+    clearTimeout(killer);
+  }
   return { events, timedOut };
 }
 
@@ -220,12 +271,12 @@ function collectProvenance(
   bobbyCommand: string,
   requestedModel: string,
   timeboxSeconds: number,
+  driver: AgentDriver = "claude",
 ) {
   const sourceState = collectSourceState();
-  return {
+  const shared = {
     repoHead: commandOutput("git", ["rev-parse", "HEAD"]),
     ...sourceState,
-    claudeCliVersion: commandOutput("claude", ["--version"]),
     nodeVersion: process.version,
     platform: `${process.platform}-${process.arch}`,
     taskSetSha256: sha256File(path.join(harnessDir, "tasks.json")),
@@ -234,68 +285,19 @@ function collectProvenance(
     requestedModel,
     timeboxSeconds,
     startupToolset: "explore",
-    claudeIsolation: CLAUDE_ISOLATION,
+    driver,
   };
-}
-
-function summarize(events: any[]) {
-  let toolCalls = 0;
-  let bobbyToolCalls = 0;
-  let discoveryToolCalls = 0;
-  let taskBookkeepingCalls = 0;
-  let shellToolCalls = 0;
-  let toolErrors = 0;
-  let resultText = "";
-  let model: string | undefined;
-  const toolCallBreakdown = new Map<string, number>();
-  // Token usage is aggregated over every assistant turn: the final `result`
-  // event's usage reflects only the last request, which undercounts a
-  // cache-heavy agent loop by orders of magnitude (see summarize.ts).
-  const usageTurns: Parameters<typeof usageTotals>[0] = [];
-  for (const event of events) {
-    if (event.type === "assistant") {
-      model ??= event.message?.model;
-      usageTurns.push(event.message?.usage ?? {});
-      for (const block of event.message?.content ?? []) {
-        if (block.type !== "tool_use") continue;
-        toolCalls += 1;
-        const name = String(block.name ?? "unknown");
-        toolCallBreakdown.set(name, (toolCallBreakdown.get(name) ?? 0) + 1);
-        if (name.startsWith("mcp__bobby__")) bobbyToolCalls += 1;
-        if (name === "ToolSearch") discoveryToolCalls += 1;
-        if (["TaskCreate", "TaskUpdate", "TaskGet", "TaskList"].includes(name)) {
-          taskBookkeepingCalls += 1;
-        }
-        if (["Bash", "Read", "Write", "Edit", "Glob", "Grep"].includes(name)) {
-          shellToolCalls += 1;
-        }
-      }
-    } else if (event.type === "user") {
-      for (const block of event.message?.content ?? []) {
-        if (block.type === "tool_result" && block.is_error) toolErrors += 1;
-      }
-    } else if (event.type === "result") {
-      resultText = event.result ?? "";
-      model ??= event.model;
-    }
+  if (driver === "cursor") {
+    return {
+      ...shared,
+      cursorSdkVersion: CURSOR_SDK_VERSION,
+      cursorIsolation: CURSOR_ISOLATION,
+    };
   }
-  const usage = usageTotals(usageTurns);
   return {
-    toolCalls,
-    bobbyToolCalls,
-    hostToolCalls: toolCalls - bobbyToolCalls,
-    discoveryToolCalls,
-    taskBookkeepingCalls,
-    shellToolCalls,
-    toolErrors,
-    ...usage,
-    resultText,
-    model,
-    toolCallBreakdown: Object.fromEntries(
-      [...toolCallBreakdown.entries()].sort(([left], [right]) =>
-        left.localeCompare(right),
-      ),
-    ),
+    ...shared,
+    claudeCliVersion: commandOutput("claude", ["--version"]),
+    claudeIsolation: CLAUDE_ISOLATION,
   };
 }
 
@@ -340,7 +342,31 @@ async function verify(
   return { pass: failures.length === 0, failures };
 }
 
+async function resolveCursorModel(requested: string | undefined): Promise<string> {
+  const apiKey = process.env.CURSOR_API_KEY;
+  try {
+    const listed = await Cursor.models.list(apiKey ? { apiKey } : {});
+    return resolveGrokModel(requested, listed);
+  } catch (error) {
+    const fallback = requested && requested !== "default" ? requested : "grok-4.6";
+    if (!/grok/i.test(fallback)) {
+      throw error;
+    }
+    return resolveGrokModel(fallback, []);
+  }
+}
+
+function isBobbyRunner(tool: string): boolean {
+  return tool === "bobby" || tool === "bobby-vision";
+}
+
 async function main() {
+  const driverArg = arg("driver", "claude") ?? "claude";
+  if (driverArg !== "claude" && driverArg !== "cursor") {
+    console.error(`unknown --driver ${driverArg} (claude|cursor)`);
+    process.exit(2);
+  }
+  const driver = driverArg as AgentDriver;
   const toolName = arg("tool");
   const taskId = arg("task");
   const runs = Number(arg("runs", "1"));
@@ -366,17 +392,48 @@ async function main() {
     console.error(`unknown --task ${taskId}`);
     process.exit(2);
   }
+  let requestedModel = arg("model", "default") ?? "default";
+  if (driver === "cursor") {
+    requestedModel = await resolveCursorModel(
+      requestedModel === "default" ? undefined : requestedModel,
+    );
+  }
   mkdirSync(resultsDir, { recursive: true });
   mkdirSync(path.join(resultsDir, "transcripts"), { recursive: true });
   const bobbyCommand = resolveBobbyCommand();
   const provenance = collectProvenance(
     bobbyCommand,
-    arg("model", "default") ?? "default",
+    requestedModel,
     timeboxSeconds,
+    driver,
   );
+
+  let mlxUp: boolean | undefined;
+  if (toolNames.includes("bobby-vision")) {
+    mlxUp = await probeMlx();
+    if (!mlxUp) {
+      console.error(
+        "bobby-vision skipped: MLX at http://127.0.0.1:9101 did not answer",
+      );
+    }
+  }
 
   for (const tool of toolNames) {
     const runner = runners[tool];
+    if (tool === "bobby-vision" && mlxUp === false) {
+      appendFileSync(
+        path.join(resultsDir, "runs.jsonl"),
+        JSON.stringify({
+          batchId,
+          tool,
+          skipped: true,
+          skipReason: "mlx-unreachable",
+          at: new Date().toISOString(),
+          provenance,
+        }) + "\n",
+      );
+      continue;
+    }
 
     for (const task of selected) {
       for (let run = 1; run <= runs; run += 1) {
@@ -387,51 +444,17 @@ async function main() {
         const workDir = await mkdtemp(path.join(tmpdir(), `cg-${tool}-`));
         const downloadsDir = path.join(workDir, "downloads");
         mkdirSync(downloadsDir, { recursive: true });
-        // Relative upload_roots in config resolve against the gateway cwd
-        // (the Claude workDir). Ensure the default root exists and stage the
-        // fixture inside it so upload_files does not policyDeny.
         const uploadRoot = path.join(workDir, "data", "uploads");
         mkdirSync(uploadRoot, { recursive: true });
         const stagedFixture = path.join(uploadRoot, "approved-upload.txt");
         writeFileSync(stagedFixture, readFileSync(fixturePath));
 
         const mcpConfig = { mcpServers: structuredClone(runner.mcpServers) };
-        // Prefer the repo's own release build for the bobby runner — the
-        // benchmark should measure this checkout, not a stale installed binary.
-        // Per-run config: allow loopback (gauntlet-server is 127.0.0.1) and
-        // keep upload_roots relative to workDir. HttpConfig is partial-override
-        // safe (#[serde(default)]); still write a complete enough file that
-        // BOBBY_BROWSER_CONFIG never fails parse and drops MCP.
         const gauntletConfigPath = path.join(workDir, "bobby-gauntlet.toml");
-        if (tool === "bobby") {
+        if (isBobbyRunner(tool)) {
           writeFileSync(
             gauntletConfigPath,
-            [
-              "[browser]",
-              'upload_roots = ["./data/uploads"]',
-              'downloads_dir = "./downloads"',
-              'artifacts_dir = "./artifacts"',
-              'profiles_dir = "./profiles"',
-              "headless = true",
-              "",
-              "[http]",
-              "allow_loopback = true",
-              "allow_private_network = false",
-              "max_redirects = 5",
-              "max_header_bytes = 65536",
-              "max_body_bytes = 8388608",
-              "max_download_bytes = 67108864",
-              "request_timeout_ms = 30000",
-              "max_concurrent_requests = 8",
-              "",
-              "[mcp]",
-              // Measure the default experience: explore advertises the
-              // standard loop (observe, navigate, base controls, form batch,
-              // and verified submit), which is
-              // what a user who never touches toolset_select gets.
-              'startup_toolset = "explore"',
-              "",
-            ].join("\n"),
+            bobbyGauntletToml(tool === "bobby-vision"),
           );
         }
         for (const serverConfig of Object.values(mcpConfig.mcpServers) as any[]) {
@@ -461,18 +484,29 @@ async function main() {
             .replace("{{url}}", entryUrl)
             .replace(
               "{{fixture}}",
-              tool === "bobby" ? stagedFixture : fixturePath,
+              isBobbyRunner(tool) ? stagedFixture : fixturePath,
             )
             .replace("{{downloads}}", downloadsDir) +
           (runner.promptSuffix
             ? "\n\n" +
               runner.promptSuffix.replaceAll("{{harnessDir}}", harnessDir)
             : "") +
+          (tool === "bobby-vision" ? "\n" + VISION_ASSIST_PROMPT : "") +
           "\n" +
           SELF_REPORT;
 
         const started = Date.now();
-        const { events, timedOut } = await runClaude(prompt, workDir, timeboxMs);
+        const cursorServers = mcpJsonToCursorServers(mcpConfig);
+        const { events, timedOut } =
+          driver === "cursor"
+            ? await runCursor(
+                prompt,
+                workDir,
+                timeboxMs,
+                requestedModel,
+                cursorServers,
+              )
+            : await runClaude(prompt, workDir, timeboxMs);
         const wallMs = Date.now() - started;
         const summary = summarize(events);
         const outcome = await verify(server.base, task, downloadsDir);
@@ -529,6 +563,12 @@ async function main() {
 const transcriptToSummarize = arg("summarize-transcript");
 const printProvenance = arg("print-provenance");
 const printClaudeArgsWorkDir = arg("print-claude-args");
+const printCursorOptionsWorkDir = arg("print-cursor-options");
+const driverFlag = arg("driver", "claude") ?? "claude";
+if (driverFlag !== "claude" && driverFlag !== "cursor") {
+  console.error(`unknown --driver ${driverFlag} (claude|cursor)`);
+  process.exit(2);
+}
 if (transcriptToSummarize) {
   const events = JSON.parse(readFileSync(transcriptToSummarize, "utf8"));
   console.log(JSON.stringify(summarize(events)));
@@ -539,12 +579,27 @@ if (transcriptToSummarize) {
         resolveBobbyCommand(),
         arg("model", "default") ?? "default",
         Number(arg("timebox-seconds", "480")),
+        driverFlag as AgentDriver,
       ),
     ),
   );
 } else if (printClaudeArgsWorkDir) {
   console.log(
     JSON.stringify(buildClaudeArgs("benchmark prompt", printClaudeArgsWorkDir)),
+  );
+} else if (printCursorOptionsWorkDir) {
+  const mcp = JSON.parse(
+    readFileSync(path.join(printCursorOptionsWorkDir, ".mcp.json"), "utf8"),
+  );
+  console.log(
+    JSON.stringify(
+      buildCursorAgentOptions({
+        workDir: printCursorOptionsWorkDir,
+        model: arg("model") ?? "grok-4.6",
+        apiKey: process.env.CURSOR_API_KEY ?? "cursor_test",
+        mcpServers: mcpJsonToCursorServers(mcp),
+      }),
+    ),
   );
 } else {
   await main();

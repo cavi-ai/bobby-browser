@@ -22,12 +22,7 @@ test("transcript summary separates Bobby calls from host overhead", () => {
         type: "assistant",
         message: {
           model: "claude-opus-5",
-          usage: {
-            input_tokens: 5,
-            output_tokens: 10,
-            cache_read_input_tokens: 100,
-            cache_creation_input_tokens: 20,
-          },
+          usage: { input_tokens: 12, output_tokens: 34 },
           content: [
             { type: "tool_use", name: "ToolSearch" },
             { type: "tool_use", name: "TaskCreate" },
@@ -45,21 +40,9 @@ test("transcript summary separates Bobby calls from host overhead", () => {
         },
       },
       {
-        type: "assistant",
-        message: {
-          usage: {
-            input_tokens: 7,
-            output_tokens: 24,
-            cache_read_input_tokens: 60,
-            cache_creation_input_tokens: 8,
-          },
-          content: [],
-        },
-      },
-      {
         type: "result",
         result: "finished",
-        usage: { input_tokens: 7, output_tokens: 24 },
+        usage: { input_tokens: 12, output_tokens: 34 },
       },
     ]),
   );
@@ -79,12 +62,6 @@ test("transcript summary separates Bobby calls from host overhead", () => {
     taskBookkeepingCalls: 1,
     shellToolCalls: 2,
     toolErrors: 1,
-    // Aggregated across assistant turns, not the final result event's
-    // last-request-only usage: 5+7 in, 10+24 out, cache fields summed.
-    inputTokens: 12,
-    outputTokens: 34,
-    cacheReadTokens: 160,
-    cacheCreationTokens: 28,
     resultText: "finished",
     model: "claude-opus-5",
     toolCallBreakdown: {
@@ -95,6 +72,10 @@ test("transcript summary separates Bobby calls from host overhead", () => {
       mcp__bobby__click: 1,
       mcp__bobby__workflow_start: 1,
     },
+    inputTokens: 12,
+    outputTokens: 34,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
   });
 });
 
@@ -146,6 +127,7 @@ test("provenance fingerprints the exact benchmark inputs", () => {
     requestedModel: "claude-opus-5",
     timeboxSeconds: 300,
     startupToolset: "explore",
+    driver: "claude",
     claudeIsolation: "strict-mcp,project-settings,no-skills,no-chrome,no-persistence",
   });
   assert.match(provenance.repoHead, /^[0-9a-f]{40,64}$/);
@@ -197,6 +179,87 @@ test("the canonical Bobby benchmark pins its agent model", () => {
 
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.match(result.stdout, /--tool bobby --timebox-seconds 300 --model claude-opus-5/);
+});
+
+test("unknown --driver is refused", () => {
+  const result = spawnSync(
+    process.execPath,
+    ["--import", "tsx", runPath, "--driver", "opus"],
+    { cwd: harnessDir, encoding: "utf8" },
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /unknown --driver opus/);
+});
+
+test("Cursor runner isolates the benchmark from ambient settings", () => {
+  const workDir = mkdtempSync(path.join(tmpdir(), "bobby-run-cursor-"));
+  writeFileSync(
+    path.join(workDir, ".mcp.json"),
+    JSON.stringify({
+      mcpServers: {
+        bobby: { command: "bobby", args: ["mcp-stdio"] },
+      },
+    }),
+  );
+
+  const result = spawnSync(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      runPath,
+      "--print-cursor-options",
+      workDir,
+      "--driver",
+      "cursor",
+      "--model",
+      "grok-4.6",
+    ],
+    { cwd: harnessDir, encoding: "utf8" },
+  );
+
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  const options = JSON.parse(result.stdout);
+  assert.equal(options.model.id, "grok-4.6");
+  assert.deepEqual(options.local.settingSources, []);
+  assert.equal(options.local.cwd, workDir);
+  assert.equal(options.mcpServers.bobby.command, "bobby");
+});
+
+test("cursor provenance records the SDK driver instead of Claude isolation", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "bobby-run-cursor-prov-"));
+  const bobby = path.join(directory, "bobby");
+  writeFileSync(bobby, "current-bobby-binary");
+
+  const result = spawnSync(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      runPath,
+      "--print-provenance",
+      "true",
+      "--driver",
+      "cursor",
+      "--model",
+      "grok-4.6",
+      "--timebox-seconds",
+      "300",
+    ],
+    {
+      cwd: harnessDir,
+      encoding: "utf8",
+      env: { ...process.env, BOBBY_MCP_COMMAND: bobby },
+    },
+  );
+
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  const provenance = JSON.parse(result.stdout);
+  assert.equal(provenance.driver, "cursor");
+  assert.equal(provenance.cursorIsolation, "inline-mcp,no-setting-sources");
+  assert.equal(provenance.cursorSdkVersion, "1.0.30");
+  assert.equal(provenance.requestedModel, "grok-4.6");
+  assert.equal(provenance.claudeIsolation, undefined);
 });
 
 test("npm-backed competitor runners use exact package versions", () => {

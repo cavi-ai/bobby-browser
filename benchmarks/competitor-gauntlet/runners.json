@@ -1,6 +1,21 @@
 {
   "bobby": {
-    "description": "bobby-browser MCP (stdio gateway, managed Chromium for repeatability). Runs the default explore toolset \u2014 the standard form loop needs no toolset_select.",
+    "description": "bobby-browser MCP (stdio gateway, managed Chromium for repeatability). Runs the default explore toolset — the standard form loop needs no toolset_select.",
+    "mcpServers": {
+      "bobby": {
+        "command": "${BOBBY_MCP_COMMAND}",
+        "args": [
+          "mcp-stdio"
+        ],
+        "env": {
+          "AUTOMATION_RUNTIME_BROWSER_SELECTION": "{\"preference\":{\"mode\":\"exact\",\"engine\":\"chromium\"}}",
+          "BOBBY_BROWSER_CONFIG": "${BOBBY_GAUNTLET_CONFIG}"
+        }
+      }
+    }
+  },
+  "bobby-vision": {
+    "description": "bobby-browser MCP with local MLX vision assist (Qwen3.5-27B-4bit). Same journeys as bobby; session must set executionPolicy.visionAssist=true.",
     "mcpServers": {
       "bobby": {
         "command": "${BOBBY_MCP_COMMAND}",
