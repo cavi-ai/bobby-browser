@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `corpus_lint.py` no longer requires `target_index`: the engine omits the
+  key entirely on abstentions, so a valid abstain row failed lint as a
+  missing field. The positive:negative balance band is now scale-aware —
+  below 60 negatives the 2:1–8:1 band stays a hard error; at or above that
+  mass a breach relaxes to a warning past 12:1, since positive volume
+  scales with steps × runs while negative volume does not.
+
 ## 0.13.0 - 2026-09-04
 
 ### Added

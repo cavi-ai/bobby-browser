@@ -108,6 +108,31 @@ class CorpusLintTests(unittest.TestCase):
         errors, _ = lint([row, negative("vague")])
         self.assertTrue(any("missing required field" in e for e in errors))
 
+    def test_absent_target_index_reads_as_abstain_not_missing(self):
+        # The engine omits target_index entirely on abstentions
+        # (skip_serializing_if Option::is_none); absence must not lint as a
+        # missing required field.
+        row = negative("the widget in the corner")
+        del row["target_index"]
+        errors, _ = lint([record(), row])
+        self.assertFalse(any("missing required field" in e for e in errors))
+
+    def test_out_of_band_ratio_with_healthy_negative_mass_warns_not_errors(self):
+        # 800 positives to 60 negatives is 13.3:1 — past the 8:1 band, but the
+        # abstain class is not starved at that absolute mass, so the breach
+        # relaxes to a warning.
+        rows = [record(step=f"s{i}") for i in range(800)] + [
+            negative(f"vague {i}") for i in range(60)
+        ]
+        errors, warnings = lint(rows)
+        self.assertEqual(errors, [])
+        self.assertTrue(any("abstain region may thin" in w for w in warnings))
+
+    def test_out_of_band_ratio_below_negative_mass_is_still_an_error(self):
+        rows = [record(step=f"s{i}") for i in range(45)] + [negative("vague")]
+        errors, _ = lint(rows)
+        self.assertTrue(any("outside the healthy band" in e for e in errors))
+
 
 if __name__ == "__main__":
     unittest.main()
