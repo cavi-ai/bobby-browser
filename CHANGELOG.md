@@ -17,6 +17,11 @@
   for non-bobby tools.
 - CI's node job runs the competitor gauntlet's browser-free unit tests, so
   the measurement harness itself is gated.
+- Direct contract tests pin every gate in the CDP dispatch chokepoint
+  (`CdpConnection::dispatch` → `dispatch_reserved`): request validation,
+  unknown-method refusal, non-object params, missing-capability fail-closed,
+  and the exact-shape `enable` / user-agent no-op handlers. The gateway's
+  highest-degree node previously had only indirect coverage.
 
 ### Fixed
 
