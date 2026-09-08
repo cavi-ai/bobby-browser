@@ -129,6 +129,8 @@ test("provenance fingerprints the exact benchmark inputs", () => {
     startupToolset: "explore",
     driver: "claude",
     claudeIsolation: "strict-mcp,project-settings,no-skills,no-chrome,no-persistence",
+    engine: "chromium",
+    providerMode: "off",
   });
   assert.match(provenance.repoHead, /^[0-9a-f]{40,64}$/);
   assert.match(provenance.sourceStateSha256, /^[0-9a-f]{64}$/);

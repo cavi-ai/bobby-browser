@@ -140,7 +140,7 @@ version = "0.35"
 features = ["tokio-runtime"]
 
 [dependencies.base64]
-version = "0.22"
+version = "0.23"
 
 [dependencies.bytes]
 version = "1"
@@ -228,7 +228,7 @@ features = [
 version = "0.3"
 
 [target."cfg(windows)".dependencies.windows-registry]
-version = "0.6"
+version = "0.100"
 
 [[example]]
 name = "endpoint-log-test"

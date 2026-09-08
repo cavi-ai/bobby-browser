@@ -74,6 +74,10 @@ pub struct RuntimeService {
     /// `visionAssistFailed` repairs diverge on exactly this).
     vision_assist_configured: bool,
     vision_provider_configured: bool,
+    /// The operator's `[vision].propose_budget_ms`, echoed on `runtime_info`
+    /// so a caller can judge the metrics latency histogram against the
+    /// configured budget without config access.
+    vision_propose_budget_ms: Option<u64>,
     operational_metrics: OperationalMetrics,
 }
 
@@ -111,6 +115,7 @@ impl RuntimeService {
             nodes: Arc::new(NodeRegistry::default()),
             vision_assist_configured: false,
             vision_provider_configured: false,
+            vision_propose_budget_ms: None,
             operational_metrics: OperationalMetrics::default(),
             started_at: std::time::Instant::now(),
             in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -130,6 +135,7 @@ impl RuntimeService {
             nodes: Arc::new(NodeRegistry::default()),
             vision_assist_configured: false,
             vision_provider_configured: false,
+            vision_propose_budget_ms: None,
             operational_metrics: OperationalMetrics::default(),
             started_at: std::time::Instant::now(),
             in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -147,6 +153,11 @@ impl RuntimeService {
     fn with_vision_state(mut self, assist: bool, provider: bool) -> Self {
         self.vision_assist_configured = assist;
         self.vision_provider_configured = provider;
+        self
+    }
+
+    fn with_vision_propose_budget(mut self, budget_ms: Option<u64>) -> Self {
+        self.vision_propose_budget_ms = budget_ms;
         self
     }
 
@@ -351,6 +362,7 @@ impl RuntimeService {
             .with_workers(workers)
             .with_nodes(nodes)
             .with_vision_state(vision_assist_present, provider_present)
+            .with_vision_propose_budget(config.vision.propose_budget_ms)
             .with_operational_metrics(operational_metrics))
     }
 
@@ -376,6 +388,7 @@ impl RuntimeService {
             active_sessions,
             queued_jobs: self.in_flight.load(std::sync::atomic::Ordering::Acquire),
             uptime_ms: self.started_at.elapsed().as_millis() as u64,
+            vision_propose_budget_ms: self.vision_propose_budget_ms,
             operational_metrics: Some(self.operational_metrics.snapshot()),
         }
     }

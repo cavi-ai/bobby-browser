@@ -1009,19 +1009,11 @@ async fn run_broker_serve(
         );
     }
     let (selection, _source) = resolve_browser_selection()?;
-    let durable_profile_id = match &selection.preference {
-        config::EnginePreferenceConfig::Exact {
-            engine: config::BrowserEngineConfig::Firefox,
-            profile_id: Some(profile_id),
-        } => Some(profile_id.clone()),
-        _ => None,
-    };
+    let durable_profile_id = selection.preference.durable_profile_id().map(str::to_owned);
     if durable_profile_id.is_some() && config.context.dir.is_none() {
         config.context.dir = Some(
-            dirs::config_dir()
-                .ok_or_else(|| anyhow::anyhow!("config directory unavailable"))?
-                .join("bobby-browser")
-                .join("context"),
+            config::default_context_dir()
+                .ok_or_else(|| anyhow::anyhow!("config directory unavailable"))?,
         );
     }
     let factory = firefox_companion::selection::compose_worker_factory_warm(&config, selection)?;

@@ -35,6 +35,8 @@ const PROVENANCE_KEYS = [
   "timeboxSeconds",
   "startupToolset",
   "claudeIsolation",
+  "engine",
+  "providerMode",
 ] as const;
 
 function validProvenance(value: unknown): value is Record<string, unknown> {
@@ -140,25 +142,40 @@ if (process.argv[2] === "check") {
   // the aggregates (mean wall/tokens, worst errors) face the thresholds, so
   // a lucky single run cannot green the gate and one flaky run cannot hide
   // behind two good ones.
+  //
+  // Thresholds split by engine and provider mode: baseline.dimensions
+  // keys on "<engine>/<providerMode>" from the batch's provenance (e.g.
+  // "firefox/off"). A batch whose dimension has no entry falls back to the
+  // top-level tasks/budget, so the default matrix cell needs no duplicate.
   const baseline = JSON.parse(
-    readFileSync(path.join(harnessDir, "baseline.json"), "utf8"),
+    readFileSync(
+      process.env.GAUNTLET_BASELINE_PATH ?? path.join(harnessDir, "baseline.json"),
+      "utf8",
+    ),
   );
-  const budget = (baseline.budget ?? null) as Record<string, number> | null;
-  if (budget !== null) {
+  const validateBudget = (budget: unknown, label: string): void => {
+    if (budget === null || budget === undefined) return;
     const keys = [
       "perTaskCacheReadTokens",
       "perTaskCacheCreationTokens",
       "perTaskToolCalls",
     ];
     for (const key of keys) {
-      if (
-        !Number.isFinite(budget[key]) ||
-        Number(budget[key]) <= 0
-      ) {
-        console.error(`baseline budget.${key} must be a positive number`);
+      const value = (budget as Record<string, unknown>)[key];
+      if (!Number.isFinite(value) || Number(value) <= 0) {
+        console.error(`baseline ${label}.${key} must be a positive number`);
         process.exit(1);
       }
     }
+  };
+  validateBudget(baseline.budget, "budget");
+  const dimensions = (baseline.dimensions ?? {}) as Record<string, any>;
+  for (const [key, overlay] of Object.entries(dimensions)) {
+    if (!overlay || typeof overlay !== "object" || !overlay.tasks) {
+      console.error(`baseline dimensions.${key} must carry tasks`);
+      process.exit(1);
+    }
+    validateBudget(overlay.budget, `dimensions.${key}.budget`);
   }
   const bobbyRuns = runs.filter((run) => run.tool === "bobby");
   const latestBatchId = bobbyRuns.at(-1)?.batchId;
@@ -179,10 +196,20 @@ if (process.argv[2] === "check") {
   const batchProvenanceKey = validProvenance(batchProvenance)
     ? provenanceKey(batchProvenance)
     : null;
+  const dimension = validProvenance(batchProvenance)
+    ? `${batchProvenance.engine}/${batchProvenance.providerMode}`
+    : null;
+  const overlay = dimension !== null ? dimensions[dimension] : undefined;
+  if (overlay) {
+    console.log(`baseline dimension: ${dimension}`);
+  }
+  const selectedTasks = (overlay?.tasks ?? baseline.tasks) as Record<string, any>;
+  const budget = (overlay?.budget ?? baseline.budget ?? null) as Record<
+    string,
+    number
+  > | null;
   let failures = 0;
-  for (const [task, base] of Object.entries(
-    baseline.tasks as Record<string, any>,
-  )) {
+  for (const [task, base] of Object.entries(selectedTasks)) {
     const taskRuns = latest.get(task);
     if (!taskRuns || taskRuns.length === 0) {
       console.log(`MISS ${task}: no bobby run recorded`);

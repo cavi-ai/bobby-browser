@@ -1,5 +1,68 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `bobby mcp-stdio` promotes verified intent outcomes into the shared
+  context store when the engine selection carries a durable Firefox profile
+  identity (exact Firefox + `profileId`), mirroring `bobby serve`. Agents
+  run over stdio, so the remembered-site path was previously serve-only.
+  The durable-profile rule now lives on
+  `EnginePreferenceConfig::durable_profile_id`, shared by both entry points.
+
+- `[vision].propose_budget_ms`: an operator-set health budget for one vision
+  propose round-trip. `bobby doctor`'s vision probe warns when the measured
+  round-trip exceeds it (naming both numbers and the setting), and
+  `/v1/runtime` advertises it as `visionProposeBudgetMs`, so a caller can
+  judge the metrics latency histogram against the configured budget without
+  config access. Unset means no budget gate — `timeout_ms` stays the only
+  bound.
+
+- `bobby mcp-stdio` dumps the operational metrics snapshot to
+  `BOBBY_METRICS_SNAPSHOT_PATH` when the host closes the session, when that
+  env var is set. The snapshot is counters and histograms only — never
+  prompts, values, or URLs. A dump failure is logged and never fails the
+  shutdown.
+- Competitor gauntlet run records carry `attribution`: the run's action
+  count and resolution sources (`deterministic` / `context` /
+  `visionPrefill` / `visionFallback`, from the bobby metrics snapshot), the
+  driving model's tier, and the interface failure taxonomy (error codes
+  counted from structured tool errors). Snapshot-derived fields are null
+  for non-bobby tools.
+- CI's node job runs the competitor gauntlet's browser-free unit tests, so
+  the measurement harness itself is gated.
+- Direct contract tests pin every gate in the CDP dispatch chokepoint
+  (`CdpConnection::dispatch` → `dispatch_reserved`): request validation,
+  unknown-method refusal, non-object params, missing-capability fail-closed,
+  and the exact-shape `enable` / user-agent no-op handlers. The gateway's
+  highest-degree node previously had only indirect coverage.
+- Competitor gauntlet thresholds split by engine and provider mode: run
+  provenance records `engine` (parsed from the bobby runner's browser
+  selection) and `providerMode` (`off` — the gauntlet configures no vision
+  today), and `score check` reads an optional `dimensions` map in
+  `baseline.json` keyed on `"<engine>/<providerMode>"`, falling back to the
+  top-level tasks/budget when the batch's dimension has no entry. Both
+  fields join the provenance uniformity gate, and the baseline path accepts
+  a `GAUNTLET_BASELINE_PATH` override.
+
+### Changed
+
+- Public agent skill: pass `workflowHandle` on later calls; explicit ids are
+  the repair path when the handle dies. `workflowId` stays on
+  `checkpoint_save` / `workflow_recover` only.
+- Explore-loop tool descriptions (`click`, `intent_complete_form`,
+  `intent_submit_and_verify`) name `workflowHandle` as the call scope.
+
+### Fixed
+
+- `corpus_lint.py` no longer requires `target_index`: the engine omits the
+  key entirely on abstentions, so a valid abstain row failed lint as a
+  missing field. The positive:negative balance band is now scale-aware —
+  below 60 negatives the 2:1–8:1 band stays a hard error; at or above that
+  mass a breach relaxes to a warning past 12:1, since positive volume
+  scales with steps × runs while negative volume does not.
+
 ## 0.13.0 - 2026-09-04
 
 ### Added

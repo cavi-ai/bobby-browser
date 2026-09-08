@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use artifact_store::ArtifactStore;
@@ -36,7 +37,7 @@ async fn run() -> anyhow::Result<()> {
     let config_path = std::env::var_os("BOBBY_BROWSER_CONFIG")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("./config.toml"));
-    let config = AppConfig::load(&config_path).map_err(|error| {
+    let mut config = AppConfig::load(&config_path).map_err(|error| {
         anyhow::anyhow!(
             "failed to load config from {}: {error}",
             config_path.display()
@@ -44,13 +45,28 @@ async fn run() -> anyhow::Result<()> {
     })?;
     config.validate().map_err(anyhow::Error::msg)?;
     let (selection, _source) = firefox_companion::selection::resolve_browser_selection()?;
+    // Mirror `bobby serve`: a durable Firefox profile identity promotes
+    // verified intent outcomes into the shared context store. Agents run
+    // over stdio, so without this the remembered-site path was serve-only.
+    let durable_profile_id = selection.preference.durable_profile_id().map(str::to_owned);
+    if durable_profile_id.is_some() && config.context.dir.is_none() {
+        config.context.dir = Some(
+            config::default_context_dir()
+                .ok_or_else(|| anyhow::anyhow!("config directory unavailable"))?,
+        );
+    }
     // Warm the companion like `bobby serve`: cold compose only binds for the
     // first session's 30s discovery window, which never aligns with an
     // already-paired extension's reconnect schedule.
     let factory = firefox_companion::selection::compose_worker_factory_warm(&config, selection)?;
-    let runtime = RuntimeService::build_with_worker_factory(&config, Arc::clone(&factory))
-        .await
-        .map_err(anyhow::Error::new)?;
+    let runtime = match durable_profile_id.as_deref() {
+        Some(profile_id) => {
+            RuntimeService::build_with_context_promotion(&config, Arc::clone(&factory), profile_id)
+                .await
+        }
+        None => RuntimeService::build_with_worker_factory(&config, Arc::clone(&factory)).await,
+    }
+    .map_err(anyhow::Error::new)?;
     if !handle.is_valid_at(Utc::now()) {
         anyhow::bail!("startup credential expired during runtime construction");
     }
@@ -84,6 +100,7 @@ async fn run() -> anyhow::Result<()> {
         config.http.max_download_bytes,
         artifact_records,
     );
+    let operational_metrics = runtime.operational_metrics();
     let authenticated = Arc::new(AuthenticatedRuntime::with_session_ownership(
         runtime,
         handle.clone(),
@@ -123,6 +140,7 @@ async fn run() -> anyhow::Result<()> {
         })
     });
     let served = server.serve(tokio::io::stdin(), tokio::io::stdout()).await;
+    write_metrics_snapshot_if_configured(&operational_metrics);
     // Firefox's RemoteAgent allows one active WebDriver session per browser
     // and keeps it past connection loss, so an unended session makes every
     // later launch fail with "Maximum number of active sessions" until the
@@ -130,6 +148,30 @@ async fn run() -> anyhow::Result<()> {
     // it is the path agents actually run, and it exits on every host restart.
     factory.shutdown().await;
     served?;
+    Ok(())
+}
+
+/// `BOBBY_METRICS_SNAPSHOT_PATH` asks the gateway to dump the operational
+/// metrics snapshot to a file when the host closes the stdio session. The
+/// snapshot is counters and histograms only — never prompts, values, or
+/// URLs — so benchmark harnesses and operators can read it safely. A dump
+/// failure is logged and never fails the shutdown.
+fn write_metrics_snapshot_if_configured(metrics: &observability::OperationalMetrics) {
+    let Some(path) = std::env::var_os("BOBBY_METRICS_SNAPSHOT_PATH") else {
+        return;
+    };
+    if let Err(error) = write_metrics_snapshot(Path::new(&path), metrics) {
+        tracing::warn!(%error, "metrics snapshot dump failed");
+    }
+}
+
+fn write_metrics_snapshot(
+    path: &Path,
+    metrics: &observability::OperationalMetrics,
+) -> anyhow::Result<()> {
+    let snapshot = metrics.snapshot();
+    let body = serde_json::to_vec_pretty(&snapshot)?;
+    std::fs::write(path, body)?;
     Ok(())
 }
 
@@ -246,5 +288,51 @@ mod tests {
             Ok(Capability::BrowserMutate)
         ));
         assert!(parse_capability("browser:* ").is_err());
+    }
+
+    #[test]
+    fn metrics_snapshot_dump_writes_the_counter_snapshot() {
+        let metrics = observability::OperationalMetrics::default();
+        metrics.record_intent_resolution(
+            observability::IntentMetricKind::Fill,
+            observability::ResolutionSource::VisionFallback,
+        );
+        metrics.record_verification(observability::VerificationMetricResult::Accepted);
+        let path = std::env::temp_dir().join(format!("bobby-metrics-{}.json", Uuid::new_v4()));
+
+        write_metrics_snapshot(&path, &metrics).unwrap();
+
+        let body: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(body["intent"]["total"], 1);
+        assert_eq!(body["intent"]["visionFallback"], 1);
+        assert_eq!(body["verification"]["accepted"], 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn metrics_snapshot_dump_is_a_no_op_without_the_env_var() {
+        let _guard = ENVIRONMENT.lock().await;
+        std::env::remove_var("BOBBY_METRICS_SNAPSHOT_PATH");
+        let metrics = observability::OperationalMetrics::default();
+        // Unset env: returns without touching the filesystem.
+        write_metrics_snapshot_if_configured(&metrics);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn metrics_snapshot_dump_honors_the_env_var() {
+        let _guard = ENVIRONMENT.lock().await;
+        let path = std::env::temp_dir().join(format!("bobby-metrics-{}.json", Uuid::new_v4()));
+        std::env::set_var("BOBBY_METRICS_SNAPSHOT_PATH", &path);
+        let metrics = observability::OperationalMetrics::default();
+        metrics.record_workflow_call(observability::WorkflowCallClass::Mutation);
+
+        write_metrics_snapshot_if_configured(&metrics);
+
+        let body: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(body["workflowCalls"]["mutation"], 1);
+        std::env::remove_var("BOBBY_METRICS_SNAPSHOT_PATH");
+        let _ = std::fs::remove_file(&path);
     }
 }

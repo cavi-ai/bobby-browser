@@ -1686,6 +1686,18 @@ mod install_tests {
     }
 
     #[test]
+    fn the_agents_skill_teaches_handle_first_not_workflow_id_reuse() {
+        assert!(
+            SKILL_SOURCE.contains("Pass the returned `workflowHandle`"),
+            "skill must teach the handle-only path"
+        );
+        assert!(
+            !SKILL_SOURCE.contains("Reuse the `workflowId`."),
+            "skill must not tell agents to reuse workflowId as the primary loop"
+        );
+    }
+
+    #[test]
     fn the_agents_skill_installs_into_the_project_tree() {
         let root = tempfile::tempdir().unwrap();
         let path = install_skill(SkillKind::Agents, true, root.path()).unwrap();

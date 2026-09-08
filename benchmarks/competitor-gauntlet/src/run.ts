@@ -20,6 +20,7 @@ import {
   resolveGrokModel,
   VISION_ASSIST_PROMPT,
 } from "./driver.js";
+import { buildAttribution, readMetricsSnapshot } from "./attribution.js";
 import { summarize } from "./summarize.js";
 
 const harnessDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -292,13 +293,38 @@ function collectProvenance(
       ...shared,
       cursorSdkVersion: CURSOR_SDK_VERSION,
       cursorIsolation: CURSOR_ISOLATION,
+      engine: bobbyEngine(),
+      providerMode: bobbyProviderMode(),
     };
   }
   return {
     ...shared,
     claudeCliVersion: commandOutput("claude", ["--version"]),
     claudeIsolation: CLAUDE_ISOLATION,
+    engine: bobbyEngine(),
+    providerMode: bobbyProviderMode(),
   };
+}
+
+// The engine the bobby runner is pinned to, read from the runner definition
+// itself so the provenance record cannot drift from what actually ran.
+function bobbyEngine(): string {
+  try {
+    const selection = JSON.parse(
+      runners?.bobby?.mcpServers?.bobby?.env
+        ?.AUTOMATION_RUNTIME_BROWSER_SELECTION ?? "",
+    );
+    const engine = selection?.preference?.engine;
+    return typeof engine === "string" && engine.length > 0 ? engine : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+// The gauntlet config has no [vision] section today: vision is off. When a
+// vision runner variant lands, this returns the configured provider mode.
+function bobbyProviderMode(): string {
+  return "off";
 }
 
 function parseSelfReport(text: string): unknown {
@@ -479,6 +505,19 @@ async function main() {
           JSON.stringify(mcpConfig, null, 2),
         );
 
+        // The bobby runner asks the stdio gateway to dump its operational
+        // metrics snapshot when the session closes; the run record reads it
+        // back for action-count and resolution-source attribution.
+        const metricsSnapshotPath =
+          tool === "bobby" ? path.join(workDir, "metrics-snapshot.json") : null;
+        if (metricsSnapshotPath) {
+          const bobbyServer = mcpConfig.mcpServers["bobby"] as any;
+          bobbyServer.env = {
+            ...bobbyServer.env,
+            BOBBY_METRICS_SNAPSHOT_PATH: metricsSnapshotPath,
+          };
+        }
+
         const prompt =
           task.prompt
             .replace("{{url}}", entryUrl)
@@ -543,6 +582,13 @@ async function main() {
           provenance,
           cacheReadTokens: summary.cacheReadTokens,
           cacheCreationTokens: summary.cacheCreationTokens,
+          attribution: buildAttribution(
+            events,
+            metricsSnapshotPath
+              ? readMetricsSnapshot(metricsSnapshotPath)
+              : null,
+            summary.model ?? null,
+          ),
           selfReport: parseSelfReport(summary.resultText),
           transcript: path.relative(repoRoot, transcriptFile),
         };
