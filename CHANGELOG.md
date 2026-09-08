@@ -44,6 +44,8 @@
 - Public agent skill: pass `workflowHandle` on later calls; explicit ids are
   the repair path when the handle dies. `workflowId` stays on
   `checkpoint_save` / `workflow_recover` only.
+- Explore-loop tool descriptions (`click`, `intent_complete_form`,
+  `intent_submit_and_verify`) name `workflowHandle` as the call scope.
 
 ### Fixed
 
