@@ -608,7 +608,7 @@ name = "bobby-chromiumoxide"
 version = "0.9.1"
 dependencies = [
  "async-tungstenite",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "chromiumoxide_cdp",
  "chromiumoxide_fetcher",
