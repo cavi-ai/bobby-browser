@@ -82,10 +82,11 @@ calls. Rules that govern every call:
    same call. Hand-author one (`autoCheckpoint: false`) only to attach
    `invariants`/`replayableInputs`; put commands you already ran in
    `evidenceRefs` — never hand-authored evidence.
-2. **Reuse the `workflowId`.** Every outcome echoes it; pass it back so
-   `checkpoint_save`/`workflow_recover` see the whole flow. Lost it?
+2. **Pass the `workflowHandle`.** Later calls take it;
+   `sessionId`/`pageId`/`workflowId` are repair if the handle dies. Lost it?
    `recovery_status` with `sessionId` lists that session's recoverable
-   workflows, newest first.
+   workflows, newest first. Pass an echoed `workflowId` only into
+   `checkpoint_save`/`workflow_recover`.
 3. **Fail-closed by design.** `verificationFailed` means the action ran but
    the expected state was not proven — re-read (`inspect`, `form_snapshot`)
    instead of retrying blindly. `needsReconciliation` means the side effect
