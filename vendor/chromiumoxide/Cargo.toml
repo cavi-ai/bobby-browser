@@ -228,7 +228,7 @@ features = [
 version = "0.3"
 
 [target."cfg(windows)".dependencies.windows-registry]
-version = "0.6"
+version = "0.100"
 
 [[example]]
 name = "endpoint-log-test"
