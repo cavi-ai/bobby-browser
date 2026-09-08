@@ -4,6 +4,14 @@
 
 ### Added
 
+- `[vision].propose_budget_ms`: an operator-set health budget for one vision
+  propose round-trip. `bobby doctor`'s vision probe warns when the measured
+  round-trip exceeds it (naming both numbers and the setting), and
+  `/v1/runtime` advertises it as `visionProposeBudgetMs`, so a caller can
+  judge the metrics latency histogram against the configured budget without
+  config access. Unset means no budget gate — `timeout_ms` stays the only
+  bound.
+
 - `bobby mcp-stdio` dumps the operational metrics snapshot to
   `BOBBY_METRICS_SNAPSHOT_PATH` when the host closes the session, when that
   env var is set. The snapshot is counters and histograms only — never
@@ -22,6 +30,14 @@
   unknown-method refusal, non-object params, missing-capability fail-closed,
   and the exact-shape `enable` / user-agent no-op handlers. The gateway's
   highest-degree node previously had only indirect coverage.
+- Competitor gauntlet thresholds split by engine and provider mode: run
+  provenance records `engine` (parsed from the bobby runner's browser
+  selection) and `providerMode` (`off` — the gauntlet configures no vision
+  today), and `score check` reads an optional `dimensions` map in
+  `baseline.json` keyed on `"<engine>/<providerMode>"`, falling back to the
+  top-level tasks/budget when the batch's dimension has no entry. Both
+  fields join the provenance uniformity gate, and the baseline path accepts
+  a `GAUNTLET_BASELINE_PATH` override.
 
 ### Fixed
 
