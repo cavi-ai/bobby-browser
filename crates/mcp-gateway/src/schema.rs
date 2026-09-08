@@ -2841,11 +2841,7 @@ mod tests {
 
     #[test]
     fn explore_loop_descriptions_name_the_workflow_handle() {
-        for name in [
-            "click",
-            "intent_complete_form",
-            "intent_submit_and_verify",
-        ] {
+        for name in ["click", "intent_complete_form", "intent_submit_and_verify"] {
             let description = tool_description(name);
             assert!(
                 description.contains("workflowHandle"),
