@@ -1,6 +1,9 @@
-import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, existsSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { buildPhaseScorecard, parseDoctorOutput, statsForTool } from "./phase.js";
 
 const harnessDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const resultsDir =
@@ -68,6 +71,67 @@ function validCallBreakdown(run: Record<string, unknown>): boolean {
 
 function provenanceKey(value: Record<string, unknown>): string {
   return JSON.stringify(PROVENANCE_KEYS.map((key) => value[key]));
+}
+
+function probeDoctor() {
+  const bobby = process.env.BOBBY_MCP_COMMAND ?? "bobby";
+  const result = spawnSync(bobby, ["doctor"], {
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+  return parseDoctorOutput(`${result.stdout}\n${result.stderr}`);
+}
+
+function probeInstall() {
+  if (process.env.GAUNTLET_PROBE_INSTALL !== "1") return null;
+  const bobby = process.env.BOBBY_MCP_COMMAND ?? "bobby";
+  const home = mkdtempSync(path.join(tmpdir(), "bobby-install-probe-"));
+  const started = Date.now();
+  const result = spawnSync(bobby, ["install", "--host", "claude", "--skill", "--yes"], {
+    encoding: "utf8",
+    timeout: 120_000,
+    env: { ...process.env, HOME: home },
+  });
+  const detail = String(result.stderr || result.stdout || `exit ${result.status}`).slice(
+    0,
+    400,
+  );
+  return {
+    ok: result.status === 0,
+    wallMs: Date.now() - started,
+    detail: result.status === 0 ? "ok" : detail,
+  };
+}
+
+function loadOpusReference() {
+  const directory =
+    process.env.OPUS_RESULTS_DIR ??
+    path.resolve(harnessDir, "../results/post-merge-5e5d0d9-opus-4-8");
+  const file = path.join(directory, "runs.jsonl");
+  if (!existsSync(file)) return null;
+  const opusRuns = readFileSync(file, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  return {
+    head: "5e5d0d9",
+    label: "Opus Bobby freeze — labeled only, not ranked",
+    bobby: statsForTool("bobby", opusRuns),
+  };
+}
+
+if (process.argv[2] === "phase") {
+  const doctor = probeDoctor();
+  const scorecard = buildPhaseScorecard(runs, {
+    doctor,
+    install: probeInstall() ?? undefined,
+    opusReference: loadOpusReference(),
+  });
+  const out = path.join(resultsDir, "phase-scorecard.json");
+  writeFileSync(out, JSON.stringify(scorecard, null, 2) + "\n");
+  console.log(JSON.stringify(scorecard, null, 2));
+  console.error(`wrote ${out}`);
+  process.exit(0);
 }
 
 if (process.argv[2] === "check") {

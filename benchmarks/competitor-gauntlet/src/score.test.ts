@@ -53,7 +53,7 @@ function record(task: string, batchId: string) {
   };
 }
 
-function runScore(records: object[], mode?: "check", baselinePath?: string) {
+function runScore(records: object[], mode?: "check" | "phase", baselinePath?: string) {
   const resultsDir = mkdtempSync(path.join(tmpdir(), "bobby-score-test-"));
   mkdirSync(resultsDir, { recursive: true });
   writeFileSync(
@@ -69,6 +69,8 @@ function runScore(records: object[], mode?: "check", baselinePath?: string) {
       env: {
         ...process.env,
         GAUNTLET_RESULTS_DIR: resultsDir,
+        BOBBY_MCP_COMMAND: "false",
+        OPUS_RESULTS_DIR: path.join(resultsDir, "missing-opus"),
         ...(baselinePath ? { GAUNTLET_BASELINE_PATH: baselinePath } : {}),
       },
     },
@@ -261,6 +263,39 @@ test("check enforces the call budget on the mean across runs", () => {
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.equal(result.stdout.includes("BUDGET"), false, result.stdout);
   assert.match(result.stdout, /calls=15\.0 \(n=2\)/);
+});
+
+test("phase emits ranks without mixing skipped vision into competitor order", () => {
+  const bobby = taskIds.map((task) => ({
+    ...record(task, "g"),
+    tool: "bobby",
+    model: "grok-4.6",
+    provenance: { ...record(task, "g").provenance, requestedModel: "grok-4.6", driver: "cursor" },
+  }));
+  const playwright = taskIds.map((task) => ({
+    ...record(task, "g"),
+    tool: "playwright-mcp",
+    wallMs: 500,
+    model: "grok-4.6",
+  }));
+  const result = runScore(
+    [
+      ...bobby,
+      ...playwright,
+      { tool: "bobby-vision", skipped: true, skipReason: "mlx-unreachable" },
+    ],
+    "phase",
+  );
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  const scorecard = JSON.parse(result.stdout);
+  assert.equal(scorecard.tools.bobby.passRate, 1);
+  assert.equal(scorecard.tools["bobby-vision"].skipped, true);
+  assert.equal(
+    scorecard.ranks.performance.find((row: { tool: string }) => row.tool === "playwright-mcp")
+      .rank,
+    1,
+  );
+  assert.equal(scorecard.operator.install, null);
 });
 
 test("check applies the matching engine/providerMode dimension's thresholds", () => {
