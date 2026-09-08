@@ -47,11 +47,13 @@ function record(task: string, batchId: string) {
       timeboxSeconds: 300,
       startupToolset: "explore",
       claudeIsolation: "strict-mcp,project-settings,no-skills,no-chrome,no-persistence",
+      engine: "chromium",
+      providerMode: "off",
     },
   };
 }
 
-function runScore(records: object[], mode?: "check") {
+function runScore(records: object[], mode?: "check", baselinePath?: string) {
   const resultsDir = mkdtempSync(path.join(tmpdir(), "bobby-score-test-"));
   mkdirSync(resultsDir, { recursive: true });
   writeFileSync(
@@ -64,13 +66,43 @@ function runScore(records: object[], mode?: "check") {
     {
       cwd: path.dirname(sourceDir),
       encoding: "utf8",
-      env: { ...process.env, GAUNTLET_RESULTS_DIR: resultsDir },
+      env: {
+        ...process.env,
+        GAUNTLET_RESULTS_DIR: resultsDir,
+        ...(baselinePath ? { GAUNTLET_BASELINE_PATH: baselinePath } : {}),
+      },
     },
   );
 }
 
-function check(records: object[]) {
-  return runScore(records, "check");
+function check(records: object[], baselinePath?: string) {
+  return runScore(records, "check", baselinePath);
+}
+
+// A complete baseline over the five tasks with caller-controlled budgets, so
+// dimension tests do not depend on the committed baseline's numbers.
+function writeBaseline(overrides: {
+  budget?: Record<string, number>;
+  dimensions?: Record<string, unknown>;
+}): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "bobby-baseline-test-"));
+  const baselinePath = path.join(dir, "baseline.json");
+  const tasks = Object.fromEntries(
+    taskIds.map((task) => [task, { pass: true, wallSeconds: 60, toolErrors: 0 }]),
+  );
+  writeFileSync(
+    baselinePath,
+    JSON.stringify({
+      tasks,
+      budget: overrides.budget ?? {
+        perTaskCacheReadTokens: 1_000_000,
+        perTaskCacheCreationTokens: 100_000,
+        perTaskToolCalls: 50,
+      },
+      ...(overrides.dimensions ? { dimensions: overrides.dimensions } : {}),
+    }),
+  );
+  return baselinePath;
 }
 
 test("check rejects an incomplete latest invocation instead of borrowing stale tasks", () => {
@@ -229,4 +261,78 @@ test("check enforces the call budget on the mean across runs", () => {
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.equal(result.stdout.includes("BUDGET"), false, result.stdout);
   assert.match(result.stdout, /calls=15\.0 \(n=2\)/);
+});
+
+test("check applies the matching engine/providerMode dimension's thresholds", () => {
+  // The chromium/off overlay tightens the cache-read budget below the run's
+  // 100k; the top-level budget would pass it.
+  const baselinePath = writeBaseline({
+    budget: {
+      perTaskCacheReadTokens: 1_000_000,
+      perTaskCacheCreationTokens: 100_000,
+      perTaskToolCalls: 50,
+    },
+    dimensions: {
+      "chromium/off": {
+        tasks: Object.fromEntries(
+          taskIds.map((task) => [
+            task,
+            { pass: true, wallSeconds: 60, toolErrors: 0 },
+          ]),
+        ),
+        budget: {
+          perTaskCacheReadTokens: 50_000,
+          perTaskCacheCreationTokens: 100_000,
+          perTaskToolCalls: 50,
+        },
+      },
+    },
+  });
+  const runs = taskIds.map((task) => record(task, "current"));
+
+  const result = check(runs, baselinePath);
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stdout, /baseline dimension: chromium\/off/);
+  assert.match(result.stdout, /BUDGET customer-update: cacheRead 100000 > 50000/);
+});
+
+test("check falls back to the top-level baseline when no dimension matches", () => {
+  const baselinePath = writeBaseline({
+    dimensions: {
+      "firefox/off": {
+        tasks: Object.fromEntries(
+          taskIds.map((task) => [
+            task,
+            { pass: true, wallSeconds: 60, toolErrors: 0 },
+          ]),
+        ),
+        budget: {
+          perTaskCacheReadTokens: 50_000,
+          perTaskCacheCreationTokens: 100_000,
+          perTaskToolCalls: 50,
+        },
+      },
+    },
+  });
+  // The batch ran chromium/off; only firefox/off has an overlay, so the
+  // top-level budget (1M cache-read) applies and 100k passes.
+  const runs = taskIds.map((task) => record(task, "current"));
+
+  const result = check(runs, baselinePath);
+
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.equal(result.stdout.includes("baseline dimension:"), false, result.stdout);
+});
+
+test("check rejects a dimension entry without tasks", () => {
+  const baselinePath = writeBaseline({
+    dimensions: { "firefox/off": { budget: {} } },
+  });
+  const runs = taskIds.map((task) => record(task, "current"));
+
+  const result = check(runs, baselinePath);
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /dimensions\.firefox\/off must carry tasks/);
 });

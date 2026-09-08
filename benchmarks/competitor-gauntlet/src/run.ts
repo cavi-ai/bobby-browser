@@ -236,7 +236,30 @@ function collectProvenance(
     timeboxSeconds,
     startupToolset: "explore",
     claudeIsolation: CLAUDE_ISOLATION,
+    engine: bobbyEngine(),
+    providerMode: bobbyProviderMode(),
   };
+}
+
+// The engine the bobby runner is pinned to, read from the runner definition
+// itself so the provenance record cannot drift from what actually ran.
+function bobbyEngine(): string {
+  try {
+    const selection = JSON.parse(
+      runners?.bobby?.mcpServers?.bobby?.env
+        ?.AUTOMATION_RUNTIME_BROWSER_SELECTION ?? "",
+    );
+    const engine = selection?.preference?.engine;
+    return typeof engine === "string" && engine.length > 0 ? engine : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+// The gauntlet config has no [vision] section today: vision is off. When a
+// vision runner variant lands, this returns the configured provider mode.
+function bobbyProviderMode(): string {
+  return "off";
 }
 
 function summarize(events: any[]) {
