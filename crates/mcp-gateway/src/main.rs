@@ -37,7 +37,7 @@ async fn run() -> anyhow::Result<()> {
     let config_path = std::env::var_os("BOBBY_BROWSER_CONFIG")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("./config.toml"));
-    let config = AppConfig::load(&config_path).map_err(|error| {
+    let mut config = AppConfig::load(&config_path).map_err(|error| {
         anyhow::anyhow!(
             "failed to load config from {}: {error}",
             config_path.display()
@@ -45,13 +45,28 @@ async fn run() -> anyhow::Result<()> {
     })?;
     config.validate().map_err(anyhow::Error::msg)?;
     let (selection, _source) = firefox_companion::selection::resolve_browser_selection()?;
+    // Mirror `bobby serve`: a durable Firefox profile identity promotes
+    // verified intent outcomes into the shared context store. Agents run
+    // over stdio, so without this the remembered-site path was serve-only.
+    let durable_profile_id = selection.preference.durable_profile_id().map(str::to_owned);
+    if durable_profile_id.is_some() && config.context.dir.is_none() {
+        config.context.dir = Some(
+            config::default_context_dir()
+                .ok_or_else(|| anyhow::anyhow!("config directory unavailable"))?,
+        );
+    }
     // Warm the companion like `bobby serve`: cold compose only binds for the
     // first session's 30s discovery window, which never aligns with an
     // already-paired extension's reconnect schedule.
     let factory = firefox_companion::selection::compose_worker_factory_warm(&config, selection)?;
-    let runtime = RuntimeService::build_with_worker_factory(&config, Arc::clone(&factory))
-        .await
-        .map_err(anyhow::Error::new)?;
+    let runtime = match durable_profile_id.as_deref() {
+        Some(profile_id) => {
+            RuntimeService::build_with_context_promotion(&config, Arc::clone(&factory), profile_id)
+                .await
+        }
+        None => RuntimeService::build_with_worker_factory(&config, Arc::clone(&factory)).await,
+    }
+    .map_err(anyhow::Error::new)?;
     if !handle.is_valid_at(Utc::now()) {
         anyhow::bail!("startup credential expired during runtime construction");
     }

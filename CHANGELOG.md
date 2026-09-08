@@ -4,6 +4,13 @@
 
 ### Added
 
+- `bobby mcp-stdio` promotes verified intent outcomes into the shared
+  context store when the engine selection carries a durable Firefox profile
+  identity (exact Firefox + `profileId`), mirroring `bobby serve`. Agents
+  run over stdio, so the remembered-site path was previously serve-only.
+  The durable-profile rule now lives on
+  `EnginePreferenceConfig::durable_profile_id`, shared by both entry points.
+
 - `[vision].propose_budget_ms`: an operator-set health budget for one vision
   propose round-trip. `bobby doctor`'s vision probe warns when the measured
   round-trip exceeds it (naming both numbers and the setting), and

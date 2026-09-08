@@ -44,6 +44,29 @@ impl Default for EnginePreferenceConfig {
     }
 }
 
+impl EnginePreferenceConfig {
+    /// The durable profile identity a runtime promotes verified intent
+    /// outcomes under. Only an exact Firefox selection with an explicit
+    /// profile id carries one; managed Chromium is ephemeral by design, and a
+    /// profile-less exact selection has nothing stable to key memory on.
+    pub fn durable_profile_id(&self) -> Option<&str> {
+        match self {
+            Self::Exact {
+                engine: BrowserEngineConfig::Firefox,
+                profile_id: Some(profile_id),
+            } => Some(profile_id.as_str()),
+            _ => None,
+        }
+    }
+}
+
+/// The default shared-context store root, used when the selection carries a
+/// durable profile identity but `[context].dir` is unset. `None` when the
+/// platform has no config directory.
+pub fn default_context_dir() -> Option<PathBuf> {
+    dirs::config_dir().map(|dir| dir.join("bobby-browser").join("context"))
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowserSelectionConfig {
     #[serde(default)]
@@ -494,6 +517,29 @@ prefill = true
         assert!(parsed.vision.prefill);
         let absent: super::AppConfig = toml::from_str("[vision]\n").expect("parse empty vision");
         assert!(!absent.vision.prefill);
+    }
+
+    #[test]
+    fn durable_profile_id_only_exists_for_exact_firefox_with_a_profile() {
+        let firefox = super::EnginePreferenceConfig::Exact {
+            engine: super::BrowserEngineConfig::Firefox,
+            profile_id: Some("work".to_string()),
+        };
+        assert_eq!(firefox.durable_profile_id(), Some("work"));
+        let profile_less = super::EnginePreferenceConfig::Exact {
+            engine: super::BrowserEngineConfig::Firefox,
+            profile_id: None,
+        };
+        assert_eq!(profile_less.durable_profile_id(), None);
+        let chromium = super::EnginePreferenceConfig::Exact {
+            engine: super::BrowserEngineConfig::Chromium,
+            profile_id: Some("work".to_string()),
+        };
+        assert_eq!(chromium.durable_profile_id(), None);
+        assert_eq!(
+            super::EnginePreferenceConfig::ManagedChromium.durable_profile_id(),
+            None
+        );
     }
 
     #[test]
