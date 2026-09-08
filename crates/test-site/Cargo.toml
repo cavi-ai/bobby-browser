@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 axum.workspace = true
-brotli = "8"
+brotli = "9"
 flate2 = "1"
 futures-util.workspace = true
 tokio.workspace = true

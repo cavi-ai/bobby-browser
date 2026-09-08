@@ -19,6 +19,12 @@ pub struct VisionConfig {
     pub token_env: Option<String>,
     #[serde(default = "default_vision_timeout_ms", alias = "timeoutMs")]
     pub timeout_ms: u64,
+    /// Operator-set health budget for one vision propose round-trip, in
+    /// milliseconds. `bobby doctor`'s vision probe warns when the measured
+    /// round-trip exceeds it, and `/v1/runtime` advertises it. Unset means
+    /// no budget gate — the timeout stays the only bound.
+    #[serde(default, alias = "proposeBudgetMs")]
+    pub propose_budget_ms: Option<u64>,
     #[serde(default)]
     pub provider: Option<String>,
     #[serde(default)]
@@ -60,6 +66,7 @@ impl Default for VisionConfig {
             endpoint_url: None,
             token_env: None,
             timeout_ms: default_vision_timeout_ms(),
+            propose_budget_ms: None,
             provider: None,
             providers: BTreeMap::new(),
             backend: None,

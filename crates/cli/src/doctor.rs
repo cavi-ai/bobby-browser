@@ -877,12 +877,37 @@ fn check_vision_propose_probe(
     .join()
     .ok()
     .flatten();
-    Some(match probe {
-        Some(elapsed) => DoctorCheck {
-            status: DoctorStatus::Ok,
-            name: "vision-service".to_string(),
-            detail: format!("propose round-trip ok in {}ms", elapsed.as_millis()),
-        },
+    Some(vision_probe_verdict(probe, config.vision.propose_budget_ms))
+}
+
+/// The probe verdict, pure so the budget comparison is unit-testable: a
+/// failed round-trip warns; a round-trip over the configured
+/// `[vision].proposeBudgetMs` warns; otherwise the check is green and names
+/// the budget it was measured against.
+fn vision_probe_verdict(probe: Option<Duration>, budget_ms: Option<u64>) -> DoctorCheck {
+    match probe {
+        Some(elapsed) => {
+            let elapsed_ms = elapsed.as_millis() as u64;
+            match budget_ms {
+                Some(budget_ms) if elapsed_ms > budget_ms => DoctorCheck {
+                    status: DoctorStatus::Warn,
+                    name: "vision-service".to_string(),
+                    detail: format!(
+                        "propose round-trip {elapsed_ms}ms exceeds the configured {budget_ms}ms budget ([vision].proposeBudgetMs)"
+                    ),
+                },
+                Some(budget_ms) => DoctorCheck {
+                    status: DoctorStatus::Ok,
+                    name: "vision-service".to_string(),
+                    detail: format!("propose round-trip ok in {elapsed_ms}ms (budget {budget_ms}ms)"),
+                },
+                None => DoctorCheck {
+                    status: DoctorStatus::Ok,
+                    name: "vision-service".to_string(),
+                    detail: format!("propose round-trip ok in {elapsed_ms}ms"),
+                },
+            }
+        }
         None => DoctorCheck {
             status: DoctorStatus::Warn,
             name: "vision-service".to_string(),
@@ -890,7 +915,7 @@ fn check_vision_propose_probe(
                 "propose round-trip failed (endpoint unreachable, auth rejected, or invalid reply)"
                     .to_string(),
         },
-    })
+    }
 }
 
 pub(crate) fn check_vision_provider(vision: &VisionConfig) -> Option<DoctorCheck> {
@@ -2609,5 +2634,35 @@ mod cdp_port_tests {
         assert_eq!(parse_lsof_owner("p20298\n"), None);
         assert_eq!(parse_lsof_owner("cmcp-gateway\n"), None);
         assert_eq!(parse_lsof_owner(""), None);
+    }
+
+    #[test]
+    fn vision_probe_verdict_warns_when_round_trip_exceeds_the_budget() {
+        let check = vision_probe_verdict(Some(Duration::from_millis(900)), Some(500));
+        assert_eq!(check.status, DoctorStatus::Warn);
+        assert!(check
+            .detail
+            .contains("900ms exceeds the configured 500ms budget"));
+    }
+
+    #[test]
+    fn vision_probe_verdict_ok_names_the_budget_it_was_measured_against() {
+        let check = vision_probe_verdict(Some(Duration::from_millis(120)), Some(500));
+        assert_eq!(check.status, DoctorStatus::Ok);
+        assert!(check.detail.contains("ok in 120ms (budget 500ms)"));
+    }
+
+    #[test]
+    fn vision_probe_verdict_without_a_budget_keeps_the_plain_detail() {
+        let check = vision_probe_verdict(Some(Duration::from_millis(120)), None);
+        assert_eq!(check.status, DoctorStatus::Ok);
+        assert_eq!(check.detail, "propose round-trip ok in 120ms");
+    }
+
+    #[test]
+    fn vision_probe_verdict_warns_on_a_failed_round_trip() {
+        let check = vision_probe_verdict(None, Some(500));
+        assert_eq!(check.status, DoctorStatus::Warn);
+        assert!(check.detail.contains("propose round-trip failed"));
     }
 }
