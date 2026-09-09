@@ -56,6 +56,7 @@ test("phase ranks bobby against competitors on the same Grok batch", () => {
     ),
     ...tasks.map((task) => run("chrome-devtools-mcp", task, { pass: false, wallMs: 90_000 })),
     ...tasks.map((task) => run("raw-playwright", task, { wallMs: 60_000, ease: 2 })),
+    ...tasks.map((task) => run("agent-browser", task, { wallMs: 50_000, ease: 3 })),
     {
       tool: "bobby-vision",
       skipped: true,
