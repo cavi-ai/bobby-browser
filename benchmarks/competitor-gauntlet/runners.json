@@ -57,5 +57,18 @@
     "description": "No agent tooling: bash + the playwright library only",
     "mcpServers": {},
     "promptSuffix": "You have no browser tools. Drive the browser by writing Node scripts that import the 'playwright' package (it is installed in {{harnessDir}}; run scripts with node from that directory, e.g. chromium.launch()) and running them with the Bash tool."
+  },
+  "agent-browser": {
+    "description": "Vercel agent-browser MCP (npx agent-browser@0.37.1 mcp)",
+    "mcpServers": {
+      "agent-browser": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "agent-browser@0.37.1",
+          "mcp"
+        ]
+      }
+    }
   }
 }

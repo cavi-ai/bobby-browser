@@ -268,10 +268,15 @@ test("npm-backed competitor runners use exact package versions", () => {
   const runners = JSON.parse(
     readFileSync(path.join(harnessDir, "runners.json"), "utf8"),
   );
+  // The package spec is not always the last arg — a runner like agent-browser
+  // takes a trailing subcommand (`... agent-browser@0.37.1 mcp`), so find the
+  // versioned npm spec anywhere in argv instead of assuming a fixed position.
   const packageSpecs = Object.values(runners).flatMap((runner: any) =>
     Object.values(runner.mcpServers ?? {})
       .filter((server: any) => server.command === "npx")
-      .map((server: any) => String(server.args?.at(-1) ?? "")),
+      .flatMap((server: any) =>
+        (server.args ?? []).filter((a: unknown) => /@\d+\.\d+\.\d+$|@latest$/.test(String(a))),
+      ),
   );
 
   assert(packageSpecs.length > 0, "fixture must include npm-backed competitors");
@@ -279,4 +284,21 @@ test("npm-backed competitor runners use exact package versions", () => {
     assert.doesNotMatch(packageSpec, /@latest$/);
     assert.match(packageSpec, /@\d+\.\d+\.\d+$/);
   }
+});
+
+test("agent-browser runner parses and names exactly one mcpServers command", () => {
+  const runners = JSON.parse(
+    readFileSync(path.join(harnessDir, "runners.json"), "utf8"),
+  );
+  const runner = runners["agent-browser"];
+  assert(runner, "runners.json must define an agent-browser entry");
+  const servers = Object.entries(runner.mcpServers ?? {});
+  assert.equal(servers.length, 1, "agent-browser must name exactly one mcpServers command");
+  const [, server] = servers[0] as [string, any];
+  assert.equal(server.command, "npx");
+  assert.equal(server.args?.at(-1), "mcp", "agent-browser must be launched in MCP server mode");
+  assert(
+    (server.args ?? []).some((a: unknown) => /^agent-browser@\d+\.\d+\.\d+$/.test(String(a))),
+    "agent-browser must pin an exact package version",
+  );
 });
