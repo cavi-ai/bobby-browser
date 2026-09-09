@@ -325,37 +325,46 @@ struct HttpBridgeState {
     cache_validators: BTreeMap<String, String>,
 }
 
-/// Which phase of `ChromiumWorker::dispatch_click`'s explicit press/release
-/// sequence a failure struck in. A failure before any input reached the
-/// page can be retried safely -- worst case, nothing happened yet. A
-/// failure between press and release cannot: the page may already be
-/// reacting to a mousedown with no matching mouseup, so retrying risks a
-/// second, stuck press.
+/// Which phase of a click a failure struck in, relative to the mousePressed
+/// event being acknowledged. A failure before the press is acknowledged can
+/// be retried safely -- worst case, nothing happened yet. A failure after
+/// (the release call) cannot: the page may already be reacting to a
+/// mousedown with no matching mouseup, so retrying risks a second, stuck
+/// press. `BeforePress` covers everything from target resolution through
+/// the press call itself (resolution, clickable point, bring-to-front,
+/// move, the press dispatch); no opaque call goes unclassified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClickDispatchPhase {
-    BeforeInput,
-    BetweenPressAndRelease,
+    BeforePress,
+    AfterPress,
 }
 
 /// Maps a step in the `[MousePressed, MouseReleased]` sequence to the phase
 /// a failure sending it falls in. Only the second (release) step's own
-/// failure lands between press and release -- a failure sending the first
-/// (press) step means no input landed at all yet.
+/// failure lands after the press -- a failure sending the first (press)
+/// step means the press itself was never acknowledged.
 fn click_dispatch_phase_for_step(step: usize) -> ClickDispatchPhase {
     if step == 0 {
-        ClickDispatchPhase::BeforeInput
+        ClickDispatchPhase::BeforePress
     } else {
-        ClickDispatchPhase::BetweenPressAndRelease
+        ClickDispatchPhase::AfterPress
     }
 }
 
 /// A closed-session-shaped error is only safe to retry (re-resolve the
-/// target, dispatch again) when it struck before any input reached the
-/// page. The same message shape between press and release must stay a
-/// failure: the page may already be reacting to a mousedown with no
+/// target, dispatch again) when it struck before the press was
+/// acknowledged and this click has not already spent its one
+/// closed-session retry. The same message shape after the press must stay
+/// a failure: the page may already be reacting to a mousedown with no
 /// matching mouseup.
-fn should_retry_transient_click_loss(phase: ClickDispatchPhase, error: &CommandError) -> bool {
-    phase == ClickDispatchPhase::BeforeInput && is_closed_page_message(&error.message)
+fn should_retry_transient_click_loss(
+    phase: ClickDispatchPhase,
+    error: &CommandError,
+    already_retried: bool,
+) -> bool {
+    !already_retried
+        && phase == ClickDispatchPhase::BeforePress
+        && is_closed_page_message(&error.message)
 }
 
 impl ChromiumWorker {
@@ -487,20 +496,10 @@ impl ChromiumWorker {
         target: Point,
         modifiers: &[types::ClickModifier],
     ) -> Result<(), (ClickDispatchPhase, CommandError)> {
-        if modifiers.is_empty() {
-            page.click(target).await.map_err(|error| {
-                (
-                    ClickDispatchPhase::BeforeInput,
-                    driver_error(ErrorCode::BrowserCommandFailed, error),
-                )
-            })?;
-            return Ok(());
-        }
-
         let modifier_bits = chromium_modifier_bits(modifiers);
         page.move_mouse(target).await.map_err(|error| {
             (
-                ClickDispatchPhase::BeforeInput,
+                ClickDispatchPhase::BeforePress,
                 driver_error(ErrorCode::BrowserCommandFailed, error),
             )
         })?;
@@ -529,34 +528,58 @@ impl ChromiumWorker {
         Ok(())
     }
 
-    /// Retries `dispatch_click` once when it fails before any input reached
-    /// the page (`ClickDispatchPhase::BeforeInput`) with a closed-session-
-    /// shaped error, and the CURRENT connection's page listing (no
-    /// reconnect, no revive) proves the browser and page are both intact:
-    /// that combination is a transient target/session loss, not a browser
-    /// death, and the safest recovery is a fresh target resolution before
-    /// retrying, in case layout shifted while the connection blipped.
+    /// Applied to a `BeforePress`-class failure encountered anywhere from a
+    /// click's target resolution through the press call itself (resolution,
+    /// clickable point, bring-to-front, move, the press dispatch): true when
+    /// the failure is closed-session-shaped, this click has not already
+    /// spent its one closed-session retry, and the CURRENT connection's page
+    /// listing (no reconnect, no revive) proves the browser and page are
+    /// both intact. That combination is a transient target/session loss,
+    /// not a browser death, and the caller should retry once from a fresh
+    /// target resolution, in case layout shifted while the connection
+    /// blipped. Sets `*closed_session_retried` as soon as this click's one
+    /// retry is spent, whether or not the probe below ends up allowing it.
+    async fn recover_transient_click_loss(
+        &self,
+        page_id: &PageId,
+        phase: ClickDispatchPhase,
+        error: &CommandError,
+        closed_session_retried: &mut bool,
+    ) -> bool {
+        if !should_retry_transient_click_loss(phase, error, *closed_session_retried) {
+            return false;
+        }
+        *closed_session_retried = true;
+        if self.sync_untracked_pages().await.is_err() {
+            // The probe itself failed: the transport may really be gone,
+            // so surface the original error unchanged.
+            return false;
+        }
+        // The page itself closed; there is nothing to retry.
+        self.pages.lock().await.contains_key(page_id)
+    }
+
+    /// Retries `dispatch_click` once when it fails with a `BeforePress`
+    /// closed-session-shaped error and `recover_transient_click_loss` (on
+    /// the shared, click-wide `closed_session_retried` flag) allows it: the
+    /// retry re-resolves the target fresh before dispatching again, in case
+    /// layout shifted while the connection blipped.
     async fn dispatch_click_recovering_transient_loss(
         &self,
         page_id: &PageId,
         page: &Page,
         target: Point,
         command: &ClickCommand,
+        closed_session_retried: &mut bool,
     ) -> Result<(), CommandError> {
         let (phase, error) = match self.dispatch_click(page, target, &command.modifiers).await {
             Ok(()) => return Ok(()),
             Err(failure) => failure,
         };
-        if !should_retry_transient_click_loss(phase, &error) {
-            return Err(error);
-        }
-        if self.sync_untracked_pages().await.is_err() {
-            // The probe itself failed: the transport may really be gone,
-            // so surface the original error unchanged.
-            return Err(error);
-        }
-        if !self.pages.lock().await.contains_key(page_id) {
-            // The page itself closed; there is nothing to retry.
+        if !self
+            .recover_transient_click_loss(page_id, phase, &error, closed_session_retried)
+            .await
+        {
             return Err(error);
         }
         let resolved = self
@@ -1435,7 +1458,22 @@ impl BrowserWorker for ChromiumWorker {
         command: &ClickCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         let page = self.page_handle(page_id).await?;
-        for attempt in 0..=PLAIN_CLICK_TARGET_DRIFT_RETRIES {
+        // One closed-session-shaped retry for the whole click, composed
+        // with (not replacing) the stale-target drift retry below: set the
+        // first time `recover_transient_click_loss` allows a retry, and
+        // never unset, so a second closed-session error anywhere in this
+        // click -- predispatch or inside `dispatch_click` -- just fails.
+        let mut closed_session_retried = false;
+        // `attempt` bounds only the stale-target drift retry below (each
+        // drift continue increments it); the closed-session continues do
+        // not touch it, since that retry is bounded separately by
+        // `closed_session_retried`. A `for attempt in 0..=N` here would be
+        // unsound: a closed-session continue at `attempt == N` loops back
+        // without ever incrementing past the drift bound, so the compiler
+        // could not see the loop as bounded and an `unreachable!()` after
+        // it would be reachable. `loop` has no such fallthrough to guard.
+        let mut attempt: usize = 0;
+        loop {
             let resolved = match self
                 .resolve_target(page_id, &page, &command.selector, command.target.as_ref())
                 .await
@@ -1444,7 +1482,20 @@ impl BrowserWorker for ChromiumWorker {
                 Err(error)
                     if should_retry_plain_click_target_drift(command.boundary, attempt, &error) =>
                 {
+                    attempt += 1;
                     tokio::time::sleep(PLAIN_CLICK_TARGET_DRIFT_DELAY).await;
+                    continue;
+                }
+                Err(error)
+                    if self
+                        .recover_transient_click_loss(
+                            page_id,
+                            ClickDispatchPhase::BeforePress,
+                            &error,
+                            &mut closed_session_retried,
+                        )
+                        .await =>
+                {
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -1471,6 +1522,7 @@ impl BrowserWorker for ChromiumWorker {
                 Err(error)
                     if should_retry_plain_click_target_drift(command.boundary, attempt, &error) =>
                 {
+                    attempt += 1;
                     tokio::time::sleep(PLAIN_CLICK_TARGET_DRIFT_DELAY).await;
                     continue;
                 }
@@ -1482,18 +1534,42 @@ impl BrowserWorker for ChromiumWorker {
                 Box<dyn std::future::Future<Output = Result<(), CommandError>> + Send + '_>,
             > = if self.humanization_enabled() {
                 Box::pin(self.humanized_click(&page, &resolved, &command.modifiers))
-            } else if command.modifiers.is_empty() {
-                Box::pin(resolved.click(&page))
             } else {
-                let target = resolved.clickable_point(&page).await?.ok_or_else(|| {
-                    driver_error(
-                        ErrorCode::BrowserCommandFailed,
-                        "target has no clickable point",
-                    )
-                })?;
-                Box::pin(
-                    self.dispatch_click_recovering_transient_loss(page_id, &page, target, command),
-                )
+                // A coordinate-based dispatch needs the target on-screen;
+                // best-effort, like `bring_page_to_front` above -- this only
+                // sharpens the point `clickable_point` resolves next.
+                if let Err(error) = resolved.scroll_into_view(&page).await {
+                    tracing::debug!(?error, "scroll-into-view before click dispatch failed");
+                }
+                let target = match resolved.clickable_point(&page).await {
+                    Ok(Some(point)) => point,
+                    Ok(None) => {
+                        return Err(driver_error(
+                            ErrorCode::BrowserCommandFailed,
+                            "target has no clickable point",
+                        ))
+                    }
+                    Err(error)
+                        if self
+                            .recover_transient_click_loss(
+                                page_id,
+                                ClickDispatchPhase::BeforePress,
+                                &error,
+                                &mut closed_session_retried,
+                            )
+                            .await =>
+                    {
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                Box::pin(self.dispatch_click_recovering_transient_loss(
+                    page_id,
+                    &page,
+                    target,
+                    command,
+                    &mut closed_session_retried,
+                ))
             };
             // A click that opens alert()/confirm()/prompt() blocks the
             // renderer, so the click's own CDP round trip may never return
@@ -1519,6 +1595,7 @@ impl BrowserWorker for ChromiumWorker {
                                 &error,
                             ) =>
                         {
+                            attempt += 1;
                             tokio::time::sleep(PLAIN_CLICK_TARGET_DRIFT_DELAY).await;
                             continue;
                         }
@@ -1545,7 +1622,6 @@ impl BrowserWorker for ChromiumWorker {
                 },
             ]);
         }
-        unreachable!("plain-click target drift retries are bounded")
     }
 
     async fn click_xy(
@@ -4460,19 +4536,19 @@ mod tests {
     /// `dispatch_click` and `dispatch_click_recovering_transient_loss` are
     /// built on instead.
     #[test]
-    fn click_dispatch_phase_marks_only_the_release_step_as_between_press_and_release() {
+    fn click_dispatch_phase_marks_only_the_release_step_as_after_press() {
         assert_eq!(
             click_dispatch_phase_for_step(0),
-            ClickDispatchPhase::BeforeInput
+            ClickDispatchPhase::BeforePress
         );
         assert_eq!(
             click_dispatch_phase_for_step(1),
-            ClickDispatchPhase::BetweenPressAndRelease
+            ClickDispatchPhase::AfterPress
         );
     }
 
     #[test]
-    fn transient_click_loss_retries_only_a_closed_session_error_before_input() {
+    fn transient_click_loss_retries_only_a_closed_session_error_before_press_once() {
         let closed_session = CommandError {
             code: ErrorCode::BrowserCommandFailed,
             message: "send failed because receiver is gone".into(),
@@ -4480,15 +4556,25 @@ mod tests {
             retryable: true,
         };
         assert!(should_retry_transient_click_loss(
-            ClickDispatchPhase::BeforeInput,
-            &closed_session
+            ClickDispatchPhase::BeforePress,
+            &closed_session,
+            false
         ));
         assert!(
             !should_retry_transient_click_loss(
-                ClickDispatchPhase::BetweenPressAndRelease,
-                &closed_session
+                ClickDispatchPhase::AfterPress,
+                &closed_session,
+                false
             ),
-            "a closed-session error between press and release must stay a failure"
+            "a closed-session error after the press must stay a failure"
+        );
+        assert!(
+            !should_retry_transient_click_loss(
+                ClickDispatchPhase::BeforePress,
+                &closed_session,
+                true
+            ),
+            "a second closed-session error on the same click must not be retried"
         );
 
         let unrelated_error = CommandError {
@@ -4498,7 +4584,11 @@ mod tests {
             retryable: true,
         };
         assert!(
-            !should_retry_transient_click_loss(ClickDispatchPhase::BeforeInput, &unrelated_error),
+            !should_retry_transient_click_loss(
+                ClickDispatchPhase::BeforePress,
+                &unrelated_error,
+                false
+            ),
             "an error that is not closed-session-shaped must not be retried by this path"
         );
     }
