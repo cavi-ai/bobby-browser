@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use chromiumoxide::browser::BrowserHandle;
 use chromiumoxide::cdp::browser_protocol::dom::{
-    BackendNodeId, DescribeNodeParams, GetFrameOwnerParams, Node as CdpNode,
+    BackendNodeId, DescribeNodeParams, GetContentQuadsParams, GetFrameOwnerParams, Node as CdpNode,
     SetFileInputFilesParams, ShadowRootType,
 };
 use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
@@ -17,7 +17,7 @@ use chromiumoxide::cdp::js_protocol::runtime::{
     EvaluateParams, ExecutionContextId, RemoteObjectId,
 };
 use chromiumoxide::keys::get_key_definition;
-use chromiumoxide::layout::Point;
+use chromiumoxide::layout::{ElementQuad, Point};
 use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide::{Element, Page};
 use dom_engine::{
@@ -115,28 +115,56 @@ impl ResolvedTarget {
     }
 
     /// The center of the target's border box, for CDP mouse input. `None`
-    /// when the element reports no usable rect.
+    /// when the element reports no usable rect. Goes through the backend
+    /// node id and `DOM.getContentQuads` rather than a JS
+    /// `getBoundingClientRect()` eval: the latter is frame-local, so for a
+    /// `frame_path`/`shadow_path` target (never `native`, see
+    /// `resolve_target_with_visibility`) it returns a point relative to the
+    /// wrong origin once the frame or shadow host is offset within its
+    /// parent. `DOM.getContentQuads` on a backend node id -- what
+    /// `Element::clickable_point` uses for a `native` target -- reports
+    /// coordinates in the top-level page's viewport regardless of nesting.
     pub async fn clickable_point(&self, page: &Page) -> Result<Option<Point>, CommandError> {
         if let Some(element) = &self.native {
             return element.clickable_point().await.map(Some).map_err(cdp_error);
         }
-        #[derive(serde::Deserialize)]
-        struct Rect {
-            x: f64,
-            y: f64,
-            width: f64,
-            height: f64,
-        }
-        let rect: Option<Rect> = self
-            .eval(
-                page,
-                "const r=el.getBoundingClientRect();if(!r||r.width<=0||r.height<=0)return null;return {x:r.x,y:r.y,width:r.width,height:r.height}",
+        let backend_node_id = self.backend_node_id(page).await?;
+        let quads = self
+            .execution_page(page)
+            .execute(
+                GetContentQuadsParams::builder()
+                    .backend_node_id(backend_node_id)
+                    .build(),
             )
-            .await?;
-        Ok(rect.map(|rect| Point {
-            x: rect.x + rect.width / 2.0,
-            y: rect.y + rect.height / 2.0,
-        }))
+            .await
+            .map_err(cdp_error)?;
+        Ok(quads
+            .quads
+            .iter()
+            .filter(|quad| quad.inner().len() == 8)
+            .map(ElementQuad::from_quad)
+            .filter(|quad| quad.quad_area() > 1.)
+            .map(|quad| quad.quad_center())
+            .next())
+    }
+
+    /// Scrolls the target into view. A coordinate-based click dispatch
+    /// (`clickable_point` followed by `Input.dispatchMouseEvent`) needs the
+    /// target on-screen first -- unlike a native `Element::click()`, which
+    /// scrolls internally, or a JS `el.click()`, which needs no coordinate
+    /// at all. Best-effort at the call site: this only sharpens
+    /// `clickable_point`'s result, so a failure here is logged, not fatal.
+    pub async fn scroll_into_view(&self, page: &Page) -> Result<(), CommandError> {
+        if let Some(element) = &self.native {
+            element.scroll_into_view().await.map_err(cdp_error)?;
+            return Ok(());
+        }
+        self.eval::<bool>(
+            page,
+            "el.scrollIntoView({block:'center',inline:'center',behavior:'instant'}); return true",
+        )
+        .await?;
+        Ok(())
     }
 
     pub async fn click(&self, page: &Page) -> Result<(), CommandError> {
