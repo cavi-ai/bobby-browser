@@ -1046,6 +1046,16 @@ and an exact `nearText` to two different values is refused
 With no name hint at all, the intent falls back to matching on `purpose`,
 which is looser and more likely to go ambiguous.
 
+`intent_complete_form`'s field `name` and `intent_fill`'s `accessibleName`
+hint may instead be a `controlId` a prior `workflow_observe`
+(`includeForms: true`) or `form_snapshot` call returned. When every other
+hint is empty, the gateway resolves that id against a fresh form snapshot
+and fills in `role`/`accessibleName`/`ordinal`/`framePath`/`shadowPath` from
+the control's own target before compiling the intent. An id absent from the
+snapshot, or hints that are not otherwise empty, leaves the field's hints
+untouched -- resolution then falls back to matching on the bare id or
+`purpose`, as above.
+
 ## When to reach for an intent instead of a primitive
 
 Intents resolve a target from a described purpose and verify their own

@@ -142,6 +142,14 @@ avoids requiring natural task phrasing to equal a page label. A fill completes
 only when the worker returns value/upload postcondition evidence; an action
 without verification evidence fails closed.
 
+The `accessibleName` hint may instead be a `controlId` a prior
+`workflow_observe` (`includeForms: true`) or `form_snapshot` call returned,
+with every other hint left empty. The gateway resolves that id against a
+fresh form snapshot and fills in the control's own `role`/`accessibleName`/
+`ordinal`/`framePath`/`shadowPath` before compiling the intent, so a file
+input styled as a button (or any other control with no useful accessible
+name of its own) can still be addressed by id.
+
 ### Native constraint validity
 
 After a successful type/select/check, fill verification also reads the
@@ -176,8 +184,12 @@ field that reveals it; the engine resolves it against the updated page state
 without requiring a second `completeForm` call.
 
 `name` is the stable audit label for field evidence and, when `hints` is
-empty, the exact accessible-name fallback. Explicit `hints` from
-`form_snapshot` (normally `role` and `accessibleName`) override that fallback.
+empty, the exact accessible-name fallback -- unless `name` itself is a
+`controlId` a prior `workflow_observe` (`includeForms: true`) or
+`form_snapshot` call returned, in which case the gateway resolves it against
+a fresh form snapshot and fills in the control's own target first. Explicit
+`hints` from `form_snapshot` (normally `role` and `accessibleName`) override
+both of those.
 
 The named MCP tool defaults `evidenceDetail` to `compact` on success and
 returns one filled-field summary. Full per-field evidence remains in runtime

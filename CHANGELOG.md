@@ -61,6 +61,11 @@
   `checkpoint_save` / `workflow_recover` only.
 - Explore-loop tool descriptions (`click`, `intent_complete_form`,
   `intent_submit_and_verify`) name `workflowHandle` as the call scope.
+- `intent_complete_form`'s field `name` and `intent_fill`'s `accessibleName`
+  hint accept a `controlId` from `workflow_observe` (`includeForms: true`)
+  or `form_snapshot` as an alternative to a real accessible name: when every
+  other hint is empty, the gateway resolves the id against a form snapshot
+  and fills in the control's own target before compiling the intent.
 
 ### Fixed
 

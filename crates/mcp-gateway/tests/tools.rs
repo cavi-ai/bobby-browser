@@ -2641,6 +2641,280 @@ async fn intent_tools_build_their_own_envelope_and_thread_the_workflow() {
     assert!(waited["error"].is_null(), "{waited}");
 }
 
+/// A form-snapshot control with the given id and target, shaped like the
+/// file-input control a `workflow_observe`/`form_snapshot` call returns for
+/// an `<input type="file">` styled as a button.
+fn file_snapshot_control(id: &str, role: &str, accessible_name: &str) -> types::FormControl {
+    types::FormControl {
+        id: id.to_owned(),
+        form_id: None,
+        group_id: None,
+        target: Some(types::FormControlTarget {
+            role: role.to_owned(),
+            accessible_name: accessible_name.to_owned(),
+            ordinal: None,
+            frame_path: Vec::new(),
+            shadow_path: Vec::new(),
+        }),
+        control_kind: types::FormControlKind::File,
+        accessible_name: Some(accessible_name.to_owned()),
+        label: None,
+        description: None,
+        placeholder: None,
+        autocomplete: None,
+        state: types::FormControlState::Files { count: 0 },
+        constraints: types::FormControlConstraints::default(),
+        validity: types::FormControlValidity {
+            will_validate: true,
+            valid: true,
+            flags: Vec::new(),
+            message: None,
+            described_by: Vec::new(),
+        },
+        options: Vec::new(),
+        supported_operations: vec![
+            types::FormControlOperation::SetFiles,
+            types::FormControlOperation::Clear,
+        ],
+    }
+}
+
+async fn live_server_for_control_id_resolution() -> common::LiveServer {
+    let authority = AuthorityStore::in_memory();
+    let token = authority
+        .issue(
+            PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-0000000000c1")),
+            [
+                Capability::BrowserMutate,
+                Capability::IntentExecute,
+                Capability::PageRead,
+                Capability::FileUpload,
+                Capability::SessionWrite,
+                Capability::PageWrite,
+            ],
+            Utc::now() + Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    let handle = authority.verify(&token.expose_once()).await.unwrap();
+    common::live_server(handle).await
+}
+
+// The bug this covers: an agent addresses `intent_complete_form`'s field
+// `name` with the `controlId` a prior `workflow_observe`/`form_snapshot`
+// call returned (here "control-1", target role=button/accessibleName=
+// "Customer document"). With no other hints, the compiler used to fall back
+// to `accessible_name = name`, and nothing on the page is accessibly named
+// "control-1" -- a guaranteed targetNotFound. The gateway must now resolve
+// that bare controlId against a form snapshot before compiling the intent,
+// so the resolved target the fake driver actually receives carries the
+// control's real role/accessibleName, not the id.
+#[tokio::test]
+async fn intent_complete_form_resolves_a_bare_control_id_field_name_to_its_target() {
+    let live = live_server_for_control_id_resolution().await;
+    common::initialize(&live.server).await;
+    live.probe
+        .form_snapshot_controls
+        .lock()
+        .unwrap()
+        .push(file_snapshot_control(
+            "control-1",
+            "button",
+            "Customer document",
+        ));
+    let mut next_id = 1000;
+    let (session_id, page_id) = common::create_session_and_page(&live.server, &mut next_id).await;
+
+    let response = live
+        .server
+        .handle_message(request(
+            1001,
+            "tools/call",
+            json!({
+                "name":"intent_complete_form",
+                "arguments":{
+                    "sessionId":session_id,
+                    "pageId":page_id,
+                    "purpose":"upload the signed document",
+                    "fields":[{
+                        "name":"control-1",
+                        "purpose":"Customer document file to upload",
+                        "value":{"kind":"setFiles","paths":["/tmp/approved-upload.txt"]}
+                    }]
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(response["error"].is_null(), "{response}");
+    assert_eq!(live.form_calls(), 1, "exactly one snapshot for the call");
+    let resolved = live
+        .probe
+        .last_collect_candidates_target
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the intent compiled a target and resolved it");
+    assert_eq!(resolved.role, Some("button".to_owned()), "{resolved:?}");
+    assert_eq!(
+        resolved.accessible_name,
+        Some("Customer document".to_owned()),
+        "{resolved:?}"
+    );
+}
+
+// A field name shaped like a control id but absent from the snapshot leaves
+// the field's hints untouched: the compiler's own bare-name fallback runs
+// (accessible_name = "control-9"), and the call still completes -- it must
+// never turn into a new protocol error.
+#[tokio::test]
+async fn intent_complete_form_leaves_hints_untouched_for_an_unknown_control_id() {
+    let live = live_server_for_control_id_resolution().await;
+    common::initialize(&live.server).await;
+    live.probe
+        .form_snapshot_controls
+        .lock()
+        .unwrap()
+        .push(file_snapshot_control(
+            "control-1",
+            "button",
+            "Customer document",
+        ));
+    let mut next_id = 1010;
+    let (session_id, page_id) = common::create_session_and_page(&live.server, &mut next_id).await;
+
+    let response = live
+        .server
+        .handle_message(request(
+            1011,
+            "tools/call",
+            json!({
+                "name":"intent_complete_form",
+                "arguments":{
+                    "sessionId":session_id,
+                    "pageId":page_id,
+                    "purpose":"upload the signed document",
+                    "fields":[{
+                        "name":"control-9",
+                        "purpose":"Customer document file to upload",
+                        "value":{"kind":"setFiles","paths":["/tmp/approved-upload.txt"]}
+                    }]
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(response["error"].is_null(), "{response}");
+    assert_eq!(
+        live.form_calls(),
+        1,
+        "control-id-shaped name still takes one snapshot"
+    );
+    let resolved = live
+        .probe
+        .last_collect_candidates_target
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the engine's own bare-name fallback still compiled a target");
+    assert_eq!(
+        resolved.accessible_name,
+        Some("control-9".to_owned()),
+        "an id absent from the snapshot must not be invented: {resolved:?}"
+    );
+}
+
+// A field name that is not control-id-shaped must never trigger the
+// snapshot lookup at all -- zero snapshots, same as before this change.
+#[tokio::test]
+async fn intent_complete_form_never_snapshots_for_a_plain_field_name() {
+    let live = live_server_for_control_id_resolution().await;
+    common::initialize(&live.server).await;
+    let mut next_id = 1020;
+    let (session_id, page_id) = common::create_session_and_page(&live.server, &mut next_id).await;
+
+    let response = live
+        .server
+        .handle_message(request(
+            1021,
+            "tools/call",
+            json!({
+                "name":"intent_complete_form",
+                "arguments":{
+                    "sessionId":session_id,
+                    "pageId":page_id,
+                    "purpose":"enter contact details",
+                    "fields":[{
+                        "name":"email",
+                        "purpose":"applicant email",
+                        "value":{"kind":"setText","value":"a@example.test"}
+                    }]
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(response["error"].is_null(), "{response}");
+    assert_eq!(
+        live.form_calls(),
+        0,
+        "a plain field name must never trigger a form snapshot"
+    );
+}
+
+// `intent_fill`'s sibling path: a bare controlId passed as the
+// `accessibleName` hint (with every other hint empty) resolves the same way.
+#[tokio::test]
+async fn intent_fill_resolves_a_bare_control_id_accessible_name_hint_to_its_target() {
+    let live = live_server_for_control_id_resolution().await;
+    common::initialize(&live.server).await;
+    live.probe
+        .form_snapshot_controls
+        .lock()
+        .unwrap()
+        .push(file_snapshot_control(
+            "control-1",
+            "button",
+            "Customer document",
+        ));
+    let mut next_id = 1030;
+    let (session_id, page_id) = common::create_session_and_page(&live.server, &mut next_id).await;
+
+    let response = live
+        .server
+        .handle_message(request(
+            1031,
+            "tools/call",
+            json!({
+                "name":"intent_fill",
+                "arguments":{
+                    "sessionId":session_id,
+                    "pageId":page_id,
+                    "purpose":"upload the signed document",
+                    "hints":{"accessibleName":"control-1"},
+                    "value":{"kind":"setFiles","paths":["/tmp/approved-upload.txt"]}
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(response["error"].is_null(), "{response}");
+    assert_eq!(live.form_calls(), 1, "exactly one snapshot for the call");
+    let resolved = live
+        .probe
+        .last_collect_candidates_target
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the intent compiled a target and resolved it");
+    assert_eq!(resolved.role, Some("button".to_owned()), "{resolved:?}");
+    assert_eq!(
+        resolved.accessible_name,
+        Some("Customer document".to_owned()),
+        "{resolved:?}"
+    );
+}
+
 #[tokio::test]
 async fn rejected_arguments_name_the_offending_field_and_constraint() {
     // A rejection must name the offending field in `data`; that is the only signal

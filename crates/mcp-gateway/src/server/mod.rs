@@ -136,6 +136,103 @@ fn control_identity(hints: &types::IntentHints) -> Option<ControlIdentity> {
     })
 }
 
+/// True for a form-snapshot control id (`control-{index}`, minted in
+/// `worker-pool/src/form_snapshot.rs` and `firefox-companion/src/worker.rs`):
+/// the literal prefix followed by one or more ASCII digits.
+fn looks_like_control_id(value: &str) -> bool {
+    value
+        .strip_prefix("control-")
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+/// Every hint besides `accessibleName` is unset. Shared by the two callers:
+/// `intent_complete_form` additionally requires `accessibleName` unset (a
+/// field's `name` is the locator, not its hints); `intent_fill` instead reads
+/// `accessibleName` itself as the possible control id.
+fn hints_locator_empty_besides_name(hints: &types::IntentHints) -> bool {
+    hints.role.is_none()
+        && hints.near_text.is_none()
+        && hints.ordinal.is_none()
+        && hints.frame_path.is_empty()
+        && hints.shadow_path.is_empty()
+        && !hints.allow_best_match
+}
+
+/// True when hints carry nothing the intent-engine compiler would use to
+/// locate a control -- the same condition (mirrored, not shared, since it
+/// lives in a different crate) as `targeting_hints_are_empty` in
+/// `intent-engine/src/compiler.rs`, under which the compiler falls back to
+/// `accessible_name = name`.
+fn hints_are_empty(hints: &types::IntentHints) -> bool {
+    hints.accessible_name.is_none() && hints_locator_empty_besides_name(hints)
+}
+
+/// Resolve a form-snapshot control id to the semantic target its snapshot
+/// carries. Shared by `upload_files` (selector/target resolution) and the
+/// intent dispatch arms (hint back-fill): both need the same
+/// `controlId` -> `TargetSpec` lookup across `forms[].controls` and
+/// `unowned_controls`.
+fn control_target_from_snapshot(
+    snapshot: &types::FormSnapshot,
+    control_id: &str,
+) -> Option<types::TargetSpec> {
+    let control_target = snapshot
+        .forms
+        .iter()
+        .flat_map(|form| form.controls.iter())
+        .chain(snapshot.unowned_controls.iter())
+        .find(|control| control.id == control_id)
+        .and_then(|control| control.target.as_ref())?;
+    Some(types::TargetSpec {
+        role: Some(control_target.role.clone()),
+        accessible_name: Some(control_target.accessible_name.clone()),
+        ordinal: control_target.ordinal,
+        frame_path: control_target
+            .frame_path
+            .iter()
+            .map(|segment| {
+                Box::new(types::TargetSpec {
+                    role: Some(segment.role.clone()),
+                    accessible_name: Some(segment.accessible_name.clone()),
+                    ordinal: segment.ordinal,
+                    ..Default::default()
+                })
+            })
+            .collect(),
+        shadow_path: control_target
+            .shadow_path
+            .iter()
+            .map(|segment| {
+                Box::new(types::TargetSpec {
+                    role: Some(segment.role.clone()),
+                    accessible_name: Some(segment.accessible_name.clone()),
+                    ordinal: segment.ordinal,
+                    ..Default::default()
+                })
+            })
+            .collect(),
+        ..Default::default()
+    })
+}
+
+/// Copy a resolved control target onto intent hints, unboxing `TargetSpec`'s
+/// frame/shadow segments to `IntentHints`'s own (unboxed) `Vec<TargetSpec>`.
+fn apply_control_target(hints: &mut types::IntentHints, target: types::TargetSpec) {
+    hints.role = target.role;
+    hints.accessible_name = target.accessible_name;
+    hints.ordinal = target.ordinal;
+    hints.frame_path = target
+        .frame_path
+        .into_iter()
+        .map(|segment| *segment)
+        .collect();
+    hints.shadow_path = target
+        .shadow_path
+        .into_iter()
+        .map(|segment| *segment)
+        .collect();
+}
+
 /// MCP JSON-RPC server for one authenticated principal.
 ///
 /// Holds the runtime interface, capability guard, event store, and tool catalog.
