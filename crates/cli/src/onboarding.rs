@@ -740,7 +740,7 @@ fn agents_skill_item_enabled(skill: bool, project_skill: bool, use_defaults: boo
 const MLX_MODELS: [(&str, &str); 4] = [
     // First entry is the interactive default. Qwen3.5-27B grounds precisely
     // and drives solveChallenge; the 2.5-VL small/balanced options cannot
-    // (see docs/CAPTCHA_SOLUTION.md).
+    // (see bobby://intents).
     (
         "Recommended (Qwen3.5 27B)",
         "mlx-community/Qwen3.5-27B-4bit",

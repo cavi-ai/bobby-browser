@@ -48,6 +48,8 @@
 
 ### Changed
 
+- The captcha implementation plan is no longer shipped under `docs/`; the
+  shipped captcha path is documented by `bobby://intents` and the intents guide.
 - Public agent skill: pass `workflowHandle` on later calls; explicit ids are
   the repair path when the handle dies. `workflowId` stays on
   `checkpoint_save` / `workflow_recover` only.
