@@ -41,11 +41,11 @@ Tools are advertised only when the principal holds the required capability.
 | `extract_structured` | `browser:mutate` + `vision:assist` | Schema-shaped JSON extraction via the configured vision provider (also session `executionPolicy.visionAssist` + `[vision]`) |
 | `form_snapshot` | `page:read` | Read the canonical bounded form inventory with sensitive-value redaction and no selectors, DOM IDs, or raw HTML (`maxControls` optional, 1…512; default 512) |
 | `inspect` | `browser:mutate` | Read page state, optionally element-scoped |
-| `intent_complete_form` | `browser:mutate` + `intent:execute` | Apply an ordered list of named fields as one intent; never submits (Reconciliable) |
+| `intent_complete_form` | `browser:mutate` + `intent:execute` | Apply an ordered list of named fields as one intent; never submits (Reconciliable). A field's `name` may be a form-snapshot `controlId` |
 | `intent_detect_challenge` | `browser:mutate` + `intent:execute` + `vision:assist` | Classify a captcha/human-verification challenge without acting (Replayable; `challengeDetection` evidence; a clean page is a first-class answer) |
 | `intent_dismiss_obstruction` | `browser:mutate` + `intent:execute` | Dismiss a popup, overlay, or cookie banner (Reconciliable) |
 | `intent_extract` | `browser:mutate` + `intent:execute` | Read named fields without mutating (Replayable) |
-| `intent_fill` | `browser:mutate` + `intent:execute` | Fill one described control and verify the value (Reconciliable) |
+| `intent_fill` | `browser:mutate` + `intent:execute` | Fill one described control and verify the value (Reconciliable). `accessibleName` may be a form-snapshot `controlId` |
 | `intent_follow` | `browser:mutate` + `intent:execute` | Activate a link/control and verify the destination (Boundary when `boundary: true`) |
 | `intent_locate` | `browser:mutate` + `intent:execute` | Locate an element by described purpose (Replayable) |
 | `intent_solve_challenge` | `browser:mutate` + `intent:execute` + `vision:assist` | Drive the vision solve loop against a captcha/verification widget until cleared or `timeoutMs` (Reconciliable) |

@@ -17,8 +17,8 @@ use types::{
 use crate::compiler::{compile_intent, CompleteFormFieldPlan, ExtractFieldPlan, IntentPlan};
 use crate::stuck::{never_escalates, StuckKind};
 use crate::verify::{
-    compatible, execution_record, execution_record_with_path, summarize_target, verify_fill,
-    ResolutionDetails,
+    compatible, execution_record, execution_record_with_path, is_file_input, summarize_target,
+    verify_fill, ResolutionDetails,
 };
 use crate::vision::{
     proposal_sha256, VisionAction, VisionAssist, VisionProposeRequest, VISION_CONFIDENCE_FLOOR,
@@ -760,6 +760,72 @@ fn semantic_tokens(value: &str) -> BTreeSet<String> {
         .collect()
 }
 
+/// The rule and the repair for a fill/select intent that names a file
+/// control: static text, since `intent-engine` errors are not subject to the
+/// MCP-boundary redaction rule but there is nothing instance-specific worth
+/// adding -- the control id space here (`dom_engine::Candidate::id`) is not
+/// the `controlId` `upload_files`/`control_action` resolve against (that one
+/// comes from `worker-pool`'s form snapshot), so naming a lookup is the
+/// correct repair, not echoing an id that would not resolve there.
+const FILE_CONTROL_UPLOAD_MESSAGE: &str = "target resolves to a file input; file inputs accept \
+    values only through upload_files, never a fill or select intent. Read the control's \
+    controlId from workflow_observe (includeForms:true) or form_snapshot, then call \
+    upload_files with that controlId.";
+
+/// The typed, deterministic failure for a fill/select intent that resolved
+/// to a file control: `IntentActionMismatch` already covers "the action
+/// does not match the resolved control's kind" (see the compat check
+/// below), is already listed in `never_escalates`, and already carries a
+/// generic wire-level repair -- no new `ErrorCode` earns its keep here.
+fn file_control_failure(
+    purpose: Option<String>,
+    plan_summary: String,
+    candidates: Vec<types::CandidateEvidence>,
+) -> IntentOutcome {
+    IntentOutcome::Failed {
+        error: CommandError {
+            code: ErrorCode::IntentActionMismatch,
+            message: FILE_CONTROL_UPLOAD_MESSAGE.to_owned(),
+            layer: ErrorLayer::Page,
+            retryable: false,
+        },
+        evidence: vec![intent_evidence(execution_record(
+            "fill",
+            purpose,
+            plan_summary,
+            candidates,
+            None,
+            "fileControlRequiresUpload",
+        ))],
+    }
+}
+
+/// Whether `target` names a file input among `candidates`, resolved with
+/// visibility relaxed. A native `<input type="file">` is routinely hidden
+/// behind a styled "choose file" button, so the visible-only policy the
+/// normal fill path uses can legitimately find nothing for it; that must
+/// read as "this is a file control" rather than "target not found" so the
+/// caller gets sent to `upload_files` instead of a vision fallback that was
+/// never going to help either shape of failure.
+fn targets_file_control(target: &TargetSpec, candidates: &[Candidate]) -> bool {
+    let file_candidates: Vec<Candidate> = candidates
+        .iter()
+        .filter(|candidate| is_file_input(candidate))
+        .cloned()
+        .collect();
+    if file_candidates.is_empty() {
+        return false;
+    }
+    let policy = ResolutionPolicy {
+        require_visible: false,
+        ..ResolutionPolicy::default()
+    };
+    matches!(
+        resolve_candidates(target, &file_candidates, &policy),
+        Ok(ResolutionDecision::Resolved { .. })
+    )
+}
+
 async fn execute_fill(
     intent: &IntentCommand,
     page_id: &PageId,
@@ -848,6 +914,19 @@ async fn execute_fill(
             best_match_authorized,
         } => (candidate, evidence, best_match_authorized),
         ResolutionDecision::NotFound => {
+            // A native file input is very often visually hidden behind a
+            // styled "choose file" button, so the visible-only resolution
+            // above legitimately finds nothing -- but the control is real,
+            // and no vision escalation can fill it: `ControlAction::SetFiles`
+            // takes paths, which are runtime-only, so only `upload_files`
+            // (or `control_action`) can act on it. Catch that here, before
+            // the stuck path can turn it into a `targetNotFound` that then
+            // escalates to a vision fallback which was never going to help.
+            if !matches!(value, ControlAction::SetFiles { .. })
+                && targets_file_control(&target, &window_candidates)
+            {
+                return file_control_failure(purpose, plan_summary, Vec::new());
+            }
             // Fill escalations must carry the same purpose-ranked window as
             // locate: an empty window asks the model to pick from nothing,
             // and it correctly abstains — those records are the §4i poison
@@ -889,6 +968,14 @@ async fn execute_fill(
     };
 
     if !compatible(&value, &candidate) {
+        // Resolution found the real control and it is a file input: the
+        // generic action-mismatch message below ("wrong role/type") would
+        // send an agent hunting for a different role, when the actual fix is
+        // a different tool. `is_file_input` implies `value` was not already
+        // `SetFiles` -- `compatible` would have accepted that combination.
+        if is_file_input(&candidate) {
+            return file_control_failure(purpose, plan_summary, vec![candidate_evidence]);
+        }
         return IntentOutcome::Failed {
             error: CommandError {
                 code: ErrorCode::IntentActionMismatch,

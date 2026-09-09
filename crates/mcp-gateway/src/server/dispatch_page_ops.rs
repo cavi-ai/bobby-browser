@@ -356,46 +356,10 @@ impl Server {
                         Ok(snapshot) => snapshot,
                         Err(error) => return interface_error_response(id, error),
                     };
-                    let control = snapshot
-                        .forms
-                        .iter()
-                        .flat_map(|form| form.controls.iter())
-                        .chain(snapshot.unowned_controls.iter())
-                        .find(|control| control.id == control_id);
-                    let Some(control_target) = control.and_then(|control| control.target.as_ref())
-                    else {
-                        return invalid_params_reason(id, "controlIdNotFound");
-                    };
-                    Some(types::TargetSpec {
-                        role: Some(control_target.role.clone()),
-                        accessible_name: Some(control_target.accessible_name.clone()),
-                        ordinal: control_target.ordinal,
-                        frame_path: control_target
-                            .frame_path
-                            .iter()
-                            .map(|segment| {
-                                Box::new(types::TargetSpec {
-                                    role: Some(segment.role.clone()),
-                                    accessible_name: Some(segment.accessible_name.clone()),
-                                    ordinal: segment.ordinal,
-                                    ..Default::default()
-                                })
-                            })
-                            .collect(),
-                        shadow_path: control_target
-                            .shadow_path
-                            .iter()
-                            .map(|segment| {
-                                Box::new(types::TargetSpec {
-                                    role: Some(segment.role.clone()),
-                                    accessible_name: Some(segment.accessible_name.clone()),
-                                    ordinal: segment.ordinal,
-                                    ..Default::default()
-                                })
-                            })
-                            .collect(),
-                        ..Default::default()
-                    })
+                    match control_target_from_snapshot(&snapshot, control_id) {
+                        Some(target) => Some(target),
+                        None => return invalid_params_reason(id, "controlIdNotFound"),
+                    }
                 } else {
                     input.target
                 };
