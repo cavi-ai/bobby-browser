@@ -295,6 +295,7 @@ export function isEvidence(value: unknown): value is Evidence {
     case "page": return hasExactKeys(value, ["kind", "pageId", "url", "title"]) && isUuid(value.pageId) && isString(value.url) && isString(value.title);
     case "pages": return hasExactKeys(value, ["kind", "pages"]) && Array.isArray(value.pages) && value.pages.every(isPageEvidence);
     case "popup": return hasExactKeys(value, ["kind", "openerPageId", "pageId", "url", "title"]) && isUuid(value.openerPageId) && isUuid(value.pageId) && isString(value.url) && isString(value.title);
+    case "popupClosed": return hasExactKeys(value, ["kind", "popupPageId", "openerPageId"]) && isUuid(value.popupPageId) && isUuid(value.openerPageId);
     case "download": return hasExactKeys(value, ["kind", "filename", "path", "bytes", "sha256"]) && isString(value.filename) && isString(value.path) && isSafeUnsigned(value.bytes) && isLowerSha256(value.sha256);
     case "resolution": return hasExactKeys(value, ["kind", "target", "fingerprint", "candidates", "bestMatchAuthorized"]) && isTargetSpec(value.target) && isTargetFingerprint(value.fingerprint) && Array.isArray(value.candidates) && value.candidates.every(isCandidateEvidence) && typeof value.bestMatchAuthorized === "boolean";
     case "wait": return hasExactKeys(value, ["kind", "condition", "elapsedMs", "observations"], ["excludedClasses"]) && isWaitCondition(value.condition) && isSafeUnsigned(value.elapsedMs) && isSafeUnsigned(value.observations) && optional(value, "excludedClasses", isStringArray);

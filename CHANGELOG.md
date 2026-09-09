@@ -51,6 +51,16 @@
   top-level tasks/budget when the batch's dimension has no entry. Both
   fields join the provenance uniformity gate, and the baseline path accepts
   a `GAUNTLET_BASELINE_PATH` override.
+- A successful `click_and_wait_for_popup` through a `workflowHandle` rebinds
+  that handle onto the popup and remembers the opener. Once the popup is no
+  longer open, a handle-resolved call that would otherwise fail `notFound`
+  falls back to the opener instead: a read-only call replays there once and
+  reports `Evidence::PopupClosed`; a mutating call still fails, carrying the
+  same evidence and a repair naming the opener page. `page_close
+  {workflowHandle}` on the followed popup returns the handle to the opener
+  the same way, instead of evicting it. `form_snapshot` through the handle
+  replays on the opener the same way; the `controlId` lookup inside
+  `upload_files` fails with the same evidence and repair.
 
 ### Changed
 
@@ -75,6 +85,11 @@
   below 60 negatives the 2:1–8:1 band stays a hard error; at or above that
   mass a breach relaxes to a warning past 12:1, since positive volume
   scales with steps × runs while negative volume does not.
+- A page that closes while a command is in flight (a followed popup the
+  site closes, most commonly) now fails `notFound` immediately instead of a
+  retryable transport-reset failure: after reconnecting to the live browser
+  process the runtime checks the worker's page listing, and a missing page
+  fails permanently for Replayable and mutating commands alike.
 - JSON-RPC `-32602` responses now carry the rejection reason and repair
   action in `error.message`, not only in `error.data`: MCP hosts commonly
   render `error.message` alone, so a bare "Invalid params" repeated with no

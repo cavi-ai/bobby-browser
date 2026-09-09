@@ -277,6 +277,19 @@ ownership checks still run, and explicit IDs remain the audit/repair path for
 session/page lifecycle, checkpoints, and recovery. Successful `page_close` or
 `session_close` automatically evicts matching local handles.
 
+A successful `click_and_wait_for_popup` through a handle rebinds that handle
+onto the popup, recording the page it followed from as a fallback. Once the
+popup closes, a later handle-resolved call that would otherwise fail
+`notFound` for it falls back to the recorded opener instead: a read-only call
+replays there once and returns `completed` with `popupClosed` evidence naming
+both the popup and opener page IDs; a mutating call is never retried — a
+second attempt could double an effect — and instead fails with the same
+evidence and a repair action naming the opener. Either way the handle is left
+resolving to the opener, so a further call through it needs no additional
+fallback. `page_close` on the popup through the same handle returns the
+handle to the opener directly instead of evicting it, with no `popupClosed`
+evidence — the close is the resolution, not an unexpected failure.
+
 The handle registry is bounded to **64 committed LRU bindings plus 64
 concurrent reservations**. A failed start never evicts a live handle; the 65th
 successful committed binding evicts the least recently used old handle.

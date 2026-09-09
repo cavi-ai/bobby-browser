@@ -109,6 +109,7 @@ export type Evidence =
   | { kind: "page"; pageId: Id; url: string; title: string }
   | { kind: "pages"; pages: PageEvidence[] }
   | { kind: "popup"; openerPageId: Id; pageId: Id; url: string; title: string }
+  | { kind: "popupClosed"; popupPageId: Id; openerPageId: Id }
   | { kind: "download"; filename: string; path: string; bytes: number; sha256: string; savedTo?: string }
   | { kind: "configuration"; name: string; value: string }
   | { kind: "resolution"; target: TargetSpec; fingerprint: TargetFingerprint; candidates: CandidateEvidence[]; bestMatchAuthorized: boolean }

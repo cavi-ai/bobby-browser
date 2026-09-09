@@ -6,11 +6,18 @@
 use super::*;
 
 impl Server {
+    /// `handle` is the workflow handle `call_tool` resolved for this call
+    /// (`None` for a raw-id call). Only the three dispatchers that own a
+    /// `WORKFLOW_SCOPE_TOOLS` tool need it, to run the closed-page rule in
+    /// `submit_envelope`; `workflow_observe` (in `dispatch_agent_workflow`)
+    /// takes its handle from its own required argument instead and is
+    /// unaffected by this parameter.
     pub(super) async fn dispatch_named_tool(
         &self,
         id: Value,
         call: ToolCall,
         context: types::RequestContext,
+        handle: Option<String>,
     ) -> Value {
         let name = call.name.as_str();
         if dispatch_agent_workflow::TOOLS.contains(&name) {
@@ -18,11 +25,14 @@ impl Server {
         } else if dispatch_lifecycle::TOOLS.contains(&name) {
             self.dispatch_lifecycle(id, call, context).await
         } else if dispatch_primitives::TOOLS.contains(&name) {
-            self.dispatch_primitives(id, call, context).await
+            self.dispatch_primitives(id, call, context, handle.as_deref())
+                .await
         } else if dispatch_intents::TOOLS.contains(&name) {
-            self.dispatch_intents(id, call, context).await
+            self.dispatch_intents(id, call, context, handle.as_deref())
+                .await
         } else if dispatch_page_ops::TOOLS.contains(&name) {
-            self.dispatch_page_ops(id, call, context).await
+            self.dispatch_page_ops(id, call, context, handle.as_deref())
+                .await
         } else if dispatch_workflow::TOOLS.contains(&name) {
             self.dispatch_workflow(id, call, context).await
         } else {

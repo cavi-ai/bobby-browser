@@ -47,6 +47,7 @@ function evidenceFixtures(): unknown[] {
     { kind: "page", pageId: ID, url: "https://example.test/", title: "Example" },
     { kind: "pages", pages: [{ pageId: ID, url: "https://example.test/", title: "Example" }] },
     { kind: "popup", openerPageId: ID, pageId: ID_2, url: "https://example.test/popup", title: "Popup" },
+    { kind: "popupClosed", popupPageId: ID_2, openerPageId: ID },
     { kind: "download", filename: "a.bin", path: "/tmp/a.bin", bytes: 4, sha256: SHA },
     { kind: "resolution", target: target(), fingerprint: { pageId: ID, frame: null, role: null, name: null, stableAttributes: { id: "save" } }, candidates: [{ role: null, name: "Save", score: -1, reasons: ["exact"] }], bestMatchAuthorized: false },
     { kind: "wait", condition: { kind: "element", target: target(), state: "visible" }, elapsedMs: 1, observations: 1 },

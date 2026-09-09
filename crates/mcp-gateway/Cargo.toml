@@ -39,6 +39,7 @@ async-trait.workspace = true
 tempfile.workspace = true
 checkpoint-store.workspace = true
 dom-engine.workspace = true
+gauntlet-server.workspace = true
 page-runtime.workspace = true
 session-manager.workspace = true
 worker-pool.workspace = true

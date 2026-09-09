@@ -43,6 +43,12 @@ enum DriverMode {
     /// process is still alive, so the reattach path reconnects and the
     /// replayed command succeeds without any relaunch.
     TransportResetReattaches,
+    /// The command fails with the exact page-missing error a closed popup
+    /// produces (not a transport-death message), and the worker's process
+    /// is alive, so reattach succeeds trivially -- but `list_pages` reports
+    /// the page gone, because it is: reattaching a live connection cannot
+    /// resurrect a closed tab.
+    TransportResetReattachesPageClosed,
     /// Inspect reports a prefilled value with the typed text appended,
     /// simulating `clear_first: false` into a non-empty field.
     AppendPrefill,
@@ -145,7 +151,10 @@ impl BrowserWorker for FakeWorker {
         &self.profile
     }
     async fn reconnect_live_process(&self) -> Result<Vec<Evidence>, CommandError> {
-        if !matches!(self.mode, DriverMode::TransportResetReattaches) {
+        if !matches!(
+            self.mode,
+            DriverMode::TransportResetReattaches | DriverMode::TransportResetReattachesPageClosed
+        ) {
             return Err(CommandError {
                 code: ErrorCode::BrowserCommandFailed,
                 message: "browser worker is closed".into(),
@@ -157,6 +166,13 @@ impl BrowserWorker for FakeWorker {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         self.events.lock().await.push("browser:reattach".into());
         Ok(Vec::new())
+    }
+
+    async fn list_pages(&self, _: &types::ListPagesCommand) -> Result<Vec<Evidence>, CommandError> {
+        if matches!(self.mode, DriverMode::TransportResetReattachesPageClosed) {
+            return Ok(vec![Evidence::Pages { pages: Vec::new() }]);
+        }
+        Err(driver_failure())
     }
     async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
         if matches!(self.mode, DriverMode::DeadOnOpen) {
@@ -291,6 +307,14 @@ impl BrowserWorker for FakeWorker {
         command: &TypeTextCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         self.events.lock().await.push("browser:type_text".into());
+        if matches!(self.mode, DriverMode::TransportResetReattachesPageClosed) {
+            return Err(CommandError {
+                code: ErrorCode::NotFound,
+                message: "browser page is not open".into(),
+                layer: ErrorLayer::Driver,
+                retryable: false,
+            });
+        }
         if matches!(self.mode, DriverMode::DeadWorkerCommands)
             || (matches!(self.mode, DriverMode::TransportResetReattaches)
                 && !self.reattached.load(std::sync::atomic::Ordering::SeqCst))
@@ -2848,6 +2872,80 @@ async fn a_transport_reset_reattaches_without_relaunching_the_browser() {
         launches.load(std::sync::atomic::Ordering::SeqCst),
         1,
         "a reattach must never relaunch the browser"
+    );
+}
+
+/// A closed popup fails with the exact page-missing message, not a
+/// transport-death one -- but the browser process is alive, so reattach
+/// still succeeds trivially. That must not be mistaken for a transport
+/// story: the page itself is gone, `list_pages` says so, and the command
+/// fails permanently on its first and only attempt instead of retrying (or,
+/// for a mutating command, being reported as a retryable transport reset).
+#[tokio::test]
+async fn a_reattach_that_finds_the_page_gone_fails_permanently_without_retrying() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let journal = Arc::new(RecordingJournal {
+        events: events.clone(),
+        fail_on: None,
+        pause_on: None,
+        paused: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
+    });
+    let launches = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let workers = Arc::new(WorkerPool::new(
+        8,
+        Arc::new(FakeFactory {
+            events: events.clone(),
+            mode: DriverMode::TransportResetReattachesPageClosed,
+            launches: Arc::clone(&launches),
+        }),
+    ));
+    let runtime = page_runtime::PageRuntime::new(journal, workers);
+    let session = SessionId::new();
+    let page = runtime
+        .open_browser(session.clone())
+        .await
+        .expect("open_browser");
+
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page.id.clone(),
+            PrimitiveCommand::TypeText(TypeTextCommand {
+                selector: "#field".into(),
+                target: None,
+                value: "hello".into(),
+                clear_first: false,
+                expected_url: None,
+            }),
+        ))
+        .await;
+    let CommandOutcome::Failed { error, .. } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::NotFound);
+    assert_eq!(
+        error.message, "browser page is not open",
+        "no reattach suffix -- the page is gone, not the transport"
+    );
+    assert!(!error.retryable);
+    let events = events.lock().await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| *event == "browser:type_text")
+            .count(),
+        1,
+        "a mutating call on a page that closed must be attempted exactly once: {events:?}"
+    );
+    assert!(
+        events.contains(&"browser:reattach".to_string()),
+        "the browser process is alive, so reattach must still run: {events:?}"
+    );
+    assert_eq!(
+        launches.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a page that merely closed must never trigger a full relaunch"
     );
 }
 

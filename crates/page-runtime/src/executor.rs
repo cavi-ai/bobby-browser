@@ -5,8 +5,8 @@ use chrono::Utc;
 use thiserror::Error;
 use types::{
     CommandClass, CommandEnvelope, CommandError, CommandId, CommandOutcome, CommandPhase,
-    ErrorCode, ErrorLayer, Evidence, InspectCommand, PrimitiveCommand, RuntimeCommand, TextMatch,
-    WaitCondition, WaitForCommand,
+    ErrorCode, ErrorLayer, Evidence, InspectCommand, ListPagesCommand, PrimitiveCommand,
+    RuntimeCommand, TextMatch, WaitCondition, WaitForCommand,
 };
 use workflow_journal::{JournalError, JournalRecord, PreparedResult};
 
@@ -327,6 +327,53 @@ impl PageRuntime {
                         }
                     };
                     if let Some(reattached_lease) = reattached {
+                        // The transport came back, but that only proves the
+                        // browser process is alive, not that this specific
+                        // page still is. A popup the site closed between
+                        // validation and dispatch reattaches trivially (the
+                        // connection was never the problem) and would only
+                        // fail again on the same missing target, so check
+                        // the worker's own page listing before treating this
+                        // as a transport story at all.
+                        let page_open = match reattached_lease
+                            .worker()
+                            .list_pages(&ListPagesCommand)
+                            .await
+                        {
+                            Ok(evidence) => evidence.iter().any(|item| {
+                                matches!(
+                                    item,
+                                    Evidence::Pages { pages }
+                                        if pages.iter().any(|entry| entry.page_id == page.id)
+                                )
+                            }),
+                            // Listing is unsupported or failed for an
+                            // unrelated reason: no evidence the page is
+                            // gone, so fall through to the existing
+                            // transport-reset handling instead of failing a
+                            // command that cannot be proven to have lost its
+                            // target.
+                            Err(_) => true,
+                        };
+                        if !page_open {
+                            // The page itself closed; the browser did not
+                            // die and there is nothing to retry or reattach
+                            // to. Fail permanently with the original
+                            // page-missing error -- no reattach suffix, no
+                            // evidence of a transport story that did not
+                            // happen -- for Replayable and mutating commands
+                            // alike. `reattached_lease` simply drops here
+                            // (same as the mutating, page-present branch
+                            // below): no invalidation, no relaunch, so the
+                            // session's next command still lands on a live
+                            // worker.
+                            return self
+                                .finish_failure(
+                                    &envelope,
+                                    classify_failure(&envelope, failure.error, failure.evidence),
+                                )
+                                .await;
+                        }
                         if envelope.command.class() == types::CommandClass::Replayable {
                             self.adaptive
                                 .record_retry(observability::RetryClass::Transport);

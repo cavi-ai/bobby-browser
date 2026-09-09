@@ -24,9 +24,9 @@ use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use session_manager::SessionManager;
 use tempfile::TempDir;
 use types::{
-    AccessibilitySnapshotCommand, ClickCommand, ClosePageCommand, CommandError, ErrorCode,
-    ErrorLayer, Evidence, InspectCommand, ListPagesCommand, NavigateCommand, PageEvidence, PageId,
-    SessionId, TypeTextCommand, WorkerId,
+    AccessibilitySnapshotCommand, ClickAndWaitForPopupCommand, ClickCommand, ClosePageCommand,
+    CommandError, ErrorCode, ErrorLayer, Evidence, InspectCommand, ListPagesCommand,
+    NavigateCommand, PageEvidence, PageId, SessionId, TypeTextCommand, WorkerId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
 use workflow_journal::{CommandJournal, JournalError, JournalRecord, JournalScan, JsonlJournal};
@@ -68,6 +68,20 @@ pub struct LiveProbe {
     pub delete_failures_remaining: AtomicUsize,
     pub opened_page: std::sync::Mutex<Option<PageId>>,
     pub current_url: std::sync::Mutex<Option<String>>,
+    pub type_text_calls: AtomicUsize,
+    /// The value the last successful `type_text` wrote, so `inspect`'s
+    /// verification echo reflects it instead of a fixed string -- needed
+    /// once a handle-resolved `type_text` can legitimately land on a second
+    /// page (the opener, after its popup closed) and must pass the
+    /// executor's post-type verification there.
+    pub last_typed_text: std::sync::Mutex<Option<String>>,
+    /// When set, `a11y_snapshot`/`type_text`/`form_snapshot` fail this one
+    /// page id with the same `CommandError` the real worker returns for a
+    /// popup closed from inside (`worker_pool::chromium::page_missing`):
+    /// `NotFound`, message `"browser page is not open"`. Simulates that
+    /// without a real Chrome target, for the closed-page rule's fake-runtime
+    /// tests.
+    pub closed_page_id: std::sync::Mutex<Option<PageId>>,
     /// Controls a test wants `form_snapshot` to hand back, e.g. to give a
     /// `controlId`-addressed intent field a real target to resolve.
     pub form_snapshot_controls: std::sync::Mutex<Vec<types::FormControl>>,
@@ -75,6 +89,36 @@ pub struct LiveProbe {
     /// what the intent compiler actually resolved hints to, so a test can
     /// tell a real control target apart from the bare-name fallback.
     pub last_collect_candidates_target: std::sync::Mutex<Option<types::TargetSpec>>,
+}
+
+/// Mirrors `worker_pool::chromium`'s `page_missing()`: the exact
+/// `CommandError` shape a real worker returns for a target that is gone,
+/// which is what the closed-page rule (`is_page_not_open_failure` and
+/// friends) matches on.
+fn page_missing() -> CommandError {
+    CommandError {
+        code: ErrorCode::NotFound,
+        message: "browser page is not open".into(),
+        layer: ErrorLayer::Driver,
+        retryable: false,
+    }
+}
+
+impl LiveWorker {
+    /// `Err(page_missing())` when a test set `probe.closed_page_id` to
+    /// exactly this page; `Ok(())` otherwise. Called first by every command
+    /// method the closed-page-rule tests need to fail on demand.
+    fn reject_if_closed(&self, page_id: &PageId) -> Result<(), CommandError> {
+        let closed = self
+            .probe
+            .closed_page_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if closed.as_ref() == Some(page_id) {
+            return Err(page_missing());
+        }
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -149,11 +193,18 @@ impl BrowserWorker for LiveWorker {
         _: &PageId,
         command: &InspectCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
+        let text = self
+            .probe
+            .last_typed_text
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_else(|| "live-harness-text".into());
         Ok(vec![Evidence::Inspection {
             selector: command.selector.clone(),
             url: "https://live-harness.test/".into(),
             title: "live-harness".into(),
-            text: "live-harness-text".into(),
+            text,
             html: None,
         }])
     }
@@ -169,11 +220,42 @@ impl BrowserWorker for LiveWorker {
         }])
     }
 
+    async fn click_and_wait_for_popup(
+        &self,
+        page_id: &PageId,
+        _command: &ClickAndWaitForPopupCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Ok(vec![Evidence::Popup {
+            opener_page_id: page_id.clone(),
+            page_id: PageId::new(),
+            url: "https://live-harness.test/popup".into(),
+            title: "live-harness-popup".into(),
+        }])
+    }
+
+    async fn reconnect_live_process(&self) -> Result<Vec<Evidence>, CommandError> {
+        // Real Chrome's revival path takes this branch when the browser
+        // process is still alive and only a single target closed (the
+        // closed-page rule's own scenario) -- the process reattach the
+        // executor tries first, before ever falling back to a full
+        // relaunch. Succeeding here keeps the fake on the same branch
+        // production takes instead of exercising a relaunch the fake was
+        // never built to simulate.
+        Ok(Vec::new())
+    }
+
     async fn type_text(
         &self,
-        _: &PageId,
+        page_id: &PageId,
         command: &TypeTextCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
+        self.probe.type_text_calls.fetch_add(1, Ordering::SeqCst);
+        self.reject_if_closed(page_id)?;
+        *self
+            .probe
+            .last_typed_text
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(command.value.clone());
         Ok(vec![Evidence::Element {
             selector: command.selector.clone(),
             text: Some(command.value.clone()),
@@ -223,6 +305,7 @@ impl BrowserWorker for LiveWorker {
         self.probe
             .accessibility_calls
             .fetch_add(1, Ordering::SeqCst);
+        self.reject_if_closed(page_id)?;
         self.probe.last_accessibility_max_nodes.store(
             command.max_nodes.map_or(0, |value| value as usize),
             Ordering::SeqCst,
@@ -265,6 +348,7 @@ impl BrowserWorker for LiveWorker {
         max_controls: Option<u32>,
     ) -> Result<Vec<Evidence>, CommandError> {
         self.probe.form_calls.fetch_add(1, Ordering::SeqCst);
+        self.reject_if_closed(page_id)?;
         self.probe.last_form_max_controls.store(
             max_controls.map_or(0, |value| value as usize),
             Ordering::SeqCst,
@@ -609,6 +693,22 @@ impl LiveServer {
 
     pub fn form_calls(&self) -> usize {
         self.probe.form_calls.load(Ordering::SeqCst)
+    }
+
+    pub fn type_text_calls(&self) -> usize {
+        self.probe.type_text_calls.load(Ordering::SeqCst)
+    }
+
+    /// Makes the fake worker fail every later command on `page_id` with
+    /// `worker_pool::chromium`'s exact "popup closed from inside" shape, the
+    /// way a real closed target would -- for the closed-page rule's
+    /// fake-runtime tests.
+    pub fn close_page_in_fake(&self, page_id: PageId) {
+        *self
+            .probe
+            .closed_page_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(page_id);
     }
 }
 
