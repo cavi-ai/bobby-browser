@@ -11,10 +11,10 @@ use types::{
     CommandError, CommandId, CommandOutcome, CommandPhase, ControlAction, ControlActionCommand,
     ControlActionEvidence, DownloadUrlCommand, ErrorCode, ErrorLayer, Evidence, ExecutionPath,
     ExecutionReason, FollowIntent, FormControlOperation, FormControlState, FormControlTarget,
-    FormControlValidity, InspectCommand, IntentCommand, IntentHints, NavigateCommand, PageId,
-    PrimitiveCommand, RuntimeCommand, SessionId, SubmitAndVerifyIntent, TargetSpec, TextMatch,
-    TypeTextCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId, WorkflowCheckpoint,
-    WorkflowId,
+    FormControlValidity, InspectCommand, IntentCommand, IntentHints, NavigateCommand, PageEvidence,
+    PageId, PrimitiveCommand, RuntimeCommand, SessionId, SubmitAndVerifyIntent, TargetSpec,
+    TextMatch, TypeTextCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId,
+    WorkflowCheckpoint, WorkflowId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
 use workflow_journal::{
@@ -52,6 +52,17 @@ enum DriverMode {
     /// Inspect reports a prefilled value with the typed text appended,
     /// simulating `clear_first: false` into a non-empty field.
     AppendPrefill,
+    /// The first attempt at the exercised command fails with a
+    /// closed-session-shaped message (matching
+    /// `worker_pool::is_dead_worker_error`), but the browser process and the
+    /// page are both still alive: `list_pages` on the CURRENT lease (no
+    /// reconnect) lists the page, and a retried Replayable command succeeds
+    /// on that same lease.
+    TransientTargetLoss,
+    /// Same closed-session-shaped first failure, but `list_pages` on the
+    /// CURRENT lease (no reconnect) proves the page itself is gone: this
+    /// must fail permanently without ever probing `reconnect_live_process`.
+    TransientTargetLossPageClosed,
 }
 
 struct RecordingJournal {
@@ -140,6 +151,13 @@ struct FakeWorker {
     events: Arc<Mutex<Vec<String>>>,
     mode: DriverMode,
     reattached: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Page id captured from `open_page`, for `list_pages` to echo back as
+    /// evidence that the page is still (or is no longer) listed.
+    known_page: Arc<Mutex<Option<PageId>>>,
+    /// One-shot "already failed once" marker for `TransientTargetLoss*`:
+    /// distinct from `reattached` because these modes never call
+    /// `reconnect_live_process`.
+    probed_once: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[async_trait]
@@ -170,11 +188,33 @@ impl BrowserWorker for FakeWorker {
 
     async fn list_pages(&self, _: &types::ListPagesCommand) -> Result<Vec<Evidence>, CommandError> {
         if matches!(self.mode, DriverMode::TransportResetReattachesPageClosed) {
+            // Before reattach the transport is genuinely broken, same as
+            // every other call below -- only a reattached connection can
+            // truthfully report the page is gone.
+            if !self.reattached.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(driver_failure());
+            }
+            return Ok(vec![Evidence::Pages { pages: Vec::new() }]);
+        }
+        if matches!(self.mode, DriverMode::TransientTargetLoss) {
+            let known = self.known_page.lock().await.clone();
+            return Ok(vec![Evidence::Pages {
+                pages: known
+                    .into_iter()
+                    .map(|page_id| PageEvidence {
+                        page_id,
+                        url: "https://example.test/".into(),
+                        title: "Fixture".into(),
+                    })
+                    .collect(),
+            }]);
+        }
+        if matches!(self.mode, DriverMode::TransientTargetLossPageClosed) {
             return Ok(vec![Evidence::Pages { pages: Vec::new() }]);
         }
         Err(driver_failure())
     }
-    async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
+    async fn open_page(&self, page_id: PageId) -> Result<(), CommandError> {
         if matches!(self.mode, DriverMode::DeadOnOpen) {
             return Err(CommandError {
                 code: ErrorCode::BrowserCommandFailed,
@@ -183,6 +223,7 @@ impl BrowserWorker for FakeWorker {
                 retryable: true,
             });
         }
+        *self.known_page.lock().await = Some(page_id);
         Ok(())
     }
     async fn navigate(
@@ -294,6 +335,24 @@ impl BrowserWorker for FakeWorker {
                 message: "the browser target is gone (crashed or closed); re-list pages or recover the session before retrying".into(),
                 layer: ErrorLayer::Driver,
                 retryable: true,
+            });
+        }
+        if matches!(self.mode, DriverMode::TransientTargetLoss) {
+            // A mutating command never retries on this path, so this must
+            // be the only call.
+            return Err(CommandError {
+                code: ErrorCode::BrowserCommandFailed,
+                message: "receiver is gone".into(),
+                layer: ErrorLayer::Driver,
+                retryable: true,
+            });
+        }
+        if matches!(self.mode, DriverMode::TransientTargetLossPageClosed) {
+            return Err(CommandError {
+                code: ErrorCode::BrowserCommandFailed,
+                message: "receiver is gone".into(),
+                layer: ErrorLayer::Driver,
+                retryable: false,
             });
         }
         Ok(vec![Evidence::Element {
@@ -425,6 +484,23 @@ impl BrowserWorker for FakeWorker {
             return Err(CommandError {
                 code: ErrorCode::BrowserCommandFailed,
                 message: "send failed because receiver is gone".into(),
+                layer: ErrorLayer::Driver,
+                retryable: true,
+            });
+        }
+        if matches!(
+            self.mode,
+            DriverMode::TransientTargetLoss | DriverMode::TransientTargetLossPageClosed
+        ) && !self
+            .probed_once
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            // First attempt only: the same-lease retry (or, for
+            // TransientTargetLossPageClosed, the permanent failure) must
+            // never reach a second call.
+            return Err(CommandError {
+                code: ErrorCode::BrowserCommandFailed,
+                message: "receiver is gone".into(),
                 layer: ErrorLayer::Driver,
                 retryable: true,
             });
@@ -711,6 +787,8 @@ impl WorkerFactory for DeadThenFailFactory {
                 events: self.events.clone(),
                 mode: DriverMode::DeadOnOpen,
                 reattached: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                known_page: Arc::new(Mutex::new(None)),
+                probed_once: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }));
         }
         Err(CommandError {
@@ -745,6 +823,8 @@ impl WorkerFactory for FakeFactory {
             events: self.events.clone(),
             mode,
             reattached: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            known_page: Arc::new(Mutex::new(None)),
+            probed_once: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }))
     }
 }
@@ -3018,6 +3098,222 @@ async fn a_dead_browser_revive_reports_state_loss_for_mutating_commands() {
     assert!(
         matches!(outcome, CommandOutcome::Completed { .. }),
         "the revived session must keep serving commands: {outcome:?}"
+    );
+}
+
+/// A closed-session-shaped CDP error does not always mean the browser died:
+/// `list_pages` on the CURRENT lease (no reconnect) proves the page is still
+/// there, so a Replayable command retries once on that same lease -- no
+/// reconnect, no new lease, no relaunch.
+#[tokio::test]
+async fn a_transient_target_loss_retries_a_replayable_command_on_the_same_lease() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let journal = Arc::new(RecordingJournal {
+        events: events.clone(),
+        fail_on: None,
+        pause_on: None,
+        paused: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
+    });
+    let launches = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let workers = Arc::new(WorkerPool::new(
+        8,
+        Arc::new(FakeFactory {
+            events: events.clone(),
+            mode: DriverMode::TransientTargetLoss,
+            launches: Arc::clone(&launches),
+        }),
+    ));
+    let runtime = page_runtime::PageRuntime::new(journal, workers);
+    let session = SessionId::new();
+    let page = runtime
+        .open_browser(session.clone())
+        .await
+        .expect("open_browser");
+
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page.id.clone(),
+            PrimitiveCommand::WaitFor(WaitForCommand {
+                condition: WaitCondition::NetworkQuiet {
+                    idle_ms: 100,
+                    max_in_flight: 0,
+                    ignore_url_substrings: Vec::new(),
+                    ignore_resource_types: Vec::new(),
+                    ignore_long_lived: false,
+                },
+                timeout_ms: 5_000,
+            }),
+        ))
+        .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "a same-lease retry must complete once list_pages proves the page is intact: {outcome:?}"
+    );
+    let events = events.lock().await;
+    assert!(
+        !events.contains(&"browser:reattach".to_string()),
+        "a transient target/session loss must never call reconnect_live_process: {events:?}"
+    );
+    assert_eq!(
+        launches.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a transient target/session loss must never relaunch the browser"
+    );
+}
+
+/// The same probe, but for a mutating command: instead of retrying, the
+/// original error is recoded as a retryable `targetDetached` with the
+/// original diagnostic preserved as evidence -- no reattach, no relaunch.
+#[tokio::test]
+async fn a_transient_target_loss_recodes_a_mutating_command_as_retryable_target_detached() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let journal = Arc::new(RecordingJournal {
+        events: events.clone(),
+        fail_on: None,
+        pause_on: None,
+        paused: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
+    });
+    let launches = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let workers = Arc::new(WorkerPool::new(
+        8,
+        Arc::new(FakeFactory {
+            events: events.clone(),
+            mode: DriverMode::TransientTargetLoss,
+            launches: Arc::clone(&launches),
+        }),
+    ));
+    let runtime = page_runtime::PageRuntime::new(journal, workers);
+    let session = SessionId::new();
+    let page = runtime
+        .open_browser(session.clone())
+        .await
+        .expect("open_browser");
+
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page.id.clone(),
+            PrimitiveCommand::Click(ClickCommand {
+                selector: "#submit".into(),
+                target: None,
+                boundary: false,
+                expected_url: None,
+                modifiers: Vec::new(),
+            }),
+        ))
+        .await;
+    let CommandOutcome::Failed {
+        error, evidence, ..
+    } = outcome
+    else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::TargetDetached);
+    assert!(error.retryable);
+    assert_eq!(
+        error.message,
+        "transient target loss; the browser and page are intact -- re-resolve the target and re-issue the command"
+    );
+    assert!(
+        evidence.iter().any(|item| matches!(
+            item,
+            Evidence::Configuration { name, value }
+                if name == "transientTargetLoss" && value == "receiver is gone"
+        )),
+        "the original diagnostic must survive as evidence: {evidence:?}"
+    );
+    let events = events.lock().await;
+    assert!(
+        !events.contains(&"browser:reattach".to_string()),
+        "a transient target/session loss must never call reconnect_live_process: {events:?}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| *event == "browser:click")
+            .count(),
+        1,
+        "a mutating command must never retry on this path: {events:?}"
+    );
+    assert_eq!(
+        launches.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a transient target/session loss must never relaunch the browser"
+    );
+}
+
+/// `list_pages` on the CURRENT lease (no reconnect) proves the page itself
+/// is gone: this must fail permanently on the original error, without ever
+/// probing `reconnect_live_process` -- the pre-reattach twin of
+/// `a_reattach_that_finds_the_page_gone_fails_permanently_without_retrying`.
+#[tokio::test]
+async fn a_transient_probe_with_the_page_gone_fails_permanently_without_reattach() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let journal = Arc::new(RecordingJournal {
+        events: events.clone(),
+        fail_on: None,
+        pause_on: None,
+        paused: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
+    });
+    let launches = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let workers = Arc::new(WorkerPool::new(
+        8,
+        Arc::new(FakeFactory {
+            events: events.clone(),
+            mode: DriverMode::TransientTargetLossPageClosed,
+            launches: Arc::clone(&launches),
+        }),
+    ));
+    let runtime = page_runtime::PageRuntime::new(journal, workers);
+    let session = SessionId::new();
+    let page = runtime
+        .open_browser(session.clone())
+        .await
+        .expect("open_browser");
+
+    let outcome = runtime
+        .execute(envelope(
+            session,
+            page.id.clone(),
+            PrimitiveCommand::Click(ClickCommand {
+                selector: "#submit".into(),
+                target: None,
+                boundary: false,
+                expected_url: None,
+                modifiers: Vec::new(),
+            }),
+        ))
+        .await;
+    let CommandOutcome::Failed { error, .. } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::BrowserCommandFailed);
+    assert_eq!(
+        error.message, "receiver is gone",
+        "the original message must pass through unchanged"
+    );
+    assert!(!error.retryable);
+    let events = events.lock().await;
+    assert!(
+        !events.contains(&"browser:reattach".to_string()),
+        "a probe that proves the page is gone must never call reconnect_live_process: {events:?}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| *event == "browser:click")
+            .count(),
+        1,
+        "a page that is provably gone must be attempted exactly once: {events:?}"
+    );
+    assert_eq!(
+        launches.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a page that merely closed must never trigger a full relaunch"
     );
 }
 

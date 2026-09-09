@@ -302,7 +302,117 @@ impl PageRuntime {
                         && failure.error.message == "browser page is not open");
                 let mut revived_execution = None;
                 let mut reattached_execution = None;
+                let mut probed_execution = None;
                 if browser_died && page_state.is_some() {
+                    let page = page_state.clone().expect("checked above");
+                    // Probe the CURRENT lease before assuming the browser
+                    // died: a closed-session-shaped CDP error can mean the
+                    // browser process and the page are both still alive and
+                    // only this command's own session/target was lost.
+                    // `list_pages` runs `sync_untracked_pages`, exercising
+                    // the transport and refreshing the page registry
+                    // without tearing anything down, so a successful call
+                    // here proves (or disproves) browser death outright,
+                    // before any reattach or revive is attempted.
+                    let probe = lease_slot
+                        .as_ref()
+                        .expect("lease before probe")
+                        .worker()
+                        .list_pages(&ListPagesCommand)
+                        .await;
+                    if let Ok(evidence) = probe {
+                        if !page_still_listed(&evidence, &page.id) {
+                            // The page itself closed; the browser never died
+                            // and there is nothing to reattach or revive.
+                            // Fail permanently with the original
+                            // page-missing error.
+                            return self
+                                .finish_failure(
+                                    &envelope,
+                                    classify_failure(&envelope, failure.error, failure.evidence),
+                                )
+                                .await;
+                        }
+                        if envelope.command.class() == types::CommandClass::Replayable {
+                            self.adaptive
+                                .record_retry(observability::RetryClass::Transport);
+                            let remaining = (envelope.deadline - Utc::now())
+                                .to_std()
+                                .unwrap_or(StdDuration::ZERO);
+                            let same_lease = lease_slot.as_ref().expect("lease before retry");
+                            match tokio::time::timeout(
+                                remaining,
+                                self.adaptive
+                                    .execute(&envelope, same_lease, Some(page), &gate),
+                            )
+                            .await
+                            {
+                                Ok(Ok(retry_execution)) => {
+                                    probed_execution = Some(retry_execution);
+                                }
+                                Ok(Err(retry_failure)) => {
+                                    return self
+                                        .finish_failure(
+                                            &envelope,
+                                            classify_failure(
+                                                &envelope,
+                                                retry_failure.error,
+                                                retry_failure.evidence,
+                                            ),
+                                        )
+                                        .await;
+                                }
+                                Err(_) => {
+                                    return self
+                                        .finish_failure(
+                                            &envelope,
+                                            classify_failure(
+                                                &envelope,
+                                                CommandError {
+                                                    code: ErrorCode::DeadlineExceeded,
+                                                    message: "command did not finish before its envelope deadline".into(),
+                                                    layer: ErrorLayer::Workflow,
+                                                    retryable: true,
+                                                },
+                                                Vec::new(),
+                                            ),
+                                        )
+                                        .await;
+                                }
+                            }
+                        } else {
+                            // Mutating command: recode as a retryable
+                            // target-detached failure instead of a browser
+                            // death -- the browser and page are intact, only
+                            // this command's target/session was lost. The
+                            // original diagnostic survives as evidence since
+                            // the outer message no longer carries it, and as
+                            // the TargetDetached code once the outer message
+                            // is redacted for the durable journal.
+                            return self
+                                .finish_failure(
+                                    &envelope,
+                                    CommandOutcome::Failed {
+                                        command_id: envelope.command_id.clone(),
+                                        error: CommandError {
+                                            code: ErrorCode::TargetDetached,
+                                            message: "transient target loss; the browser and page are intact -- re-resolve the target and re-issue the command".into(),
+                                            layer: ErrorLayer::Driver,
+                                            retryable: true,
+                                        },
+                                        evidence: vec![transient_target_loss_evidence(
+                                            &failure.error.message,
+                                        )],
+                                    },
+                                )
+                                .await;
+                        }
+                    }
+                    // Probe failed outright: the transport really may be
+                    // gone, so fall through to the existing reattach /
+                    // revive handling below, unchanged.
+                }
+                if probed_execution.is_none() && browser_died && page_state.is_some() {
                     let page = page_state.clone().expect("checked above");
                     let lease = lease_slot.take().expect("lease before revive");
                     // Transport-only death first: if the browser process is
@@ -340,13 +450,7 @@ impl PageRuntime {
                             .list_pages(&ListPagesCommand)
                             .await
                         {
-                            Ok(evidence) => evidence.iter().any(|item| {
-                                matches!(
-                                    item,
-                                    Evidence::Pages { pages }
-                                        if pages.iter().any(|entry| entry.page_id == page.id)
-                                )
-                            }),
+                            Ok(evidence) => page_still_listed(&evidence, &page.id),
                             // Listing is unsupported or failed for an
                             // unrelated reason: no evidence the page is
                             // gone, so fall through to the existing
@@ -453,7 +557,11 @@ impl PageRuntime {
                         }
                     }
                 }
-                if reattached_execution.is_none() && browser_died && page_state.is_some() {
+                if probed_execution.is_none()
+                    && reattached_execution.is_none()
+                    && browser_died
+                    && page_state.is_some()
+                {
                     let page = page_state.clone().expect("checked above");
                     let lease = lease_slot.take().expect("lease before revive");
                     let failed_worker_id = lease.worker_id();
@@ -551,7 +659,10 @@ impl PageRuntime {
                         }
                     }
                 }
-                match reattached_execution.or(revived_execution) {
+                match probed_execution
+                    .or(reattached_execution)
+                    .or(revived_execution)
+                {
                     Some(revived_execution) => revived_execution,
                     None => {
                         return self
@@ -1328,6 +1439,30 @@ fn reattach_evidence() -> Evidence {
         value: "websocket reset with the browser process still alive; reattached to the \
                 same process and page state is preserved"
             .into(),
+    }
+}
+
+/// True if `list_pages` evidence still lists `page_id`: the browser and the
+/// page it was asked to act on are both intact, whatever transport error was
+/// thrown getting to this check.
+fn page_still_listed(evidence: &[Evidence], page_id: &types::PageId) -> bool {
+    evidence.iter().any(|item| {
+        matches!(
+            item,
+            Evidence::Pages { pages }
+                if pages.iter().any(|entry| entry.page_id == *page_id)
+        )
+    })
+}
+
+/// Evidence that a closed-session-shaped error was a transient target/session
+/// loss rather than a browser death: the original diagnostic message, kept
+/// because the outer message is replaced with a generic re-resolve
+/// instruction.
+fn transient_target_loss_evidence(original_message: &str) -> Evidence {
+    Evidence::Configuration {
+        name: "transientTargetLoss".into(),
+        value: original_message.into(),
     }
 }
 
