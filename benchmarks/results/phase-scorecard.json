@@ -1,0 +1,221 @@
+{
+  "driver": "claude",
+  "requestedModel": "claude-sonnet-5",
+  "provenance": {
+    "repoHead": "1dc7b2a7c261626d1685c8d6c507301995df7a2d",
+    "repoDirty": true,
+    "sourceStateSha256": "5800f16be8613d19542a11e7c09795a62809243afb8b8146cb0739545bda8417",
+    "nodeVersion": "v24.16.0",
+    "platform": "darwin-arm64",
+    "taskSetSha256": "f0c09d6bce03ffe6ff320f2c588e494c964abaa6c7a0b2303d61c815a0f3e287",
+    "runnerSetSha256": "48b9fb22eb88afe85876d84cf335d59e85c5b748f26dd0744a3a23a71ac61874",
+    "bobbyBinarySha256": "76324be7b163b646306badb94c8dc6ee569bb571f1a108ceaf759df08fc683d3",
+    "requestedModel": "claude-sonnet-5",
+    "timeboxSeconds": 480,
+    "startupToolset": "explore",
+    "driver": "claude",
+    "claudeCliVersion": "2.1.261 (Claude Code)",
+    "claudeIsolation": "strict-mcp,project-settings,no-skills,no-chrome,no-persistence",
+    "engine": "chromium",
+    "providerMode": "off"
+  },
+  "tools": {
+    "bobby": {
+      "tool": "bobby",
+      "runs": 5,
+      "passRate": 1,
+      "meanWallSecondsPassing": 38.500600000000006,
+      "meanTokens": 112.8,
+      "meanEase": 4.783333333333333,
+      "errorRate": 0.08163265306122448
+    },
+    "playwright-mcp": {
+      "tool": "playwright-mcp",
+      "runs": 5,
+      "passRate": 1,
+      "meanWallSecondsPassing": 38.251999999999995,
+      "meanTokens": 202.4,
+      "meanEase": 2.1999999999999997,
+      "errorRate": 0.06666666666666667
+    },
+    "chrome-devtools-mcp": {
+      "tool": "chrome-devtools-mcp",
+      "runs": 5,
+      "passRate": 1,
+      "meanWallSecondsPassing": 43.706399999999995,
+      "meanTokens": 268,
+      "meanEase": 1.4833333333333332,
+      "errorRate": 0.07575757575757576
+    },
+    "raw-playwright": {
+      "tool": "raw-playwright",
+      "runs": 0,
+      "passRate": 0,
+      "meanWallSecondsPassing": null,
+      "meanTokens": null,
+      "meanEase": null,
+      "errorRate": null
+    },
+    "agent-browser": {
+      "tool": "agent-browser",
+      "runs": 5,
+      "passRate": 1,
+      "meanWallSecondsPassing": 71.2974,
+      "meanTokens": 235.6,
+      "meanEase": 2.15,
+      "errorRate": 0.022727272727272728
+    },
+    "bobby-vision": {
+      "tool": "bobby-vision",
+      "runs": 0,
+      "passRate": 0,
+      "meanWallSecondsPassing": null,
+      "meanTokens": null,
+      "meanEase": null,
+      "errorRate": null
+    }
+  },
+  "ranks": {
+    "accuracy": [
+      {
+        "tool": "bobby",
+        "rank": 1,
+        "value": 1,
+        "deltaVsBest": 0
+      },
+      {
+        "tool": "playwright-mcp",
+        "rank": 2,
+        "value": 1,
+        "deltaVsBest": 0
+      },
+      {
+        "tool": "chrome-devtools-mcp",
+        "rank": 3,
+        "value": 1,
+        "deltaVsBest": 0
+      },
+      {
+        "tool": "raw-playwright",
+        "rank": 0,
+        "value": 0,
+        "deltaVsBest": -1
+      },
+      {
+        "tool": "agent-browser",
+        "rank": 4,
+        "value": 1,
+        "deltaVsBest": 0
+      }
+    ],
+    "performance": [
+      {
+        "tool": "bobby",
+        "rank": 2,
+        "value": 38.500600000000006,
+        "deltaVsBest": 0.24860000000001037
+      },
+      {
+        "tool": "playwright-mcp",
+        "rank": 1,
+        "value": 38.251999999999995,
+        "deltaVsBest": 0
+      },
+      {
+        "tool": "chrome-devtools-mcp",
+        "rank": 3,
+        "value": 43.706399999999995,
+        "deltaVsBest": 5.4544
+      },
+      {
+        "tool": "raw-playwright",
+        "rank": 0,
+        "value": null,
+        "deltaVsBest": null
+      },
+      {
+        "tool": "agent-browser",
+        "rank": 4,
+        "value": 71.2974,
+        "deltaVsBest": 33.0454
+      }
+    ],
+    "tokens": [
+      {
+        "tool": "bobby",
+        "rank": 1,
+        "value": 112.8,
+        "deltaVsBest": 0
+      },
+      {
+        "tool": "playwright-mcp",
+        "rank": 2,
+        "value": 202.4,
+        "deltaVsBest": 89.60000000000001
+      },
+      {
+        "tool": "chrome-devtools-mcp",
+        "rank": 4,
+        "value": 268,
+        "deltaVsBest": 155.2
+      },
+      {
+        "tool": "raw-playwright",
+        "rank": 0,
+        "value": null,
+        "deltaVsBest": null
+      },
+      {
+        "tool": "agent-browser",
+        "rank": 3,
+        "value": 235.6,
+        "deltaVsBest": 122.8
+      }
+    ],
+    "ease": [
+      {
+        "tool": "bobby",
+        "rank": 1,
+        "value": 4.783333333333333,
+        "deltaVsBest": 0
+      },
+      {
+        "tool": "playwright-mcp",
+        "rank": 2,
+        "value": 2.1999999999999997,
+        "deltaVsBest": -2.5833333333333335
+      },
+      {
+        "tool": "chrome-devtools-mcp",
+        "rank": 4,
+        "value": 1.4833333333333332,
+        "deltaVsBest": -3.3
+      },
+      {
+        "tool": "raw-playwright",
+        "rank": 0,
+        "value": null,
+        "deltaVsBest": null
+      },
+      {
+        "tool": "agent-browser",
+        "rank": 3,
+        "value": 2.15,
+        "deltaVsBest": -2.6333333333333333
+      }
+    ]
+  },
+  "operator": {
+    "doctor": {
+      "checks": 31,
+      "failures": 1,
+      "warnings": 1
+    },
+    "install": null
+  },
+  "opusReference": null,
+  "grokBatch": {
+    "status": "not-measured"
+  },
+  "note": "Ranks compare Grok-driven bobby (vision off) to competitors. bobby-vision and Opus are labeled, not ranked."
+}
