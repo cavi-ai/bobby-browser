@@ -971,12 +971,24 @@ impl Server {
                 message.starts_with("navigation to ")
                     && message.contains("was aborted by the browser")
             });
+        // `IntentActionMismatch` on a resolved file control
+        // (`file_control_failure` in intent-engine): the generic per-code
+        // repair says "re-check the role", which is wrong here, so this
+        // message prefix earns its own repair the same way candidateLimit
+        // and an aborted navigation do above.
+        let file_control = value
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.starts_with("target resolves to a file input;"));
         let repair = if status == Some("needsReconciliation") {
             Some(crate::repair::reconciliation_repair())
         } else if candidate_limit {
             Some(crate::repair::candidate_limit_repair())
         } else if navigation_aborted {
             Some(crate::repair::navigation_aborted_repair())
+        } else if file_control {
+            Some(crate::repair::file_control_repair())
         } else {
             value
                 .get("error")
@@ -1539,6 +1551,19 @@ fn to_json<T: serde::Serialize>(value: T) -> interface_core::InterfaceResult<Val
     })
 }
 
+/// The agent-facing `-32602` message: hosts (Claude Code among them) render
+/// only `error.message`, so a `reason` parked in `data` alone reaches no one.
+/// The reason is always named, and the repair action follows it when
+/// `repair_for_protocol_reason` has one. Built only from the canned reason
+/// string and repair action -- never from caller-supplied argument values,
+/// ids, or paths (`crates/mcp-gateway/tests/redaction.rs` is the gate).
+fn invalid_params_message(reason: &str, repair: Option<&Value>) -> String {
+    match repair.and_then(|repair| repair["action"].as_str()) {
+        Some(action) => format!("Invalid params ({reason}): {action}"),
+        None => format!("Invalid params ({reason})"),
+    }
+}
+
 /// `-32602` with the schema keyword and JSON Pointer that rejected the call.
 ///
 /// `pointer` and `constraint` must describe the schema, never the submitted
@@ -1552,23 +1577,34 @@ fn invalid_params(
     arguments: &Value,
     violation: Option<crate::schema::SchemaViolation>,
 ) -> Value {
+    let mut message = None;
     let data = violation.map(|violation| {
         let mut data = json!({
             "reason":"schemaViolation",
             "pointer":violation.pointer,
             "constraint":violation.constraint
         });
-        if let Some(mut repair) = crate::repair::repair_for_protocol_reason("schemaViolation") {
-            if let Some(migration) = crate::repair::legacy_fill_shape_migration(tool, arguments) {
-                if let Some(action) = repair["action"].as_str() {
-                    repair["action"] = json!(format!("{action} {migration}"));
+        let repair =
+            crate::repair::repair_for_protocol_reason("schemaViolation").map(|mut repair| {
+                if let Some(migration) = crate::repair::legacy_fill_shape_migration(tool, arguments)
+                {
+                    if let Some(action) = repair["action"].as_str() {
+                        repair["action"] = json!(format!("{action} {migration}"));
+                    }
                 }
-            }
+                repair
+            });
+        message = Some(invalid_params_message("schemaViolation", repair.as_ref()));
+        if let Some(repair) = repair {
             data["repair"] = repair;
         }
         data
     });
-    error(id, INVALID_PARAMS, "Invalid params", data)
+    let mut response = error(id, INVALID_PARAMS, "Invalid params", data);
+    if let Some(message) = message {
+        response["error"]["message"] = json!(message);
+    }
+    response
 }
 
 /// `-32602` for a rejection with no single offending field: a body that passed
@@ -1576,10 +1612,14 @@ fn invalid_params(
 /// idempotency key.
 fn invalid_params_reason(id: Value, reason: &'static str) -> Value {
     let mut data = json!({"reason":reason});
-    if let Some(repair) = crate::repair::repair_for_protocol_reason(reason) {
+    let repair = crate::repair::repair_for_protocol_reason(reason);
+    let message = invalid_params_message(reason, repair.as_ref());
+    if let Some(repair) = repair {
         data["repair"] = repair;
     }
-    error(id, INVALID_PARAMS, "Invalid params", Some(data))
+    let mut response = error(id, INVALID_PARAMS, "Invalid params", Some(data));
+    response["error"]["message"] = json!(message);
+    response
 }
 
 fn job_port_error_response(id: Value, port_error: crate::jobs::JobPortError) -> Value {
@@ -2107,5 +2147,103 @@ mod tests {
     #[test]
     fn messages_without_the_marker_carry_no_diagnostic() {
         assert!(browser_launch_diagnostic("runtime interface request failed").is_none());
+    }
+
+    /// Hosts (Claude Code among them) render only `error.message`; the reason
+    /// and repair action must be readable there, not only in `error.data`.
+    #[test]
+    fn invalid_params_reason_message_carries_reason_and_repair_action() {
+        for (reason, action) in [
+            (
+                "malformedArguments",
+                "Re-read the tool's inputSchema and description; a bound checked outside the schema failed.",
+            ),
+            (
+                "deadlineOutOfRange",
+                "Set the envelope's deadline within the allowed window (not past, not over 300,000 ms out) and resubmit.",
+            ),
+            (
+                "invalidIdempotencyKey",
+                "Send a well-formed key, or omit the field; the call had no effect.",
+            ),
+            (
+                "workflowBindingConflict",
+                "Use the workflowHandle alone for page work, or omit it and send the complete explicit ID set.",
+            ),
+            (
+                "unknownWorkflowHandle",
+                "The handle is malformed, unknown, or evicted; use explicit IDs to inspect or close the workflow's resources, then call workflow_start for a new handle.",
+            ),
+        ] {
+            let response = invalid_params_reason(json!(1), reason);
+            assert_eq!(
+                response["error"]["message"],
+                json!(format!("Invalid params ({reason}): {action}")),
+                "{response}"
+            );
+            // error.data keeps carrying reason/repair unchanged, for clients
+            // that already read it.
+            assert_eq!(response["error"]["data"]["reason"], json!(reason));
+            assert_eq!(
+                response["error"]["data"]["repair"],
+                crate::repair::repair_for_protocol_reason(reason).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_params_reason_with_no_known_repair_still_names_the_reason() {
+        assert!(crate::repair::repair_for_protocol_reason("controlIdNotFound").is_none());
+        let response = invalid_params_reason(json!(2), "controlIdNotFound");
+        assert_eq!(
+            response["error"]["message"],
+            json!("Invalid params (controlIdNotFound)")
+        );
+        assert_eq!(
+            response["error"]["data"]["reason"],
+            json!("controlIdNotFound")
+        );
+        assert!(response["error"]["data"]["repair"].is_null());
+    }
+
+    #[test]
+    fn invalid_params_schema_violation_message_carries_reason_and_repair_action() {
+        let response = invalid_params(
+            json!(3),
+            "click",
+            &json!({}),
+            Some(crate::schema::SchemaViolation {
+                pointer: "/target".to_owned(),
+                constraint: "required",
+            }),
+        );
+        assert_eq!(
+            response["error"]["message"],
+            json!(
+                "Invalid params (schemaViolation): Fix the value at error.data.pointer; error.data.constraint names the keyword it violated."
+            )
+        );
+        assert_eq!(
+            response["error"]["data"]["reason"],
+            json!("schemaViolation")
+        );
+        assert_eq!(response["error"]["data"]["pointer"], json!("/target"));
+        assert_eq!(response["error"]["data"]["constraint"], json!("required"));
+        assert_eq!(
+            response["error"]["data"]["repair"]["action"],
+            json!(
+                "Fix the value at error.data.pointer; error.data.constraint names the keyword it violated."
+            )
+        );
+    }
+
+    /// No `SchemaViolation` means no reason is known, so the message must
+    /// stay the untouched bare string rather than naming a reason that was
+    /// never diagnosed.
+    #[test]
+    fn invalid_params_with_no_violation_stays_bare() {
+        let response = invalid_params(json!(4), "click", &json!({}), None);
+        assert_eq!(response["error"]["message"], json!("Invalid params"));
+        assert!(response["error"]["data"].is_null());
     }
 }

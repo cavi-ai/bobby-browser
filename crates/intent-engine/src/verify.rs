@@ -105,10 +105,7 @@ pub fn summarize_target(target: &types::TargetSpec) -> String {
 /// the right tool, and gating on role would only replace that clear message
 /// with a generic `IntentActionMismatch`.
 pub fn compatible(value: &ControlAction, candidate: &Candidate) -> bool {
-    let is_file_input = candidate
-        .attributes
-        .get("type")
-        .is_some_and(|value| value.eq_ignore_ascii_case("file"));
+    let is_file_input = is_file_input(candidate);
     let role = candidate.role.as_deref().unwrap_or("");
 
     match value {
@@ -121,6 +118,17 @@ pub fn compatible(value: &ControlAction, candidate: &Candidate) -> bool {
         ControlAction::SetChecked { .. } => matches!(role, "checkbox" | "radio"),
         ControlAction::Clear | ControlAction::Activate => true,
     }
+}
+
+/// True when `candidate` is a native `<input type="file">`: the worker's
+/// gather script emits it with `role=button` plus this attribute (see the
+/// rules above), the one signal that a gathered DOM candidate is a file
+/// control -- `intent-engine` has no dependency on `FormControlKind` itself.
+pub fn is_file_input(candidate: &Candidate) -> bool {
+    candidate
+        .attributes
+        .get("type")
+        .is_some_and(|value| value.eq_ignore_ascii_case("file"))
 }
 
 /// Verify fill postconditions from worker evidence when present.

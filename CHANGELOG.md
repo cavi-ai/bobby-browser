@@ -70,6 +70,15 @@
   below 60 negatives the 2:1–8:1 band stays a hard error; at or above that
   mass a breach relaxes to a warning past 12:1, since positive volume
   scales with steps × runs while negative volume does not.
+- JSON-RPC `-32602` responses now carry the rejection reason and repair
+  action in `error.message`, not only in `error.data`: MCP hosts commonly
+  render `error.message` alone, so a bare "Invalid params" repeated with no
+  visible repair. `error.data.reason` / `error.data.repair` are unchanged.
+- `intent_fill` / `intent_complete_form` on a file control (`<input
+  type="file">`) now fails with a typed, deterministic `intentActionMismatch`
+  naming `upload_files` as the repair, instead of a `targetNotFound` that
+  escalated to a vision fallback and came back `visionAssistDenied`. File
+  inputs accept paths only through `upload_files` (or `control_action`).
 
 ## 0.13.0 - 2026-09-04
 

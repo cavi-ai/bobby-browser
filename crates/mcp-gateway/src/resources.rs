@@ -853,10 +853,14 @@ tools most likely to produce it.
 ## Protocol-layer rejections
 
 Not every failed call produces an `ErrorCode`. A call the MCP layer refuses
-before it builds a command answers with JSON-RPC `-32602` ("Invalid params")
-and a reason string under `error.data.reason`
-(`crates/mcp-gateway/src/server.rs`). These are protocol-layer rejections, not
-per-command codes: they never appear inside a tool result, they carry no
+before it builds a command answers with JSON-RPC `-32602`. Hosts commonly
+render only `error.message`, so it is never the bare string "Invalid
+params": it is `Invalid params (<reason>): <repair action>`, or
+`Invalid params (<reason>)` when the reason has no repair action. The same
+reason and repair also stay under `error.data.reason` / `error.data.repair`
+for a client that already reads `data`
+(`crates/mcp-gateway/src/server/mod.rs`). These are protocol-layer rejections,
+not per-command codes: they never appear inside a tool result, they carry no
 `commandId`, and nothing ran, so the repair is always "fix the request and
 resubmit" -- never reconciliation.
 
