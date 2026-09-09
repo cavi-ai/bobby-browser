@@ -58,12 +58,9 @@
   reports `Evidence::PopupClosed`; a mutating call still fails, carrying the
   same evidence and a repair naming the opener page. `page_close
   {workflowHandle}` on the followed popup returns the handle to the opener
-  the same way, instead of evicting it. `form_snapshot` bypasses
-  `submit_envelope`, so it carries the same read-only fallback through its
-  own wiring; `upload_files`' `controlId` lookup (itself a `form_snapshot`
-  call, used to resolve the target before the upload) is a prerequisite of
-  a mutating command, so it fails with the same evidence and repair rather
-  than ever retrying.
+  the same way, instead of evicting it. `form_snapshot` through the handle
+  replays on the opener the same way; the `controlId` lookup inside
+  `upload_files` fails with the same evidence and repair.
 
 ### Changed
 
@@ -83,16 +80,11 @@
   below 60 negatives the 2:1–8:1 band stays a hard error; at or above that
   mass a breach relaxes to a warning past 12:1, since positive volume
   scales with steps × runs while negative volume does not.
-- A page that closes while a command is in flight (most commonly a followed
-  popup the site closes) now fails `notFound` immediately instead of a
-  retryable transport-reset failure. The runtime was treating the exact
-  page-missing error as a transport death: it reconnected to the still-live
-  browser process — trivially, since the process was never the problem —
-  then either retried the command (`Replayable`) or reported it as a
-  transport reset with `retryable: true` (everything else), so the
-  closed-page rule's `status: "failed"` match never fired for a mutating
-  call. The runtime now checks the reattached worker's own page listing
-  before deciding a reconnect is a transport story at all.
+- A page that closes while a command is in flight (a followed popup the
+  site closes, most commonly) now fails `notFound` immediately instead of a
+  retryable transport-reset failure: after reconnecting to the live browser
+  process the runtime checks the worker's page listing, and a missing page
+  fails permanently for Replayable and mutating commands alike.
 
 ## 0.13.0 - 2026-09-04
 
