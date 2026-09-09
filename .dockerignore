@@ -1,0 +1,8 @@
+**/target
+**/node_modules
+.worktrees
+.tmp
+.quarantine
+.claude
+docs/superpowers
+.git

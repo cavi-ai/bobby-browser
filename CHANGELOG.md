@@ -4,6 +4,12 @@
 
 ### Added
 
+- Docker image (`Dockerfile`, `docker-compose.yml`) and `deploy/docker/`
+  config running `bobby serve` with managed headless Chromium. Non-root
+  runtime user, `deploy/docker/entrypoint.sh` generates the bootstrap
+  credential on first run, `scripts/docker/smoke.sh` proves a real MCP
+  streamable HTTP session end to end.
+
 - `bobby mcp-stdio` promotes verified intent outcomes into the shared
   context store when the engine selection carries a durable Firefox profile
   identity (exact Firefox + `profileId`), mirroring `bobby serve`. Agents
@@ -48,6 +54,8 @@
 
 ### Changed
 
+- The captcha implementation plan is no longer shipped under `docs/`; the
+  shipped captcha path is documented by `bobby://intents` and the intents guide.
 - Public agent skill: pass `workflowHandle` on later calls; explicit ids are
   the repair path when the handle dies. `workflowId` stays on
   `checkpoint_save` / `workflow_recover` only.

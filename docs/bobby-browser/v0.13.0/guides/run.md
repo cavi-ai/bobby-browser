@@ -39,3 +39,38 @@ Bootstrap needs `job:*` capabilities (`bobby init --force` if an older
 
 Do not expose the runtime to untrusted networks; reach it over loopback or an
 operator-controlled boundary.
+
+## Docker
+
+```bash
+docker compose up -d --build
+bash scripts/docker/smoke.sh
+```
+
+Builds a non-root image (`Dockerfile`) running `bobby serve` with managed
+headless Chromium and starts it via `docker-compose.yml` (service `bobby`,
+named volume `bobby-data` at `/var/lib/bobby`). Two env vars select and
+locate the browser engine:
+
+- `BOBBY_CHROME_EXECUTABLE=/usr/bin/chromium`
+- `AUTOMATION_RUNTIME_BROWSER_SELECTION={"preference":{"mode":"managedChromium"}}`
+
+`deploy/docker/entrypoint.sh` runs `bobby init` once (only if
+`/var/lib/bobby/bootstrap.env` is missing) to generate the bootstrap
+credential, without printing the bearer to `docker logs`. Retrieve it with:
+
+```bash
+docker compose exec bobby bobby token --stdout
+```
+
+Security note: `deploy/docker/config.toml` binds `0.0.0.0` *inside* the
+container — Docker's port publishing cannot reach a process bound to the
+container's own loopback — but `docker-compose.yml` publishes the port as
+`127.0.0.1:7777:7777`, so the runtime stays loopback-only from the host's
+perspective. Change that published address only if you intend to expose the
+runtime beyond the host.
+
+`scripts/docker/smoke.sh` is the real proof: it builds, waits for
+`/healthz`, pulls the bootstrap bearer, and drives one MCP streamable HTTP
+session (`initialize` → `session_create`) exactly as an external client
+would, then tears the stack down.
