@@ -75,25 +75,6 @@ The default `explore` startup toolset is deliberate: it measures what a user
 who never touches `toolset_select` gets — observation, navigation, and the
 base controls, which cover every journey. `BOBBY_MCP_TOOLSET` is left unset.
 
-### Scorecard
-
-Four-tool scorecard, one run per task across the five journeys above, dated
-2026-09-08 on bobby {{PRODUCT_VERSION}} at `1dc7b2a7`. Driver: `claude-sonnet-5`.
-
-| tool | runs | pass rate | mean wall s (passing) | mean tool calls | mean tokens | error rate |
-| --- | --- | --- | --- | --- | --- | --- |
-| bobby | 5 | 100% | 38.5 | 9.8 | 901,405 | 8% |
-| playwright-mcp | 5 | 100% | 38.3 | 12.0 | 741,460 | 7% |
-| chrome-devtools-mcp | 5 | 100% | 43.7 | 13.2 | 806,536 | 8% |
-| agent-browser | 5 | 100% | 71.3 | 17.6 | 2,005,866 | 2% |
-
-Mean tokens is input + output + cache read + cache creation tokens per run,
-from `benchmarks/results/runs.jsonl`. Runners are defined in
-`benchmarks/competitor-gauntlet/runners.json`; `agent-browser` runs
-`npx agent-browser@0.37.1 mcp`. `raw-playwright` (bash + the Playwright
-library, no MCP tooling) is a separate floor reference, not part of this
-scorecard.
-
 ## Standalone scenario server
 
 Out-of-process drivers (benchmarks, third-party tooling) can run the same

@@ -50,23 +50,6 @@ workflows newest-first.
 HTTP `/v1/jobs`. Built-in handlers: `echo`, `sleep`, `http_probe`, `http_wait`,
 and `http_fetch`.
 
-### Measured
-
-`benchmarks/competitor-gauntlet` drove five journeys (customer update,
-onboarding, document upload, popup authorization, report download) against
-bobby and three competitor MCP surfaces, one run per task, dated 2026-09-08 on
-bobby 0.13.0 at `1dc7b2a7`. Driver: `claude-sonnet-5`.
-
-| tool | runs | pass rate | mean wall s (passing) | mean tool calls | mean tokens | error rate |
-| --- | --- | --- | --- | --- | --- | --- |
-| bobby | 5 | 100% | 38.5 | 9.8 | 901,405 | 8% |
-| playwright-mcp | 5 | 100% | 38.3 | 12.0 | 741,460 | 7% |
-| chrome-devtools-mcp | 5 | 100% | 43.7 | 13.2 | 806,536 | 8% |
-| agent-browser | 5 | 100% | 71.3 | 17.6 | 2,005,866 | 2% |
-
-Mean tokens is input + output + cache read + cache creation tokens per run.
-Full methodology: `docs/bobby-browser/source/pages/guides/gauntlet.md`.
-
 ## Install
 
 One command builds the runtime, mints a local credential, wires your agent host,
