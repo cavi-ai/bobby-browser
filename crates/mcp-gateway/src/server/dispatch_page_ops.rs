@@ -151,10 +151,39 @@ impl Server {
                 {
                     return invalid_params_reason(id, "malformedArguments");
                 }
-                self.runtime
-                    .form_snapshot(context, input.session_id, input.page_id, input.max_controls)
+                match self
+                    .runtime
+                    .form_snapshot(
+                        context.clone(),
+                        input.session_id.clone(),
+                        input.page_id,
+                        input.max_controls,
+                    )
                     .await
-                    .and_then(to_json)
+                {
+                    Ok(snapshot) => to_json(snapshot),
+                    Err(error) => match self.closed_page_fallback(handle, &error) {
+                        Some((opener_page_id, evidence)) => self
+                            .runtime
+                            .form_snapshot(
+                                context,
+                                input.session_id,
+                                opener_page_id,
+                                input.max_controls,
+                            )
+                            .await
+                            .and_then(to_json)
+                            .map(|mut value| {
+                                push_evidence(
+                                    &mut value,
+                                    serde_json::to_value(evidence)
+                                        .expect("Evidence always serializes"),
+                                );
+                                value
+                            }),
+                        None => Err(error),
+                    },
+                }
             }
             "control_action" => {
                 let input: ControlActionArgs = match bounded_parse(call.arguments) {
@@ -370,7 +399,23 @@ impl Server {
                         .await
                     {
                         Ok(snapshot) => snapshot,
-                        Err(error) => return interface_error_response(id, error),
+                        Err(error) => {
+                            // The lookup is a prerequisite of a mutating
+                            // command: never retried on the opener, even
+                            // though the lookup itself is read-only -- a
+                            // second `upload_files` attempt is the caller's
+                            // call to make, not this one's to risk twice.
+                            return match self.closed_page_fallback(handle, &error) {
+                                Some((_, evidence)) => {
+                                    self.finish_tool(
+                                        id,
+                                        Ok(closed_page_prerequisite_failure(evidence)),
+                                    )
+                                    .await
+                                }
+                                None => interface_error_response(id, error),
+                            };
+                        }
                     };
                     let control = snapshot
                         .forms

@@ -2137,3 +2137,191 @@ async fn workflow_handle_follows_a_popup_and_returns_to_the_opener_when_it_close
         "workflow_observe should still return live accessibility evidence from the opener: {observed}"
     );
 }
+
+/// Shared setup for the closed-page rule's fake-runtime tests (no Chrome
+/// needed): a fresh workflow handle followed onto a popup through the fake
+/// (`LiveWorker::click_and_wait_for_popup` fabricates the popup evidence;
+/// the executor's own `register_page_id` and the server's `rebind_popup`
+/// call are the same production code the real-Chrome test exercises), then
+/// the fake told to fail every later command on the popup's page id with
+/// the exact shape a real closed target returns
+/// (`live.close_page_in_fake`).
+async fn live_with_a_followed_popup_reported_closed() -> (
+    common::LiveServer,
+    String,
+    types::SessionId,
+    types::PageId,
+    types::PageId,
+) {
+    let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+    let started = start(&live.server, 1, json!({"profile": "popup-follow-fake"})).await;
+    let result = &started["result"]["structuredContent"];
+    assert_eq!(result["status"], "completed", "{started}");
+    let workflow_handle = result["workflowHandle"]
+        .as_str()
+        .unwrap_or_else(|| panic!("workflow_start did not return a handle: {started}"))
+        .to_owned();
+    let session_id: types::SessionId = serde_json::from_value(result["sessionId"].clone())
+        .expect("workflow_start returns a sessionId");
+    let opener_page_id: types::PageId =
+        serde_json::from_value(result["pageId"].clone()).expect("workflow_start returns a pageId");
+
+    let followed = call_tool(
+        &live.server,
+        2,
+        "click_and_wait_for_popup",
+        json!({
+            "workflowHandle": workflow_handle,
+            "selector": "button",
+            "target": null,
+            "timeoutMs": 30_000,
+        }),
+    )
+    .await;
+    assert_eq!(
+        followed["result"]["structuredContent"]["status"], "completed",
+        "{followed}"
+    );
+    let popup_page_id: types::PageId = serde_json::from_value(
+        followed["result"]["structuredContent"]["evidence"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|item| item["kind"] == "popup")
+            .unwrap_or_else(|| {
+                panic!("click_and_wait_for_popup carried no popup evidence: {followed}")
+            })["pageId"]
+            .clone(),
+    )
+    .expect("popup evidence names a pageId");
+
+    live.close_page_in_fake(popup_page_id.clone());
+    (
+        live,
+        workflow_handle,
+        session_id,
+        opener_page_id,
+        popup_page_id,
+    )
+}
+
+/// P5 gap 2 (read-only branch): a handle-resolved read-only call
+/// (`a11y_snapshot`) on a popup the fake now reports closed replays once on
+/// the recorded opener, succeeds, and carries `popupClosed` evidence naming
+/// both pages. The handle is left resolving to the opener, so a second call
+/// through it reaches the opener directly with no further `popupClosed`.
+#[tokio::test]
+async fn handle_resolved_read_only_call_replays_on_the_opener_once_the_popup_closes() {
+    let (live, workflow_handle, _session_id, opener_page_id, popup_page_id) =
+        live_with_a_followed_popup_reported_closed().await;
+
+    let response = call_tool(
+        &live.server,
+        3,
+        "a11y_snapshot",
+        json!({"workflowHandle": workflow_handle, "maxNodes": 8}),
+    )
+    .await;
+    let content = &response["result"]["structuredContent"];
+    assert_eq!(content["status"], "completed", "{response}");
+    let popup_closed = content["evidence"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|item| item["kind"] == "popupClosed")
+        .unwrap_or_else(|| panic!("a11y_snapshot did not report popupClosed: {response}"));
+    assert_eq!(
+        popup_closed["popupPageId"],
+        json!(popup_page_id),
+        "{response}"
+    );
+    assert_eq!(
+        popup_closed["openerPageId"],
+        json!(opener_page_id),
+        "{response}"
+    );
+
+    let again = call_tool(
+        &live.server,
+        4,
+        "a11y_snapshot",
+        json!({"workflowHandle": workflow_handle, "maxNodes": 8}),
+    )
+    .await;
+    let again_content = &again["result"]["structuredContent"];
+    assert_eq!(again_content["status"], "completed", "{again}");
+    assert!(
+        again_content["evidence"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .all(|item| item["kind"] != "popupClosed"),
+        "the handle already resolves to the opener, so a second call needs no fallback: {again}"
+    );
+}
+
+/// P5 gap 2 (raw-id call): the same closed page, addressed by `sessionId`
+/// + `pageId` instead of a handle, keeps the plain `notFound` failure and
+/// carries no `popupClosed` evidence -- the closed-page rule only ever
+/// touches a handle-resolved call.
+#[tokio::test]
+async fn raw_id_call_on_a_closed_page_keeps_the_generic_not_found_with_no_evidence() {
+    let (live, _workflow_handle, session_id, _opener_page_id, popup_page_id) =
+        live_with_a_followed_popup_reported_closed().await;
+
+    let response = call_tool(
+        &live.server,
+        3,
+        "a11y_snapshot",
+        json!({"sessionId": session_id, "pageId": popup_page_id, "maxNodes": 8}),
+    )
+    .await;
+    let content = &response["result"]["structuredContent"];
+    assert_eq!(content["status"], "failed", "{response}");
+    assert_eq!(content["error"]["code"], "notFound", "{response}");
+    assert!(
+        content["evidence"]
+            .as_array()
+            .map(Vec::is_empty)
+            .unwrap_or(true),
+        "a raw-id call must never carry popupClosed evidence: {response}"
+    );
+}
+
+/// P5 gap 1: `form_snapshot` bypasses `submit_envelope` (it calls
+/// `self.runtime.form_snapshot` directly), so the closed-page rule needs its
+/// own wiring for it. A handle-resolved call on the closed popup must
+/// behave like the read-only branch above: succeed on the opener and carry
+/// `popupClosed` evidence.
+#[tokio::test]
+async fn form_snapshot_through_the_handle_replays_on_the_opener_once_the_popup_closes() {
+    let (live, workflow_handle, _session_id, opener_page_id, popup_page_id) =
+        live_with_a_followed_popup_reported_closed().await;
+
+    let response = call_tool(
+        &live.server,
+        3,
+        "form_snapshot",
+        json!({"workflowHandle": workflow_handle}),
+    )
+    .await;
+    let content = &response["result"]["structuredContent"];
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(content["pageId"], json!(opener_page_id), "{response}");
+    let popup_closed = content["evidence"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|item| item["kind"] == "popupClosed")
+        .unwrap_or_else(|| panic!("form_snapshot did not report popupClosed: {response}"));
+    assert_eq!(
+        popup_closed["popupPageId"],
+        json!(popup_page_id),
+        "{response}"
+    );
+    assert_eq!(
+        popup_closed["openerPageId"],
+        json!(opener_page_id),
+        "{response}"
+    );
+}

@@ -1237,7 +1237,18 @@ fn advertised_form_snapshot() -> Value {
             "pageId":id(),
             "forms":array(json!({"type":"object"}), 64),
             "unownedControls":array(json!({"type":"object"}), 512),
-            "truncated":{"type":"boolean"}
+            "truncated":{"type":"boolean"},
+            // Optional: only present when the closed-page rule replayed this
+            // call on the opener after the handle's popup closed. Generic
+            // rather than an `Evidence` `$ref`, like `checkpoint_record`'s
+            // own evidence field -- that union pulls the accessibility and
+            // form-control subsystems into `form_snapshot`'s (and, through
+            // the patched `FormSnapshot` def, `workflow_observe`'s) already
+            // fat output schema, which blew the `tools/list` connect budget.
+            "evidence":array(
+                json!({"type":"object","required":["kind"],"properties":{"kind":{"type":"string"}}}),
+                MAX_EVIDENCE_ITEMS
+            )
         }),
         &[
             "schemaVersion",
@@ -2668,7 +2679,18 @@ fn form_snapshot_schema() -> Value {
             "pageId":id(),
             "forms":array(json!({"$ref":"#/$defs/FormDescriptor"}), 64),
             "unownedControls":array(json!({"$ref":"#/$defs/FormControl"}), 512),
-            "truncated":{"type":"boolean"}
+            "truncated":{"type":"boolean"},
+            // Optional: only present when the closed-page rule replayed this
+            // call on the opener after the handle's popup closed. Generic
+            // rather than an `Evidence` `$ref`, like `checkpoint_record`'s
+            // own evidence field -- that union pulls the accessibility and
+            // form-control subsystems into `form_snapshot`'s (and, through
+            // the patched `FormSnapshot` def, `workflow_observe`'s) already
+            // fat output schema, which blew the `tools/list` connect budget.
+            "evidence":array(
+                json!({"type":"object","required":["kind"],"properties":{"kind":{"type":"string"}}}),
+                MAX_EVIDENCE_ITEMS
+            )
         }),
         &[
             "schemaVersion",

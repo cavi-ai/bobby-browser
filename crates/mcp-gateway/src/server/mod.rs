@@ -1227,12 +1227,15 @@ impl Server {
         handle: Option<&str>,
         tool: &str,
     ) -> interface_core::InterfaceResult<Value> {
+        // Only a handle-resolved call can ever need the retry below, which
+        // is the only reason to keep a second copy of either argument
+        // around; a raw-id call passes both straight through uncloned.
+        let Some(handle) = handle else {
+            return self.submit_envelope_once(context, envelope).await;
+        };
         let result = self
             .submit_envelope_once(context.clone(), envelope.clone())
             .await;
-        let Some(handle) = handle else {
-            return result;
-        };
         let Ok(value) = result else {
             return result;
         };
@@ -1330,6 +1333,32 @@ impl Server {
                 .iter()
                 .all(|capability| capabilities.contains(*capability))
         })
+    }
+
+    /// The closed-page rule for a direct `RuntimeInterface` call that
+    /// bypasses `submit_envelope` (`form_snapshot`, and `upload_files`'s
+    /// `controlId` lookup): `error` is what the call already failed with on
+    /// the handle-resolved page. `None` for an unrelated error, a raw-id
+    /// call (`handle: None`), or a handle with no opener left to fall back
+    /// to -- the caller keeps its original error in every one of those
+    /// cases. On a match, rebinds `handle` to the opener (the same mutating
+    /// side effect `submit_envelope`'s rule has, regardless of whether the
+    /// caller retries there or fails outright) and returns it with the
+    /// `popupClosed` evidence to attach.
+    fn closed_page_fallback(
+        &self,
+        handle: Option<&str>,
+        error: &types::InterfaceError,
+    ) -> Option<(types::PageId, types::Evidence)> {
+        if !is_interface_page_not_open_failure(error) {
+            return None;
+        }
+        let (popup_page_id, opener_page_id) = self.workflow_handles.rebind_to_opener(handle?)?;
+        let evidence = types::Evidence::PopupClosed {
+            popup_page_id,
+            opener_page_id: opener_page_id.clone(),
+        };
+        Some((opener_page_id, evidence))
     }
 }
 
@@ -1665,6 +1694,43 @@ fn is_page_not_open_failure(value: &Value) -> bool {
                     .and_then(Value::as_str)
                     .is_some_and(|message| message.contains("browser page is not open"))
         })
+}
+
+/// `form_snapshot`, `context_ask`, and `context_neighbors` bypass
+/// `submit_envelope` -- they call `RuntimeInterface` directly, so a closed
+/// page never reaches the executor's `is_page_not_open_failure` shape.
+/// `PageRuntime::form_snapshot` leases the worker directly and folds any
+/// worker `CommandError` into `RuntimeError::Internal(error.message)`,
+/// which `map_runtime_error` then turns into
+/// `InterfaceErrorCode::Internal` with a `"runtime operation failed: "`
+/// prefix -- the `NotFound` code chromium's `page_missing()` raised does
+/// not survive that fold. Gated on both fields, like
+/// `is_page_not_open_failure`, so an unrelated internal failure worded
+/// differently is never mistaken for this one.
+fn is_interface_page_not_open_failure(error: &types::InterfaceError) -> bool {
+    error.code == types::InterfaceErrorCode::Internal
+        && error.message.contains("browser page is not open")
+}
+
+/// `CommandOutcome::Failed`-shaped, for a prerequisite call (`upload_files`'
+/// `controlId` lookup) that hit the closed-page rule. Never retried --
+/// it is a prerequisite of a mutating command -- but built with the same
+/// `code`/`message` a real closed target's `notFound` carries and the
+/// `popupClosed` evidence attached, so `tool_success`'s existing scan
+/// attaches `popup_closed_repair` exactly like a failed mutating envelope
+/// would.
+fn closed_page_prerequisite_failure(evidence: types::Evidence) -> Value {
+    to_json(types::CommandOutcome::Failed {
+        command_id: types::CommandId::new(),
+        error: types::CommandError {
+            code: types::ErrorCode::NotFound,
+            message: "browser page is not open".to_owned(),
+            layer: types::ErrorLayer::Driver,
+            retryable: false,
+        },
+        evidence: vec![evidence],
+    })
+    .expect("CommandOutcome always serializes")
 }
 
 /// `Evidence::PopupClosed` as MCP output JSON, built from the real type so
