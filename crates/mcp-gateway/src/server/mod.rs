@@ -136,6 +136,103 @@ fn control_identity(hints: &types::IntentHints) -> Option<ControlIdentity> {
     })
 }
 
+/// True for a form-snapshot control id (`control-{index}`, minted in
+/// `worker-pool/src/form_snapshot.rs` and `firefox-companion/src/worker.rs`):
+/// the literal prefix followed by one or more ASCII digits.
+fn looks_like_control_id(value: &str) -> bool {
+    value
+        .strip_prefix("control-")
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+/// Every hint besides `accessibleName` is unset. Shared by the two callers:
+/// `intent_complete_form` additionally requires `accessibleName` unset (a
+/// field's `name` is the locator, not its hints); `intent_fill` instead reads
+/// `accessibleName` itself as the possible control id.
+fn hints_locator_empty_besides_name(hints: &types::IntentHints) -> bool {
+    hints.role.is_none()
+        && hints.near_text.is_none()
+        && hints.ordinal.is_none()
+        && hints.frame_path.is_empty()
+        && hints.shadow_path.is_empty()
+        && !hints.allow_best_match
+}
+
+/// True when hints carry nothing the intent-engine compiler would use to
+/// locate a control -- the same condition (mirrored, not shared, since it
+/// lives in a different crate) as `targeting_hints_are_empty` in
+/// `intent-engine/src/compiler.rs`, under which the compiler falls back to
+/// `accessible_name = name`.
+fn hints_are_empty(hints: &types::IntentHints) -> bool {
+    hints.accessible_name.is_none() && hints_locator_empty_besides_name(hints)
+}
+
+/// Resolve a form-snapshot control id to the semantic target its snapshot
+/// carries. Shared by `upload_files` (selector/target resolution) and the
+/// intent dispatch arms (hint back-fill): both need the same
+/// `controlId` -> `TargetSpec` lookup across `forms[].controls` and
+/// `unowned_controls`.
+fn control_target_from_snapshot(
+    snapshot: &types::FormSnapshot,
+    control_id: &str,
+) -> Option<types::TargetSpec> {
+    let control_target = snapshot
+        .forms
+        .iter()
+        .flat_map(|form| form.controls.iter())
+        .chain(snapshot.unowned_controls.iter())
+        .find(|control| control.id == control_id)
+        .and_then(|control| control.target.as_ref())?;
+    Some(types::TargetSpec {
+        role: Some(control_target.role.clone()),
+        accessible_name: Some(control_target.accessible_name.clone()),
+        ordinal: control_target.ordinal,
+        frame_path: control_target
+            .frame_path
+            .iter()
+            .map(|segment| {
+                Box::new(types::TargetSpec {
+                    role: Some(segment.role.clone()),
+                    accessible_name: Some(segment.accessible_name.clone()),
+                    ordinal: segment.ordinal,
+                    ..Default::default()
+                })
+            })
+            .collect(),
+        shadow_path: control_target
+            .shadow_path
+            .iter()
+            .map(|segment| {
+                Box::new(types::TargetSpec {
+                    role: Some(segment.role.clone()),
+                    accessible_name: Some(segment.accessible_name.clone()),
+                    ordinal: segment.ordinal,
+                    ..Default::default()
+                })
+            })
+            .collect(),
+        ..Default::default()
+    })
+}
+
+/// Copy a resolved control target onto intent hints, unboxing `TargetSpec`'s
+/// frame/shadow segments to `IntentHints`'s own (unboxed) `Vec<TargetSpec>`.
+fn apply_control_target(hints: &mut types::IntentHints, target: types::TargetSpec) {
+    hints.role = target.role;
+    hints.accessible_name = target.accessible_name;
+    hints.ordinal = target.ordinal;
+    hints.frame_path = target
+        .frame_path
+        .into_iter()
+        .map(|segment| *segment)
+        .collect();
+    hints.shadow_path = target
+        .shadow_path
+        .into_iter()
+        .map(|segment| *segment)
+        .collect();
+}
+
 /// MCP JSON-RPC server for one authenticated principal.
 ///
 /// Holds the runtime interface, capability guard, event store, and tool catalog.
@@ -993,6 +1090,16 @@ impl Server {
                     .map(str::to_owned)
             })
             .flatten();
+        // `IntentActionMismatch` on a resolved file control
+        // (`file_control_failure` in intent-engine): the generic per-code
+        // repair says "re-check the role", which is wrong here, so this
+        // message prefix earns its own repair the same way candidateLimit
+        // and an aborted navigation do above.
+        let file_control = value
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.starts_with("target resolves to a file input;"));
         let repair = if status == Some("needsReconciliation") {
             Some(crate::repair::reconciliation_repair())
         } else if candidate_limit {
@@ -1001,6 +1108,8 @@ impl Server {
             Some(crate::repair::navigation_aborted_repair())
         } else if let Some(opener_page_id) = popup_closed_opener.as_deref() {
             Some(crate::repair::popup_closed_repair(opener_page_id))
+        } else if file_control {
+            Some(crate::repair::file_control_repair())
         } else {
             value
                 .get("error")
@@ -1756,6 +1865,19 @@ fn push_evidence(value: &mut Value, evidence: Value) {
     }
 }
 
+/// The agent-facing `-32602` message: hosts (Claude Code among them) render
+/// only `error.message`, so a `reason` parked in `data` alone reaches no one.
+/// The reason is always named, and the repair action follows it when
+/// `repair_for_protocol_reason` has one. Built only from the canned reason
+/// string and repair action -- never from caller-supplied argument values,
+/// ids, or paths (`crates/mcp-gateway/tests/redaction.rs` is the gate).
+fn invalid_params_message(reason: &str, repair: Option<&Value>) -> String {
+    match repair.and_then(|repair| repair["action"].as_str()) {
+        Some(action) => format!("Invalid params ({reason}): {action}"),
+        None => format!("Invalid params ({reason})"),
+    }
+}
+
 /// `-32602` with the schema keyword and JSON Pointer that rejected the call.
 ///
 /// `pointer` and `constraint` must describe the schema, never the submitted
@@ -1769,23 +1891,34 @@ fn invalid_params(
     arguments: &Value,
     violation: Option<crate::schema::SchemaViolation>,
 ) -> Value {
+    let mut message = None;
     let data = violation.map(|violation| {
         let mut data = json!({
             "reason":"schemaViolation",
             "pointer":violation.pointer,
             "constraint":violation.constraint
         });
-        if let Some(mut repair) = crate::repair::repair_for_protocol_reason("schemaViolation") {
-            if let Some(migration) = crate::repair::legacy_fill_shape_migration(tool, arguments) {
-                if let Some(action) = repair["action"].as_str() {
-                    repair["action"] = json!(format!("{action} {migration}"));
+        let repair =
+            crate::repair::repair_for_protocol_reason("schemaViolation").map(|mut repair| {
+                if let Some(migration) = crate::repair::legacy_fill_shape_migration(tool, arguments)
+                {
+                    if let Some(action) = repair["action"].as_str() {
+                        repair["action"] = json!(format!("{action} {migration}"));
+                    }
                 }
-            }
+                repair
+            });
+        message = Some(invalid_params_message("schemaViolation", repair.as_ref()));
+        if let Some(repair) = repair {
             data["repair"] = repair;
         }
         data
     });
-    error(id, INVALID_PARAMS, "Invalid params", data)
+    let mut response = error(id, INVALID_PARAMS, "Invalid params", data);
+    if let Some(message) = message {
+        response["error"]["message"] = json!(message);
+    }
+    response
 }
 
 /// `-32602` for a rejection with no single offending field: a body that passed
@@ -1793,10 +1926,14 @@ fn invalid_params(
 /// idempotency key.
 fn invalid_params_reason(id: Value, reason: &'static str) -> Value {
     let mut data = json!({"reason":reason});
-    if let Some(repair) = crate::repair::repair_for_protocol_reason(reason) {
+    let repair = crate::repair::repair_for_protocol_reason(reason);
+    let message = invalid_params_message(reason, repair.as_ref());
+    if let Some(repair) = repair {
         data["repair"] = repair;
     }
-    error(id, INVALID_PARAMS, "Invalid params", Some(data))
+    let mut response = error(id, INVALID_PARAMS, "Invalid params", Some(data));
+    response["error"]["message"] = json!(message);
+    response
 }
 
 fn job_port_error_response(id: Value, port_error: crate::jobs::JobPortError) -> Value {
@@ -2324,5 +2461,103 @@ mod tests {
     #[test]
     fn messages_without_the_marker_carry_no_diagnostic() {
         assert!(browser_launch_diagnostic("runtime interface request failed").is_none());
+    }
+
+    /// Hosts (Claude Code among them) render only `error.message`; the reason
+    /// and repair action must be readable there, not only in `error.data`.
+    #[test]
+    fn invalid_params_reason_message_carries_reason_and_repair_action() {
+        for (reason, action) in [
+            (
+                "malformedArguments",
+                "Re-read the tool's inputSchema and description; a bound checked outside the schema failed.",
+            ),
+            (
+                "deadlineOutOfRange",
+                "Set the envelope's deadline within the allowed window (not past, not over 300,000 ms out) and resubmit.",
+            ),
+            (
+                "invalidIdempotencyKey",
+                "Send a well-formed key, or omit the field; the call had no effect.",
+            ),
+            (
+                "workflowBindingConflict",
+                "Use the workflowHandle alone for page work, or omit it and send the complete explicit ID set.",
+            ),
+            (
+                "unknownWorkflowHandle",
+                "The handle is malformed, unknown, or evicted; use explicit IDs to inspect or close the workflow's resources, then call workflow_start for a new handle.",
+            ),
+        ] {
+            let response = invalid_params_reason(json!(1), reason);
+            assert_eq!(
+                response["error"]["message"],
+                json!(format!("Invalid params ({reason}): {action}")),
+                "{response}"
+            );
+            // error.data keeps carrying reason/repair unchanged, for clients
+            // that already read it.
+            assert_eq!(response["error"]["data"]["reason"], json!(reason));
+            assert_eq!(
+                response["error"]["data"]["repair"],
+                crate::repair::repair_for_protocol_reason(reason).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_params_reason_with_no_known_repair_still_names_the_reason() {
+        assert!(crate::repair::repair_for_protocol_reason("controlIdNotFound").is_none());
+        let response = invalid_params_reason(json!(2), "controlIdNotFound");
+        assert_eq!(
+            response["error"]["message"],
+            json!("Invalid params (controlIdNotFound)")
+        );
+        assert_eq!(
+            response["error"]["data"]["reason"],
+            json!("controlIdNotFound")
+        );
+        assert!(response["error"]["data"]["repair"].is_null());
+    }
+
+    #[test]
+    fn invalid_params_schema_violation_message_carries_reason_and_repair_action() {
+        let response = invalid_params(
+            json!(3),
+            "click",
+            &json!({}),
+            Some(crate::schema::SchemaViolation {
+                pointer: "/target".to_owned(),
+                constraint: "required",
+            }),
+        );
+        assert_eq!(
+            response["error"]["message"],
+            json!(
+                "Invalid params (schemaViolation): Fix the value at error.data.pointer; error.data.constraint names the keyword it violated."
+            )
+        );
+        assert_eq!(
+            response["error"]["data"]["reason"],
+            json!("schemaViolation")
+        );
+        assert_eq!(response["error"]["data"]["pointer"], json!("/target"));
+        assert_eq!(response["error"]["data"]["constraint"], json!("required"));
+        assert_eq!(
+            response["error"]["data"]["repair"]["action"],
+            json!(
+                "Fix the value at error.data.pointer; error.data.constraint names the keyword it violated."
+            )
+        );
+    }
+
+    /// No `SchemaViolation` means no reason is known, so the message must
+    /// stay the untouched bare string rather than naming a reason that was
+    /// never diagnosed.
+    #[test]
+    fn invalid_params_with_no_violation_stays_bare() {
+        let response = invalid_params(json!(4), "click", &json!({}), None);
+        assert_eq!(response["error"]["message"], json!("Invalid params"));
+        assert!(response["error"]["data"].is_null());
     }
 }

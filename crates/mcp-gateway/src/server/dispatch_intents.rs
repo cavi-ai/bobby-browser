@@ -58,9 +58,35 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
+                let mut hints = input.hints.unwrap_or_default();
+                let control_id = hints
+                    .accessible_name
+                    .as_deref()
+                    .filter(|name| looks_like_control_id(name))
+                    .map(str::to_owned);
+                if let Some(control_id) = control_id {
+                    if hints_locator_empty_besides_name(&hints) {
+                        if let Ok(snapshot) = self
+                            .runtime
+                            .form_snapshot(
+                                context.clone(),
+                                input.session_id.clone(),
+                                input.page_id.clone(),
+                                None,
+                            )
+                            .await
+                        {
+                            if let Some(target) =
+                                control_target_from_snapshot(&snapshot, &control_id)
+                            {
+                                apply_control_target(&mut hints, target);
+                            }
+                        }
+                    }
+                }
                 let intent = types::IntentCommand::Fill(types::FillIntent {
                     purpose: input.purpose,
-                    hints: input.hints.unwrap_or_default(),
+                    hints,
                     value: input.value,
                 });
                 match apply_idempotency_key(&mut context, input.idempotency_key) {
@@ -79,7 +105,7 @@ impl Server {
                     .await
             }
             "intent_complete_form" => {
-                let input: IntentCompleteFormArgs = match bounded_parse(call.arguments) {
+                let mut input: IntentCompleteFormArgs = match bounded_parse(call.arguments) {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
@@ -89,6 +115,36 @@ impl Server {
                     .iter()
                     .map(|field| field.name.clone())
                     .collect::<Vec<_>>();
+                // A field addressed by a form-snapshot controlId (as its bare
+                // `name`, with no other hints) needs the control's real
+                // target -- otherwise the compiler falls back to
+                // `accessible_name = name`, and nothing on the page is
+                // accessibly named "control-1". One snapshot serves every
+                // qualifying field in the call; zero when none qualify.
+                if input.fields.iter().any(|field| {
+                    hints_are_empty(&field.hints) && looks_like_control_id(&field.name)
+                }) {
+                    if let Ok(snapshot) = self
+                        .runtime
+                        .form_snapshot(
+                            context.clone(),
+                            input.session_id.clone(),
+                            input.page_id.clone(),
+                            None,
+                        )
+                        .await
+                    {
+                        for field in &mut input.fields {
+                            if hints_are_empty(&field.hints) && looks_like_control_id(&field.name) {
+                                if let Some(target) =
+                                    control_target_from_snapshot(&snapshot, &field.name)
+                                {
+                                    apply_control_target(&mut field.hints, target);
+                                }
+                            }
+                        }
+                    }
+                }
                 let intent = types::IntentCommand::CompleteForm(types::CompleteFormIntent {
                     purpose: input.purpose,
                     fields: input.fields,

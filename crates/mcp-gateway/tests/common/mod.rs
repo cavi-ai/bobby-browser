@@ -82,6 +82,13 @@ pub struct LiveProbe {
     /// without a real Chrome target, for the closed-page rule's fake-runtime
     /// tests.
     pub closed_page_id: std::sync::Mutex<Option<PageId>>,
+    /// Controls a test wants `form_snapshot` to hand back, e.g. to give a
+    /// `controlId`-addressed intent field a real target to resolve.
+    pub form_snapshot_controls: std::sync::Mutex<Vec<types::FormControl>>,
+    /// The target passed to the most recent `collect_candidates` call --
+    /// what the intent compiler actually resolved hints to, so a test can
+    /// tell a real control target apart from the bare-name fallback.
+    pub last_collect_candidates_target: std::sync::Mutex<Option<types::TargetSpec>>,
 }
 
 /// Mirrors `worker_pool::chromium`'s `page_missing()`: the exact
@@ -366,7 +373,12 @@ impl BrowserWorker for LiveWorker {
                 schema_version: types::FORM_SNAPSHOT_SCHEMA_VERSION,
                 page_id: page_id.clone(),
                 forms: Vec::new(),
-                unowned_controls: Vec::new(),
+                unowned_controls: self
+                    .probe
+                    .form_snapshot_controls
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
                 truncated: false,
             },
         }])
@@ -375,8 +387,13 @@ impl BrowserWorker for LiveWorker {
     async fn collect_candidates(
         &self,
         _: &PageId,
-        _: &types::TargetSpec,
+        target: &types::TargetSpec,
     ) -> Result<Vec<dom_engine::Candidate>, CommandError> {
+        *self
+            .probe
+            .last_collect_candidates_target
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(target.clone());
         // No DOM behind the fake: intents that must resolve a target fail
         // with the engine's own domain error (e.g. targetNotFound), which is
         // exactly the deterministic terminal outcome tests assert against.

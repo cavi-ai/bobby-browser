@@ -4,7 +4,10 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use dom_engine::{Candidate, CandidateState};
-use intent_engine::{compatible, IntentBrowser, IntentEngine, IntentOutcome, VisionContext};
+use intent_engine::{
+    compatible, IntentBrowser, IntentEngine, IntentOutcome, VisionAssist, VisionContext,
+    VisionProposal, VisionProposeRequest,
+};
 use types::{
     CaptureScreenshotCommand, ClickCommand, CommandError, CompleteFormField, CompleteFormIntent,
     ControlAction, ControlActionCommand, ControlActionEvidence, ErrorCode, Evidence, FillIntent,
@@ -797,6 +800,200 @@ async fn fill_files_on_textbox_is_action_mismatch() {
     let record = record.expect("IntentExecution on mismatch");
     assert_eq!(record.verification, "actionMismatch");
     assert_eq!(record.resolution_path, IntentResolutionPath::Deterministic);
+}
+
+/// A resolved file control gets its own typed message instead of the generic
+/// action-mismatch text: the fix is a different tool, not a different role.
+#[tokio::test]
+async fn fill_text_on_a_file_control_names_upload_files_instead_of_a_generic_mismatch() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![file_input("Resume")]),
+        calls: Arc::clone(&calls),
+        type_text_evidence: Vec::new(),
+        upload_evidence: Vec::new(),
+    };
+    let page_id = PageId::new();
+    let outcome = IntentEngine::execute(
+        &fill(
+            "Resume",
+            Some("textbox"),
+            ControlAction::SetText {
+                value: "resume.pdf".into(),
+                clear_first: true,
+            },
+        ),
+        &page_id,
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    let IntentOutcome::Failed { error, evidence } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::IntentActionMismatch);
+    assert!(error.message.contains("upload_files"), "{}", error.message);
+    assert!(error.message.contains("controlId"), "{}", error.message);
+    {
+        let log = calls.lock().expect("call log");
+        assert!(log.type_text.is_empty());
+        assert!(log.upload_files.is_empty());
+    }
+    let record = evidence.iter().find_map(|item| match item {
+        Evidence::IntentExecution { record } => Some(record),
+        _ => None,
+    });
+    let record = record.expect("IntentExecution on file control");
+    assert_eq!(record.verification, "fileControlRequiresUpload");
+    assert_eq!(record.resolution_path, IntentResolutionPath::Deterministic);
+}
+
+/// A native file input is routinely hidden behind a styled "choose file"
+/// button, so the deterministic resolver's visible-only pass finds nothing
+/// for it -- reproducing the observed bug (`workflow_observe` lists a `File`
+/// control, `intent_complete_form` targets it, the resolver says
+/// `targetNotFound`). That must still fail typed before any vision fallback,
+/// not escalate: every browser method the escalation path could reach
+/// panics, so a regression that removes the early check fails loudly here
+/// rather than quietly changing only the message.
+#[tokio::test]
+async fn complete_form_on_a_hidden_file_control_fails_before_vision_with_the_upload_repair() {
+    let mut hidden_file = file_input("Resume");
+    hidden_file.state.visible = false;
+    let browser = FileControlOnlyBrowser {
+        candidate: hidden_file,
+    };
+
+    let outcome = IntentEngine::execute(
+        &IntentCommand::CompleteForm(CompleteFormIntent {
+            purpose: "apply".into(),
+            fields: vec![CompleteFormField {
+                name: "resume".into(),
+                purpose: "attach resume".into(),
+                hints: IntentHints {
+                    role: Some("textbox".into()),
+                    accessible_name: Some("Resume".into()),
+                    ..IntentHints::default()
+                },
+                value: ControlAction::SetText {
+                    value: "resume.pdf".into(),
+                    clear_first: true,
+                },
+            }],
+        }),
+        &PageId::new(),
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(Arc::new(PanickingVision)),
+            proposals: None,
+            defer_escalation: false,
+            prompt_context: None,
+            corpus: None,
+            context_store: None,
+        },
+    )
+    .await;
+
+    let IntentOutcome::Failed { error, .. } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::IntentActionMismatch);
+    assert!(error.message.contains("upload_files"), "{}", error.message);
+    assert!(error.message.contains("controlId"), "{}", error.message);
+}
+
+/// Every method a vision escalation or a deterministic act could reach
+/// panics; only `collect_candidates` answers. A test using this browser
+/// passes only if the file-control check returns before touching any of
+/// them.
+struct FileControlOnlyBrowser {
+    candidate: Candidate,
+}
+
+#[async_trait]
+impl IntentBrowser for FileControlOnlyBrowser {
+    async fn collect_candidates(
+        &self,
+        _page_id: &PageId,
+        _target: &TargetSpec,
+    ) -> Result<Vec<Candidate>, CommandError> {
+        Ok(vec![self.candidate.clone()])
+    }
+
+    async fn click(
+        &self,
+        _page_id: &PageId,
+        _command: &ClickCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        panic!("click must not run: a file control must fail before any act");
+    }
+
+    async fn click_xy(
+        &self,
+        _page_id: &PageId,
+        _x: f64,
+        _y: f64,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        panic!("click_xy must not run: a file control must fail before any act");
+    }
+
+    async fn type_text(
+        &self,
+        _page_id: &PageId,
+        _command: &TypeTextCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        panic!("type_text must not run: a file control must fail before any act");
+    }
+
+    async fn upload_files(
+        &self,
+        _page_id: &PageId,
+        _command: &UploadFilesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        panic!(
+            "upload_files must not run: intent_complete_form must fail typed, \
+             not act on a file control itself"
+        );
+    }
+
+    async fn control_action(
+        &self,
+        _page_id: &PageId,
+        _command: &ControlActionCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        panic!("control_action must not run: a file control must fail before any act");
+    }
+
+    async fn wait_for(
+        &self,
+        _page_id: &PageId,
+        _command: &WaitForCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        panic!("wait_for must not run: a file control must fail before any act");
+    }
+
+    async fn capture_screenshot(
+        &self,
+        _page_id: &PageId,
+        _command: &CaptureScreenshotCommand,
+    ) -> Result<(Vec<u8>, Vec<Evidence>), CommandError> {
+        panic!("vision must not run: a file control must fail deterministically first");
+    }
+}
+
+struct PanickingVision;
+
+#[async_trait]
+impl VisionAssist for PanickingVision {
+    async fn propose(
+        &self,
+        _request: VisionProposeRequest,
+    ) -> Result<VisionProposal, CommandError> {
+        panic!("vision must not run: a file control must fail deterministically first");
+    }
 }
 
 #[tokio::test]

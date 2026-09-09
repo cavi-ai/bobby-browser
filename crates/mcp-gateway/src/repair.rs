@@ -41,6 +41,17 @@ pub(crate) fn popup_closed_repair(opener_page_id: &str) -> Value {
     ))
 }
 
+/// Repair for a fill or select intent (`intent_fill`, `intent_complete_form`)
+/// that resolved to a file control (`ErrorCode::IntentActionMismatch`,
+/// `crates/intent-engine/src/engine.rs`'s `file_control_failure`). The
+/// generic `intentActionMismatch` advice ("re-check the role") does not
+/// apply here: no role or kind adjustment makes a fill act on a file input,
+/// only a different tool. The controlId itself is per-instance and already
+/// in the message, not a canned string this repair can carry.
+pub(crate) fn file_control_repair() -> Value {
+    repair("Do not retry a fill or select intent on this target; call upload_files (or control_action with a setFiles action) using the controlId from workflow_observe (includeForms:true) or form_snapshot.")
+}
+
 pub(crate) fn candidate_limit_repair() -> Value {
     repair("Narrow the target using role + accessibleName, label, testId, CSS, or ordinal, then retry once; the error lists the first bounded matches and the exact count/limit.")
 }
@@ -274,6 +285,19 @@ mod tests {
             .to_owned();
         assert!(action.contains("download_url"), "{action}");
         assert!(action.starts_with("Do not retry"), "{action}");
+    }
+
+    #[test]
+    fn file_control_repair_points_at_upload_files_not_a_role_fix() {
+        let action = file_control_repair()["action"].as_str().unwrap().to_owned();
+        assert!(action.contains("upload_files"), "{action}");
+        assert!(action.starts_with("Do not retry"), "{action}");
+        // The generic intentActionMismatch repair below is the wrong advice
+        // for a file control; this one must not repeat it.
+        assert!(
+            !action.contains("Re-check the control's real role"),
+            "{action}"
+        );
     }
 
     #[test]

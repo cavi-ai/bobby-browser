@@ -71,6 +71,11 @@
   `checkpoint_save` / `workflow_recover` only.
 - Explore-loop tool descriptions (`click`, `intent_complete_form`,
   `intent_submit_and_verify`) name `workflowHandle` as the call scope.
+- `intent_complete_form`'s field `name` and `intent_fill`'s `accessibleName`
+  hint accept a `controlId` from `workflow_observe` (`includeForms: true`)
+  or `form_snapshot` as an alternative to a real accessible name: when every
+  other hint is empty, the gateway resolves the id against a form snapshot
+  and fills in the control's own target before compiling the intent.
 
 ### Fixed
 
@@ -85,6 +90,15 @@
   retryable transport-reset failure: after reconnecting to the live browser
   process the runtime checks the worker's page listing, and a missing page
   fails permanently for Replayable and mutating commands alike.
+- JSON-RPC `-32602` responses now carry the rejection reason and repair
+  action in `error.message`, not only in `error.data`: MCP hosts commonly
+  render `error.message` alone, so a bare "Invalid params" repeated with no
+  visible repair. `error.data.reason` / `error.data.repair` are unchanged.
+- `intent_fill` / `intent_complete_form` on a file control (`<input
+  type="file">`) now fails with a typed, deterministic `intentActionMismatch`
+  naming `upload_files` as the repair, instead of a `targetNotFound` that
+  escalated to a vision fallback and came back `visionAssistDenied`. File
+  inputs accept paths only through `upload_files` (or `control_action`).
 
 ## 0.13.0 - 2026-09-04
 
