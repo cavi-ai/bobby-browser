@@ -51,6 +51,14 @@
   top-level tasks/budget when the batch's dimension has no entry. Both
   fields join the provenance uniformity gate, and the baseline path accepts
   a `GAUNTLET_BASELINE_PATH` override.
+- A successful `click_and_wait_for_popup` through a `workflowHandle` rebinds
+  that handle onto the popup and remembers the opener. Once the popup is no
+  longer open, a handle-resolved call that would otherwise fail `notFound`
+  falls back to the opener instead: a read-only call replays there once and
+  reports `Evidence::PopupClosed`; a mutating call still fails, carrying the
+  same evidence and a repair naming the opener page. `page_close
+  {workflowHandle}` on the followed popup returns the handle to the opener
+  the same way, instead of evicting it.
 
 ### Changed
 

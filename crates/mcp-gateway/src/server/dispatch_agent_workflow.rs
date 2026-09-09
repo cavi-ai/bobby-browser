@@ -251,7 +251,10 @@ impl Server {
                 target: input.target,
             }),
         );
-        let observation_outcome = match self.submit_envelope(submit_context, envelope).await {
+        let observation_outcome = match self
+            .submit_envelope(submit_context, envelope, Some(&handle), "workflow_observe")
+            .await
+        {
             Ok(outcome) => outcome,
             Err(error) => return interface_error_response(id, error),
         };
@@ -490,6 +493,7 @@ impl Server {
             session_id: session.id.clone(),
             page_id: page.id.clone(),
             workflow_id: workflow_id.clone(),
+            opener_page_id: None,
         };
         match reservation.publish_with_supervisor(binding, published_sender) {
             Ok(()) => success_response,

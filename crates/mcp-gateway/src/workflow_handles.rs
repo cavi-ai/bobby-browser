@@ -82,6 +82,12 @@ pub(crate) struct WorkflowBinding {
     pub(crate) session_id: types::SessionId,
     pub(crate) page_id: types::PageId,
     pub(crate) workflow_id: types::WorkflowId,
+    /// Set only while `page_id` names a popup a successful
+    /// `click_and_wait_for_popup` follow rebound this handle onto. Names the
+    /// page to fall back to once that popup is no longer open. `None` for
+    /// every binding that was never rebound this way, and cleared again as
+    /// soon as the fallback is used (successful retry or failed-with-repair).
+    pub(crate) opener_page_id: Option<types::PageId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -207,20 +213,23 @@ impl WorkflowHandles {
     ///
     /// Only tools in `WORKFLOW_SCOPE_TOOLS` opt into this transformation. All
     /// other calls stay untouched so their existing schema remains the sole
-    /// source of rejection for an unexpected `workflowHandle` field.
+    /// source of rejection for an unexpected `workflowHandle` field. The
+    /// second element of a successful return is the handle that was resolved,
+    /// when the call used one -- callers need it to apply the closed-page
+    /// rule; a raw-id call carries `None` and is never touched by that rule.
     pub(crate) fn normalize_arguments(
         &self,
         tool: &str,
         arguments: &Value,
-    ) -> Result<Value, WorkflowHandleError> {
+    ) -> Result<(Value, Option<String>), WorkflowHandleError> {
         let Some(scope) = workflow_scope_for_tool(tool) else {
-            return Ok(arguments.clone());
+            return Ok((arguments.clone(), None));
         };
         let Some(object) = arguments.as_object() else {
-            return Ok(arguments.clone());
+            return Ok((arguments.clone(), None));
         };
         let Some(handle) = object.get("workflowHandle") else {
-            return Ok(arguments.clone());
+            return Ok((arguments.clone(), None));
         };
 
         if ["sessionId", "pageId", "workflowId"]
@@ -253,21 +262,85 @@ impl WorkflowHandles {
                 serde_json::json!(binding.workflow_id),
             );
         }
-        Ok(Value::Object(normalized))
+        Ok((Value::Object(normalized), Some(handle.to_owned())))
     }
 
     pub(crate) fn remove_session(&self, session_id: &types::SessionId) -> usize {
         self.remove_bindings(|binding| &binding.session_id == session_id)
     }
 
+    /// A page closed. A binding currently on that exact page falls back to
+    /// its recorded opener instead of being evicted -- otherwise closing a
+    /// followed popup through its own handle (`page_close {workflowHandle}`)
+    /// would strand the handle as `unknownWorkflowHandle` instead of
+    /// returning it to the opener, defeating the whole point of following.
+    /// A binding with no opener recorded is evicted as before. Any *other*
+    /// binding whose opener was this exact page has that opener cleared: it
+    /// is gone too, so there is nothing left to fall back to.
     pub(crate) fn remove_page(
         &self,
         session_id: &types::SessionId,
         page_id: &types::PageId,
     ) -> usize {
-        self.remove_bindings(|binding| {
-            &binding.session_id == session_id && &binding.page_id == page_id
-        })
+        let mut state = self.lock_state();
+        let mut affected = 0usize;
+        let mut evicted = BTreeSet::new();
+        for (handle, binding) in state.bindings.iter_mut() {
+            if &binding.session_id != session_id {
+                continue;
+            }
+            if &binding.page_id == page_id {
+                if let Some(opener_page_id) = binding.opener_page_id.take() {
+                    binding.page_id = opener_page_id;
+                    affected += 1;
+                } else {
+                    evicted.insert(handle.clone());
+                }
+            } else if binding.opener_page_id.as_ref() == Some(page_id) {
+                binding.opener_page_id = None;
+                affected += 1;
+            }
+        }
+        if !evicted.is_empty() {
+            state.bindings.retain(|handle, _| !evicted.contains(handle));
+            state.lru.retain(|handle| !evicted.contains(handle));
+            affected += evicted.len();
+        }
+        affected
+    }
+
+    /// A successful `click_and_wait_for_popup` through `handle` follows it
+    /// onto the popup: `page_id` becomes the popup and `opener_page_id`
+    /// remembers the page to fall back to once the popup is no longer open.
+    /// A handle nobody holds by the time the click completes (reset, or
+    /// evicted by LRU pressure) is a silent no-op: the popup still opened,
+    /// there is just no longer a handle tracking it.
+    pub(crate) fn rebind_popup(
+        &self,
+        handle: &str,
+        popup_page_id: types::PageId,
+        opener_page_id: types::PageId,
+    ) {
+        let mut state = self.lock_state();
+        if let Some(binding) = state.bindings.get_mut(handle) {
+            binding.page_id = popup_page_id;
+            binding.opener_page_id = Some(opener_page_id);
+        }
+    }
+
+    /// The closed-page rule's rebind. If `handle` is bound with a recorded
+    /// opener, falls back to it: `page_id` becomes the opener and
+    /// `opener_page_id` clears, so a second closed-page failure on the same
+    /// handle finds no further fallback. Returns the `(popup, opener)` pair
+    /// for the caller's `popupClosed` evidence, or `None` when there is no
+    /// opener to fall back to -- an ordinary raw-bound page, or a fallback
+    /// this handle already spent.
+    pub(crate) fn rebind_to_opener(&self, handle: &str) -> Option<(types::PageId, types::PageId)> {
+        let mut state = self.lock_state();
+        let binding = state.bindings.get_mut(handle)?;
+        let opener_page_id = binding.opener_page_id.take()?;
+        let popup_page_id = std::mem::replace(&mut binding.page_id, opener_page_id.clone());
+        Some((popup_page_id, opener_page_id))
     }
 
     pub(crate) fn reconcile_sessions(&self, sessions: &[types::SessionState]) -> usize {
@@ -451,6 +524,7 @@ mod tests {
             session_id,
             page_id,
             workflow_id,
+            opener_page_id: None,
         }
     }
 
@@ -517,7 +591,7 @@ mod tests {
         let (handle, _) = publish(reservation, expected.clone());
 
         for (tool, scope) in WORKFLOW_SCOPE_TOOLS {
-            let normalized = registry
+            let (normalized, resolved_handle) = registry
                 .normalize_arguments(tool, &json!({"workflowHandle": handle}))
                 .unwrap_or_else(|error| panic!("{tool}: {error:?}"));
             assert_eq!(normalized["sessionId"], json!(expected.session_id));
@@ -530,6 +604,7 @@ mod tests {
                     .as_ref(),
                 "{tool}"
             );
+            assert_eq!(resolved_handle, Some(handle.clone()), "{tool}");
         }
     }
 
@@ -596,13 +671,13 @@ mod tests {
         });
         assert_eq!(
             registry.normalize_arguments("navigate", &explicit),
-            Ok(explicit.clone())
+            Ok((explicit.clone(), None))
         );
 
         let not_allowlisted = json!({"workflowHandle":"wf_0123456789abcdef0123456789abcdef"});
         assert_eq!(
             registry.normalize_arguments("session_create", &not_allowlisted),
-            Ok(not_allowlisted)
+            Ok((not_allowlisted, None))
         );
     }
 
@@ -845,6 +920,144 @@ mod tests {
         );
         assert_lru_matches_bindings(&registry);
         assert!(registry.resolve(&b_page_a).is_ok());
+    }
+
+    #[test]
+    fn rebind_popup_follows_the_handle_onto_the_popup_and_records_the_opener() {
+        let registry = registry();
+        let session = session_id(1000);
+        let opener = page_id(1001);
+        let popup = page_id(1002);
+        let reservation = registry.reserve().unwrap();
+        let generation = reservation.generation;
+        let (handle, _) = publish(
+            reservation,
+            binding(generation, session, opener.clone(), workflow_id(1003)),
+        );
+
+        registry.rebind_popup(&handle, popup.clone(), opener.clone());
+
+        let bound = registry.resolve(&handle).unwrap();
+        assert_eq!(bound.page_id, popup);
+        assert_eq!(bound.opener_page_id, Some(opener));
+    }
+
+    #[test]
+    fn rebind_popup_on_a_handle_nobody_holds_is_a_silent_no_op() {
+        let registry = registry();
+        registry.rebind_popup(
+            "wf_0123456789abcdef0123456789abcdef",
+            page_id(1),
+            page_id(2),
+        );
+        assert_eq!(
+            registry.resolve("wf_0123456789abcdef0123456789abcdef"),
+            Err(WorkflowHandleError::Unknown)
+        );
+    }
+
+    #[test]
+    fn rebind_to_opener_falls_back_and_then_finds_nothing_left_to_fall_back_to() {
+        let registry = registry();
+        let session = session_id(1010);
+        let opener = page_id(1011);
+        let popup = page_id(1012);
+        let reservation = registry.reserve().unwrap();
+        let generation = reservation.generation;
+        let (handle, _) = publish(
+            reservation,
+            binding(generation, session, opener.clone(), workflow_id(1013)),
+        );
+        registry.rebind_popup(&handle, popup.clone(), opener.clone());
+
+        let fallback = registry.rebind_to_opener(&handle);
+        assert_eq!(fallback, Some((popup, opener.clone())));
+        let bound = registry.resolve(&handle).unwrap();
+        assert_eq!(bound.page_id, opener);
+        assert_eq!(bound.opener_page_id, None);
+
+        // The fallback is spent: a second closed-page failure on the same
+        // handle has nowhere left to fall back to.
+        assert_eq!(registry.rebind_to_opener(&handle), None);
+    }
+
+    #[test]
+    fn rebind_to_opener_is_a_no_op_for_a_binding_with_no_recorded_opener() {
+        let registry = registry();
+        let reservation = registry.reserve().unwrap();
+        let generation = reservation.generation;
+        let (handle, _) = publish(
+            reservation,
+            binding(
+                generation,
+                session_id(1020),
+                page_id(1021),
+                workflow_id(1022),
+            ),
+        );
+
+        assert_eq!(registry.rebind_to_opener(&handle), None);
+        assert!(registry.resolve(&handle).unwrap().opener_page_id.is_none());
+    }
+
+    #[test]
+    fn remove_page_on_a_followed_popup_returns_the_handle_to_the_opener_instead_of_evicting() {
+        let registry = registry();
+        let session = session_id(1030);
+        let opener = page_id(1031);
+        let popup = page_id(1032);
+        let reservation = registry.reserve().unwrap();
+        let generation = reservation.generation;
+        let (handle, _) = publish(
+            reservation,
+            binding(
+                generation,
+                session.clone(),
+                opener.clone(),
+                workflow_id(1033),
+            ),
+        );
+        registry.rebind_popup(&handle, popup.clone(), opener.clone());
+
+        assert_eq!(registry.remove_page(&session, &popup), 1);
+
+        let bound = registry.resolve(&handle).expect(
+            "closing the followed popup must return the handle to the opener, not evict it",
+        );
+        assert_eq!(bound.page_id, opener);
+        assert_eq!(bound.opener_page_id, None);
+    }
+
+    #[test]
+    fn remove_page_on_the_opener_clears_a_dangling_fallback_without_evicting_the_live_popup() {
+        let registry = registry();
+        let session = session_id(1040);
+        let opener = page_id(1041);
+        let popup = page_id(1042);
+        let reservation = registry.reserve().unwrap();
+        let generation = reservation.generation;
+        let (handle, _) = publish(
+            reservation,
+            binding(
+                generation,
+                session.clone(),
+                opener.clone(),
+                workflow_id(1043),
+            ),
+        );
+        registry.rebind_popup(&handle, popup.clone(), opener.clone());
+
+        // The opener closes while the handle is still following the popup.
+        assert_eq!(registry.remove_page(&session, &opener), 1);
+
+        let bound = registry
+            .resolve(&handle)
+            .expect("the popup is still open; only its dangling fallback should clear");
+        assert_eq!(bound.page_id, popup);
+        assert_eq!(
+            bound.opener_page_id, None,
+            "the opener is gone, so there is nothing left to fall back to"
+        );
     }
 
     #[test]

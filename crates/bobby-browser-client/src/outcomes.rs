@@ -301,6 +301,16 @@ pub enum Evidence {
         url: String,
         title: String,
     },
+    /// A handle-resolved call found its bound page no longer open (a popup
+    /// the handle was following, since closed) and fell back to the opener
+    /// the earlier `click_and_wait_for_popup` recorded. `popup_page_id` is
+    /// the page that is now gone; `opener_page_id` is the page the handle is
+    /// bound to going forward. Carried on a completed read-only retry, or
+    /// on the original `failed` outcome when the call was mutating.
+    PopupClosed {
+        popup_page_id: PageId,
+        opener_page_id: PageId,
+    },
     Download {
         filename: String,
         path: String,
@@ -515,6 +525,7 @@ impl Evidence {
                 *path = format!("artifact://sha256/{sha256}");
                 *saved_to = None;
             }
+            Self::PopupClosed { .. } => {}
             Self::BrowserExecution { .. } => {}
             Self::IntentExecution { .. } => {}
             Self::Extraction { .. } => {}

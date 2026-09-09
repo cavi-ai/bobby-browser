@@ -2201,6 +2201,11 @@ fn evidence_variants() -> Vec<Value> {
             &["openerPageId", "pageId", "url", "title"],
         ),
         tagged_fields(
+            "popupClosed",
+            json!({"popupPageId":id(),"openerPageId":id()}),
+            &["popupPageId", "openerPageId"],
+        ),
+        tagged_fields(
             "download",
             json!({"filename":string(1,MAX_STRING_BYTES),"path":string(1,MAX_STRING_BYTES),"bytes":{"type":"integer","minimum":0},"sha256":sha256(),"savedTo":string(1,4096)}),
             &["filename", "path", "bytes", "sha256"],

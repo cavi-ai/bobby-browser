@@ -31,6 +31,16 @@ pub(crate) fn navigation_aborted_repair() -> Value {
     repair("Do not retry the navigation; fetch files with download_url, or use click_and_wait_for_download for an in-page link, and navigate only to renderable URLs.")
 }
 
+/// Repair for a mutating call that failed because its workflow handle was
+/// following a popup that has since closed. The handle is already rebound
+/// to `opener_page_id` by the time this repair is read -- never retry the
+/// call as-is, since it would re-target a page that is now gone.
+pub(crate) fn popup_closed_repair(opener_page_id: &str) -> Value {
+    repair(&format!(
+        "The popup this workflow handle was following closed; the handle is now bound to page {opener_page_id}. Do not retry this call unchanged -- act on the opener (a read-only call through the same handle replays there automatically), or pass pageId explicitly if you meant the opener all along."
+    ))
+}
+
 pub(crate) fn candidate_limit_repair() -> Value {
     repair("Narrow the target using role + accessibleName, label, testId, CSS, or ordinal, then retry once; the error lists the first bounded matches and the exact count/limit.")
 }

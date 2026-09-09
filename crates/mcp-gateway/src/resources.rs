@@ -659,7 +659,17 @@ tools most likely to produce it.
   the very next command, the browser target was lost and re-registered:
   reattach (in-page state preserved) or a relaunch (state wiped, page
   reloaded to its last URL) already happened -- re-observe, then continue
-  with current ids. A
+  with current ids.
+
+  A call made through `workflowHandle` is different: if that handle's page
+  is the popup an earlier `click_and_wait_for_popup` follow bound it to, and
+  that popup has since closed, the gateway itself falls back to the opener
+  before this error ever reaches the caller -- a read-only call replays
+  there once and returns `popupClosed` evidence on that (now successful)
+  retry; a mutating call still fails, but with `popupClosed` evidence and a
+  repair naming the opener page, not this generic one. There is nothing to
+  repair here for that case; act on the opener, or pass `pageId` explicitly
+  if the popup itself was truly the target. A
   *session* this principal doesn't own, or that doesn't exist, is caught
   earlier than that -- before any command outcome is produced -- and answers
   as a top-level JSON-RPC error rather than inside a tool's structured
@@ -1103,6 +1113,10 @@ mint their own envelopes.
 
 Clicks the resolved element and waits for the popup it opens, then registers
 that popup as a new page in the session so later calls can address it.
+Called through a `workflowHandle`, a successful follow also rebinds that
+handle onto the popup and remembers the page it opened from: later
+handle-resolved calls land on the popup automatically, and once the popup
+closes, the handle falls back to that opener (`notFound`, above).
 
     "input": {
       "selector": string,          // required, may be ""

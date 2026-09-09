@@ -2530,6 +2530,7 @@ dependencies = [
  "dom-engine",
  "firefox-companion",
  "futures-util",
+ "gauntlet-server",
  "hex",
  "interface-core",
  "jsonschema",

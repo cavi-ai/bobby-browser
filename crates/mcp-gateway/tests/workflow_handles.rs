@@ -1915,3 +1915,225 @@ async fn reusing_a_request_id_while_the_first_is_in_flight_returns_invalid_reque
         .unwrap();
     assert!(response.get("error").is_none(), "{response}");
 }
+
+fn workflow_handle_chrome_executable() -> std::path::PathBuf {
+    std::env::var("BOBBY_CHROME_EXECUTABLE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        })
+}
+
+/// P2 end-to-end proof, live: the authorization journey driven entirely
+/// through `workflowHandle` over the real MCP surface with an installed
+/// browser. `click_and_wait_for_popup` follows the handle onto the popup;
+/// the popup then closes itself (the way the authorization page does,
+/// reproduced here the same way `runtime-tests`'
+/// `popup_closed_from_inside_still_lists_the_opener` does it -- directly
+/// against the runtime, since closing it is test setup, not the behavior
+/// under test); the next handle-resolved call must land cleanly on the
+/// opener with `popupClosed` evidence, with zero tool errors along the way.
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn workflow_handle_follows_a_popup_and_returns_to_the_opener_when_it_closes() {
+    let scenario = gauntlet_server::ScenarioServer::start(gauntlet_server::ScenarioConfig::seeded(
+        "workflow-handle-popup-follow",
+    ))
+    .await
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let config = config::AppConfig {
+        cdp: config::CdpConfig::default(),
+        mcp: config::McpConfig::default(),
+        http: config::HttpConfig {
+            allow_loopback: true,
+            ..config::HttpConfig::default()
+        },
+        server: config::ServerConfig {
+            host: "127.0.0.1".into(),
+            port: 0,
+            shutdown_timeout_ms: 10_000,
+        },
+        browser: config::BrowserConfig {
+            executable: Some(workflow_handle_chrome_executable()),
+            profiles_dir: root.path().join("profiles"),
+            headless: true,
+            max_active: 8,
+            upload_roots: vec![root.path().join("uploads")],
+            downloads_dir: root.path().join("downloads"),
+            artifacts_dir: root.path().join("artifacts"),
+            max_artifact_bytes: 8 * 1024 * 1024,
+            max_screenshot_dimension: 16_384,
+            max_js_result_bytes: 64 * 1024,
+            max_js_timeout_ms: 30_000,
+        },
+        storage: config::StorageConfig {
+            journal_path: root.path().join("commands.jsonl"),
+            checkpoints_dir: root.path().join("checkpoints"),
+            authority_path: root.path().join("authority.json"),
+            scheduler_journal_path: root.path().join("scheduler-jobs.jsonl"),
+        },
+        interface: config::InterfaceConfig::default(),
+        observability: config::ObservabilityConfig::default(),
+        vision: config::VisionConfig::default(),
+        context: Default::default(),
+        nodes: Default::default(),
+    };
+    let runtime_service = sdk_core::RuntimeService::build(&config).await.unwrap();
+    // Kept aside, raw, only to close the popup from inside it below -- the
+    // same live runtime the MCP server drives, not a second one.
+    let raw_runtime = runtime_service.clone();
+
+    let handle = verified_handle(vec![
+        Capability::SessionRead,
+        Capability::SessionWrite,
+        Capability::PageWrite,
+        Capability::BrowserMutate,
+        Capability::RecoveryWrite,
+        Capability::RecoveryRead,
+    ])
+    .await;
+    let server = Server::new(Arc::new(sdk_core::AuthenticatedRuntime::new(
+        runtime_service,
+        handle,
+    )));
+    initialize(&server).await;
+
+    let mut next_id = 900u64;
+    async fn call(server: &Server, next_id: &mut u64, name: &str, arguments: Value) -> Value {
+        *next_id += 1;
+        call_tool(server, *next_id, name, arguments).await
+    }
+
+    let start = call(
+        &server,
+        &mut next_id,
+        "workflow_start",
+        json!({
+            "profile": "workflow-handle-popup-follow",
+            "url": scenario.application_url("/integrations"),
+            // Only so the raw-runtime `window.close()` below (test setup,
+            // not the behavior under test) is allowed to run.
+            "executionPolicy": {"javascriptEvaluation": true},
+        }),
+    )
+    .await;
+    assert_eq!(
+        start["result"]["structuredContent"]["status"], "completed",
+        "{start}"
+    );
+    let workflow_handle = start["result"]["structuredContent"]["workflowHandle"]
+        .as_str()
+        .unwrap_or_else(|| panic!("workflow_start did not return a handle: {start}"))
+        .to_owned();
+
+    let followed = call(
+        &server,
+        &mut next_id,
+        "click_and_wait_for_popup",
+        json!({
+            "workflowHandle": workflow_handle,
+            "selector": "button[aria-label='Connect Ledger Cloud']",
+            "target": null,
+            "timeoutMs": 30_000,
+        }),
+    )
+    .await;
+    assert_eq!(
+        followed["result"]["structuredContent"]["status"], "completed",
+        "{followed}"
+    );
+    let popup_evidence = followed["result"]["structuredContent"]["evidence"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|item| item["kind"] == "popup")
+        .unwrap_or_else(|| {
+            panic!("click_and_wait_for_popup carried no popup evidence: {followed}")
+        });
+    let popup_page_id = popup_evidence["pageId"]
+        .as_str()
+        .expect("popup evidence names pageId")
+        .to_owned();
+
+    // Act in the popup via the handle: the handle is bound to it now.
+    let in_popup = call(
+        &server,
+        &mut next_id,
+        "a11y_snapshot",
+        json!({"workflowHandle": workflow_handle, "maxNodes": 64}),
+    )
+    .await;
+    assert_eq!(
+        in_popup["result"]["structuredContent"]["status"], "completed",
+        "{in_popup}"
+    );
+
+    // Close the popup from inside it, the way the authorization page does.
+    // This is setup for the assertion below, not the behavior under test
+    // (covered live by `popup_closed_from_inside_still_lists_the_opener` in
+    // `runtime-tests`), so it goes straight to the runtime rather than
+    // through the MCP `evaluate_javascript` tool and its own capability
+    // gate.
+    let popup_page_id: types::PageId = serde_json::from_value(json!(popup_page_id)).unwrap();
+    let close = raw_runtime
+        .submit(types::CommandEnvelope {
+            schema_version: types::CommandEnvelope::SCHEMA_VERSION,
+            command_id: types::CommandId::new(),
+            workflow_id: types::WorkflowId::new(),
+            attempt_id: types::AttemptId::new(),
+            session_id: serde_json::from_value(
+                start["result"]["structuredContent"]["sessionId"].clone(),
+            )
+            .unwrap(),
+            page_id: Some(popup_page_id),
+            deadline: Utc::now() + Duration::seconds(10),
+            command: types::RuntimeCommand::Primitive(types::PrimitiveCommand::EvaluateJavaScript(
+                types::EvaluateJavaScriptCommand {
+                    expression: "window.close()".into(),
+                    timeout_ms: 5_000,
+                    await_promise: false,
+                },
+            )),
+        })
+        .await;
+    // `window.close()` tears the target down out from under the eval's own
+    // reply -- CDP can fail to read back a result from a context that is
+    // already gone -- so this call's own outcome is unreliable by design;
+    // only a hard policy/auth rejection (test setup gone wrong) fails loudly
+    // here rather than downstream.
+    assert!(
+        !matches!(close, types::CommandOutcome::PolicyDenied { .. }),
+        "{close:?}"
+    );
+
+    // The very next handle-resolved call must land cleanly on the opener.
+    let observed = call(
+        &server,
+        &mut next_id,
+        "workflow_observe",
+        json!({"workflowHandle": workflow_handle}),
+    )
+    .await;
+    assert_eq!(
+        observed["result"]["structuredContent"]["status"], "completed",
+        "{observed}"
+    );
+    let observed_evidence = observed["result"]["structuredContent"]["observationOutcome"]
+        ["evidence"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        observed_evidence
+            .iter()
+            .any(|item| item["kind"] == "popupClosed"),
+        "workflow_observe did not report popupClosed: {observed}"
+    );
+    assert!(
+        observed_evidence
+            .iter()
+            .any(|item| item["kind"] == "accessibilitySnapshot"),
+        "workflow_observe should still return live accessibility evidence from the opener: {observed}"
+    );
+}

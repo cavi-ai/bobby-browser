@@ -26,6 +26,7 @@ impl Server {
         id: Value,
         call: ToolCall,
         mut context: types::RequestContext,
+        handle: Option<&str>,
     ) -> Value {
         let result = match call.name.as_str() {
             "intent_locate" => {
@@ -49,7 +50,8 @@ impl Server {
                     intent,
                 );
                 pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
-                self.submit_envelope(context, envelope).await
+                self.submit_envelope(context, envelope, handle, call.name.as_str())
+                    .await
             }
             "intent_fill" => {
                 let input: IntentFillArgs = match bounded_parse(call.arguments) {
@@ -73,7 +75,8 @@ impl Server {
                     intent,
                 );
                 pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
-                self.submit_envelope(context, envelope).await
+                self.submit_envelope(context, envelope, handle, call.name.as_str())
+                    .await
             }
             "intent_complete_form" => {
                 let input: IntentCompleteFormArgs = match bounded_parse(call.arguments) {
@@ -102,7 +105,7 @@ impl Server {
                     intent,
                 );
                 pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
-                self.submit_envelope(context, envelope)
+                self.submit_envelope(context, envelope, handle, call.name.as_str())
                     .await
                     .map(|outcome| {
                         project_complete_form_outcome(outcome, evidence_detail, &field_names)
@@ -165,10 +168,11 @@ impl Server {
                 // submits. No threaded workflow, no ledger protection (and
                 // no guard) -- documented in the failure taxonomy.
                 let result = if input.auto_checkpoint.unwrap_or(true) {
-                    self.submit_envelope_with_auto_checkpoint(context, envelope)
+                    self.submit_envelope_with_auto_checkpoint(context, envelope, handle)
                         .await
                 } else {
-                    self.submit_envelope(context, envelope).await
+                    self.submit_envelope(context, envelope, handle, call.name.as_str())
+                        .await
                 };
                 // Record the completed-or-possibly-landed Boundary submit so
                 // a second one is refused. Semantics by outcome:
@@ -223,7 +227,8 @@ impl Server {
                     intent,
                 );
                 pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
-                self.submit_envelope(context, envelope).await
+                self.submit_envelope(context, envelope, handle, call.name.as_str())
+                    .await
             }
             "intent_follow" => {
                 let input: IntentFollowArgs = match bounded_parse(call.arguments) {
@@ -249,10 +254,11 @@ impl Server {
                 );
                 pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
                 if input.auto_checkpoint.unwrap_or(true) {
-                    self.submit_envelope_with_auto_checkpoint(context, envelope)
+                    self.submit_envelope_with_auto_checkpoint(context, envelope, handle)
                         .await
                 } else {
-                    self.submit_envelope(context, envelope).await
+                    self.submit_envelope(context, envelope, handle, call.name.as_str())
+                        .await
                 }
             }
             "intent_dismiss_obstruction" => {
@@ -280,7 +286,8 @@ impl Server {
                     intent,
                 );
                 pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
-                self.submit_envelope(context, envelope).await
+                self.submit_envelope(context, envelope, handle, call.name.as_str())
+                    .await
             }
             "intent_extract" => {
                 let input: IntentExtractArgs = match bounded_parse(call.arguments) {
@@ -303,7 +310,8 @@ impl Server {
                     intent,
                 );
                 pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
-                self.submit_envelope(context, envelope).await
+                self.submit_envelope(context, envelope, handle, call.name.as_str())
+                    .await
             }
             "intent_solve_challenge" => {
                 let input: IntentSolveChallengeArgs = match bounded_parse(call.arguments) {
@@ -326,7 +334,8 @@ impl Server {
                     intent,
                 );
                 pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
-                self.submit_envelope(context, envelope).await
+                self.submit_envelope(context, envelope, handle, call.name.as_str())
+                    .await
             }
             "intent_detect_challenge" => {
                 let input: IntentDetectChallengeArgs = match bounded_parse(call.arguments) {
@@ -349,7 +358,8 @@ impl Server {
                     intent,
                 );
                 pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
-                self.submit_envelope(context, envelope).await
+                self.submit_envelope(context, envelope, handle, call.name.as_str())
+                    .await
             }
             _ => unreachable!("dispatch_intents received a tool it does not own"),
         };

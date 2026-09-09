@@ -35,6 +35,7 @@ impl Server {
         id: Value,
         call: ToolCall,
         context: types::RequestContext,
+        handle: Option<&str>,
     ) -> Value {
         let result = match call.name.as_str() {
             "page_list" => {
@@ -49,7 +50,8 @@ impl Server {
                     input.workflow_id,
                     types::PrimitiveCommand::ListPages(types::ListPagesCommand),
                 );
-                self.submit_envelope(context, envelope).await
+                self.submit_envelope(context, envelope, handle, call.name.as_str())
+                    .await
             }
             "page_close" => {
                 let input: PageCloseArgs = match bounded_parse(call.arguments) {
@@ -67,7 +69,9 @@ impl Server {
                         page_id: page_id.clone(),
                     }),
                 );
-                let result = self.submit_envelope(context, envelope).await;
+                let result = self
+                    .submit_envelope(context, envelope, handle, call.name.as_str())
+                    .await;
                 if result
                     .as_ref()
                     .is_ok_and(|outcome| outcome["status"] == "completed")
@@ -89,7 +93,8 @@ impl Server {
                     input.workflow_id,
                     types::PrimitiveCommand::ActivatePage(types::ActivatePageCommand { page_id }),
                 );
-                self.submit_envelope(context, envelope).await
+                self.submit_envelope(context, envelope, handle, call.name.as_str())
+                    .await
             }
             "a11y_snapshot" => {
                 let input: A11ySnapshotArgs = match bounded_parse(call.arguments) {
@@ -108,7 +113,8 @@ impl Server {
                         },
                     ),
                 );
-                self.submit_envelope(context, envelope).await
+                self.submit_envelope(context, envelope, handle, call.name.as_str())
+                    .await
             }
             "context_ask" => {
                 let input: ContextAskArgs = match bounded_parse(call.arguments) {
@@ -168,7 +174,8 @@ impl Server {
                         action: input.action,
                     }),
                 );
-                self.submit_envelope(context, envelope).await
+                self.submit_envelope(context, envelope, handle, call.name.as_str())
+                    .await
             }
             "network_log" => {
                 let input: NetworkLogArgs = match bounded_parse(call.arguments) {
@@ -186,7 +193,8 @@ impl Server {
                         },
                     )),
                 );
-                self.submit_envelope(context, envelope).await
+                self.submit_envelope(context, envelope, handle, call.name.as_str())
+                    .await
             }
             "emulate" => {
                 let input: EmulateArgs = match bounded_parse(call.arguments) {
@@ -206,7 +214,8 @@ impl Server {
                         },
                     )),
                 );
-                self.submit_envelope(context, envelope).await
+                self.submit_envelope(context, envelope, handle, call.name.as_str())
+                    .await
             }
             "dialog" => {
                 let input: DialogArgs = match bounded_parse(call.arguments) {
@@ -225,7 +234,8 @@ impl Server {
                         },
                     )),
                 );
-                self.submit_envelope(context, envelope).await
+                self.submit_envelope(context, envelope, handle, call.name.as_str())
+                    .await
             }
             "pdf" => {
                 let input: PdfArgs = match bounded_parse(call.arguments) {
@@ -246,7 +256,8 @@ impl Server {
                         },
                     )),
                 );
-                self.submit_envelope(context, envelope).await
+                self.submit_envelope(context, envelope, handle, call.name.as_str())
+                    .await
             }
             "cookie_get" => {
                 let input: CookieGetArgs = match bounded_parse(call.arguments) {
@@ -262,7 +273,8 @@ impl Server {
                         types::GetCookiesCommand { urls: input.urls },
                     )),
                 );
-                self.submit_envelope(context, envelope).await
+                self.submit_envelope(context, envelope, handle, call.name.as_str())
+                    .await
             }
             "cookie_set" => {
                 let input: CookieSetArgs = match bounded_parse(call.arguments) {
@@ -280,7 +292,8 @@ impl Server {
                         },
                     )),
                 );
-                self.submit_envelope(context, envelope).await
+                self.submit_envelope(context, envelope, handle, call.name.as_str())
+                    .await
             }
             "cookie_delete" => {
                 let input: CookieDeleteArgs = match bounded_parse(call.arguments) {
@@ -299,7 +312,8 @@ impl Server {
                         },
                     )),
                 );
-                self.submit_envelope(context, envelope).await
+                self.submit_envelope(context, envelope, handle, call.name.as_str())
+                    .await
             }
             "extract_structured" => {
                 let input: ExtractStructuredArgs = match bounded_parse(call.arguments) {
@@ -316,7 +330,8 @@ impl Server {
                         purpose: input.purpose,
                     }),
                 );
-                self.submit_envelope(context, envelope).await
+                self.submit_envelope(context, envelope, handle, call.name.as_str())
+                    .await
             }
             "download_url" => {
                 let input: DownloadUrlArgs = match bounded_parse(call.arguments) {
@@ -335,7 +350,8 @@ impl Server {
                         save_as: input.save_as,
                     }),
                 );
-                self.submit_envelope(context, envelope).await
+                self.submit_envelope(context, envelope, handle, call.name.as_str())
+                    .await
             }
             "upload_files" => {
                 let input: UploadFilesArgs = match bounded_parse(call.arguments) {
@@ -410,7 +426,8 @@ impl Server {
                         paths: input.paths,
                     }),
                 );
-                self.submit_envelope(context, envelope).await
+                self.submit_envelope(context, envelope, handle, call.name.as_str())
+                    .await
             }
             "evaluate_javascript" => {
                 let input: EvaluateJavaScriptArgs = match bounded_parse(call.arguments) {
@@ -428,7 +445,8 @@ impl Server {
                         await_promise: input.await_promise.unwrap_or(false),
                     }),
                 );
-                self.submit_envelope(context, envelope).await
+                self.submit_envelope(context, envelope, handle, call.name.as_str())
+                    .await
             }
             _ => unreachable!("dispatch_page_ops received a tool it does not own"),
         };

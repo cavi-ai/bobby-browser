@@ -925,11 +925,14 @@ impl Server {
         if let Err(interface_error) = self.authorization.authorize(&context, operation) {
             return interface_error_response(id, interface_error);
         }
-        call.arguments = match self
+        let handle = match self
             .workflow_handles
             .normalize_arguments(&call.name, &call.arguments)
         {
-            Ok(arguments) => arguments,
+            Ok((arguments, handle)) => {
+                call.arguments = arguments;
+                handle
+            }
             Err(WorkflowHandleError::BindingConflict) => {
                 return invalid_params_reason(id, "workflowBindingConflict")
             }
@@ -948,7 +951,7 @@ impl Server {
         if let Some(metrics) = &self.operational_metrics {
             metrics.record_workflow_call(workflow_call_class(&call.name));
         }
-        self.dispatch_named_tool(id, call, context).await
+        self.dispatch_named_tool(id, call, context, handle).await
     }
 
     async fn tool_success(&self, id: Value, mut value: Value) -> Value {
@@ -971,12 +974,33 @@ impl Server {
                 message.starts_with("navigation to ")
                     && message.contains("was aborted by the browser")
             });
+        // The closed-page rule already attached `popupClosed` evidence to a
+        // failed mutating call before it reached here; this is the one
+        // place that turns it into the specific repair, the same way
+        // `candidate_limit`/`navigation_aborted` override the code's general
+        // one above. A successful read-only retry also carries the evidence
+        // but never `status: "failed"`, so it never takes this branch.
+        let popup_closed_opener = (status == Some("failed"))
+            .then(|| {
+                value
+                    .get("evidence")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .find(|item| item.get("kind").and_then(Value::as_str) == Some("popupClosed"))
+                    .and_then(|item| item.get("openerPageId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .flatten();
         let repair = if status == Some("needsReconciliation") {
             Some(crate::repair::reconciliation_repair())
         } else if candidate_limit {
             Some(crate::repair::candidate_limit_repair())
         } else if navigation_aborted {
             Some(crate::repair::navigation_aborted_repair())
+        } else if let Some(opener_page_id) = popup_closed_opener.as_deref() {
+            Some(crate::repair::popup_closed_repair(opener_page_id))
         } else {
             value
                 .get("error")
@@ -1122,7 +1146,42 @@ impl Server {
     /// The gate in `Executor::validate` is unchanged and still matches on all
     /// five fields. A checkpoint that fails to save fails the call, so this is
     /// never a way to reach a Boundary action without one.
+    /// Boundary commands (`click` with `boundary: true`, and
+    /// `click_and_wait_for_popup`) are always mutating, so a closed popup
+    /// never earns a retry here -- only the fail-with-`popupClosed`-evidence
+    /// branch of the closed-page rule applies. `handle` is the workflow
+    /// handle the caller resolved, when it used one; a raw-id call passes
+    /// `None` and this is a plain pass-through.
     async fn submit_envelope_with_auto_checkpoint(
+        &self,
+        context: types::RequestContext,
+        envelope: types::CommandEnvelope,
+        handle: Option<&str>,
+    ) -> interface_core::InterfaceResult<Value> {
+        let result = self
+            .submit_envelope_with_auto_checkpoint_once(context, envelope)
+            .await;
+        let Some(handle) = handle else {
+            return result;
+        };
+        let Ok(mut value) = result else {
+            return result;
+        };
+        if !is_page_not_open_failure(&value) {
+            return Ok(value);
+        }
+        let Some((popup_page_id, opener_page_id)) = self.workflow_handles.rebind_to_opener(handle)
+        else {
+            return Ok(value);
+        };
+        push_evidence(
+            &mut value,
+            popup_closed_evidence(popup_page_id, opener_page_id),
+        );
+        Ok(value)
+    }
+
+    async fn submit_envelope_with_auto_checkpoint_once(
         &self,
         context: types::RequestContext,
         envelope: types::CommandEnvelope,
@@ -1153,7 +1212,58 @@ impl Server {
         Ok(value)
     }
 
+    /// The closed-page rule: when `handle` names a workflow binding and this
+    /// envelope's command fails because its page is no longer open (a popup
+    /// the handle followed, since closed), fall back to the recorded opener.
+    /// A read-only `tool` replays there once and reports `popupClosed`
+    /// evidence on the (now successful) retry; anything else fails with the
+    /// same evidence attached, naming the opener, rather than risk a second
+    /// mutating effect. `handle` is `None` for a raw-id call, which this
+    /// rule never touches.
     async fn submit_envelope(
+        &self,
+        context: types::RequestContext,
+        envelope: types::CommandEnvelope,
+        handle: Option<&str>,
+        tool: &str,
+    ) -> interface_core::InterfaceResult<Value> {
+        let result = self
+            .submit_envelope_once(context.clone(), envelope.clone())
+            .await;
+        let Some(handle) = handle else {
+            return result;
+        };
+        let Ok(value) = result else {
+            return result;
+        };
+        if !is_page_not_open_failure(&value) {
+            return Ok(value);
+        }
+        let Some((popup_page_id, opener_page_id)) = self.workflow_handles.rebind_to_opener(handle)
+        else {
+            return Ok(value);
+        };
+        let evidence = popup_closed_evidence(popup_page_id, opener_page_id.clone());
+        if tool_annotations(tool)["readOnlyHint"] == json!(true) {
+            let mut retry_envelope = envelope;
+            retry_envelope.page_id = Some(opener_page_id);
+            retry_envelope.command_id = types::CommandId::new();
+            retry_envelope.attempt_id = types::AttemptId::new();
+            let retried = self.submit_envelope_once(context, retry_envelope).await;
+            return match retried {
+                Ok(mut retried_value) => {
+                    push_evidence(&mut retried_value, evidence);
+                    Ok(retried_value)
+                }
+                Err(error) => Err(error),
+            };
+        }
+        let mut value = value;
+        push_evidence(&mut value, evidence);
+        Ok(value)
+    }
+
+    async fn submit_envelope_once(
         &self,
         context: types::RequestContext,
         envelope: types::CommandEnvelope,
@@ -1537,6 +1647,47 @@ fn to_json<T: serde::Serialize>(value: T) -> interface_core::InterfaceResult<Val
         reconciliation_required: false,
         required_capability: None,
     })
+}
+
+/// True for the runtime's "a resource named inside an already-accepted
+/// command turns out to be stale" failure, specifically for a page id --
+/// almost always a popup that closed between a handle resolving it and the
+/// command reaching the browser (`bobby://failure-taxonomy`, `notFound`).
+/// Gated on both the code and this exact message: a page-scoped command can
+/// fail `notFound` for other reasons, and only this one names the condition
+/// the closed-page rule may act on.
+fn is_page_not_open_failure(value: &Value) -> bool {
+    value.get("status").and_then(Value::as_str) == Some("failed")
+        && value.get("error").is_some_and(|error| {
+            error.get("code").and_then(Value::as_str) == Some("notFound")
+                && error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .is_some_and(|message| message.contains("browser page is not open"))
+        })
+}
+
+/// `Evidence::PopupClosed` as MCP output JSON, built from the real type so
+/// its shape can never drift from the wire schema.
+fn popup_closed_evidence(popup_page_id: types::PageId, opener_page_id: types::PageId) -> Value {
+    serde_json::to_value(types::Evidence::PopupClosed {
+        popup_page_id,
+        opener_page_id,
+    })
+    .expect("Evidence always serializes")
+}
+
+/// Appends one evidence item to a command-outcome-shaped `Value`, creating
+/// the array if the outcome variant did not already carry one.
+fn push_evidence(value: &mut Value, evidence: Value) {
+    match value.get_mut("evidence").and_then(Value::as_array_mut) {
+        Some(array) => array.push(evidence),
+        None => {
+            if let Some(object) = value.as_object_mut() {
+                object.insert("evidence".to_owned(), json!([evidence]));
+            }
+        }
+    }
 }
 
 /// `-32602` with the schema keyword and JSON Pointer that rejected the call.
