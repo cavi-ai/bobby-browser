@@ -78,7 +78,7 @@ base controls, which cover every journey. `BOBBY_MCP_TOOLSET` is left unset.
 ### Scorecard
 
 Four-tool scorecard, one run per task across the five journeys above, dated
-2026-09-08 on bobby 0.13.0 at `1dc7b2a7`. Driver: `claude-sonnet-5`.
+2026-09-08 on bobby {{PRODUCT_VERSION}} at `1dc7b2a7`. Driver: `claude-sonnet-5`.
 
 | tool | runs | pass rate | mean wall s (passing) | mean tool calls | mean tokens | error rate |
 | --- | --- | --- | --- | --- | --- | --- |
