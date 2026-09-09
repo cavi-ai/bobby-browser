@@ -1,0 +1,22 @@
+services:
+  bobby:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: bobby-browser:local
+    ports:
+      # Host-side loopback only: the container binds 0.0.0.0 internally
+      # (required for this port mapping to reach it at all), but publishing
+      # is restricted to 127.0.0.1 on the host so the runtime is not
+      # reachable from other hosts on the network. See deploy/docker/config.toml.
+      - "127.0.0.1:7777:7777"
+    environment:
+      BOBBY_CHROME_EXECUTABLE: /usr/bin/chromium
+      AUTOMATION_RUNTIME_BROWSER_SELECTION: '{"preference":{"mode":"managedChromium"}}'
+    volumes:
+      - bobby-data:/var/lib/bobby
+    # Headless Chromium crashes tabs on the default 64MB /dev/shm.
+    shm_size: "1gb"
+
+volumes:
+  bobby-data:

@@ -1,0 +1,60 @@
+# bobby-browser configuration for the Docker image.
+#
+# Derived from the repo's root config.toml (see that file for full field
+# documentation); this copy only changes the bind host and moves state
+# directories under /var/lib/bobby, the container's persistent volume.
+#
+# server.host is 0.0.0.0, not 127.0.0.1: Docker's `-p`/`ports:` publishing
+# forwards into the container's network namespace, not onto the container's
+# own loopback, so a loopback-only bind here would be unreachable from the
+# host. Host-side exposure is restricted to 127.0.0.1 in docker-compose.yml
+# instead, which keeps the documented "loopback unless the operator changes
+# it" security posture at the host boundary.
+
+[server]
+host = "0.0.0.0"
+port = 7777
+
+[browser]
+profiles_dir = "/var/lib/bobby/data/profiles"
+headless = true
+max_active = 8
+upload_roots = ["/var/lib/bobby/data/uploads"]
+downloads_dir = "/var/lib/bobby/data/downloads"
+artifacts_dir = "/var/lib/bobby/data/artifacts"
+max_artifact_bytes = 8388608
+max_screenshot_dimension = 16384
+max_js_result_bytes = 65536
+max_js_timeout_ms = 30000
+
+[storage]
+journal_path = "/var/lib/bobby/data/storage/commands.jsonl"
+checkpoints_dir = "/var/lib/bobby/data/storage/checkpoints"
+authority_path = "/var/lib/bobby/data/storage/authority.json"
+scheduler_journal_path = "/var/lib/bobby/data/storage/scheduler-jobs.jsonl"
+
+[http]
+allow_loopback = false
+allow_private_network = false
+max_redirects = 5
+max_header_bytes = 65536
+max_body_bytes = 8388608
+max_download_bytes = 67108864
+request_timeout_ms = 30000
+max_concurrent_requests = 8
+
+[cdp]
+enabled = false
+host = "127.0.0.1"
+port = 9222
+auto_session = true
+
+[interface]
+max_request_bytes = 1048576
+max_event_batch = 256
+max_event_retention = 16384
+max_connections = 64
+max_rejection_workers = 16
+token_records_path = "/var/lib/bobby/data/storage/authorities.json"
+max_principals = 16
+max_in_flight_per_principal = 8
