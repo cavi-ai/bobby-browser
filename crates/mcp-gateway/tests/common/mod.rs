@@ -69,6 +69,12 @@ pub struct LiveProbe {
     pub opened_page: std::sync::Mutex<Option<PageId>>,
     pub current_url: std::sync::Mutex<Option<String>>,
     pub type_text_calls: AtomicUsize,
+    /// The value the last successful `type_text` wrote, so `inspect`'s
+    /// verification echo reflects it instead of a fixed string -- needed
+    /// once a handle-resolved `type_text` can legitimately land on a second
+    /// page (the opener, after its popup closed) and must pass the
+    /// executor's post-type verification there.
+    pub last_typed_text: std::sync::Mutex<Option<String>>,
     /// When set, `a11y_snapshot`/`type_text`/`form_snapshot` fail this one
     /// page id with the same `CommandError` the real worker returns for a
     /// popup closed from inside (`worker_pool::chromium::page_missing`):
@@ -180,11 +186,18 @@ impl BrowserWorker for LiveWorker {
         _: &PageId,
         command: &InspectCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
+        let text = self
+            .probe
+            .last_typed_text
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_else(|| "live-harness-text".into());
         Ok(vec![Evidence::Inspection {
             selector: command.selector.clone(),
             url: "https://live-harness.test/".into(),
             title: "live-harness".into(),
-            text: "live-harness-text".into(),
+            text,
             html: None,
         }])
     }
@@ -231,6 +244,11 @@ impl BrowserWorker for LiveWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         self.probe.type_text_calls.fetch_add(1, Ordering::SeqCst);
         self.reject_if_closed(page_id)?;
+        *self
+            .probe
+            .last_typed_text
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(command.value.clone());
         Ok(vec![Evidence::Element {
             selector: command.selector.clone(),
             text: Some(command.value.clone()),

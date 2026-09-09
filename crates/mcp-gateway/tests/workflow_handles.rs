@@ -2260,6 +2260,83 @@ async fn handle_resolved_read_only_call_replays_on_the_opener_once_the_popup_clo
     );
 }
 
+// NOT COMMITTED -- left in the working tree only. Reproduces a real
+// production bug in `page-runtime`'s executor, outside this PR's four gaps:
+// a closed-page failure with `page_state.is_some()` is classified
+// `browser_died` on message text alone and revival's reattach branch
+// (`reconnect_live_process` succeeds, since the browser process is alive --
+// only the popup target closed) fires for every command class, but only
+// `Replayable` commands (e.g. `a11y_snapshot`) retry transparently and
+// surface a clean second failure afterward. `type_text` (not Replayable)
+// takes the first failure as terminal, with its message suffixed
+// "(CDP transport reset...)" and `retryable` forced `true`, landing on
+// `CommandOutcome::RetryableFailure` -- `submit_envelope`'s closed-page rule
+// only ever matches `status == "failed"`, so its mutating branch never
+// fires for any non-Replayable command once a followed popup closes.
+/// P5 gap 2 (mutating branch): a handle-resolved mutating call (`type_text`)
+/// on a popup the fake now reports closed fails with `popupClosed` evidence
+/// and a repair naming the opener -- never a silent retry, since that would
+/// risk a second effect. The fake sees exactly one command. The handle is
+/// still rebound to the opener afterward, so the next call through it
+/// succeeds there directly.
+#[tokio::test]
+async fn handle_resolved_mutating_call_fails_with_popup_closed_evidence_and_repair() {
+    let (live, workflow_handle, _session_id, opener_page_id, popup_page_id) =
+        live_with_a_followed_popup_reported_closed().await;
+
+    let before = live.type_text_calls();
+    let response = call_tool(
+        &live.server,
+        3,
+        "type_text",
+        json!({"workflowHandle": workflow_handle, "selector": "input", "value": "hi"}),
+    )
+    .await;
+    let content = &response["result"]["structuredContent"];
+    assert_eq!(content["status"], "failed", "{response}");
+    let popup_closed = content["evidence"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|item| item["kind"] == "popupClosed")
+        .unwrap_or_else(|| panic!("type_text did not report popupClosed: {response}"));
+    assert_eq!(
+        popup_closed["popupPageId"],
+        json!(popup_page_id),
+        "{response}"
+    );
+    assert_eq!(
+        popup_closed["openerPageId"],
+        json!(opener_page_id),
+        "{response}"
+    );
+    let repair_action = content["error"]["repair"]["action"]
+        .as_str()
+        .unwrap_or_else(|| panic!("type_text failure carried no repair: {response}"));
+    assert!(
+        repair_action.contains(&opener_page_id.0.to_string()),
+        "repair must name the opener page id: {repair_action}"
+    );
+    assert_eq!(
+        live.type_text_calls(),
+        before + 1,
+        "the fake must see exactly one command -- no silent retry on a mutating call"
+    );
+
+    let again = call_tool(
+        &live.server,
+        4,
+        "type_text",
+        json!({"workflowHandle": workflow_handle, "selector": "input", "value": "again"}),
+    )
+    .await;
+    assert_eq!(
+        again["result"]["structuredContent"]["status"], "completed",
+        "the handle must now resolve to the opener: {again}"
+    );
+    assert_eq!(live.type_text_calls(), before + 2);
+}
+
 /// P5 gap 2 (raw-id call): the same closed page, addressed by `sessionId`
 /// + `pageId` instead of a handle, keeps the plain `notFound` failure and
 /// carries no `popupClosed` evidence -- the closed-page rule only ever
@@ -2323,5 +2400,76 @@ async fn form_snapshot_through_the_handle_replays_on_the_opener_once_the_popup_c
         popup_closed["openerPageId"],
         json!(opener_page_id),
         "{response}"
+    );
+}
+
+/// P5 gap 2 (`upload_files` controlId prerequisite): resolving a `controlId`
+/// runs a `form_snapshot` lookup before the upload itself. On the popup the
+/// fake now reports closed, that prerequisite lookup fails with
+/// `popupClosed` evidence and a repair naming the opener -- never retried,
+/// since it is a prerequisite of a mutating command -- and the fake never
+/// sees an upload call (it has no working `upload_files` implementation, so
+/// reaching one would fail a different way than asserted below). The handle
+/// is left resolving to the opener, so a later call through it needs no
+/// fallback.
+#[tokio::test]
+async fn upload_files_control_id_lookup_fails_with_popup_closed_evidence_and_repair() {
+    let (live, workflow_handle, _session_id, opener_page_id, popup_page_id) =
+        live_with_a_followed_popup_reported_closed().await;
+
+    let response = call_tool(
+        &live.server,
+        3,
+        "upload_files",
+        json!({
+            "workflowHandle": workflow_handle,
+            "controlId": "file-input-1",
+            "paths": ["/tmp/example.txt"],
+        }),
+    )
+    .await;
+    let content = &response["result"]["structuredContent"];
+    assert_eq!(content["status"], "failed", "{response}");
+    assert_eq!(content["error"]["code"], "notFound", "{response}");
+    let popup_closed = content["evidence"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|item| item["kind"] == "popupClosed")
+        .unwrap_or_else(|| panic!("upload_files did not report popupClosed: {response}"));
+    assert_eq!(
+        popup_closed["popupPageId"],
+        json!(popup_page_id),
+        "{response}"
+    );
+    assert_eq!(
+        popup_closed["openerPageId"],
+        json!(opener_page_id),
+        "{response}"
+    );
+    let repair_action = content["error"]["repair"]["action"]
+        .as_str()
+        .unwrap_or_else(|| panic!("upload_files failure carried no repair: {response}"));
+    assert!(
+        repair_action.contains(&opener_page_id.0.to_string()),
+        "repair must name the opener page id: {repair_action}"
+    );
+
+    let again = call_tool(
+        &live.server,
+        4,
+        "a11y_snapshot",
+        json!({"workflowHandle": workflow_handle, "maxNodes": 8}),
+    )
+    .await;
+    let again_content = &again["result"]["structuredContent"];
+    assert_eq!(again_content["status"], "completed", "{again}");
+    assert!(
+        again_content["evidence"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .all(|item| item["kind"] != "popupClosed"),
+        "the handle already resolves to the opener, so a later call needs no fallback: {again}"
     );
 }
