@@ -736,7 +736,7 @@ tools most likely to produce it.
 - `shadowRootUnavailable` -- a step in the target's shadow path named a host
   with no attached shadow root the engine can reach. Repair: re-resolve the
   target; the element may not have attached a shadow root yet.
-- `targetDetached` -- two distinct situations share this code; read the
+- `targetDetached` -- three distinct situations share this code; read the
   message to tell them apart:
   - *The whole browser transport died* ("the browser target is gone",
     "send failed because receiver is gone", "browser process was killed",
@@ -751,6 +751,15 @@ tools most likely to produce it.
     in-page state, so re-observe (`workflow_observe`, `form_snapshot`)
     before replaying anything that already ran. After a reattach, state is
     intact: re-issue only the command that failed.
+  - *Transient target loss* ("transient target loss; the browser and page
+    are intact -- re-resolve the target and re-issue the command"): a
+    closed-session-shaped error struck a mutating command, but probing the
+    current connection (no reconnect, no relaunch) proved the browser and
+    the page are both still there -- only this command's own target or CDP
+    session was lost. The original diagnostic is kept as a
+    `transientTargetLoss` `Configuration` evidence item. Repair: re-resolve
+    the target and re-issue the same command; no reattach or relaunch
+    occurred, so page state (typed values included) is untouched.
   - *The element went stale*: it existed at resolution time but was no
     longer connected to the DOM by the time the engine acted. Repair:
     re-resolve the target -- the page changed underneath the call.

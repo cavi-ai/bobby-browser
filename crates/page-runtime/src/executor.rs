@@ -329,11 +329,7 @@ impl PageRuntime {
                             return self
                                 .finish_failure(
                                     &envelope,
-                                    classify_failure(
-                                        &envelope,
-                                        failure.error,
-                                        failure.evidence,
-                                    ),
+                                    classify_failure(&envelope, failure.error, failure.evidence),
                                 )
                                 .await;
                         }
@@ -343,8 +339,7 @@ impl PageRuntime {
                             let remaining = (envelope.deadline - Utc::now())
                                 .to_std()
                                 .unwrap_or(StdDuration::ZERO);
-                            let same_lease =
-                                lease_slot.as_ref().expect("lease before retry");
+                            let same_lease = lease_slot.as_ref().expect("lease before retry");
                             match tokio::time::timeout(
                                 remaining,
                                 self.adaptive
@@ -664,7 +659,10 @@ impl PageRuntime {
                         }
                     }
                 }
-                match probed_execution.or(reattached_execution).or(revived_execution) {
+                match probed_execution
+                    .or(reattached_execution)
+                    .or(revived_execution)
+                {
                     Some(revived_execution) => revived_execution,
                     None => {
                         return self

@@ -325,6 +325,39 @@ struct HttpBridgeState {
     cache_validators: BTreeMap<String, String>,
 }
 
+/// Which phase of `ChromiumWorker::dispatch_click`'s explicit press/release
+/// sequence a failure struck in. A failure before any input reached the
+/// page can be retried safely -- worst case, nothing happened yet. A
+/// failure between press and release cannot: the page may already be
+/// reacting to a mousedown with no matching mouseup, so retrying risks a
+/// second, stuck press.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClickDispatchPhase {
+    BeforeInput,
+    BetweenPressAndRelease,
+}
+
+/// Maps a step in the `[MousePressed, MouseReleased]` sequence to the phase
+/// a failure sending it falls in. Only the second (release) step's own
+/// failure lands between press and release -- a failure sending the first
+/// (press) step means no input landed at all yet.
+fn click_dispatch_phase_for_step(step: usize) -> ClickDispatchPhase {
+    if step == 0 {
+        ClickDispatchPhase::BeforeInput
+    } else {
+        ClickDispatchPhase::BetweenPressAndRelease
+    }
+}
+
+/// A closed-session-shaped error is only safe to retry (re-resolve the
+/// target, dispatch again) when it struck before any input reached the
+/// page. The same message shape between press and release must stay a
+/// failure: the page may already be reacting to a mousedown with no
+/// matching mouseup.
+fn should_retry_transient_click_loss(phase: ClickDispatchPhase, error: &CommandError) -> bool {
+    phase == ClickDispatchPhase::BeforeInput && is_closed_page_message(&error.message)
+}
+
 impl ChromiumWorker {
     /// Clone the Arc-backed page handle and drop the pages guard
     /// immediately. Every command path goes through this instead of holding
@@ -442,7 +475,9 @@ impl ChromiumWorker {
         if path.hover_dwell_ms > 0 {
             tokio::time::sleep(Duration::from_millis(path.hover_dwell_ms)).await;
         }
-        self.dispatch_click(page, target, modifiers).await?;
+        self.dispatch_click(page, target, modifiers)
+            .await
+            .map_err(|(_, error)| error)?;
         Ok(())
     }
 
@@ -451,22 +486,32 @@ impl ChromiumWorker {
         page: &Page,
         target: Point,
         modifiers: &[types::ClickModifier],
-    ) -> Result<(), CommandError> {
+    ) -> Result<(), (ClickDispatchPhase, CommandError)> {
         if modifiers.is_empty() {
-            page.click(target)
-                .await
-                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+            page.click(target).await.map_err(|error| {
+                (
+                    ClickDispatchPhase::BeforeInput,
+                    driver_error(ErrorCode::BrowserCommandFailed, error),
+                )
+            })?;
             return Ok(());
         }
 
         let modifier_bits = chromium_modifier_bits(modifiers);
-        page.move_mouse(target)
-            .await
-            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
-        for (event_type, buttons) in [
+        page.move_mouse(target).await.map_err(|error| {
+            (
+                ClickDispatchPhase::BeforeInput,
+                driver_error(ErrorCode::BrowserCommandFailed, error),
+            )
+        })?;
+        for (index, (event_type, buttons)) in [
             (DispatchMouseEventType::MousePressed, 1),
             (DispatchMouseEventType::MouseReleased, 0),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let phase = click_dispatch_phase_for_step(index);
             let params = DispatchMouseEventParams::builder()
                 .r#type(event_type)
                 .x(target.x)
@@ -476,12 +521,56 @@ impl ChromiumWorker {
                 .buttons(buttons)
                 .click_count(1)
                 .build()
-                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+                .map_err(|error| (phase, driver_error(ErrorCode::BrowserCommandFailed, error)))?;
             page.execute(params)
                 .await
-                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+                .map_err(|error| (phase, driver_error(ErrorCode::BrowserCommandFailed, error)))?;
         }
         Ok(())
+    }
+
+    /// Retries `dispatch_click` once when it fails before any input reached
+    /// the page (`ClickDispatchPhase::BeforeInput`) with a closed-session-
+    /// shaped error, and the CURRENT connection's page listing (no
+    /// reconnect, no revive) proves the browser and page are both intact:
+    /// that combination is a transient target/session loss, not a browser
+    /// death, and the safest recovery is a fresh target resolution before
+    /// retrying, in case layout shifted while the connection blipped.
+    async fn dispatch_click_recovering_transient_loss(
+        &self,
+        page_id: &PageId,
+        page: &Page,
+        target: Point,
+        command: &ClickCommand,
+    ) -> Result<(), CommandError> {
+        let (phase, error) = match self.dispatch_click(page, target, &command.modifiers).await {
+            Ok(()) => return Ok(()),
+            Err(failure) => failure,
+        };
+        if !should_retry_transient_click_loss(phase, &error) {
+            return Err(error);
+        }
+        if self.sync_untracked_pages().await.is_err() {
+            // The probe itself failed: the transport may really be gone,
+            // so surface the original error unchanged.
+            return Err(error);
+        }
+        if !self.pages.lock().await.contains_key(page_id) {
+            // The page itself closed; there is nothing to retry.
+            return Err(error);
+        }
+        let resolved = self
+            .resolve_target(page_id, page, &command.selector, command.target.as_ref())
+            .await?;
+        let target = resolved.clickable_point(page).await?.ok_or_else(|| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "target has no clickable point",
+            )
+        })?;
+        self.dispatch_click(page, target, &command.modifiers)
+            .await
+            .map_err(|(_, error)| error)
     }
 
     /// Best-effort `Page.bringToFront`, run immediately before dispatching a
@@ -1402,7 +1491,9 @@ impl BrowserWorker for ChromiumWorker {
                         "target has no clickable point",
                     )
                 })?;
-                Box::pin(self.dispatch_click(&page, target, &command.modifiers))
+                Box::pin(
+                    self.dispatch_click_recovering_transient_loss(page_id, &page, target, command),
+                )
             };
             // A click that opens alert()/confirm()/prompt() blocks the
             // renderer, so the click's own CDP round trip may never return
@@ -4263,12 +4354,14 @@ mod tests {
     };
 
     use super::{
-        apply_state_commit, clamp_js_timeout_ms, compact_ax_tree, driver_error_is_retryable,
-        element_wait_missing_observation, ensure_automatic_download_modifier_support,
-        iframe_hop_ordinal, is_closed_page_message, is_dead_worker_error, is_missing_css_node,
-        should_retry_plain_click_target_drift, snapshot_cookie, text_matches,
+        apply_state_commit, clamp_js_timeout_ms, click_dispatch_phase_for_step, compact_ax_tree,
+        driver_error_is_retryable, element_wait_missing_observation,
+        ensure_automatic_download_modifier_support, iframe_hop_ordinal, is_closed_page_message,
+        is_dead_worker_error, is_missing_css_node, should_retry_plain_click_target_drift,
+        should_retry_transient_click_loss, snapshot_cookie, text_matches,
         unscoped_css_wait_selector, validate_clip, wait_should_retry_replaced_context,
-        ChromiumWorker, HttpBridgeState, EDITABLE_CONTROL_CHECK_JS, TARGET_GONE_MESSAGE,
+        ChromiumWorker, ClickDispatchPhase, HttpBridgeState, EDITABLE_CONTROL_CHECK_JS,
+        TARGET_GONE_MESSAGE,
     };
     use types::{
         ClickModifier, CommandError, ErrorCode, ErrorLayer, PageId, SessionId, TargetSpec,
@@ -4359,6 +4452,55 @@ mod tests {
         assert_eq!(error.code, ErrorCode::InvalidRequest);
         assert!(!error.retryable);
         assert!(error.message.contains("modifiers"));
+    }
+
+    /// A real Chrome transport blip mid-click is not reproducible in a unit
+    /// test (there is no live CDP connection to interrupt); these tests
+    /// cover the deterministic phase-mapping and retry-eligibility helpers
+    /// `dispatch_click` and `dispatch_click_recovering_transient_loss` are
+    /// built on instead.
+    #[test]
+    fn click_dispatch_phase_marks_only_the_release_step_as_between_press_and_release() {
+        assert_eq!(
+            click_dispatch_phase_for_step(0),
+            ClickDispatchPhase::BeforeInput
+        );
+        assert_eq!(
+            click_dispatch_phase_for_step(1),
+            ClickDispatchPhase::BetweenPressAndRelease
+        );
+    }
+
+    #[test]
+    fn transient_click_loss_retries_only_a_closed_session_error_before_input() {
+        let closed_session = CommandError {
+            code: ErrorCode::BrowserCommandFailed,
+            message: "send failed because receiver is gone".into(),
+            layer: ErrorLayer::Driver,
+            retryable: true,
+        };
+        assert!(should_retry_transient_click_loss(
+            ClickDispatchPhase::BeforeInput,
+            &closed_session
+        ));
+        assert!(
+            !should_retry_transient_click_loss(
+                ClickDispatchPhase::BetweenPressAndRelease,
+                &closed_session
+            ),
+            "a closed-session error between press and release must stay a failure"
+        );
+
+        let unrelated_error = CommandError {
+            code: ErrorCode::BrowserCommandFailed,
+            message: "injected driver failure".into(),
+            layer: ErrorLayer::Driver,
+            retryable: true,
+        };
+        assert!(
+            !should_retry_transient_click_loss(ClickDispatchPhase::BeforeInput, &unrelated_error),
+            "an error that is not closed-session-shaped must not be retried by this path"
+        );
     }
 
     #[test]

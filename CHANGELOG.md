@@ -90,6 +90,19 @@
   retryable transport-reset failure: after reconnecting to the live browser
   process the runtime checks the worker's page listing, and a missing page
   fails permanently for Replayable and mutating commands alike.
+- A closed-session-shaped CDP error (dead-worker or page-missing message)
+  no longer escalates straight to browser reattach/revival: the runtime
+  first probes the current lease's page listing, with no reconnect. When
+  the browser and page are both still there, a Replayable command retries
+  once on the same lease and a mutating command fails with a retryable
+  `targetDetached` (`transientTargetLoss` evidence keeps the original
+  diagnostic) instead of being reported as a browser death. Only a probe
+  that itself fails, or a page that is genuinely gone, still reattaches,
+  revives, or fails permanently as before.
+- Chromium's explicit-modifiers click dispatch retries once, on a fresh
+  target resolution, when a closed-session-shaped error strikes before any
+  mouse input reached the page and the page is still listed; an error
+  between the press and release events still fails, unchanged.
 - JSON-RPC `-32602` responses now carry the rejection reason and repair
   action in `error.message`, not only in `error.data`: MCP hosts commonly
   render `error.message` alone, so a bare "Invalid params" repeated with no

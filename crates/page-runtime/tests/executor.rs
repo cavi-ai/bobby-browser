@@ -12,9 +12,9 @@ use types::{
     ControlActionEvidence, DownloadUrlCommand, ErrorCode, ErrorLayer, Evidence, ExecutionPath,
     ExecutionReason, FollowIntent, FormControlOperation, FormControlState, FormControlTarget,
     FormControlValidity, InspectCommand, IntentCommand, IntentHints, NavigateCommand, PageEvidence,
-    PageId, PrimitiveCommand, RuntimeCommand, SessionId, SubmitAndVerifyIntent, TargetSpec, TextMatch,
-    TypeTextCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId, WorkflowCheckpoint,
-    WorkflowId,
+    PageId, PrimitiveCommand, RuntimeCommand, SessionId, SubmitAndVerifyIntent, TargetSpec,
+    TextMatch, TypeTextCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId,
+    WorkflowCheckpoint, WorkflowId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
 use workflow_journal::{
@@ -3205,7 +3205,10 @@ async fn a_transient_target_loss_recodes_a_mutating_command_as_retryable_target_
             }),
         ))
         .await;
-    let CommandOutcome::Failed { error, evidence, .. } = outcome else {
+    let CommandOutcome::Failed {
+        error, evidence, ..
+    } = outcome
+    else {
         panic!("expected Failed, got {outcome:?}");
     };
     assert_eq!(error.code, ErrorCode::TargetDetached);
