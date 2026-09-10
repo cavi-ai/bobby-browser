@@ -110,6 +110,17 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
+                // `intent_fill`'s top-level `hints` shape is only unambiguous
+                // here when there is exactly one field to apply it to, and
+                // that field carries no hints of its own to be overwritten.
+                // Anything else (no single target, or a conflicting field
+                // hint already set) is rejected rather than guessed at.
+                if let Some(hints) = input.hints.take() {
+                    match input.fields.as_mut_slice() {
+                        [field] if hints_are_empty(&field.hints) => field.hints = hints,
+                        _ => return invalid_params_reason(id, "hintsPerField"),
+                    }
+                }
                 let evidence_detail = input.evidence_detail.unwrap_or(EvidenceDetail::Compact);
                 let field_names = input
                     .fields

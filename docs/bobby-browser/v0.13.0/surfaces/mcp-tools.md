@@ -335,6 +335,7 @@ A `-32602` response carries `data` describing what failed:
 | `invalidIdempotencyKey` | — | Key is not 1–128 printable ASCII characters |
 | `workflowBindingConflict` | — | A handle-capable call mixed `workflowHandle` with explicit scope IDs; use one form only |
 | `unknownWorkflowHandle` | — | Handle is malformed, unknown, evicted, or from an earlier server generation; repair with explicit IDs |
+| `hintsPerField` | — | `intent_complete_form` only: a top-level `hints` was sent with `fields` not exactly one entry, or the one field already had its own `hints` |
 
 `pageOpenFailed`, `navigationFailed`, `workflowGenerationChanged`, and
 `workflowSupervisorLost` are not protocol-layer rejections. They are the four

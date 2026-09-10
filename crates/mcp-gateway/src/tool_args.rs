@@ -227,6 +227,7 @@ pub(crate) enum EvidenceDetail {
 
 intent_args!(IntentCompleteFormArgs {
     purpose: String,
+    hints: Option<types::IntentHints>,
     fields: Vec<types::CompleteFormField>,
     evidence_detail: Option<EvidenceDetail>,
 });
@@ -568,7 +569,7 @@ pub(crate) struct PromptGetArgs {
 
 #[cfg(test)]
 mod tests {
-    use super::{UploadFilesArgs, WorkflowObserveArgs};
+    use super::{IntentCompleteFormArgs, UploadFilesArgs, WorkflowObserveArgs};
 
     #[test]
     fn workflow_observe_goal_limit_counts_unicode_scalars_not_utf8_bytes() {
@@ -594,5 +595,27 @@ mod tests {
         .expect("controlId upload arguments parse");
         assert_eq!(args.control_id.as_deref(), Some("control-4"));
         assert!(args.selector.is_none() && args.target.is_none());
+    }
+
+    /// `intent_fill`'s top-level `hints` shape must also parse on
+    /// `intent_complete_form`: the dispatch arm decides whether it applies
+    /// (single field, no field-level hints) or is rejected (`hintsPerField`).
+    #[test]
+    fn intent_complete_form_accepts_top_level_hints() {
+        let args = serde_json::from_value::<IntentCompleteFormArgs>(serde_json::json!({
+            "sessionId":"00000000-0000-0000-0000-000000000001",
+            "pageId":"00000000-0000-0000-0000-000000000002",
+            "purpose":"pick a billing cycle",
+            "fields":[{
+                "name":"Billing cycle",
+                "purpose":"select the billing cycle",
+                "value":{"kind":"selectOne","value":"annual"}
+            }],
+            "hints":{"role":"combobox","accessibleName":"Billing cycle"}
+        }))
+        .expect("top-level hints parses");
+        let hints = args.hints.expect("hints carried through");
+        assert_eq!(hints.role.as_deref(), Some("combobox"));
+        assert_eq!(hints.accessible_name.as_deref(), Some("Billing cycle"));
     }
 }

@@ -909,6 +909,10 @@ resubmit" -- never reconciliation.
   belongs to an earlier server generation. Repair: use retained explicit IDs
   to inspect or close the workflow resources, then call `workflow_start` for
   a new handle when needed.
+- `hintsPerField` -- `intent_complete_form` only: a top-level `hints` was
+  sent with `fields` not exactly one entry, or the one field already carried
+  its own `hints`. Repair: send hints per field (`fields[].hints`); a
+  top-level `hints` is a convenience for the single-field case only.
 
 `workflowGenerationChanged` is different: it is a structured
 `workflow_start` failure reason, not an `-32602` protocol rejection. It means

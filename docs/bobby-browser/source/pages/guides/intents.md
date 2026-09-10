@@ -191,6 +191,12 @@ a fresh form snapshot and fills in the control's own target first. Explicit
 `hints` from `form_snapshot` (normally `role` and `accessibleName`) override
 both of those.
 
+The `intent_complete_form` MCP tool call also accepts `intent_fill`'s
+top-level `hints` as a convenience: when `fields` has exactly one entry and
+that field's own `hints` are empty, the gateway folds the top-level `hints`
+into it; otherwise (more than one field, or the field already has hints)
+the call is rejected with `hintsPerField`.
+
 The named MCP tool defaults `evidenceDetail` to `compact` on success and
 returns one filled-field summary. Full per-field evidence remains in runtime
 events; pass `evidenceDetail: "full"` when diagnosing. Failures always retain

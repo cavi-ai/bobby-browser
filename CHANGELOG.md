@@ -76,6 +76,10 @@
   or `form_snapshot` as an alternative to a real accessible name: when every
   other hint is empty, the gateway resolves the id against a form snapshot
   and fills in the control's own target before compiling the intent.
+- `intent_complete_form` accepts a top-level `hints` (`intent_fill`'s shape)
+  when `fields` has exactly one entry and that field's own hints are empty,
+  folding it into the field. A top-level `hints` with more than one field,
+  or when the field already has hints, is rejected with `hintsPerField`.
 - A handle-capable call that names no `workflowHandle` and no explicit scope
   ID at all now resolves against this connection's one live workflow handle
   when exactly one is bound, the same substitution an explicit

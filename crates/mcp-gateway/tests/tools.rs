@@ -2862,6 +2862,156 @@ async fn intent_complete_form_never_snapshots_for_a_plain_field_name() {
     );
 }
 
+// `intent_fill`'s top-level `hints` shape also parses on
+// `intent_complete_form`. With exactly one field whose own hints are
+// empty, the gateway folds the top-level hints into that field instead
+// of rejecting the call.
+#[tokio::test]
+async fn intent_complete_form_promotes_top_level_hints_to_its_one_field() {
+    let live = live_server_for_control_id_resolution().await;
+    common::initialize(&live.server).await;
+    let mut next_id = 1040;
+    let (session_id, page_id) = common::create_session_and_page(&live.server, &mut next_id).await;
+
+    let response = live
+        .server
+        .handle_message(request(
+            1041,
+            "tools/call",
+            json!({
+                "name":"intent_complete_form",
+                "arguments":{
+                    "sessionId":session_id,
+                    "pageId":page_id,
+                    "purpose":"pick a billing cycle",
+                    "fields":[{
+                        "name":"Billing cycle",
+                        "purpose":"select the billing cycle",
+                        "value":{"kind":"selectOne","value":"annual"}
+                    }],
+                    "hints":{"role":"combobox","accessibleName":"Billing cycle"}
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(response["error"].is_null(), "{response}");
+    assert_eq!(
+        live.form_calls(),
+        0,
+        "a plain field name must never trigger a form snapshot"
+    );
+    let resolved = live
+        .probe
+        .last_collect_candidates_target
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the intent compiled a target and resolved it");
+    assert_eq!(resolved.role, Some("combobox".to_owned()), "{resolved:?}");
+    assert_eq!(
+        resolved.accessible_name,
+        Some("Billing cycle".to_owned()),
+        "{resolved:?}"
+    );
+}
+
+// More than one field makes a top-level `hints` ambiguous -- there is no
+// single field it could apply to -- so the call is rejected rather than
+// guessing which field it meant.
+#[tokio::test]
+async fn intent_complete_form_rejects_top_level_hints_for_more_than_one_field() {
+    let live = live_server_for_control_id_resolution().await;
+    common::initialize(&live.server).await;
+    let mut next_id = 1050;
+    let (session_id, page_id) = common::create_session_and_page(&live.server, &mut next_id).await;
+
+    let response = live
+        .server
+        .handle_message(request(
+            1051,
+            "tools/call",
+            json!({
+                "name":"intent_complete_form",
+                "arguments":{
+                    "sessionId":session_id,
+                    "pageId":page_id,
+                    "purpose":"enter contact details",
+                    "fields":[
+                        {
+                            "name":"email",
+                            "purpose":"applicant email",
+                            "value":{"kind":"setText","value":"a@example.test"}
+                        },
+                        {
+                            "name":"terms",
+                            "purpose":"accept terms",
+                            "value":{"kind":"setChecked","checked":true}
+                        }
+                    ],
+                    "hints":{"role":"textbox"}
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response["error"]["code"], -32602, "{response}");
+    assert_eq!(
+        response["error"]["data"]["reason"],
+        json!("hintsPerField"),
+        "{response}"
+    );
+    assert_eq!(
+        response["error"]["message"],
+        json!(
+            "Invalid params (hintsPerField): intent_complete_form takes hints per field \
+             (fields[].hints); a top-level hints applies only when fields has exactly one entry."
+        ),
+        "{response}"
+    );
+}
+
+// A single field that already carries its own hints must not be
+// silently overwritten by a top-level `hints` -- reject instead of
+// guessing which one the caller meant.
+#[tokio::test]
+async fn intent_complete_form_rejects_top_level_hints_when_the_field_already_has_hints() {
+    let live = live_server_for_control_id_resolution().await;
+    common::initialize(&live.server).await;
+    let mut next_id = 1060;
+    let (session_id, page_id) = common::create_session_and_page(&live.server, &mut next_id).await;
+
+    let response = live
+        .server
+        .handle_message(request(
+            1061,
+            "tools/call",
+            json!({
+                "name":"intent_complete_form",
+                "arguments":{
+                    "sessionId":session_id,
+                    "pageId":page_id,
+                    "purpose":"pick a billing cycle",
+                    "fields":[{
+                        "name":"Billing cycle",
+                        "purpose":"select the billing cycle",
+                        "hints":{"role":"combobox"},
+                        "value":{"kind":"selectOne","value":"annual"}
+                    }],
+                    "hints":{"accessibleName":"Billing cycle"}
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response["error"]["code"], -32602, "{response}");
+    assert_eq!(
+        response["error"]["data"]["reason"],
+        json!("hintsPerField"),
+        "{response}"
+    );
+}
+
 // `intent_fill`'s sibling path: a bare controlId passed as the
 // `accessibleName` hint (with every other hint empty) resolves the same way.
 #[tokio::test]
