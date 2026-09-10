@@ -899,6 +899,21 @@ async fn returned_handle_drives_primitives_intents_context_and_network_through_n
         Value::Null,
         "{context}"
     );
+    // A miss is spelled out: the agent reading structuredContent gets the
+    // reason and the snapshot next step, not a bare null to interpret.
+    assert_eq!(
+        context["result"]["structuredContent"]["hit"],
+        json!(false),
+        "{context}"
+    );
+    assert_eq!(
+        context["result"]["structuredContent"]["reason"], "notRemembered",
+        "{context}"
+    );
+    assert_eq!(
+        context["result"]["structuredContent"]["nextStep"], "a11y_snapshot",
+        "{context}"
+    );
 
     let network = call_tool(
         &live.server,

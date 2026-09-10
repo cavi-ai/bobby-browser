@@ -359,6 +359,13 @@ Note: `ExtractValueKind` (`text`, `attribute`, `href`) is separate from fill and
 
 `ExtractValueKind`: `text`, `attribute` (+ `attribute` name), `href`.
 
+An `a11y_snapshot` node passed verbatim must be an *actionable* node (button,
+textbox, link, ...): text and layout roles the AX tree emits (`StaticText`,
+`LabelText`, `MenuListPopup`, ...) are never element candidates, so the field
+misses with an `a11yOnlyRole` marker instead of a generic `targetNotFound`.
+Read page text with page-scoped `wait_for`/`inspect` targets
+(`role: main|RootWebArea`) or `extract_structured` instead.
+
 ### DetectChallenge (Replayable)
 
 ```ts

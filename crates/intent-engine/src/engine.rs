@@ -2108,6 +2108,17 @@ async fn resolve_extract_field(
         Err(error) => return vec![missing_extraction(&field.name, Some(error.code))],
     };
 
+    // An `a11y_snapshot` node passed verbatim can name a role the element
+    // collector never emits (`StaticText` and friends). Fail typed before
+    // the resolver reports a generic not-found that would send the agent
+    // re-snapshotting, or worse, a green `completed` with a silently
+    // missing field.
+    if field.target.role.as_deref().is_some_and(a11y_only_role)
+        && resolve_candidates(&field.target, &candidates, &ResolutionPolicy::default()).is_err()
+    {
+        return a11y_only_role_extraction(field);
+    }
+
     match resolve_candidates(&field.target, &candidates, &ResolutionPolicy::default()) {
         Ok(ResolutionDecision::Resolved {
             candidate,
@@ -2366,6 +2377,53 @@ fn missing_extraction(field: &str, error_code: Option<ErrorCode>) -> Evidence {
         resolution_path: IntentResolutionPath::Deterministic,
         error_code,
     }
+}
+
+/// Accessibility-tree roles that can never be a DOM candidate: the semantic
+/// resolver gathers *elements* (`crates/worker-pool/src/targeting.rs`'s
+/// `implicitRole` map), so roles the AX tree emits for text/layout structure
+/// (`StaticText`, its label wrapper, select popups, inline text leaves)
+/// resolve to nothing by construction. An `a11y_snapshot` advertises them,
+/// so an agent that passes a snapshot node verbatim deserves a typed
+/// explanation -- not a bare `targetNotFound` that invites retries and a
+/// vision escalation that cannot help either.
+fn a11y_only_role(role: &str) -> bool {
+    matches!(
+        role.to_ascii_lowercase().as_str(),
+        "statictext"
+            | "labeltext"
+            | "inlinetextbox"
+            | "menulistpopup"
+            | "rootwebarea"
+            | "genericcontainer"
+            | "ignored"
+            | "section"
+            | "clientsidepushbutton"
+            | "layouttable"
+            | "layouttablecell"
+            | "layouttablerow"
+            | "linebreak"
+    )
+}
+
+/// The typed extraction miss for an `a11y_snapshot`-shaped role the
+/// deterministic resolver can never match: `value: None` (a miss, not a
+/// failure — the intent still completes) with the a11y-only reason so the
+/// agent repairs once instead of re-snapshotting and retrying.
+fn a11y_only_role_extraction(field: &ExtractFieldPlan) -> Vec<Evidence> {
+    let role = field.target.role.as_deref().unwrap_or("").to_owned();
+    vec![
+        Evidence::Configuration {
+            name: "a11yOnlyRole".into(),
+            value: role,
+        },
+        Evidence::Extraction {
+            field: field.name.clone(),
+            value: None,
+            resolution_path: IntentResolutionPath::Deterministic,
+            error_code: Some(ErrorCode::InvalidRequest),
+        },
+    ]
 }
 
 fn extract_value_from_candidate(kind: &ExtractValueKind, candidate: &Candidate) -> Option<String> {

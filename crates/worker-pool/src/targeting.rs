@@ -1062,15 +1062,26 @@ fn choose(
             "no target candidate matched",
         )),
         ResolutionDecision::Ambiguous { candidates } => {
+            // Machine-readable repair, not a Rust Debug dump: name each
+            // contender the way the outcome's resolution evidence does
+            // (role/name/score), so the agent reading `error.message` can
+            // narrow the target without re-deriving the candidate list.
             let summary = candidates
                 .iter()
                 .take(10)
-                .map(|candidate| format!("role={:?},score={}", candidate.role, candidate.score))
+                .map(|candidate| {
+                    let role = candidate.role.as_deref().unwrap_or("(no role)");
+                    let name = candidate.name.as_deref().unwrap_or("(no name)");
+                    format!("{role} \"{name}\" score={}", candidate.score)
+                })
                 .collect::<Vec<_>>()
-                .join(";");
+                .join("; ");
             Err(target_error(
                 ErrorCode::TargetAmbiguous,
-                format!("target is ambiguous: {summary}"),
+                format!(
+                    "target is ambiguous: {summary}. Narrow the target with an exact \
+                     accessibleName and ordinal, then retry"
+                ),
             ))
         }
         ResolutionDecision::Resolved {
@@ -1824,5 +1835,58 @@ mod tests {
                 "missing implicit role mapping: {mapping}"
             );
         }
+    }
+
+    fn ambiguous_candidate(
+        role: Option<&str>,
+        name: Option<&str>,
+        _score: i32,
+    ) -> BrowserCandidate {
+        BrowserCandidate {
+            id: "1".into(),
+            css: None,
+            test_id: None,
+            role: role.map(str::to_owned),
+            name: name.map(str::to_owned),
+            label: None,
+            text: String::new(),
+            attributes: BTreeMap::new(),
+            attached: true,
+            visible: true,
+            enabled: true,
+        }
+    }
+
+    /// The `TargetAmbiguous` message is machine-readable repair, not a Rust
+    /// `Debug` dump: contenders read like the resolution evidence (role,
+    /// quoted name, score), and the message ends with the narrowing step.
+    #[test]
+    fn ambiguous_resolution_message_names_role_name_score_and_the_narrowing_step() {
+        let target = TargetSpec {
+            role: Some("button".into()),
+            ..TargetSpec::default()
+        };
+        let raw = vec![
+            ambiguous_candidate(Some("button"), Some("Submit"), 80),
+            ambiguous_candidate(Some("button"), Some("Submit now"), 80),
+        ];
+        let error = choose(&target, raw, true).expect_err("two equal candidates");
+        assert_eq!(error.code, ErrorCode::TargetAmbiguous);
+        assert!(
+            error.message.contains("button \"Submit\" score=")
+                && error.message.contains("button \"Submit now\" score="),
+            "message names each contender semantically: {}",
+            error.message
+        );
+        assert!(
+            !error.message.contains("Some(") && !error.message.contains("None("),
+            "message must not leak Rust Debug formatting: {}",
+            error.message
+        );
+        assert!(
+            error.message.contains("Narrow the target"),
+            "message carries the narrowing repair: {}",
+            error.message
+        );
     }
 }
