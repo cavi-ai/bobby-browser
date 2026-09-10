@@ -83,7 +83,9 @@
   element resolver can never match (`StaticText`, `LabelText`,
   `MenuListPopup`, ...) misses with an `a11yOnlyRole` configuration marker
   instead of a bare `targetNotFound` — and runs no vision escalation, which
-  cannot resolve a text node either.
+  cannot resolve a text node either. (#465 shipped the marker with a guard
+  that checked the wrong resolver shape; this fixes it to fire on every
+  non-resolved decision and pins it with tests.)
 - A `targetAmbiguous` rejection names its contenders the way the outcome's
   resolution evidence does (`button "Submit" score=80`) and ends with the
   narrowing repair, replacing the previous Rust `Debug` dump
