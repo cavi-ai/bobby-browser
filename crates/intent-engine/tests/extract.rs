@@ -873,3 +873,91 @@ fn assert_vision_assist_failed(outcome: &IntentOutcome) {
     assert_eq!(*value, None);
     assert_eq!(*error_code, Some(ErrorCode::VisionAssistFailed));
 }
+
+/// An `a11y_snapshot` node passed verbatim can name a role the element
+/// collector never emits (`StaticText`, `LabelText`, ...). The field must
+/// miss with a typed a11y-only marker -- and no vision escalation, which
+/// cannot resolve a text node either -- instead of a bare `targetNotFound`
+/// that escalates.
+#[tokio::test]
+async fn extract_on_an_a11y_only_role_misses_typed_without_vision() {
+    let mut field = field("ref", "confirmation reference", ExtractValueKind::Text);
+    field.hints = IntentHints {
+        role: Some("StaticText".into()),
+        accessible_name: Some("Subscription confirmed ref-9137".into()),
+        ..IntentHints::default()
+    };
+    // No candidates and no vision assist: the deterministic miss is all
+    // the agent gets, so it must say why.
+    let browser = FakeBrowser {
+        candidate_responses: Arc::new(Mutex::new(VecDeque::from([vec![]]))),
+        ..FakeBrowser::default()
+    };
+    let outcome = IntentEngine::execute(
+        &extract(vec![field]),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("a miss is a completed partial, not a failure: {outcome:?}");
+    };
+    assert!(
+        evidence.iter().any(
+            |item| matches!(item, Evidence::Configuration { name, .. } if name == "a11yOnlyRole")
+        ),
+        "the miss names the a11y-only role class: {evidence:?}"
+    );
+    let Evidence::Extraction {
+        value, error_code, ..
+    } = find_extraction(&evidence, "ref")
+    else {
+        unreachable!()
+    };
+    assert_eq!(*value, None);
+    assert_eq!(*error_code, Some(ErrorCode::InvalidRequest));
+}
+
+/// A real element role on the same page still extracts deterministically:
+/// the a11y-only short-circuit never fires for roles the collector emits.
+#[tokio::test]
+async fn extract_on_a_gatherable_role_is_unaffected() {
+    let mut field = field("ref", "confirmation reference", ExtractValueKind::Text);
+    field.hints = IntentHints {
+        role: Some("textbox".into()),
+        accessible_name: Some("Subscription confirmed ref-9137".into()),
+        ..IntentHints::default()
+    };
+    let browser = FakeBrowser {
+        candidate_responses: Arc::new(Mutex::new(VecDeque::from([vec![candidate_with_role(
+            "textbox",
+            "Subscription confirmed ref-9137",
+            "Subscription confirmed ref-9137",
+            BTreeMap::new(),
+        )]]))),
+        ..FakeBrowser::default()
+    };
+    let outcome = IntentEngine::execute(
+        &extract(vec![field]),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("expected Completed, got {outcome:?}");
+    };
+    assert!(
+        !evidence.iter().any(
+            |item| matches!(item, Evidence::Configuration { name, .. } if name == "a11yOnlyRole")
+        ),
+        "no a11y-only marker for a resolvable field: {evidence:?}"
+    );
+    let Evidence::Extraction { value, .. } = find_extraction(&evidence, "ref") else {
+        unreachable!()
+    };
+    assert_eq!(value.as_deref(), Some("Subscription confirmed ref-9137"));
+}

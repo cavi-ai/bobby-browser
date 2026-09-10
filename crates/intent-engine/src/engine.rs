@@ -2109,17 +2109,19 @@ async fn resolve_extract_field(
     };
 
     // An `a11y_snapshot` node passed verbatim can name a role the element
-    // collector never emits (`StaticText` and friends). Fail typed before
-    // the resolver reports a generic not-found that would send the agent
+    // collector never emits (`StaticText` and friends). Fail typed when the
+    // deterministic resolver cannot place the target, before the stuck path
+    // reports a generic not-found that would send the agent
     // re-snapshotting, or worse, a green `completed` with a silently
     // missing field.
+    let decision = resolve_candidates(&field.target, &candidates, &ResolutionPolicy::default());
     if field.target.role.as_deref().is_some_and(a11y_only_role)
-        && resolve_candidates(&field.target, &candidates, &ResolutionPolicy::default()).is_err()
+        && !matches!(decision, Ok(ResolutionDecision::Resolved { .. }))
     {
         return a11y_only_role_extraction(field);
     }
 
-    match resolve_candidates(&field.target, &candidates, &ResolutionPolicy::default()) {
+    match decision {
         Ok(ResolutionDecision::Resolved {
             candidate,
             evidence,
