@@ -61,6 +61,10 @@
   the same way, instead of evicting it. `form_snapshot` through the handle
   replays on the opener the same way; the `controlId` lookup inside
   `upload_files` fails with the same evidence and repair.
+- `runtime_info`'s output schema advertises `operationalMetrics` (the
+  counters/histograms snapshot, opaque object) and `visionProposeBudgetMs`,
+  matching the wire payload the runtime already returns — a caller can see
+  the observation window and resolution-source counters before calling.
 
 ### Changed
 
