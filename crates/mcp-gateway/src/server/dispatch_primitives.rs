@@ -25,6 +25,7 @@ impl Server {
         call: ToolCall,
         mut context: types::RequestContext,
         handle: Option<&str>,
+        defaulted_handle: Option<&str>,
     ) -> Value {
         let result = match call.name.as_str() {
             "command_execute" => {
@@ -211,7 +212,7 @@ impl Server {
             }
             _ => unreachable!("dispatch_primitives received a tool it does not own"),
         };
-        self.finish_tool(id, result).await
+        self.finish_tool(id, result, defaulted_handle).await
     }
 }
 

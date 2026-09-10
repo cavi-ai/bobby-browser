@@ -36,6 +36,7 @@ impl Server {
         call: ToolCall,
         context: types::RequestContext,
         handle: Option<&str>,
+        defaulted_handle: Option<&str>,
     ) -> Value {
         let result = match call.name.as_str() {
             "page_list" => {
@@ -410,6 +411,7 @@ impl Server {
                                     self.finish_tool(
                                         id,
                                         Ok(closed_page_prerequisite_failure(evidence)),
+                                        defaulted_handle,
                                     )
                                     .await
                                 }
@@ -459,6 +461,6 @@ impl Server {
             }
             _ => unreachable!("dispatch_page_ops received a tool it does not own"),
         };
-        self.finish_tool(id, result).await
+        self.finish_tool(id, result, defaulted_handle).await
     }
 }

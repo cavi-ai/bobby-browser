@@ -909,6 +909,10 @@ resubmit" -- never reconciliation.
   belongs to an earlier server generation. Repair: use retained explicit IDs
   to inspect or close the workflow resources, then call `workflow_start` for
   a new handle when needed.
+- `hintsPerField` -- `intent_complete_form` only: a top-level `hints` was
+  sent with `fields` not exactly one entry, or the one field already carried
+  its own `hints`. Repair: send hints per field (`fields[].hints`); a
+  top-level `hints` is a convenience for the single-field case only.
 
 `workflowGenerationChanged` is different: it is a structured
 `workflow_start` failure reason, not an `-32602` protocol rejection. It means
@@ -924,6 +928,11 @@ is a server-generation-scoped convenience, never authority: normal ownership,
 capability, and operation checks still run after substitution. The V1
 allowlist accepts a handle only on the advertised page-work tools; lifecycle,
 checkpoint, and recovery tools keep explicit IDs as the audit and repair path.
+A call to one of those tools that names no `workflowHandle` and no explicit
+scope ID at all defaults to this connection's one live handle when exactly
+one is bound, and the outcome's evidence carries a `workflowHandleDefaulted`
+configuration item naming it; zero or several live handles leave the call for
+the ordinary schema rejection, which then names the live count.
 
 One server generation holds at most 64 committed bindings in an LRU plus 64
 concurrent startup reservations. A failed start does not evict a live handle.

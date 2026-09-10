@@ -232,6 +232,9 @@ pub(crate) fn repair_for_protocol_reason(reason: &str) -> Option<Value> {
         "unknownWorkflowHandle" => {
             "The handle is malformed, unknown, or evicted; use explicit IDs to inspect or close the workflow's resources, then call workflow_start for a new handle."
         }
+        "hintsPerField" => {
+            "intent_complete_form takes hints per field (fields[].hints); a top-level hints applies only when fields has exactly one entry."
+        }
         _ => return None,
     };
     Some(repair(action))
@@ -298,6 +301,17 @@ mod tests {
             !action.contains("Re-check the control's real role"),
             "{action}"
         );
+    }
+
+    #[test]
+    fn hints_per_field_repair_names_the_field_scoped_shape() {
+        let action = repair_for_protocol_reason("hintsPerField")
+            .expect("hintsPerField has a repair")["action"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(action.contains("fields[].hints"), "{action}");
+        assert!(action.contains("exactly one entry"), "{action}");
     }
 
     #[test]

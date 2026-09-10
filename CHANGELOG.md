@@ -76,6 +76,16 @@
   or `form_snapshot` as an alternative to a real accessible name: when every
   other hint is empty, the gateway resolves the id against a form snapshot
   and fills in the control's own target before compiling the intent.
+- `intent_complete_form` accepts a top-level `hints` (`intent_fill`'s shape)
+  when `fields` has exactly one entry and that field's own hints are empty,
+  folding it into the field. A top-level `hints` with more than one field,
+  or when the field already has hints, is rejected with `hintsPerField`.
+- A handle-capable call that names no `workflowHandle` and no explicit scope
+  ID at all now resolves against this connection's one live workflow handle
+  when exactly one is bound, the same substitution an explicit
+  `workflowHandle` would have produced; the outcome's evidence carries a
+  `workflowHandleDefaulted` configuration item naming the handle it used.
+  Zero or two-or-more live handles get no default.
 
 ### Fixed
 
@@ -139,6 +149,13 @@
   is now left in place untouched; a pre-ownership one-line entry (from a
   binary predating this change) is removed but never killed, since it names
   no owner to verify against.
+- A `schemaViolation` `-32602` rejection now names the pointer and
+  constraint in `error.message` itself (`schemaViolation at /sessionId:
+  required`), not only in `error.data`, since MCP hosts commonly render
+  `error.message` alone. A scope-less call to a handle-capable tool that the
+  single-live-handle default above could not resolve (zero, or more than
+  one, live handle) gets a targeted repair action naming the live count and
+  pointing at `workflow_start`.
 
 ## 0.13.0 - 2026-09-04
 

@@ -998,7 +998,13 @@ impl Server {
         // tolerated `None` would un-gate any tool someone forgets to map.
         if call.name == "toolset_select" {
             if let Err(violation) = validate_tool_arguments(&call.name, &call.arguments) {
-                return invalid_params(id, &call.name, &call.arguments, Some(violation));
+                return invalid_params(
+                    id,
+                    &call.name,
+                    &call.arguments,
+                    Some(violation),
+                    self.workflow_handles.live_binding_count(),
+                );
             }
             let input: ToolsetSelectArgs = match bounded_parse(call.arguments) {
                 Ok(input) => input,
@@ -1022,13 +1028,13 @@ impl Server {
         if let Err(interface_error) = self.authorization.authorize(&context, operation) {
             return interface_error_response(id, interface_error);
         }
-        let handle = match self
+        let (handle, defaulted_handle) = match self
             .workflow_handles
             .normalize_arguments(&call.name, &call.arguments)
         {
-            Ok((arguments, handle)) => {
+            Ok((arguments, handle, defaulted_handle)) => {
                 call.arguments = arguments;
-                handle
+                (handle, defaulted_handle)
             }
             Err(WorkflowHandleError::BindingConflict) => {
                 return invalid_params_reason(id, "workflowBindingConflict")
@@ -1043,12 +1049,19 @@ impl Server {
             }
         };
         if let Err(violation) = validate_tool_arguments(&call.name, &call.arguments) {
-            return invalid_params(id, &call.name, &call.arguments, Some(violation));
+            return invalid_params(
+                id,
+                &call.name,
+                &call.arguments,
+                Some(violation),
+                self.workflow_handles.live_binding_count(),
+            );
         }
         if let Some(metrics) = &self.operational_metrics {
             metrics.record_workflow_call(workflow_call_class(&call.name));
         }
-        self.dispatch_named_tool(id, call, context, handle).await
+        self.dispatch_named_tool(id, call, context, handle, defaulted_handle)
+            .await
     }
 
     async fn tool_success(&self, id: Value, mut value: Value) -> Value {
@@ -1852,6 +1865,20 @@ fn popup_closed_evidence(popup_page_id: types::PageId, opener_page_id: types::Pa
     .expect("Evidence always serializes")
 }
 
+/// `{"kind":"configuration","name":"workflowHandleDefaulted","value":handle}`
+/// evidence for a call that named no scope at all and was resolved against
+/// this connection's one live workflow binding
+/// (`WorkflowHandles::normalize_arguments`'s `default_scope`). `handle` is
+/// server-minted, never caller data, so this discloses no more than
+/// `workflow_start` already returned.
+fn workflow_handle_defaulted_evidence(handle: &str) -> Value {
+    json!({
+        "kind": "configuration",
+        "name": "workflowHandleDefaulted",
+        "value": handle,
+    })
+}
+
 /// Appends one evidence item to a command-outcome-shaped `Value`, creating
 /// the array if the outcome variant did not already carry one.
 fn push_evidence(value: &mut Value, evidence: Value) {
@@ -1890,6 +1917,7 @@ fn invalid_params(
     tool: &str,
     arguments: &Value,
     violation: Option<crate::schema::SchemaViolation>,
+    live_workflow_handles: usize,
 ) -> Value {
     let mut message = None;
     let data = violation.map(|violation| {
@@ -1906,9 +1934,20 @@ fn invalid_params(
                         repair["action"] = json!(format!("{action} {migration}"));
                     }
                 }
+                if let Some(hint) =
+                    missing_scope_hint(tool, arguments, &violation, live_workflow_handles)
+                {
+                    if let Some(action) = repair["action"].as_str() {
+                        repair["action"] = json!(format!("{hint} {action}"));
+                    }
+                }
                 repair
             });
-        message = Some(invalid_params_message("schemaViolation", repair.as_ref()));
+        let reason = format!(
+            "schemaViolation at {}: {}",
+            violation.pointer, violation.constraint
+        );
+        message = Some(invalid_params_message(&reason, repair.as_ref()));
         if let Some(repair) = repair {
             data["repair"] = repair;
         }
@@ -1919,6 +1958,41 @@ fn invalid_params(
         response["error"]["message"] = json!(message);
     }
     response
+}
+
+/// The targeted repair prefix for a call to a `WORKFLOW_SCOPE_TOOLS` tool
+/// that named no scope at all. `normalize_arguments` already tried the
+/// single-live-handle default (`workflow_handles.rs`'s `default_scope`) and
+/// only reaches schema validation when it could not, so `live_workflow_handles`
+/// here is always 0 or 2-or-more -- never the 1-handle case the default
+/// already resolved. Gated on `arguments` carrying none of the four scope
+/// keys so the fixed wording ("names no workflowHandle and no
+/// sessionId/pageId") is never printed for a call that in fact named one of
+/// them (a `pageId`-only call still fails `required` on `sessionId`, but it
+/// did name scope, so this hint must not fire for it).
+fn missing_scope_hint(
+    tool: &str,
+    arguments: &Value,
+    violation: &crate::schema::SchemaViolation,
+    live_workflow_handles: usize,
+) -> Option<String> {
+    if violation.constraint != "required"
+        || (violation.pointer != "/sessionId" && violation.pointer != "/pageId")
+    {
+        return None;
+    }
+    crate::workflow_handles::workflow_scope_for_tool(tool)?;
+    let object = arguments.as_object()?;
+    if ["workflowHandle", "sessionId", "pageId", "workflowId"]
+        .iter()
+        .any(|key| object.contains_key(*key))
+    {
+        return None;
+    }
+    Some(format!(
+        "This call names no workflowHandle and no sessionId/pageId; pass the workflowHandle \
+         from workflow_start ({live_workflow_handles} live workflow handles on this connection)."
+    ))
 }
 
 /// `-32602` for a rejection with no single offending field: a body that passed
@@ -2530,11 +2604,12 @@ mod tests {
                 pointer: "/target".to_owned(),
                 constraint: "required",
             }),
+            0,
         );
         assert_eq!(
             response["error"]["message"],
             json!(
-                "Invalid params (schemaViolation): Fix the value at error.data.pointer; error.data.constraint names the keyword it violated."
+                "Invalid params (schemaViolation at /target: required): Fix the value at error.data.pointer; error.data.constraint names the keyword it violated."
             )
         );
         assert_eq!(
@@ -2551,12 +2626,59 @@ mod tests {
         );
     }
 
+    /// `click` is `WORKFLOW_SCOPE_TOOLS`-allowlisted and the violation is
+    /// `required` at `/sessionId`, but `arguments` already names `pageId` --
+    /// this call did name scope, just an incomplete one, so the "names no
+    /// workflowHandle and no sessionId/pageId" hint must not fire for it.
+    #[test]
+    fn invalid_params_missing_scope_hint_does_not_fire_for_a_partial_explicit_scope() {
+        let response = invalid_params(
+            json!(5),
+            "click",
+            &json!({"pageId": "018f0000-0000-7000-8000-000000000009"}),
+            Some(crate::schema::SchemaViolation {
+                pointer: "/sessionId".to_owned(),
+                constraint: "required",
+            }),
+            0,
+        );
+        let action = response["error"]["data"]["repair"]["action"]
+            .as_str()
+            .expect("repair action");
+        assert!(!action.contains("workflow_start"), "{action}");
+    }
+
+    /// The one live handle a scope-less call would have defaulted to is
+    /// resolved before schema validation ever runs (`normalize_arguments`),
+    /// so this rejection path only ever sees 0 or 2-or-more live handles --
+    /// exercised here with 2, matching the gauntlet scenario in
+    /// `tests/workflow_handles.rs`.
+    #[test]
+    fn invalid_params_missing_scope_hint_names_the_live_handle_count() {
+        let response = invalid_params(
+            json!(6),
+            "intent_complete_form",
+            &json!({"purpose": "fill", "fields": []}),
+            Some(crate::schema::SchemaViolation {
+                pointer: "/sessionId".to_owned(),
+                constraint: "required",
+            }),
+            2,
+        );
+        assert_eq!(
+            response["error"]["message"],
+            json!(
+                "Invalid params (schemaViolation at /sessionId: required): This call names no workflowHandle and no sessionId/pageId; pass the workflowHandle from workflow_start (2 live workflow handles on this connection). Fix the value at error.data.pointer; error.data.constraint names the keyword it violated."
+            )
+        );
+    }
+
     /// No `SchemaViolation` means no reason is known, so the message must
     /// stay the untouched bare string rather than naming a reason that was
     /// never diagnosed.
     #[test]
     fn invalid_params_with_no_violation_stays_bare() {
-        let response = invalid_params(json!(4), "click", &json!({}), None);
+        let response = invalid_params(json!(4), "click", &json!({}), None, 0);
         assert_eq!(response["error"]["message"], json!("Invalid params"));
         assert!(response["error"]["data"].is_null());
     }
