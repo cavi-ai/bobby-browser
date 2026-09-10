@@ -751,7 +751,12 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
                 "active_sessions":{"type":"integer","minimum":0},
                 "queued_jobs":{"type":"integer","minimum":0},
                 "uptime_ms":{"type":"integer","minimum":0},
-                "credentialExpiresAt":{"type":"string","format":"date-time"}
+                "credentialExpiresAt":{"type":"string","format":"date-time"},
+                "visionProposeBudgetMs":{"type":"integer","minimum":0},
+                // Counters and latency histograms only (never prompts,
+                // values, or URLs); the full nested projection stays in the
+                // wire type and the metrics snapshot file, not the catalog.
+                "operationalMetrics":json!({"type":"object"})
             }),
             &[
                 "version",
@@ -1016,6 +1021,17 @@ pub(crate) fn advertised_tool_output_schema(name: &str) -> Value {
             if defs.as_object().is_some_and(|defs| !defs.is_empty()) {
                 schema["$defs"] = defs;
             }
+            schema
+        }
+        "runtime_info" => {
+            // Small flat object: advertising it beats the opaque collapse,
+            // so a caller sees credential expiry, the vision budget, and
+            // the metrics snapshot before calling anything.
+            let mut schema = tool_output_schema(name);
+            schema
+                .as_object_mut()
+                .expect("output schemas are objects")
+                .remove("$defs");
             schema
         }
         _ => {
@@ -3632,4 +3648,27 @@ fn accessibility_target() -> Value {
         }),
         &["role", "accessibleName"],
     )
+}
+
+/// The runtime_info output schema advertises the operational-metrics
+/// snapshot (opaque object; nested counters/histograms stay in the wire
+/// type) and the vision propose budget, so a caller can see both before
+/// calling.
+#[test]
+fn runtime_info_output_schema_advertises_operational_metrics_and_vision_budget() {
+    let schema = tool_output_schema("runtime_info");
+    let properties = schema["properties"].as_object().expect("properties");
+    assert!(
+        properties.contains_key("operationalMetrics"),
+        "{properties:?}"
+    );
+    assert!(
+        properties.contains_key("visionProposeBudgetMs"),
+        "{properties:?}"
+    );
+    let advertised = advertised_tool_output_schema("runtime_info");
+    assert!(
+        advertised["properties"]["operationalMetrics"].is_object(),
+        "{advertised}"
+    );
 }
