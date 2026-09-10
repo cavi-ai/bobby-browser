@@ -315,6 +315,14 @@ optional `workflowId`, and returns the workflow ID it used. Omit `workflowId`
 to mint one; pass it back to keep later commands in the same workflow.
 `intent_*` tools also accept an optional `idempotencyKey`.
 
+A handle-capable call that names no `workflowHandle` and no explicit scope ID
+at all defaults to this connection's one live workflow handle when exactly one
+is bound — the same substitution an explicit `workflowHandle` would have
+produced. The outcome's evidence then carries a `configuration` item named
+`workflowHandleDefaulted` whose value is the handle it used. Zero or two-or-
+more live handles get no default; the call falls through to the ordinary
+`schemaViolation` rejection below, whose repair action names the live count.
+
 ## Rejected arguments
 
 A `-32602` response carries `data` describing what failed:
@@ -337,6 +345,10 @@ explicit IDs before starting again.
 `pointer` and `constraint` describe the published schema, never the submitted
 value. Example: a `session_create` call with no `profile` returns
 `{"reason":"schemaViolation","pointer":"/profile","constraint":"required"}`.
+The `-32602` `error.message` itself now names `pointer` and `constraint` too
+(`schemaViolation at /profile: required`), and a scope-less call to a
+handle-capable tool gets a targeted repair action naming the live handle
+count when the single-handle default above did not apply.
 
 ## Tool metadata
 

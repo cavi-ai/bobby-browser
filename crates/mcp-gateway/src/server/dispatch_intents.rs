@@ -27,6 +27,7 @@ impl Server {
         call: ToolCall,
         mut context: types::RequestContext,
         handle: Option<&str>,
+        defaulted_handle: Option<&str>,
     ) -> Value {
         let result = match call.name.as_str() {
             "intent_locate" => {
@@ -419,7 +420,7 @@ impl Server {
             }
             _ => unreachable!("dispatch_intents received a tool it does not own"),
         };
-        self.finish_tool(id, result).await
+        self.finish_tool(id, result, defaulted_handle).await
     }
 }
 

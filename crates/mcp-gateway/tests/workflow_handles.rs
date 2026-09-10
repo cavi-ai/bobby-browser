@@ -913,6 +913,100 @@ async fn returned_handle_drives_primitives_intents_context_and_network_through_n
     );
 }
 
+/// The gauntlet-observed failure this closes: an agent calls a
+/// `WORKFLOW_SCOPE_TOOLS` tool right after `workflow_start` but forgets the
+/// handle entirely (no `workflowHandle`, no explicit ids). With exactly one
+/// live binding on the connection, the call defaults to it instead of
+/// bouncing off a schema rejection -- dispatched all the way to the fake
+/// runtime, which fails this specific call on its own terms (no real target
+/// named "Email" exists on the fresh page `workflow_start` opened, so
+/// resolution reports `targetNotFound`). That failure is the proof: the
+/// call was never rejected for a missing scope, and the outcome -- whatever
+/// its status -- names the handle defaulting used, so the agent can see
+/// what happened without reading `error.data`.
+#[tokio::test]
+async fn scope_less_intent_complete_form_defaults_to_the_only_live_handle_and_reports_it() {
+    let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+    let started = start(&live.server, 80, json!({"profile":"harness"})).await;
+    let handle = started["result"]["structuredContent"]["workflowHandle"]
+        .as_str()
+        .expect("workflow_start returns a handle")
+        .to_owned();
+
+    let response = call_tool(
+        &live.server,
+        81,
+        "intent_complete_form",
+        json!({
+            "purpose":"fill the form",
+            "fields":[{
+                "name":"Email",
+                "purpose":"Contact email",
+                "value":{"kind":"setText","value":"someone@example.test"}
+            }]
+        }),
+    )
+    .await;
+    assert!(
+        response["error"].is_null(),
+        "the call must be accepted and dispatched, never bounce off a schema rejection: {response}"
+    );
+    let outcome = &response["result"]["structuredContent"];
+    assert_eq!(
+        outcome["workflowId"], started["result"]["structuredContent"]["workflowId"],
+        "{response}"
+    );
+    let defaulted = outcome["evidence"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|item| item["name"] == "workflowHandleDefaulted")
+        .unwrap_or_else(|| panic!("workflowHandleDefaulted evidence missing: {response}"));
+    assert_eq!(defaulted["kind"], "configuration", "{response}");
+    assert_eq!(defaulted["value"], handle, "{response}");
+}
+
+/// Two live handles is not "the only one": defaulting must not guess between
+/// them, and the resulting schema rejection names the live count so the
+/// agent knows this is not the single-handle case it may have seen before.
+#[tokio::test]
+async fn scope_less_intent_complete_form_with_two_live_handles_is_rejected_naming_the_count() {
+    let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+    start(&live.server, 90, json!({"profile":"harness-a"})).await;
+    start(&live.server, 91, json!({"profile":"harness-b"})).await;
+
+    let response = call_tool(
+        &live.server,
+        92,
+        "intent_complete_form",
+        json!({
+            "purpose":"fill the form",
+            "fields":[{
+                "name":"Email",
+                "purpose":"Contact email",
+                "value":{"kind":"setText","value":"someone@example.test"}
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(response["error"]["code"], -32602, "{response}");
+    assert_eq!(
+        response["error"]["data"]["reason"], "schemaViolation",
+        "{response}"
+    );
+    assert_eq!(
+        response["error"]["data"]["pointer"], "/sessionId",
+        "{response}"
+    );
+    assert_eq!(
+        response["error"]["data"]["constraint"], "required",
+        "{response}"
+    );
+    let message = response["error"]["message"].as_str().unwrap();
+    assert!(message.contains("2 live workflow handles"), "{message}");
+    assert!(message.contains("workflow_start"), "{message}");
+}
+
 #[tokio::test]
 async fn workflow_handle_conflicts_and_unknown_handles_fail_before_dispatch() {
     let live = live_with_capabilities(Capability::ALL.to_vec()).await;

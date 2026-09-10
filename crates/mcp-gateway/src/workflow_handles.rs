@@ -217,19 +217,29 @@ impl WorkflowHandles {
     /// second element of a successful return is the handle that was resolved,
     /// when the call used one -- callers need it to apply the closed-page
     /// rule; a raw-id call carries `None` and is never touched by that rule.
+    /// The third element is that same handle again, but only when this call
+    /// carried no scope at all and was resolved by [`Self::default_scope`]:
+    /// callers use it to attach `workflowHandleDefaulted` evidence to a
+    /// successful outcome, since the caller never named this handle itself.
     pub(crate) fn normalize_arguments(
         &self,
         tool: &str,
         arguments: &Value,
-    ) -> Result<(Value, Option<String>), WorkflowHandleError> {
+    ) -> Result<(Value, Option<String>, Option<String>), WorkflowHandleError> {
         let Some(scope) = workflow_scope_for_tool(tool) else {
-            return Ok((arguments.clone(), None));
+            return Ok((arguments.clone(), None, None));
         };
         let Some(object) = arguments.as_object() else {
-            return Ok((arguments.clone(), None));
+            return Ok((arguments.clone(), None, None));
         };
         let Some(handle) = object.get("workflowHandle") else {
-            return Ok((arguments.clone(), None));
+            if ["sessionId", "pageId", "workflowId"]
+                .iter()
+                .any(|key| object.contains_key(*key))
+            {
+                return Ok((arguments.clone(), None, None));
+            }
+            return Ok(self.default_scope(scope, object));
         };
 
         if ["sessionId", "pageId", "workflowId"]
@@ -262,7 +272,63 @@ impl WorkflowHandles {
                 serde_json::json!(binding.workflow_id),
             );
         }
-        Ok((Value::Object(normalized), Some(handle.to_owned())))
+        Ok((Value::Object(normalized), Some(handle.to_owned()), None))
+    }
+
+    /// The single-live-handle scope default: a `WORKFLOW_SCOPE_TOOLS` call
+    /// that named no `workflowHandle` and none of
+    /// `sessionId`/`pageId`/`workflowId` resolves against this connection's
+    /// one live workflow binding, exactly as if that handle had been passed
+    /// explicitly. Zero or two-or-more live bindings leave `arguments`
+    /// untouched so schema validation reports the missing scope
+    /// (`server/mod.rs`'s `missing_scope_hint` names the live count in that
+    /// rejection). Only reachable from [`Self::normalize_arguments`], which
+    /// has already confirmed no scope key is present.
+    fn default_scope(
+        &self,
+        scope: WorkflowScope,
+        object: &serde_json::Map<String, Value>,
+    ) -> (Value, Option<String>, Option<String>) {
+        let only_handle = {
+            let state = self.lock_state();
+            if state.bindings.len() == 1 {
+                state.bindings.keys().next().cloned()
+            } else {
+                None
+            }
+        };
+        let Some(handle) = only_handle else {
+            return (Value::Object(object.clone()), None, None);
+        };
+        let Ok(binding) = self.resolve(&handle) else {
+            return (Value::Object(object.clone()), None, None);
+        };
+
+        let mut normalized = object.clone();
+        normalized.insert(
+            "sessionId".to_owned(),
+            serde_json::json!(binding.session_id),
+        );
+        normalized.insert("pageId".to_owned(), serde_json::json!(binding.page_id));
+        if scope == WorkflowScope::SessionPageWorkflow {
+            normalized.insert(
+                "workflowId".to_owned(),
+                serde_json::json!(binding.workflow_id),
+            );
+        }
+        (
+            Value::Object(normalized),
+            Some(handle.clone()),
+            Some(handle),
+        )
+    }
+
+    /// Live workflow bindings on this connection. Used by the missing-scope
+    /// rejection (`server/mod.rs`'s `missing_scope_hint`) to name the count
+    /// when [`Self::default_scope`] found zero or more than one and left the
+    /// call for schema validation to reject.
+    pub(crate) fn live_binding_count(&self) -> usize {
+        self.lock_state().bindings.len()
     }
 
     pub(crate) fn remove_session(&self, session_id: &types::SessionId) -> usize {
@@ -591,9 +657,10 @@ mod tests {
         let (handle, _) = publish(reservation, expected.clone());
 
         for (tool, scope) in WORKFLOW_SCOPE_TOOLS {
-            let (normalized, resolved_handle) = registry
+            let (normalized, resolved_handle, defaulted_handle) = registry
                 .normalize_arguments(tool, &json!({"workflowHandle": handle}))
                 .unwrap_or_else(|error| panic!("{tool}: {error:?}"));
+            assert_eq!(defaulted_handle, None, "{tool}");
             assert_eq!(normalized["sessionId"], json!(expected.session_id));
             assert_eq!(normalized["pageId"], json!(expected.page_id));
             assert_eq!(normalized.get("workflowHandle"), None);
@@ -671,13 +738,110 @@ mod tests {
         });
         assert_eq!(
             registry.normalize_arguments("navigate", &explicit),
-            Ok((explicit.clone(), None))
+            Ok((explicit.clone(), None, None))
         );
 
         let not_allowlisted = json!({"workflowHandle":"wf_0123456789abcdef0123456789abcdef"});
         assert_eq!(
             registry.normalize_arguments("session_create", &not_allowlisted),
-            Ok((not_allowlisted, None))
+            Ok((not_allowlisted, None, None))
+        );
+    }
+
+    #[test]
+    fn normalize_arguments_defaults_a_scope_less_call_to_the_only_live_binding() {
+        let registry = registry();
+        let reservation = registry.reserve().unwrap();
+        let expected = binding(
+            reservation.generation,
+            session_id(1),
+            page_id(2),
+            workflow_id(3),
+        );
+        let (handle, _) = publish(reservation, expected.clone());
+
+        let (normalized, resolved_handle, defaulted_handle) = registry
+            .normalize_arguments("navigate", &json!({"url": "https://example.test/"}))
+            .unwrap();
+        assert_eq!(normalized["sessionId"], json!(expected.session_id));
+        assert_eq!(normalized["pageId"], json!(expected.page_id));
+        assert_eq!(normalized["workflowId"], json!(expected.workflow_id));
+        assert_eq!(normalized["url"], json!("https://example.test/"));
+        assert_eq!(normalized.get("workflowHandle"), None);
+        assert_eq!(resolved_handle, Some(handle.clone()));
+        assert_eq!(defaulted_handle, Some(handle));
+    }
+
+    #[test]
+    fn normalize_arguments_does_not_default_with_zero_live_bindings() {
+        let registry = registry();
+        let arguments = json!({"url": "https://example.test/"});
+        assert_eq!(
+            registry.normalize_arguments("navigate", &arguments),
+            Ok((arguments, None, None))
+        );
+    }
+
+    #[test]
+    fn normalize_arguments_does_not_default_with_two_live_bindings() {
+        let registry = registry();
+        for index in 0..2u128 {
+            let reservation = registry.reserve().unwrap();
+            let generation = reservation.generation;
+            publish(
+                reservation,
+                binding(
+                    generation,
+                    session_id(index),
+                    page_id(index),
+                    workflow_id(index),
+                ),
+            );
+        }
+        let arguments = json!({"url": "https://example.test/"});
+        assert_eq!(
+            registry.normalize_arguments("navigate", &arguments),
+            Ok((arguments, None, None))
+        );
+    }
+
+    #[test]
+    fn normalize_arguments_does_not_default_a_call_carrying_any_explicit_scope_key() {
+        let registry = registry();
+        let reservation = registry.reserve().unwrap();
+        let generation = reservation.generation;
+        publish(
+            reservation,
+            binding(generation, session_id(1), page_id(2), workflow_id(3)),
+        );
+
+        for explicit in [
+            json!({"sessionId": session_id(9)}),
+            json!({"pageId": page_id(9)}),
+            json!({"workflowId": workflow_id(9)}),
+        ] {
+            assert_eq!(
+                registry.normalize_arguments("navigate", &explicit),
+                Ok((explicit.clone(), None, None)),
+                "{explicit}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_arguments_does_not_default_a_non_allowlisted_tool() {
+        let registry = registry();
+        let reservation = registry.reserve().unwrap();
+        let generation = reservation.generation;
+        publish(
+            reservation,
+            binding(generation, session_id(1), page_id(2), workflow_id(3)),
+        );
+
+        let arguments = json!({});
+        assert_eq!(
+            registry.normalize_arguments("session_create", &arguments),
+            Ok((arguments, None, None))
         );
     }
 
