@@ -578,4 +578,106 @@ mod tests {
             raw
         );
     }
+
+    /// One schema-valid dummy per top-level intent property name. Shared across
+    /// tools because the same name (`hints`, `purpose`, ...) means the same shape
+    /// everywhere it appears at the top level of an intent call.
+    fn intent_property_dummy(property: &str) -> Value {
+        match property {
+            "sessionId" => json!("10000000-0000-4000-8000-000000000001"),
+            "pageId" => json!("10000000-0000-4000-8000-000000000002"),
+            "workflowId" => json!("10000000-0000-4000-8000-000000000003"),
+            "commandId" => json!("10000000-0000-4000-8000-000000000004"),
+            "attemptId" => json!("10000000-0000-4000-8000-000000000005"),
+            "idempotencyKey" => json!("parity-guard-idempotency-key"),
+            "purpose" => json!("parity guard dummy purpose"),
+            // Valid against `IntentHints` (every field optional) and against the
+            // challenge intents' `{region?, timeoutMs?}` hints -- both accept `{}`.
+            "hints" => json!({}),
+            // `FillValue`/`ControlAction`'s simplest variant.
+            "value" => json!({"kind": "clear"}),
+            // One valid `ExtractField`; `intent_complete_form`'s `fields` (excluded
+            // below) additionally requires each item's `value`.
+            "fields" => json!([{"name": "field", "purpose": "parity guard field"}]),
+            "evidenceDetail" => json!("compact"),
+            "expectedState" | "expectedDestination" => json!({
+                "condition": {"kind": "document", "ready": "commit"},
+                "timeoutMs": 1000
+            }),
+            "autoCheckpoint" | "boundary" | "reSubmit" => json!(true),
+            "condition" => json!({"kind": "document", "ready": "commit"}),
+            "timeoutMs" => json!(1000),
+            other => panic!(
+                "intent_property_dummy: no dummy registered for property {other:?}; \
+                 add one so the parity guard can cover it"
+            ),
+        }
+    }
+
+    /// Every intent tool's input schema must advertise only what its own parser
+    /// (the `intent_args!` struct behind `bounded_parse`, `deny_unknown_fields`)
+    /// accepts. A property present in the schema but absent from the struct
+    /// validates fine and then fails to parse with `malformedArguments` --
+    /// `intent_extract` did exactly that (schema advertised `hints`,
+    /// `IntentExtractArgs` had no such field; `ExtractIntent` has no top-level
+    /// hints to receive it either).
+    ///
+    /// `intent_complete_form` is excluded: PR #462 (open) is already changing
+    /// `IntentCompleteFormArgs` and its dispatch arm, so this guard leaves that
+    /// tool to it rather than asserting either the current mismatch or #462's
+    /// still-unmerged fix.
+    #[test]
+    fn intent_schema_properties_all_parse_into_the_tool_args_struct() {
+        let covered = TOOLS
+            .iter()
+            .copied()
+            .filter(|name| *name != "intent_complete_form");
+        for name in covered {
+            let schema = crate::schema::tool_schema(name);
+            let properties = schema["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{name}: schema properties is not an object"));
+            let mut arguments = serde_json::Map::new();
+            for key in properties.keys() {
+                arguments.insert(key.clone(), intent_property_dummy(key));
+            }
+            let arguments = Value::Object(arguments);
+
+            validate_tool_arguments(name, &arguments).unwrap_or_else(|violation| {
+                panic!("{name}: {arguments} failed schema validation: {violation:?}")
+            });
+
+            let parsed: Result<(), ()> = match name {
+                "intent_locate" => bounded_parse::<IntentLocateArgs>(arguments.clone()).map(drop),
+                "intent_fill" => bounded_parse::<IntentFillArgs>(arguments.clone()).map(drop),
+                "intent_submit_and_verify" => {
+                    bounded_parse::<IntentSubmitAndVerifyArgs>(arguments.clone()).map(drop)
+                }
+                "intent_wait_for_state" => {
+                    bounded_parse::<IntentWaitForStateArgs>(arguments.clone()).map(drop)
+                }
+                "intent_follow" => bounded_parse::<IntentFollowArgs>(arguments.clone()).map(drop),
+                "intent_dismiss_obstruction" => {
+                    bounded_parse::<IntentDismissObstructionArgs>(arguments.clone()).map(drop)
+                }
+                "intent_extract" => bounded_parse::<IntentExtractArgs>(arguments.clone()).map(drop),
+                "intent_solve_challenge" => {
+                    bounded_parse::<IntentSolveChallengeArgs>(arguments.clone()).map(drop)
+                }
+                "intent_detect_challenge" => {
+                    bounded_parse::<IntentDetectChallengeArgs>(arguments.clone()).map(drop)
+                }
+                other => {
+                    unreachable!("intent tool {other} missing from the parity guard's own dispatch")
+                }
+            };
+            parsed.unwrap_or_else(|()| {
+                let advertised: Vec<_> = properties.keys().collect();
+                panic!(
+                    "{name}: schema advertises {advertised:?} but bounded_parse into its \
+                     args struct rejected a call setting every one of them"
+                )
+            });
+        }
+    }
 }

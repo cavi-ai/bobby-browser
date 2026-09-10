@@ -407,10 +407,18 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             intent_properties(json!({"timeoutMs":timeout_ms()})),
             intent_required(&["purpose"]),
         ),
+        // `ExtractIntent` (bobby-browser-client/src/commands.rs) carries `purpose` +
+        // `fields` only -- no top-level hints, unlike the other `intent_properties`
+        // callers. Each `ExtractField` has its own `hints` (see `extract_field`'s
+        // `$defs` entry), so advertising a top-level one here would validate but
+        // then fail `IntentExtractArgs`'s `deny_unknown_fields` parse.
         "intent_extract" => (
-            intent_properties(json!({
-                "fields":nonempty_array(json!({"$ref":"#/$defs/ExtractField"}), MAX_COLLECTION_ITEMS)
-            })),
+            without_property(
+                intent_properties(json!({
+                    "fields":nonempty_array(json!({"$ref":"#/$defs/ExtractField"}), MAX_COLLECTION_ITEMS)
+                })),
+                "hints",
+            ),
             intent_required(&["purpose", "fields"]),
         ),
         "intent_solve_challenge" => (
@@ -1327,6 +1335,17 @@ fn merge_properties(properties: &mut Value, extra: Value) {
         return;
     };
     target.extend(extra);
+}
+
+/// Drops a property that a shared builder like [`intent_properties`] advertises
+/// by default but one caller's parser (and underlying command type) has no field
+/// for. Leaves `$defs` untouched -- other tools, or this tool's own nested
+/// definitions, may still reference it.
+fn without_property(mut properties: Value, key: &str) -> Value {
+    if let Some(target) = properties.as_object_mut() {
+        target.remove(key);
+    }
+    properties
 }
 
 /// Emits only the definitions a tool can actually reach; a full `$defs` block on every
