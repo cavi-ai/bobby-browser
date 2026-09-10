@@ -303,6 +303,12 @@ impl PageRuntime {
                 let mut revived_execution = None;
                 let mut reattached_execution = None;
                 let mut probed_execution = None;
+                // Carried past their own blocks (which end before the revive
+                // branch below) so a browserRevived evidence item can name
+                // what the probe and the reattach attempt each reported,
+                // instead of the caller only learning that a revive happened.
+                let mut probe_error_message: Option<String> = None;
+                let mut reattach_error_message: Option<String> = None;
                 if browser_died && page_state.is_some() {
                     let page = page_state.clone().expect("checked above");
                     // Probe the CURRENT lease before assuming the browser
@@ -320,6 +326,7 @@ impl PageRuntime {
                         .worker()
                         .list_pages(&ListPagesCommand)
                         .await;
+                    probe_error_message = probe.as_ref().err().map(|error| error.message.clone());
                     if let Ok(evidence) = probe {
                         if !page_still_listed(&evidence, &page.id) {
                             // The page itself closed; the browser never died
@@ -428,10 +435,11 @@ impl PageRuntime {
                             );
                             Some(lease)
                         }
-                        Err(_) => {
+                        Err(error) => {
                             // Process really gone (or reconnect unsupported):
                             // fall through to the relaunch revive path with
                             // the lease returned for its existing take.
+                            reattach_error_message = Some(error.message);
                             lease_slot = Some(lease);
                             None
                         }
@@ -640,6 +648,12 @@ impl PageRuntime {
                                     }
                                 }
                             } else {
+                                let mut evidence = failure.evidence;
+                                evidence.push(browser_revived_evidence(
+                                    probe_error_message.as_deref(),
+                                    reattach_error_message.as_deref().unwrap_or("not attempted"),
+                                    &failure.error.message,
+                                ));
                                 return self
                                     .finish_failure(
                                         &envelope,
@@ -647,11 +661,11 @@ impl PageRuntime {
                                             &envelope,
                                             CommandError {
                                                 code: ErrorCode::TargetDetached,
-                                                message: "the browser process was killed; a fresh browser was launched and the page reloaded to its last URL -- inspect current state and re-issue the command".into(),
+                                                message: "the browser transport was lost and could not be reattached; a fresh browser was launched and the page reloaded to its last URL -- inspect current state and re-issue the command".into(),
                                                 layer: ErrorLayer::Driver,
                                                 retryable: false,
                                             },
-                                            failure.evidence,
+                                            evidence,
                                         ),
                                     )
                                 .await;
@@ -1463,6 +1477,29 @@ fn transient_target_loss_evidence(original_message: &str) -> Evidence {
     Evidence::Configuration {
         name: "transientTargetLoss".into(),
         value: original_message.into(),
+    }
+}
+
+/// Evidence for the relaunch revive path: what the pre-revive probe
+/// (`list_pages` on the current lease), the reattach attempt
+/// (`worker_pool::reconnect_live_process`'s static reason), and the original
+/// failing command each reported. The outer message is replaced with a
+/// generic instruction to inspect and re-issue, so this is the only place
+/// the actual "why" survives into `commands.jsonl`.
+fn browser_revived_evidence(
+    probe_error: Option<&str>,
+    reattach_error: &str,
+    original_message: &str,
+) -> Evidence {
+    let probe = match probe_error {
+        Some(message) => format!("err: {message}"),
+        None => "ok".into(),
+    };
+    Evidence::Configuration {
+        name: "browserRevived".into(),
+        value: format!(
+            "probe: {probe} | reattach: {reattach_error} | original: {original_message}"
+        ),
     }
 }
 

@@ -112,6 +112,17 @@
   naming `upload_files` as the repair, instead of a `targetNotFound` that
   escalated to a vision fallback and came back `visionAssistDenied`. File
   inputs accept paths only through `upload_files` (or `control_action`).
+- The four distinct reasons `reconnect_live_process` can fail to reattach
+  (no browser handle, browser process exited, no debug websocket url, CDP
+  connect failed) used to collapse into the same generic "browser worker is
+  closed", discarded to `tracing::warn!` under `mcp-stdio`. Each now returns
+  its own static-prefix message, and a browser revive that could not
+  reattach attaches a `browserRevived` `Configuration` evidence item naming
+  the pre-revive probe result, the reattach failure, and the original
+  command's error, so the reason survives redaction into `commands.jsonl`.
+  The revive failure message itself no longer claims the browser process
+  was killed (unproven); it says the transport was lost and could not be
+  reattached.
 
 ## 0.13.0 - 2026-09-04
 

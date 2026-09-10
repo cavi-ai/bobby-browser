@@ -1160,7 +1160,7 @@ impl ChromiumWorker {
     /// the relaunch path).
     async fn reconnect_live_process_impl(&self) -> Result<Vec<Evidence>, CommandError> {
         let Some(mut browser) = self.browser.lock().await.take() else {
-            return Err(closed_error());
+            return Err(reattach_failed("browser handle missing"));
         };
         // Abort the old handler: its websocket is dead either way.
         if let Some(task) = self.handler_task.lock().await.take() {
@@ -1168,26 +1168,36 @@ impl ChromiumWorker {
         }
         // Process-alive verdict: prefer the child handle's exit status (no
         // subprocess spawn); the PID registry is the fallback when the child
-        // was never readable.
-        let child_alive = match browser.get_mut_child() {
-            Some(child) => child.try_wait().ok().flatten().is_none(),
-            None => self
-                .pid_registry_path
-                .as_deref()
-                .and_then(|path| std::fs::read_to_string(path).ok())
-                .and_then(|text| text.trim().parse::<u32>().ok())
-                .and_then(process_registry::process_command_name)
-                .is_some_and(|name| name.contains("chrom")),
+        // was never readable. Keep the exit status around (when we have one)
+        // so a reattach failure can say which of these two checks fired.
+        let (child_alive, exit_status) = match browser.get_mut_child() {
+            Some(child) => match child.try_wait().ok().flatten() {
+                Some(status) => (false, Some(status.to_string())),
+                None => (true, None),
+            },
+            None => {
+                let alive = self
+                    .pid_registry_path
+                    .as_deref()
+                    .and_then(|path| std::fs::read_to_string(path).ok())
+                    .and_then(|text| text.trim().parse::<u32>().ok())
+                    .and_then(process_registry::process_command_name)
+                    .is_some_and(|name| name.contains("chrom"));
+                (alive, None)
+            }
         };
         if !child_alive {
             // Really dead: hand the browser back so the caller's relaunch
             // path can register/unregister against it as before.
             *self.browser.lock().await = Some(browser);
-            return Err(closed_error());
+            return Err(reattach_failed(format!(
+                "browser process exited ({})",
+                exit_status.unwrap_or_else(|| "unknown".into())
+            )));
         }
         let Some(url) = &self.debug_ws_url else {
             *self.browser.lock().await = Some(browser);
-            return Err(closed_error());
+            return Err(reattach_failed("no debug websocket url"));
         };
         let (fresh, mut handler) = match Browser::connect(url.clone()).await {
             Ok(pair) => pair,
@@ -1198,7 +1208,7 @@ impl ChromiumWorker {
                     "CDP reattach to live browser failed: {error}"
                 );
                 *self.browser.lock().await = Some(browser);
-                return Err(closed_error());
+                return Err(reattach_failed(format!("CDP connect: {error}")));
             }
         };
         let handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
@@ -3785,6 +3795,21 @@ fn closed_error() -> CommandError {
     }
 }
 
+/// A distinct, static reason for each way `reconnect_live_process_impl` can
+/// fail to reattach. Four different causes (handle already taken, process
+/// exited, no debug websocket url, CDP connect failed) used to collapse into
+/// the same generic `closed_error()`, so nothing recorded which one actually
+/// happened; this names it, so the revive path's evidence carries a real
+/// diagnostic instead of a repeated "browser worker is closed".
+fn reattach_failed(reason: impl std::fmt::Display) -> CommandError {
+    CommandError {
+        code: ErrorCode::BrowserCommandFailed,
+        message: format!("reattach failed: {reason}"),
+        layer: ErrorLayer::Driver,
+        retryable: false,
+    }
+}
+
 /// The worker's browser is gone or unreachable: dead command channel,
 /// canceled oneshot, closed session, or an explicitly closed worker. Such a
 /// worker can never serve another command, so callers may invalidate and
@@ -4560,6 +4585,27 @@ mod tests {
             session_jitter: behavioral.session_jitter,
             session_random: super::Mutex::new(super::SessionRandom::new(1)),
         }
+    }
+
+    #[tokio::test]
+    async fn reconnect_live_process_names_a_missing_browser_handle() {
+        // The other three reattach-failure reasons ("browser process
+        // exited", "no debug websocket url", "CDP connect: <error>") all
+        // require `self.browser` to hold a live `chromiumoxide::Browser`
+        // (a real CDP connection), which this child-less fixture cannot
+        // provide -- they are exercised by the gauntlet's live-Chromium
+        // runs instead, not by a unit test.
+        let temp = tempfile::tempdir().expect("temporary worker root");
+        let worker = chromium_worker_without_browser(temp.path());
+
+        let error = worker
+            .reconnect_live_process_impl()
+            .await
+            .expect_err("no browser handle to reattach to");
+
+        assert_eq!(error.code, ErrorCode::BrowserCommandFailed);
+        assert_eq!(error.message, "reattach failed: browser handle missing");
+        assert!(!error.retryable);
     }
 
     #[tokio::test]
