@@ -128,6 +128,17 @@
   The revive failure message itself no longer claims the browser process
   was killed (unproven); it says the transport was lost and could not be
   reattached.
+- `reap_orphaned_processes` (worker-pool) now records each registry entry's
+  owner PID and only kills its Chrome once that owner is confirmed dead. It
+  used to SIGKILL any registered Chrome process on every new launch
+  regardless of whether the bobby instance that registered it was still
+  running, so one bobby process starting up could kill a browser a
+  different, live bobby process was still driving mid-task (`browserRevived`
+  evidence: `reattach failed: browser process exited (signal: 9 (SIGKILL))`).
+  A live owner's entry, including one this process itself just registered,
+  is now left in place untouched; a pre-ownership one-line entry (from a
+  binary predating this change) is removed but never killed, since it names
+  no owner to verify against.
 
 ## 0.13.0 - 2026-09-04
 

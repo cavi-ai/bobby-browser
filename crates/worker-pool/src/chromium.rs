@@ -1202,8 +1202,7 @@ impl ChromiumWorker {
                 let alive = self
                     .pid_registry_path
                     .as_deref()
-                    .and_then(|path| std::fs::read_to_string(path).ok())
-                    .and_then(|text| text.trim().parse::<u32>().ok())
+                    .and_then(process_registry::read_registered_pid)
                     .and_then(process_registry::process_command_name)
                     .is_some_and(|name| name.contains("chrom"));
                 (alive, None)
@@ -5153,7 +5152,10 @@ mod tests {
         let worker_id = WorkerId::new();
         let path = super::register_chrome_pid(registry_dir.path(), &worker_id, 4_242)
             .expect("registering a PID under a writable directory must succeed");
-        assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), "4242");
+        assert_eq!(
+            super::process_registry::read_registered_pid(&path),
+            Some(4_242)
+        );
 
         super::unregister_chrome_pid(&path);
         assert!(!path.exists());
