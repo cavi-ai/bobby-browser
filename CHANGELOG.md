@@ -93,8 +93,7 @@
   property: `IntentExtractArgs` never accepted one (each `fields` entry
   carries its own), so a call that set it validated and then failed to
   parse with `malformedArguments`. A new test asserts every intent tool's
-  schema properties (`intent_complete_form` excepted, mid-fix elsewhere)
-  round-trip through its own parser.
+  schema properties round-trip through its own parser.
 - `corpus_lint.py` no longer requires `target_index`: the engine omits the
   key entirely on abstentions, so a valid abstain row failed lint as a
   missing field. The positive:negative balance band is now scale-aware —

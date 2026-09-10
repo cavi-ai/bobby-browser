@@ -596,8 +596,9 @@ mod tests {
             "hints" => json!({}),
             // `FillValue`/`ControlAction`'s simplest variant.
             "value" => json!({"kind": "clear"}),
-            // One valid `ExtractField`; `intent_complete_form`'s `fields` (excluded
-            // below) additionally requires each item's `value`.
+            // One valid `ExtractField`; `intent_complete_form` overrides this
+            // below with a `CompleteFormField`, which additionally requires
+            // each item's `value`.
             "fields" => json!([{"name": "field", "purpose": "parity guard field"}]),
             "evidenceDetail" => json!("compact"),
             "expectedState" | "expectedDestination" => json!({
@@ -614,6 +615,23 @@ mod tests {
         }
     }
 
+    /// Per-tool override for [`intent_property_dummy`]: the same property name
+    /// can mean a different shape depending on which tool carries it.
+    /// `intent_complete_form`'s `fields` is `CompleteFormField`
+    /// (`{name, purpose, value}`, `value` a `ControlAction`), not the
+    /// `ExtractField` (`{name, purpose}`) the shared `"fields"` dummy above
+    /// builds for `intent_extract`.
+    fn intent_property_dummy_override(tool: &str, property: &str) -> Option<Value> {
+        match (tool, property) {
+            ("intent_complete_form", "fields") => Some(json!([{
+                "name": "field",
+                "purpose": "parity guard field",
+                "value": {"kind": "setText", "value": "parity guard value"}
+            }])),
+            _ => None,
+        }
+    }
+
     /// Every intent tool's input schema must advertise only what its own parser
     /// (the `intent_args!` struct behind `bounded_parse`, `deny_unknown_fields`)
     /// accepts. A property present in the schema but absent from the struct
@@ -621,25 +639,18 @@ mod tests {
     /// `intent_extract` did exactly that (schema advertised `hints`,
     /// `IntentExtractArgs` had no such field; `ExtractIntent` has no top-level
     /// hints to receive it either).
-    ///
-    /// `intent_complete_form` is excluded: PR #462 (open) is already changing
-    /// `IntentCompleteFormArgs` and its dispatch arm, so this guard leaves that
-    /// tool to it rather than asserting either the current mismatch or #462's
-    /// still-unmerged fix.
     #[test]
     fn intent_schema_properties_all_parse_into_the_tool_args_struct() {
-        let covered = TOOLS
-            .iter()
-            .copied()
-            .filter(|name| *name != "intent_complete_form");
-        for name in covered {
+        for name in TOOLS.iter().copied() {
             let schema = crate::schema::tool_schema(name);
             let properties = schema["properties"]
                 .as_object()
                 .unwrap_or_else(|| panic!("{name}: schema properties is not an object"));
             let mut arguments = serde_json::Map::new();
             for key in properties.keys() {
-                arguments.insert(key.clone(), intent_property_dummy(key));
+                let dummy = intent_property_dummy_override(name, key)
+                    .unwrap_or_else(|| intent_property_dummy(key));
+                arguments.insert(key.clone(), dummy);
             }
             let arguments = Value::Object(arguments);
 
@@ -650,6 +661,9 @@ mod tests {
             let parsed: Result<(), ()> = match name {
                 "intent_locate" => bounded_parse::<IntentLocateArgs>(arguments.clone()).map(drop),
                 "intent_fill" => bounded_parse::<IntentFillArgs>(arguments.clone()).map(drop),
+                "intent_complete_form" => {
+                    bounded_parse::<IntentCompleteFormArgs>(arguments.clone()).map(drop)
+                }
                 "intent_submit_and_verify" => {
                     bounded_parse::<IntentSubmitAndVerifyArgs>(arguments.clone()).map(drop)
                 }
