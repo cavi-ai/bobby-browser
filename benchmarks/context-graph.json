@@ -1,7 +1,7 @@
 {
   "sites": 100,
   "controlsPerSite": 20,
-  "reopenMs": 31.779333,
-  "exactAskMicros": 194.84420799999998,
-  "fuzzyAskMicros": 192.82525
+  "reopenMs": 11.683708,
+  "exactAskMicros": 68.236291,
+  "fuzzyAskMicros": 70.900333
 }

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.14.0 - 2026-09-10
+
 ### Added
 
 - Docker image (`Dockerfile`, `docker-compose.yml`) and `deploy/docker/`
@@ -83,7 +85,9 @@
   element resolver can never match (`StaticText`, `LabelText`,
   `MenuListPopup`, ...) misses with an `a11yOnlyRole` configuration marker
   instead of a bare `targetNotFound` — and runs no vision escalation, which
-  cannot resolve a text node either.
+  cannot resolve a text node either. (The marker first shipped with a guard
+  that checked the wrong resolver shape and never fired; it now runs on
+  every non-resolved decision, pinned by tests.)
 - A `targetAmbiguous` rejection names its contenders the way the outcome's
   resolution evidence does (`button "Submit" score=80`) and ends with the
   narrowing repair, replacing the previous Rust `Debug` dump
@@ -96,6 +100,9 @@
 
 ### Changed
 
+- Dependency bumps that reach consumers: `agent-client-protocol` 2.0 to
+  2.1, `base64` 0.22 to 0.23, `jsonschema` 0.52 to 0.53, `brotli` 8 to 9,
+  `windows-registry` 0.6 to 0.100.
 - The captcha implementation plan is no longer shipped under `docs/`; the
   shipped captcha path is documented by `bobby://intents` and the intents guide.
 - Public agent skill: pass `workflowHandle` on later calls; explicit ids are
