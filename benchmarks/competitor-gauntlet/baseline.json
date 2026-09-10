@@ -1,16 +1,32 @@
 {
-  "note": "bobby-only gauntlet baseline, measured on main at 1688938 after the explore/a11y friction batch (2026-08-10). score check evaluates only the latest invocation batch and requires every baseline task; pass must hold, wall time <= 2x, tool errors <= +3, and (with --runs N) every run must pass while the mean faces the thresholds. The budget block caps mean per-task token/call economics — the PRD's 'call economics measurable but not enforced' gap — with ~40% headroom over the measured 480K cache-read / 32K cache-create / 9.6 calls (claude-opus-5, 2026-09-01). Thresholds split by engine and provider mode via an optional top-level \"dimensions\" map keyed on \"<engine>/<providerMode>\" from the batch's provenance (e.g. \"firefox/off\"); a batch with no matching dimension falls back to the top-level tasks/budget, so the default cell is not duplicated. Update deliberately when the product improves or the app changes; never to sneak a regression through.",
-  "measuredAt": "2026-08-10",
+  "note": "bobby-only gauntlet baseline, measured on main at 2e48fbf6 after the Phase 18 measurement batch (2026-09-10: 5/5 pass, 0 tool errors, mean 484K cache-read / 35K cache-create / 9.8 calls, claude-opus-5, chromium/off, results/phase18-opus). score check evaluates only the latest invocation batch and requires every baseline task; pass must hold, wall time <= 2x, tool errors <= +3, and (with --runs N) every run must pass while the mean faces the thresholds. The budget block caps mean per-task token/call economics — the PRD's 'call economics measurable but not enforced' gap — with ~40% headroom over the measured 480K cache-read / 32K cache-create / 9.6 calls (claude-opus-5, 2026-09-01). Thresholds split by engine and provider mode via an optional top-level \"dimensions\" map keyed on \"<engine>/<providerMode>\" from the batch's provenance (e.g. \"firefox/off\"); a batch with no matching dimension falls back to the top-level tasks/budget, so the default cell is not duplicated. Update deliberately when the product improves or the app changes; never to sneak a regression through.",
+  "measuredAt": "2026-09-10",
   "tasks": {
-    "customer-update": { "pass": true, "wallSeconds": 43, "toolErrors": 0 },
-    "onboarding": { "pass": true, "wallSeconds": 65, "toolErrors": 0 },
-    "documents": { "pass": true, "wallSeconds": 45, "toolErrors": 0 },
-    "authorization": { "pass": true, "wallSeconds": 48, "toolErrors": 0 },
-    "report-recovery": { "pass": true, "wallSeconds": 50, "toolErrors": 0 }
+    "customer-update": { "pass": true, "wallSeconds": 42, "toolErrors": 0 },
+    "onboarding": { "pass": true, "wallSeconds": 46, "toolErrors": 0 },
+    "documents": { "pass": true, "wallSeconds": 46, "toolErrors": 0 },
+    "authorization": { "pass": true, "wallSeconds": 31, "toolErrors": 0 },
+    "report-recovery": { "pass": true, "wallSeconds": 32, "toolErrors": 0 }
   },
   "budget": {
     "perTaskCacheReadTokens": 700000,
     "perTaskCacheCreationTokens": 70000,
     "perTaskToolCalls": 16
+  },
+  "dimensions": {
+    "chromium/off": {
+      "tasks": {
+        "customer-update": { "pass": true, "wallSeconds": 42, "toolErrors": 0 },
+        "onboarding": { "pass": true, "wallSeconds": 46, "toolErrors": 0 },
+        "documents": { "pass": true, "wallSeconds": 46, "toolErrors": 0 },
+        "authorization": { "pass": true, "wallSeconds": 31, "toolErrors": 0 },
+        "report-recovery": { "pass": true, "wallSeconds": 32, "toolErrors": 0 }
+      },
+      "budget": {
+        "perTaskCacheReadTokens": 700000,
+        "perTaskCacheCreationTokens": 70000,
+        "perTaskToolCalls": 16
+      }
+    }
   }
 }
