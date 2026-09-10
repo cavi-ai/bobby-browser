@@ -1,0 +1,43 @@
+# bobby-browser ↔ OpenShell network policy (sample)
+# Apply with: openshell policy set <sandbox> --policy openshell/policy.yaml --wait
+# WARNING: `policy set` replaces the entire sandbox policy. Prefer merging
+# openshell/policy-network.yaml into your existing policy when you already
+# customize FS/process.
+# Replace binaries.path with the agent binary that will call MCP.
+# Reachability uses OpenShell's supervisor proxy — do not expose bobby beyond
+# the host gateway address the sandbox can dial (host.docker.internal /
+# host.containers.internal / LAN host). Keep bobby bind loopback+gateway only.
+# Prefer BOBBY_MCP_TOOLSET=explore (or act) inside the sandbox to keep tools/list small.
+version: 1
+filesystem_policy:
+  include_workdir: true
+  read_only: [/usr, /lib, /proc, /dev/urandom, /app, /etc, /var/log]
+  read_write: [/sandbox, /tmp, /dev/null]
+landlock:
+  compatibility: best_effort
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+network_policies:
+  bobby_browser_mcp:
+    name: bobby-browser-mcp
+    endpoints:
+      - host: host.docker.internal
+        port: 7777
+        path: /v1/mcp
+        protocol: mcp
+        enforcement: enforce
+        mcp:
+          max_body_bytes: 262144
+          allow_all_known_mcp_methods: true
+        deny_rules:
+          - method: tools/call
+            tool: evaluate_javascript
+          - method: tools/call
+            tool: job_submit
+          - method: tools/call
+            tool: job_status
+          - method: tools/call
+            tool: job_cancel
+    binaries:
+      - path: /usr/local/bin/claude
