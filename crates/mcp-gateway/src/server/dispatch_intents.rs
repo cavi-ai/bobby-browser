@@ -27,6 +27,7 @@ impl Server {
         call: ToolCall,
         mut context: types::RequestContext,
         handle: Option<&str>,
+        defaulted_handle: Option<&str>,
     ) -> Value {
         let result = match call.name.as_str() {
             "intent_locate" => {
@@ -109,6 +110,17 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
+                // `intent_fill`'s top-level `hints` shape is only unambiguous
+                // here when there is exactly one field to apply it to, and
+                // that field carries no hints of its own to be overwritten.
+                // Anything else (no single target, or a conflicting field
+                // hint already set) is rejected rather than guessed at.
+                if let Some(hints) = input.hints.take() {
+                    match input.fields.as_mut_slice() {
+                        [field] if hints_are_empty(&field.hints) => field.hints = hints,
+                        _ => return invalid_params_reason(id, "hintsPerField"),
+                    }
+                }
                 let evidence_detail = input.evidence_detail.unwrap_or(EvidenceDetail::Compact);
                 let field_names = input
                     .fields
@@ -419,7 +431,7 @@ impl Server {
             }
             _ => unreachable!("dispatch_intents received a tool it does not own"),
         };
-        self.finish_tool(id, result).await
+        self.finish_tool(id, result, defaulted_handle).await
     }
 }
 
