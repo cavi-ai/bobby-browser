@@ -349,7 +349,12 @@ value. Example: a `session_create` call with no `profile` returns
 The `-32602` `error.message` itself now names `pointer` and `constraint` too
 (`schemaViolation at /profile: required`), and a scope-less call to a
 handle-capable tool gets a targeted repair action naming the live handle
-count when the single-handle default above did not apply.
+count when the single-handle default above did not apply. A rejection on a
+choice keyword (`oneOf`/`anyOf`/`enum`/`const`) extends the repair with the
+variant-list fix: the value must match exactly one variant of the schema's
+list, each variant's `kind` discriminator included — for a rejected
+`FillValue`, that means `{"kind":"setText","value":…}` rather than a bare
+`{"value":…}`.
 
 ## Tool metadata
 
@@ -488,6 +493,11 @@ answer, not an error: the retained context is invalidated by every command that
 may have changed the page — including `navigate` and `emulate`, which are
 replayable yet replace or reflow it — and by any non-read-only command that
 failed. The repair is to take an `a11y_snapshot`, which re-populates it.
+
+A miss is spelled out in the outcome: `answer: null` alongside `hit: false`,
+`reason: "notRemembered"`, and `nextStep: "a11y_snapshot"`, so a caller can
+tell "unknown" from "located" without interpreting `null`. A hit answers with
+`hit: true` alongside the target.
 
 Ambiguous descriptions (two controls with the same accessible name), partial
 matches, and anything below the confidence floor answer nothing rather than

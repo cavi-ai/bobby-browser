@@ -135,8 +135,18 @@ async fn context_ask(
         )
         .await
         .map_err(ProtocolError::from)?;
-    // `None` is an answer, not a failure — same contract as MCP context_ask.
-    Ok(Json(serde_json::json!({ "answer": answer })))
+    // `None` is an answer, not a failure — same contract as MCP context_ask:
+    // the miss carries `hit:false` and the snapshot repair so HTTP consumers
+    // get the same machine-readable next step.
+    Ok(Json(match answer {
+        Some(answer) => serde_json::json!({ "answer": answer, "hit": true }),
+        None => serde_json::json!({
+            "answer": null,
+            "hit": false,
+            "reason": "notRemembered",
+            "nextStep": "a11y_snapshot"
+        }),
+    }))
 }
 
 async fn context_site(
