@@ -1912,6 +1912,11 @@ fn invalid_params_message(reason: &str, repair: Option<&Value>) -> String {
 /// `arguments` are used only to detect a pre-0.11.0 `FillValue` marker and
 /// append its migration mapping to the repair action -- a canned string, not
 /// an echo of what was sent, so this does not weaken that guarantee.
+///
+/// Choice-style keywords (`oneOf`, `anyOf`, `enum`, `const`) get a
+/// keyword-specific action: the generic "fix the value" line does not tell
+/// an agent reading `error.message` that the answer is a fixed variant list
+/// in `tools/list` (e.g. a `FillValue` needs its `kind` discriminator).
 fn invalid_params(
     id: Value,
     tool: &str,
@@ -1928,6 +1933,11 @@ fn invalid_params(
         });
         let repair =
             crate::repair::repair_for_protocol_reason("schemaViolation").map(|mut repair| {
+                if let Some(action) = repair["action"].as_str() {
+                    if let Some(hint) = choice_constraint_hint(violation.constraint) {
+                        repair["action"] = json!(format!("{action} {hint}"));
+                    }
+                }
                 if let Some(migration) = crate::repair::legacy_fill_shape_migration(tool, arguments)
                 {
                     if let Some(action) = repair["action"].as_str() {
@@ -1970,6 +1980,22 @@ fn invalid_params(
 /// sessionId/pageId") is never printed for a call that in fact named one of
 /// them (a `pageId`-only call still fails `required` on `sessionId`, but it
 /// did name scope, so this hint must not fire for it).
+fn choice_constraint_hint(constraint: &str) -> Option<&'static str> {
+    match constraint {
+        "oneOf" | "anyOf" => {
+            Some("the value must match exactly one variant of the schema's oneOf list; \
+                  re-read the tool's inputSchema $defs and include each variant's `kind` discriminator")
+        }
+        "enum" => Some(
+            "the value must be one of the schema's enum members; re-read the tool's inputSchema",
+        ),
+        "const" => Some(
+            "the value must equal the schema's const; re-read the tool's inputSchema",
+        ),
+        _ => None,
+    }
+}
+
 fn missing_scope_hint(
     tool: &str,
     arguments: &Value,
@@ -2681,5 +2707,52 @@ mod tests {
         let response = invalid_params(json!(4), "click", &json!({}), None, 0);
         assert_eq!(response["error"]["message"], json!("Invalid params"));
         assert!(response["error"]["data"].is_null());
+    }
+
+    /// A choice-keyword rejection names the variant-list fix in the
+    /// message an agent actually reads: `FillValue` needs its `kind`
+    /// discriminator, and the generic "fix the value" line does not say so.
+    /// Non-choice keywords keep the generic action unchanged.
+    #[test]
+    fn invalid_params_choice_constraint_names_the_variant_list_fix() {
+        let response = invalid_params(
+            json!(7),
+            "intent_complete_form",
+            &json!({"purpose":"fill","fields":[{"name":"email","purpose":"email","value":{"value":"a@b.test"}}]}),
+            Some(crate::schema::SchemaViolation {
+                pointer: "/fields/0/value".to_owned(),
+                constraint: "oneOf",
+            }),
+            0,
+        );
+        let message = response["error"]["message"]
+            .as_str()
+            .expect("message is a string");
+        assert!(
+            message.contains("oneOf") && message.contains("kind"),
+            "message must name the variant-list fix: {message}"
+        );
+        let action = response["error"]["data"]["repair"]["action"]
+            .as_str()
+            .expect("repair action");
+        assert!(action.contains("kind"), "{action}");
+
+        let plain = invalid_params(
+            json!(8),
+            "click",
+            &json!({}),
+            Some(crate::schema::SchemaViolation {
+                pointer: "/target".to_owned(),
+                constraint: "required",
+            }),
+            0,
+        );
+        assert_eq!(
+            plain["error"]["data"]["repair"]["action"],
+            json!(
+                "Fix the value at error.data.pointer; error.data.constraint names the keyword it violated."
+            ),
+            "non-choice constraints keep the generic action"
+        );
     }
 }

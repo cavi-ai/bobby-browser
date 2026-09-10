@@ -72,10 +72,18 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         ),
         "workflow_observe" => (
             json!({
+                // `WORKFLOW_SCOPE_TOOLS` (SessionPageWorkflow): the
+                // advertisement rewrites this into handle-XOR-explicit-ids.
+                // `workflowHandle` stays declared (never required) so a
+                // pre-normalization call validates the same as other
+                // scope tools.
                 "workflowHandle": workflow_handle(),
                 // `validate_string` is intentionally byte-oriented. Four bytes per
                 // scalar prevents it from rejecting a valid 256-scalar UTF-8 goal;
                 // the observe parser applies the scalar limit before registry lookup.
+                "sessionId": id(),
+                "pageId": id(),
+                "workflowId": id(),
                 "goal": string(0, MAX_WORKFLOW_GOAL_SCALARS * 4),
                 "maxNodes": {"type":"integer","minimum":1,"maximum":2048},
                 "includeForms": {"type":"boolean"},
@@ -83,7 +91,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                 "evidenceDetail":{"type":"string","enum":["compact","full"]},
                 "target": {"type":"object","description":"Scope the observation to one region's subtree (same shape as a11y_snapshot.target) instead of the whole page"}
             }),
-            vec!["workflowHandle"],
+            vec!["sessionId", "pageId"],
         ),
         "context_ask" => (
             json!({
@@ -116,7 +124,15 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             vec!["sessionId", "pageId"],
         ),
         "page_activate" => (
-            json!({"sessionId": id(), "pageId": id(), "workflowId": id()}),
+            json!({
+                "sessionId": id(),
+                "pageId": id(),
+                "workflowId": id(),
+                // handle+pageId = "activate this page and rebind the
+                // handle": normalization accepts the mix for this tool
+                // only, so the validation schema declares the handle too.
+                "workflowHandle": workflow_handle()
+            }),
             vec!["sessionId", "pageId"],
         ),
         "a11y_snapshot" => (
@@ -2955,7 +2971,7 @@ mod tests {
         assert_eq!(start["properties"]["url"]["maxLength"], MAX_URL_BYTES);
 
         let observe = tool_schema("workflow_observe");
-        assert_eq!(observe["required"], json!(["workflowHandle"]));
+        assert_eq!(observe["required"], json!(["sessionId", "pageId"]));
         assert_eq!(observe["properties"]["goal"]["maxLength"], 1024);
         assert_eq!(observe["properties"]["maxNodes"]["maximum"], 2048);
         assert_eq!(observe["properties"]["maxControls"]["maximum"], 512);
@@ -3045,7 +3061,20 @@ mod tests {
         });
         assert!(validator.is_valid(&accepted));
         assert!(!validator.is_valid(&rejected));
-        assert!(validate_tool_arguments("workflow_observe", &accepted).is_ok());
+        // Validation (`validate_tool_arguments`) sees post-normalization
+        // arguments: the handle has been replaced by its binding ids, so the
+        // handle-bearing call validates against the advertised oneOf while
+        // the normalized ids validate against the internal schema.
+        assert!(validate_tool_arguments("workflow_observe", &accepted).is_err());
+        // The explicit-id branch accepts the normalized shape too.
+        let ids = json!({
+            "sessionId":"00000000-0000-0000-0000-000000000001",
+            "pageId":"00000000-0000-0000-0000-000000000002",
+            "workflowId":"00000000-0000-0000-0000-000000000003",
+            "goal":"é".repeat(MAX_WORKFLOW_GOAL_SCALARS)
+        });
+        assert!(validator.is_valid(&ids));
+        assert!(validate_tool_arguments("workflow_observe", &ids).is_ok());
     }
 
     #[test]

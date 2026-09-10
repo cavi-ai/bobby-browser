@@ -671,3 +671,36 @@ async fn context_routes_require_context_read_and_validate_ids() {
         serde_json::json!({ "site": null })
     );
 }
+
+/// A `context_ask` miss carries the machine-readable miss shape
+/// (`hit:false`, `reason:"notRemembered"`, the snapshot next step) instead
+/// of a bare `null` answer, so an HTTP consumer gets the same repair
+/// signal the MCP surface reports.
+#[tokio::test]
+async fn context_ask_miss_names_the_not_remembered_reason_and_next_step() {
+    let (app, token) = authenticated_app(
+        [Capability::ContextRead, Capability::PageRead],
+        InterfaceConfig::default(),
+    )
+    .await;
+    let session = uuid!("20000000-0000-0000-0000-000000000021");
+    let page = uuid!("30000000-0000-0000-0000-000000000031");
+
+    let response = app
+        .clone()
+        .oneshot(authorized(
+            "GET",
+            &format!("/v1/context/ask?sessionId={session}&pageId={page}&description=Email"),
+            &token,
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+    let value = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+    assert_eq!(value["answer"], serde_json::Value::Null);
+    assert_eq!(value["hit"], serde_json::json!(false));
+    assert_eq!(value["reason"], "notRemembered");
+    assert_eq!(value["nextStep"], "a11y_snapshot");
+}

@@ -323,6 +323,13 @@ produced. The outcome's evidence then carries a `configuration` item named
 more live handles get no default; the call falls through to the ordinary
 `schemaViolation` rejection below, whose repair action names the live count.
 
+`page_activate` is the one deliberate exception to the handle/ids mixing
+refusal: `page_activate {workflowHandle, pageId}` means "activate this page
+and rebind the handle to it" (same session). The prior bound page is recorded
+as the opener, so the closed-page fallback still reaches it. An explicit
+`sessionId` beside the handle must match the handle's binding; a cross-
+session activate stays a `workflowBindingConflict`.
+
 ## Rejected arguments
 
 A `-32602` response carries `data` describing what failed:
@@ -333,7 +340,7 @@ A `-32602` response carries `data` describing what failed:
 | `malformedArguments` | — | Cleared the schema but failed to deserialize |
 | `deadlineOutOfRange` | — | `command_execute` envelope deadline is past, or more than five minutes in the future |
 | `invalidIdempotencyKey` | — | Key is not 1–128 printable ASCII characters |
-| `workflowBindingConflict` | — | A handle-capable call mixed `workflowHandle` with explicit scope IDs; use one form only |
+| `workflowBindingConflict` | — | A handle-capable call mixed `workflowHandle` with explicit scope IDs; use one form only (`page_activate` alone accepts handle + `pageId` as activate-and-rebind) |
 | `unknownWorkflowHandle` | — | Handle is malformed, unknown, evicted, or from an earlier server generation; repair with explicit IDs |
 | `hintsPerField` | — | `intent_complete_form` only: a top-level `hints` was sent with `fields` not exactly one entry, or the one field already had its own `hints` |
 
@@ -349,7 +356,12 @@ value. Example: a `session_create` call with no `profile` returns
 The `-32602` `error.message` itself now names `pointer` and `constraint` too
 (`schemaViolation at /profile: required`), and a scope-less call to a
 handle-capable tool gets a targeted repair action naming the live handle
-count when the single-handle default above did not apply.
+count when the single-handle default above did not apply. A rejection on a
+choice keyword (`oneOf`/`anyOf`/`enum`/`const`) extends the repair with the
+variant-list fix: the value must match exactly one variant of the schema's
+list, each variant's `kind` discriminator included — for a rejected
+`FillValue`, that means `{"kind":"setText","value":…}` rather than a bare
+`{"value":…}`.
 
 ## Tool metadata
 
@@ -494,6 +506,11 @@ answer, not an error: the retained context is invalidated by every command that
 may have changed the page — including `navigate` and `emulate`, which are
 replayable yet replace or reflow it — and by any non-read-only command that
 failed. The repair is to take an `a11y_snapshot`, which re-populates it.
+
+A miss is spelled out in the outcome: `answer: null` alongside `hit: false`,
+`reason: "notRemembered"`, and `nextStep: "a11y_snapshot"`, so a caller can
+tell "unknown" from "located" without interpreting `null`. A hit answers with
+`hit: true` alongside the target.
 
 Ambiguous descriptions (two controls with the same accessible name), partial
 matches, and anything below the confidence floor answer nothing rather than

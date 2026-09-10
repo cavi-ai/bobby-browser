@@ -7,16 +7,15 @@ use super::*;
 
 impl Server {
     /// `handle` is the workflow handle `call_tool` resolved for this call
-    /// (`None` for a raw-id call). Only the three dispatchers that own a
-    /// `WORKFLOW_SCOPE_TOOLS` tool need it, to run the closed-page rule in
-    /// `submit_envelope`; `workflow_observe` (in `dispatch_agent_workflow`)
-    /// takes its handle from its own required argument instead and is
-    /// unaffected by this parameter. `defaulted_handle` is that same handle
-    /// again, but only when the call carried no scope at all and
+    /// (`None` for a raw-id call). The `WORKFLOW_SCOPE_TOOLS` dispatchers
+    /// need it, to run the closed-page rule in `submit_envelope`;
+    /// `workflow_start` takes no scope and `dispatch_workflow` tools mint
+    /// their own. `defaulted_handle` is that same handle again, but only
+    /// when the call carried no scope at all and
     /// `WorkflowHandles::normalize_arguments` resolved it against this
-    /// connection's one live binding -- those same three dispatchers thread
-    /// it to `finish_tool`, which attaches `workflowHandleDefaulted`
-    /// evidence to a successful outcome.
+    /// connection's one live binding -- those same dispatchers thread
+    /// it to `finish_tool` (or `workflow_observe_success`), which attaches
+    /// `workflowHandleDefaulted` evidence to a successful outcome.
     pub(super) async fn dispatch_named_tool(
         &self,
         id: Value,
@@ -27,7 +26,14 @@ impl Server {
     ) -> Value {
         let name = call.name.as_str();
         if dispatch_agent_workflow::TOOLS.contains(&name) {
-            self.dispatch_agent_workflow(id, call, context).await
+            self.dispatch_agent_workflow(
+                id,
+                call,
+                context,
+                handle.as_deref(),
+                defaulted_handle.as_deref(),
+            )
+            .await
         } else if dispatch_lifecycle::TOOLS.contains(&name) {
             self.dispatch_lifecycle(id, call, context).await
         } else if dispatch_primitives::TOOLS.contains(&name) {
