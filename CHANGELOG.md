@@ -70,6 +70,25 @@
   rebinds the handle to it (same session; the prior page is recorded as the
   opener), replacing the `workflowBindingConflict` refusal that forced the
   gauntlet agent off the handle path. Cross-session activates stay refused.
+- `context_ask` / `context_neighbors` spell out a miss: the outcome carries
+  `hit: false`, `reason: "notRemembered"`, and `nextStep: "a11y_snapshot"`
+  next to the `null` answer (HTTP `/v1/context/ask` too, with `hit: true`
+  added on the hit path), so an agent can tell "unknown" from "located"
+  without parsing null and gets the snapshot repair.
+- An `intent_extract` field hinted at an accessibility-tree-only role the
+  element resolver can never match (`StaticText`, `LabelText`,
+  `MenuListPopup`, ...) misses with an `a11yOnlyRole` configuration marker
+  instead of a bare `targetNotFound` — and runs no vision escalation, which
+  cannot resolve a text node either.
+- A `targetAmbiguous` rejection names its contenders the way the outcome's
+  resolution evidence does (`button "Submit" score=80`) and ends with the
+  narrowing repair, replacing the previous Rust `Debug` dump
+  (`role=Some("button"),score=0`).
+- A schema violation on a choice keyword (`oneOf`/`anyOf`/`enum`/`const`)
+  extends the repair with the variant-list fix — the value must match one
+  variant of the schema's list, each variant's `kind` discriminator
+  included — so a rejected `FillValue` names the discriminator in the
+  message the agent actually reads.
 
 ### Changed
 
