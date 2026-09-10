@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
@@ -67,6 +67,7 @@ pub(crate) const WORKFLOW_SCOPE_TOOLS: &[(&str, WorkflowScope)] = &[
     ("type_text", WorkflowScope::SessionPageWorkflow),
     ("upload_files", WorkflowScope::SessionPageWorkflow),
     ("wait_for", WorkflowScope::SessionPageWorkflow),
+    ("workflow_observe", WorkflowScope::SessionPageWorkflow),
 ];
 
 pub(crate) fn workflow_scope_for_tool(name: &str) -> Option<WorkflowScope> {
@@ -246,6 +247,34 @@ impl WorkflowHandles {
             .iter()
             .any(|key| object.contains_key(*key))
         {
+            // `page_activate {workflowHandle, pageId}` is the
+            // gauntlet-observed "activate this page and rebind the handle"
+            // call, not a conflict: same session required, the handle's
+            // bound page moves to the named one. Every other tool keeps the
+            // strict mixing refusal.
+            if tool == "page_activate" {
+                let handle = handle.as_str().ok_or(WorkflowHandleError::Unknown)?;
+                let binding = self.resolve(handle)?;
+                let requested = object
+                    .get("pageId")
+                    .and_then(Value::as_str)
+                    .and_then(|value| Uuid::parse_str(value).ok())
+                    .map(types::PageId)
+                    .ok_or(WorkflowHandleError::Unknown)?;
+                if let Some(explicit) = requested_session(object)? {
+                    if binding.session_id != explicit {
+                        return Err(WorkflowHandleError::BindingConflict);
+                    }
+                }
+                let mut normalized = object.clone();
+                normalized.remove("workflowHandle");
+                normalized.remove("sessionId");
+                normalized.insert("sessionId".to_owned(), json!(binding.session_id));
+                normalized.insert("workflowId".to_owned(), json!(binding.workflow_id));
+                normalized.insert("pageId".to_owned(), json!(requested));
+                self.rebind_page(handle, requested);
+                return Ok((Value::Object(normalized), Some(handle.to_owned()), None));
+            }
             return Err(WorkflowHandleError::BindingConflict);
         }
 
@@ -394,6 +423,19 @@ impl WorkflowHandles {
         }
     }
 
+    /// The `page_activate` rebind: the handle's bound page moves to
+    /// `page_id` on the same session. The prior bound page is recorded as
+    /// the opener so the closed-page fallback can still reach it.
+    pub(crate) fn rebind_page(&self, handle: &str, page_id: types::PageId) {
+        let mut state = self.lock_state();
+        if let Some(binding) = state.bindings.get_mut(handle) {
+            if binding.page_id != page_id {
+                binding.opener_page_id = Some(binding.page_id.clone());
+                binding.page_id = page_id;
+            }
+        }
+    }
+
     /// The closed-page rule's rebind. If `handle` is bound with a recorded
     /// opener, falls back to it: `page_id` becomes the opener and
     /// `opener_page_id` clears, so a second closed-page failure on the same
@@ -462,6 +504,22 @@ impl WorkflowHandles {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// The `sessionId` a `page_activate` handle+pageId call must name to prove
+/// the requested page belongs to the handle's session. `None` (the common
+/// case — the handle already names the session) is allowed; an explicit id
+/// must parse (the binding match happens at the call site).
+fn requested_session(
+    object: &serde_json::Map<String, Value>,
+) -> Result<Option<types::SessionId>, WorkflowHandleError> {
+    match object.get("sessionId").and_then(Value::as_str) {
+        None => Ok(None),
+        Some(value) => Uuid::parse_str(value)
+            .map(types::SessionId)
+            .map(Some)
+            .map_err(|_| WorkflowHandleError::Unknown),
     }
 }
 
@@ -842,6 +900,75 @@ mod tests {
         assert_eq!(
             registry.normalize_arguments("session_create", &arguments),
             Ok((arguments, None, None))
+        );
+    }
+
+    /// `page_activate {workflowHandle, pageId}` is "activate this page and
+    /// rebind the handle", the gauntlet-observed call that used to die as a
+    /// binding conflict and force the agent off the handle path. Same
+    /// session required; the handle moves to the requested page.
+    #[test]
+    fn page_activate_handle_plus_page_id_activates_and_rebinds() {
+        let registry = registry();
+        let session = session_id(1100);
+        let bound_page = page_id(1101);
+        let popup = page_id(1102);
+        let reservation = registry.reserve().unwrap();
+        let generation = reservation.generation;
+        let (handle, _) = publish(
+            reservation,
+            binding(
+                generation,
+                session.clone(),
+                bound_page.clone(),
+                workflow_id(1103),
+            ),
+        );
+
+        let arguments = json!({
+            "workflowHandle": handle,
+            "pageId": popup,
+        });
+        let (normalized, resolved, defaulted) = registry
+            .normalize_arguments("page_activate", &arguments)
+            .unwrap();
+        assert_eq!(normalized["sessionId"], json!(session));
+        assert_eq!(normalized["pageId"], json!(popup));
+        assert_eq!(normalized.get("workflowHandle"), None);
+        assert_eq!(resolved, Some(handle.clone()));
+        assert_eq!(defaulted, None);
+
+        let bound = registry.resolve(&handle).unwrap();
+        assert_eq!(bound.page_id, popup, "the handle rebinds to the popup");
+        assert_eq!(
+            bound.opener_page_id,
+            Some(bound_page),
+            "the prior page stays reachable as the opener"
+        );
+    }
+
+    /// An explicit `sessionId` beside the handle must match the binding —
+    /// a cross-session activate is still a conflict, never a silent
+    /// cross-session move.
+    #[test]
+    fn page_activate_handle_plus_page_id_on_another_session_stays_a_conflict() {
+        let registry = registry();
+        let session = session_id(1110);
+        let reservation = registry.reserve().unwrap();
+        let generation = reservation.generation;
+        let (handle, _) = publish(
+            reservation,
+            binding(generation, session, page_id(1111), workflow_id(1112)),
+        );
+
+        let arguments = json!({
+            "workflowHandle": handle,
+            "pageId": page_id(1112),
+            "sessionId": session_id(9999),
+        });
+        assert_eq!(
+            registry.normalize_arguments("page_activate", &arguments),
+            Err(WorkflowHandleError::BindingConflict)
         );
     }
 

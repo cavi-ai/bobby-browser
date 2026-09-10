@@ -61,6 +61,15 @@
   the same way, instead of evicting it. `form_snapshot` through the handle
   replays on the opener the same way; the `controlId` lookup inside
   `upload_files` fails with the same evidence and repair.
+- `workflow_observe` joins the handle-capable scope tools: it takes the
+  `workflowHandle` (with the single-live-handle default and
+  `workflowHandleDefaulted` evidence) or the explicit id set, so the
+  canonical loop tool follows the same repair path as every other scope
+  tool when a handle dies.
+- `page_activate {workflowHandle, pageId}` activates the named page and
+  rebinds the handle to it (same session; the prior page is recorded as the
+  opener), replacing the `workflowBindingConflict` refusal that forced the
+  gauntlet agent off the handle path. Cross-session activates stay refused.
 - `context_ask` / `context_neighbors` spell out a miss: the outcome carries
   `hit: false`, `reason: "notRemembered"`, and `nextStep: "a11y_snapshot"`
   next to the `null` answer (HTTP `/v1/context/ask` too, with `hit: true`

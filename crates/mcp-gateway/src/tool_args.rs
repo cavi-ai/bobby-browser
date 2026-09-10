@@ -54,7 +54,13 @@ pub(crate) struct WorkflowStartArgs {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct WorkflowObserveArgs {
-    pub(crate) workflow_handle: String,
+    /// Injected by `normalize_arguments` from a passed `workflowHandle` (the
+    /// tool is `WORKFLOW_SCOPE_TOOLS`, SessionPageWorkflow scope); a raw-id
+    /// caller sends the three ids directly.
+    pub(crate) session_id: types::SessionId,
+    pub(crate) page_id: types::PageId,
+    #[serde(default)]
+    pub(crate) workflow_id: Option<types::WorkflowId>,
     #[serde(default)]
     pub(crate) goal: Option<String>,
     #[serde(default)]
@@ -575,7 +581,12 @@ mod tests {
     fn workflow_observe_goal_limit_counts_unicode_scalars_not_utf8_bytes() {
         let parse = |goal| {
             serde_json::from_value::<WorkflowObserveArgs>(serde_json::json!({
-                "workflowHandle":"wf_0123456789abcdef0123456789abcdef",
+                // `WORKFLOW_SCOPE_TOOLS`: the handle arrives normalized as
+                // explicit ids, so the parser (like the validator) only
+                // ever sees the id form.
+                "sessionId":"00000000-0000-0000-0000-000000000001",
+                "pageId":"00000000-0000-0000-0000-000000000002",
+                "workflowId":"00000000-0000-0000-0000-000000000003",
                 "goal":goal,
             }))
             .expect("observe arguments parse")

@@ -131,6 +131,8 @@ impl Server {
         id: Value,
         call: ToolCall,
         context: types::RequestContext,
+        handle: Option<&str>,
+        defaulted_handle: Option<&str>,
     ) -> Value {
         match call.name.as_str() {
             "workflow_start" => {
@@ -138,8 +140,14 @@ impl Server {
                     .await
             }
             "workflow_observe" => {
-                self.dispatch_workflow_observe(id, call.arguments, context)
-                    .await
+                self.dispatch_workflow_observe(
+                    id,
+                    call.arguments,
+                    context,
+                    handle,
+                    defaulted_handle,
+                )
+                .await
             }
             _ => unreachable!("dispatch_agent_workflow received a tool it does not own"),
         }
@@ -150,6 +158,8 @@ impl Server {
         id: Value,
         arguments: Value,
         context: types::RequestContext,
+        handle: Option<&str>,
+        defaulted_handle: Option<&str>,
     ) -> Value {
         let input: WorkflowObserveArgs = match bounded_parse(arguments) {
             Ok(input) => input,
@@ -160,18 +170,9 @@ impl Server {
         }
         let evidence_detail = input.evidence_detail.unwrap_or(EvidenceDetail::Compact);
 
-        let handle = input.workflow_handle;
-        let binding = match self.workflow_handles.resolve(&handle) {
-            Ok(binding) => binding,
-            Err(
-                WorkflowHandleError::CapacityExhausted
-                | WorkflowHandleError::GenerationChanged
-                | WorkflowHandleError::SupervisorLost
-                | WorkflowHandleError::Unknown
-                | WorkflowHandleError::BindingConflict
-                | WorkflowHandleError::Malformed,
-            ) => return invalid_params_reason(id, "unknownWorkflowHandle"),
-        };
+        let session_id = input.session_id.clone();
+        let page_id = input.page_id.clone();
+        let workflow_id = input.workflow_id.clone();
         let max_nodes = input
             .max_nodes
             .unwrap_or(DEFAULT_WORKFLOW_OBSERVE_MAX_NODES);
@@ -192,12 +193,7 @@ impl Server {
             if context.capabilities.contains(types::Capability::PageRead) {
                 let answer = match self
                     .runtime
-                    .context_ask(
-                        context.clone(),
-                        binding.session_id.clone(),
-                        binding.page_id.clone(),
-                        goal,
-                    )
+                    .context_ask(context.clone(), session_id.clone(), page_id.clone(), goal)
                     .await
                 {
                     Ok(answer) => answer,
@@ -209,8 +205,8 @@ impl Server {
                             .runtime
                             .form_snapshot(
                                 context,
-                                binding.session_id.clone(),
-                                binding.page_id.clone(),
+                                session_id.clone(),
+                                page_id.clone(),
                                 Some(max_controls),
                             )
                             .await
@@ -221,21 +217,21 @@ impl Server {
                     } else {
                         None
                     };
+                    let mut outcome = json!({
+                        "status":"completed",
+                        "source":"retained",
+                        "sessionId":session_id,
+                        "pageId":page_id,
+                        "workflowId":workflow_id,
+                        "retainedAnswer":answer,
+                        "observationOutcome":Value::Null,
+                        "formSnapshot":form_snapshot,
+                    });
+                    if let Some(handle) = handle {
+                        outcome["workflowHandle"] = json!(handle);
+                    }
                     return self
-                        .workflow_observe_success(
-                            id,
-                            json!({
-                                "status":"completed",
-                                "source":"retained",
-                                "workflowHandle":handle,
-                                "sessionId":binding.session_id,
-                                "pageId":binding.page_id,
-                                "workflowId":binding.workflow_id,
-                                "retainedAnswer":answer,
-                                "observationOutcome":Value::Null,
-                                "formSnapshot":form_snapshot,
-                            }),
-                        )
+                        .workflow_observe_success(id, outcome, defaulted_handle)
                         .await;
                 }
             }
@@ -243,16 +239,16 @@ impl Server {
 
         let (submit_context, envelope) = primitive_envelope(
             context.clone(),
-            binding.session_id.clone(),
-            Some(binding.page_id.clone()),
-            Some(binding.workflow_id.clone()),
+            session_id.clone(),
+            Some(page_id.clone()),
+            workflow_id.clone(),
             types::PrimitiveCommand::AccessibilitySnapshot(types::AccessibilitySnapshotCommand {
                 max_nodes: Some(max_nodes),
                 target: input.target,
             }),
         );
         let observation_outcome = match self
-            .submit_envelope(submit_context, envelope, Some(&handle), "workflow_observe")
+            .submit_envelope(submit_context, envelope, handle, "workflow_observe")
             .await
         {
             Ok(outcome) => outcome,
@@ -271,8 +267,8 @@ impl Server {
                 .runtime
                 .form_snapshot(
                     context,
-                    binding.session_id.clone(),
-                    binding.page_id.clone(),
+                    session_id.clone(),
+                    page_id.clone(),
                     Some(max_controls),
                 )
                 .await
@@ -284,26 +280,37 @@ impl Server {
             None
         };
 
-        self.workflow_observe_success(
-            id,
-            json!({
-                "status":status,
-                "source":"live",
-                "workflowHandle":handle,
-                "sessionId":binding.session_id,
-                "pageId":binding.page_id,
-                "workflowId":binding.workflow_id,
-                "retainedAnswer":Value::Null,
-                "observationOutcome":observation_outcome,
-                "formSnapshot":form_snapshot,
-            }),
-        )
-        .await
+        let mut outcome = json!({
+            "status":status,
+            "source":"live",
+            "sessionId":session_id,
+            "pageId":page_id,
+            "workflowId":workflow_id,
+            "retainedAnswer":Value::Null,
+            "observationOutcome":observation_outcome,
+            "formSnapshot":form_snapshot,
+        });
+        if let Some(handle) = handle {
+            outcome["workflowHandle"] = json!(handle);
+        }
+        self.workflow_observe_success(id, outcome, defaulted_handle)
+            .await
     }
 
-    async fn workflow_observe_success(&self, id: Value, value: Value) -> Value {
+    async fn workflow_observe_success(
+        &self,
+        id: Value,
+        value: Value,
+        defaulted_handle: Option<&str>,
+    ) -> Value {
         let is_error = value.get("status").and_then(Value::as_str) != Some("completed");
-        let mut response = self.tool_success(id, value).await;
+        let mut response = if let Some(handle) = defaulted_handle {
+            let mut value = value;
+            push_evidence(&mut value, workflow_handle_defaulted_evidence(handle));
+            self.tool_success(id, value).await
+        } else {
+            self.tool_success(id, value).await
+        };
         if let Some(result) = response.get_mut("result").and_then(Value::as_object_mut) {
             result.insert("isError".to_owned(), json!(is_error));
         }
