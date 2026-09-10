@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "bobby-browser": {
+      "url": "http://host.docker.internal:7777/v1/mcp",
+      "transport": "streamable-http",
+      "headers": {
+        "Authorization": "Bearer ${AUTOMATION_RUNTIME_TOKEN}"
+      }
+    }
+  }
+}

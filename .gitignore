@@ -67,3 +67,4 @@ __pycache__/
 
 models/
 .worktrees/
+config.toml
