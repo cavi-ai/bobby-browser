@@ -490,26 +490,47 @@ async fn workflow_observe_bounds_reject_before_handle_lookup_or_runtime_effects(
     );
     assert_eq!(live.accessibility_calls(), 1);
 
+    // Handle normalization now runs before argument validation, so an
+    // unknown handle refuses as `unknownWorkflowHandle` (normalization's
+    // own refusal) and never reaches the runtime; the same bounds on the
+    // valid handle reject as plain `schemaViolation` with no runtime work.
     let unknown = "wf_ffffffffffffffffffffffffffffffff";
+    let unknown_response = observe(
+        &live.server,
+        322,
+        json!({"workflowHandle":unknown,"maxNodes":0}),
+    )
+    .await;
+    assert_eq!(
+        unknown_response["error"]["code"], -32602,
+        "{unknown_response}"
+    );
+    assert_eq!(
+        unknown_response["error"]["data"]["reason"], "unknownWorkflowHandle",
+        "{unknown_response}"
+    );
+    assert_eq!(live.accessibility_calls(), 1);
+    assert_eq!(live.form_calls(), 0);
+
     for (id, arguments) in [
-        (322, json!({"workflowHandle":unknown,"maxNodes":0})),
-        (323, json!({"workflowHandle":unknown,"maxNodes":2049})),
-        (324, json!({"workflowHandle":unknown,"maxControls":0})),
-        (325, json!({"workflowHandle":unknown,"maxControls":513})),
+        (323, json!({"workflowHandle":handle,"maxNodes":0})),
+        (324, json!({"workflowHandle":handle,"maxNodes":2049})),
+        (325, json!({"workflowHandle":handle,"maxControls":0})),
+        (326, json!({"workflowHandle":handle,"maxControls":513})),
+        (327, json!({"workflowHandle":handle,"goal":"a".repeat(257)})),
         (
-            326,
-            json!({"workflowHandle":unknown,"goal":"a".repeat(257)}),
-        ),
-        (
-            327,
-            json!({"workflowHandle":unknown,"goal":"🙂".repeat(257)}),
+            328,
+            json!({"workflowHandle":handle,"goal":"🙂".repeat(257)}),
         ),
     ] {
         let response = observe(&live.server, id, arguments).await;
         assert_eq!(response["error"]["code"], -32602, "{response}");
-        assert_ne!(
-            response["error"]["data"]["reason"], "unknownWorkflowHandle",
-            "validation looked up the handle first: {response}"
+        assert!(
+            matches!(
+                response["error"]["data"]["reason"].as_str(),
+                Some("schemaViolation") | Some("malformedArguments")
+            ),
+            "bounds reject before any runtime effect: {response}"
         );
         assert_eq!(
             live.accessibility_calls(),
@@ -2566,4 +2587,88 @@ async fn upload_files_control_id_lookup_fails_with_popup_closed_evidence_and_rep
             .all(|item| item["kind"] != "popupClosed"),
         "the handle already resolves to the opener, so a later call needs no fallback: {again}"
     );
+}
+
+/// The scope default covers `workflow_observe` too once it joined
+/// `WORKFLOW_SCOPE_TOOLS`: a scope-less observe resolves against the one
+/// live binding, and the outcome names the defaulted handle.
+#[tokio::test]
+async fn scope_less_workflow_observe_defaults_to_the_only_live_handle_and_reports_it() {
+    let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+    let started = start(&live.server, 700, json!({"profile":"harness"})).await;
+    let handle = started["result"]["structuredContent"]["workflowHandle"]
+        .as_str()
+        .expect("workflow_start returns a handle")
+        .to_owned();
+
+    let response = call_tool(&live.server, 701, "workflow_observe", json!({})).await;
+    assert!(
+        response["error"].is_null(),
+        "the call must be accepted and dispatched, never bounce off a schema rejection: {response}"
+    );
+    let outcome = &response["result"]["structuredContent"];
+    assert_eq!(
+        outcome["workflowId"], started["result"]["structuredContent"]["workflowId"],
+        "{response}"
+    );
+    assert_eq!(outcome["source"], "live", "{response}");
+    let defaulted = outcome["evidence"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|item| item["name"] == "workflowHandleDefaulted")
+        .unwrap_or_else(|| panic!("workflowHandleDefaulted evidence missing: {response}"));
+    assert_eq!(defaulted["value"], handle, "{response}");
+}
+
+/// `page_activate {workflowHandle, pageId}` activates the named page and
+/// rebinds the handle to it (same session), instead of refusing the mix —
+/// the gauntlet agent left the handle path after two such conflicts.
+#[tokio::test]
+async fn page_activate_with_handle_and_page_id_activates_and_rebinds() {
+    let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+    let started = start(&live.server, 710, json!({"profile":"harness"})).await;
+    let start_outcome = &started["result"]["structuredContent"];
+    let handle = start_outcome["workflowHandle"].as_str().unwrap();
+    let page_id = start_outcome["pageId"].clone();
+
+    // Open a second page through the same workflow handle.
+    let opened = call_tool(
+        &live.server,
+        711,
+        "page_open",
+        json!({"sessionId": start_outcome["sessionId"], "url":"https://live-harness.test/second"}),
+    )
+    .await;
+    assert!(opened["error"].is_null(), "{opened}");
+    let second_page = opened["result"]["structuredContent"]["id"].clone();
+
+    let activated = call_tool(
+        &live.server,
+        712,
+        "page_activate",
+        json!({"workflowHandle": handle, "pageId": second_page}),
+    )
+    .await;
+    assert!(
+        activated["error"].is_null(),
+        "handle+pageId must activate and rebind, never a conflict: {activated}"
+    );
+    let outcome = &activated["result"]["structuredContent"];
+    assert_eq!(outcome["status"], "completed", "{activated}");
+
+    // The handle now observes the second page, not the original one.
+    let observed = call_tool(
+        &live.server,
+        713,
+        "workflow_observe",
+        json!({"workflowHandle": handle}),
+    )
+    .await;
+    assert_eq!(
+        observed["result"]["structuredContent"]["pageId"], second_page,
+        "the handle rebinds to the activated page: {observed}"
+    );
+    // The original page id is untouched for raw-id callers.
+    assert_eq!(page_id, start_outcome["pageId"], "{page_id}");
 }

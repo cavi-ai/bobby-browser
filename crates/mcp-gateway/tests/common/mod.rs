@@ -283,6 +283,17 @@ impl BrowserWorker for LiveWorker {
         }])
     }
 
+    async fn activate_page(
+        &self,
+        command: &types::ActivatePageCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Ok(vec![Evidence::Page {
+            page_id: command.page_id.clone(),
+            url: "https://live-harness.test/".into(),
+            title: "live-harness".into(),
+        }])
+    }
+
     async fn network_log(
         &self,
         _: &PageId,
