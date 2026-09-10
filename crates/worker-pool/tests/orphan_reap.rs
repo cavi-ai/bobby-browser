@@ -60,11 +60,9 @@ async fn new_factory_reaps_a_chrome_process_orphaned_by_a_prior_instance() {
         1,
         "launch must register exactly one PID entry: {registry_entries:?}"
     );
-    let pid: i32 = std::fs::read_to_string(&registry_entries[0])
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let registered_pid = worker_pool::process_registry::read_registered_pid(&registry_entries[0])
+        .expect("a freshly launched worker must register a readable PID entry");
+    let pid = i32::try_from(registered_pid).unwrap();
 
     // Bypasses `terminate`/`close`, as when the parent runtime is SIGKILLed
     // before its cleanup runs. This test process stays the Chrome process's
@@ -78,6 +76,20 @@ async fn new_factory_reaps_a_chrome_process_orphaned_by_a_prior_instance() {
     // The orphaned entry must still be on disk: nothing ran the worker's own
     // cleanup path.
     assert!(registry_entries[0].exists());
+
+    // The entry's recorded owner is this test binary's own PID, which is still very much
+    // running -- a live owner's entry is deliberately left alone by the reaper. Simulate
+    // the entry instead having been written by a different bobby process that has since
+    // died: substitute the owner with a PID that is real but guaranteed dead by the time
+    // the next factory reaps it.
+    let mut dead_owner = std::process::Command::new("true").spawn().unwrap();
+    let dead_owner_pid = dead_owner.id();
+    dead_owner.wait().unwrap();
+    std::fs::write(
+        &registry_entries[0],
+        format!("owner={dead_owner_pid}\npid={registered_pid}\n"),
+    )
+    .unwrap();
 
     // A brand-new factory, as if the runtime had just restarted, must find
     // and clear that stale registration on construction.

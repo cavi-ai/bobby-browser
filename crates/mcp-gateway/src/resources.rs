@@ -739,14 +739,17 @@ tools most likely to produce it.
 - `targetDetached` -- three distinct situations share this code; read the
   message to tell them apart:
   - *The whole browser transport died* ("the browser target is gone",
-    "send failed because receiver is gone", "browser process was killed",
-    "Firefox BiDi connection closed"):
-    the CDP or Firefox BiDi websocket reset, or the browser process died.
-    The runtime reattaches to a still-live browser itself (`cdpReattach`
-    evidence -- page state, including typed form values, is preserved) or
-    relaunches and reloads the page's last URL when the process is really
-    dead. Firefox reconnects the BiDi socket without `session.new` so the
-    existing WebDriver session and tabs stay intact.
+    "send failed because receiver is gone", "the browser transport was
+    lost", "Firefox BiDi connection closed"):
+    the CDP or Firefox BiDi websocket reset, or the browser process died --
+    we do not always know which. The runtime reattaches to a still-live
+    browser itself (`cdpReattach` evidence -- page state, including typed
+    form values, is preserved) or relaunches and reloads the page's last URL
+    when reattach was not possible (`browserRevived` `Configuration`
+    evidence carries what the pre-revive probe, the reattach attempt, and
+    the original command each reported, since the outer message here is
+    generic). Firefox reconnects the BiDi socket without `session.new` so
+    the existing WebDriver session and tabs stay intact.
     Repair: none needed before the next command -- but a relaunch did wipe
     in-page state, so re-observe (`workflow_observe`, `form_snapshot`)
     before replaying anything that already ran. After a reattach, state is

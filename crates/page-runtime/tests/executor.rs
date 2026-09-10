@@ -175,7 +175,7 @@ impl BrowserWorker for FakeWorker {
         ) {
             return Err(CommandError {
                 code: ErrorCode::BrowserCommandFailed,
-                message: "browser worker is closed".into(),
+                message: "reattach failed: browser process exited (unknown)".into(),
                 layer: ErrorLayer::Driver,
                 retryable: false,
             });
@@ -3069,13 +3069,30 @@ async fn a_dead_browser_revive_reports_state_loss_for_mutating_commands() {
             }),
         ))
         .await;
-    let CommandOutcome::Failed { error, .. } = outcome else {
+    let CommandOutcome::Failed {
+        error, evidence, ..
+    } = outcome
+    else {
         panic!("expected Failed, got {outcome:?}");
     };
     assert_eq!(error.code, ErrorCode::TargetDetached);
     assert!(
-        error.message.contains("browser process was killed"),
+        error
+            .message
+            .contains("the browser transport was lost and could not be reattached"),
         "{error:?}"
+    );
+    assert!(
+        evidence.iter().any(|item| matches!(
+            item,
+            Evidence::Configuration { name, value }
+                if name == "browserRevived"
+                    && value
+                        == "probe: err: injected driver failure \
+                            | reattach: reattach failed: browser process exited (unknown) \
+                            | original: send failed because receiver is gone"
+        )),
+        "the probe, reattach, and original messages must all survive as evidence: {evidence:?}"
     );
 
     // The session is not wedged: the next command lands on the revived page.

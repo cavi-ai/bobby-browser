@@ -117,6 +117,28 @@
   naming `upload_files` as the repair, instead of a `targetNotFound` that
   escalated to a vision fallback and came back `visionAssistDenied`. File
   inputs accept paths only through `upload_files` (or `control_action`).
+- The four distinct reasons `reconnect_live_process` can fail to reattach
+  (no browser handle, browser process exited, no debug websocket url, CDP
+  connect failed) used to collapse into the same generic "browser worker is
+  closed", discarded to `tracing::warn!` under `mcp-stdio`. Each now returns
+  its own static-prefix message, and a browser revive that could not
+  reattach attaches a `browserRevived` `Configuration` evidence item naming
+  the pre-revive probe result, the reattach failure, and the original
+  command's error, so the reason survives redaction into `commands.jsonl`.
+  The revive failure message itself no longer claims the browser process
+  was killed (unproven); it says the transport was lost and could not be
+  reattached.
+- `reap_orphaned_processes` (worker-pool) now records each registry entry's
+  owner PID and only kills its Chrome once that owner is confirmed dead. It
+  used to SIGKILL any registered Chrome process on every new launch
+  regardless of whether the bobby instance that registered it was still
+  running, so one bobby process starting up could kill a browser a
+  different, live bobby process was still driving mid-task (`browserRevived`
+  evidence: `reattach failed: browser process exited (signal: 9 (SIGKILL))`).
+  A live owner's entry, including one this process itself just registered,
+  is now left in place untouched; a pre-ownership one-line entry (from a
+  binary predating this change) is removed but never killed, since it names
+  no owner to verify against.
 
 ## 0.13.0 - 2026-09-04
 
