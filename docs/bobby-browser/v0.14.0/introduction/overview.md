@@ -4,10 +4,11 @@ documentedVersion: 0.14.0
 
 # Overview
 
-bobby-browser is a browser automation runtime with authenticated,
-capability-scoped control surfaces. All adapters share capability, idempotency,
-evidence, checkpoint, and event contracts. Authentication fails closed;
-credentials are never accepted in URLs or query strings.
+bobby-browser is a fail-closed execution plane for agents completing stateful,
+sensitive workflows in real Firefox and Chromium. Its authenticated,
+capability-scoped control surfaces share idempotency, evidence, checkpoint,
+recovery, and event contracts. Credentials are never accepted in URLs or query
+strings.
 
 > **Alpha.** Interfaces are stable enough to build against, but may still change
 > before 1.0. See the [security model](../security/model.md) before exposing any

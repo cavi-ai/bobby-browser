@@ -45,19 +45,32 @@ The training ground intentionally includes no CAPTCHA solver or bypass. An autom
 `benchmarks/competitor-gauntlet` is a separate harness that drives the gauntlet
 journeys with alternate tooling stacks.
 
-Run it from the workspace tree:
+Run it from the repository root:
 
 ```bash
-cd benchmarks/competitor-gauntlet
-cargo run -- --tool bobby
+pnpm --filter @cavi-ai/competitor-gauntlet run run -- --tool bobby
 ```
 
 `--tool` is required.
 
 - `--tool bobby` runs only the native bobby-browser runner.
+- `--tool obscura` runs an identified Obscura MCP binary.
 - `--tool all` runs every configured runner, including the full bobby competitor
   gamut.
 - Runner names are validated against `benchmarks/competitor-gauntlet/runners.json`.
+
+The Obscura runner requires an absolute executable path. The harness hashes the
+binary into benchmark provenance and enables private-network access only so
+Obscura can reach the isolated loopback scenario server:
+
+```bash
+OBSCURA_MCP_COMMAND=/absolute/path/to/obscura \
+  pnpm --filter @cavi-ai/competitor-gauntlet run run -- \
+  --tool obscura --model claude-opus-5 --timebox-seconds 300
+```
+
+Set `OBSCURA_MCP_COMMAND` before `--tool all` as well. Benchmark results and
+transcripts remain local artifacts; do not commit them.
 
 When selecting bobby, the harness creates an isolated run workspace and writes
 `bobby-gauntlet.toml` with:

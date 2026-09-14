@@ -57,6 +57,7 @@ test("phase ranks bobby against competitors on the same Grok batch", () => {
     ...tasks.map((task) => run("chrome-devtools-mcp", task, { pass: false, wallMs: 90_000 })),
     ...tasks.map((task) => run("raw-playwright", task, { wallMs: 60_000, ease: 2 })),
     ...tasks.map((task) => run("agent-browser", task, { wallMs: 50_000, ease: 3 })),
+    ...tasks.map((task) => run("obscura", task, { wallMs: 30_000, ease: 4 })),
     {
       tool: "bobby-vision",
       skipped: true,
@@ -70,6 +71,7 @@ test("phase ranks bobby against competitors on the same Grok batch", () => {
 
   assert.equal(scorecard.tools.bobby.passRate, 1);
   assert.equal(scorecard.tools["playwright-mcp"].meanWallSecondsPassing, 20);
+  assert.equal(scorecard.tools.obscura.meanWallSecondsPassing, 30);
   assert.equal(scorecard.tools["bobby-vision"].skipped, true);
   const accuracy = scorecard.ranks.accuracy.find((row) => row.tool === "bobby");
   assert.equal(accuracy?.rank, 1);
@@ -78,7 +80,7 @@ test("phase ranks bobby against competitors on the same Grok batch", () => {
     (row) => row.tool === "playwright-mcp",
   );
   assert.equal(perfPlaywright?.rank, 1);
-  assert.equal(perfBobby?.rank, 2);
+  assert.equal(perfBobby?.rank, 3);
   assert.equal(scorecard.grokBatch.status, "measured");
   assert.equal(scorecard.note.includes("not ranked"), true);
 });
