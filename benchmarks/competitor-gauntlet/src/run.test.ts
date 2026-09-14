@@ -302,3 +302,64 @@ test("agent-browser runner parses and names exactly one mcpServers command", () 
     "agent-browser must pin an exact package version",
   );
 });
+
+test("obscura runner pins an explicit binary and permits the local gauntlet", () => {
+  const runners = JSON.parse(
+    readFileSync(path.join(harnessDir, "runners.json"), "utf8"),
+  );
+  const runner = runners.obscura;
+  assert(runner, "runners.json must define an obscura entry");
+  const servers = Object.entries(runner.mcpServers ?? {});
+  assert.equal(servers.length, 1, "obscura must name exactly one MCP server command");
+  const [name, server] = servers[0] as [string, any];
+  assert.equal(name, "obscura");
+  assert.equal(server.command, "${OBSCURA_MCP_COMMAND}");
+  assert.deepEqual(server.args, ["--allow-private-network", "mcp"]);
+});
+
+test("obscura provenance fingerprints the exact executable", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "obscura-run-provenance-"));
+  const obscura = path.join(directory, "obscura");
+  writeFileSync(obscura, "current-obscura-binary");
+
+  const result = spawnSync(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      runPath,
+      "--print-provenance",
+      "true",
+      "--tool",
+      "obscura",
+    ],
+    {
+      cwd: harnessDir,
+      encoding: "utf8",
+      env: { ...process.env, OBSCURA_MCP_COMMAND: obscura },
+    },
+  );
+
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  const provenance = JSON.parse(result.stdout);
+  assert.equal(
+    provenance.runnerBinarySha256,
+    createHash("sha256").update("current-obscura-binary").digest("hex"),
+  );
+  assert.equal(provenance.bobbyBinarySha256, undefined);
+  assert.equal(provenance.engine, "obscura");
+  assert.equal(provenance.startupToolset, "full");
+});
+
+test("obscura runs require an absolute pinned binary path", () => {
+  const env = { ...process.env };
+  delete env.OBSCURA_MCP_COMMAND;
+  const result = spawnSync(
+    process.execPath,
+    ["--import", "tsx", runPath, "--tool", "obscura"],
+    { cwd: harnessDir, encoding: "utf8", env },
+  );
+
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /OBSCURA_MCP_COMMAND must be an absolute path/);
+});

@@ -29,6 +29,18 @@
       }
     }
   },
+  "obscura": {
+    "description": "Obscura MCP using the pinned local binary supplied by OBSCURA_MCP_COMMAND. Private-network access is enabled only so the runner can reach the loopback gauntlet server.",
+    "mcpServers": {
+      "obscura": {
+        "command": "${OBSCURA_MCP_COMMAND}",
+        "args": [
+          "--allow-private-network",
+          "mcp"
+        ]
+      }
+    }
+  },
   "playwright-mcp": {
     "description": "Microsoft @playwright/mcp",
     "mcpServers": {

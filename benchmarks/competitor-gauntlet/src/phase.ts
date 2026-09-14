@@ -1,5 +1,12 @@
 const EASE_KEYS = ["navigate", "click", "fill", "extract"] as const;
-const RANK_TOOLS = ["bobby", "playwright-mcp", "chrome-devtools-mcp", "raw-playwright", "agent-browser"] as const;
+const RANK_TOOLS = [
+  "bobby",
+  "playwright-mcp",
+  "chrome-devtools-mcp",
+  "raw-playwright",
+  "agent-browser",
+  "obscura",
+] as const;
 
 export type PhaseRun = {
   tool: string;
