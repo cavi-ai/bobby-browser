@@ -261,6 +261,10 @@ impl Server {
         else {
             return interface_error_response(id, workflow_internal_error(&context));
         };
+        let active_page_id = handle
+            .and_then(|handle| self.workflow_handles.resolve(handle).ok())
+            .map(|binding| binding.page_id)
+            .unwrap_or(page_id);
         let observation_outcome = project_observation_outcome(observation_outcome, evidence_detail);
         let form_snapshot = if status == "completed" && input.include_forms {
             match self
@@ -268,7 +272,7 @@ impl Server {
                 .form_snapshot(
                     context,
                     session_id.clone(),
-                    page_id.clone(),
+                    active_page_id.clone(),
                     Some(max_controls),
                 )
                 .await
@@ -284,7 +288,7 @@ impl Server {
             "status":status,
             "source":"live",
             "sessionId":session_id,
-            "pageId":page_id,
+            "pageId":active_page_id,
             "workflowId":workflow_id,
             "retainedAnswer":Value::Null,
             "observationOutcome":observation_outcome,

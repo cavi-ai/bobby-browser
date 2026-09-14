@@ -1144,6 +1144,14 @@ impl Server {
             .collect::<BTreeSet<_>>();
         let mut referenced = BTreeSet::new();
         collect_artifact_ids(&value, &mut referenced);
+        let screenshot_artifacts = value
+            .get("evidence")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|item| item.get("kind").and_then(Value::as_str) == Some("screenshot"))
+            .filter_map(|item| item.get("artifactId").and_then(Value::as_str))
+            .collect::<BTreeSet<_>>();
         let mut content = vec![json!({"type":"text","text":text})];
         for artifact_id in referenced.intersection(&trusted) {
             content.push(json!({
@@ -1152,6 +1160,27 @@ impl Server {
                 "name":format!("artifact-{artifact_id}"),
                 "description":"Authenticated runtime artifact"
             }));
+            if screenshot_artifacts.contains(artifact_id.as_str()) {
+                let context = self.request_context();
+                if let Ok(Some(artifact)) = self
+                    .resources
+                    .read(&self.handle, &context, artifact_id)
+                    .await
+                {
+                    if screenshot_artifacts.contains(artifact_id.as_str())
+                        && artifact.media_type.starts_with("image/")
+                    {
+                        let data = BASE64.encode(&artifact.bytes);
+                        if data.len() <= MAX_RESOURCE_ENCODED_BYTES {
+                            content.push(json!({
+                                "type":"image",
+                                "data":data,
+                                "mimeType":artifact.media_type
+                            }));
+                        }
+                    }
+                }
+            }
         }
         // MCP `isError` mirrors the command status: a failed command is a
         // failed tool call, not a successful one carrying a failure payload.
@@ -1331,6 +1360,7 @@ impl Server {
                 interface_core::Event::new("command.outcome", value.clone()),
             )
             .await;
+        admission.attach_download_previews(&mut value);
         Ok(value)
     }
 
@@ -1433,6 +1463,7 @@ impl Server {
                                 interface_core::Event::new("command.outcome", value.clone()),
                             )
                             .await;
+                        admission.attach_download_previews(&mut value);
                         Ok(value)
                     }
                     Err(error) => Err(error),
