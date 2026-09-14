@@ -120,6 +120,7 @@ async fn the_default_is_explore() {
     assert!(
         names.contains(&"click".to_owned())
             && names.contains(&"a11y_snapshot".to_owned())
+            && names.contains(&"intent_follow".to_owned())
             && !names.contains(&"intent_fill".to_owned())
             && !names.contains(&"command_execute".to_owned()),
         "unset startup must advertise the explore loop, not the full surface: {names:?}"
@@ -209,6 +210,7 @@ async fn selecting_a_phase_changes_what_is_advertised() {
         .collect();
     assert!(names.contains(&"a11y_snapshot".to_owned()));
     assert!(names.contains(&"click".to_owned()));
+    assert!(names.contains(&"intent_follow".to_owned()));
     assert!(
         !names.contains(&"intent_fill".to_owned())
             && !names.contains(&"command_execute".to_owned()),

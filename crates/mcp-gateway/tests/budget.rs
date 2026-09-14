@@ -162,6 +162,48 @@ async fn every_advertised_tool_carries_a_name_and_input_schema() {
 }
 
 #[tokio::test]
+async fn screenshot_advertises_each_mode_shape() {
+    let tools = list_tools(all_capabilities()).await;
+    let screenshot = tools
+        .iter()
+        .find(|tool| tool["name"] == "screenshot")
+        .expect("screenshot is advertised");
+    let modes = screenshot["inputSchema"]["$defs"]["ScreenshotMode"]["oneOf"]
+        .as_array()
+        .expect("ScreenshotMode is an explicit union");
+
+    assert_eq!(
+        modes
+            .iter()
+            .map(|mode| mode["properties"]["kind"]["const"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["viewport", "fullPage", "element", "clip"]
+    );
+    let required = |mode: &Value| {
+        mode["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|field| field.as_str().unwrap().to_owned())
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(
+        required(&modes[2]),
+        BTreeSet::from(["kind".to_owned(), "target".to_owned()])
+    );
+    assert_eq!(
+        required(&modes[3]),
+        BTreeSet::from([
+            "height".to_owned(),
+            "kind".to_owned(),
+            "width".to_owned(),
+            "x".to_owned(),
+            "y".to_owned()
+        ])
+    );
+}
+
+#[tokio::test]
 async fn command_execute_does_not_advertise_the_command_union() {
     let tools = list_tools(all_capabilities()).await;
     let tool = tools

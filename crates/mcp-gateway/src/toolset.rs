@@ -163,11 +163,10 @@ const EXPLORE: &[&str] = &[
     "upload_files",
     "dialog",
     "download_url",
-    // These two intents close the standard form loop. Keeping them in explore
-    // avoids a phase switch that otherwise hides the primitives the agent just
-    // used, while the remaining intent family stays in the intent phase.
+    // Composite intents for common workflows stay in the default phase.
     "intent_complete_form",
     "intent_submit_and_verify",
+    "intent_follow",
     // Read-only challenge detection: a stuck agent learns "this is a captcha"
     // without a phase switch or any page mutation. The solve loop itself
     // stays in the intent phase.
