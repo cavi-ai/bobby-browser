@@ -268,16 +268,11 @@ function resolveBobbyCommand(): string {
     (exists(repoBobby) ? repoBobby : "bobby");
 }
 
-function resolveObscuraCommand(): string {
-  return process.env.OBSCURA_MCP_COMMAND ?? "obscura";
-}
-
 function collectProvenance(
   bobbyCommand: string,
   requestedModel: string,
   timeboxSeconds: number,
   driver: AgentDriver = "claude",
-  runnerName?: string,
 ) {
   const sourceState = collectSourceState();
   const shared = {
@@ -287,20 +282,18 @@ function collectProvenance(
     platform: `${process.platform}-${process.arch}`,
     taskSetSha256: sha256File(path.join(harnessDir, "tasks.json")),
     runnerSetSha256: sha256File(path.join(harnessDir, "runners.json")),
+    bobbyBinarySha256: sha256File(bobbyCommand),
     requestedModel,
     timeboxSeconds,
-    startupToolset: runnerName === "obscura" ? "full" : "explore",
+    startupToolset: "explore",
     driver,
-    ...(runnerName === "obscura"
-      ? { runnerBinarySha256: sha256File(resolveObscuraCommand()) }
-      : { bobbyBinarySha256: sha256File(bobbyCommand) }),
   };
   if (driver === "cursor") {
     return {
       ...shared,
       cursorSdkVersion: CURSOR_SDK_VERSION,
       cursorIsolation: CURSOR_ISOLATION,
-      engine: runnerName === "obscura" ? "obscura" : bobbyEngine(),
+      engine: bobbyEngine(),
       providerMode: bobbyProviderMode(),
     };
   }
@@ -308,7 +301,7 @@ function collectProvenance(
     ...shared,
     claudeCliVersion: commandOutput("claude", ["--version"]),
     claudeIsolation: CLAUDE_ISOLATION,
-    engine: runnerName === "obscura" ? "obscura" : bobbyEngine(),
+    engine: bobbyEngine(),
     providerMode: bobbyProviderMode(),
   };
 }
@@ -420,15 +413,6 @@ async function main() {
     console.error(`unknown --tool ${toolName}`);
     process.exit(2);
   }
-  if (toolNames.includes("obscura")) {
-    const command = process.env.OBSCURA_MCP_COMMAND;
-    if (!command || !path.isAbsolute(command) || !exists(command)) {
-      console.error(
-        "OBSCURA_MCP_COMMAND must be an absolute path to the pinned Obscura executable",
-      );
-      process.exit(2);
-    }
-  }
   const selected = taskId ? tasks.filter((t: any) => t.id === taskId) : tasks;
   if (selected.length === 0) {
     console.error(`unknown --task ${taskId}`);
@@ -443,7 +427,12 @@ async function main() {
   mkdirSync(resultsDir, { recursive: true });
   mkdirSync(path.join(resultsDir, "transcripts"), { recursive: true });
   const bobbyCommand = resolveBobbyCommand();
-  const obscuraCommand = resolveObscuraCommand();
+  const provenance = collectProvenance(
+    bobbyCommand,
+    requestedModel,
+    timeboxSeconds,
+    driver,
+  );
 
   let mlxUp: boolean | undefined;
   if (toolNames.includes("bobby-vision")) {
@@ -457,13 +446,6 @@ async function main() {
 
   for (const tool of toolNames) {
     const runner = runners[tool];
-    const provenance = collectProvenance(
-      bobbyCommand,
-      requestedModel,
-      timeboxSeconds,
-      driver,
-      tool,
-    );
     if (tool === "bobby-vision" && mlxUp === false) {
       appendFileSync(
         path.join(resultsDir, "runs.jsonl"),
@@ -503,9 +485,10 @@ async function main() {
         }
         for (const serverConfig of Object.values(mcpConfig.mcpServers) as any[]) {
           if (typeof serverConfig.command === "string") {
-            serverConfig.command = serverConfig.command
-              .replace("${BOBBY_MCP_COMMAND}", bobbyCommand)
-              .replace("${OBSCURA_MCP_COMMAND}", obscuraCommand);
+            serverConfig.command = serverConfig.command.replace(
+              "${BOBBY_MCP_COMMAND}",
+              bobbyCommand,
+            );
           }
           if (serverConfig.env) {
             for (const [key, value] of Object.entries(serverConfig.env)) {
@@ -643,7 +626,6 @@ if (transcriptToSummarize) {
         arg("model", "default") ?? "default",
         Number(arg("timebox-seconds", "480")),
         driverFlag as AgentDriver,
-        arg("tool"),
       ),
     ),
   );
