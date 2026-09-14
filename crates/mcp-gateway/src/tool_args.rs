@@ -194,7 +194,7 @@ macro_rules! page_scoped_args {
 /// checkpoint must name the exact ids the submit will carry, so the caller
 /// pins them up front and the server threads them through unchanged.
 macro_rules! intent_args {
-    ($name:ident { $($field:ident : $ty:ty),* $(,)? }) => {
+    ($name:ident { $($(#[$field_meta:meta])* $field:ident : $ty:ty),* $(,)? }) => {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
         pub(crate) struct $name {
@@ -208,7 +208,7 @@ macro_rules! intent_args {
             pub(crate) attempt_id: Option<types::AttemptId>,
             #[serde(default)]
             pub(crate) idempotency_key: Option<String>,
-            $(pub(crate) $field : $ty,)*
+            $($(#[$field_meta])* pub(crate) $field : $ty,)*
         }
     };
 }
@@ -258,6 +258,7 @@ intent_args!(IntentWaitForStateArgs {
 intent_args!(IntentFollowArgs {
     purpose: String,
     hints: Option<types::IntentHints>,
+    #[serde(alias = "expectedState")]
     expected_destination: types::WaitForCommand,
     boundary: Option<bool>,
     auto_checkpoint: Option<bool>,
@@ -576,7 +577,7 @@ pub(crate) struct PromptGetArgs {
 
 #[cfg(test)]
 mod tests {
-    use super::{IntentCompleteFormArgs, UploadFilesArgs, WorkflowObserveArgs};
+    use super::{IntentCompleteFormArgs, IntentFollowArgs, UploadFilesArgs, WorkflowObserveArgs};
 
     #[test]
     fn workflow_observe_goal_limit_counts_unicode_scalars_not_utf8_bytes() {
@@ -629,5 +630,29 @@ mod tests {
         let hints = args.hints.expect("hints carried through");
         assert_eq!(hints.role.as_deref(), Some("combobox"));
         assert_eq!(hints.accessible_name.as_deref(), Some("Billing cycle"));
+    }
+
+    #[test]
+    fn intent_follow_accepts_one_expected_state_spelling() {
+        let base = serde_json::json!({
+            "sessionId":"00000000-0000-0000-0000-000000000001",
+            "pageId":"00000000-0000-0000-0000-000000000002",
+            "purpose":"generate report"
+        });
+        let wait = serde_json::json!({
+            "condition":{"kind":"url","matcher":{"kind":"contains","value":"/reports"}},
+            "timeoutMs":30_000
+        });
+        for key in ["expectedDestination", "expectedState"] {
+            let mut value = base.clone();
+            value[key] = wait.clone();
+            serde_json::from_value::<IntentFollowArgs>(value)
+                .unwrap_or_else(|error| panic!("{key} must parse: {error}"));
+        }
+        let mut both = base.clone();
+        both["expectedDestination"] = wait.clone();
+        both["expectedState"] = wait;
+        assert!(serde_json::from_value::<IntentFollowArgs>(both).is_err());
+        assert!(serde_json::from_value::<IntentFollowArgs>(base).is_err());
     }
 }

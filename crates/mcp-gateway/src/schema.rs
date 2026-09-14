@@ -415,10 +415,11 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         "intent_follow" => (
             intent_properties(json!({
                 "expectedDestination":{"$ref":"#/$defs/WaitForCommand"},
+                "expectedState":{"$ref":"#/$defs/WaitForCommand"},
                 "boundary":{"type":"boolean"},
                 "autoCheckpoint":{"type":"boolean"}
             })),
-            intent_required(&["purpose", "expectedDestination"]),
+            intent_required(&["purpose"]),
         ),
         "intent_dismiss_obstruction" => (
             intent_properties(json!({"timeoutMs":timeout_ms()})),
@@ -2547,7 +2548,18 @@ fn command_outcome_properties() -> Value {
         "reason":string(0, MAX_STRING_BYTES),
         "priorAttemptId":id(),
         "attemptId":id(),
-        "artifactRegistration":{"type":"object"}
+        "artifactRegistration":{"type":"object"},
+        "downloadPreviews":array(
+            object(
+                json!({
+                    "filename":string(1, MAX_STRING_BYTES),
+                    "text":string(0, MAX_STRING_BYTES),
+                    "truncated":{"type":"boolean"}
+                }),
+                &["filename", "text", "truncated"],
+            ),
+            MAX_EVIDENCE_ITEMS,
+        )
     })
 }
 
@@ -2916,6 +2928,24 @@ mod tests {
             }),
         )
         .expect("extract fields default to text when value is omitted");
+    }
+
+    #[test]
+    fn intent_follow_accepts_expected_state_alias() {
+        let scope = json!({
+            "sessionId": "10000000-0000-4000-8000-000000000001",
+            "pageId": "10000000-0000-4000-8000-000000000002",
+            "purpose": "generate the report"
+        });
+        let wait = json!({
+            "condition": {"kind":"url","matcher":{"kind":"contains","value":"/reports"}},
+            "timeoutMs": 30_000
+        });
+        let mut aliased = scope.clone();
+        aliased["expectedState"] = wait.clone();
+        validate_tool_arguments("intent_follow", &aliased)
+            .expect("expectedState is accepted for action verification");
+        assert!(tool_schema("intent_follow")["properties"]["expectedDestination"].is_object());
     }
 
     #[test]

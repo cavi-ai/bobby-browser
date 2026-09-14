@@ -17,7 +17,10 @@ use std::sync::{
     Arc,
 };
 
-use interface_core::{CapabilityHandle, EventStore, InterfaceResult, RuntimeInterface};
+use interface_core::{
+    ArtifactOwnershipLimits, ArtifactReader, CapabilityHandle, EventStore, InterfaceResult,
+    RuntimeInterface, SessionOwnershipRegistry,
+};
 use mcp_gateway::{ArtifactResources, Server};
 use page_runtime::{PageRuntime, RecoveryCoordinator};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
@@ -822,25 +825,51 @@ async fn live_server_with_modes(
         .await
         .expect("harness checkpoint store opens");
     let downloads_dir = root.path().join("downloads");
-    let pages = if adaptive_http {
+    let (pages, resources) = if adaptive_http {
         let network = network_engine::NetworkPolicy {
             allow_loopback: true,
             ..Default::default()
         };
+        let max_download_bytes = network.max_download_bytes;
+        let artifact_store = artifact_store::ArtifactStore::new(
+            root.path().join("artifacts"),
+            max_download_bytes,
+            16_384,
+        );
         let adaptive = page_runtime::AdaptivePageEngine::new(
             network_engine::EligibilityPolicy::new(network.clone()),
             network_engine::DirectHttpExecutor::new(network.clone()),
-            artifact_store::ArtifactStore::new(
-                root.path().join("artifacts"),
-                network.max_download_bytes,
-                16_384,
-            ),
+            artifact_store.clone(),
             network,
         )
         .with_downloads_root(&downloads_dir);
-        PageRuntime::new_adaptive(journal.clone(), workers.clone(), None, adaptive)
+        let (ownership, _) = SessionOwnershipRegistry::bounded(4);
+        let reader = ArtifactReader::new(
+            artifact_store.clone(),
+            ownership,
+            max_download_bytes,
+            ArtifactOwnershipLimits {
+                max_records: 128,
+                max_bytes: u64::try_from(max_download_bytes).expect("download bound fits u64")
+                    * 128,
+            },
+        )
+        .expect("artifact reader config is valid");
+        (
+            PageRuntime::new_adaptive(journal.clone(), workers.clone(), None, adaptive),
+            ArtifactResources::production(
+                reader,
+                artifact_store,
+                &downloads_dir,
+                max_download_bytes,
+                128,
+            ),
+        )
     } else {
-        PageRuntime::new(journal.clone(), workers.clone())
+        (
+            PageRuntime::new(journal.clone(), workers.clone()),
+            ArtifactResources::default(),
+        )
     };
     let runtime = RuntimeService::with_recovery(
         SessionManager::new(workers.clone()),
@@ -864,7 +893,7 @@ async fn live_server_with_modes(
         interface,
         handle.clone(),
         EventStore::new(16_384),
-        ArtifactResources::default(),
+        resources,
     ));
     LiveServer {
         server,

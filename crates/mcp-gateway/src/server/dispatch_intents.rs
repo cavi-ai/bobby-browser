@@ -730,6 +730,9 @@ mod tests {
                     .unwrap_or_else(|| intent_property_dummy(key));
                 arguments.insert(key.clone(), dummy);
             }
+            if name == "intent_follow" {
+                arguments.remove("expectedDestination");
+            }
             let arguments = Value::Object(arguments);
 
             validate_tool_arguments(name, &arguments).unwrap_or_else(|violation| {
