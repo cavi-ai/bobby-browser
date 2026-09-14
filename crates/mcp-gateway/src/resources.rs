@@ -11,6 +11,14 @@ use types::{
     RequestContext, SessionId,
 };
 
+const MAX_DOWNLOAD_PREVIEW_BYTES: usize = 4 * 1024;
+
+struct DownloadPreview {
+    filename: String,
+    text: String,
+    truncated: bool,
+}
+
 #[derive(Clone)]
 pub struct ArtifactResources {
     reader: Option<ArtifactReader>,
@@ -175,7 +183,12 @@ impl ArtifactResources {
                         .download_record(context, envelope, filename, path, *bytes, sha256)
                         .await;
                     let result = match result {
-                        Ok(record) => self.admit_record(handle, context, envelope, &record).await,
+                        Ok((record, preview)) => {
+                            if let Some(preview) = preview {
+                                admission.download_previews.push(preview);
+                            }
+                            self.admit_record(handle, context, envelope, &record).await
+                        }
                         Err(error) => Err(error),
                     };
                     ("download", result)
@@ -229,21 +242,37 @@ impl ArtifactResources {
         path: &str,
         expected_bytes: u64,
         expected_sha256: &str,
-    ) -> InterfaceResult<ArtifactRecord> {
+    ) -> InterfaceResult<(ArtifactRecord, Option<DownloadPreview>)> {
         let page_id = envelope
             .page_id
             .clone()
             .ok_or_else(|| resource_error(context, InterfaceErrorCode::InvalidRequest))?;
         if path == expected_sha256 && valid_sha256(path) {
-            return Ok(ArtifactRecord {
-                artifact_id: path.to_owned(),
-                page_id,
-                media_type: "application/octet-stream".to_owned(),
-                width: 0,
-                height: 0,
-                bytes: expected_bytes,
-                sha256: expected_sha256.to_owned(),
-            });
+            let store = self
+                .artifact_store
+                .as_ref()
+                .ok_or_else(|| resource_error(context, InterfaceErrorCode::ArtifactDenied))?;
+            let bytes = store
+                .get(&envelope.session_id, path)
+                .await
+                .map_err(|_| resource_error(context, InterfaceErrorCode::ArtifactDenied))?;
+            if bytes.len() as u64 != expected_bytes
+                || hex::encode(sha2::Sha256::digest(&bytes)) != expected_sha256
+            {
+                return Err(resource_error(context, InterfaceErrorCode::ArtifactDenied));
+            }
+            return Ok((
+                ArtifactRecord {
+                    artifact_id: path.to_owned(),
+                    page_id,
+                    media_type: "application/octet-stream".to_owned(),
+                    width: 0,
+                    height: 0,
+                    bytes: expected_bytes,
+                    sha256: expected_sha256.to_owned(),
+                },
+                download_preview(filename, &bytes),
+            ));
         }
         let store = self
             .artifact_store
@@ -280,7 +309,8 @@ impl ArtifactResources {
         {
             return Err(resource_error(context, InterfaceErrorCode::ArtifactDenied));
         }
-        store
+        let preview = download_preview(filename, &bytes);
+        let record = store
             .put(
                 &envelope.session_id,
                 &page_id,
@@ -290,7 +320,8 @@ impl ArtifactResources {
                 self.max_download_bytes,
             )
             .await
-            .map_err(|_| resource_error(context, InterfaceErrorCode::ArtifactDenied))
+            .map_err(|_| resource_error(context, InterfaceErrorCode::ArtifactDenied))?;
+        Ok((record, preview))
     }
 
     pub(crate) async fn list(&self) -> Vec<String> {
@@ -328,6 +359,7 @@ pub(crate) struct ArtifactAdmission {
     admitted: usize,
     download_uris: BTreeMap<String, Option<String>>,
     failures: Vec<ArtifactAdmissionFailure>,
+    download_previews: Vec<DownloadPreview>,
 }
 
 struct ArtifactAdmissionFailure {
@@ -367,6 +399,29 @@ impl ArtifactAdmission {
                     "retryable":false,
                     "reconciliationRequired":true
                 }),
+            );
+        }
+    }
+
+    pub(crate) fn attach_download_previews(&self, value: &mut serde_json::Value) {
+        if self.download_previews.is_empty() {
+            return;
+        }
+        let previews = self
+            .download_previews
+            .iter()
+            .map(|preview| {
+                serde_json::json!({
+                    "filename":preview.filename,
+                    "text":preview.text,
+                    "truncated":preview.truncated
+                })
+            })
+            .collect();
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "downloadPreviews".to_owned(),
+                serde_json::Value::Array(previews),
             );
         }
     }
@@ -430,6 +485,26 @@ fn safe_extension(filename: &str) -> &str {
                 && extension.bytes().all(|byte| byte.is_ascii_alphanumeric())
         })
         .unwrap_or("bin")
+}
+
+fn download_preview(filename: &str, bytes: &[u8]) -> Option<DownloadPreview> {
+    let extension = filename.rsplit_once('.')?.1.to_ascii_lowercase();
+    if !matches!(
+        extension.as_str(),
+        "csv" | "htm" | "html" | "json" | "md" | "text" | "tsv" | "txt" | "xml"
+    ) {
+        return None;
+    }
+    let text = std::str::from_utf8(bytes).ok()?;
+    let mut end = text.len().min(MAX_DOWNLOAD_PREVIEW_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    Some(DownloadPreview {
+        filename: filename.to_owned(),
+        text: text[..end].to_owned(),
+        truncated: end < text.len(),
+    })
 }
 
 fn resource_error(context: &RequestContext, code: InterfaceErrorCode) -> InterfaceError {

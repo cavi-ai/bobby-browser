@@ -124,6 +124,10 @@ async fn download_url_save_as_materializes_through_the_mcp_boundary() {
         response["result"]["structuredContent"]["status"], "completed",
         "{response}"
     );
+    let preview = &response["result"]["structuredContent"]["downloadPreviews"][0];
+    assert_eq!(preview["filename"], "report.csv");
+    assert_eq!(preview["text"], "name,value\nlatency,70.2\n");
+    assert_eq!(preview["truncated"], false);
     assert_eq!(
         response["result"]["structuredContent"]["evidence"][0]["savedTo"], "report.csv",
         "relative saveAs must remain relative at the MCP boundary"
@@ -2054,15 +2058,6 @@ fn workflow_handle_chrome_executable() -> std::path::PathBuf {
         })
 }
 
-/// P2 end-to-end proof, live: the authorization journey driven entirely
-/// through `workflowHandle` over the real MCP surface with an installed
-/// browser. `click_and_wait_for_popup` follows the handle onto the popup;
-/// the popup then closes itself (the way the authorization page does,
-/// reproduced here the same way `runtime-tests`'
-/// `popup_closed_from_inside_still_lists_the_opener` does it -- directly
-/// against the runtime, since closing it is test setup, not the behavior
-/// under test); the next handle-resolved call must land cleanly on the
-/// opener with `popupClosed` evidence, with zero tool errors along the way.
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn workflow_handle_follows_a_popup_and_returns_to_the_opener_when_it_closes() {
@@ -2335,11 +2330,6 @@ async fn live_with_a_followed_popup_reported_closed() -> (
     )
 }
 
-/// P5 gap 2 (read-only branch): a handle-resolved read-only call
-/// (`a11y_snapshot`) on a popup the fake now reports closed replays once on
-/// the recorded opener, succeeds, and carries `popupClosed` evidence naming
-/// both pages. The handle is left resolving to the opener, so a second call
-/// through it reaches the opener directly with no further `popupClosed`.
 #[tokio::test]
 async fn handle_resolved_read_only_call_replays_on_the_opener_once_the_popup_closes() {
     let (live, workflow_handle, _session_id, opener_page_id, popup_page_id) =
@@ -2390,25 +2380,6 @@ async fn handle_resolved_read_only_call_replays_on_the_opener_once_the_popup_clo
     );
 }
 
-// NOT COMMITTED -- left in the working tree only. Reproduces a real
-// production bug in `page-runtime`'s executor, outside this PR's four gaps:
-// a closed-page failure with `page_state.is_some()` is classified
-// `browser_died` on message text alone and revival's reattach branch
-// (`reconnect_live_process` succeeds, since the browser process is alive --
-// only the popup target closed) fires for every command class, but only
-// `Replayable` commands (e.g. `a11y_snapshot`) retry transparently and
-// surface a clean second failure afterward. `type_text` (not Replayable)
-// takes the first failure as terminal, with its message suffixed
-// "(CDP transport reset...)" and `retryable` forced `true`, landing on
-// `CommandOutcome::RetryableFailure` -- `submit_envelope`'s closed-page rule
-// only ever matches `status == "failed"`, so its mutating branch never
-// fires for any non-Replayable command once a followed popup closes.
-/// P5 gap 2 (mutating branch): a handle-resolved mutating call (`type_text`)
-/// on a popup the fake now reports closed fails with `popupClosed` evidence
-/// and a repair naming the opener -- never a silent retry, since that would
-/// risk a second effect. The fake sees exactly one command. The handle is
-/// still rebound to the opener afterward, so the next call through it
-/// succeeds there directly.
 #[tokio::test]
 async fn handle_resolved_mutating_call_fails_with_popup_closed_evidence_and_repair() {
     let (live, workflow_handle, _session_id, opener_page_id, popup_page_id) =
@@ -2467,10 +2438,6 @@ async fn handle_resolved_mutating_call_fails_with_popup_closed_evidence_and_repa
     assert_eq!(live.type_text_calls(), before + 2);
 }
 
-/// P5 gap 2 (raw-id call): the same closed page, addressed by `sessionId`
-/// + `pageId` instead of a handle, keeps the plain `notFound` failure and
-/// carries no `popupClosed` evidence -- the closed-page rule only ever
-/// touches a handle-resolved call.
 #[tokio::test]
 async fn raw_id_call_on_a_closed_page_keeps_the_generic_not_found_with_no_evidence() {
     let (live, _workflow_handle, session_id, _opener_page_id, popup_page_id) =
@@ -2495,11 +2462,6 @@ async fn raw_id_call_on_a_closed_page_keeps_the_generic_not_found_with_no_eviden
     );
 }
 
-/// P5 gap 1: `form_snapshot` bypasses `submit_envelope` (it calls
-/// `self.runtime.form_snapshot` directly), so the closed-page rule needs its
-/// own wiring for it. A handle-resolved call on the closed popup must
-/// behave like the read-only branch above: succeed on the opener and carry
-/// `popupClosed` evidence.
 #[tokio::test]
 async fn form_snapshot_through_the_handle_replays_on_the_opener_once_the_popup_closes() {
     let (live, workflow_handle, _session_id, opener_page_id, popup_page_id) =
@@ -2533,15 +2495,37 @@ async fn form_snapshot_through_the_handle_replays_on_the_opener_once_the_popup_c
     );
 }
 
-/// P5 gap 2 (`upload_files` controlId prerequisite): resolving a `controlId`
-/// runs a `form_snapshot` lookup before the upload itself. On the popup the
-/// fake now reports closed, that prerequisite lookup fails with
-/// `popupClosed` evidence and a repair naming the opener -- never retried,
-/// since it is a prerequisite of a mutating command -- and the fake never
-/// sees an upload call (it has no working `upload_files` implementation, so
-/// reaching one would fail a different way than asserted below). The handle
-/// is left resolving to the opener, so a later call through it needs no
-/// fallback.
+#[tokio::test]
+async fn workflow_observe_reports_and_reads_forms_from_the_opener_after_popup_close() {
+    let (live, workflow_handle, _session_id, opener_page_id, popup_page_id) =
+        live_with_a_followed_popup_reported_closed().await;
+
+    let response = call_tool(
+        &live.server,
+        3,
+        "workflow_observe",
+        json!({"workflowHandle": workflow_handle, "includeForms": true}),
+    )
+    .await;
+    let content = &response["result"]["structuredContent"];
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(content["status"], "completed", "{response}");
+    assert_eq!(content["pageId"], json!(opener_page_id), "{response}");
+    assert_eq!(
+        content["formSnapshot"]["pageId"],
+        json!(opener_page_id),
+        "{response}"
+    );
+    let popup_closed = content["observationOutcome"]["evidence"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|item| item["kind"] == "popupClosed")
+        .unwrap_or_else(|| panic!("workflow_observe did not report popupClosed: {response}"));
+    assert_eq!(popup_closed["popupPageId"], json!(popup_page_id));
+    assert_eq!(popup_closed["openerPageId"], json!(opener_page_id));
+}
+
 #[tokio::test]
 async fn upload_files_control_id_lookup_fails_with_popup_closed_evidence_and_repair() {
     let (live, workflow_handle, _session_id, opener_page_id, popup_page_id) =
