@@ -184,6 +184,7 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
+                let evidence_detail = input.evidence_detail.unwrap_or(EvidenceDetail::Compact);
                 // Boundary-once guard, per (workflow, control): a completed
                 // Boundary submit for this control means its effect is on
                 // record, and another submit against it would double-apply.
@@ -272,7 +273,7 @@ impl Server {
                             .await;
                     }
                 }
-                result
+                result.map(|outcome| project_submit_outcome(outcome, evidence_detail))
             }
             "intent_wait_for_state" => {
                 let input: IntentWaitForStateArgs = match bounded_parse(call.arguments) {
@@ -435,6 +436,27 @@ impl Server {
     }
 }
 
+fn project_submit_outcome(mut outcome: Value, detail: EvidenceDetail) -> Value {
+    if detail == EvidenceDetail::Full || outcome["status"] != "completed" {
+        return outcome;
+    }
+
+    let evidence = outcome["evidence"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| {
+            matches!(
+                item["kind"].as_str(),
+                Some("wait" | "submitSettlement" | "formValidation")
+            )
+        })
+        .cloned()
+        .collect();
+    outcome["evidence"] = Value::Array(evidence);
+    outcome
+}
+
 fn project_complete_form_outcome(
     mut outcome: Value,
     detail: EvidenceDetail,
@@ -575,6 +597,62 @@ mod tests {
 
         assert_eq!(
             project_complete_form_outcome(raw.clone(), EvidenceDetail::Full, &["email".into()]),
+            raw
+        );
+    }
+
+    #[test]
+    fn compact_submit_outcome_keeps_verification_evidence() {
+        let raw = json!({
+            "status": "completed",
+            "commandId": "018f0000-0000-7000-8000-000000000005",
+            "evidence": [
+                {"kind":"resolution","target":{},"fingerprint":{},"candidates":[],"bestMatchAuthorized":false},
+                {"kind":"controlAction","action":{}},
+                {"kind":"wait","condition":{"kind":"text","text":"Saved"},"elapsedMs":10,"observations":2,"observed":"Saved"},
+                {"kind":"submitSettlement","outcome":"settled"},
+                {"kind":"intentExecution","record":{}}
+            ]
+        });
+
+        let compact = project_submit_outcome(raw, EvidenceDetail::Compact);
+
+        assert_eq!(compact["status"], "completed");
+        assert_eq!(compact["commandId"], "018f0000-0000-7000-8000-000000000005");
+        assert_eq!(
+            compact["evidence"],
+            json!([
+                {"kind":"wait","condition":{"kind":"text","text":"Saved"},"elapsedMs":10,"observations":2,"observed":"Saved"},
+                {"kind":"submitSettlement","outcome":"settled"}
+            ])
+        );
+    }
+
+    #[test]
+    fn compact_submit_outcome_keeps_failures_unchanged() {
+        let raw = json!({
+            "status": "failed",
+            "commandId": "018f0000-0000-7000-8000-000000000006",
+            "error": {"code":"targetNotFound"},
+            "evidence": [{"kind":"resolution","target":{}}]
+        });
+
+        assert_eq!(
+            project_submit_outcome(raw.clone(), EvidenceDetail::Compact),
+            raw
+        );
+    }
+
+    #[test]
+    fn full_submit_outcome_is_unchanged() {
+        let raw = json!({
+            "status": "completed",
+            "commandId": "018f0000-0000-7000-8000-000000000007",
+            "evidence": [{"kind":"intentExecution","record":{}}]
+        });
+
+        assert_eq!(
+            project_submit_outcome(raw.clone(), EvidenceDetail::Full),
             raw
         );
     }

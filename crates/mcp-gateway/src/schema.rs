@@ -398,6 +398,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         "intent_submit_and_verify" => (
             intent_properties(json!({
                 "expectedState":{"$ref":"#/$defs/WaitForCommand"},
+                "evidenceDetail":{"type":"string","enum":["compact","full"]},
                 "autoCheckpoint":{"type":"boolean"},
                 "reSubmit":{"type":"boolean","description":"Submit despite a prior completed submit for this workflow (boundaryAlreadyExecuted)."}
             })),
