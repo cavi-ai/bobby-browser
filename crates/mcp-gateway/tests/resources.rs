@@ -7,6 +7,7 @@ use std::{
 
 use artifact_store::ArtifactStore;
 use async_trait::async_trait;
+use base64::Engine as _;
 use chrono::{Duration, Utc};
 use interface_core::{
     ArtifactOwnershipLimits, ArtifactReader, AuthorityStore, EventStore, SessionOwnershipRegistry,
@@ -480,6 +481,23 @@ async fn capture(server: &Server) -> String {
 }
 
 #[tokio::test]
+async fn screenshot_result_includes_the_verified_image() {
+    let (server, _root) = fixture().await;
+    let captured = execute_screenshot(&server).await;
+    let image = captured["result"]["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "image")
+        .unwrap_or_else(|| panic!("screenshot response had no image: {captured}"));
+    assert_eq!(image["mimeType"], "image/png");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(image["data"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(bytes, ONE_PIXEL_PNG);
+}
+
+#[tokio::test]
 async fn production_constructor_registers_runtime_artifact_then_lists_and_reads_it() {
     let (server, _root) = fixture().await;
     let uri = capture(&server).await;
@@ -592,6 +610,10 @@ async fn download_paths_are_replaced_by_authenticated_resources_and_never_expose
         .unwrap()
         .iter()
         .any(|item| item["type"] == "resource_link" && item["uri"] == path));
+    let preview = &response["result"]["structuredContent"]["downloadPreviews"][0];
+    assert_eq!(preview["filename"], "fixture.txt");
+    assert_eq!(preview["text"], "private fixture download");
+    assert_eq!(preview["truncated"], false);
     let read = server
         .handle_message(request(31, "resources/read", json!({"uri":path})))
         .await
