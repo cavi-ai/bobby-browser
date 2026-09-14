@@ -1,11 +1,11 @@
 # bobby-browser
 
-A fail-closed browser execution plane for agents completing stateful, sensitive
-workflows in real Firefox and Chromium. Authenticated, capability-scoped control
-surfaces include MCP (stdio and streamable HTTP), ACP over stdio, Rust and
+A browser automation runtime for agents, with authenticated, capability-scoped
+control surfaces: MCP (stdio and streamable HTTP), ACP over stdio, Rust and
 TypeScript SDKs, and Playwright/Puppeteer over authenticated CDP. All adapters
-share the same idempotency, evidence, checkpoint, recovery, and event contracts;
-credentials are never accepted in URLs or query strings.
+share the same capability, idempotency, evidence, checkpoint, and event
+contracts. Authentication fails closed; credentials are never accepted in URLs
+or query strings.
 
 ## Built for agents
 
