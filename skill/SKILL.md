@@ -31,7 +31,7 @@ calls. Rules that govern every call:
    the task will need (`select:` accepts a comma-separated list) — each extra
    round trip is a full model turn. The explore toolset already advertises
    the standard loop (observe, navigate, click, type, upload, dialogs,
-   downloads, `intent_complete_form`, `intent_submit_and_verify`,
+   downloads, `intent_follow`, `intent_complete_form`, `intent_submit_and_verify`,
    `intent_detect_challenge`); search only for what is genuinely missing.
 
 ## Core loop
@@ -58,6 +58,9 @@ calls. Rules that govern every call:
 
 ## Choosing the tool
 
+- Link or control with a result to verify: Use one `intent_follow` with
+  `expectedState`; do not split it into `click` plus `wait_for` or another
+  observation.
 - Form with multiple fields: one `intent_complete_form` (fields resolve
   just-in-time; include conditional fields after their revealer even if
   initially absent) — never a `intent_fill` per field unless fields must

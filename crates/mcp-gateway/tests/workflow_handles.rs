@@ -1850,6 +1850,8 @@ async fn intent_follow_description_preserves_boundary_no_retry_guidance() {
         "{description}"
     );
     assert!(description.contains("On failure"), "{description}");
+    assert!(description.contains("Prefer over click"), "{description}");
+    assert!(description.contains("wait_for"), "{description}");
     assert!(description.contains("needsReconciliation"), "{description}");
     assert!(description.contains("do not retry"), "{description}");
     assert!(description.contains("recovery_status"), "{description}");

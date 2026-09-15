@@ -30,12 +30,12 @@ mod workflow_handles;
 ///
 /// Kept under ~500 characters so it does not push connect payloads.
 pub const INITIALIZE_INSTRUCTIONS: &str = "\
-Start with workflow_start; reuse workflowHandle (blank scope=1 handle; ids only if it dies). \
-Then workflow_observe. Form: intent_complete_form, then intent_submit_and_verify. \
-Pass snapshot target {role,accessibleName,ordinal} verbatim. Read structuredContent.status; \
-follow error.repair. Boundary intents default autoCheckpoint true. \
-Deferred schemas load together in one search. Captcha: \
-intent_detect_challenge then intent_solve_challenge. Stuck: \
+Start workflow_start; reuse workflowHandle (ids only if it dies). \
+Use workflow_observe. Verify links/controls with intent_follow expectedState. \
+Form: intent_complete_form, then intent_submit_and_verify. \
+Pass target {role,accessibleName,ordinal} verbatim. Check structuredContent.status; \
+follow error.repair. Boundary defaults autoCheckpoint. Deferred schemas load together. \
+Captcha: intent_detect_challenge then intent_solve_challenge. Stuck: \
 bobby://failure-taxonomy, bobby://job-handlers.";
 
 #[doc(hidden)]
