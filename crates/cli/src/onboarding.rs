@@ -1695,6 +1695,10 @@ mod install_tests {
             !SKILL_SOURCE.contains("Reuse the `workflowId`."),
             "skill must not tell agents to reuse workflowId as the primary loop"
         );
+        assert!(
+            SKILL_SOURCE.contains("Use one `intent_follow`"),
+            "skill must route verified control activation through intent_follow"
+        );
     }
 
     #[test]

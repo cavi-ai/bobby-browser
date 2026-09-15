@@ -3905,6 +3905,7 @@ async fn initialize_carries_agent_instructions() {
         "workflow_observe",
         "intent_complete_form",
         "intent_submit_and_verify",
+        "intent_follow",
     ] {
         assert!(
             instructions.contains(tool),
