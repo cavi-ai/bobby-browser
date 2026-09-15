@@ -569,9 +569,12 @@ enum OpenshellCommand {
         /// Host bobby port
         #[arg(long, default_value_t = 7777)]
         mcp_port: u16,
-        /// Agent binary path listed in the OpenShell policy
-        #[arg(long, default_value = "/usr/local/bin/claude")]
-        agent_binary: String,
+        /// Agent whose OpenShell binary allowlist is emitted
+        #[arg(long, value_enum, default_value_t = openshell::OpenshellAgent::Codex)]
+        agent: openshell::OpenshellAgent,
+        /// Explicit agent binary path (replaces the selected agent allowlist)
+        #[arg(long)]
+        agent_binary: Option<String>,
     },
     /// Mint one agent-scoped principal for a sandbox; write injection env (0600)
     Provision {
@@ -1546,6 +1549,7 @@ fn run_openshell(command: OpenshellCommand) -> Result<()> {
             path,
             mcp_host,
             mcp_port,
+            agent,
             agent_binary,
         } => {
             let root = match path {
@@ -1555,6 +1559,7 @@ fn run_openshell(command: OpenshellCommand) -> Result<()> {
             let options = openshell::PackOptions {
                 mcp_host,
                 mcp_port,
+                agent,
                 agent_binary,
             };
             let pack = openshell::install_pack(&root, &options)?;
@@ -1589,7 +1594,7 @@ fn run_openshell(command: OpenshellCommand) -> Result<()> {
             let pack = openshell::PackOptions {
                 mcp_host,
                 mcp_port,
-                agent_binary: "/usr/local/bin/claude".to_owned(),
+                ..openshell::PackOptions::default()
             };
             let result = openshell::provision_sandbox(
                 &sandbox,
@@ -3290,13 +3295,41 @@ model = "mlx-community/example-selected"
             Some(CliCommand::Openshell {
                 command:
                     OpenshellCommand::Install {
-                        mcp_host, mcp_port, ..
+                        mcp_host,
+                        mcp_port,
+                        agent,
+                        agent_binary,
+                        ..
                     },
             }) => {
                 assert_eq!(mcp_host, "host.containers.internal");
                 assert_eq!(mcp_port, 8888);
+                assert_eq!(agent, openshell::OpenshellAgent::Codex);
+                assert_eq!(agent_binary, None);
             }
             _ => panic!("unexpected openshell install parse"),
+        }
+        let claude =
+            Cli::try_parse_from(["bobby", "openshell", "install", "--agent", "claude"]).unwrap();
+        match claude.command {
+            Some(CliCommand::Openshell {
+                command: OpenshellCommand::Install { agent, .. },
+            }) => assert_eq!(agent, openshell::OpenshellAgent::Claude),
+            _ => panic!("unexpected Claude OpenShell install parse"),
+        }
+        let custom = Cli::try_parse_from([
+            "bobby",
+            "openshell",
+            "install",
+            "--agent-binary",
+            "/opt/agents/custom",
+        ])
+        .unwrap();
+        match custom.command {
+            Some(CliCommand::Openshell {
+                command: OpenshellCommand::Install { agent_binary, .. },
+            }) => assert_eq!(agent_binary.as_deref(), Some("/opt/agents/custom")),
+            _ => panic!("unexpected custom-binary OpenShell install parse"),
         }
         let provision = Cli::try_parse_from([
             "bobby",

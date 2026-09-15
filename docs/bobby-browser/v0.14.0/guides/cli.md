@@ -189,6 +189,11 @@ principal per sandbox.
 | `status --sandbox <id>` | Non-secret status for one sandbox |
 | `revoke --sandbox <id>` | Revoke the principal provisioned for a sandbox |
 
+`install` defaults to `--agent codex`, whose policy allowlist covers the Codex
+paths in the OpenShell base image. Use `--agent claude` for the existing Claude
+Code path, or `--agent-binary <path>` to replace the selected preset with an
+explicit binary path.
+
 `bobby install --host openshell` writes the same pack, `bobby init --emit
 openshell` prints the MCP fragment, and `bobby doctor` reports `openshell-pack`
 and the related checks when a pack is present. See

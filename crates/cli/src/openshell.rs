@@ -21,6 +21,12 @@ const DEFAULT_MCP_PORT: u16 = 7777;
 const MCP_PATH: &str = "/v1/mcp";
 /// Headroom above bobby's 128 KiB tools/list budget for OpenShell L7 buffering.
 const MCP_MAX_BODY_BYTES: u32 = 262_144;
+const CODEX_BINARIES: &[&str] = &[
+    "/usr/bin/codex",
+    "/usr/local/bin/codex",
+    "/usr/lib/node_modules/@openai/**",
+];
+const CLAUDE_BINARIES: &[&str] = &["/usr/local/bin/claude"];
 
 const SKILL_SOURCE: &str = include_str!("../../../skill/SKILL.md");
 
@@ -33,6 +39,25 @@ pub enum OpenshellCapabilityPreset {
     Openshell,
     /// Full local agent floor (still no `authority:admin`).
     Agent,
+}
+
+/// Agent whose executable paths may reach bobby through the OpenShell proxy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum OpenshellAgent {
+    /// OpenAI Codex CLI installed by the OpenShell base image (default).
+    #[default]
+    Codex,
+    /// Claude Code installed at the path used by existing bobby packs.
+    Claude,
+}
+
+impl OpenshellAgent {
+    fn binaries(self) -> &'static [&'static str] {
+        match self {
+            Self::Codex => CODEX_BINARIES,
+            Self::Claude => CLAUDE_BINARIES,
+        }
+    }
 }
 
 /// Narrow OpenShell tenant set — least privilege for sandboxed agents.
@@ -77,8 +102,9 @@ pub struct OpenshellPack {
 pub struct PackOptions {
     pub mcp_host: String,
     pub mcp_port: u16,
-    /// Agent binary path placeholder inside the OpenShell policy `binaries` list.
-    pub agent_binary: String,
+    pub agent: OpenshellAgent,
+    /// Explicit binary path that replaces the selected agent's allowlist.
+    pub agent_binary: Option<String>,
 }
 
 impl Default for PackOptions {
@@ -86,7 +112,8 @@ impl Default for PackOptions {
         Self {
             mcp_host: DEFAULT_MCP_HOST.to_owned(),
             mcp_port: DEFAULT_MCP_PORT,
-            agent_binary: "/usr/local/bin/claude".to_owned(),
+            agent: OpenshellAgent::default(),
+            agent_binary: None,
         }
     }
 }
@@ -94,6 +121,13 @@ impl Default for PackOptions {
 impl PackOptions {
     pub fn mcp_url(&self) -> String {
         format!("http://{}:{}{}", self.mcp_host, self.mcp_port, MCP_PATH)
+    }
+
+    fn agent_binaries(&self) -> Vec<&str> {
+        match self.agent_binary.as_deref() {
+            Some(binary) => vec![binary],
+            None => self.agent.binaries().to_vec(),
+        }
     }
 }
 
@@ -115,6 +149,12 @@ pub fn emit_mcp_config(options: &PackOptions) -> String {
 }
 
 fn emit_network_policies_block(options: &PackOptions) -> String {
+    let binaries = options
+        .agent_binaries()
+        .into_iter()
+        .map(|binary| format!("      - path: {binary}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     format!(
         r#"network_policies:
   bobby_browser_mcp:
@@ -138,13 +178,13 @@ fn emit_network_policies_block(options: &PackOptions) -> String {
           - method: tools/call
             tool: job_cancel
     binaries:
-      - path: {binary}
+{binaries}
 "#,
         host = options.mcp_host,
         port = options.mcp_port,
         path = MCP_PATH,
         max_body = MCP_MAX_BODY_BYTES,
-        binary = options.agent_binary,
+        binaries = binaries,
     )
 }
 
@@ -170,7 +210,8 @@ pub fn emit_policy_yaml(options: &PackOptions) -> String {
 # WARNING: `policy set` replaces the entire sandbox policy. Prefer merging
 # openshell/policy-network.yaml into your existing policy when you already
 # customize FS/process.
-# Replace binaries.path with the agent binary that will call MCP.
+# The binaries allowlist matches the agent selected when this pack was generated.
+# Use --agent-binary when a custom agent installation calls MCP.
 # Reachability uses OpenShell's supervisor proxy — do not expose bobby beyond
 # the host gateway address the sandbox can dial (host.docker.internal /
 # host.containers.internal / LAN host). Keep bobby bind loopback+gateway only.
@@ -902,6 +943,14 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    fn policy_binary_paths(yaml: &str) -> Vec<&str> {
+        yaml.lines()
+            .skip_while(|line| *line != "    binaries:")
+            .skip(1)
+            .filter_map(|line| line.strip_prefix("      - path: "))
+            .collect()
+    }
+
     #[test]
     fn mcp_config_uses_env_placeholder_not_a_literal_secret() {
         let options = PackOptions::default();
@@ -921,7 +970,8 @@ mod tests {
         let options = PackOptions {
             mcp_host: "host.containers.internal".into(),
             mcp_port: 7777,
-            agent_binary: "/usr/bin/node".into(),
+            agent: OpenshellAgent::Codex,
+            agent_binary: Some("/usr/bin/node".into()),
         };
         let yaml = emit_policy_yaml(&options);
         assert!(yaml.contains("protocol: mcp"));
@@ -937,6 +987,39 @@ mod tests {
         assert!(network.contains("merge-only") || network.contains("Merge this block"));
         assert!(!network.contains("filesystem_policy:"));
         assert!(network.contains("tool: evaluate_javascript"));
+    }
+
+    #[test]
+    fn default_pack_uses_codex_binary_allowlist() {
+        let yaml = emit_policy_yaml(&PackOptions::default());
+        assert_eq!(
+            policy_binary_paths(&yaml),
+            vec![
+                "/usr/bin/codex",
+                "/usr/local/bin/codex",
+                "/usr/lib/node_modules/@openai/**",
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_pack_keeps_existing_binary_path() {
+        let options = PackOptions {
+            agent: OpenshellAgent::Claude,
+            ..PackOptions::default()
+        };
+        let yaml = emit_policy_yaml(&options);
+        assert_eq!(policy_binary_paths(&yaml), vec!["/usr/local/bin/claude"]);
+    }
+
+    #[test]
+    fn explicit_agent_binary_replaces_preset_allowlist() {
+        let options = PackOptions {
+            agent_binary: Some("/opt/agents/custom".into()),
+            ..PackOptions::default()
+        };
+        let yaml = emit_policy_yaml(&options);
+        assert_eq!(policy_binary_paths(&yaml), vec!["/opt/agents/custom"]);
     }
 
     #[test]
@@ -1008,7 +1091,8 @@ mod tests {
         let options = PackOptions {
             mcp_host: "127.0.0.1".into(),
             mcp_port: 7777,
-            agent_binary: "/usr/local/bin/claude".into(),
+            agent: OpenshellAgent::Claude,
+            agent_binary: None,
         };
         write_text(&openshell.join("mcp.json"), &emit_mcp_config(&options)).unwrap();
         let extras = doctor_openshell_extras(&project, None, None, false);
