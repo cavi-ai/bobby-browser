@@ -51,9 +51,10 @@ calls. Rules that govern every call:
 - **Scope big pages**: pass `target: {role: "main"}` to `workflow_observe`
   to skip repeated site chrome, and `target` on `a11y_snapshot` to scope to
   one form or dialog.
-- **Trim observation payloads when it counts.** `workflow_observe` and
-  `intent_complete_form` default `evidenceDetail: "compact"` on success;
-  pass `"full"` only when debugging.
+- **Trim observation payloads when it counts.** `workflow_observe`,
+  `intent_complete_form`, `intent_submit_and_verify`, and `intent_follow`
+  default `evidenceDetail: "compact"` on success; pass `"full"` only when
+  debugging.
 - Pass the returned `workflowHandle` on later calls. `sessionId`/`pageId`/`workflowId` are the repair path if the handle stops resolving (handles expire with the server generation; explicit ids survive).
 
 ## Choosing the tool

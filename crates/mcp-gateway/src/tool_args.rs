@@ -260,6 +260,7 @@ intent_args!(IntentFollowArgs {
     hints: Option<types::IntentHints>,
     #[serde(alias = "expectedState")]
     expected_destination: types::WaitForCommand,
+    evidence_detail: Option<EvidenceDetail>,
     boundary: Option<bool>,
     auto_checkpoint: Option<bool>,
 });
@@ -637,7 +638,8 @@ mod tests {
         let base = serde_json::json!({
             "sessionId":"00000000-0000-0000-0000-000000000001",
             "pageId":"00000000-0000-0000-0000-000000000002",
-            "purpose":"generate report"
+            "purpose":"generate report",
+            "evidenceDetail":"compact"
         });
         let wait = serde_json::json!({
             "condition":{"kind":"url","matcher":{"kind":"contains","value":"/reports"}},

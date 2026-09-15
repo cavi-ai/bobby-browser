@@ -416,6 +416,7 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             intent_properties(json!({
                 "expectedDestination":{"$ref":"#/$defs/WaitForCommand"},
                 "expectedState":{"$ref":"#/$defs/WaitForCommand"},
+                "evidenceDetail":{"type":"string","enum":["compact","full"]},
                 "boundary":{"type":"boolean"},
                 "autoCheckpoint":{"type":"boolean"}
             })),
@@ -2252,6 +2253,11 @@ fn evidence_variants() -> Vec<Value> {
             &["pageId", "url", "title"],
         ),
         tagged_fields(
+            "pageGeneration",
+            json!({"pageId":id(),"generation":{"type":"integer","minimum":0}}),
+            &["pageId", "generation"],
+        ),
+        tagged_fields(
             "pages",
             json!({"pages":array(object(page_evidence_properties(), &["pageId","url","title"]),MAX_COLLECTION_ITEMS)}),
             &["pages"],
@@ -2943,6 +2949,7 @@ mod tests {
         validate_tool_arguments("intent_follow", &aliased)
             .expect("expectedState is accepted for action verification");
         assert!(tool_schema("intent_follow")["properties"]["expectedDestination"].is_object());
+        assert!(tool_schema("intent_follow")["properties"]["evidenceDetail"].is_object());
     }
 
     #[test]
