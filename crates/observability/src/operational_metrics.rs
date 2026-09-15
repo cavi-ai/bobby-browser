@@ -3,10 +3,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 pub use types::{
-    ConfidenceMetricsSnapshot, ContextMetricsSnapshot, IntentMetricsSnapshot,
-    LatencyBucketSnapshot, LatencyHistogramSnapshot, OperationalMetricsSnapshot,
-    PrefillMetricsSnapshot, ReconciliationMetricsSnapshot, RetryMetricsSnapshot,
-    VerificationMetricsSnapshot, VisionMetricsSnapshot, WorkflowCallMetricsSnapshot,
+    ConfidenceMetricsSnapshot, ContextMetricsSnapshot, ContextRankedVisionMetricsSnapshot,
+    IntentMetricsSnapshot, LatencyBucketSnapshot, LatencyHistogramSnapshot,
+    OperationalMetricsSnapshot, PrefillMetricsSnapshot, ReconciliationMetricsSnapshot,
+    RetryMetricsSnapshot, VerificationMetricsSnapshot, VisionMetricsSnapshot,
+    WorkflowCallMetricsSnapshot,
 };
 
 const LATENCY_UPPER_BOUNDS_MS: [u64; 10] =
@@ -43,6 +44,26 @@ pub enum ContextLookupOutcome {
     AmbiguousRefusal,
     StaleRejection,
     Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StructuralContextSource {
+    Observed,
+    VisionPromoted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextCandidateRankingMetric {
+    pub source: Option<StructuralContextSource>,
+    pub outcome: ContextLookupOutcome,
+    pub latency_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContextRankedVisionMetric {
+    pub provider_mode: ProviderMode,
+    pub confidence: Option<f64>,
+    pub verification: Option<VerificationMetricResult>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +148,12 @@ struct OperationalMetricsInner {
     intent_kind: [AtomicU64; 10],
     resolution_source: [AtomicU64; 4],
     context: [AtomicU64; 5],
+    context_rank_source: [AtomicU64; 3],
+    context_rank_outcome: [AtomicU64; 5],
+    context_rank_latency: [AtomicU64; 11],
+    context_rank_provider: [AtomicU64; 3],
+    context_rank_confidence: [AtomicU64; 4],
+    context_rank_verification: [AtomicU64; 2],
     prefill: [AtomicU64; 5],
     vision_outcome: [AtomicU64; 5],
     provider_mode: [AtomicU64; 3],
@@ -146,6 +173,12 @@ impl Default for OperationalMetrics {
                 intent_kind: atomic_array(),
                 resolution_source: atomic_array(),
                 context: atomic_array(),
+                context_rank_source: atomic_array(),
+                context_rank_outcome: atomic_array(),
+                context_rank_latency: atomic_array(),
+                context_rank_provider: atomic_array(),
+                context_rank_confidence: atomic_array(),
+                context_rank_verification: atomic_array(),
                 prefill: atomic_array(),
                 vision_outcome: atomic_array(),
                 provider_mode: atomic_array(),
@@ -170,6 +203,26 @@ impl OperationalMetrics {
         increment(&self.inner.context[outcome as usize]);
     }
 
+    pub fn record_context_candidate_ranking(&self, metric: ContextCandidateRankingMetric) {
+        let source_index = match metric.source {
+            Some(StructuralContextSource::Observed) => 0,
+            Some(StructuralContextSource::VisionPromoted) => 1,
+            None => 2,
+        };
+        increment(&self.inner.context_rank_source[source_index]);
+        increment(&self.inner.context_rank_outcome[metric.outcome as usize]);
+        increment_latency(&self.inner.context_rank_latency, metric.latency_ms);
+    }
+
+    pub fn record_context_ranked_vision(&self, metric: ContextRankedVisionMetric) {
+        increment(&self.inner.context_rank_provider[metric.provider_mode as usize]);
+        increment_confidence(&self.inner.context_rank_confidence, metric.confidence);
+        if let Some(result) = metric.verification {
+            let index = usize::from(result != VerificationMetricResult::Accepted);
+            increment(&self.inner.context_rank_verification[index]);
+        }
+    }
+
     pub fn record_prefill(&self, outcome: PrefillOutcome) {
         increment(&self.inner.prefill[outcome as usize]);
     }
@@ -177,18 +230,8 @@ impl OperationalMetrics {
     pub fn record_vision_proposal(&self, observation: VisionProposalMetric) {
         increment(&self.inner.vision_outcome[observation.outcome as usize]);
         increment(&self.inner.provider_mode[observation.provider_mode as usize]);
-        let latency_index = LATENCY_UPPER_BOUNDS_MS
-            .iter()
-            .position(|bound| observation.latency_ms <= *bound)
-            .unwrap_or(LATENCY_UPPER_BOUNDS_MS.len());
-        increment(&self.inner.latency[latency_index]);
-        let confidence_index = match observation.confidence {
-            None => 3,
-            Some(value) if value < CONFIDENCE_ACCEPTANCE_THRESHOLD => 0,
-            Some(value) if value < CONFIDENCE_HIGH_THRESHOLD => 1,
-            Some(_) => 2,
-        };
-        increment(&self.inner.confidence[confidence_index]);
+        increment_latency(&self.inner.latency, observation.latency_ms);
+        increment_confidence(&self.inner.confidence, observation.confidence);
     }
 
     pub fn record_verification(&self, result: VerificationMetricResult) {
@@ -211,6 +254,12 @@ impl OperationalMetrics {
         let intent_kind = load(&self.inner.intent_kind);
         let resolution_source = load(&self.inner.resolution_source);
         let context = load(&self.inner.context);
+        let context_rank_source = load(&self.inner.context_rank_source);
+        let context_rank_outcome = load(&self.inner.context_rank_outcome);
+        let context_rank_latency = load(&self.inner.context_rank_latency);
+        let context_rank_provider = load(&self.inner.context_rank_provider);
+        let context_rank_confidence = load(&self.inner.context_rank_confidence);
+        let context_rank_verification = load(&self.inner.context_rank_verification);
         let prefill = load(&self.inner.prefill);
         let vision_outcome = load(&self.inner.vision_outcome);
         let provider_mode = load(&self.inner.provider_mode);
@@ -247,6 +296,25 @@ impl OperationalMetrics {
                 stale_rejection: context[3],
                 error: context[4],
             },
+            context_ranked_vision: ContextRankedVisionMetricsSnapshot {
+                attempted: saturating_sum(&context_rank_outcome),
+                source_observed: context_rank_source[0],
+                source_vision_promoted: context_rank_source[1],
+                source_unreported: context_rank_source[2],
+                hit: context_rank_outcome[0],
+                miss: context_rank_outcome[1],
+                ambiguous_refusal: context_rank_outcome[2],
+                stale_rejection: context_rank_outcome[3],
+                error: context_rank_outcome[4],
+                provider_escalations: saturating_sum(&context_rank_provider),
+                provider_http: context_rank_provider[0],
+                provider_acp: context_rank_provider[1],
+                provider_direct_local: context_rank_provider[2],
+                candidate_ranking_latency_ms: latency_histogram(&context_rank_latency),
+                confidence: confidence_snapshot(&context_rank_confidence),
+                verification_accepted: context_rank_verification[0],
+                verification_rejected: context_rank_verification[1],
+            },
             prefill: PrefillMetricsSnapshot {
                 hit: prefill[0],
                 miss: prefill[1],
@@ -264,23 +332,8 @@ impl OperationalMetrics {
                 provider_http: provider_mode[0],
                 provider_acp: provider_mode[1],
                 provider_direct_local: provider_mode[2],
-                latency_ms: LatencyHistogramSnapshot {
-                    buckets: LATENCY_UPPER_BOUNDS_MS
-                        .iter()
-                        .zip(latency.iter())
-                        .map(|(upper_bound_ms, count)| LatencyBucketSnapshot {
-                            upper_bound_ms: *upper_bound_ms,
-                            count: *count,
-                        })
-                        .collect(),
-                    overflow: latency[10],
-                },
-                confidence: ConfidenceMetricsSnapshot {
-                    below_acceptance: confidence[0],
-                    accepted: confidence[1],
-                    high: confidence[2],
-                    unreported: confidence[3],
-                },
+                latency_ms: latency_histogram(&latency),
+                confidence: confidence_snapshot(&confidence),
             },
             verification: VerificationMetricsSnapshot {
                 accepted: verification[0],
@@ -325,6 +378,47 @@ fn increment(counter: &AtomicU64) {
     let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
         Some(value.saturating_add(1))
     });
+}
+
+fn increment_latency(counters: &[AtomicU64; 11], latency_ms: u64) {
+    let index = LATENCY_UPPER_BOUNDS_MS
+        .iter()
+        .position(|bound| latency_ms <= *bound)
+        .unwrap_or(LATENCY_UPPER_BOUNDS_MS.len());
+    increment(&counters[index]);
+}
+
+fn increment_confidence(counters: &[AtomicU64; 4], confidence: Option<f64>) {
+    let index = match confidence {
+        None => 3,
+        Some(value) if value < CONFIDENCE_ACCEPTANCE_THRESHOLD => 0,
+        Some(value) if value < CONFIDENCE_HIGH_THRESHOLD => 1,
+        Some(_) => 2,
+    };
+    increment(&counters[index]);
+}
+
+fn latency_histogram(counters: &[u64; 11]) -> LatencyHistogramSnapshot {
+    LatencyHistogramSnapshot {
+        buckets: LATENCY_UPPER_BOUNDS_MS
+            .iter()
+            .zip(counters.iter())
+            .map(|(upper_bound_ms, count)| LatencyBucketSnapshot {
+                upper_bound_ms: *upper_bound_ms,
+                count: *count,
+            })
+            .collect(),
+        overflow: counters[10],
+    }
+}
+
+fn confidence_snapshot(counters: &[u64; 4]) -> ConfidenceMetricsSnapshot {
+    ConfidenceMetricsSnapshot {
+        below_acceptance: counters[0],
+        accepted: counters[1],
+        high: counters[2],
+        unreported: counters[3],
+    }
 }
 
 fn load<const N: usize>(counters: &[AtomicU64; N]) -> [u64; N] {

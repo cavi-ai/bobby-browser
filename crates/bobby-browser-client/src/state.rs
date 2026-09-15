@@ -46,6 +46,8 @@ pub struct OperationalMetricsSnapshot {
     pub observation_window_ms: u64,
     pub intent: IntentMetricsSnapshot,
     pub context: ContextMetricsSnapshot,
+    #[serde(default)]
+    pub context_ranked_vision: ContextRankedVisionMetricsSnapshot,
     pub prefill: PrefillMetricsSnapshot,
     pub vision: VisionMetricsSnapshot,
     pub verification: VerificationMetricsSnapshot,
@@ -163,6 +165,61 @@ pub struct LatencyHistogramSnapshot {
 pub struct LatencyBucketSnapshot {
     pub upper_bound_ms: u64,
     pub count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ContextRankedVisionMetricsSnapshot {
+    pub attempted: u64,
+    pub source_observed: u64,
+    pub source_vision_promoted: u64,
+    pub source_unreported: u64,
+    pub hit: u64,
+    pub miss: u64,
+    pub ambiguous_refusal: u64,
+    pub stale_rejection: u64,
+    pub error: u64,
+    pub provider_escalations: u64,
+    pub provider_http: u64,
+    pub provider_acp: u64,
+    pub provider_direct_local: u64,
+    pub candidate_ranking_latency_ms: LatencyHistogramSnapshot,
+    pub confidence: ConfidenceMetricsSnapshot,
+    pub verification_accepted: u64,
+    pub verification_rejected: u64,
+}
+
+impl Default for ContextRankedVisionMetricsSnapshot {
+    fn default() -> Self {
+        Self {
+            attempted: 0,
+            source_observed: 0,
+            source_vision_promoted: 0,
+            source_unreported: 0,
+            hit: 0,
+            miss: 0,
+            ambiguous_refusal: 0,
+            stale_rejection: 0,
+            error: 0,
+            provider_escalations: 0,
+            provider_http: 0,
+            provider_acp: 0,
+            provider_direct_local: 0,
+            candidate_ranking_latency_ms: LatencyHistogramSnapshot {
+                buckets: Vec::new(),
+                overflow: 0,
+            },
+            confidence: ConfidenceMetricsSnapshot {
+                below_acceptance: 0,
+                accepted: 0,
+                high: 0,
+                unreported: 0,
+            },
+            verification_accepted: 0,
+            verification_rejected: 0,
+        }
+    }
 }
 
 /// Browser session returned by session create/list endpoints.
