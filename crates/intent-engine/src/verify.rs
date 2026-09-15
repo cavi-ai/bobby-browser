@@ -108,6 +108,10 @@ pub fn compatible(value: &ControlAction, candidate: &Candidate) -> bool {
     let is_file_input = is_file_input(candidate);
     let role = candidate.role.as_deref().unwrap_or("");
 
+    compatible_role(value, role, is_file_input)
+}
+
+pub(crate) fn compatible_role(value: &ControlAction, role: &str, is_file_input: bool) -> bool {
     match value {
         ControlAction::SetFiles { .. } => is_file_input,
         ControlAction::SetText { .. } => {

@@ -14,9 +14,10 @@ use intent_engine::{
 };
 use observability::{OperationalMetrics, ProviderMode};
 use types::{
-    CaptureScreenshotCommand, ClickCommand, CommandError, ControlAction, ErrorCode, Evidence,
-    FillIntent, IntentCommand, IntentHints, IntentResolutionPath, LocateIntent, PageId, TargetSpec,
-    TypeTextCommand, UploadFilesCommand, WaitForCommand,
+    CaptureScreenshotCommand, ClickCommand, CommandError, ControlAction, ControlActionCommand,
+    ControlActionEvidence, ErrorCode, Evidence, FillIntent, FormControlOperation, FormControlState,
+    FormControlValidity, IntentCommand, IntentHints, IntentResolutionPath, LocateIntent, PageId,
+    TargetSpec, TypeTextCommand, UploadFilesCommand, WaitForCommand,
 };
 
 struct FakeVision {
@@ -42,6 +43,7 @@ struct FakeBrowser {
     click_xy_calls: Arc<AtomicUsize>,
     click_targets: Arc<std::sync::Mutex<Vec<Option<types::TargetSpec>>>>,
     type_text_calls: Arc<std::sync::Mutex<Vec<TypeTextCommand>>>,
+    control_action_calls: Arc<std::sync::Mutex<Vec<ControlActionCommand>>>,
     type_text_evidence: Vec<Evidence>,
     screenshot_png: Vec<u8>,
 }
@@ -105,6 +107,53 @@ impl IntentBrowser for FakeBrowser {
         _command: &UploadFilesCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         Err(unsupported("upload_files"))
+    }
+
+    async fn control_action(
+        &self,
+        _page_id: &PageId,
+        command: &ControlActionCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.control_action_calls
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(command.clone());
+        let (operation, state) = match &command.action {
+            ControlAction::SelectOne { value } => (
+                FormControlOperation::SelectOne,
+                FormControlState::Selection {
+                    values: vec![value.clone()],
+                },
+            ),
+            ControlAction::SelectMany { values } => (
+                FormControlOperation::SelectMany,
+                FormControlState::Selection {
+                    values: values.clone(),
+                },
+            ),
+            ControlAction::SetChecked { checked } => (
+                FormControlOperation::SetChecked,
+                FormControlState::Checked { checked: *checked },
+            ),
+            ControlAction::Clear => (FormControlOperation::Clear, FormControlState::Empty),
+            _ => return Err(unsupported("control_action")),
+        };
+        Ok(vec![Evidence::ControlAction {
+            action: ControlActionEvidence {
+                operation,
+                target: command.target.clone(),
+                state,
+                validity: FormControlValidity {
+                    will_validate: true,
+                    valid: true,
+                    flags: Vec::new(),
+                    message: None,
+                    described_by: Vec::new(),
+                },
+                node_replaced: false,
+                revealed_controls: Vec::new(),
+            },
+        }])
     }
 
     async fn wait_for(
@@ -558,8 +607,86 @@ async fn type_into_candidate_out_of_range_fails_closed_without_mutation() {
 }
 
 #[tokio::test]
-async fn type_into_candidate_rejects_non_text_fill_without_mutation() {
-    let type_text_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+async fn type_into_candidate_applies_runtime_control_actions_without_disclosing_values() {
+    let cases = [
+        (
+            "combobox",
+            ControlAction::SelectOne {
+                value: "runtime-ca".into(),
+            },
+            "runtime-ca",
+        ),
+        (
+            "listbox",
+            ControlAction::SelectMany {
+                values: vec!["runtime-red".into(), "runtime-blue".into()],
+            },
+            "runtime-red",
+        ),
+        ("checkbox", ControlAction::SetChecked { checked: true }, ""),
+        ("textbox", ControlAction::Clear, ""),
+    ];
+
+    for (role, action, runtime_value) in cases {
+        let request_debug = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let control_action_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let dir = tempfile::tempdir().expect("temp corpus directory");
+        let assist = Arc::new(RecordingVision {
+            proposal: VisionProposal {
+                confidence: 0.95,
+                action: VisionAction::TypeIntoCandidate { index: 1 },
+            },
+            request_debug: request_debug.clone(),
+        });
+        let browser = FakeBrowser {
+            candidates: vec![
+                form_candidate("primary-control", role, "Account field"),
+                form_candidate("secondary-control", role, "Account field"),
+            ],
+            control_action_calls: control_action_calls.clone(),
+            screenshot_png: b"png".to_vec(),
+            ..FakeBrowser::default()
+        };
+
+        let outcome = IntentEngine::execute(
+            &fill("Account field", role, action.clone()),
+            &PageId::new(),
+            &browser,
+            &VisionContext {
+                session_ok: true,
+                capability_ok: true,
+                assist: Some(assist),
+                proposals: None,
+                defer_escalation: false,
+                prompt_context: None,
+                corpus: Some(VisionCorpus::new(dir.path()).expect("vision corpus")),
+                context_store: None,
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, IntentOutcome::Completed { .. }),
+            "expected completed {action:?}, got {outcome:?}"
+        );
+        let calls = control_action_calls
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].action, action);
+        assert_eq!(calls[0].target.ordinal, Some(1));
+        if !runtime_value.is_empty() {
+            let requests = request_debug.lock().unwrap_or_else(|p| p.into_inner());
+            assert!(!requests[0].contains(runtime_value));
+            let corpus = std::fs::read_to_string(dir.path().join("vision-corpus.jsonl")).unwrap();
+            assert!(!corpus.contains(runtime_value));
+        }
+    }
+}
+
+#[tokio::test]
+async fn type_into_candidate_rejects_incompatible_control_kind_without_mutation() {
+    let control_action_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
     let assist = Arc::new(FakeVision {
         called: Arc::new(AtomicBool::new(false)),
         proposal: VisionProposal {
@@ -569,19 +696,21 @@ async fn type_into_candidate_rejects_non_text_fill_without_mutation() {
     });
     let browser = FakeBrowser {
         candidates: vec![
-            form_candidate("home-state", "combobox", "State field"),
-            form_candidate("work-state", "combobox", "State field"),
+            form_candidate("primary-name", "textbox", "Account field"),
+            form_candidate("secondary-name", "textbox", "Account field"),
         ],
-        type_text_calls: type_text_calls.clone(),
+        control_action_calls: control_action_calls.clone(),
         screenshot_png: b"png".to_vec(),
         ..FakeBrowser::default()
     };
 
     let outcome = IntentEngine::execute(
         &fill(
-            "State field",
-            "combobox",
-            ControlAction::SelectOne { value: "CA".into() },
+            "Account field",
+            "textbox",
+            ControlAction::SelectOne {
+                value: "runtime-ca".into(),
+            },
         ),
         &PageId::new(),
         &browser,
@@ -602,7 +731,7 @@ async fn type_into_candidate_rejects_non_text_fill_without_mutation() {
         outcome,
         IntentOutcome::Failed { error, .. } if error.code == ErrorCode::VisionAssistFailed
     ));
-    assert!(type_text_calls
+    assert!(control_action_calls
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .is_empty());
