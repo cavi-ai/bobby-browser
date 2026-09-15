@@ -1,7 +1,8 @@
 use observability::{
-    ContextLookupOutcome, IntentMetricKind, OperationalMetrics, PrefillOutcome, ProviderMode,
-    ReconciliationMetricOutcome, ResolutionSource, RetryClass, VerificationMetricResult,
-    VisionProposalMetric, VisionProposalOutcome, WorkflowCallClass,
+    ContextCandidateRankingMetric, ContextLookupOutcome, ContextRankedVisionMetric,
+    IntentMetricKind, OperationalMetrics, PrefillOutcome, ProviderMode,
+    ReconciliationMetricOutcome, ResolutionSource, RetryClass, StructuralContextSource,
+    VerificationMetricResult, VisionProposalMetric, VisionProposalOutcome, WorkflowCallClass,
 };
 
 #[test]
@@ -138,6 +139,16 @@ fn serialized_snapshot_cannot_retain_sensitive_canaries() {
         confidence: None,
         outcome: VisionProposalOutcome::TimedOut,
     });
+    metrics.record_context_candidate_ranking(ContextCandidateRankingMetric {
+        source: Some(StructuralContextSource::VisionPromoted),
+        outcome: ContextLookupOutcome::StaleRejection,
+        latency_ms: 26,
+    });
+    metrics.record_context_ranked_vision(ContextRankedVisionMetric {
+        provider_mode: ProviderMode::Http,
+        confidence: Some(0.74),
+        verification: Some(VerificationMetricResult::OtherRejected),
+    });
     let serialized = serde_json::to_string(&metrics.snapshot()).unwrap();
 
     for canary in canaries {
@@ -148,4 +159,80 @@ fn serialized_snapshot_cannot_retain_sensitive_canaries() {
     }
     assert!(serialized.contains("timedOut"));
     assert!(serialized.contains("observationWindowMs"));
+    assert!(serialized.contains("contextRankedVision"));
+    for forbidden_key in [
+        "accessibleName",
+        "candidateName",
+        "domValue",
+        "payload",
+        "purpose",
+        "selector",
+        "url",
+    ] {
+        assert!(
+            !serialized.contains(forbidden_key),
+            "metric snapshot exposed forbidden field {forbidden_key}"
+        );
+    }
+}
+
+#[test]
+fn context_ranked_vision_snapshot_has_a_bounded_contract() {
+    let metrics = OperationalMetrics::default();
+    metrics.record_context_candidate_ranking(ContextCandidateRankingMetric {
+        source: Some(StructuralContextSource::Observed),
+        outcome: ContextLookupOutcome::Hit,
+        latency_ms: 25,
+    });
+    metrics.record_context_ranked_vision(ContextRankedVisionMetric {
+        provider_mode: ProviderMode::Acp,
+        confidence: Some(0.90),
+        verification: Some(VerificationMetricResult::Accepted),
+    });
+
+    let snapshot = metrics.snapshot().context_ranked_vision;
+    assert_eq!(snapshot.attempted, 1);
+    assert_eq!(snapshot.source_observed, 1);
+    assert_eq!(snapshot.source_vision_promoted, 0);
+    assert_eq!(snapshot.source_unreported, 0);
+    assert_eq!(snapshot.hit, 1);
+    assert_eq!(snapshot.miss, 0);
+    assert_eq!(snapshot.stale_rejection, 0);
+    assert_eq!(snapshot.provider_escalations, 1);
+    assert_eq!(snapshot.provider_acp, 1);
+    assert_eq!(snapshot.confidence.high, 1);
+    assert_eq!(snapshot.verification_accepted, 1);
+    assert_eq!(snapshot.verification_rejected, 0);
+    assert_eq!(snapshot.candidate_ranking_latency_ms.buckets[0].count, 1);
+
+    let serialized = serde_json::to_value(snapshot).unwrap();
+    let mut keys = serialized
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec![
+            "ambiguousRefusal",
+            "attempted",
+            "candidateRankingLatencyMs",
+            "confidence",
+            "error",
+            "hit",
+            "miss",
+            "providerAcp",
+            "providerDirectLocal",
+            "providerEscalations",
+            "providerHttp",
+            "sourceObserved",
+            "sourceUnreported",
+            "sourceVisionPromoted",
+            "staleRejection",
+            "verificationAccepted",
+            "verificationRejected",
+        ]
+    );
 }

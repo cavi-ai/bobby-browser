@@ -120,3 +120,47 @@ fn runtime_info_accepts_older_payloads_without_operational_metrics() {
         .get("operationalMetrics")
         .is_none());
 }
+
+#[test]
+fn operational_metrics_accept_an_older_snapshot_without_context_ranked_vision() {
+    let snapshot: types::OperationalMetricsSnapshot = serde_json::from_value(json!({
+        "observationWindowMs": 1,
+        "intent": {
+            "total": 0, "locate": 0, "fill": 0, "completeForm": 0, "extract": 0,
+            "submit": 0, "waitForState": 0, "follow": 0, "dismiss": 0,
+            "solveChallenge": 0, "detectChallenge": 0, "deterministic": 0,
+            "context": 0, "visionPrefill": 0, "visionFallback": 0
+        },
+        "context": {
+            "hit": 0, "miss": 0, "ambiguousRefusal": 0, "staleRejection": 0,
+            "error": 0
+        },
+        "prefill": {
+            "hit": 0, "miss": 0, "droppedEntry": 0, "policyDenied": 0,
+            "providerFailure": 0
+        },
+        "vision": {
+            "attempted": 0, "accepted": 0, "rejected": 0, "abstained": 0,
+            "timedOut": 0, "failed": 0, "providerHttp": 0, "providerAcp": 0,
+            "providerDirectLocal": 0, "latencyMs": {"buckets": [], "overflow": 0},
+            "confidence": {"belowAcceptance": 0, "accepted": 0, "high": 0, "unreported": 0}
+        },
+        "verification": {
+            "accepted": 0, "targetNotFound": 0, "targetAmbiguous": 0,
+            "obstructionPersisted": 0, "valueMismatch": 0, "otherRejected": 0
+        },
+        "retries": {
+            "transport": 0, "timeout": 0, "targetDetached": 0,
+            "stateConflict": 0, "other": 0
+        },
+        "reconciliation": {
+            "resumed": 0, "restarted": 0, "needsReconciliation": 0, "failed": 0
+        },
+        "workflowCalls": {
+            "lifecycle": 0, "discovery": 0, "read": 0, "mutation": 0,
+            "compositeWorkflow": 0, "recovery": 0, "artifact": 0, "job": 0
+        }
+    }))
+    .unwrap();
+    assert_eq!(snapshot.context_ranked_vision.attempted, 0);
+}

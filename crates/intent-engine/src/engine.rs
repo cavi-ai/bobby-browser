@@ -3,7 +3,8 @@ use std::{collections::BTreeSet, sync::Arc};
 use async_trait::async_trait;
 use dom_engine::{resolve_candidates, Candidate, ResolutionDecision, ResolutionPolicy};
 use observability::{
-    ContextLookupOutcome, OperationalMetrics, ProviderMode, VerificationMetricResult,
+    ContextCandidateRankingMetric, ContextLookupOutcome, ContextRankedVisionMetric,
+    OperationalMetrics, ProviderMode, StructuralContextSource, VerificationMetricResult,
     VisionProposalMetric, VisionProposalOutcome,
 };
 use types::{
@@ -758,11 +759,29 @@ struct PersistedCandidateRank {
     observed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ContextCandidateRankingResult {
+    outcome: ContextLookupOutcome,
+    source: Option<StructuralContextSource>,
+}
+
+impl ContextCandidateRankingResult {
+    fn without_source(outcome: ContextLookupOutcome) -> Self {
+        Self {
+            outcome,
+            source: None,
+        }
+    }
+}
+
 async fn rank_candidates_from_context(
     vision: &VisionContext,
     intent_kind: &str,
     mut candidates: Vec<types::CandidateEvidence>,
-) -> (Vec<types::CandidateEvidence>, Option<ContextLookupOutcome>) {
+) -> (
+    Vec<types::CandidateEvidence>,
+    Option<ContextCandidateRankingResult>,
+) {
     let Some(store) = &vision.context_store else {
         return (candidates, None);
     };
@@ -771,19 +790,39 @@ async fn rank_candidates_from_context(
         .as_ref()
         .and_then(|context| context.url.as_deref())
     else {
-        return (candidates, Some(ContextLookupOutcome::Miss));
+        return (
+            candidates,
+            Some(ContextCandidateRankingResult::without_source(
+                ContextLookupOutcome::Miss,
+            )),
+        );
     };
     let (Some(site_key), Some(page_pattern)) = (
         context_store::site_key(url),
         context_store::page_pattern(url),
     ) else {
-        return (candidates, Some(ContextLookupOutcome::Error));
+        return (
+            candidates,
+            Some(ContextCandidateRankingResult::without_source(
+                ContextLookupOutcome::Error,
+            )),
+        );
     };
     let Some(site) = store.site(&site_key).await else {
-        return (candidates, Some(ContextLookupOutcome::Miss));
+        return (
+            candidates,
+            Some(ContextCandidateRankingResult::without_source(
+                ContextLookupOutcome::Miss,
+            )),
+        );
     };
     let Some(page) = site.pages.get(&page_pattern) else {
-        return (candidates, Some(ContextLookupOutcome::Miss));
+        return (
+            candidates,
+            Some(ContextCandidateRankingResult::without_source(
+                ContextLookupOutcome::Miss,
+            )),
+        );
     };
 
     let outcome = rank_candidates_for_page(page, intent_kind, &mut candidates);
@@ -794,7 +833,7 @@ fn rank_candidates_for_page(
     page: &context_store::PageContext,
     intent_kind: &str,
     candidates: &mut Vec<types::CandidateEvidence>,
-) -> ContextLookupOutcome {
+) -> ContextCandidateRankingResult {
     let controls = page
         .forms
         .values()
@@ -806,18 +845,34 @@ fn rank_candidates_for_page(
             }
             Some((
                 control,
+                stats.last_verified_day,
                 PersistedCandidateRank {
                     net_successes: stats.success_count - stats.failure_count,
                     successes: stats.success_count,
                     last_verified_day: stats.last_verified_day.unwrap_or_default(),
                     observed: stats.source == Some(context_store::RecordSource::Observed),
                 },
+                structural_context_source(stats.source),
             ))
         })
         .collect::<Vec<_>>();
     if controls.is_empty() {
-        return ContextLookupOutcome::Miss;
+        return ContextCandidateRankingResult::without_source(ContextLookupOutcome::Miss);
     }
+
+    let stale_match = controls
+        .iter()
+        .filter(|(_, last_verified_day, _, _)| last_verified_day.is_none())
+        .find(|(control, _, _, _)| {
+            candidates
+                .iter()
+                .any(|candidate| same_identity(control, candidate))
+        })
+        .map(|(_, _, _, source)| *source);
+    let controls = controls
+        .into_iter()
+        .filter(|(_, last_verified_day, _, _)| last_verified_day.is_some())
+        .collect::<Vec<_>>();
 
     let ranks = candidates
         .iter()
@@ -828,31 +883,76 @@ fn rank_candidates_for_page(
             };
             controls
                 .iter()
-                .filter(|(control, _)| {
+                .filter(|(control, _, _, _)| {
                     control.role.trim().eq_ignore_ascii_case(role.trim())
                         && control
                             .accessible_name
                             .trim()
                             .eq_ignore_ascii_case(name.trim())
                 })
-                .map(|(_, rank)| *rank)
-                .max()
+                .map(|(_, _, rank, source)| (*rank, *source))
+                .max_by_key(|(rank, _)| *rank)
         })
         .collect::<Vec<_>>();
-    let Some(best_rank) = ranks.iter().flatten().max().copied() else {
-        return ContextLookupOutcome::Miss;
+    let Some(best_rank) = ranks.iter().flatten().map(|(rank, _)| *rank).max() else {
+        return if let Some(source) = stale_match {
+            ContextCandidateRankingResult {
+                outcome: ContextLookupOutcome::StaleRejection,
+                source,
+            }
+        } else {
+            ContextCandidateRankingResult::without_source(ContextLookupOutcome::Miss)
+        };
     };
     let best = ranks
         .iter()
         .enumerate()
-        .filter_map(|(index, rank)| (*rank == Some(best_rank)).then_some(index))
+        .filter_map(|(index, rank)| {
+            rank.is_some_and(|(rank, _)| rank == best_rank)
+                .then_some(index)
+        })
         .collect::<Vec<_>>();
     let [best_index] = best.as_slice() else {
-        return ContextLookupOutcome::AmbiguousRefusal;
+        return ContextCandidateRankingResult {
+            outcome: ContextLookupOutcome::AmbiguousRefusal,
+            source: best
+                .first()
+                .and_then(|index| ranks[*index].and_then(|(_, source)| source)),
+        };
     };
+    let source = ranks[*best_index].and_then(|(_, source)| source);
     let best = candidates.remove(*best_index);
     candidates.insert(0, best);
-    ContextLookupOutcome::Hit
+    ContextCandidateRankingResult {
+        outcome: ContextLookupOutcome::Hit,
+        source,
+    }
+}
+
+fn same_identity(
+    control: &context_store::ControlContext,
+    candidate: &types::CandidateEvidence,
+) -> bool {
+    let (Some(role), Some(name)) = (candidate.role.as_deref(), candidate.name.as_deref()) else {
+        return false;
+    };
+    control.role.trim().eq_ignore_ascii_case(role.trim())
+        && control
+            .accessible_name
+            .trim()
+            .eq_ignore_ascii_case(name.trim())
+}
+
+fn structural_context_source(
+    source: Option<context_store::RecordSource>,
+) -> Option<StructuralContextSource> {
+    match source {
+        Some(context_store::RecordSource::Observed) => Some(StructuralContextSource::Observed),
+        Some(context_store::RecordSource::VisionPromoted) => {
+            Some(StructuralContextSource::VisionPromoted)
+        }
+        None => None,
+    }
 }
 
 #[cfg(test)]
@@ -899,7 +999,7 @@ mod context_candidate_ranking_tests {
     fn duplicate_semantic_identity_refuses_context_ranking() {
         let mut candidates = vec![candidate("Continue"), candidate("Continue")];
         assert_eq!(
-            rank_candidates_for_page(&page("Continue"), "locate", &mut candidates),
+            rank_candidates_for_page(&page("Continue"), "locate", &mut candidates).outcome,
             ContextLookupOutcome::AmbiguousRefusal
         );
     }
@@ -908,9 +1008,36 @@ mod context_candidate_ranking_tests {
     fn missing_live_identity_does_not_rank() {
         let mut candidates = vec![candidate("Cancel")];
         assert_eq!(
-            rank_candidates_for_page(&page("Continue"), "locate", &mut candidates),
+            rank_candidates_for_page(&page("Continue"), "locate", &mut candidates).outcome,
             ContextLookupOutcome::Miss
         );
+    }
+
+    #[test]
+    fn matching_context_without_a_freshness_stamp_is_rejected_as_stale() {
+        let mut stale = page("Continue");
+        let stats = stale
+            .forms
+            .get_mut("page")
+            .unwrap()
+            .controls
+            .first_mut()
+            .unwrap()
+            .intents
+            .get_mut("locate")
+            .unwrap();
+        stats.last_verified_day = None;
+        stats.source = Some(RecordSource::VisionPromoted);
+        let mut candidates = vec![candidate("Cancel"), candidate("Continue")];
+
+        let result = rank_candidates_for_page(&stale, "locate", &mut candidates);
+
+        assert_eq!(result.outcome, ContextLookupOutcome::StaleRejection);
+        assert_eq!(
+            result.source,
+            Some(observability::StructuralContextSource::VisionPromoted)
+        );
+        assert_eq!(candidates[0].name.as_deref(), Some("Cancel"));
     }
 }
 
@@ -3356,11 +3483,18 @@ async fn escalate_with_vision(
         verification,
         fill_payload,
     } = report;
-    let (candidates, context_outcome) =
+    let ranking_started = std::time::Instant::now();
+    let (candidates, context_ranking) =
         rank_candidates_from_context(vision, intent_kind, candidates).await;
-    if let (Some(outcome), Some((metrics, _))) = (context_outcome, assist.operational_metrics()) {
-        metrics.record_context_lookup(outcome);
+    if let (Some(ranking), Some((metrics, _))) = (context_ranking, assist.operational_metrics()) {
+        metrics.record_context_lookup(ranking.outcome);
+        metrics.record_context_candidate_ranking(ContextCandidateRankingMetric {
+            source: ranking.source,
+            outcome: ranking.outcome,
+            latency_ms: ranking_started.elapsed().as_millis() as u64,
+        });
     }
+    let context_ranked = context_ranking.is_some();
     tracing::info!(intent = intent_kind, trigger = "stuck", "vision.escalation");
     // `stuck_evidence` is prefixed onto failure evidence only, never onto a Completed one.
     let mut base_evidence = prior_evidence.clone();
@@ -3439,8 +3573,9 @@ async fn escalate_with_vision(
     {
         Ok(proposal) => proposal,
         Err(error) => {
-            record_vision_metric(
+            record_context_ranked_vision_metric(
                 metric_context.as_ref(),
+                context_ranked,
                 propose_started.elapsed().as_millis() as u64,
                 None,
                 VisionProposalOutcome::Failed,
@@ -3468,8 +3603,9 @@ async fn escalate_with_vision(
     );
     let proposal_hash = proposal_sha256(&proposal);
     if proposal.confidence < VISION_CONFIDENCE_FLOOR {
-        record_vision_metric(
+        record_context_ranked_vision_metric(
             metric_context.as_ref(),
+            context_ranked,
             provider_latency_ms,
             Some(proposal.confidence),
             VisionProposalOutcome::Rejected,
@@ -3548,8 +3684,9 @@ async fn escalate_with_vision(
     {
         Ok(evidence) => evidence,
         Err(error) => {
-            record_vision_metric(
+            record_context_ranked_vision_metric(
                 metric_context.as_ref(),
+                context_ranked,
                 provider_latency_ms,
                 Some(proposal.confidence),
                 VisionProposalOutcome::Rejected,
@@ -3620,8 +3757,9 @@ async fn escalate_with_vision(
         None,
         resolved,
     );
-    record_vision_metric(
+    record_context_ranked_vision_metric(
         metric_context.as_ref(),
+        context_ranked,
         provider_latency_ms,
         Some(proposal.confidence),
         VisionProposalOutcome::Accepted,
@@ -3641,6 +3779,31 @@ async fn escalate_with_vision(
         },
     )));
     IntentOutcome::Completed { evidence }
+}
+
+fn record_context_ranked_vision_metric(
+    metric_context: Option<&(OperationalMetrics, ProviderMode)>,
+    context_ranked: bool,
+    latency_ms: u64,
+    confidence: Option<f32>,
+    outcome: VisionProposalOutcome,
+    verification: Option<VerificationMetricResult>,
+) {
+    record_vision_metric(
+        metric_context,
+        latency_ms,
+        confidence,
+        outcome,
+        verification,
+    );
+    let (true, Some((metrics, provider_mode))) = (context_ranked, metric_context) else {
+        return;
+    };
+    metrics.record_context_ranked_vision(ContextRankedVisionMetric {
+        provider_mode: *provider_mode,
+        confidence: confidence.map(f64::from),
+        verification,
+    });
 }
 
 fn record_vision_metric(

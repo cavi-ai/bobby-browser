@@ -1410,6 +1410,15 @@ async fn verified_page_context_ranks_the_provider_candidate_window() {
         Some("Review order")
     );
     assert_eq!(metrics.snapshot().context.hit, 1);
+    let ranked = metrics.snapshot().context_ranked_vision;
+    assert_eq!(ranked.attempted, 1);
+    assert_eq!(ranked.source_observed, 1);
+    assert_eq!(ranked.hit, 1);
+    assert_eq!(ranked.provider_escalations, 1);
+    assert_eq!(ranked.provider_direct_local, 1);
+    assert_eq!(ranked.confidence.high, 1);
+    assert_eq!(ranked.verification_accepted, 1);
+    assert_eq!(ranked.verification_rejected, 0);
 }
 
 #[tokio::test]
