@@ -9,6 +9,7 @@ import type {
   RecoveryStatus,
   CandidateEvidence,
   CommandError,
+  CommandErrorCode,
   CommandOutcome,
   EventBatch,
   EventGap,
@@ -16,8 +17,10 @@ import type {
   ExecutionRecord,
   FormControl,
   FormControlTarget,
+  FormControlValidity,
   FormDescriptor,
   FormSnapshot,
+  FormValidationIssue,
   InterfaceEvent,
   JsonValue,
   NetworkResourceType,
@@ -94,6 +97,20 @@ const unique = (values: readonly unknown[]): boolean => new Set(values).size ===
 const CONTROL_KINDS = ["text", "email", "password", "search", "number", "checkbox", "radio", "switch", "selectOne", "selectMultiple", "date", "time", "dateTimeLocal", "range", "file", "contentEditable", "combobox", "listbox", "submit", "reset", "other"] as const;
 const OPERATIONS = ["setText", "setChecked", "selectOne", "selectMany", "setFiles", "clear", "activate"] as const;
 const VALIDITY_FLAGS = ["valueMissing", "typeMismatch", "patternMismatch", "tooLong", "tooShort", "rangeUnderflow", "rangeOverflow", "stepMismatch", "badInput", "customError"] as const;
+const COMMAND_ERROR_CODES = ["invalidRequest", "notFound", "deadlineExceeded", "browserLaunchFailed", "browserCommandFailed", "verificationFailed", "journalFailed", "resourceExhausted", "policyDenied", "internal", "targetNotFound", "targetAmbiguous", "frameNotFound", "shadowRootUnavailable", "targetDetached", "targetObscured", "targetOutOfBounds", "waitConditionTimedOut", "screenshotCaptureFailed", "networkPolicyDenied", "httpResponseTooLarge", "httpTransferFailed", "httpStateConflict", "httpEquivalenceUnproven", "intentCompileFailed", "intentActionMismatch", "obstructionSuspected", "visionAssistDenied", "visionAssistFailed", "expectedStatePreSatisfied", "boundaryAlreadyExecuted"] as const;
+
+function isCommandErrorCode(value: unknown): value is CommandErrorCode {
+  return oneOf(value, COMMAND_ERROR_CODES);
+}
+
+function isFormControlValidity(value: unknown): value is FormControlValidity {
+  return hasExactKeys(value, ["willValidate", "valid"], ["flags", "message", "describedBy"])
+    && typeof value.willValidate === "boolean"
+    && typeof value.valid === "boolean"
+    && optional(value, "flags", (flags): flags is string[] => Array.isArray(flags) && flags.length <= 10 && flags.every((flag) => oneOf(flag, VALIDITY_FLAGS)) && unique(flags) && (!value.valid || flags.length === 0))
+    && (value.message === undefined || value.message === null || boundedText(value.message, 1024))
+    && optional(value, "describedBy", (items): items is string[] => Array.isArray(items) && items.length <= 512 && items.every((item) => boundedText(item, 2048)));
+}
 
 function isTargetSegment(value: unknown): boolean {
   return hasExactKeys(value, ["role", "accessibleName", "ordinal"]) && boundedText(value.role, 128) && boundedText(value.accessibleName, 2048) && (value.ordinal === null || isSafeUnsigned(value.ordinal, 2047));
@@ -102,11 +119,19 @@ function isFormControlTarget(value: unknown): value is FormControlTarget {
   return hasExactKeys(value, ["role", "accessibleName"], ["ordinal", "framePath", "shadowPath"]) && boundedText(value.role, 128) && boundedText(value.accessibleName, 2048) && (value.ordinal === undefined || value.ordinal === null || isSafeUnsigned(value.ordinal, 2047)) && (value.framePath === undefined || (Array.isArray(value.framePath) && value.framePath.length <= 8 && value.framePath.every(isTargetSegment))) && (value.shadowPath === undefined || (Array.isArray(value.shadowPath) && value.shadowPath.length <= 8 && value.shadowPath.every(isTargetSegment)));
 }
 function isControlActionEvidence(value: unknown): boolean {
-  if (!hasExactKeys(value, ["operation", "target", "state", "validity", "nodeReplaced"]) || !oneOf(value.operation, OPERATIONS) || !isFormControlTarget(value.target) || typeof value.nodeReplaced !== "boolean" || !isRecord(value.state) || !isRecord(value.validity)) return false;
+  if (!hasExactKeys(value, ["operation", "target", "state", "validity", "nodeReplaced"], ["revealedControls"]) || !oneOf(value.operation, OPERATIONS) || !isFormControlTarget(value.target) || typeof value.nodeReplaced !== "boolean" || !isRecord(value.state) || !isFormControlValidity(value.validity)) return false;
   const state = value.state;
   const stateValid = state.kind === "empty" ? hasExactKeys(state, ["kind"]) : state.kind === "text" ? hasExactKeys(state, ["kind", "value"]) && boundedText(state.value, 4096, true) : state.kind === "redacted" ? hasExactKeys(state, ["kind", "present"]) && typeof state.present === "boolean" : state.kind === "checked" ? hasExactKeys(state, ["kind", "checked"]) && typeof state.checked === "boolean" : state.kind === "selection" ? hasExactKeys(state, ["kind", "values"]) && Array.isArray(state.values) && state.values.length <= 512 && state.values.every((v) => boundedText(v, 4096, true)) : state.kind === "files" && hasExactKeys(state, ["kind", "count"]) && isSafeUnsigned(state.count, 512);
-  const validity = value.validity;
-  return stateValid && hasExactKeys(validity, ["willValidate", "valid", "flags", "message", "describedBy"]) && typeof validity.willValidate === "boolean" && typeof validity.valid === "boolean" && Array.isArray(validity.flags) && validity.flags.every((v) => oneOf(v, VALIDITY_FLAGS)) && nullableBoundedText(validity.message, 1024) && Array.isArray(validity.describedBy) && validity.describedBy.every((v) => boundedText(v, 2048));
+  return stateValid && optional(value, "revealedControls", (controls): controls is unknown[] => Array.isArray(controls) && controls.length <= 512 && controls.every((control) => hasExactKeys(control, ["controlKind"], ["accessibleName", "target"]) && oneOf(control.controlKind, CONTROL_KINDS) && optional(control, "accessibleName", (name): name is string => boundedText(name, 2048)) && optional(control, "target", isFormControlTarget)));
+}
+
+function isFormValidationIssue(value: unknown): value is FormValidationIssue {
+  return hasExactKeys(value, ["controlId", "controlKind", "accessibleName", "target", "validity"])
+    && boundedText(value.controlId, 128)
+    && oneOf(value.controlKind, CONTROL_KINDS)
+    && nullableBoundedText(value.accessibleName, 2048)
+    && (value.target === null || isFormControlTarget(value.target))
+    && isFormControlValidity(value.validity);
 }
 function isFormControl(value: unknown): value is FormControl {
   // Optional keys mirror the runtime's slim serialization: default-value
@@ -119,7 +144,7 @@ function isFormControl(value: unknown): value is FormControl {
   const c = value.constraints ?? {};
   const constraintsValid = hasExactKeys(c, [], ["required", "readOnly", "disabled", "pattern", "minLength", "maxLength", "min", "max", "step", "multiple", "accept"]) && (c.required === undefined || typeof c.required === "boolean") && (c.readOnly === undefined || typeof c.readOnly === "boolean") && (c.disabled === undefined || typeof c.disabled === "boolean") && (c.pattern === undefined || nullableBoundedText(c.pattern, 2048)) && (c.minLength === undefined || c.minLength === null || isSafeUnsigned(c.minLength, 4_294_967_295)) && (c.maxLength === undefined || c.maxLength === null || isSafeUnsigned(c.maxLength, 4_294_967_295)) && !((typeof c.minLength === "number") && (typeof c.maxLength === "number") && c.minLength > c.maxLength) && (c.min === undefined || nullableBoundedText(c.min, 4096)) && (c.max === undefined || nullableBoundedText(c.max, 4096)) && (c.step === undefined || nullableBoundedText(c.step, 4096)) && (c.multiple === undefined || typeof c.multiple === "boolean") && (c.accept === undefined || (Array.isArray(c.accept) && c.accept.length <= 128 && c.accept.every((v) => boundedText(v, 2048))));
   const validity = value.validity;
-  const validityValid = hasExactKeys(validity, ["valid"], ["willValidate", "flags", "message", "describedBy"]) && (validity.willValidate === undefined || typeof validity.willValidate === "boolean") && typeof validity.valid === "boolean" && (validity.flags === undefined || (Array.isArray(validity.flags) && validity.flags.length <= 10 && validity.flags.every((v) => oneOf(v, VALIDITY_FLAGS)) && unique(validity.flags) && (!validity.valid || validity.flags.length === 0))) && (validity.message === undefined || nullableBoundedText(validity.message, 1024)) && (validity.describedBy === undefined || (Array.isArray(validity.describedBy) && validity.describedBy.length <= 512 && validity.describedBy.every((v) => boundedText(v, 2048))));
+  const validityValid = isFormControlValidity(validity);
   const optionsValid = value.options === undefined || (Array.isArray(value.options) && value.options.length <= 512 && value.options.every((option) => hasExactKeys(option, ["value", "label"], ["disabled", "selected", "groupLabel"]) && boundedText(option.value, 4096, true) && boundedText(option.label, 2048, true) && (option.disabled === undefined || typeof option.disabled === "boolean") && (option.selected === undefined || typeof option.selected === "boolean") && (option.groupLabel === undefined || nullableBoundedText(option.groupLabel, 2048))));
   return stateValid && constraintsValid && validityValid && optionsValid && Array.isArray(value.supportedOperations) && value.supportedOperations.every((v) => oneOf(v, OPERATIONS)) && unique(value.supportedOperations);
 }
@@ -281,7 +306,7 @@ export function isEvidence(value: unknown): value is Evidence {
     case "executionPath":
       return hasExactKeys(value, ["kind", "path", "reason", "stateVersion", "elapsedMs", "bytes", "sha256"], ["finalUrl", "contentType", "status", "redirectChain"])
         && (value.path === "directHttp" || value.path === "browser" || value.path === "browserFallback")
-        && (value.reason === "eligibleStaticDocument" || value.reason === "eligibleExplicitDownload" || value.reason === "ineligibleCommand" || value.reason === "semanticTargetRequired" || value.reason === "javascriptRequired" || value.reason === "unsupportedContentType" || value.reason === "stateConflict" || value.reason === "policyRequired")
+        && (value.reason === "eligibleStaticDocument" || value.reason === "eligibleExplicitDownload" || value.reason === "ineligibleCommand" || value.reason === "semanticTargetRequired" || value.reason === "javascriptRequired" || value.reason === "unsupportedContentType" || value.reason === "stateConflict" || value.reason === "policyRequired" || value.reason === "pageMutated")
         && isSafeUnsigned(value.stateVersion)
         && isSafeUnsigned(value.elapsedMs)
         && (value.bytes === null || isSafeUnsigned(value.bytes))
@@ -290,15 +315,17 @@ export function isEvidence(value: unknown): value is Evidence {
         && validExecutionPathOptionalFields(value);
     case "navigation": return hasExactKeys(value, ["kind", "url", "title"]) && isString(value.url) && isString(value.title);
     case "inspection": return hasExactKeys(value, ["kind", "selector", "url", "title", "text", "html"]) && isNullableString(value.selector) && isString(value.url) && isString(value.title) && isString(value.text) && isNullableString(value.html);
+    case "submitSettlement": return hasExactKeys(value, ["kind", "outcome"]) && (value.outcome === "settled" || value.outcome === "validationRejected");
     case "element": return hasExactKeys(value, ["kind", "selector", "text"]) && isString(value.selector) && isNullableString(value.text);
     case "upload": return hasExactKeys(value, ["kind", "selector", "paths"]) && isString(value.selector) && isStringArray(value.paths);
     case "page": return hasExactKeys(value, ["kind", "pageId", "url", "title"]) && isUuid(value.pageId) && isString(value.url) && isString(value.title);
+    case "pageGeneration": return hasExactKeys(value, ["kind", "pageId", "generation"]) && isUuid(value.pageId) && isSafeUnsigned(value.generation);
     case "pages": return hasExactKeys(value, ["kind", "pages"]) && Array.isArray(value.pages) && value.pages.every(isPageEvidence);
     case "popup": return hasExactKeys(value, ["kind", "openerPageId", "pageId", "url", "title"]) && isUuid(value.openerPageId) && isUuid(value.pageId) && isString(value.url) && isString(value.title);
     case "popupClosed": return hasExactKeys(value, ["kind", "popupPageId", "openerPageId"]) && isUuid(value.popupPageId) && isUuid(value.openerPageId);
-    case "download": return hasExactKeys(value, ["kind", "filename", "path", "bytes", "sha256"]) && isString(value.filename) && isString(value.path) && isSafeUnsigned(value.bytes) && isLowerSha256(value.sha256);
+    case "download": return hasExactKeys(value, ["kind", "filename", "path", "bytes", "sha256"], ["savedTo"]) && isString(value.filename) && isString(value.path) && isSafeUnsigned(value.bytes) && isLowerSha256(value.sha256) && optional(value, "savedTo", isString);
     case "resolution": return hasExactKeys(value, ["kind", "target", "fingerprint", "candidates", "bestMatchAuthorized"]) && isTargetSpec(value.target) && isTargetFingerprint(value.fingerprint) && Array.isArray(value.candidates) && value.candidates.every(isCandidateEvidence) && typeof value.bestMatchAuthorized === "boolean";
-    case "wait": return hasExactKeys(value, ["kind", "condition", "elapsedMs", "observations"], ["excludedClasses"]) && isWaitCondition(value.condition) && isSafeUnsigned(value.elapsedMs) && isSafeUnsigned(value.observations) && optional(value, "excludedClasses", isStringArray);
+    case "wait": return hasExactKeys(value, ["kind", "condition", "elapsedMs", "observations"], ["excludedClasses", "observed"]) && isWaitCondition(value.condition) && isSafeUnsigned(value.elapsedMs) && isSafeUnsigned(value.observations) && optional(value, "excludedClasses", isStringArray) && optional(value, "observed", (observed): observed is string => typeof observed === "string" && [...observed].length <= 512);
     case "screenshot": return hasExactKeys(value, ["kind", "artifactId", "mediaType", "width", "height", "bytes", "sha256"]) && isString(value.artifactId) && isString(value.mediaType) && isSafeUnsigned(value.width, 4_294_967_295) && isSafeUnsigned(value.height, 4_294_967_295) && isSafeUnsigned(value.bytes) && isLowerSha256(value.sha256);
     case "configuration": return hasExactKeys(value, ["kind", "name", "value"]) && isString(value.name) && isString(value.value);
     case "browserExecution": return hasExactKeys(value, ["kind", "engine", "browserVersion", "profileId", "interactionPath"]) && isString(value.engine) && isString(value.browserVersion) && isString(value.profileId) && isString(value.interactionPath);
@@ -310,10 +337,29 @@ export function isEvidence(value: unknown): value is Evidence {
       && isSafeUnsigned(value.synthesizedMs, 600_000);
     case "accessibilitySnapshot": return hasExactKeys(value, ["kind", "pageId", "nodes", "truncated"], []) && isUuid(value.pageId) && Array.isArray(value.nodes) && value.nodes.every(isAccessibilityNode) && typeof value.truncated === "boolean";
     case "formSnapshot": return hasExactKeys(value, ["kind", "snapshot"]) && isFormSnapshot(value.snapshot);
+    case "formValidation": return hasExactKeys(value, ["kind", "issues"]) && Array.isArray(value.issues) && value.issues.length <= 512 && value.issues.every(isFormValidationIssue);
     case "controlAction": return hasExactKeys(value, ["kind", "action"]) && isControlActionEvidence(value.action);
+    case "structuredExtraction": return hasExactKeys(value, ["kind", "pageId", "value", "truncated"]) && isUuid(value.pageId) && isJsonValue(value.value) && typeof value.truncated === "boolean";
+    case "challengeDetection": {
+      if (!hasExactKeys(value, ["kind", "confidence", "detection"], ["priorKind"]) || typeof value.confidence !== "number" || !Number.isFinite(value.confidence) || !optional(value, "priorKind", isString)) return false;
+      if (value.detection === null) return true;
+      if (!hasExactKeys(value.detection, ["challenge_type", "confidence", "blocking"], ["region", "hints"]) || !oneOf(value.detection.challenge_type, ["recaptchaV2Checkbox", "recaptchaV3", "textCaptcha", "imageGridCaptcha", "mfaCodeEntry"] as const) || typeof value.detection.confidence !== "number" || !Number.isFinite(value.detection.confidence) || typeof value.detection.blocking !== "boolean") return false;
+      const regionValid = value.detection.region === undefined || (hasExactKeys(value.detection.region, ["x", "y", "width", "height"]) && [value.detection.region.x, value.detection.region.y, value.detection.region.width, value.detection.region.height].every((coordinate) => typeof coordinate === "number" && Number.isFinite(coordinate)));
+      const hintsValid = value.detection.hints === undefined || (hasExactKeys(value.detection.hints, [], ["target_field_purpose", "instruction_text"]) && optional(value.detection.hints, "target_field_purpose", isString) && optional(value.detection.hints, "instruction_text", isString));
+      return regionValid && hintsValid;
+    }
     case "cookieState": return hasExactKeys(value, ["kind", "pageId", "cookies"], []) && (value.pageId === null || isUuid(value.pageId)) && Array.isArray(value.cookies) && value.cookies.every(isCookieRecord);
     case "pdfArtifact": return hasExactKeys(value, ["kind", "artifactId", "mediaType", "bytes", "sha256"]) && isString(value.artifactId) && isString(value.mediaType) && isSafeUnsigned(value.bytes) && isLowerSha256(value.sha256);
     case "dialog": return hasExactKeys(value, ["kind", "dialogType", "message", "action"]) && isString(value.dialogType) && isString(value.message) && (value.action === "accept" || value.action === "dismiss");
+    case "emulation": return hasExactKeys(value, ["kind", "viewport", "geolocation"])
+      && (value.viewport === null || (hasExactKeys(value.viewport, ["width", "height"]) && isSafeUnsigned(value.viewport.width, 4_294_967_295) && isSafeUnsigned(value.viewport.height, 4_294_967_295)))
+      && (value.geolocation === null || (hasExactKeys(value.geolocation, ["latitude", "longitude", "accuracy"]) && typeof value.geolocation.latitude === "number" && Number.isFinite(value.geolocation.latitude) && typeof value.geolocation.longitude === "number" && Number.isFinite(value.geolocation.longitude) && (value.geolocation.accuracy === null || (typeof value.geolocation.accuracy === "number" && Number.isFinite(value.geolocation.accuracy)))));
+    case "harArtifact": return hasExactKeys(value, ["kind", "artifactId", "mediaType", "bytes", "sha256", "entries"]) && isString(value.artifactId) && isString(value.mediaType) && isSafeUnsigned(value.bytes) && isLowerSha256(value.sha256) && isSafeUnsigned(value.entries, 4_294_967_295);
+    case "extraction": return hasExactKeys(value, ["kind", "field", "resolutionPath"], ["value", "errorCode"])
+      && isString(value.field)
+      && (value.resolutionPath === "deterministic" || value.resolutionPath === "visionFallback" || value.resolutionPath === "visionPrefill")
+      && optional(value, "value", isString)
+      && optional(value, "errorCode", isCommandErrorCode);
     default: return false;
   }
 }
@@ -351,24 +397,26 @@ function isAccessibilityNode(value: unknown, depth = 0): boolean {
     && optional(value, "invalid", (item): item is boolean => typeof item === "boolean")
     && optional(value, "checked", (item): item is boolean => typeof item === "boolean")
     && optional(value, "autocomplete", isString)
+    && optional(value, "url", isString)
     && optional(value, "valueMin", isString)
     && optional(value, "valueMax", isString)
     && (value.children === undefined || (Array.isArray(value.children) && value.children.every((child) => isAccessibilityNode(child, depth + 1))))
-    && Object.keys(value).every((key) => ["role", "name", "target", "value", "description", "required", "disabled", "readOnly", "invalid", "checked", "autocomplete", "valueMin", "valueMax", "children"].includes(key));
+    && Object.keys(value).every((key) => ["role", "name", "target", "value", "description", "required", "disabled", "readOnly", "invalid", "checked", "autocomplete", "url", "valueMin", "valueMax", "children"].includes(key));
 }
 
 function isAccessibilityTarget(value: unknown): value is AccessibilityTarget {
-  return hasExactKeys(value, ["role", "accessibleName"], ["ordinal"])
+  return hasExactKeys(value, ["role", "accessibleName"], ["ordinal", "framePath"])
     && isString(value.role)
     && isString(value.accessibleName)
-    && optional(value, "ordinal", (item): item is number => isSafeUnsigned(item, 2047));
+    && optional(value, "ordinal", (item): item is number => isSafeUnsigned(item, 2047))
+    && optional(value, "framePath", (segments): segments is unknown[] => Array.isArray(segments) && segments.length <= 8 && segments.every(isTargetSegment));
 }
 
 function isExecutionRecord(value: unknown): value is ExecutionRecord {
   return hasExactKeys(value, ["intentKind", "purpose", "resolutionPath", "planSummary", "candidates", "waitElapsedMs", "verification", "artifactIds", "visionProposalSha256"])
     && isString(value.intentKind)
     && isNullableString(value.purpose)
-    && (value.resolutionPath === "deterministic" || value.resolutionPath === "visionFallback")
+    && (value.resolutionPath === "deterministic" || value.resolutionPath === "visionFallback" || value.resolutionPath === "visionPrefill")
     && isString(value.planSummary)
     && Array.isArray(value.candidates) && value.candidates.every(isCandidateEvidence)
     && (value.waitElapsedMs === null || isSafeUnsigned(value.waitElapsedMs))
@@ -381,7 +429,7 @@ function isEvidenceArray(value: unknown): value is Evidence[] { return Array.isA
 
 export function isCommandError(value: unknown): value is CommandError {
   return hasExactKeys(value, ["code", "message", "layer", "retryable"])
-    && (value.code === "invalidRequest" || value.code === "notFound" || value.code === "deadlineExceeded" || value.code === "browserLaunchFailed" || value.code === "browserCommandFailed" || value.code === "verificationFailed" || value.code === "journalFailed" || value.code === "resourceExhausted" || value.code === "policyDenied" || value.code === "internal" || value.code === "targetNotFound" || value.code === "targetAmbiguous" || value.code === "frameNotFound" || value.code === "shadowRootUnavailable" || value.code === "targetDetached" || value.code === "waitConditionTimedOut" || value.code === "screenshotCaptureFailed" || value.code === "networkPolicyDenied" || value.code === "httpResponseTooLarge" || value.code === "httpTransferFailed" || value.code === "httpStateConflict" || value.code === "httpEquivalenceUnproven" || value.code === "intentCompileFailed" || value.code === "intentActionMismatch" || value.code === "obstructionSuspected" || value.code === "visionAssistDenied" || value.code === "visionAssistFailed" || value.code === "expectedStatePreSatisfied" || value.code === "boundaryAlreadyExecuted")
+    && isCommandErrorCode(value.code)
     && isString(value.message)
     && (value.layer === "interface" || value.layer === "broker" || value.layer === "workflow" || value.layer === "page" || value.layer === "driver" || value.layer === "browser" || value.layer === "network" || value.layer === "site" || value.layer === "journal")
     && typeof value.retryable === "boolean";

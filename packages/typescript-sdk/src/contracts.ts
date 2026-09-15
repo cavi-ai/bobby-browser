@@ -35,7 +35,7 @@ export interface InterfaceError {
   requiredCapability: Capability | null;
 }
 
-export type CommandErrorCode = "invalidRequest" | "notFound" | "deadlineExceeded" | "browserLaunchFailed" | "browserCommandFailed" | "verificationFailed" | "journalFailed" | "resourceExhausted" | "policyDenied" | "internal" | "targetNotFound" | "targetAmbiguous" | "frameNotFound" | "shadowRootUnavailable" | "targetDetached" | "waitConditionTimedOut" | "screenshotCaptureFailed" | "networkPolicyDenied" | "httpResponseTooLarge" | "httpTransferFailed" | "httpStateConflict" | "httpEquivalenceUnproven" | "intentCompileFailed" | "intentActionMismatch" | "obstructionSuspected" | "visionAssistDenied" | "visionAssistFailed" | "expectedStatePreSatisfied" | "boundaryAlreadyExecuted";
+export type CommandErrorCode = "invalidRequest" | "notFound" | "deadlineExceeded" | "browserLaunchFailed" | "browserCommandFailed" | "verificationFailed" | "journalFailed" | "resourceExhausted" | "policyDenied" | "internal" | "targetNotFound" | "targetAmbiguous" | "frameNotFound" | "shadowRootUnavailable" | "targetDetached" | "targetObscured" | "targetOutOfBounds" | "waitConditionTimedOut" | "screenshotCaptureFailed" | "networkPolicyDenied" | "httpResponseTooLarge" | "httpTransferFailed" | "httpStateConflict" | "httpEquivalenceUnproven" | "intentCompileFailed" | "intentActionMismatch" | "obstructionSuspected" | "visionAssistDenied" | "visionAssistFailed" | "expectedStatePreSatisfied" | "boundaryAlreadyExecuted";
 export interface CommandError { code: CommandErrorCode; message: string; layer: ErrorLayer; retryable: boolean; }
 
 /** Maximum UTF-8 byte length for intent `purpose` strings. */
@@ -44,7 +44,7 @@ export const MAX_INTENT_PURPOSE_BYTES = 256 as const;
 export const DEFAULT_DISMISS_OBSTRUCTION_TIMEOUT_MS = 5_000 as const;
 
 export type ExecutionPath = "directHttp" | "browser" | "browserFallback";
-export type ExecutionReason = "eligibleStaticDocument" | "eligibleExplicitDownload" | "ineligibleCommand" | "semanticTargetRequired" | "javascriptRequired" | "unsupportedContentType" | "stateConflict" | "policyRequired";
+export type ExecutionReason = "eligibleStaticDocument" | "eligibleExplicitDownload" | "ineligibleCommand" | "semanticTargetRequired" | "javascriptRequired" | "unsupportedContentType" | "stateConflict" | "policyRequired" | "pageMutated";
 export interface TargetSpec { css?: string | null; testId?: string | null; role?: string | null; accessibleName?: string | null; label?: string | null; text?: TextMatch | null; attributes?: Record<string, string>; framePath?: TargetSpec[]; shadowPath?: TargetSpec[]; ordinal?: number | null; allowBestMatch?: boolean; }
 export type TextMatch = { kind: "exact" | "contains" | "regex"; value: string };
 export interface TargetFingerprint { pageId: Id; frame: string | null; role: string | null; name: string | null; stableAttributes: Record<string, string>; }
@@ -85,7 +85,7 @@ export type NetworkResourceType =
   | "FedCM"
   | "Other";
 
-export type IntentResolutionPath = "deterministic" | "visionFallback";
+export type IntentResolutionPath = "deterministic" | "visionFallback" | "visionPrefill";
 export interface ExecutionRecord {
   intentKind: string;
   purpose: string | null;
@@ -107,13 +107,14 @@ export type Evidence =
   | { kind: "element"; selector: string; text: string | null }
   | { kind: "upload"; selector: string; paths: string[] }
   | { kind: "page"; pageId: Id; url: string; title: string }
+  | { kind: "pageGeneration"; pageId: Id; generation: number }
   | { kind: "pages"; pages: PageEvidence[] }
   | { kind: "popup"; openerPageId: Id; pageId: Id; url: string; title: string }
   | { kind: "popupClosed"; popupPageId: Id; openerPageId: Id }
   | { kind: "download"; filename: string; path: string; bytes: number; sha256: string; savedTo?: string }
   | { kind: "configuration"; name: string; value: string }
   | { kind: "resolution"; target: TargetSpec; fingerprint: TargetFingerprint; candidates: CandidateEvidence[]; bestMatchAuthorized: boolean }
-  | { kind: "wait"; condition: WaitCondition; elapsedMs: number; observations: number; excludedClasses?: string[] }
+  | { kind: "wait"; condition: WaitCondition; elapsedMs: number; observations: number; excludedClasses?: string[]; observed?: string }
   | { kind: "screenshot"; artifactId: Id; mediaType: string; width: number; height: number; bytes: number; sha256: string }
   | { kind: "browserExecution"; engine: string; browserVersion: string; profileId: string; interactionPath: string }
   | { kind: "javaScriptResult"; value: JsonValue; truncated: boolean }
@@ -121,9 +122,16 @@ export type Evidence =
   | { kind: "formSnapshot"; snapshot: FormSnapshot }
   | { kind: "formValidation"; issues: FormValidationIssue[] }
   | { kind: "controlAction"; action: ControlActionEvidence }
+  | { kind: "structuredExtraction"; pageId: Id; value: JsonValue; truncated: boolean }
+  | { kind: "challengeDetection"; confidence: number; detection: ChallengeDetection | null; priorKind?: string }
+  | { kind: "cookieState"; pageId: Id | null; cookies: CookieRecord[] }
+  | { kind: "pdfArtifact"; artifactId: string; mediaType: string; bytes: number; sha256: string }
+  | { kind: "dialog"; dialogType: string; message: string; action: "accept" | "dismiss" }
+  | { kind: "emulation"; viewport: ViewportSize | null; geolocation: GeolocationCoordinates | null }
+  | { kind: "harArtifact"; artifactId: string; mediaType: string; bytes: number; sha256: string; entries: number }
   | { kind: "intentExecution"; record: ExecutionRecord }
   | { kind: "humanization"; engine: string; actions: number; synthesizedMs: number }
-  | { kind: "extraction"; field: string; value: string | null; resolutionPath: IntentResolutionPath; errorCode: CommandErrorCode | null };
+  | { kind: "extraction"; field: string; value?: string; resolutionPath: IntentResolutionPath; errorCode?: CommandErrorCode };
 
 /** Result of `POST /v1/commands`, discriminated by `status`. */
 export type CommandOutcome =
@@ -154,7 +162,7 @@ export interface GetCookiesCommand { urls?: string[] }
 export interface SetCookiesCommand { cookies: SetCookieParam[] }
 export interface DeleteCookiesCommand { urls?: string[]; names?: string[] }
 export interface PrintToPdfCommand { landscape?: boolean; printBackground?: boolean; scale?: number | null; pageRanges?: string | null }
-export interface AccessibilityTarget { role: string; accessibleName: string; ordinal?: number }
+export interface AccessibilityTarget { role: string; accessibleName: string; ordinal?: number; framePath?: SemanticTargetSegment[] }
 export interface AccessibilityNode {
   role?: string;
   name?: string;
@@ -167,6 +175,7 @@ export interface AccessibilityNode {
   invalid?: boolean;
   checked?: boolean;
   autocomplete?: string;
+  url?: string;
   valueMin?: string;
   valueMax?: string;
   children?: AccessibilityNode[];
@@ -181,7 +190,7 @@ export interface SemanticTargetSegment { role: string; accessibleName: string; o
 export interface FormControlTarget { role: string; accessibleName: string; ordinal?: number | null; framePath?: SemanticTargetSegment[]; shadowPath?: SemanticTargetSegment[]; }
 export type FormControlState = { kind: "empty" } | { kind: "text"; value: string } | { kind: "redacted"; present: boolean } | { kind: "checked"; checked: boolean } | { kind: "selection"; values: string[] } | { kind: "files"; count: number };
 export interface FormControlConstraints { required?: boolean; readOnly?: boolean; disabled?: boolean; pattern?: string | null; minLength?: number | null; maxLength?: number | null; min?: string | null; max?: string | null; step?: string | null; multiple?: boolean; accept?: string[]; }
-export interface FormControlValidity { willValidate?: boolean; valid: boolean; flags?: FormValidityFlag[]; message?: string | null; describedBy?: string[]; }
+export interface FormControlValidity { willValidate: boolean; valid: boolean; flags?: FormValidityFlag[]; message?: string | null; describedBy?: string[]; }
 export interface FormValidationIssue { controlId: string; controlKind: FormControlKind; accessibleName: string | null; target: FormControlTarget | null; validity: FormControlValidity; }
 export interface FormOption { value: string; label: string; disabled?: boolean; selected?: boolean; groupLabel?: string | null; }
 export interface FormControl { id: string; formId?: string | null; groupId?: string | null; target?: FormControlTarget | null; controlKind: FormControlKind; accessibleName?: string | null; label?: string | null; description?: string | null; placeholder?: string | null; autocomplete?: string | null; state: FormControlState; constraints?: FormControlConstraints; validity: FormControlValidity; options?: FormOption[]; supportedOperations: FormControlOperation[]; }
@@ -206,6 +215,12 @@ export type ControlAction =
 export interface ControlActionCommand { target: FormControlTarget; action: ControlAction; }
 export interface RevealedControl { controlKind: FormControlKind; accessibleName?: string; target?: FormControlTarget; }
 export interface ControlActionEvidence { operation: FormControlOperation; target: FormControlTarget; state: FormControlState; validity: FormControlValidity; nodeReplaced: boolean; revealedControls?: RevealedControl[]; }
+export interface ViewportSize { width: number; height: number; }
+export interface GeolocationCoordinates { latitude: number; longitude: number; accuracy: number | null; }
+export type ChallengeType = "recaptchaV2Checkbox" | "recaptchaV3" | "textCaptcha" | "imageGridCaptcha" | "mfaCodeEntry";
+export interface ChallengeDetectionRegion { x: number; y: number; width: number; height: number; }
+export interface ChallengeDetectionHints { target_field_purpose?: string; instruction_text?: string; }
+export interface ChallengeDetection { challenge_type: ChallengeType; confidence: number; region?: ChallengeDetectionRegion; blocking: boolean; hints?: ChallengeDetectionHints; }
 export interface ClickAndWaitForPopupCommand { selector: string; target: TargetSpec | null; timeoutMs: number; }
 export interface ClickAndWaitForDownloadCommand { selector: string; target: TargetSpec | null; timeoutMs: number; }
 export interface WaitForCommand { condition: WaitCondition; timeoutMs: number; }
