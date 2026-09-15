@@ -74,7 +74,7 @@ test("slim wire shape omits default fields and still validates", () => {
     autocomplete: "email",
     state: { kind: "empty" },
     constraints: { required: true, maxLength: 254 },
-    validity: { valid: true },
+    validity: { willValidate: true, valid: true },
     supportedOperations: ["setText", "clear"],
   };
   const slimSnapshot = {

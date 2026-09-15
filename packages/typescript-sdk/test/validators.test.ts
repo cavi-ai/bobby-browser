@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -14,13 +15,14 @@ import {
   isWorkflowCheckpoint,
 } from "../src/validators.js";
 import { isInterfaceError } from "../src/events.js";
+import type { Evidence, TargetSpec } from "../src/contracts.js";
 
 const ID = "00000000-0000-4000-8000-000000000001";
 const ID_2 = "00000000-0000-4000-8000-000000000002";
 const SHA = "0123456789abcdef".repeat(4);
 const TIME = "2026-07-17T12:34:56Z";
 
-function target(): unknown {
+function target(): TargetSpec {
   return {
     css: null,
     testId: "save",
@@ -36,21 +38,23 @@ function target(): unknown {
   };
 }
 
-function evidenceFixtures(): unknown[] {
+function evidenceFixtures(): Evidence[] {
   return [
     { kind: "executionPath", path: "directHttp", reason: "eligibleStaticDocument", stateVersion: 0, elapsedMs: 1, bytes: null, sha256: null },
     { kind: "executionPath", path: "browserFallback", reason: "javascriptRequired", stateVersion: 2, elapsedMs: 3, bytes: 4, sha256: SHA, finalUrl: "https://example.test/", contentType: "text/html", status: 200, redirectChain: ["https://example.test/"] },
     { kind: "navigation", url: "https://example.test/", title: "Example" },
     { kind: "inspection", selector: null, url: "https://example.test/", title: "Example", text: "body", html: null },
+    { kind: "submitSettlement", outcome: "settled" },
     { kind: "element", selector: "#save", text: null },
     { kind: "upload", selector: "input", paths: ["/tmp/a"] },
     { kind: "page", pageId: ID, url: "https://example.test/", title: "Example" },
+    { kind: "pageGeneration", pageId: ID, generation: 2 },
     { kind: "pages", pages: [{ pageId: ID, url: "https://example.test/", title: "Example" }] },
     { kind: "popup", openerPageId: ID, pageId: ID_2, url: "https://example.test/popup", title: "Popup" },
     { kind: "popupClosed", popupPageId: ID_2, openerPageId: ID },
-    { kind: "download", filename: "a.bin", path: "/tmp/a.bin", bytes: 4, sha256: SHA },
+    { kind: "download", filename: "a.bin", path: "/tmp/a.bin", bytes: 4, sha256: SHA, savedTo: "downloads/a.bin" },
     { kind: "resolution", target: target(), fingerprint: { pageId: ID, frame: null, role: null, name: null, stableAttributes: { id: "save" } }, candidates: [{ role: null, name: "Save", score: -1, reasons: ["exact"] }], bestMatchAuthorized: false },
-    { kind: "wait", condition: { kind: "element", target: target(), state: "visible" }, elapsedMs: 1, observations: 1 },
+    { kind: "wait", condition: { kind: "element", target: target(), state: "visible" }, elapsedMs: 1, observations: 1, observed: "Save" },
     { kind: "wait", condition: { kind: "text", target: target(), matcher: { kind: "contains", value: "Save" } }, elapsedMs: 1, observations: 1 },
     { kind: "wait", condition: { kind: "value", target: target(), matcher: { kind: "regex", value: "S.*" } }, elapsedMs: 1, observations: 1 },
     { kind: "wait", condition: { kind: "url", matcher: { kind: "exact", value: "https://example.test/" } }, elapsedMs: 1, observations: 1 },
@@ -61,12 +65,23 @@ function evidenceFixtures(): unknown[] {
     { kind: "configuration", name: "focusEmulation", value: "true" },
     { kind: "browserExecution", engine: "firefox", browserVersion: "128.0", profileId: ID, interactionPath: "engineNative" },
     { kind: "javaScriptResult", value: { answer: 42 }, truncated: false },
+    { kind: "accessibilitySnapshot", pageId: ID, nodes: [{ role: "link", target: { role: "link", accessibleName: "Docs", framePath: [{ role: "iframe", accessibleName: "Content", ordinal: null }] }, url: "https://example.test/docs" }], truncated: false },
+    { kind: "formSnapshot", snapshot: { schemaVersion: 1, pageId: ID, forms: [], unownedControls: [], truncated: false } },
+    { kind: "formValidation", issues: [{ controlId: "email", controlKind: "email", accessibleName: "Email", target: null, validity: { willValidate: true, valid: false, flags: ["valueMissing"], message: "Required", describedBy: [] } }] },
+    { kind: "controlAction", action: { operation: "setChecked", target: { role: "checkbox", accessibleName: "Business" }, state: { kind: "checked", checked: true }, validity: { willValidate: true, valid: true }, nodeReplaced: false, revealedControls: [{ controlKind: "text", accessibleName: "Company", target: { role: "textbox", accessibleName: "Company" } }] } },
+    { kind: "structuredExtraction", pageId: ID, value: { title: "Example" }, truncated: false },
+    { kind: "challengeDetection", confidence: 0.9, detection: { challenge_type: "recaptchaV2Checkbox", confidence: 0.8, region: { x: 1, y: 2, width: 3, height: 4 }, blocking: true, hints: { target_field_purpose: "Verify", instruction_text: "Check the box" } }, priorKind: "recaptchaV2Checkbox" },
+    { kind: "cookieState", pageId: ID, cookies: [{ name: "session", value: "value", domain: "example.test", path: "/", secure: true, httpOnly: true, sameSite: "Lax", expiresUnix: 1 }] },
+    { kind: "pdfArtifact", artifactId: "artifact-pdf", mediaType: "application/pdf", bytes: 4, sha256: SHA },
+    { kind: "dialog", dialogType: "alert", message: "Saved", action: "accept" },
+    { kind: "emulation", viewport: { width: 1280, height: 720 }, geolocation: { latitude: 40.7, longitude: -74, accuracy: 10 } },
+    { kind: "harArtifact", artifactId: "artifact-har", mediaType: "application/json", bytes: 4, sha256: SHA, entries: 1 },
     {
       kind: "intentExecution",
       record: {
         intentKind: "locate",
         purpose: "Continue",
-        resolutionPath: "deterministic",
+        resolutionPath: "visionPrefill",
         planSummary: "role=button name~Continue",
         candidates: [],
         waitElapsedMs: null,
@@ -75,12 +90,32 @@ function evidenceFixtures(): unknown[] {
         visionProposalSha256: null,
       },
     },
+    { kind: "humanization", engine: "firefox", actions: 2, synthesizedMs: 25 },
+    { kind: "extraction", field: "title", value: "Example", resolutionPath: "visionPrefill" },
+    { kind: "extraction", field: "missing", resolutionPath: "deterministic", errorCode: "targetNotFound" },
   ];
 }
 
 function recoveryDecision(): unknown {
   return { status: "restarted", checkpointId: ID, lineage: { workflowId: ID, abandonedAttemptId: ID, attemptId: ID_2, reason: "retry" }, evidence: [] };
 }
+
+test("evidence fixtures cover every Rust wire variant and field", () => {
+  const source = readFileSync(new URL("../../../../crates/bobby-browser-client/src/outcomes.rs", import.meta.url), "utf8");
+  const start = source.indexOf("pub enum Evidence {");
+  const body = source.slice(start, source.indexOf("\n}\n", start));
+  const variants = [...body.matchAll(/^    ([A-Z][A-Za-z0-9_]*)\s*\{\n([\s\S]*?)^    \},?$/gm)];
+  const rustKinds = variants.map((match) => `${match[1]![0]!.toLowerCase()}${match[1]!.slice(1)}`).sort();
+  const fixtureKinds = [...new Set(evidenceFixtures().map((evidence) => evidence.kind))].sort();
+  assert.notEqual(start, -1);
+  assert.deepEqual(fixtureKinds, rustKinds);
+  for (const variant of variants) {
+    const kind = `${variant[1]![0]!.toLowerCase()}${variant[1]!.slice(1)}`;
+    const expected = ["kind", ...[...variant[2]!.matchAll(/^        ([a-z][a-z0-9_]*):/gm)].map((field) => field[1]!.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase()))].sort();
+    const actual = [...new Set(evidenceFixtures().filter((evidence) => evidence.kind === kind).flatMap((evidence) => Object.keys(evidence)))].sort();
+    assert.deepEqual(actual, expected, kind);
+  }
+});
 
 function checkpoint(): Record<string, unknown> {
   return {
@@ -113,6 +148,7 @@ test("deep validators accept every exact public response variant", () => {
   assert.equal(isSessionState({ id: ID, profile: "default", proxy: null, page_ids: [ID_2], created_at: TIME, last_used_at: TIME, execution_policy: { javascriptEvaluation: false, visionAssist: false, fingerprint: false, humanize: false } }), true);
   assert.equal(isPageState({ id: ID, session_id: ID_2, url: null, mode: "Document", ready_state: "complete", pending_requests: 0 }), true);
 
+  assert.equal(new Set(evidenceFixtures().map((evidence) => evidence.kind)).size, 32);
   for (const evidence of evidenceFixtures()) {
     assert.equal(isCommandOutcome({ status: "completed", commandId: ID, evidence: [evidence] }), true, JSON.stringify(evidence));
   }
