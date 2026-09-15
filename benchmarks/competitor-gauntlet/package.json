@@ -16,6 +16,6 @@
   },
   "dependencies": {
     "@cursor/sdk": "^1.0.30",
-    "playwright": "^1.52.0"
+    "playwright": "^1.63.0"
   }
 }
