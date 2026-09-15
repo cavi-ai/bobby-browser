@@ -1204,6 +1204,12 @@ async fn submit_and_verify_requires_matching_checkpoint_before_boundary_act() {
         matches!(accepted, CommandOutcome::Completed { .. }),
         "{accepted:?}"
     );
+    let accepted_json = serde_json::to_value(&accepted).expect("serialize outcome");
+    assert!(accepted_json["evidence"]
+        .as_array()
+        .expect("completed evidence")
+        .iter()
+        .any(|item| item["kind"] == "pageGeneration" && item["generation"] == 1));
     let observed = events.lock().await.clone();
     assert!(observed
         .iter()

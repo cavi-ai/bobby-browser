@@ -273,7 +273,7 @@ impl Server {
                             .await;
                     }
                 }
-                result.map(|outcome| project_submit_outcome(outcome, evidence_detail))
+                result.map(|outcome| project_verified_action_outcome(outcome, evidence_detail))
             }
             "intent_wait_for_state" => {
                 let input: IntentWaitForStateArgs = match bounded_parse(call.arguments) {
@@ -304,6 +304,7 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
+                let evidence_detail = input.evidence_detail.unwrap_or(EvidenceDetail::Compact);
                 let intent = types::IntentCommand::Follow(types::FollowIntent {
                     purpose: input.purpose,
                     hints: input.hints.unwrap_or_default(),
@@ -322,13 +323,14 @@ impl Server {
                     intent,
                 );
                 pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
-                if input.auto_checkpoint.unwrap_or(true) {
+                let result = if input.auto_checkpoint.unwrap_or(true) {
                     self.submit_envelope_with_auto_checkpoint(context, envelope, handle)
                         .await
                 } else {
                     self.submit_envelope(context, envelope, handle, call.name.as_str())
                         .await
-                }
+                };
+                result.map(|outcome| project_verified_action_outcome(outcome, evidence_detail))
             }
             "intent_dismiss_obstruction" => {
                 let input: IntentDismissObstructionArgs = match bounded_parse(call.arguments) {
@@ -436,7 +438,7 @@ impl Server {
     }
 }
 
-fn project_submit_outcome(mut outcome: Value, detail: EvidenceDetail) -> Value {
+fn project_verified_action_outcome(mut outcome: Value, detail: EvidenceDetail) -> Value {
     if detail == EvidenceDetail::Full || outcome["status"] != "completed" {
         return outcome;
     }
@@ -448,7 +450,16 @@ fn project_submit_outcome(mut outcome: Value, detail: EvidenceDetail) -> Value {
         .filter(|item| {
             matches!(
                 item["kind"].as_str(),
-                Some("wait" | "submitSettlement" | "formValidation")
+                Some(
+                    "pageGeneration"
+                        | "wait"
+                        | "screenshot"
+                        | "pdfArtifact"
+                        | "harArtifact"
+                        | "download"
+                        | "submitSettlement"
+                        | "formValidation"
+                )
             )
         })
         .cloned()
@@ -480,15 +491,18 @@ fn project_complete_form_outcome(
         format!(", +{remainder} more")
     };
     let value = format!("filled {} fields: {shown}{suffix}", field_names.len());
-    let revealed_controls = outcome["evidence"]
+    let retained = outcome["evidence"]
         .as_array()
         .into_iter()
         .flatten()
         .filter(|item| {
-            item["kind"] == "controlAction"
+            matches!(
+                item["kind"].as_str(),
+                Some("pageGeneration" | "screenshot" | "pdfArtifact" | "harArtifact" | "download")
+            ) || (item["kind"] == "controlAction"
                 && item["action"]["revealedControls"]
                     .as_array()
-                    .is_some_and(|controls| !controls.is_empty())
+                    .is_some_and(|controls| !controls.is_empty()))
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -497,7 +511,7 @@ fn project_complete_form_outcome(
         "name": "completeForm",
         "value": value,
     })];
-    evidence.extend(revealed_controls);
+    evidence.extend(retained);
     outcome["evidence"] = Value::Array(evidence);
     outcome
 }
@@ -602,34 +616,38 @@ mod tests {
     }
 
     #[test]
-    fn compact_submit_outcome_keeps_verification_evidence() {
+    fn compact_verified_action_outcome_keeps_verification_evidence() {
         let raw = json!({
             "status": "completed",
             "commandId": "018f0000-0000-7000-8000-000000000005",
             "evidence": [
                 {"kind":"resolution","target":{},"fingerprint":{},"candidates":[],"bestMatchAuthorized":false},
                 {"kind":"controlAction","action":{}},
+                {"kind":"pageGeneration","pageId":"018f0000-0000-7000-8000-000000000010","generation":4},
                 {"kind":"wait","condition":{"kind":"text","text":"Saved"},"elapsedMs":10,"observations":2,"observed":"Saved"},
+                {"kind":"screenshot","artifactId":"shot-1","mediaType":"image/png","width":1,"height":1,"bytes":1,"sha256":"abc"},
                 {"kind":"submitSettlement","outcome":"settled"},
                 {"kind":"intentExecution","record":{}}
             ]
         });
 
-        let compact = project_submit_outcome(raw, EvidenceDetail::Compact);
+        let compact = project_verified_action_outcome(raw, EvidenceDetail::Compact);
 
         assert_eq!(compact["status"], "completed");
         assert_eq!(compact["commandId"], "018f0000-0000-7000-8000-000000000005");
         assert_eq!(
             compact["evidence"],
             json!([
+                {"kind":"pageGeneration","pageId":"018f0000-0000-7000-8000-000000000010","generation":4},
                 {"kind":"wait","condition":{"kind":"text","text":"Saved"},"elapsedMs":10,"observations":2,"observed":"Saved"},
+                {"kind":"screenshot","artifactId":"shot-1","mediaType":"image/png","width":1,"height":1,"bytes":1,"sha256":"abc"},
                 {"kind":"submitSettlement","outcome":"settled"}
             ])
         );
     }
 
     #[test]
-    fn compact_submit_outcome_keeps_failures_unchanged() {
+    fn compact_verified_action_outcome_keeps_failures_unchanged() {
         let raw = json!({
             "status": "failed",
             "commandId": "018f0000-0000-7000-8000-000000000006",
@@ -638,13 +656,13 @@ mod tests {
         });
 
         assert_eq!(
-            project_submit_outcome(raw.clone(), EvidenceDetail::Compact),
+            project_verified_action_outcome(raw.clone(), EvidenceDetail::Compact),
             raw
         );
     }
 
     #[test]
-    fn full_submit_outcome_is_unchanged() {
+    fn full_verified_action_outcome_is_unchanged() {
         let raw = json!({
             "status": "completed",
             "commandId": "018f0000-0000-7000-8000-000000000007",
@@ -652,7 +670,7 @@ mod tests {
         });
 
         assert_eq!(
-            project_submit_outcome(raw.clone(), EvidenceDetail::Full),
+            project_verified_action_outcome(raw.clone(), EvidenceDetail::Full),
             raw
         );
     }

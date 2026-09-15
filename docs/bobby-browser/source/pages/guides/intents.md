@@ -329,6 +329,10 @@ await client.submit(
 Set `boundary: true` when activation may mutate (for example sign-out); requires a
 matching workflow checkpoint.
 
+The MCP tool defaults to compact evidence containing the current page
+generation, verified wait, and artifact references. Pass `evidenceDetail:
+"full"` for diagnostic evidence.
+
 ### DismissObstruction (Reconciliable)
 
 Clears a popup / overlay / cookie banner. No caller `boundary` flag — always
