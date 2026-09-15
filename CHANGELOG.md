@@ -32,27 +32,11 @@
   env var is set. The snapshot is counters and histograms only — never
   prompts, values, or URLs. A dump failure is logged and never fails the
   shutdown.
-- Competitor gauntlet run records carry `attribution`: the run's action
-  count and resolution sources (`deterministic` / `context` /
-  `visionPrefill` / `visionFallback`, from the bobby metrics snapshot), the
-  driving model's tier, and the interface failure taxonomy (error codes
-  counted from structured tool errors). Snapshot-derived fields are null
-  for non-bobby tools.
-- CI's node job runs the competitor gauntlet's browser-free unit tests, so
-  the measurement harness itself is gated.
 - Direct contract tests pin every gate in the CDP dispatch chokepoint
   (`CdpConnection::dispatch` → `dispatch_reserved`): request validation,
   unknown-method refusal, non-object params, missing-capability fail-closed,
   and the exact-shape `enable` / user-agent no-op handlers. The gateway's
   highest-degree node previously had only indirect coverage.
-- Competitor gauntlet thresholds split by engine and provider mode: run
-  provenance records `engine` (parsed from the bobby runner's browser
-  selection) and `providerMode` (`off` — the gauntlet configures no vision
-  today), and `score check` reads an optional `dimensions` map in
-  `baseline.json` keyed on `"<engine>/<providerMode>"`, falling back to the
-  top-level tasks/budget when the batch's dimension has no entry. Both
-  fields join the provenance uniformity gate, and the baseline path accepts
-  a `GAUNTLET_BASELINE_PATH` override.
 - A successful `click_and_wait_for_popup` through a `workflowHandle` rebinds
   that handle onto the popup and remembers the opener. Once the popup is no
   longer open, a handle-resolved call that would otherwise fail `notFound`
@@ -550,7 +534,6 @@
 - The Firefox companion server binds and publishes its descriptor at `bobby serve` startup, so a paired extension discovers it whenever it polls rather than only inside a per-session 30s window. Serve shutdown ends the shared BiDi connection.
 - `workflow_observe` accepts a target, forwarded to the underlying snapshot, so an observation reads one region instead of the whole page's chrome on every call.
 - The DOM candidate collector roles `ARTICLE` elements, so `a11y_snapshot` target scoping resolves article subtrees.
-- The competitor gauntlet no longer pins the full toolset: the benchmark measures the default `explore` phase a user actually gets.
 - Runtime error detail reaches the operator interface.
 
 ### Fixed
@@ -629,7 +612,6 @@
 - `tools/list` advertise-only trim: the constant `$schema` URL is dropped from advertised input and output schemas, and `workflow_recover`'s `RecoveryDecision` is advertised as a status-tag projection (the same treatment `Evidence` already had). Validation schemas and `tools/call` are unchanged.
 - The `tool_schema_sizes` example prints the per-tool composition (description / input / output / annotations / examples), so future growth is attributable at a glance.
 - The Northstar scenario server is extracted from `runtime-tests` into a reusable `gauntlet-server` crate. It serves `GET /__gauntlet/snapshot` and `GET /__gauntlet/request-log` (the same state the in-process `snapshot()` / `request_log()` expose), and ships a `gauntlet-server` binary (`--seed`, `--level`) so out-of-process drivers can run and verify journeys over HTTP. The five release-gate journeys are unchanged.
-- `benchmarks/competitor-gauntlet/` is a benchmark harness that runs the five Northstar journeys against alternative agent browser tooling with a headless agent driver, recording wall time, tool calls, error counts, token usage, server-authoritative pass/fail, and a structured agent self-report per run. Results append to `benchmarks/results/runs.jsonl` (gitignored); `score` aggregates per tool.
 - MCP `job_submit` / `job_status` / `job_cancel` mirror HTTP `/v1/jobs` (same caps). Advertised in `full`, `act`, and `verify` when a job port is attached (`bobby mcp-stdio` and `bobby serve` MCP HTTP). Built-in handlers: `echo`, `sleep`, `http_probe`, `http_wait`, and `http_fetch` (SSRF-safe; `http_fetch` returns a truncated GET body so agents need not open a browser for health/API JSON); `bobby://job-handlers` documents payloads; `bobby doctor` reports them under `job-handlers`.
 - Ollama joins the direct vision backends. `bobby vision-proxy --ollama --ollama-base-url` and `bobby vision connect --provider ollama` normalize a local model's output to the `VisionProposal` schema, and a provider on port 11434 is detected from config. No credentials leave the machine.
 - `bobby vision collect` gathers gauntlet vision proposals as JSONL training data, creating and validating the output directory up front. The collector API is staged ahead of the runner that will drive it.

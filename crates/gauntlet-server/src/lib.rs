@@ -285,9 +285,9 @@ impl ScenarioServer {
             .route("/api/reports/latest", get(latest_report))
             .route("/api/reports/{id}", get(report_state))
             .route("/api/reports/{id}/download", get(download_report))
-            // Tool-neutral verification surface for out-of-process drivers
-            // (the competitor gauntlet): the same state `snapshot()` and
-            // `request_log()` expose in-process, as JSON over HTTP.
+            // Tool-neutral verification surface for out-of-process drivers:
+            // the same state `snapshot()` and `request_log()` expose
+            // in-process, as JSON over HTTP.
             .route("/__gauntlet/snapshot", get(gauntlet_snapshot))
             .route("/__gauntlet/request-log", get(gauntlet_request_log))
             .fallback(get(static_file))
