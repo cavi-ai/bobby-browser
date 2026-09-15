@@ -206,7 +206,13 @@ fn context_ranked_vision_snapshot_has_a_bounded_contract() {
     assert_eq!(snapshot.candidate_ranking_latency_ms.buckets[0].count, 1);
 
     let serialized = serde_json::to_value(snapshot).unwrap();
-    let keys = serialized.as_object().unwrap().keys().collect::<Vec<_>>();
+    let mut keys = serialized
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    keys.sort();
     assert_eq!(
         keys,
         vec![
