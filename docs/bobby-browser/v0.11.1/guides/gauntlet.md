@@ -40,41 +40,6 @@ The command prints the isolated onboarding URL and keeps the scenario server run
 
 The training ground intentionally includes no CAPTCHA solver or bypass. An automation agent must pause for legitimate completion of the challenge, then continue the workflow.
 
-## Competitor gauntlet runner
-
-`benchmarks/competitor-gauntlet` is a separate harness that drives the gauntlet
-journeys with alternate tooling stacks.
-
-Run it from the workspace tree:
-
-```bash
-cd benchmarks/competitor-gauntlet
-cargo run -- --tool bobby
-```
-
-`--tool` is required.
-
-- `--tool bobby` runs only the native bobby-browser runner.
-- `--tool all` runs every configured runner, including the full bobby competitor
-  gamut.
-- Runner names are validated against `benchmarks/competitor-gauntlet/runners.json`.
-
-When selecting bobby, the harness creates an isolated run workspace and writes
-`bobby-gauntlet.toml` with:
-
-- `upload_roots = ["./data/uploads"]`
-- `downloads_dir = "./downloads"`
-- `artifacts_dir = "./artifacts"`
-- `headless = true`
-- `[http] allow_loopback = true`
-- `[mcp] startup_toolset = "explore"`
-
-The fixture is staged at `./data/uploads/approved-upload.txt` in that workspace
-to satisfy upload policy, and `BOBBY_BROWSER_CONFIG` is pointed at that config.
-The default `explore` startup toolset is deliberate: it measures what a user
-who never touches `toolset_select` gets — observation, navigation, and the
-base controls, which cover every journey. `BOBBY_MCP_TOOLSET` is left unset.
-
 ## Standalone scenario server
 
 Out-of-process drivers (benchmarks, third-party tooling) can run the same
