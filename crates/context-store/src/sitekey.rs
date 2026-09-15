@@ -22,6 +22,37 @@ pub fn site_key(page_url: &str) -> Option<String> {
     Some(format!("{scheme}://{registrable}"))
 }
 
+/// Derives the query-free path pattern used by persisted page context.
+pub fn page_pattern(page_url: &str) -> Option<String> {
+    let parsed = url::Url::parse(page_url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let pattern = parsed
+        .path()
+        .split('/')
+        .map(|segment| {
+            if templated(segment) {
+                "{}".to_string()
+            } else {
+                segment.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    Some(if pattern.is_empty() {
+        "/".to_string()
+    } else {
+        pattern
+    })
+}
+
+fn templated(segment: &str) -> bool {
+    !segment.is_empty()
+        && (segment.chars().all(|character| character.is_ascii_digit())
+            || (segment.len() > 2 && segment.chars().any(|character| character.is_ascii_digit())))
+}
+
 fn registrable_domain(host: &str) -> String {
     if host.parse::<std::net::IpAddr>().is_ok()
         || (host.starts_with('[') && host.ends_with(']'))
@@ -37,7 +68,7 @@ fn registrable_domain(host: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::site_key;
+    use super::{page_pattern, site_key};
 
     #[test]
     fn site_key_table() {
@@ -74,6 +105,22 @@ mod tests {
         ];
         for (input, expected) in cases {
             assert_eq!(site_key(input).as_deref(), *expected, "input: {input}");
+        }
+    }
+
+    #[test]
+    fn page_pattern_table() {
+        let cases: &[(&str, Option<&str>)] = &[
+            ("https://example.com/login?next=/home#form", Some("/login")),
+            ("https://example.com", Some("/")),
+            (
+                "https://example.com/customers/cus_1042",
+                Some("/customers/{}"),
+            ),
+            ("about:blank", None),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(page_pattern(input).as_deref(), *expected, "input: {input}");
         }
     }
 }
