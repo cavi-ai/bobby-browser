@@ -10,12 +10,12 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
-    "@types/node": "26.4.1",
+    "@types/node": "26.5.1",
     "tsx": "4.23.13",
     "typescript": "7.0.2"
   },
   "dependencies": {
     "@cursor/sdk": "^1.0.30",
-    "playwright": "^1.52.0"
+    "playwright": "^1.63.0"
   }
 }
