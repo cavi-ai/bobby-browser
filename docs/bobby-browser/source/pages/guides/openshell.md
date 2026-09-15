@@ -56,11 +56,28 @@ Writes project `openshell/`:
 - `skills/bobby-browser/SKILL.md` — agent skill copy
 - `README.md` — operator steps
 
-Default gateway host is `host.docker.internal:7777` (Docker Desktop). Override:
+The pack defaults to Codex and emits the OpenShell Codex binary allowlist:
+`/usr/bin/codex`, `/usr/local/bin/codex`, and
+`/usr/lib/node_modules/@openai/**`. Select Claude Code while retaining the
+existing Bobby binary path:
 
 ```bash
-bobby openshell install --mcp-host host.containers.internal --mcp-port 7777 \
-  --agent-binary /usr/local/bin/claude
+bobby openshell install --agent claude
+# emits /usr/local/bin/claude
+```
+
+For another installation layout, `--agent-binary` replaces the selected
+agent's complete allowlist with the exact path provided:
+
+```bash
+bobby openshell install --agent-binary /opt/agents/custom
+```
+
+Default gateway host is `host.docker.internal:7777` (Docker Desktop). Override
+the endpoint independently:
+
+```bash
+bobby openshell install --mcp-host host.containers.internal --mcp-port 7777
 ```
 
 ## Host prerequisites
