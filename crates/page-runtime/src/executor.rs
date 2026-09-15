@@ -807,7 +807,7 @@ impl PageRuntime {
                 return outcome;
             }
         }
-        let evidence = execution.evidence;
+        let mut evidence = execution.evidence;
         match &envelope.command {
             RuntimeCommand::Primitive(PrimitiveCommand::OpenPage(_)) => {
                 if let Some(Evidence::Page { page_id, url, .. }) = evidence.first() {
@@ -866,6 +866,12 @@ impl PageRuntime {
                         self.context().record(observed, nodes.clone());
                     }
                 }
+            }
+            if let Some(generation) = self.context().generation(page_id) {
+                evidence.push(Evidence::PageGeneration {
+                    page_id: page_id.clone(),
+                    generation,
+                });
             }
         }
 

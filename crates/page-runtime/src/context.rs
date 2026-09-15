@@ -260,6 +260,11 @@ impl ContextGraph {
         self.lock().len()
     }
 
+    /// Current generation for a retained page.
+    pub fn generation(&self, page: &PageId) -> Option<u64> {
+        self.lock().get(page).map(|entry| entry.generation)
+    }
+
     /// Invalidates everything known about `page`.
     ///
     /// Bumps the generation rather than clearing the nodes. Keeping the stamped

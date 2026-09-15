@@ -100,6 +100,9 @@ Compact `intent_complete_form` evidence retains conditional
 `revealedControls`, so their semantic targets can be used immediately. A
 `networkQuiet` submit rejected by client-side validation returns compact,
 value-free `formValidation` issues for the same repair loop.
+Compact verified-action results retain the page generation, wait observation,
+and artifact references. Command, workflow, and attempt IDs remain available
+for recovery.
 
 `selectOne` and `selectMany` match by option value first and then visible label
 (trimmed, case-insensitive) when no value matches.

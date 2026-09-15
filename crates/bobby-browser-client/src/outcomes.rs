@@ -292,6 +292,11 @@ pub enum Evidence {
         url: String,
         title: String,
     },
+    /// Retained page-context generation after command bookkeeping.
+    PageGeneration {
+        page_id: PageId,
+        generation: u64,
+    },
     Pages {
         pages: Vec<PageEvidence>,
     },
