@@ -18,7 +18,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use context_store::{
-    day_since_epoch, site_key, ContextStore, ControlContext, IntentStats, RecordSource,
+    day_since_epoch, page_pattern, site_key, ContextStore, ControlContext, IntentStats,
+    RecordSource,
 };
 use types::{ContextAnswer, ContextAnswerSource, Evidence, IntentResolutionPath, TargetSpec};
 
@@ -369,43 +370,6 @@ fn control_from_target(target: &TargetSpec) -> Option<ControlContext> {
         form_membership: PAGE_LEVEL_FORM.to_string(),
         intents: BTreeMap::new(),
     })
-}
-
-/// Page pattern for persistence: path only, query and fragment stripped,
-/// segments carrying digits templated to `{}` so per-entity URLs share one
-/// pattern. Never the full URL.
-fn page_pattern(page_url: &str) -> Option<String> {
-    let parsed = url::Url::parse(page_url).ok()?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return None;
-    }
-    let pattern: Vec<String> = parsed
-        .path()
-        .split('/')
-        .map(|segment| {
-            if templated(segment) {
-                "{}".to_string()
-            } else {
-                segment.to_string()
-            }
-        })
-        .collect();
-    let joined = pattern.join("/");
-    Some(if joined.is_empty() {
-        "/".to_string()
-    } else {
-        joined
-    })
-}
-
-fn templated(segment: &str) -> bool {
-    if segment.is_empty() {
-        return false;
-    }
-    if segment.chars().all(|character| character.is_ascii_digit()) {
-        return true;
-    }
-    segment.len() > 2 && segment.chars().any(|character| character.is_ascii_digit())
 }
 
 #[cfg(test)]

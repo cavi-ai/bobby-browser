@@ -3,8 +3,8 @@ use std::{collections::BTreeSet, sync::Arc};
 use async_trait::async_trait;
 use dom_engine::{resolve_candidates, Candidate, ResolutionDecision, ResolutionPolicy};
 use observability::{
-    OperationalMetrics, ProviderMode, VerificationMetricResult, VisionProposalMetric,
-    VisionProposalOutcome,
+    ContextLookupOutcome, OperationalMetrics, ProviderMode, VerificationMetricResult,
+    VisionProposalMetric, VisionProposalOutcome,
 };
 use types::{
     CaptureScreenshotCommand, ClickCommand, CommandError, ControlAction, ControlActionCommand,
@@ -580,6 +580,8 @@ const VISION_WINDOW_ROLES: [&str; 10] = [
     "switch",
 ];
 
+const CONTEXT_RANK_CANDIDATE_LIMIT: usize = 10;
+
 fn vision_window_eligible(role: Option<&str>, name: Option<&str>) -> bool {
     name.is_some() && role.is_some_and(|role| VISION_WINDOW_ROLES.contains(&role))
 }
@@ -629,7 +631,7 @@ fn ranked_near_miss_window(
     scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
     scored
         .into_iter()
-        .take(5)
+        .take(CONTEXT_RANK_CANDIDATE_LIMIT)
         .map(|(_, candidate)| types::CandidateEvidence {
             role: candidate.role.clone(),
             name: candidate.name.clone(),
@@ -746,6 +748,170 @@ fn disambiguate_by_purpose(
         },
         best_match_authorized: false,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct PersistedCandidateRank {
+    net_successes: u64,
+    successes: u64,
+    last_verified_day: u32,
+    observed: bool,
+}
+
+async fn rank_candidates_from_context(
+    vision: &VisionContext,
+    intent_kind: &str,
+    mut candidates: Vec<types::CandidateEvidence>,
+) -> (Vec<types::CandidateEvidence>, Option<ContextLookupOutcome>) {
+    let Some(store) = &vision.context_store else {
+        return (candidates, None);
+    };
+    let Some(url) = vision
+        .prompt_context
+        .as_ref()
+        .and_then(|context| context.url.as_deref())
+    else {
+        return (candidates, Some(ContextLookupOutcome::Miss));
+    };
+    let (Some(site_key), Some(page_pattern)) = (
+        context_store::site_key(url),
+        context_store::page_pattern(url),
+    ) else {
+        return (candidates, Some(ContextLookupOutcome::Error));
+    };
+    let Some(site) = store.site(&site_key).await else {
+        return (candidates, Some(ContextLookupOutcome::Miss));
+    };
+    let Some(page) = site.pages.get(&page_pattern) else {
+        return (candidates, Some(ContextLookupOutcome::Miss));
+    };
+
+    let outcome = rank_candidates_for_page(page, intent_kind, &mut candidates);
+    (candidates, Some(outcome))
+}
+
+fn rank_candidates_for_page(
+    page: &context_store::PageContext,
+    intent_kind: &str,
+    candidates: &mut Vec<types::CandidateEvidence>,
+) -> ContextLookupOutcome {
+    let controls = page
+        .forms
+        .values()
+        .flat_map(|form| form.controls.iter())
+        .filter_map(|control| {
+            let stats = control.intents.get(intent_kind)?;
+            if stats.success_count == 0 || stats.success_count <= stats.failure_count {
+                return None;
+            }
+            Some((
+                control,
+                PersistedCandidateRank {
+                    net_successes: stats.success_count - stats.failure_count,
+                    successes: stats.success_count,
+                    last_verified_day: stats.last_verified_day.unwrap_or_default(),
+                    observed: stats.source == Some(context_store::RecordSource::Observed),
+                },
+            ))
+        })
+        .collect::<Vec<_>>();
+    if controls.is_empty() {
+        return ContextLookupOutcome::Miss;
+    }
+
+    let ranks = candidates
+        .iter()
+        .map(|candidate| {
+            let (Some(role), Some(name)) = (candidate.role.as_deref(), candidate.name.as_deref())
+            else {
+                return None;
+            };
+            controls
+                .iter()
+                .filter(|(control, _)| {
+                    control.role.trim().eq_ignore_ascii_case(role.trim())
+                        && control
+                            .accessible_name
+                            .trim()
+                            .eq_ignore_ascii_case(name.trim())
+                })
+                .map(|(_, rank)| *rank)
+                .max()
+        })
+        .collect::<Vec<_>>();
+    let Some(best_rank) = ranks.iter().flatten().max().copied() else {
+        return ContextLookupOutcome::Miss;
+    };
+    let best = ranks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, rank)| (*rank == Some(best_rank)).then_some(index))
+        .collect::<Vec<_>>();
+    let [best_index] = best.as_slice() else {
+        return ContextLookupOutcome::AmbiguousRefusal;
+    };
+    let best = candidates.remove(*best_index);
+    candidates.insert(0, best);
+    ContextLookupOutcome::Hit
+}
+
+#[cfg(test)]
+mod context_candidate_ranking_tests {
+    use super::*;
+    use context_store::{ControlContext, FormContext, IntentStats, RecordSource};
+    use std::collections::BTreeMap;
+
+    fn page(control_name: &str) -> context_store::PageContext {
+        context_store::PageContext {
+            forms: BTreeMap::from([(
+                "page".into(),
+                FormContext {
+                    controls: vec![ControlContext {
+                        role: "button".into(),
+                        accessible_name: control_name.into(),
+                        ordinal: None,
+                        form_membership: "page".into(),
+                        intents: BTreeMap::from([(
+                            "locate".into(),
+                            IntentStats {
+                                success_count: 2,
+                                failure_count: 0,
+                                last_verified_day: Some(20_000),
+                                source: Some(RecordSource::Observed),
+                            },
+                        )]),
+                    }],
+                },
+            )]),
+        }
+    }
+
+    fn candidate(name: &str) -> types::CandidateEvidence {
+        types::CandidateEvidence {
+            role: Some("button".into()),
+            name: Some(name.into()),
+            score: 0,
+            reasons: vec!["noMatch".into()],
+        }
+    }
+
+    #[test]
+    fn duplicate_semantic_identity_refuses_context_ranking() {
+        let mut candidates = vec![candidate("Continue"), candidate("Continue")];
+        assert_eq!(
+            rank_candidates_for_page(&page("Continue"), "locate", &mut candidates),
+            ContextLookupOutcome::AmbiguousRefusal
+        );
+    }
+
+    #[test]
+    fn missing_live_identity_does_not_rank() {
+        let mut candidates = vec![candidate("Cancel")];
+        assert_eq!(
+            rank_candidates_for_page(&page("Continue"), "locate", &mut candidates),
+            ContextLookupOutcome::Miss
+        );
+    }
 }
 
 fn semantic_tokens(value: &str) -> BTreeSet<String> {
@@ -3190,6 +3356,11 @@ async fn escalate_with_vision(
         verification,
         fill_payload,
     } = report;
+    let (candidates, context_outcome) =
+        rank_candidates_from_context(vision, intent_kind, candidates).await;
+    if let (Some(outcome), Some((metrics, _))) = (context_outcome, assist.operational_metrics()) {
+        metrics.record_context_lookup(outcome);
+    }
     tracing::info!(intent = intent_kind, trigger = "stuck", "vision.escalation");
     // `stuck_evidence` is prefixed onto failure evidence only, never onto a Completed one.
     let mut base_evidence = prior_evidence.clone();

@@ -3,9 +3,14 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use context_store::{
+    ContextStore, ControlContext, FormContext, IntentStats, PageContext as StoredPageContext,
+    RecordSource, SiteContext,
+};
 use intent_engine::{
-    IntentBrowser, IntentEngine, IntentOutcome, VisionAction, VisionAssist, VisionContext,
-    VisionCorpus, VisionProposal, VisionProposeRequest, VISION_CONFIDENCE_FLOOR,
+    instrument_vision_assist, IntentBrowser, IntentEngine, IntentOutcome, VisionAction,
+    VisionAssist, VisionContext, VisionCorpus, VisionPromptContext, VisionProposal,
+    VisionProposeRequest, VISION_CONFIDENCE_FLOOR,
 };
 use observability::{OperationalMetrics, ProviderMode};
 use types::{
@@ -1306,6 +1311,105 @@ async fn near_miss_window_is_purpose_ranked() {
         !request.contains("Onboarding"),
         "sidebar chrome must not fill the window: {request}"
     );
+}
+
+#[tokio::test]
+async fn verified_page_context_ranks_the_provider_candidate_window() {
+    let temp = tempfile::tempdir().unwrap();
+    let (store, _) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
+    store
+        .upsert_site(
+            "https://example.test",
+            SiteContext {
+                pages: BTreeMap::from([(
+                    "/checkout".into(),
+                    StoredPageContext {
+                        forms: BTreeMap::from([(
+                            "page".into(),
+                            FormContext {
+                                controls: vec![ControlContext {
+                                    role: "button".into(),
+                                    accessible_name: "Review order".into(),
+                                    ordinal: None,
+                                    form_membership: "page".into(),
+                                    intents: BTreeMap::from([(
+                                        "locate".into(),
+                                        IntentStats {
+                                            success_count: 3,
+                                            failure_count: 0,
+                                            last_verified_day: Some(20_000),
+                                            source: Some(RecordSource::Observed),
+                                        },
+                                    )]),
+                                }],
+                            },
+                        )]),
+                    },
+                )]),
+                ..SiteContext::default()
+            },
+        )
+        .await;
+
+    let request_debug = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let metrics = OperationalMetrics::default();
+    let assist = instrument_vision_assist(
+        Arc::new(RecordingVision {
+            proposal: VisionProposal {
+                confidence: 0.95,
+                action: VisionAction::ClickCandidate { index: 0 },
+            },
+            request_debug: request_debug.clone(),
+        }),
+        metrics.clone(),
+    );
+    let click_targets = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let browser = FakeBrowser {
+        candidates: vec![
+            form_candidate("one", "button", "Account"),
+            form_candidate("two", "button", "Settings"),
+            form_candidate("three", "button", "Support"),
+            form_candidate("four", "button", "History"),
+            form_candidate("five", "button", "Cancel"),
+            form_candidate("review", "button", "Review order"),
+        ],
+        click_targets: click_targets.clone(),
+        screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
+    };
+
+    let outcome = IntentEngine::execute(
+        &IntentCommand::Locate(LocateIntent {
+            purpose: "Finish checkout".into(),
+            hints: IntentHints::default(),
+        }),
+        &PageId::new(),
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(assist),
+            proposals: None,
+            defer_escalation: false,
+            prompt_context: Some(VisionPromptContext {
+                url: Some("https://example.test/checkout?step=2".into()),
+                ..VisionPromptContext::default()
+            }),
+            corpus: None,
+            context_store: Some(Arc::new(store)),
+        },
+    )
+    .await;
+
+    assert!(matches!(outcome, IntentOutcome::Completed { .. }));
+    let targets = click_targets.lock().unwrap_or_else(|p| p.into_inner());
+    assert_eq!(
+        targets[0]
+            .as_ref()
+            .and_then(|target| target.accessible_name.as_deref()),
+        Some("Review order")
+    );
+    assert_eq!(metrics.snapshot().context.hit, 1);
 }
 
 #[tokio::test]

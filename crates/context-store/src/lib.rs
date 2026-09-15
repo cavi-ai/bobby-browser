@@ -26,7 +26,7 @@ use tokio::fs::{File, OpenOptions};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
-pub use sitekey::site_key;
+pub use sitekey::{page_pattern, site_key};
 
 pub const SCHEMA_VERSION: u16 = 1;
 
