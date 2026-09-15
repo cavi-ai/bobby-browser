@@ -707,10 +707,7 @@ fn apply_advertised_input_patches(patched: &mut Map<String, Value>) {
     );
     patched.insert(
         "ScreenshotMode".to_owned(),
-        json!({
-            "type":"object",
-            "description":"viewport | fullPage | element | clip. Full union enforced at tools/call."
-        }),
+        json!({"oneOf": screenshot_modes()}),
     );
 }
 
