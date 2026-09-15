@@ -19,6 +19,10 @@ const PLAYWRIGHT_1_62_1_INJECTED: (usize, &str) = (
     317_080,
     "b817c6e941f652f2996b93bd096e6a6e9457e16b40e8ebf62adcd855f723b263",
 );
+const PLAYWRIGHT_1_63_INJECTED: (usize, &str) = (
+    321_149,
+    "02d87b87a0382dda09a8786a2b838be38f4b2a857e1f21afc04d5e8c00fb604d",
+);
 const PLAYWRIGHT_1_61_UTILITY: (usize, &str) = (
     10_652,
     "3fc2ec24a4359c88a30f650d4daf23c0554eda935fb19bf1fe81f687f65d8dcd",
@@ -28,10 +32,11 @@ const PLAYWRIGHT_1_62_UTILITY: (usize, &str) = (
     "fd3b882cab3a898b34e827ab330d9fb152340d61f7d0c3cec30247018af131e4",
 );
 
-const INJECTED_BOOTSTRAPS: [(usize, &str); 3] = [
+const INJECTED_BOOTSTRAPS: [(usize, &str); 4] = [
     PLAYWRIGHT_1_61_INJECTED,
     PLAYWRIGHT_1_62_0_INJECTED,
     PLAYWRIGHT_1_62_1_INJECTED,
+    PLAYWRIGHT_1_63_INJECTED,
 ];
 
 fn is_pinned_bootstrap_identity(len: usize, digest: &str) -> bool {
@@ -177,6 +182,14 @@ mod tests {
         assert!(is_pinned_bootstrap_identity(
             11_035,
             "fd3b882cab3a898b34e827ab330d9fb152340d61f7d0c3cec30247018af131e4"
+        ));
+    }
+
+    #[test]
+    fn accepts_playwright_1_63_injected_bootstrap_identity() {
+        assert!(is_pinned_bootstrap_identity(
+            321_149,
+            "02d87b87a0382dda09a8786a2b838be38f4b2a857e1f21afc04d5e8c00fb604d"
         ));
     }
 
