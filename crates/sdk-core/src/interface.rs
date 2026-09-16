@@ -7,6 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use checkpoint_store::CheckpointStoreError;
 use chrono::Utc;
 use interface_core::{
     canonical_sha256, command_identity_sha256, AuthorizationGuard, CapabilityHandle,
@@ -659,7 +660,7 @@ impl RuntimeInterface for AuthenticatedRuntime {
             .inner
             .recovery_session(&workflow)
             .await
-            .map_err(|_| internal_error(&ctx))?;
+            .map_err(|error| recovery_lookup_error(&ctx, error))?;
         self.require_owned_session(&ctx, &session_id)?;
         self.inner
             .recovery_status(&workflow)
@@ -704,7 +705,7 @@ impl RuntimeInterface for AuthenticatedRuntime {
             .inner
             .recovery_session(&workflow)
             .await
-            .map_err(|_| internal_error(&ctx))?;
+            .map_err(|error| recovery_lookup_error(&ctx, error))?;
         self.require_owned_session(&ctx, &session_id)?;
         self.inner
             .recover_for_session(&workflow, &session_id)
@@ -801,6 +802,20 @@ fn internal_error(ctx: &RequestContext) -> InterfaceError {
         InterfaceErrorCode::Internal,
         "runtime operation failed",
     )
+}
+
+fn recovery_lookup_error(
+    ctx: &RequestContext,
+    error: page_runtime::RecoveryError,
+) -> InterfaceError {
+    match error {
+        page_runtime::RecoveryError::Store(CheckpointStoreError::NotFound(_)) => error_with(
+            ctx,
+            InterfaceErrorCode::NotFound,
+            "runtime resource was not found",
+        ),
+        _ => internal_error(ctx),
+    }
 }
 
 fn error_with(ctx: &RequestContext, code: InterfaceErrorCode, message: &str) -> InterfaceError {
