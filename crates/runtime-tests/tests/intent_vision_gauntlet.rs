@@ -332,14 +332,14 @@ async fn customer_update_run(run_idx: usize) -> TestResult<usize> {
     if escalate_or(
         &runtime,
         locate(OPEN_CUSTOMER[run_idx % OPEN_CUSTOMER.len()]),
-        runtime.click("a[href='/customers/cus_atlas']", false),
+        runtime.click_named("link", "Atlas Labs", false),
     )
     .await?
     {
         committed += 1;
     }
     runtime
-        .wait_visible("button[aria-label='Customer priority']")
+        .wait_named("combobox", "Customer priority")
         .await?;
 
     if escalate_or(
@@ -472,6 +472,9 @@ async fn onboarding_submit(
     {
         committed += 1;
     }
+
+    runtime.click_named("button", "Next", false).await?;
+    runtime.wait_named("button", "Create customer").await?;
 
     if escalate_or(
         runtime,

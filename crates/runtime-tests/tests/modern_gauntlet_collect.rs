@@ -147,6 +147,9 @@ async fn collect_onboarding_corpus() -> TestResult<()> {
         .type_text("input[aria-label='Postal code']", "10001")
         .await?;
 
+    runtime.click_named("button", "Next", false).await?;
+    runtime.wait_named("button", "Create customer").await?;
+
     collector
         .capture(
             &runtime,
@@ -398,10 +401,10 @@ async fn collect_customer_update_corpus() -> TestResult<()> {
         )
         .await?;
     runtime
-        .click("a[href='/customers/cus_atlas']", false)
+        .click_named("link", "Atlas Labs", false)
         .await?;
     runtime
-        .wait_visible("button[aria-label='Customer priority']")
+        .wait_named("combobox", "Customer priority")
         .await?;
 
     collector

@@ -269,10 +269,10 @@ async fn grow_customer_update_traps_corpus() -> TestResult<()> {
             )
             .await?;
         runtime
-            .click("a[href='/customers/cus_atlas']", false)
+            .click_named("link", "Atlas Labs", false)
             .await?;
         runtime
-            .wait_visible("button[aria-label='Customer priority']")
+            .wait_named("combobox", "Customer priority")
             .await?;
 
         collector
@@ -457,10 +457,10 @@ async fn grow_customer_update_corpus() -> TestResult<()> {
                 )
                 .await?;
             runtime
-                .click("a[href='/customers/cus_atlas']", false)
+                .click_named("link", "Atlas Labs", false)
                 .await?;
             runtime
-                .wait_visible("button[aria-label='Customer priority']")
+                .wait_named("combobox", "Customer priority")
                 .await?;
 
             collector
@@ -721,6 +721,9 @@ async fn grow_onboarding_corpus() -> TestResult<()> {
                     &step("read_postal_code"),
                 )
                 .await?;
+
+            runtime.click_named("button", "Next", false).await?;
+            runtime.wait_named("button", "Create customer").await?;
 
             collector
                 .capture(
