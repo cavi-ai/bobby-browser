@@ -18,8 +18,8 @@ use types::{
 use crate::compiler::{compile_intent, CompleteFormFieldPlan, ExtractFieldPlan, IntentPlan};
 use crate::stuck::{never_escalates, StuckKind};
 use crate::verify::{
-    compatible, execution_record, execution_record_with_path, is_file_input, summarize_target,
-    verify_fill, ResolutionDetails,
+    compatible, compatible_role, execution_record, execution_record_with_path, is_file_input,
+    summarize_target, verify_fill, ResolutionDetails,
 };
 use crate::vision::{
     proposal_sha256, VisionAction, VisionAssist, VisionProposeRequest, VISION_CONFIDENCE_FLOOR,
@@ -568,11 +568,13 @@ async fn execute_locate(
 /// top-5 window budget, and shift the prompt off the adapter's training
 /// distribution (measured: one `main` row flips the adapter to abstain
 /// on an otherwise-clean window).
-const VISION_WINDOW_ROLES: [&str; 10] = [
+const VISION_WINDOW_ROLES: [&str; 12] = [
     "button",
     "link",
     "textbox",
+    "spinbutton",
     "combobox",
+    "listbox",
     "checkbox",
     "radio",
     "tab",
@@ -1132,12 +1134,11 @@ async fn execute_fill(
         _ => None,
     };
     let plan_summary = format!("{} value={}", summarize_target(&target), fill_kind(&value));
-    let fill_payload = match &value {
-        ControlAction::SetText { value, clear_first } => Some(VisionFillPayload {
-            text: value.clone(),
-            clear_first: *clear_first,
+    let fill_payload = match value {
+        ControlAction::SetFiles { .. } | ControlAction::Activate => None,
+        _ => Some(VisionFillPayload {
+            action: value.clone(),
         }),
-        _ => None,
     };
     let candidates = match browser.collect_candidates(page_id, &target).await {
         Ok(candidates) => candidates,
@@ -3257,8 +3258,7 @@ async fn execute_detect_challenge(
 /// into any vision escalation.
 #[derive(Debug, Clone)]
 struct VisionFillPayload {
-    text: String,
-    clear_first: bool,
+    action: ControlAction,
 }
 
 struct StuckReport<'a> {
@@ -3936,28 +3936,72 @@ async fn execute_vision_action(
         VisionAction::TypeIntoCandidate { index } => {
             let payload = fill_payload.ok_or_else(|| CommandError {
                 code: ErrorCode::VisionAssistFailed,
-                message: "typeIntoCandidate requires a runtime text fill payload".into(),
+                message: "typeIntoCandidate requires a runtime fill action".into(),
                 layer: ErrorLayer::Page,
                 retryable: false,
             })?;
             let target = prompt_candidate_target("typeIntoCandidate", *index, prompt_candidates)?;
-            let evidence = browser
-                .type_text(
-                    page_id,
-                    &TypeTextCommand {
-                        selector: String::new(),
-                        target: Some(target),
-                        value: payload.text.clone(),
-                        clear_first: payload.clear_first,
-                        expected_url: None,
-                    },
-                )
-                .await?;
-            let value = ControlAction::SetText {
-                value: payload.text.clone(),
-                clear_first: payload.clear_first,
+            let role = target.role.as_deref().unwrap_or_default();
+            if !compatible_role(&payload.action, role, false) {
+                return Err(CommandError {
+                    code: ErrorCode::IntentActionMismatch,
+                    message: format!(
+                        "typeIntoCandidate fill {} is incompatible with candidate role={role:?}",
+                        fill_kind(&payload.action)
+                    ),
+                    layer: ErrorLayer::Page,
+                    retryable: false,
+                });
+            }
+            let evidence = match &payload.action {
+                ControlAction::SetText { value, clear_first } => {
+                    browser
+                        .type_text(
+                            page_id,
+                            &TypeTextCommand {
+                                selector: String::new(),
+                                target: Some(target),
+                                value: value.clone(),
+                                clear_first: *clear_first,
+                                expected_url: None,
+                            },
+                        )
+                        .await?
+                }
+                ControlAction::SelectOne { .. }
+                | ControlAction::SelectMany { .. }
+                | ControlAction::SetChecked { .. }
+                | ControlAction::Clear => {
+                    let control_target = FormControlTarget {
+                        role: target.role.clone().unwrap_or_default(),
+                        accessible_name: target.accessible_name.clone().unwrap_or_default(),
+                        ordinal: target.ordinal,
+                        frame_path: Vec::new(),
+                        shadow_path: Vec::new(),
+                    };
+                    browser
+                        .control_action(
+                            page_id,
+                            &ControlActionCommand {
+                                target: control_target,
+                                action: payload.action.clone(),
+                            },
+                        )
+                        .await?
+                }
+                ControlAction::SetFiles { .. } | ControlAction::Activate => {
+                    return Err(CommandError {
+                        code: ErrorCode::IntentActionMismatch,
+                        message: format!(
+                            "typeIntoCandidate does not support fill {}",
+                            fill_kind(&payload.action)
+                        ),
+                        layer: ErrorLayer::Page,
+                        retryable: false,
+                    });
+                }
             };
-            verify_fill(&value, &evidence).map_err(|_| CommandError {
+            verify_fill(&payload.action, &evidence).map_err(|_| CommandError {
                 code: ErrorCode::VerificationFailed,
                 message: "typeIntoCandidate verification failed".into(),
                 layer: ErrorLayer::Page,
