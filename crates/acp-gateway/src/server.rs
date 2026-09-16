@@ -2,9 +2,9 @@
 //!
 //! Wire scope: `initialize`, `session/new`, `session/prompt`,
 //! `session/cancel`, and agent→client `session/update` plus
-//! `session/request_permission`. A prompt is a structured automation request
-//! (an optional `url` plus one intent in the exact `types::IntentCommand`
-//! wire shape), never freeform natural language: there is no planner.
+//! `session/request_permission`. A prompt is either a structured automation
+//! request or a named context, checkpoint, or recovery operation. Freeform
+//! natural language is rejected: there is no planner.
 //!
 //! Every run goes through the same `AuthenticatedRuntime` the other adapters
 //! use, so capability, idempotency, evidence, and outcome semantics cannot
@@ -31,21 +31,61 @@ use sdk_core::AuthenticatedRuntime;
 use tokio::sync::Mutex;
 use types::{
     AttemptId, Capability, ClosePageCommand, CommandEnvelope, CommandId, CommandOutcome,
-    CreateSessionRequest, IntentCommand, NavigateCommand, OpenPageRequest, PageId, PageState,
-    RuntimeCommand, SessionId, SessionState, WaitUntil, WorkflowId,
+    CreateSessionRequest, Evidence, IntentCommand, NavigateCommand, OpenPageRequest, PageId,
+    PageState, RecoveryDecision, RuntimeCommand, SessionId, SessionState, WaitUntil,
+    WorkflowCheckpoint, WorkflowId,
 };
 
 use crate::escalation::{decide, Escalation, EscalationRequest, SessionPolicyGates};
 
-/// What a `session/prompt` text block must decode to. `url` is the target
-/// page (opened and navigated first); `intent` is one intent in the exact
-/// shape `command_execute` accepts.
+/// What a `session/prompt` text block must decode to.
+#[derive(Debug, serde::Deserialize)]
+#[serde(untagged)]
+enum StructuredPrompt {
+    Operation(PromptOperation),
+    Automation(Box<AutomationPrompt>),
+}
+
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct StructuredPrompt {
+struct AutomationPrompt {
     #[serde(default)]
     url: Option<String>,
     intent: IntentCommand,
+    #[serde(default)]
+    workflow_id: Option<WorkflowId>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "operation", deny_unknown_fields)]
+enum PromptOperation {
+    #[serde(rename = "contextAsk")]
+    ContextAsk { description: String },
+    #[serde(rename = "contextNeighbors")]
+    ContextNeighbors { description: String },
+    #[serde(rename = "contextSite")]
+    ContextSite {
+        #[serde(rename = "siteKey")]
+        site_key: String,
+    },
+    #[serde(rename = "checkpointSave")]
+    CheckpointSave {
+        checkpoint: Box<WorkflowCheckpoint>,
+        #[serde(rename = "evidenceRefs", default)]
+        evidence_refs: Vec<CommandId>,
+    },
+    #[serde(rename = "recoveryStatus")]
+    RecoveryStatus {
+        #[serde(rename = "workflowId", default)]
+        workflow_id: Option<WorkflowId>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    #[serde(rename = "workflowRecover")]
+    WorkflowRecover {
+        #[serde(rename = "workflowId")]
+        workflow_id: WorkflowId,
+    },
 }
 
 #[derive(Default)]
@@ -215,6 +255,12 @@ struct AcpSession {
     turn: Arc<PromptTurn>,
 }
 
+struct AcpCommandScope {
+    runtime_session: SessionId,
+    page: PageId,
+    workflow_id: WorkflowId,
+}
+
 #[async_trait]
 trait AcpRuntime: Send + Sync {
     async fn create_session(
@@ -242,6 +288,52 @@ trait AcpRuntime: Send + Sync {
         ctx: types::RequestContext,
         envelope: CommandEnvelope,
     ) -> InterfaceResult<CommandOutcome>;
+    async fn context_ask(
+        &self,
+        ctx: types::RequestContext,
+        session: SessionId,
+        page: PageId,
+        description: String,
+    ) -> InterfaceResult<Option<types::ContextAnswer>>;
+    async fn context_neighbors(
+        &self,
+        ctx: types::RequestContext,
+        session: SessionId,
+        page: PageId,
+        description: String,
+    ) -> InterfaceResult<Option<types::ContextNeighbors>>;
+    async fn context_site(
+        &self,
+        ctx: types::RequestContext,
+        site_key: String,
+    ) -> InterfaceResult<Option<types::ContextSiteView>>;
+    async fn resolve_command_evidence(
+        &self,
+        ctx: types::RequestContext,
+        command_ids: Vec<CommandId>,
+    ) -> InterfaceResult<Vec<Evidence>>;
+    async fn checkpoint(
+        &self,
+        ctx: types::RequestContext,
+        checkpoint: WorkflowCheckpoint,
+        evidence: Vec<Evidence>,
+    ) -> InterfaceResult<WorkflowCheckpoint>;
+    async fn recovery_status(
+        &self,
+        ctx: types::RequestContext,
+        workflow: WorkflowId,
+    ) -> InterfaceResult<types::RecoveryStatus>;
+    async fn workflows_for_session(
+        &self,
+        ctx: types::RequestContext,
+        session: SessionId,
+        limit: usize,
+    ) -> InterfaceResult<Vec<WorkflowId>>;
+    async fn recover(
+        &self,
+        ctx: types::RequestContext,
+        workflow: WorkflowId,
+    ) -> InterfaceResult<RecoveryDecision>;
 }
 
 #[async_trait]
@@ -284,6 +376,76 @@ impl AcpRuntime for AuthenticatedRuntime {
         envelope: CommandEnvelope,
     ) -> InterfaceResult<CommandOutcome> {
         AuthenticatedRuntime::submit_with_one_shot_vision_consent(self, ctx, envelope).await
+    }
+
+    async fn context_ask(
+        &self,
+        ctx: types::RequestContext,
+        session: SessionId,
+        page: PageId,
+        description: String,
+    ) -> InterfaceResult<Option<types::ContextAnswer>> {
+        RuntimeInterface::context_ask(self, ctx, session, page, description).await
+    }
+
+    async fn context_neighbors(
+        &self,
+        ctx: types::RequestContext,
+        session: SessionId,
+        page: PageId,
+        description: String,
+    ) -> InterfaceResult<Option<types::ContextNeighbors>> {
+        RuntimeInterface::context_neighbors(self, ctx, session, page, description).await
+    }
+
+    async fn context_site(
+        &self,
+        ctx: types::RequestContext,
+        site_key: String,
+    ) -> InterfaceResult<Option<types::ContextSiteView>> {
+        RuntimeInterface::context_site(self, ctx, site_key).await
+    }
+
+    async fn resolve_command_evidence(
+        &self,
+        ctx: types::RequestContext,
+        command_ids: Vec<CommandId>,
+    ) -> InterfaceResult<Vec<Evidence>> {
+        RuntimeInterface::resolve_command_evidence(self, ctx, command_ids).await
+    }
+
+    async fn checkpoint(
+        &self,
+        ctx: types::RequestContext,
+        checkpoint: WorkflowCheckpoint,
+        evidence: Vec<Evidence>,
+    ) -> InterfaceResult<WorkflowCheckpoint> {
+        RuntimeInterface::checkpoint(self, ctx, checkpoint, evidence).await
+    }
+
+    async fn recovery_status(
+        &self,
+        ctx: types::RequestContext,
+        workflow: WorkflowId,
+    ) -> InterfaceResult<types::RecoveryStatus> {
+        RuntimeInterface::recovery_status(self, ctx, workflow).await
+    }
+
+    async fn workflows_for_session(
+        &self,
+        ctx: types::RequestContext,
+        session: SessionId,
+        limit: usize,
+    ) -> InterfaceResult<Vec<WorkflowId>> {
+        RuntimeInterface::workflows_for_session(self, ctx, session, limit).await
+    }
+
+    async fn recover(
+        &self,
+        ctx: types::RequestContext,
+        workflow: WorkflowId,
+    ) -> InterfaceResult<RecoveryDecision> {
+        RuntimeInterface::recover(self, ctx, workflow).await
     }
 }
 
@@ -553,6 +715,22 @@ impl AcpServer {
             BeginTurnError::Closed => invalid_request("session is closed"),
         })?;
 
+        let structured = match structured {
+            StructuredPrompt::Operation(operation) => {
+                return self
+                    .prompt_operation(
+                        connection,
+                        &acp_session_id,
+                        &runtime_session,
+                        current_page.as_ref(),
+                        operation,
+                        &mut prompt_turn,
+                    )
+                    .await;
+            }
+            StructuredPrompt::Automation(structured) => *structured,
+        };
+
         if let Some(url) = &structured.url {
             let page = match self
                 .open_and_navigate(
@@ -595,18 +773,15 @@ impl AcpServer {
         let submit_session = runtime_session.clone();
         let submit_page = page.clone();
         let intent = structured.intent.clone();
-        let mut submitted = tokio::spawn(async move {
-            runtime
-                .submit(
-                    ctx,
-                    envelope(
-                        &submit_session,
-                        &submit_page,
-                        RuntimeCommand::Intent(intent),
-                    ),
-                )
-                .await
-        });
+        let command = envelope(
+            &submit_session,
+            &submit_page,
+            RuntimeCommand::Intent(intent),
+            structured.workflow_id,
+        );
+        let workflow_id = command.workflow_id.clone();
+        let attempt_id = command.attempt_id.clone();
+        let mut submitted = tokio::spawn(async move { runtime.submit(ctx, command).await });
         let outcome = match prompt_turn.wait(&mut submitted).await {
             Ok(result) => result
                 .map_err(internal_error)
@@ -616,7 +791,15 @@ impl AcpServer {
                 return Ok(PromptResponse::new(StopReason::Cancelled));
             }
         };
-        report_outcome(connection, &acp_session_id, &outcome);
+        report_outcome(
+            connection,
+            &acp_session_id,
+            &runtime_session,
+            &page,
+            &workflow_id,
+            &attempt_id,
+            &outcome,
+        )?;
         match &outcome {
             CommandOutcome::Completed { .. } => Ok(PromptResponse::new(StopReason::EndTurn)),
             CommandOutcome::Failed { error, .. }
@@ -625,8 +808,11 @@ impl AcpServer {
                 self.maybe_escalate(
                     connection,
                     &acp_session_id,
-                    &runtime_session,
-                    &page,
+                    &AcpCommandScope {
+                        runtime_session,
+                        page,
+                        workflow_id,
+                    },
                     structured.intent,
                     &mut prompt_turn,
                 )
@@ -639,6 +825,166 @@ impl AcpServer {
         }
     }
 
+    async fn prompt_operation(
+        &self,
+        connection: &ConnectionTo<Client>,
+        acp_session_id: &str,
+        runtime_session: &SessionId,
+        page: Option<&PageId>,
+        operation: PromptOperation,
+        prompt_turn: &mut PromptLease,
+    ) -> Result<PromptResponse, agent_client_protocol::Error> {
+        const MAX_EVIDENCE_REFS: usize = 128;
+        const MAX_RECOVERABLE_WORKFLOWS: usize = 32;
+
+        let payload = async {
+            let payload = match operation {
+                PromptOperation::ContextAsk { description } => {
+                    let page = page.ok_or_else(|| {
+                        PromptStepError::Failed(invalid_request(
+                            "contextAsk requires a page; navigate in an automation prompt first",
+                        ))
+                    })?;
+                    let result = prompt_turn
+                        .wait(self.runtime.context_ask(
+                            self.ctx(),
+                            runtime_session.clone(),
+                            page.clone(),
+                            description,
+                        ))
+                        .await
+                        .map_err(|_| PromptStepError::Cancelled)?
+                        .map_err(|error| PromptStepError::Failed(interface_error(error)))?;
+                    serde_json::json!({"operation":"contextAsk", "result":result})
+                }
+                PromptOperation::ContextNeighbors { description } => {
+                    let page = page.ok_or_else(|| {
+                        PromptStepError::Failed(invalid_request(
+                        "contextNeighbors requires a page; navigate in an automation prompt first",
+                    ))
+                    })?;
+                    let result = prompt_turn
+                        .wait(self.runtime.context_neighbors(
+                            self.ctx(),
+                            runtime_session.clone(),
+                            page.clone(),
+                            description,
+                        ))
+                        .await
+                        .map_err(|_| PromptStepError::Cancelled)?
+                        .map_err(|error| PromptStepError::Failed(interface_error(error)))?;
+                    serde_json::json!({"operation":"contextNeighbors", "result":result})
+                }
+                PromptOperation::ContextSite { site_key } => {
+                    let result = prompt_turn
+                        .wait(self.runtime.context_site(self.ctx(), site_key))
+                        .await
+                        .map_err(|_| PromptStepError::Cancelled)?
+                        .map_err(|error| PromptStepError::Failed(interface_error(error)))?;
+                    serde_json::json!({"operation":"contextSite", "result":result})
+                }
+                PromptOperation::CheckpointSave {
+                    checkpoint,
+                    evidence_refs,
+                } => {
+                    if checkpoint.session_id != *runtime_session {
+                        return Err(PromptStepError::Failed(invalid_request(
+                            "checkpoint sessionId must match the ACP session",
+                        )));
+                    }
+                    if evidence_refs.len() > MAX_EVIDENCE_REFS {
+                        return Err(PromptStepError::Failed(invalid_request(
+                            "evidenceRefs exceeds 128 entries",
+                        )));
+                    }
+                    let evidence = prompt_turn
+                        .wait(
+                            self.runtime
+                                .resolve_command_evidence(self.ctx(), evidence_refs),
+                        )
+                        .await
+                        .map_err(|_| PromptStepError::Cancelled)?
+                        .map_err(|error| PromptStepError::Failed(interface_error(error)))?;
+                    let runtime = Arc::clone(&self.runtime);
+                    let ctx = self.ctx();
+                    let mut saving = tokio::spawn(async move {
+                        runtime.checkpoint(ctx, *checkpoint, evidence).await
+                    });
+                    let result = match prompt_turn.wait(&mut saving).await {
+                        Ok(result) => result
+                            .map_err(|error| PromptStepError::Failed(internal_error(error)))?
+                            .map_err(|error| PromptStepError::Failed(interface_error(error)))?,
+                        Err(TurnCancelled) => {
+                            let _ = saving.await;
+                            return Err(PromptStepError::Cancelled);
+                        }
+                    };
+                    serde_json::json!({"operation":"checkpointSave", "result":result})
+                }
+                PromptOperation::RecoveryStatus { workflow_id, limit } => {
+                    let result = if let Some(workflow_id) = workflow_id {
+                        serde_json::to_value(
+                            prompt_turn
+                                .wait(self.runtime.recovery_status(self.ctx(), workflow_id))
+                                .await
+                                .map_err(|_| PromptStepError::Cancelled)?
+                                .map_err(|error| PromptStepError::Failed(interface_error(error)))?,
+                        )
+                        .map_err(|error| PromptStepError::Failed(internal_error(error)))?
+                    } else {
+                        let limit = limit.unwrap_or(MAX_RECOVERABLE_WORKFLOWS);
+                        if !(1..=MAX_RECOVERABLE_WORKFLOWS).contains(&limit) {
+                            return Err(PromptStepError::Failed(invalid_request(
+                                "limit must be between 1 and 32",
+                            )));
+                        }
+                        let workflows = prompt_turn
+                            .wait(self.runtime.workflows_for_session(
+                                self.ctx(),
+                                runtime_session.clone(),
+                                limit,
+                            ))
+                            .await
+                            .map_err(|_| PromptStepError::Cancelled)?
+                            .map_err(|error| PromptStepError::Failed(interface_error(error)))?;
+                        serde_json::json!({
+                            "sessionId":runtime_session,
+                            "workflows":workflows,
+                        })
+                    };
+                    serde_json::json!({"operation":"recoveryStatus", "result":result})
+                }
+                PromptOperation::WorkflowRecover { workflow_id } => {
+                    let runtime = Arc::clone(&self.runtime);
+                    let ctx = self.ctx();
+                    let mut recovering =
+                        tokio::spawn(async move { runtime.recover(ctx, workflow_id).await });
+                    let result = match prompt_turn.wait(&mut recovering).await {
+                        Ok(result) => result
+                            .map_err(|error| PromptStepError::Failed(internal_error(error)))?
+                            .map_err(|error| PromptStepError::Failed(interface_error(error)))?,
+                        Err(TurnCancelled) => {
+                            let _ = recovering.await;
+                            return Err(PromptStepError::Cancelled);
+                        }
+                    };
+                    serde_json::json!({"operation":"workflowRecover", "result":result})
+                }
+            };
+            Ok::<_, PromptStepError>(payload)
+        }
+        .await;
+        let payload = match payload {
+            Ok(payload) => payload,
+            Err(PromptStepError::Cancelled) => {
+                return Ok(PromptResponse::new(StopReason::Cancelled));
+            }
+            Err(PromptStepError::Failed(error)) => return Err(error),
+        };
+        send_json_chunk(connection, acp_session_id, payload)?;
+        Ok(PromptResponse::new(StopReason::EndTurn))
+    }
+
     /// The only path that reaches a human. Whether to ask is
     /// [`crate::escalation`]'s decision; an approval applies only to the retry
     /// of this command on the existing page and never creates a reusable
@@ -647,8 +993,7 @@ impl AcpServer {
         &self,
         connection: &ConnectionTo<Client>,
         acp_session_id: &str,
-        runtime_session: &SessionId,
-        page: &PageId,
+        scope: &AcpCommandScope,
         intent: IntentCommand,
         prompt_turn: &mut PromptLease,
     ) -> Result<PromptResponse, agent_client_protocol::Error> {
@@ -717,8 +1062,14 @@ impl AcpServer {
                     "vision assist approved for this command; retrying on the current page"
                         .to_string(),
                 );
-                let outcome = match self
-                    .retry_with_one_shot(runtime_session, page, intent, prompt_turn)
+                let (outcome, attempt_id) = match self
+                    .retry_with_one_shot(
+                        &scope.runtime_session,
+                        &scope.page,
+                        &scope.workflow_id,
+                        intent,
+                        prompt_turn,
+                    )
                     .await
                 {
                     Ok(outcome) => outcome,
@@ -727,7 +1078,15 @@ impl AcpServer {
                     }
                     Err(PromptStepError::Failed(error)) => return Err(error),
                 };
-                report_outcome(connection, acp_session_id, &outcome);
+                report_outcome(
+                    connection,
+                    acp_session_id,
+                    &scope.runtime_session,
+                    &scope.page,
+                    &scope.workflow_id,
+                    &attempt_id,
+                    &outcome,
+                )?;
                 Ok(PromptResponse::new(match &outcome {
                     CommandOutcome::Completed { .. } => StopReason::EndTurn,
                     _ => StopReason::Refusal,
@@ -740,15 +1099,24 @@ impl AcpServer {
         &self,
         runtime_session: &SessionId,
         page: &PageId,
+        workflow_id: &WorkflowId,
         intent: IntentCommand,
         prompt_turn: &mut PromptLease,
-    ) -> Result<CommandOutcome, PromptStepError> {
-        let retry = self.runtime.submit_with_one_shot_vision_consent(
-            self.ctx(),
-            envelope(runtime_session, page, RuntimeCommand::Intent(intent)),
+    ) -> Result<(CommandOutcome, AttemptId), PromptStepError> {
+        let command = envelope(
+            runtime_session,
+            page,
+            RuntimeCommand::Intent(intent),
+            Some(workflow_id.clone()),
         );
+        let attempt_id = command.attempt_id.clone();
+        let retry = self
+            .runtime
+            .submit_with_one_shot_vision_consent(self.ctx(), command);
         match prompt_turn.wait(retry).await {
-            Ok(result) => result.map_err(|error| PromptStepError::Failed(internal_error(error))),
+            Ok(result) => result
+                .map(|outcome| (outcome, attempt_id))
+                .map_err(|error| PromptStepError::Failed(interface_error(error))),
             Err(TurnCancelled) => Err(PromptStepError::Cancelled),
         }
     }
@@ -801,6 +1169,7 @@ impl AcpServer {
                         wait_until: WaitUntil::Interactive,
                         timeout_ms: 30_000,
                     })),
+                    None,
                 ),
             ))
             .await;
@@ -836,6 +1205,7 @@ impl AcpServer {
                 RuntimeCommand::Primitive(types::PrimitiveCommand::ClosePage(ClosePageCommand {
                     page_id: page.clone(),
                 })),
+                None,
             ),
         );
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), close).await;
@@ -852,10 +1222,10 @@ impl AcpServer {
         self.runtime
             .submit(
                 self.ctx(),
-                envelope(runtime_session, page, RuntimeCommand::Intent(intent)),
+                envelope(runtime_session, page, RuntimeCommand::Intent(intent), None),
             )
             .await
-            .map_err(internal_error)
+            .map_err(interface_error)
     }
 }
 
@@ -863,11 +1233,12 @@ fn envelope(
     runtime_session: &SessionId,
     page: &PageId,
     command: RuntimeCommand,
+    workflow_id: Option<WorkflowId>,
 ) -> CommandEnvelope {
     CommandEnvelope {
         schema_version: CommandEnvelope::SCHEMA_VERSION,
         command_id: CommandId::new(),
-        workflow_id: WorkflowId::new(),
+        workflow_id: workflow_id.unwrap_or_default(),
         attempt_id: AttemptId::new(),
         session_id: runtime_session.clone(),
         page_id: Some(page.clone()),
@@ -901,27 +1272,47 @@ fn send_chunk(connection: &ConnectionTo<Client>, acp_session_id: &str, text: Str
     ));
 }
 
+fn send_json_chunk(
+    connection: &ConnectionTo<Client>,
+    acp_session_id: &str,
+    payload: serde_json::Value,
+) -> Result<(), agent_client_protocol::Error> {
+    let text = serde_json::to_string(&payload).map_err(internal_error)?;
+    send_chunk(connection, acp_session_id, text);
+    Ok(())
+}
+
 fn report_outcome(
     connection: &ConnectionTo<Client>,
     acp_session_id: &str,
+    runtime_session: &SessionId,
+    page: &PageId,
+    workflow_id: &WorkflowId,
+    attempt_id: &AttemptId,
     outcome: &CommandOutcome,
-) {
-    let line = match outcome {
-        CommandOutcome::Completed { evidence, .. } => {
-            format!("completed ({} evidence record(s))", evidence.len())
-        }
-        CommandOutcome::Failed { error, .. } => {
-            format!("failed: {:?} -- {}", error.code, error.message)
-        }
-        CommandOutcome::NeedsReconciliation { error, .. } => {
-            format!(
-                "needs reconciliation: {:?} -- {}",
-                error.code, error.message
-            )
-        }
-        other => format!("outcome: {other:?}"),
-    };
-    send_chunk(connection, acp_session_id, line);
+) -> Result<(), agent_client_protocol::Error> {
+    send_json_chunk(
+        connection,
+        acp_session_id,
+        outcome_payload(runtime_session, page, workflow_id, attempt_id, outcome),
+    )
+}
+
+fn outcome_payload(
+    runtime_session: &SessionId,
+    page: &PageId,
+    workflow_id: &WorkflowId,
+    attempt_id: &AttemptId,
+    outcome: &CommandOutcome,
+) -> serde_json::Value {
+    serde_json::json!({
+        "operation":"execute",
+        "sessionId":runtime_session,
+        "pageId":page,
+        "workflowId":workflow_id,
+        "attemptId":attempt_id,
+        "outcome":outcome,
+    })
 }
 
 fn invalid_request(message: impl Into<String>) -> agent_client_protocol::Error {
@@ -931,6 +1322,12 @@ fn invalid_request(message: impl Into<String>) -> agent_client_protocol::Error {
 fn internal_error(error: impl std::fmt::Debug) -> agent_client_protocol::Error {
     agent_client_protocol::Error::internal_error()
         .data(serde_json::Value::String(format!("{error:?}")))
+}
+
+fn interface_error(error: types::InterfaceError) -> agent_client_protocol::Error {
+    let data = serde_json::to_value(&error)
+        .unwrap_or_else(|_| serde_json::Value::String("runtime interface error".into()));
+    agent_client_protocol::Error::internal_error().data(data)
 }
 
 #[cfg(test)]
@@ -1096,6 +1493,90 @@ mod tests {
                 .push(envelope);
             Ok(outcome)
         }
+
+        async fn context_ask(
+            &self,
+            _ctx: types::RequestContext,
+            _session: SessionId,
+            _page: PageId,
+            _description: String,
+        ) -> InterfaceResult<Option<types::ContextAnswer>> {
+            Ok(None)
+        }
+
+        async fn context_neighbors(
+            &self,
+            _ctx: types::RequestContext,
+            _session: SessionId,
+            _page: PageId,
+            _description: String,
+        ) -> InterfaceResult<Option<types::ContextNeighbors>> {
+            Ok(None)
+        }
+
+        async fn context_site(
+            &self,
+            _ctx: types::RequestContext,
+            _site_key: String,
+        ) -> InterfaceResult<Option<types::ContextSiteView>> {
+            Ok(None)
+        }
+
+        async fn resolve_command_evidence(
+            &self,
+            _ctx: types::RequestContext,
+            _command_ids: Vec<CommandId>,
+        ) -> InterfaceResult<Vec<Evidence>> {
+            Ok(Vec::new())
+        }
+
+        async fn checkpoint(
+            &self,
+            _ctx: types::RequestContext,
+            checkpoint: WorkflowCheckpoint,
+            _evidence: Vec<Evidence>,
+        ) -> InterfaceResult<WorkflowCheckpoint> {
+            Ok(checkpoint)
+        }
+
+        async fn recovery_status(
+            &self,
+            ctx: types::RequestContext,
+            _workflow: WorkflowId,
+        ) -> InterfaceResult<types::RecoveryStatus> {
+            Err(test_interface_error(ctx, "recovery status unavailable"))
+        }
+
+        async fn workflows_for_session(
+            &self,
+            _ctx: types::RequestContext,
+            _session: SessionId,
+            _limit: usize,
+        ) -> InterfaceResult<Vec<WorkflowId>> {
+            Ok(Vec::new())
+        }
+
+        async fn recover(
+            &self,
+            ctx: types::RequestContext,
+            _workflow: WorkflowId,
+        ) -> InterfaceResult<RecoveryDecision> {
+            Err(test_interface_error(ctx, "recovery unavailable"))
+        }
+    }
+
+    fn test_interface_error(ctx: types::RequestContext, message: &str) -> types::InterfaceError {
+        types::InterfaceError {
+            code: types::InterfaceErrorCode::UnsupportedOperation,
+            layer: types::ErrorLayer::Interface,
+            message: message.into(),
+            correlation_id: ctx.correlation_id,
+            command_id: None,
+            retryable: false,
+            retry_after_ms: None,
+            reconciliation_required: false,
+            required_capability: None,
+        }
     }
 
     async fn recording_server(runtime: Arc<RecordingRuntime>) -> AcpServer {
@@ -1153,8 +1634,81 @@ mod tests {
             r#"{"url":"https://example.com","intent":{"kind":"locate","input":{"purpose":"the submit button"}}}"#,
         )])
         .expect("structured prompt decodes");
+        let StructuredPrompt::Automation(parsed) = parsed else {
+            panic!("expected automation prompt");
+        };
+        let parsed = *parsed;
         assert_eq!(parsed.url.as_deref(), Some("https://example.com"));
         assert!(matches!(parsed.intent, IntentCommand::Locate(_)));
+    }
+
+    #[test]
+    fn an_automation_prompt_preserves_a_supplied_workflow_id() {
+        let workflow_id = WorkflowId::new();
+        let parsed = parse_prompt(&[text_block(
+            &serde_json::json!({
+                "workflowId": workflow_id,
+                "intent": {"kind":"locate", "input":{"purpose":"the submit button"}}
+            })
+            .to_string(),
+        )])
+        .expect("automation prompt decodes");
+        let StructuredPrompt::Automation(parsed) = parsed else {
+            panic!("expected automation prompt");
+        };
+        let parsed = *parsed;
+        assert_eq!(parsed.workflow_id, Some(workflow_id));
+    }
+
+    #[test]
+    fn recovery_status_prompt_decodes_session_discovery() {
+        let parsed = parse_prompt(&[text_block(r#"{"operation":"recoveryStatus","limit":8}"#)])
+            .expect("recovery prompt decodes");
+        assert!(matches!(
+            parsed,
+            StructuredPrompt::Operation(PromptOperation::RecoveryStatus {
+                workflow_id: None,
+                limit: Some(8),
+            })
+        ));
+    }
+
+    #[test]
+    fn command_payload_preserves_workflow_and_evidence() {
+        let session_id = SessionId::new();
+        let page_id = PageId::new();
+        let workflow_id = WorkflowId::new();
+        let attempt_id = AttemptId::new();
+        let command_id = CommandId::new();
+        let outcome = CommandOutcome::Completed {
+            command_id: command_id.clone(),
+            evidence: vec![Evidence::Navigation {
+                url: "https://example.test/complete".into(),
+                title: "Complete".into(),
+            }],
+        };
+        let payload = outcome_payload(&session_id, &page_id, &workflow_id, &attempt_id, &outcome);
+        assert_eq!(
+            payload["sessionId"],
+            serde_json::to_value(session_id).unwrap()
+        );
+        assert_eq!(payload["pageId"], serde_json::to_value(page_id).unwrap());
+        assert_eq!(
+            payload["workflowId"],
+            serde_json::to_value(workflow_id).unwrap()
+        );
+        assert_eq!(
+            payload["attemptId"],
+            serde_json::to_value(attempt_id).unwrap()
+        );
+        assert_eq!(
+            payload["outcome"]["commandId"],
+            serde_json::to_value(command_id).unwrap()
+        );
+        assert_eq!(
+            payload["outcome"]["evidence"][0]["url"],
+            "https://example.test/complete"
+        );
     }
 
     #[test]
@@ -1351,6 +1905,7 @@ mod tests {
         server.new_session().await.unwrap();
         let (_, runtime_session, turn) = only_session(&server).await;
         let page = PageId::new();
+        let workflow_id = WorkflowId::new();
         let intent = IntentCommand::Locate(types::LocateIntent {
             purpose: "missing control".into(),
             hints: types::IntentHints::default(),
@@ -1358,7 +1913,13 @@ mod tests {
         {
             let mut lease = turn.begin().expect("prompt starts");
             server
-                .retry_with_one_shot(&runtime_session, &page, intent.clone(), &mut lease)
+                .retry_with_one_shot(
+                    &runtime_session,
+                    &page,
+                    &workflow_id,
+                    intent.clone(),
+                    &mut lease,
+                )
                 .await
                 .ok()
                 .expect("one-shot retry dispatches");
@@ -1375,6 +1936,7 @@ mod tests {
         assert_eq!(one_shot.len(), 1);
         assert_eq!(one_shot[0].session_id, runtime_session);
         assert_eq!(one_shot[0].page_id.as_ref(), Some(&page));
+        assert_eq!(one_shot[0].workflow_id, workflow_id);
         assert_eq!(
             runtime
                 .submitted

@@ -38,20 +38,36 @@ pinned: ACP schema v1 (`agent-client-protocol` 2.x).
 |---|---|
 | `initialize` | Protocol handshake; advertises agent capabilities |
 | `session/new` | Runtime session (the ACP session id *is* the runtime session id) |
-| `session/prompt` | One structured automation request, streamed back as `session/update` chunks |
+| `session/prompt` | One structured automation, context, checkpoint, or recovery request |
 | `session/cancel` | Cancels the in-flight prompt step |
 | `session/close` | Cancels active work, deletes the runtime session, and releases browser capacity |
 | `session/request_permission` (agent → client) | Vision-escalation approval only |
 
 ## Structured prompts
 
-A prompt is a single text block of JSON — an optional `url` plus one intent in
-the exact shape `command_execute` accepts. There is no planner and no
-freeform natural language:
+A prompt is a single text block of JSON. Automation requests accept an optional
+`url`, an optional stable `workflowId`, and one intent in the exact shape
+`command_execute` accepts. There is no planner and no freeform natural language:
 
 ```json
 {"url": "https://example.com/form", "intent": {"kind": "locate", "input": {"purpose": "the submit button"}}}
 ```
+
+The same channel accepts these explicit operations:
+
+| `operation` | Fields | Runtime mapping |
+|---|---|---|
+| `contextAsk` | `description` | Current-page retained target lookup |
+| `contextNeighbors` | `description` | Current-page retained form neighborhood |
+| `contextSite` | `siteKey` | Retained site structure |
+| `checkpointSave` | `checkpoint`, `evidenceRefs` | Resolve owned command evidence, then save |
+| `recoveryStatus` | optional `workflowId`, optional `limit` | Read one workflow or list the current session's workflows |
+| `workflowRecover` | `workflowId` | Recover an owned workflow |
+
+Successful operations emit one JSON `session/update` text chunk with
+`operation` and `result`. Automation replies contain `operation: "execute"`,
+`sessionId`, `pageId`, the stable `workflowId`, `attemptId`, and the complete
+`CommandOutcome`, including evidence.
 
 The first `url` opens a page; later URLs navigate that same page so cookies,
 storage, and live page state remain in one browser context without accumulating
