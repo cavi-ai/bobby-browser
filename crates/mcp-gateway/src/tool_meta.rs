@@ -49,6 +49,10 @@ pub(crate) fn required_capabilities(name: &str) -> Option<&'static [types::Capab
             types::Capability::BrowserMutate,
             types::Capability::FileDownload,
         ]),
+        "click_and_wait_for_download" => Some(&[
+            types::Capability::BrowserMutate,
+            types::Capability::FileDownload,
+        ]),
         "upload_files" => Some(&[
             types::Capability::BrowserMutate,
             types::Capability::FileUpload,
@@ -105,6 +109,7 @@ pub(crate) fn required_operation(name: &str) -> Option<types::InterfaceOperation
         | "control_action"
         | "navigate"
         | "click"
+        | "click_and_wait_for_download"
         | "click_and_wait_for_popup"
         | "type_text"
         | "inspect"
@@ -178,6 +183,7 @@ pub(crate) fn tool_description(name: &str) -> &'static str {
         "page_activate" => "Bring a page to the front in an owned session. Requires browser:mutate. Produces the activated page's URL and title. On failure with notFound, the page id is stale -- call page_list for current ids.",
         "navigate" => "Navigate and wait for a load state. Requires browser:mutate. Returns settled URL/title evidence. On failure, use http(s)/data URLs or increase timeout_ms for deadlineExceeded.",
         "click" => "Click a selector or resolved target with optional Shift, Ctrl, Alt, or Meta modifiers. Pass workflowHandle; ids if it dies. Requires browser:mutate. Boundary clicks auto-checkpoint unless disabled. On failure with targetNotFound or targetAmbiguous, refresh a11y_snapshot.",
+        "click_and_wait_for_download" => "Click a control and wait for its browser download to finish (Boundary). Pass workflowHandle. Requires browser:mutate and file:download. autoCheckpoint defaults true. On failure with needsReconciliation, call recovery_status.",
         "click_and_wait_for_popup" => "Click a control and wait for a window.open popup to register in page_list (Boundary). Requires browser:mutate. autoCheckpoint defaults true; pass false to author the checkpoint. workflowHandle follows onto the popup, then back to the opener once it closes. On failure with deadlineExceeded, confirm the click opens a window; on needsReconciliation, call recovery_status.",
         "type_text" => "Type text into an element identified by a selector or a resolved target, optionally clearing it first. Requires browser:mutate. Produces execution-path evidence for the input. On failure with targetNotFound or targetAmbiguous, take a fresh a11y_snapshot and pass the new target.",
         "wait_for" => "Wait for a page condition with a bounded timeout. Requires browser:mutate. Produces wait evidence with elapsed time and observation count. On failure with waitConditionTimedOut, confirm the condition still matches page state via inspect, then retry with a longer timeout.",

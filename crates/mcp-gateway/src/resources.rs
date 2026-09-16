@@ -564,7 +564,8 @@ every capability `required_capabilities` names for it (`crates/mcp-gateway/src/s
   `pdf`, `dialog`, `emulate`, `network_log`, `cookie_get`, `cookie_set`,
   `cookie_delete`, and `control_action` for every action except `setFiles`.
   Required alongside one more capability for `extract_structured`
-  (+ `vision:assist`), `download_url` (+ `file:download`), `upload_files`
+  (+ `vision:assist`), `download_url` and `click_and_wait_for_download`
+  (+ `file:download`), `upload_files`
   (+ `file:upload`), `control_action` with a `setFiles` action
   (+ `file:upload`), `evaluate_javascript` (+ `javascript:evaluate`), and all
   ten `intent_*` tools (+ `intent:execute`; the two challenge intents also
@@ -589,9 +590,8 @@ every capability `required_capabilities` names for it (`crates/mcp-gateway/src/s
 - `file:upload` -- gates `upload_files` (with `browser:mutate`), among
   others: `control_action` with a `setFiles` action and file-carrying intent
   fields need it too -- see above.
-- `file:download` -- gates `download_url` (with `browser:mutate`), among
-  others: `clickAndWaitForDownload` (reachable via `command_execute`, see
-  `bobby://primitives`) needs it too.
+- `file:download` -- gates `download_url` and `click_and_wait_for_download`
+  (with `browser:mutate`).
 - `javascript:evaluate` -- gates `evaluate_javascript` (with `browser:mutate`).
 - `intent:execute` -- gates `intent_locate`, `intent_fill`,
   `intent_complete_form`, `intent_submit_and_verify`, `intent_wait_for_state`,
@@ -1188,9 +1188,9 @@ resolution or verification overhead.
 
 const PRIMITIVES_BODY: &str = r#"# Primitives with no named tool
 
-Every `IntentCommand` variant, and every `PrimitiveCommand` variant but three
-(`clickAndWaitForDownload`, `setFocusEmulation`, `setEmulatedMedia`),
-has a named MCP tool that builds the command envelope for you. Those three
+Every `IntentCommand` variant, and every `PrimitiveCommand` variant but two
+(`setFocusEmulation`, `setEmulatedMedia`), has a named MCP tool that builds
+the command envelope for you. Those two
 remain reachable only through `command_execute`, and
 `command_execute` advertises `envelope.command` as an opaque object, so
 nothing in `tools/list` describes their shape. This document is that
@@ -1244,6 +1244,9 @@ clicking. Produces `Evidence::Popup` (`openerPageId`, the new `pageId`, `url`,
 `verificationFailed`. A timeout waiting for the popup is `deadlineExceeded`.
 
 ## `clickAndWaitForDownload`
+
+Prefer the flat `click_and_wait_for_download` tool. The primitive remains
+available to command-envelope callers.
 
 Clicks the resolved element and waits for the download it starts, then admits
 the downloaded file as an artifact.
@@ -1396,7 +1399,7 @@ pub(crate) fn static_resources() -> &'static [(&'static str, &'static str, &'sta
         (
             PRIMITIVES_URI,
             "Primitives without a tool",
-            "The four executable primitives that have no named tool, their argument shape, and how to reach them via command_execute.",
+            "Executable primitives without a named tool, their argument shape, and how to reach them via command_execute.",
         ),
         (
             JOB_HANDLERS_URI,

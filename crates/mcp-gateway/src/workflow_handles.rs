@@ -23,6 +23,10 @@ pub(crate) const WORKFLOW_SCOPE_TOOLS: &[(&str, WorkflowScope)] = &[
     ("a11y_snapshot", WorkflowScope::SessionPageWorkflow),
     ("click", WorkflowScope::SessionPageWorkflow),
     (
+        "click_and_wait_for_download",
+        WorkflowScope::SessionPageWorkflow,
+    ),
+    (
         "click_and_wait_for_popup",
         WorkflowScope::SessionPageWorkflow,
     ),

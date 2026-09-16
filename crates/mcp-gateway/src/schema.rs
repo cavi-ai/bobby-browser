@@ -299,6 +299,20 @@ pub(crate) fn tool_schema(name: &str) -> Value {
             }),
             vec!["sessionId", "pageId"],
         ),
+        "click_and_wait_for_download" => (
+            json!({
+                "workflowId": id(),
+                "commandId": id_pin(),
+                "attemptId": id_pin(),
+                "sessionId": id(),
+                "pageId": id(),
+                "selector": string(1, MAX_STRING_BYTES),
+                "target": nullable(json!({"$ref":"#/$defs/TargetSpec"})),
+                "timeoutMs": timeout_ms(),
+                "autoCheckpoint":{"type":"boolean"}
+            }),
+            vec!["sessionId", "pageId"],
+        ),
         "type_text" => (
             json!({
                 "workflowId": id(),
@@ -514,8 +528,8 @@ pub(crate) fn tool_schema(name: &str) -> Value {
 /// collapses `envelope.command` to an opaque object instead of the full
 /// `PrimitiveCommand`/`IntentCommand` union. Top-level property names and
 /// required fields stay identical. `tool_schema` / `definitions()` keep the
-/// full shapes, so `tools/call` validation is unchanged. The four primitives
-/// with no named tool are documented in `bobby://primitives`.
+/// full shapes, so `tools/call` validation is unchanged. Primitives with no
+/// named tool are documented in `bobby://primitives`.
 pub(crate) fn advertised_tool_schema(name: &str) -> Value {
     let mut schema = tool_schema(name);
     // The draft URL is constant and MCP does not require it per tool; the

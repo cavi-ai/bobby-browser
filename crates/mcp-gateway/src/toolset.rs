@@ -157,6 +157,7 @@ const EXPLORE: &[&str] = &[
     // dialogs, and download without a toolset_select + schema-discovery
     // round trip first. Escape hatches and niche mutations stay in `act`.
     "click",
+    "click_and_wait_for_download",
     "click_and_wait_for_popup",
     "type_text",
     "control_action",
@@ -177,6 +178,7 @@ const EXPLORE: &[&str] = &[
 /// its own envelope, and is absent from the other narrow phases.
 const ACT: &[&str] = &[
     "click",
+    "click_and_wait_for_download",
     "click_and_wait_for_popup",
     "type_text",
     "control_action",
@@ -239,6 +241,7 @@ pub const EVERY_TOOL: &[&str] = &[
     "a11y_snapshot",
     "checkpoint_save",
     "click",
+    "click_and_wait_for_download",
     "click_and_wait_for_popup",
     "command_execute",
     "context_ask",
