@@ -255,24 +255,21 @@ impl ModernRuntime {
 
     pub async fn establish_session(&self) -> TestResult<()> {
         if self
-            .wait_visible_timeout("nav[aria-label='Primary navigation']", 2_000)
+            .probe_visible("nav[aria-label='Primary navigation']", 2_000)
             .await
-            .is_ok()
         {
             return Ok(());
         }
         if self
-            .wait_visible_timeout("button[aria-label='Accept all cookies']", 8_000)
+            .probe_visible("button[aria-label='Accept all cookies']", 8_000)
             .await
-            .is_ok()
         {
             self.click("button[aria-label='Accept all cookies']", false)
                 .await?;
         }
         if self
-            .wait_visible_timeout("form[aria-label='Operator sign in']", 8_000)
+            .probe_visible("form[aria-label='Operator sign in']", 8_000)
             .await
-            .is_ok()
         {
             self.type_text(
                 "input[aria-label='Work email']",
@@ -804,6 +801,30 @@ impl ModernRuntime {
             timeout_ms,
         }))
         .await
+    }
+
+    async fn probe_visible(&self, selector: &str, timeout_ms: u64) -> bool {
+        matches!(
+            self.runtime
+                .submit(CommandEnvelope {
+                    schema_version: CommandEnvelope::SCHEMA_VERSION,
+                    command_id: CommandId::new(),
+                    workflow_id: WorkflowId::new(),
+                    attempt_id: AttemptId::new(),
+                    session_id: self.session_id.clone(),
+                    page_id: Some(self.page_id.clone()),
+                    deadline: Utc::now() + Duration::seconds(30),
+                    command: RuntimeCommand::Primitive(PrimitiveCommand::WaitFor(WaitForCommand {
+                        condition: WaitCondition::Element {
+                            target: Box::new(css_target(selector)),
+                            state: ElementState::Visible,
+                        },
+                        timeout_ms,
+                    })),
+                })
+                .await,
+            CommandOutcome::Completed { .. }
+        )
     }
 
     pub async fn inspect(&self, selector: Option<&str>) -> TestResult<Vec<Evidence>> {
