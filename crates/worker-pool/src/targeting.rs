@@ -1155,7 +1155,16 @@ async fn collect_candidates_merged(
     };
 
     let mut owners = HashMap::new();
-    let closed_roots = discover_closed_shadow_roots(page, scope, shadow_hosts).await?;
+    // Never `describeNode(pierce, depth: 24)` the document root. Chromium
+    // returns a recursive `Node` tree; serde + Drop overflow Linux debug
+    // stacks during AccessibilitySnapshot/Inspect on ordinary pages.
+    // Closed roots on an explicit shadow hop are found by
+    // `discover_closed_root_for_candidate` (depth 1) in `open_target_scope`.
+    let closed_roots = if matches!(scope, LocatorScope::Context(_)) && shadow_hosts.is_empty() {
+        Vec::new()
+    } else {
+        discover_closed_shadow_roots(page, scope, shadow_hosts).await?
+    };
     for root in closed_roots {
         let nested_scope = TARGET_SCOPE.fetch_add(1, Ordering::Relaxed);
         let mut nested = collect_candidates_within(&root, &[], nested_scope).await?;
