@@ -21,7 +21,7 @@ fn bootstrap_env() -> Vec<(String, String)> {
         ),
         (
             "AUTOMATION_RUNTIME_BOOTSTRAP_CAPABILITIES".into(),
-            "session:read,session:write,page:write,browser:mutate,intent:execute,vision:assist"
+            "session:read,session:write,page:read,page:write,browser:mutate,intent:execute,vision:assist,context:read,recovery:read,recovery:write"
                 .into(),
         ),
         (
@@ -88,6 +88,14 @@ impl Gateway {
     }
 
     fn call(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        self.call_with_updates(method, params).0
+    }
+
+    fn call_with_updates(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> (serde_json::Value, Vec<serde_json::Value>) {
         self.next_id += 1;
         let id = self.next_id;
         let frame = serde_json::json!({
@@ -99,12 +107,16 @@ impl Gateway {
         writeln!(self.stdin, "{}", serde_json::to_string(&frame).unwrap()).unwrap();
         self.stdin.flush().unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut updates = Vec::new();
         loop {
             let frame = self.read_frame(method, deadline);
+            if frame.get("method").and_then(serde_json::Value::as_str) == Some("session/update") {
+                updates.push(frame["params"].clone());
+            }
             if frame.get("id").and_then(serde_json::Value::as_u64) != Some(id) {
                 continue;
             }
-            return frame;
+            return (frame, updates);
         }
     }
 
@@ -188,6 +200,161 @@ impl Gateway {
             .cloned()
             .unwrap_or(serde_json::Value::Null)
     }
+}
+
+#[test]
+fn context_and_recovery_operations_return_structured_results() {
+    let mut gateway = Gateway::spawn();
+    gateway.result(
+        "initialize",
+        serde_json::json!({
+            "protocolVersion": 1,
+            "clientCapabilities": {},
+        }),
+    );
+    let session = gateway.result(
+        "session/new",
+        serde_json::json!({"cwd": "/tmp", "mcpServers": []}),
+    );
+    let session_id = session["sessionId"]
+        .as_str()
+        .expect("session/new returns a sessionId")
+        .to_owned();
+
+    let (response, updates) = gateway.call_with_updates(
+        "session/prompt",
+        serde_json::json!({
+            "sessionId": session_id,
+            "prompt": [{"type": "text", "text": "{\"operation\":\"recoveryStatus\"}"}],
+        }),
+    );
+
+    assert!(response.get("error").is_none(), "prompt failed: {response}");
+    assert_eq!(
+        response
+            .pointer("/result/stopReason")
+            .and_then(serde_json::Value::as_str),
+        Some("end_turn")
+    );
+    let payload = updates
+        .iter()
+        .filter_map(|update| update.pointer("/update/content/text"))
+        .filter_map(serde_json::Value::as_str)
+        .find_map(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        .expect("structured recovery response");
+    assert_eq!(payload["operation"], "recoveryStatus");
+    assert_eq!(payload["result"]["sessionId"], session_id);
+    assert_eq!(payload["result"]["workflows"], serde_json::json!([]));
+
+    let (response, updates) = gateway.call_with_updates(
+        "session/prompt",
+        serde_json::json!({
+            "sessionId": session_id,
+            "prompt": [{"type": "text", "text": "{\"operation\":\"contextSite\",\"siteKey\":\"example.test\"}"}],
+        }),
+    );
+    assert!(response.get("error").is_none(), "prompt failed: {response}");
+    let payload = updates
+        .iter()
+        .filter_map(|update| update.pointer("/update/content/text"))
+        .filter_map(serde_json::Value::as_str)
+        .find_map(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        .expect("structured context response");
+    assert_eq!(payload["operation"], "contextSite");
+    assert!(payload["result"].is_null());
+
+    let checkpoint_id = uuid::Uuid::new_v4().to_string();
+    let workflow_id = uuid::Uuid::new_v4().to_string();
+    let attempt_id = uuid::Uuid::new_v4().to_string();
+    let page_id = uuid::Uuid::new_v4().to_string();
+    let checkpoint = serde_json::json!({
+        "schemaVersion": 1,
+        "checkpointId": checkpoint_id.clone(),
+        "workflowId": workflow_id.clone(),
+        "attemptId": attempt_id,
+        "sessionId": session_id.clone(),
+        "pageId": page_id,
+        "restartUrl": "data:text/html,<html><body>checkpoint</body></html>",
+        "currentUrl": "data:text/html,<html><body>checkpoint</body></html>",
+        "cursor": null,
+        "boundaryCommandId": null,
+        "recoveryClass": "replayable",
+        "invariants": [],
+        "replayableInputs": [],
+        "evidence": [],
+        "recoveryHistory": [],
+        "recoveryReceipts": [],
+        "createdAt": chrono::Utc::now().to_rfc3339(),
+    });
+    let checkpoint_prompt = serde_json::json!({
+        "operation": "checkpointSave",
+        "checkpoint": checkpoint,
+        "evidenceRefs": [],
+    })
+    .to_string();
+    let (response, updates) = gateway.call_with_updates(
+        "session/prompt",
+        serde_json::json!({
+            "sessionId": session_id,
+            "prompt": [{"type": "text", "text": checkpoint_prompt}],
+        }),
+    );
+    assert!(response.get("error").is_none(), "prompt failed: {response}");
+    let payload = updates
+        .iter()
+        .filter_map(|update| update.pointer("/update/content/text"))
+        .filter_map(serde_json::Value::as_str)
+        .find_map(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        .expect("structured checkpoint response");
+    assert_eq!(payload["operation"], "checkpointSave");
+    assert_eq!(payload["result"]["checkpointId"], checkpoint_id);
+
+    let status_prompt = serde_json::json!({
+        "operation": "recoveryStatus",
+        "workflowId": workflow_id.clone(),
+    })
+    .to_string();
+    let (response, updates) = gateway.call_with_updates(
+        "session/prompt",
+        serde_json::json!({
+            "sessionId": session_id,
+            "prompt": [{"type": "text", "text": status_prompt}],
+        }),
+    );
+    assert!(response.get("error").is_none(), "prompt failed: {response}");
+    let payload = updates
+        .iter()
+        .filter_map(|update| update.pointer("/update/content/text"))
+        .filter_map(serde_json::Value::as_str)
+        .find_map(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        .expect("structured status response");
+    assert_eq!(
+        payload["result"]["checkpoint"]["checkpointId"],
+        checkpoint_id
+    );
+
+    let recover_prompt = serde_json::json!({
+        "operation": "workflowRecover",
+        "workflowId": workflow_id,
+    })
+    .to_string();
+    let (response, updates) = gateway.call_with_updates(
+        "session/prompt",
+        serde_json::json!({
+            "sessionId": session_id,
+            "prompt": [{"type": "text", "text": recover_prompt}],
+        }),
+    );
+    assert!(response.get("error").is_none(), "prompt failed: {response}");
+    let payload = updates
+        .iter()
+        .filter_map(|update| update.pointer("/update/content/text"))
+        .filter_map(serde_json::Value::as_str)
+        .find_map(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        .expect("structured recovery response");
+    assert_eq!(payload["operation"], "workflowRecover");
+    assert_eq!(payload["result"]["status"], "resumed");
+    assert_eq!(payload["result"]["checkpointId"], checkpoint_id);
 }
 
 impl Drop for Gateway {

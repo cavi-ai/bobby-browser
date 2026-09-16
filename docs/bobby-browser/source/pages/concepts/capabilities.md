@@ -41,11 +41,11 @@ Wire strings (camelCase JSON uses these exact values):
 | `readPage` | `page:read` | direct | direct | via command | via command | Chromium, Firefox |
 | `closePage` | `page:write` | via command | via command | via command | via command | Chromium, Firefox |
 | `submitCommand` | `browser:mutate` | direct | direct | direct | direct | Chromium, Firefox |
-| `createCheckpoint` | `recovery:write` | direct | direct | direct | — | Chromium, Firefox |
-| `readCheckpoint` | `recovery:read` | direct | direct | direct | — | Chromium, Firefox |
-| `recoverWorkflow` | `recovery:write` | direct | direct | — | — | Chromium, Firefox |
+| `createCheckpoint` | `recovery:write` | direct | direct | direct | direct | Chromium, Firefox |
+| `readCheckpoint` | `recovery:read` | direct | direct | direct | direct | Chromium, Firefox |
+| `recoverWorkflow` | `recovery:write` | direct | direct | — | direct | Chromium, Firefox |
 | `readArtifact` | `artifact:read` | direct | — | — | — | engine-agnostic |
-| `readContext` | `context:read` | direct | direct | — | — | Chromium, Firefox |
+| `readContext` | `context:read` | direct | direct | — | direct | Chromium, Firefox |
 | `captureArtifact` | `artifact:capture` | via command | via command | direct | — | Chromium, Firefox |
 | `subscribeEvents` | `session:read` | direct | direct | direct | — | Chromium, Firefox |
 | `submitJob` | `job:submit` | direct | direct | — | — | engine-agnostic |

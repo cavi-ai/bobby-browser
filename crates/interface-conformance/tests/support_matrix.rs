@@ -39,7 +39,7 @@ fn support_matrix_records_current_adapter_and_engine_boundaries() {
     assert_eq!(recover.http, AdapterSupport::Direct);
     assert_eq!(recover.mcp, AdapterSupport::Direct);
     assert_eq!(recover.cdp, AdapterSupport::Unsupported);
-    assert_eq!(recover.acp, AdapterSupport::Unsupported);
+    assert_eq!(recover.acp, AdapterSupport::Direct);
     assert_eq!(recover.engines, EngineSupport::ChromiumAndFirefox);
 
     let artifact = operation_support()
@@ -59,6 +59,22 @@ fn support_matrix_records_current_adapter_and_engine_boundaries() {
         .adapters()
         .iter()
         .all(|support| *support == AdapterSupport::Direct));
+}
+
+#[test]
+fn acp_exposes_context_checkpoint_and_recovery_operations() {
+    for operation in [
+        InterfaceOperation::ReadContext,
+        InterfaceOperation::CreateCheckpoint,
+        InterfaceOperation::ReadCheckpoint,
+        InterfaceOperation::RecoverWorkflow,
+    ] {
+        let support = operation_support()
+            .iter()
+            .find(|row| row.operation == operation)
+            .unwrap();
+        assert_eq!(support.acp, AdapterSupport::Direct, "{operation:?}");
+    }
 }
 
 #[test]
