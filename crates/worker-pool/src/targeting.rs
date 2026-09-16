@@ -1181,7 +1181,7 @@ async fn discover_closed_shadow_roots(
         .execute(
             DescribeNodeParams::builder()
                 .object_id(object_id)
-                .depth(-1)
+                .depth(24)
                 .pierce(true)
                 .build(),
         )
@@ -1207,17 +1207,20 @@ async fn discover_closed_shadow_roots(
 /// `content_document`: iframes require an explicit `frame_path`. Only
 /// `.children` and `.shadow_roots` are followed.
 fn collect_closed_shadow_root_ids(node: &CdpNode, out: &mut Vec<BackendNodeId>) {
-    if let Some(shadow_roots) = &node.shadow_roots {
-        for root in shadow_roots {
-            if matches!(root.shadow_root_type, Some(ShadowRootType::Closed)) {
-                out.push(root.backend_node_id);
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        if let Some(shadow_roots) = &node.shadow_roots {
+            for root in shadow_roots {
+                if matches!(root.shadow_root_type, Some(ShadowRootType::Closed)) {
+                    out.push(root.backend_node_id);
+                }
+                stack.push(root);
             }
-            collect_closed_shadow_root_ids(root, out);
         }
-    }
-    if let Some(children) = &node.children {
-        for child in children {
-            collect_closed_shadow_root_ids(child, out);
+        if let Some(children) = &node.children {
+            for child in children.iter().rev() {
+                stack.push(child);
+            }
         }
     }
 }

@@ -38,11 +38,14 @@ pub struct Element {
 
 impl Element {
     pub(crate) async fn new(tab: Arc<PageInner>, node_id: NodeId) -> Result<Self> {
+        // Depth 0: only this node. Depth 100 forced Chrome to serialize a
+        // hundred-level subtree whose debug Drop overflowed Linux CI stacks
+        // on `find_element("body")`.
         let backend_node_id = tab
             .execute(
                 DescribeNodeParams::builder()
                     .node_id(node_id)
-                    .depth(100)
+                    .depth(0)
                     .build(),
             )
             .await?
@@ -370,7 +373,7 @@ impl Element {
             .execute(
                 DescribeNodeParams::builder()
                     .backend_node_id(self.backend_node_id)
-                    .depth(100)
+                    .depth(0)
                     .build(),
             )
             .await?
