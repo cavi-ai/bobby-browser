@@ -235,7 +235,10 @@ impl VisionAssist for HttpVisionAssist {
             ActionBody::ExtractValue { .. } => {
                 return Err(provider_error("vision extract value exceeded its bound"));
             }
-            ActionBody::ClickCandidate { index } => VisionAction::ClickCandidate { index },
+            ActionBody::ClickCandidate { index } => {
+                validate_candidate_action(&request, index, "clickCandidate")?;
+                VisionAction::ClickCandidate { index }
+            }
             ActionBody::TypeIntoCandidate { index } => {
                 validate_candidate_action(&request, index, "typeIntoCandidate")?;
                 VisionAction::TypeIntoCandidate { index }
@@ -313,12 +316,7 @@ fn validate_candidate_action(
     index: u32,
     action_kind: &str,
 ) -> Result<(), CommandError> {
-    let compatible = match action_kind {
-        "typeIntoCandidate" => matches!(request.intent_kind.as_str(), "fill" | "type"),
-        "extractFromCandidate" => request.intent_kind == "extract",
-        _ => false,
-    };
-    if !compatible {
+    if !types::candidate_action_is_compatible(action_kind, &request.intent_kind) {
         return Err(provider_error(format!(
             "vision {action_kind} action is incompatible with intent {}",
             request.intent_kind
@@ -603,6 +601,10 @@ mod tests {
     #[tokio::test]
     async fn candidate_actions_reject_incompatible_intents() {
         for (body, intent_kind) in [
+            (
+                r#"{"confidence":0.9,"action":{"kind":"clickCandidate","index":0}}"#,
+                "fill",
+            ),
             (
                 r#"{"confidence":0.9,"action":{"kind":"typeIntoCandidate","index":0}}"#,
                 "extract",

@@ -82,8 +82,8 @@ jobs:
         run: python3 scripts/check-version-agreement.py
 
       - name: Vision experiment regressions
-        working-directory: scripts/vision-mlx/training
-        run: python3 -m unittest test_evaluate_adapter.py test_corpus_lint.py test_relabel_live_windows.py
+        working-directory: scripts/vision-mlx
+        run: python3 -m unittest test_provider_base.py test_v1_provider.py training/test_evaluate_adapter.py training/test_corpus_lint.py training/test_relabel_live_windows.py
 
       - name: Firefox launcher regressions
         run: scripts/dev/firefox-start.test.sh

@@ -4704,6 +4704,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tower",
+ "types",
 ]
 
 [[package]]

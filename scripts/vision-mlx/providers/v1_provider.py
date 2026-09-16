@@ -23,6 +23,7 @@ import logging
 import os
 from typing import Optional
 
+from candidate_action_contract import CANDIDATE_ACTION_BY_INTENT
 from .base import ProposeRequest, ProposeResponse, VisionProvider
 
 log = logging.getLogger(__name__)
@@ -32,14 +33,6 @@ DEFAULT_MODEL = "mlx-community/Qwen2.5-7B-Instruct-4bit"
 V1_PREFIX = """BOBBY-VISION/1
 ROLE: element selector for a browser automation runtime
 RULES: reply with ONLY the index of the element that satisfies the task. No text, no JSON, no explanation. If nothing fits, reply -1."""
-
-ACTION_BY_INTENT = {
-    "fill": "typeIntoCandidate",
-    "type": "typeIntoCandidate",
-    "extract": "extractFromCandidate",
-}
-CLICK_INTENT_KINDS = frozenset(("locate", "submitAndVerify", "follow", "dismissObstruction"))
-
 
 class MlxV1Provider(VisionProvider):
     name = "v1"
@@ -87,11 +80,9 @@ class MlxV1Provider(VisionProvider):
     ) -> ProposeResponse:
         n_candidates = len(request.context.candidates) if request.context else 0
 
-        action_kind = ACTION_BY_INTENT.get(request.intent_kind)
+        action_kind = CANDIDATE_ACTION_BY_INTENT.get(request.intent_kind)
         if action_kind is None:
-            if request.intent_kind not in CLICK_INTENT_KINDS:
-                return self._abstention(request.intent_kind)
-            action_kind = "clickCandidate"
+            return self._abstention(request.intent_kind)
 
         if index is None or index < 0 or index >= n_candidates:
             # Abstain (or out-of-range noise treated as abstention, per the
@@ -108,9 +99,15 @@ class MlxV1Provider(VisionProvider):
 
     @staticmethod
     def _abstention(intent_kind: str) -> ProposeResponse:
+        action_kind = CANDIDATE_ACTION_BY_INTENT.get(intent_kind)
+        if action_kind is None:
+            return ProposeResponse(
+                confidence=0.0,
+                action={"kind": "click", "x": 0.0, "y": 0.0},
+            )
         return ProposeResponse(
             confidence=0.0,
-            action={"kind": ACTION_BY_INTENT.get(intent_kind, "clickCandidate"), "index": 0},
+            action={"kind": action_kind, "index": 0},
         )
 
     def extract(self, schema: dict, content: str, purpose: Optional[str]) -> dict:

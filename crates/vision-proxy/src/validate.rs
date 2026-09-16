@@ -81,21 +81,13 @@ pub fn validate_proposal_for_request(
     if is_detect_action != (intent_kind == "detectChallenge") {
         return Err(ValidateError::DetectIntentMismatch);
     }
-    let (index, compatible) = match proposal.action {
-        VisionAction::ClickCandidate { index } => (
-            Some(index),
-            matches!(
-                intent_kind,
-                "locate" | "submitAndVerify" | "follow" | "dismissObstruction"
-            ),
-        ),
-        VisionAction::TypeIntoCandidate { index } => {
-            (Some(index), matches!(intent_kind, "fill" | "type"))
-        }
-        VisionAction::ExtractFromCandidate { index } => (Some(index), intent_kind == "extract"),
-        _ => (None, true),
+    let (index, action_kind) = match proposal.action {
+        VisionAction::ClickCandidate { index } => (Some(index), Some("clickCandidate")),
+        VisionAction::TypeIntoCandidate { index } => (Some(index), Some("typeIntoCandidate")),
+        VisionAction::ExtractFromCandidate { index } => (Some(index), Some("extractFromCandidate")),
+        _ => (None, None),
     };
-    if !compatible {
+    if action_kind.is_some_and(|kind| !types::candidate_action_is_compatible(kind, intent_kind)) {
         return Err(ValidateError::CandidateIntentMismatch);
     }
     if let Some(index) = index {

@@ -7,6 +7,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
 from providers.base import ProposeRequest, VisionContext, VisionContextCandidate
 from providers.v1_provider import MlxV1Provider
+from candidate_action_contract import ACTION_SPECS
 
 
 def request(intent_kind: str) -> ProposeRequest:
@@ -26,26 +27,21 @@ def request(intent_kind: str) -> ProposeRequest:
 
 class MlxV1ProviderTests(unittest.TestCase):
     def test_valid_index_maps_to_the_action_owned_by_the_intent(self):
-        for intent_kind, action_kind in (
-            ("fill", "typeIntoCandidate"),
-            ("type", "typeIntoCandidate"),
-            ("extract", "extractFromCandidate"),
-            ("locate", "clickCandidate"),
-        ):
-            with self.subTest(intent_kind=intent_kind):
-                response = MlxV1Provider()._response_for_index(request(intent_kind), 1)
+        for spec in ACTION_SPECS:
+            for intent_kind in spec["intents"]:
+                with self.subTest(intent_kind=intent_kind):
+                    response = MlxV1Provider()._response_for_index(request(intent_kind), 1)
 
-                self.assertEqual(response.confidence, 0.95)
-                self.assertEqual(response.action, {"kind": action_kind, "index": 1})
-                self.assertNotIn("text", response.action)
-                self.assertNotIn("value", response.action)
+                    self.assertEqual(response.confidence, 0.95)
+                    self.assertEqual(response.action, {"kind": spec["kind"], "index": 1})
+                    self.assertNotIn("text", response.action)
+                    self.assertNotIn("value", response.action)
 
     def test_unknown_intent_kind_and_invalid_index_abstain(self):
         # The abstain shape keeps the intent's action kind: the proxy
         # validator rejects a clickCandidate on a fill/extract intent as
         # incompatible, which would turn a clean abstain into a 502.
         for intent_kind, generated, action_kind in (
-            ("unknown", "1", "clickCandidate"),
             ("fill", "2", "typeIntoCandidate"),
             ("extract", "not-an-index", "extractFromCandidate"),
         ):
@@ -55,6 +51,10 @@ class MlxV1ProviderTests(unittest.TestCase):
 
                 self.assertEqual(response.confidence, 0.0)
                 self.assertEqual(response.action, {"kind": action_kind, "index": 0})
+
+        response = MlxV1Provider()._response_for_index(request("unknown"), 1)
+        self.assertEqual(response.confidence, 0.0)
+        self.assertEqual(response.action, {"kind": "click", "x": 0.0, "y": 0.0})
 
     def test_explicit_negative_index_abstains(self):
         parsed = MlxV1Provider._parse_index("-1")

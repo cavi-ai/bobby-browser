@@ -9,7 +9,14 @@ use crate::wire::{ExtractResponse, ProposeResponse};
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 pub const DEFAULT_MODEL: &str = "gpt-4o";
 
-const PROPOSE_SYSTEM: &str = "Return only JSON of the form {\"confidence\": <0.0-1.0>, \"action\": <action>}. Action shapes: {\"kind\":\"click\",\"x\":<px>,\"y\":<px>} {\"kind\":\"typeText\",\"text\":\"<text>\"} {\"kind\":\"extractValue\",\"value\":\"<text>\"} {\"kind\":\"clickCandidate\",\"index\":<n>} {\"kind\":\"typeIntoCandidate\",\"index\":<n>} {\"kind\":\"extractFromCandidate\",\"index\":<n>} {\"kind\":\"challengeSolved\"}. {\"kind\":\"challengeDetected\",\"challengeType\":\"<type>\",\"blocking\":<bool>,\"region\":{\"x\":<px>,\"y\":<px>,\"width\":<px>,\"height\":<px>} (optional)} {\"kind\":\"noChallengeDetected\"} When candidates are listed, select only by zero-based index: use clickCandidate for locate/submitAndVerify/follow/dismissObstruction, typeIntoCandidate for fill/type, and extractFromCandidate for extract. Candidate actions contain only kind and index. Never emit typed or extracted values. Without candidates, legacy click/typeText/extractValue actions remain supported. For solveChallenge requests, solve the visible challenge (captcha or verification widget) one step at a time with click. Never type: a challenge is only ever clicked, and typing its label or instructions solves nothing. Aim at the exact center of the target control; checkboxes and verify buttons are small, so pick coordinates inside their borders. Only return {\"kind\":\"challengeSolved\"} when the screenshot shows the solved state (for a checkbox challenge, a visible green checkmark). For detectChallenge requests, never click and never solve: classify the page and return challengeDetected with challengeType one of recaptchaV2Checkbox, recaptchaV3, textCaptcha, imageGridCaptcha, mfaCodeEntry (blocking=true when the widget prevents the task, region optional), or noChallengeDetected when the page carries no captcha or verification widget. Click coordinates are CSS pixels of the screenshot.";
+const PROPOSE_SYSTEM: &str = "Return only JSON of the form {\"confidence\": <0.0-1.0>, \"action\": <action>}. Action shapes: {\"kind\":\"click\",\"x\":<px>,\"y\":<px>} {\"kind\":\"typeText\",\"text\":\"<text>\"} {\"kind\":\"extractValue\",\"value\":\"<text>\"} {\"kind\":\"clickCandidate\",\"index\":<n>} {\"kind\":\"typeIntoCandidate\",\"index\":<n>} {\"kind\":\"extractFromCandidate\",\"index\":<n>} {\"kind\":\"challengeSolved\"}. {\"kind\":\"challengeDetected\",\"challengeType\":\"<type>\",\"blocking\":<bool>,\"region\":{\"x\":<px>,\"y\":<px>,\"width\":<px>,\"height\":<px>} (optional)} {\"kind\":\"noChallengeDetected\"} When candidates are listed, select only by zero-based index. Candidate actions contain only kind and index. Never emit typed or extracted values. Without candidates, legacy click/typeText/extractValue actions remain supported. For solveChallenge requests, solve the visible challenge (captcha or verification widget) one step at a time with click. Never type: a challenge is only ever clicked, and typing its label or instructions solves nothing. Aim at the exact center of the target control; checkboxes and verify buttons are small, so pick coordinates inside their borders. Only return {\"kind\":\"challengeSolved\"} when the screenshot shows the solved state (for a checkbox challenge, a visible green checkmark). For detectChallenge requests, never click and never solve: classify the page and return challengeDetected with challengeType one of recaptchaV2Checkbox, recaptchaV3, textCaptcha, imageGridCaptcha, mfaCodeEntry (blocking=true when the widget prevents the task, region optional), or noChallengeDetected when the page carries no captcha or verification widget. Click coordinates are CSS pixels of the screenshot.";
+
+fn propose_system() -> String {
+    format!(
+        "{PROPOSE_SYSTEM} Candidate action intent rules: {}.",
+        types::candidate_action_prompt_rules()
+    )
+}
 
 const EXTRACT_SYSTEM: &str = "Return only JSON {\"value\": <json matching the caller schema>}.";
 
@@ -142,8 +149,9 @@ impl Upstream for OpenAiUpstream {
                 ));
             }
         }
+        let system = propose_system();
         let value = self
-            .chat_json(PROPOSE_SYSTEM, &user_text, Some(&input.screenshot_png_b64))
+            .chat_json(&system, &user_text, Some(&input.screenshot_png_b64))
             .await?;
         let proposal: ProposeResponse = serde_json::from_value(value).map_err(|e| {
             UpstreamError::Invalid(format!("proposal JSON does not match wire shape: {e}"))
@@ -260,6 +268,7 @@ mod tests {
 
     #[test]
     fn prompt_requires_index_only_intent_compatible_candidate_actions() {
+        let system = propose_system();
         for required in [
             "clickCandidate",
             "typeIntoCandidate",
@@ -267,7 +276,7 @@ mod tests {
             "zero-based index",
             "Never emit typed or extracted values",
         ] {
-            assert!(PROPOSE_SYSTEM.contains(required), "missing {required}");
+            assert!(system.contains(required), "missing {required}");
         }
     }
 }
