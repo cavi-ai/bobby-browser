@@ -26,39 +26,46 @@ Wire strings (camelCase JSON uses these exact values):
 | Browser fingerprint | `browser:fingerprint` |
 | Browser humanize | `browser:humanize` |
 
-## Operation → capability matrix
+<!-- BEGIN GENERATED INTERFACE SUPPORT -->
+## Generated operation support
 
-From `InterfaceOperation::required` (HTTP broker and MCP operations map to these):
+`direct` means the adapter exposes the operation. `via command` means it is reached through `submitCommand`. The capability column is the direct operation gate; translated paths use `browser:mutate` plus nested command requirements.
 
-| Operation | HTTP / MCP | Required capability |
-|---|---|---|
-| RuntimeInfo | `GET /v1/runtime` / `runtime_info` | `session:read` |
-| CreateSession | `POST /v1/sessions` / `session_create` | `session:write` |
-| DeleteSession | `DELETE /v1/sessions/{id}` / `session_close` | `session:write` |
-| ReadSession | `GET /v1/sessions` / `session_list` | `session:read` |
-| OpenPage | `POST /v1/pages` / `page_open` | `page:write` |
-| ReadPage | `form_snapshot` | `page:read` |
-| SubmitCommand | `POST /v1/commands` / `command_execute` (+ flat MCP browser tools) | `browser:mutate` |
-| CreateCheckpoint | `POST /v1/checkpoints` / `checkpoint_save` | `recovery:write` |
-| ReadCheckpoint | `GET /v1/recovery/{id}` / `recovery_status` | `recovery:read` |
-| RecoverWorkflow | `POST /v1/recovery/{id}` / `workflow_recover` | `recovery:write` |
-| SubscribeEvents | `GET /v1/events` / `events_read` | `session:read` |
-| ReadArtifact | `GET /v1/artifacts/{id}` | `artifact:read` |
-| ReadContext | `GET /v1/context/ask`, `GET /v1/context/site/{key}` / `context_neighbors` | `context:read` |
-| IssuePrincipal | `POST /v1/principals` | `authority:admin` |
-| RevokePrincipal | `DELETE /v1/principals/{id}` | `authority:admin` |
-| SubmitJob | `POST /v1/jobs` | `job:submit` |
-| ReadJob | `GET /v1/jobs/{id}` | `job:read` |
-| CancelJob | `DELETE /v1/jobs/{id}` | `job:cancel` |
+| Operation | Required capability | HTTP | MCP | CDP | ACP | Engine scope |
+|---|---|---|---|---|---|---|
+| `runtimeInfo` | `session:read` | direct | direct | direct | — | engine-agnostic |
+| `createSession` | `session:write` | direct | direct | — | direct | Chromium, Firefox |
+| `readSession` | `session:read` | direct | direct | direct | — | Chromium, Firefox |
+| `deleteSession` | `session:write` | direct | direct | — | direct | Chromium, Firefox |
+| `openPage` | `page:write` | direct | direct | direct | direct | Chromium, Firefox |
+| `readPage` | `page:read` | direct | direct | via command | via command | Chromium, Firefox |
+| `closePage` | `page:write` | via command | via command | via command | via command | Chromium, Firefox |
+| `submitCommand` | `browser:mutate` | direct | direct | direct | direct | Chromium, Firefox |
+| `createCheckpoint` | `recovery:write` | direct | direct | direct | — | Chromium, Firefox |
+| `readCheckpoint` | `recovery:read` | direct | direct | direct | — | Chromium, Firefox |
+| `recoverWorkflow` | `recovery:write` | direct | direct | — | — | Chromium, Firefox |
+| `readArtifact` | `artifact:read` | direct | — | — | — | engine-agnostic |
+| `readContext` | `context:read` | direct | direct | — | — | Chromium, Firefox |
+| `captureArtifact` | `artifact:capture` | via command | via command | direct | — | Chromium, Firefox |
+| `subscribeEvents` | `session:read` | direct | direct | direct | — | Chromium, Firefox |
+| `submitJob` | `job:submit` | direct | direct | — | — | engine-agnostic |
+| `readJob` | `job:read` | direct | direct | — | — | engine-agnostic |
+| `cancelJob` | `job:cancel` | direct | direct | — | — | engine-agnostic |
+| `issuePrincipal` | `authority:admin` | direct | — | — | — | engine-agnostic |
+| `revokePrincipal` | `authority:admin` | direct | — | — | — | engine-agnostic |
 
-`activatePage` / MCP `page_activate` and `accessibilitySnapshot` / MCP
-`a11y_snapshot` are **primitive commands** (via `command_execute` or the flat
-MCP tools), not separate `/v1/pages/...` routes. Both still require
-`browser:mutate`. See [Accessibility snapshot](../guides/accessibility-snapshot.md).
+## Execution-policy gates
 
-Some interface operations (`ClosePage`, `CaptureArtifact`) exist in
-the type map for authority checks; prefer the documented HTTP/MCP surfaces
-above for public clients.
+These fields are opt-ins. The capability is checked at the listed operation before protected behavior runs.
+
+| `executionPolicy` field | Capability | Enforced at | HTTP | MCP | CDP | ACP | Engines |
+|---|---|---|---|---|---|---|---|
+| `javascriptEvaluation` | `javascript:evaluate` | `submitCommand` | yes | yes | yes | — | Chromium, Firefox |
+| `visionAssist` | `vision:assist` | `submitCommand` | yes | yes | — | yes | Chromium, Firefox |
+| `fingerprint` | `browser:fingerprint` | `createSession` | yes | yes | — | — | Chromium, Firefox |
+| `humanize` | `browser:humanize` | `createSession` | yes | yes | — | — | Chromium, Firefox |
+
+<!-- END GENERATED INTERFACE SUPPORT -->
 
 ## Privileged primitives (beyond `browser:mutate`)
 

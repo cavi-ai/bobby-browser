@@ -1,6 +1,13 @@
 use serde::{Deserialize, Serialize};
 
 pub mod live;
+mod support_matrix;
+
+pub use support_matrix::{
+    execution_policy_requirements, operation_support, render_support_matrix_markdown,
+    AdapterSupport, EngineSupport, ExecutionPolicyRequirement, OperationSupport,
+    SUPPORT_MATRIX_BEGIN, SUPPORT_MATRIX_END,
+};
 
 pub const CANONICAL_STEPS: [&str; 10] = [
     "runtime.info",

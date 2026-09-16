@@ -225,6 +225,54 @@ pub enum InterfaceOperation {
 }
 
 impl InterfaceOperation {
+    pub const ALL: [Self; 20] = [
+        Self::RuntimeInfo,
+        Self::CreateSession,
+        Self::ReadSession,
+        Self::DeleteSession,
+        Self::OpenPage,
+        Self::ReadPage,
+        Self::ClosePage,
+        Self::SubmitCommand,
+        Self::CreateCheckpoint,
+        Self::ReadCheckpoint,
+        Self::RecoverWorkflow,
+        Self::ReadArtifact,
+        Self::ReadContext,
+        Self::CaptureArtifact,
+        Self::SubscribeEvents,
+        Self::SubmitJob,
+        Self::ReadJob,
+        Self::CancelJob,
+        Self::IssuePrincipal,
+        Self::RevokePrincipal,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RuntimeInfo => "runtimeInfo",
+            Self::CreateSession => "createSession",
+            Self::ReadSession => "readSession",
+            Self::DeleteSession => "deleteSession",
+            Self::OpenPage => "openPage",
+            Self::ReadPage => "readPage",
+            Self::ClosePage => "closePage",
+            Self::SubmitCommand => "submitCommand",
+            Self::CreateCheckpoint => "createCheckpoint",
+            Self::ReadCheckpoint => "readCheckpoint",
+            Self::RecoverWorkflow => "recoverWorkflow",
+            Self::ReadArtifact => "readArtifact",
+            Self::ReadContext => "readContext",
+            Self::CaptureArtifact => "captureArtifact",
+            Self::SubscribeEvents => "subscribeEvents",
+            Self::SubmitJob => "submitJob",
+            Self::ReadJob => "readJob",
+            Self::CancelJob => "cancelJob",
+            Self::IssuePrincipal => "issuePrincipal",
+            Self::RevokePrincipal => "revokePrincipal",
+        }
+    }
+
     pub const fn required(self) -> &'static [Capability] {
         match self {
             Self::RuntimeInfo => &[Capability::SessionRead],
@@ -248,6 +296,76 @@ impl InterfaceOperation {
             Self::IssuePrincipal => &[Capability::AuthorityAdmin],
             Self::RevokePrincipal => &[Capability::AuthorityAdmin],
         }
+    }
+}
+
+#[cfg(test)]
+mod interface_operation_tests {
+    use super::InterfaceOperation;
+    use std::collections::HashSet;
+
+    #[test]
+    fn all_is_exhaustive_and_unique() {
+        let expected_names = [
+            "runtimeInfo",
+            "createSession",
+            "readSession",
+            "deleteSession",
+            "openPage",
+            "readPage",
+            "closePage",
+            "submitCommand",
+            "createCheckpoint",
+            "readCheckpoint",
+            "recoverWorkflow",
+            "readArtifact",
+            "readContext",
+            "captureArtifact",
+            "subscribeEvents",
+            "submitJob",
+            "readJob",
+            "cancelJob",
+            "issuePrincipal",
+            "revokePrincipal",
+        ];
+
+        fn listed(operation: InterfaceOperation) {
+            match operation {
+                InterfaceOperation::RuntimeInfo
+                | InterfaceOperation::CreateSession
+                | InterfaceOperation::ReadSession
+                | InterfaceOperation::DeleteSession
+                | InterfaceOperation::OpenPage
+                | InterfaceOperation::ReadPage
+                | InterfaceOperation::ClosePage
+                | InterfaceOperation::SubmitCommand
+                | InterfaceOperation::CreateCheckpoint
+                | InterfaceOperation::ReadCheckpoint
+                | InterfaceOperation::RecoverWorkflow
+                | InterfaceOperation::ReadArtifact
+                | InterfaceOperation::ReadContext
+                | InterfaceOperation::CaptureArtifact
+                | InterfaceOperation::SubscribeEvents
+                | InterfaceOperation::SubmitJob
+                | InterfaceOperation::ReadJob
+                | InterfaceOperation::CancelJob
+                | InterfaceOperation::IssuePrincipal
+                | InterfaceOperation::RevokePrincipal => {}
+            }
+            assert!(InterfaceOperation::ALL.contains(&operation));
+        }
+
+        for (operation, expected_name) in InterfaceOperation::ALL.into_iter().zip(expected_names) {
+            listed(operation);
+            assert_eq!(operation.as_str(), expected_name);
+        }
+        assert_eq!(
+            InterfaceOperation::ALL
+                .into_iter()
+                .collect::<HashSet<_>>()
+                .len(),
+            InterfaceOperation::ALL.len()
+        );
     }
 }
 
