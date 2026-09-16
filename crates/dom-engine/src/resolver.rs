@@ -257,21 +257,18 @@ fn parse_simple_css(selector: &str) -> Option<SimpleCss> {
     }
     while !rest.is_empty() {
         if let Some(stripped) = rest.strip_prefix('#') {
-            let end = stripped
-                .find(|character: char| character == '[' || character == '#')
-                .unwrap_or(stripped.len());
+            let end = stripped.find(['[', '#']).unwrap_or(stripped.len());
             if end == 0 {
                 return None;
             }
             parsed.id = Some(stripped[..end].to_owned());
             rest = &stripped[end..];
-        } else if let Some(stripped) = rest.strip_prefix('[') {
+        } else {
+            let stripped = rest.strip_prefix('[')?;
             let close = stripped.find(']')?;
             let body = &stripped[..close];
             rest = &stripped[close + 1..];
             parsed.attributes.push(parse_attr(body)?);
-        } else {
-            return None;
         }
     }
     if parsed.tag.is_none() && parsed.id.is_none() && parsed.attributes.is_empty() {
