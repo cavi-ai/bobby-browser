@@ -4,7 +4,7 @@ documentedVersion: 0.14.0
 
 # Northstar browser release gate
 
-`@cavi-ai/bobby-gauntlet` is the Northstar Ops application: a responsive, API-backed customer operations workspace. It replaces the synthetic station/championship course. Package tests cover application contracts; five non-ignored installed-Chromium journeys prove the public runtime boundary, visible state, durable effects, recovery, uploads, frames, popups, and downloads.
+`@cavi-ai/bobby-gauntlet` is the Northstar Ops application: a SaaS+commerce operator workspace with CMP, MFA, combobox search, a virtualized ledger, a wizard, shadow-DOM confirmation, toast/chat overlays, nested payment frames, and 3-D Secure. Package tests cover application contracts; seven non-ignored installed-Chromium journeys prove the public runtime boundary through a11y targets and intents, plus durable server effects, recovery, uploads, frames, popups, and downloads.
 
 Build and test the production application:
 
@@ -20,7 +20,7 @@ export BOBBY_CHROME_EXECUTABLE="/path/to/chrome"
 cargo test -p runtime-tests --locked --test modern_gauntlet_e2e -- --test-threads=1
 ```
 
-The five mandatory journeys are customer discovery and durable priority update, validated onboarding with preserved values, document upload with iframe confirmation, popup authorization with obstruction handling, and interrupted report recovery with a verified download. None is ignored, and a manifest test protects their stable names.
+The seven mandatory journeys are CMP+login+MFA, customer discovery through the combobox and virtual ledger, validated wizard onboarding, document upload with shadow confirmation, popup authorization with toast/chat overlays, checkout with address autocomplete, date-range calendar and 3-D Secure, and interrupted report recovery with a verified download. None is ignored, and a manifest test protects their stable names. Auth and cookie consent are a prefix on every Level-1 journey.
 
 ## Challenge levels
 
