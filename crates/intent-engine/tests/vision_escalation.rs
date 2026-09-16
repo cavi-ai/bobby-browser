@@ -314,6 +314,7 @@ fn form_candidate(id: &str, role: &str, name: &str) -> dom_engine::Candidate {
     dom_engine::Candidate {
         id: id.into(),
         css: Some(format!("#{id}")),
+        tag: None,
         test_id: None,
         role: Some(role.into()),
         name: Some(name.into()),
@@ -956,6 +957,7 @@ async fn click_candidate_proposal_clicks_the_referenced_element() {
         dom_engine::Candidate {
             id: format!("btn-{name}"),
             css: Some(format!("[data-name=\"{name}\"]")),
+            tag: None,
             test_id: None,
             role: Some("button".into()),
             name: Some(name.into()),
@@ -1040,6 +1042,7 @@ async fn click_candidate_index_outside_the_prompt_list_fails_closed() {
         dom_engine::Candidate {
             id: format!("btn-{name}"),
             css: Some(format!("[data-name=\"{name}\"]")),
+            tag: None,
             test_id: None,
             role: Some("button".into()),
             name: Some(name.into()),

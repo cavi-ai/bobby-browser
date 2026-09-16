@@ -142,6 +142,7 @@ fn overlay_close_button() -> Candidate {
     Candidate {
         id: "dismiss-overlay".into(),
         css: Some("#dismiss-overlay".into()),
+        tag: None,
         test_id: None,
         role: Some("button".into()),
         name: Some("Close".into()),

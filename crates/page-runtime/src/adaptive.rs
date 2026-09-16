@@ -1941,6 +1941,7 @@ mod tests {
         let aria_invalid = dom_engine::Candidate {
             id: "postal-code".into(),
             css: Some("#postal-code".into()),
+            tag: None,
             test_id: None,
             role: Some("textbox".into()),
             name: Some("Postal code".into()),
@@ -1960,6 +1961,7 @@ mod tests {
         let healthy_candidate = dom_engine::Candidate {
             id: "full-name".into(),
             css: Some("#full-name".into()),
+            tag: None,
             test_id: None,
             role: Some("textbox".into()),
             name: Some("Full name".into()),

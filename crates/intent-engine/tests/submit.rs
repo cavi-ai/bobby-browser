@@ -134,6 +134,7 @@ fn button(name: &str) -> Candidate {
     Candidate {
         id: name.into(),
         css: Some(format!("#{name}")),
+        tag: None,
         test_id: None,
         role: Some("button".into()),
         name: Some(name.into()),

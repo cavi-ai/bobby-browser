@@ -103,6 +103,7 @@ fn button(name: &str) -> Candidate {
     Candidate {
         id: format!("btn-{name}"),
         css: Some(format!("[data-name=\"{name}\"]")),
+        tag: None,
         test_id: None,
         role: Some("button".into()),
         name: Some(name.into()),

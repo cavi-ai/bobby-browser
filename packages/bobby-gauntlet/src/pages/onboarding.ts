@@ -5,35 +5,33 @@ import { RecaptchaController } from "../recaptcha.js";
 
 export async function onboardingPage(document: Document, api: NorthstarApi, config: RunConfig): Promise<HTMLElement> {
   const page = element(document, "section", { className: "page" });
-  page.append(pageHeader(document, "New relationship", "Onboard a customer", "Capture the essentials once, review them clearly, and create a durable customer record."));
+  page.append(pageHeader(document, "New relationship", "Onboard a customer", "Three steps. Back keeps accepted values. The postal code is validated only at submit."));
   const form = element(document, "form", { className: "workflow-card", ariaLabel: "Customer onboarding" });
   form.noValidate = true;
+  const stepper = element(document, "p", { className: "wizard-step", text: "Step 1 of 3" });
   const fields = element(document, "div", { className: "form-grid" });
+  const errors = element(document, "div", { className: "error-summary" });
+  errors.setAttribute("role", "alert");
+  errors.tabIndex = -1;
   const fullName = inputField(document, "Full name", "text", "name");
   const email = inputField(document, "Work email", "email", "email");
   const companyName = inputField(document, "Company name", "text", "organization");
   const postalCode = inputField(document, "Postal code", "text", "postal-code");
   const plan = selectField(document, "Plan", [["starter", "Starter"], ["growth", "Growth"], ["scale", "Scale"]]);
+  let billingCycle: BillingCycle = "monthly";
   const billingSlot = element(document, "div", { className: "field-slot" });
-  const errors = element(document, "div", { className: "error-summary" });
-  errors.setAttribute("role", "alert");
-  errors.tabIndex = -1;
   const identityFields = config.level === 2 && config.traps.reversedIdentityFields
     ? [email.label, fullName.label]
     : [fullName.label, email.label];
-  fields.append(...identityFields, companyName.label, postalCode.label, plan.label, billingSlot);
   let confirmEmail: HTMLInputElement | undefined;
+  const delayedSlot = element(document, "div", { className: "field-slot delayed-control" });
   if (config.level === 2) {
-    const delayedSlot = element(document, "div", { className: "field-slot delayed-control" });
-    fields.append(delayedSlot);
     document.defaultView?.setTimeout(() => {
       const confirmation = inputField(document, "Confirm work email", "email", "email");
       confirmEmail = confirmation.input;
       delayedSlot.replaceChildren(confirmation.label);
     }, config.traps.delayedControlMs);
   }
-  const submit = element(document, "button", { text: "Create customer" });
-  submit.type = "submit";
   let recaptcha: HTMLElement | undefined;
   let recaptchaController: RecaptchaController | undefined;
   if (config.level === 2 && config.recaptchaSiteKey) {
@@ -44,28 +42,58 @@ export async function onboardingPage(document: Document, api: NorthstarApi, conf
       errors.replaceChildren(element(document, "p", { text: "reCAPTCHA could not be loaded. Reload the page to try again." }));
     });
   }
-  form.append(errors, fields);
+  const back = element(document, "button", { text: "Back" });
+  back.type = "button";
+  back.className = "secondary";
+  const next = element(document, "button", { text: "Next" });
+  next.type = "button";
+  const submit = element(document, "button", { text: "Create customer" });
+  submit.type = "submit";
+  const actions = element(document, "div", { className: "wizard-actions" });
+  form.append(stepper, errors, fields, actions);
   if (recaptcha !== undefined) form.append(recaptcha);
-  form.append(submit);
   page.append(form);
-
+  let step = 1;
   const renderBilling = () => {
     billingSlot.replaceChildren();
     if (plan.select.value === "starter") return;
-    billingSlot.append(selectField(document, "Billing cycle", [["monthly", "Monthly"], ["annual", "Annual"]]).label);
+    const billing = selectField(document, "Billing cycle", [["monthly", "Monthly"], ["annual", "Annual"]]);
+    billing.select.value = billingCycle;
+    billing.select.addEventListener("change", () => {
+      billingCycle = billing.select.value as BillingCycle;
+    });
+    billingSlot.append(billing.label);
   };
   plan.select.addEventListener("change", renderBilling);
-  renderBilling();
+  const renderStep = () => {
+    stepper.textContent = `Step ${step} of 3`;
+    fields.replaceChildren();
+    if (step === 1) fields.append(...identityFields, ...(config.level === 2 ? [delayedSlot] : []));
+    if (step === 2) fields.append(companyName.label, postalCode.label);
+    if (step === 3) {
+      renderBilling();
+      fields.append(plan.label, billingSlot);
+    }
+    back.hidden = step === 1;
+    next.hidden = step === 3;
+    submit.hidden = step !== 3;
+    actions.replaceChildren(back, next, submit);
+  };
+  back.addEventListener("click", () => { step = Math.max(1, step - 1); renderStep(); });
+  next.addEventListener("click", () => { step = Math.min(3, step + 1); renderStep(); });
+  renderStep();
 
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     errors.replaceChildren();
     for (const field of form.querySelectorAll("[aria-invalid='true']")) field.removeAttribute("aria-invalid");
-    const billing = form.querySelector<HTMLSelectElement>("select[aria-label='Billing cycle']")?.value ?? "monthly";
+    const billing = form.querySelector<HTMLSelectElement>("select[aria-label='Billing cycle']")?.value ?? billingCycle;
     if (confirmEmail !== undefined && confirmEmail.value !== email.input.value) {
       confirmEmail.setAttribute("aria-invalid", "true");
       errors.append(element(document, "p", { text: "The confirmation email must match the work email." }));
       confirmEmail.focus();
+      step = 1;
+      renderStep();
       return;
     }
     const recaptchaResponse = recaptchaController?.response()
@@ -93,6 +121,10 @@ export async function onboardingPage(document: Document, api: NorthstarApi, conf
           const target = name === "postalCode" ? postalCode.input : form.querySelector<HTMLElement>(`[name='${name}']`);
           target?.setAttribute("aria-invalid", "true");
           errors.append(element(document, "p", { text: message }));
+        }
+        if (error.fields.postalCode !== undefined) {
+          step = 2;
+          renderStep();
         }
         const first = form.querySelector<HTMLElement>("[aria-invalid='true']");
         first?.focus();

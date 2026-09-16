@@ -457,6 +457,7 @@ impl BrowserWorker for FakeWorker {
         Ok(vec![dom_engine::Candidate {
             id: "submit".into(),
             css: Some("#submit".into()),
+            tag: None,
             test_id: None,
             role: target.role.clone().or_else(|| Some("button".into())),
             name: Some(name.clone()),

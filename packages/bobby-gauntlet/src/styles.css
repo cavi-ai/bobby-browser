@@ -87,6 +87,25 @@ button:disabled { cursor: wait; opacity: .6; }
 .error-panel { padding: 16px; color: var(--danger); background: #fff0ed; border: 1px solid #f2c9c3; border-radius: 12px; }
 .skeleton-panel { min-height: 150px; display: grid; place-items: center; color: var(--muted); background: linear-gradient(100deg, #e8ede7 30%, #f7faf6 50%, #e8ede7 70%); background-size: 300% 100%; border-radius: var(--radius); animation: shimmer 1.2s infinite; }
 @keyframes shimmer { to { background-position-x: -150%; } }
+button.secondary { background: transparent; color: var(--brand-strong); border: 1px solid var(--line); }
+.consent-backdrop, .auth-page { min-height: 100vh; display: grid; place-items: center; padding: 24px; background: var(--canvas); }
+.consent-dialog, .auth-page .workflow-card { width: min(32rem, 100%); }
+.consent-actions, .wizard-actions { display: flex; gap: 12px; }
+.combobox, .listbox-field { position: relative; }
+.combobox-list, .listbox-options { position: absolute; z-index: 4; left: 0; right: 0; margin: 4px 0 0; padding: 6px; list-style: none; background: white; border: 1px solid var(--line); border-radius: 10px; }
+.combobox-list li, .listbox-options li { padding: 8px 10px; cursor: pointer; }
+.virtual-table { height: 384px; overflow: auto; border: 1px solid var(--line); border-radius: 12px; background: white; }
+.virtual-row { display: grid; grid-template-columns: 1.2fr 1.4fr 0.6fr; gap: 12px; height: 48px; align-items: center; padding: 0 16px; border-bottom: 1px solid var(--line); }
+.dropzone { min-height: 88px; display: grid; place-items: center; border: 1px dashed var(--line); border-radius: 12px; color: var(--muted); }
+.toast-stack, .chat-overlay { position: fixed; z-index: 30; right: 20px; padding: 16px; background: white; border: 1px solid var(--line); border-radius: 12px; }
+.toast-stack { top: 20px; }
+.chat-overlay { bottom: 20px; width: min(320px, calc(100% - 40px)); }
+.live-ticker { color: var(--muted); font-weight: 700; }
+.calendar-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+.calendar-grid button[data-selected='true'] { background: var(--brand-strong); }
+iframe#card-frame, iframe#three-ds-frame { width: 100%; min-height: 220px; border: 1px solid var(--line); border-radius: 12px; background: white; }
+northstar-preview { display: grid; gap: 12px; }
+@keyframes shimmer { to { background-position-x: -150%; } }
 
 @media (max-width: 820px) {
   .app-shell { grid-template-columns: 1fr; }

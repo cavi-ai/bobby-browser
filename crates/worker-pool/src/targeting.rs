@@ -63,6 +63,7 @@ struct JsLocator {
 struct BrowserCandidate {
     id: String,
     css: Option<String>,
+    tag: Option<String>,
     test_id: Option<String>,
     role: Option<String>,
     name: Option<String>,
@@ -915,6 +916,7 @@ fn into_candidate(mut item: BrowserCandidate) -> Candidate {
     Candidate {
         id: item.id,
         css,
+        tag: item.tag.filter(|tag| !tag.is_empty()),
         test_id: item.test_id,
         role: item.role,
         name: item.name,
@@ -999,10 +1001,18 @@ pub async fn resolve_target_with_visibility(
         shadow_hosts: locator_shadow_hosts,
         id: candidate.id.clone(),
     };
+    // `find_element(css)` is only safe for a unique `#id`. Tag and
+    // `[aria-label=…]` stamps match more than one node; using them here
+    // would click the first hit (often a wrapper) instead of the candidate
+    // the resolver just chose. The JS locator keys off `data-bobby-target`.
     let native = if target.frame_path.is_empty() && target.shadow_path.is_empty() {
         match (&owner, candidate.css.as_deref()) {
-            (Some(element), Some(css)) => element.find_element(css).await.ok(),
-            (None, Some(css)) => scope.execution_page.find_element(css).await.ok(),
+            (Some(element), Some(css)) if css.starts_with('#') => {
+                element.find_element(css).await.ok()
+            }
+            (None, Some(css)) if css.starts_with('#') => {
+                scope.execution_page.find_element(css).await.ok()
+            }
             _ => None,
         }
     } else {
@@ -1254,7 +1264,7 @@ fn candidate_collector_operation(scope: u64) -> Result<String, CommandError> {
         r#"let n=0,out=[];
 const labelledBy=el=>(el.getAttribute('aria-labelledby')||'').split(/\s+/).filter(Boolean).map(id=>String(el.ownerDocument.getElementById(id)?.innerText||'').trim()||'').filter(Boolean).join(' ')||null;
 const implicitRole=el=>{{if(el.tagName==='BUTTON')return 'button';if(el.tagName==='A'&&el.hasAttribute('href'))return 'link';if(el.tagName==='IFRAME')return 'iframe';if(el.tagName==='TEXTAREA'||el.isContentEditable)return 'textbox';if(el.tagName==='SELECT')return el.multiple?'listbox':'combobox';if(el.tagName==='FORM')return 'form';if(el.tagName==='DIALOG')return 'dialog';if(el.tagName==='MAIN')return 'main';if(el.tagName==='NAV')return 'navigation';if(el.tagName==='ARTICLE')return 'article';if(el.tagName==='SECTION'&&(el.getAttribute('aria-label')||el.getAttribute('aria-labelledby')))return 'region';if(/^H[1-6]$/.test(el.tagName))return 'heading';if(el.tagName==='UL'||el.tagName==='OL'||el.tagName==='MENU'||el.tagName==='DL')return 'list';if(el.tagName==='LI')return 'listitem';if(el.tagName==='IMG')return 'img';if(el.tagName==='OPTION')return 'option';if(el.tagName==='TABLE')return 'table';if(el.tagName==='TR')return 'row';if(el.tagName==='TD')return 'cell';if(el.tagName==='TH')return 'columnheader';if(el.tagName==='P')return 'paragraph';if(el.tagName==='HR')return 'separator';if(el.tagName==='FIELDSET'||el.tagName==='DETAILS')return 'group';if(el.tagName==='ASIDE')return 'complementary';if(el.tagName==='HEADER')return 'banner';if(el.tagName==='FOOTER')return 'contentinfo';if(el.tagName==='PROGRESS')return 'progressbar';if(el.tagName==='METER')return 'meter';if(el.tagName==='OUTPUT')return 'status';if(el.tagName==='SUMMARY')return 'button';if(el.tagName==='FIGURE')return 'figure';if(el.tagName==='BLOCKQUOTE')return 'blockquote';if(el.tagName==='DT')return 'term';if(el.tagName==='DD')return 'definition';if(el.tagName==='AREA'&&el.hasAttribute('href'))return 'link';if(el.tagName==='TIME')return 'time';if(el.tagName!=='INPUT')return null;const type=(el.type||'text').toLowerCase();if(['button','submit','reset','image','file'].includes(type))return 'button';if(type==='checkbox')return 'checkbox';if(type==='radio')return 'radio';if(type==='range')return 'slider';if(type==='number')return 'spinbutton';if(type==='search')return 'searchbox';return type==='hidden'?null:'textbox'}};
-const visit=current=>{{for(const el of current.querySelectorAll('*')){{const id={prefix}+(++n);el.setAttribute('data-bobby-target',id);const style=getComputedStyle(el),rect=el.getBoundingClientRect();const label=el.labels&&el.labels.length?Array.from(el.labels).map(x=>String(x.innerText||'').trim()).filter(Boolean).join(' '):null;const role=el.getAttribute('role')||implicitRole(el);const name=el.getAttribute('aria-label')||labelledBy(el)||label||(el.tagName==='IMG'?el.getAttribute('alt'):null)||(el.tagName==='IFRAME'?el.getAttribute('title'):null)||String(el.innerText||'').trim()||null;const attributes={{}};for(const a of el.attributes)if(['name','type','src','href','placeholder','autocomplete','pattern','min','max','step','multiple','aria-invalid'].includes(a.name)||a.name.startsWith('data-'))attributes[a.name]=a.value;for(const booleanName of ['required','readonly','checked','multiple'])if(el[booleanName]===true)attributes[booleanName]='true';const css=el.id?`#${{CSS.escape(el.id)}}`:`[data-bobby-target="${{id}}"]`;out.push({{id,css,testId:el.getAttribute('data-testid'),role,name,label,text:String(el.innerText||el.value||'').trim(),attributes,attached:el.isConnected,visible:style.visibility!=='hidden'&&style.display!=='none'&&rect.width>0&&rect.height>0,enabled:!el.disabled&&el.getAttribute('aria-disabled')!=='true'&&!el.closest('fieldset[disabled]')}});if(el.shadowRoot)visit(el.shadowRoot)}}}};visit(root);return out"#
+const visit=current=>{{for(const el of current.querySelectorAll('*')){{const id={prefix}+(++n);el.setAttribute('data-bobby-target',id);const style=getComputedStyle(el),rect=el.getBoundingClientRect();const label=el.labels&&el.labels.length?Array.from(el.labels).map(x=>String(x.innerText||'').trim()).filter(Boolean).join(' '):null;const role=el.getAttribute('role')||implicitRole(el);const name=el.getAttribute('aria-label')||labelledBy(el)||label||(el.tagName==='IMG'?el.getAttribute('alt'):null)||(el.tagName==='IFRAME'?el.getAttribute('title'):null)||String(el.innerText||'').trim()||null;const tag=el.tagName.toLowerCase();const attributes={{}};for(const a of el.attributes)if(['id','name','type','src','href','placeholder','autocomplete','pattern','min','max','step','multiple','aria-invalid','aria-label','title'].includes(a.name)||a.name.startsWith('data-'))attributes[a.name]=a.value;for(const booleanName of ['required','readonly','checked','multiple'])if(el[booleanName]===true)attributes[booleanName]='true';const aria=el.getAttribute('aria-label');const css=el.id?`#${{CSS.escape(el.id)}}`:aria?`[aria-label="${{aria.replace(/\\\\/g,'\\\\\\\\').replace(/"/g,'\\\\"')}}"]`:tag;out.push({{id,css,tag,testId:el.getAttribute('data-testid'),role,name,label,text:String(el.innerText||el.value||'').trim(),attributes,attached:el.isConnected,visible:style.visibility!=='hidden'&&style.display!=='none'&&rect.width>0&&rect.height>0,enabled:!el.disabled&&el.getAttribute('aria-disabled')!=='true'&&!el.closest('fieldset[disabled]')}});if(el.shadowRoot)visit(el.shadowRoot)}}}};visit(root);return out"#
     ))
 }
 
@@ -1609,6 +1619,7 @@ mod tests {
         BrowserCandidate {
             id: "1".into(),
             css: css.map(str::to_owned),
+            tag: Some("input".into()),
             test_id: None,
             role: Some("textbox".into()),
             name: Some("Name".into()),
@@ -1654,6 +1665,13 @@ mod tests {
         let operation = candidate_collector_operation(1).expect("collector operation");
 
         assert!(operation.contains("'aria-invalid'"));
+        assert!(operation.contains("'aria-label'"));
+        assert!(operation.contains("'title'"));
+        assert!(operation.contains("const tag=el.tagName.toLowerCase()"));
+        assert!(
+            !operation.contains("[data-bobby-target="),
+            "stamped css must not advertise the per-gather tracking id"
+        );
     }
 
     fn cdp_node(
@@ -1845,6 +1863,7 @@ mod tests {
         BrowserCandidate {
             id: "1".into(),
             css: None,
+            tag: Some("button".into()),
             test_id: None,
             role: role.map(str::to_owned),
             name: name.map(str::to_owned),

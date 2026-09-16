@@ -163,12 +163,11 @@ async fn grow_documents_traps_corpus() -> TestResult<()> {
         runtime
             .click("form[aria-label='Upload customer document'] button", true)
             .await?;
-        runtime.wait_visible("iframe[title^='Preview of']").await?;
         runtime
-            .wait_in_frame_button("#document-preview", "#confirm-preview")
+            .wait_shadow("#document-preview-widget", "#confirm-preview")
             .await?;
         runtime
-            .click_in_frame("#document-preview", "#confirm-preview")
+            .click_shadow("#document-preview-widget", "#confirm-preview", true)
             .await?;
         runtime.mark_completed(&format!("documents-traps-{run_idx}"))?;
     }
@@ -242,7 +241,7 @@ async fn grow_customer_update_traps_corpus() -> TestResult<()> {
             .capture(
                 &runtime,
                 &GroundTruth::Click {
-                    selector: "form[aria-label='Customer search'] button",
+                    selector: "[aria-label='Search customers'] button",
                     purpose: "Run the customer search".into(),
                     ordinal: None,
                 },
@@ -251,7 +250,7 @@ async fn grow_customer_update_traps_corpus() -> TestResult<()> {
             )
             .await?;
         runtime
-            .click("form[aria-label='Customer search'] button", false)
+            .click("[aria-label='Search customers'] button", false)
             .await?;
         runtime
             .wait_visible("a[href='/customers/cus_atlas']")
@@ -273,14 +272,14 @@ async fn grow_customer_update_traps_corpus() -> TestResult<()> {
             .click("a[href='/customers/cus_atlas']", false)
             .await?;
         runtime
-            .wait_visible("select[aria-label='Customer priority']")
+            .wait_visible("button[aria-label='Customer priority']")
             .await?;
 
         collector
             .capture(
                 &runtime,
                 &GroundTruth::Click {
-                    selector: "select[aria-label='Customer priority']",
+                    selector: "button[aria-label='Customer priority']",
                     purpose: "Choose the high priority".into(),
                     ordinal: None,
                 },
@@ -288,7 +287,7 @@ async fn grow_customer_update_traps_corpus() -> TestResult<()> {
                 &step("select_priority"),
             )
             .await?;
-        runtime.select_one("Customer priority", "high").await?;
+        runtime.choose_option("Customer priority", "High").await?;
 
         collector
             .capture(
@@ -415,7 +414,7 @@ async fn grow_customer_update_corpus() -> TestResult<()> {
                 .capture(
                     &runtime,
                     &GroundTruth::Click {
-                        selector: "form[aria-label='Customer search'] button",
+                        selector: "[aria-label='Search customers'] button",
                         purpose: DISAMBIGUATED_CLICK_SEARCH
                             [run_idx % DISAMBIGUATED_CLICK_SEARCH.len()]
                         .into(),
@@ -430,7 +429,7 @@ async fn grow_customer_update_corpus() -> TestResult<()> {
                 .capture(
                     &runtime,
                     &GroundTruth::Click {
-                        selector: "form[aria-label='Customer search'] button",
+                        selector: "[aria-label='Search customers'] button",
                         purpose: "Run the customer search".into(),
                         ordinal: None,
                     },
@@ -439,7 +438,7 @@ async fn grow_customer_update_corpus() -> TestResult<()> {
                 )
                 .await?;
             runtime
-                .click("form[aria-label='Customer search'] button", false)
+                .click("[aria-label='Search customers'] button", false)
                 .await?;
             runtime
                 .wait_visible("a[href='/customers/cus_atlas']")
@@ -461,14 +460,14 @@ async fn grow_customer_update_corpus() -> TestResult<()> {
                 .click("a[href='/customers/cus_atlas']", false)
                 .await?;
             runtime
-                .wait_visible("select[aria-label='Customer priority']")
+                .wait_visible("button[aria-label='Customer priority']")
                 .await?;
 
             collector
                 .capture(
                     &runtime,
                     &GroundTruth::Click {
-                        selector: "select[aria-label='Customer priority']",
+                        selector: "button[aria-label='Customer priority']",
                         purpose: "Choose the high priority".into(),
                         ordinal: None,
                     },
@@ -476,7 +475,7 @@ async fn grow_customer_update_corpus() -> TestResult<()> {
                     &step("select_priority"),
                 )
                 .await?;
-            runtime.select_one("Customer priority", "high").await?;
+            runtime.choose_option("Customer priority", "High").await?;
 
             // Priority boundary pair (§4n): post-select, these phrasings
             // are satisfied by re-opening the combobox or committing with
@@ -550,7 +549,7 @@ async fn grow_customer_update_corpus() -> TestResult<()> {
                 .capture(
                     &runtime,
                     &GroundTruth::Extract {
-                        selector: "select[aria-label='Customer priority']",
+                        selector: "button[aria-label='Customer priority']",
                         purpose: READ_PRIORITY[run_idx % READ_PRIORITY.len()].into(),
                         ordinal: None,
                     },
@@ -596,6 +595,24 @@ async fn grow_onboarding_corpus() -> TestResult<()> {
                     "maya@atlas.example",
                     "work email",
                 ),
+            ] {
+                collector
+                    .capture(
+                        &runtime,
+                        &GroundTruth::TypeText {
+                            selector,
+                            text: value,
+                            purpose: format!("Enter '{value}' into the {field} field"),
+                            ordinal: None,
+                        },
+                        "onboarding",
+                        &step(&format!("type_{field}")),
+                    )
+                    .await?;
+                runtime.type_text(selector, value).await?;
+            }
+            runtime.click_named("button", "Next", false).await?;
+            for (selector, value, field) in [
                 (
                     "input[aria-label='Company name']",
                     "Atlas Labs",
@@ -618,6 +635,7 @@ async fn grow_onboarding_corpus() -> TestResult<()> {
                     .await?;
                 runtime.type_text(selector, value).await?;
             }
+            runtime.click_named("button", "Next", false).await?;
 
             collector
                 .capture(
@@ -764,7 +782,7 @@ async fn grow_authorization_corpus() -> TestResult<()> {
                 .capture(
                     &runtime,
                     &GroundTruth::Click {
-                        selector: "button[aria-label='Dismiss notification preferences']",
+                        selector: "button[aria-label='Dismiss notification']",
                         purpose: "Dismiss the notification preferences prompt".into(),
                         ordinal: None,
                     },
@@ -773,10 +791,7 @@ async fn grow_authorization_corpus() -> TestResult<()> {
                 )
                 .await?;
             runtime
-                .click(
-                    "button[aria-label='Dismiss notification preferences']",
-                    false,
-                )
+                .click("button[aria-label='Dismiss notification']", false)
                 .await?;
             Ok(runtime)
         },
@@ -847,7 +862,7 @@ async fn grow_authorization_traps_corpus() -> TestResult<()> {
             .capture(
                 &runtime,
                 &GroundTruth::Click {
-                    selector: "button[aria-label='Dismiss notification preferences']",
+                    selector: "button[aria-label='Dismiss notification']",
                     purpose: "Dismiss the notification preferences prompt".into(),
                     ordinal: None,
                 },
@@ -856,10 +871,7 @@ async fn grow_authorization_traps_corpus() -> TestResult<()> {
             )
             .await?;
         runtime
-            .click(
-                "button[aria-label='Dismiss notification preferences']",
-                false,
-            )
+            .click("button[aria-label='Dismiss notification']", false)
             .await?;
         runtime.mark_completed(&format!("authorization-traps-{run_idx}"))?;
     }
@@ -970,12 +982,11 @@ async fn grow_documents_corpus() -> TestResult<()> {
         runtime
             .click("form[aria-label='Upload customer document'] button", true)
             .await?;
-        runtime.wait_visible("iframe[title^='Preview of']").await?;
         runtime
-            .wait_in_frame_button("#document-preview", "#confirm-preview")
+            .wait_shadow("#document-preview-widget", "#confirm-preview")
             .await?;
         runtime
-            .click_in_frame("#document-preview", "#confirm-preview")
+            .click_shadow("#document-preview-widget", "#confirm-preview", true)
             .await?;
         Ok(runtime)
     })

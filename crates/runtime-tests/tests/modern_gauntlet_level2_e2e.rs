@@ -35,21 +35,12 @@ async fn level_two_onboarding_solves_recaptcha_and_completes() -> TestResult<()>
         .click("section.interruption-dialog button[type='button']", false)
         .await?;
 
-    // Fill all form fields
     for (selector, value) in [
         ("input[aria-label='Full name']", "Maya Chen"),
         ("input[aria-label='Work email']", "maya@atlas.example"),
-        ("input[aria-label='Company name']", "Atlas Labs"),
-        ("input[aria-label='Postal code']", "10001"),
     ] {
         runtime.type_text(selector, value).await?;
     }
-    runtime.select_one("Plan", "growth").await?;
-    runtime
-        .wait_visible("select[aria-label='Billing cycle']")
-        .await?;
-    runtime.select_one("Billing cycle", "annual").await?;
-    // Level 2's irregular form delays a confirmation field that must match.
     runtime
         .wait_visible("input[aria-label='Confirm work email']")
         .await?;
@@ -59,6 +50,19 @@ async fn level_two_onboarding_solves_recaptcha_and_completes() -> TestResult<()>
             "maya@atlas.example",
         )
         .await?;
+    runtime.click_named("button", "Next", false).await?;
+    for (selector, value) in [
+        ("input[aria-label='Company name']", "Atlas Labs"),
+        ("input[aria-label='Postal code']", "10001"),
+    ] {
+        runtime.type_text(selector, value).await?;
+    }
+    runtime.click_named("button", "Next", false).await?;
+    runtime.select_one("Plan", "growth").await?;
+    runtime
+        .wait_visible("select[aria-label='Billing cycle']")
+        .await?;
+    runtime.select_one("Billing cycle", "annual").await?;
 
     // Solve the reCAPTCHA challenge using vision-first intent
     let solve = runtime

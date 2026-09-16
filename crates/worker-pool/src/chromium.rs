@@ -3501,8 +3501,10 @@ fn element_wait_missing_observation(
     state: &types::ElementState,
     error: &CommandError,
 ) -> Option<bool> {
-    let target_missing = matches!(error.code, ErrorCode::TargetNotFound)
-        || is_missing_css_node(error)
+    let target_missing = matches!(
+        error.code,
+        ErrorCode::TargetNotFound | ErrorCode::FrameNotFound | ErrorCode::ShadowRootUnavailable
+    ) || is_missing_css_node(error)
         || (matches!(error.code, ErrorCode::BrowserCommandFailed)
             && error
                 .message
@@ -4785,6 +4787,36 @@ mod tests {
     }
 
     #[test]
+    fn element_wait_treats_unmapped_frame_as_not_yet_present() {
+        let error = types::CommandError {
+            code: ErrorCode::FrameNotFound,
+            message: "frame path component 0 did not map to a child frame".into(),
+            layer: types::ErrorLayer::Driver,
+            retryable: false,
+        };
+
+        assert_eq!(
+            element_wait_missing_observation(&types::ElementState::Visible, &error),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn element_wait_treats_unattached_shadow_as_not_yet_present() {
+        let error = types::CommandError {
+            code: ErrorCode::ShadowRootUnavailable,
+            message: "shadow path component 0 has no attached shadow root".into(),
+            layer: types::ErrorLayer::Driver,
+            retryable: false,
+        };
+
+        assert_eq!(
+            element_wait_missing_observation(&types::ElementState::Visible, &error),
+            Some(false)
+        );
+    }
+
+    #[test]
     fn detached_element_wait_accepts_target_loss_between_resolution_and_probe() {
         let error = types::CommandError {
             code: ErrorCode::BrowserCommandFailed,
@@ -4937,6 +4969,7 @@ mod tests {
         dom_engine::Candidate {
             id: id.into(),
             css: None,
+            tag: None,
             test_id: None,
             role: Some("iframe".into()),
             name: name.map(str::to_string),

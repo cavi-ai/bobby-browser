@@ -9,6 +9,7 @@ fn candidate(id: &str, name: &str, visible: bool) -> Candidate {
     Candidate {
         id: id.into(),
         css: None,
+        tag: None,
         test_id: None,
         role: Some("button".into()),
         name: Some(name.into()),
@@ -22,6 +23,151 @@ fn candidate(id: &str, name: &str, visible: bool) -> Candidate {
         },
         frame_path: Vec::new(),
     }
+}
+
+fn css_target(css: &str) -> TargetSpec {
+    TargetSpec {
+        css: Some(css.into()),
+        ..TargetSpec::default()
+    }
+}
+
+fn css_candidate(id: &str, tag: &str, css: Option<&str>, attrs: &[(&str, &str)]) -> Candidate {
+    let mut item = candidate(id, "", true);
+    item.role = None;
+    item.name = attrs
+        .iter()
+        .find(|(key, _)| *key == "aria-label" || *key == "title")
+        .map(|(_, value)| (*value).to_owned());
+    item.tag = Some(tag.into());
+    item.css = css.map(str::to_owned);
+    for (key, value) in attrs {
+        item.attributes.insert((*key).into(), (*value).into());
+    }
+    item
+}
+
+fn resolved_id(decision: ResolutionDecision) -> Option<String> {
+    match decision {
+        ResolutionDecision::Resolved { candidate, .. } => Some(candidate.id.clone()),
+        _ => None,
+    }
+}
+
+#[test]
+fn css_id_selector_matches_stamped_hash_id() {
+    let candidates = vec![css_candidate("n", "input", Some("#card-number"), &[])];
+    let decision = resolve_candidates(
+        &css_target("#card-number"),
+        &candidates,
+        &ResolutionPolicy::default(),
+    )
+    .unwrap();
+    assert_eq!(resolved_id(decision).as_deref(), Some("n"));
+}
+
+#[test]
+fn css_id_selector_matches_id_attribute() {
+    let candidates = vec![css_candidate("n", "input", None, &[("id", "card-number")])];
+    let decision = resolve_candidates(
+        &css_target("#card-number"),
+        &candidates,
+        &ResolutionPolicy::default(),
+    )
+    .unwrap();
+    assert_eq!(resolved_id(decision).as_deref(), Some("n"));
+}
+
+#[test]
+fn css_tag_selector_matches_custom_element() {
+    let candidates = vec![css_candidate("host", "northstar-preview", None, &[])];
+    let decision = resolve_candidates(
+        &css_target("northstar-preview"),
+        &candidates,
+        &ResolutionPolicy::default(),
+    )
+    .unwrap();
+    assert_eq!(resolved_id(decision).as_deref(), Some("host"));
+}
+
+#[test]
+fn css_attribute_selector_matches_aria_label() {
+    let candidates = vec![css_candidate(
+        "card",
+        "input",
+        None,
+        &[("aria-label", "Card number")],
+    )];
+    let decision = resolve_candidates(
+        &css_target("input[aria-label='Card number']"),
+        &candidates,
+        &ResolutionPolicy::default(),
+    )
+    .unwrap();
+    assert_eq!(resolved_id(decision).as_deref(), Some("card"));
+}
+
+#[test]
+fn css_attribute_selector_matches_iframe_title() {
+    let candidates = vec![css_candidate(
+        "frame",
+        "iframe",
+        None,
+        &[("title", "Card details")],
+    )];
+    let decision = resolve_candidates(
+        &css_target("iframe[title='Card details']"),
+        &candidates,
+        &ResolutionPolicy::default(),
+    )
+    .unwrap();
+    assert_eq!(resolved_id(decision).as_deref(), Some("frame"));
+}
+
+#[test]
+fn css_attribute_selector_matches_button_type() {
+    let candidates = vec![css_candidate("save", "button", None, &[("type", "submit")])];
+    let decision = resolve_candidates(
+        &css_target("button[type='submit']"),
+        &candidates,
+        &ResolutionPolicy::default(),
+    )
+    .unwrap();
+    assert_eq!(resolved_id(decision).as_deref(), Some("save"));
+}
+
+#[test]
+fn css_verbatim_path_still_matches_stamped_css() {
+    let candidates = vec![css_candidate(
+        "fx",
+        "input",
+        Some("html > body > input"),
+        &[],
+    )];
+    let decision = resolve_candidates(
+        &css_target("html > body > input"),
+        &candidates,
+        &ResolutionPolicy::default(),
+    )
+    .unwrap();
+    assert_eq!(resolved_id(decision).as_deref(), Some("fx"));
+}
+
+#[test]
+fn css_selector_does_not_match_a_different_control() {
+    let candidates = vec![css_candidate(
+        "other",
+        "input",
+        None,
+        &[("aria-label", "Expiry")],
+    )];
+    let decision = resolve_candidates(
+        &css_target("input[aria-label='Card number']"),
+        &candidates,
+        &ResolutionPolicy::default(),
+    )
+    .unwrap();
+    assert!(matches!(decision, ResolutionDecision::NotFound));
 }
 
 fn target(name: &str) -> TargetSpec {

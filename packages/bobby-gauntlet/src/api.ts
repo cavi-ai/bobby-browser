@@ -1,4 +1,8 @@
 import type {
+  BillingAddress,
+  ChargeInput,
+  ChargeRecord,
+  ConsentState,
   CustomerDetail,
   CustomerSummary,
   DashboardSummary,
@@ -10,6 +14,7 @@ import type {
   ReportInput,
   ReportState,
   RunConfig,
+  SessionState,
 } from "./models.js";
 
 export class ApiError extends Error {
@@ -35,6 +40,38 @@ export class NorthstarApi {
     readonly runId: string,
     private readonly fetcher: typeof fetch = fetch,
   ) {}
+
+  consent(): Promise<ConsentState> {
+    return this.request("/api/consent");
+  }
+
+  setConsent(choice: "accept" | "reject"): Promise<ConsentState> {
+    return this.request("/api/consent", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ choice }),
+    });
+  }
+
+  session(): Promise<SessionState> {
+    return this.request("/api/session");
+  }
+
+  login(email: string, password: string): Promise<{ status: "mfaRequired" }> {
+    return this.request("/api/session/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+  }
+
+  verifyMfa(code: string): Promise<SessionState> {
+    return this.request("/api/session/mfa", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+  }
 
   dashboard(): Promise<DashboardSummary> {
     return this.request("/api/dashboard");
@@ -75,6 +112,10 @@ export class NorthstarApi {
     return this.request("/api/documents", { method: "POST", body });
   }
 
+  confirmDocument(id: string): Promise<{ status: string }> {
+    return this.request(`/api/documents/${encodeURIComponent(id)}/confirm`, { method: "POST" });
+  }
+
   integrationState(): Promise<IntegrationState> {
     return this.request("/api/integrations/ledger-cloud");
   }
@@ -103,11 +144,27 @@ export class NorthstarApi {
     return this.request("/api/reports/latest");
   }
 
+  addresses(query: string): Promise<BillingAddress[]> {
+    return this.request(`/api/billing/addresses?q=${encodeURIComponent(query)}`);
+  }
+
+  charge(input: ChargeInput): Promise<ChargeRecord> {
+    return this.request("/api/billing/charge", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    });
+  }
+
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const headers = new Headers(init.headers);
     headers.set("x-northstar-run", this.runId);
     const fetcher = this.fetcher;
-    const response = await fetcher(new URL(path, currentOrigin()), { ...init, headers });
+    const response = await fetcher(new URL(path, currentOrigin()), {
+      ...init,
+      headers,
+      credentials: "include",
+    });
     const isJson = response.headers.get("content-type")?.includes("application/json") === true;
     const payload: unknown = isJson ? await response.json() : undefined;
     if (!response.ok) throw toApiError(response.status, payload);

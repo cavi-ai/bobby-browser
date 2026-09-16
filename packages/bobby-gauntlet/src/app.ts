@@ -1,5 +1,7 @@
 import { NorthstarApi } from "./api.js";
 import { element } from "./components.js";
+import { cookieBanner, signInPage } from "./gate.js";
+import { billingPage } from "./pages/billing.js";
 import { dashboardPage } from "./pages/dashboard.js";
 import { customerDetailPage, customersPage } from "./pages/customers.js";
 import { documentsPage } from "./pages/documents.js";
@@ -19,6 +21,16 @@ export function mountNorthstar(root: HTMLElement, api: NorthstarApi, config: Run
   const router = createRouter(window);
   let interruptionShown = false;
   const render = async (route: Route): Promise<void> => {
+    const consent = await api.consent();
+    if (consent.consent === null) {
+      root.replaceChildren(cookieBanner(document, api, () => render(route)));
+      return;
+    }
+    const session = await api.session();
+    if (!session.authenticated) {
+      root.replaceChildren(signInPage(document, api, () => render(route)));
+      return;
+    }
     const shell = applicationShell(document, await northstarPage(document, route, api, router, config), router);
     if (!interruptionShown) {
       const interruption = levelTwoInterruption(document, config);
@@ -39,6 +51,7 @@ async function northstarPage(document: Document, route: Route, api: NorthstarApi
   if (route.segments[0] === "onboarding") return onboardingPage(document, api, config);
   if (route.segments[0] === "integrations") return integrationsPage(document, api);
   if (route.segments[0] === "reports") return reportsPage(document, api);
+  if (route.segments[0] === "billing" || route.segments[0] === "checkout") return billingPage(document, api);
   return dashboardPage(document, api);
 }
 
@@ -48,7 +61,7 @@ function applicationShell(document: Document, content: HTMLElement, router: AppR
   const brand = element(document, "a", { className: "brand", text: "Northstar Ops" });
   brand.href = "/";
   const navigation = element(document, "nav", { ariaLabel: "Primary navigation" });
-  for (const [label, path] of [["Overview", "/"], ["Customers", "/customers"], ["Onboarding", "/onboarding"], ["Documents", "/documents"], ["Integrations", "/integrations"], ["Reports", "/reports"]] as const) {
+  for (const [label, path] of [["Overview", "/"], ["Customers", "/customers"], ["Onboarding", "/onboarding"], ["Documents", "/documents"], ["Integrations", "/integrations"], ["Billing", "/billing"], ["Reports", "/reports"]] as const) {
     const link = element(document, "a", { text: label });
     link.href = path;
     link.addEventListener("click", (event) => { event.preventDefault(); void router.navigate(path); });

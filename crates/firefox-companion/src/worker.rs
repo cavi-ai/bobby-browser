@@ -1763,6 +1763,7 @@ impl FirefoxCompanionWorker {
                 Candidate {
                     id: format!("control-{index}"),
                     css: Some(control.css_path),
+                    tag: None,
                     test_id: control.test_id,
                     role: control.role,
                     name: control.name,
@@ -5088,6 +5089,7 @@ fn accessibility_candidates(nodes: &[types::AccessibilityNode]) -> Vec<Candidate
             candidates.push(Candidate {
                 id: format!("firefox-a11y-{}", candidates.len()),
                 css: None,
+                tag: None,
                 test_id: None,
                 role: node.role.clone(),
                 name: node.name.clone(),
@@ -5570,6 +5572,7 @@ fn bounded_text_matches(matcher: &TextMatch, value: &str) -> Result<bool, Comman
     let candidate = Candidate {
         id: "wait-value".into(),
         css: None,
+        tag: None,
         test_id: None,
         role: None,
         name: None,
