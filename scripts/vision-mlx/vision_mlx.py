@@ -26,6 +26,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Any, Optional
 from urllib.parse import urlparse
 
+from candidate_action_contract import CANDIDATE_PROMPT_RULES
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -159,8 +161,7 @@ class VisionModel:
             '{"confidence": 0.0..1.0, "action": {"kind": "challengeDetected", "challengeType": string, "blocking": boolean, "region": {"x": number, "y": number, "width": number, "height": number} (optional)}}\n'
             '{"confidence": 0.0..1.0, "action": {"kind": "noChallengeDetected"}}\n'
             "When candidates are listed, select only by zero-based index: "
-            "clickCandidate for locate/submitAndVerify/follow/dismissObstruction, "
-            "typeIntoCandidate for fill/type, extractFromCandidate for extract. "
+            f"{CANDIDATE_PROMPT_RULES}. "
             "Candidate actions contain only kind and index; never emit typed or "
             "extracted values. Without candidates, click/typeText/extractValue "
             "remain supported. For solveChallenge requests, solve the visible "

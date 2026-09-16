@@ -26,6 +26,16 @@ import sys
 import time
 from pathlib import Path
 
+VISION_MLX_DIR = Path(__file__).resolve().parents[1]
+if str(VISION_MLX_DIR) not in sys.path:
+    sys.path.insert(0, str(VISION_MLX_DIR))
+
+from candidate_action_contract import (
+    CANDIDATE_ACTION_KINDS,
+    LEGACY_ACTION_BY_CANDIDATE,
+    SNAKE_CASE_CANDIDATE_KINDS,
+)
+
 from mlx_finetune import (
     build_completion,
     build_prompt,
@@ -37,9 +47,7 @@ SUPPORTED_ACTION_KINDS = {
     "click",
     "typeText",
     "extractValue",
-    "clickCandidate",
-    "typeIntoCandidate",
-    "extractFromCandidate",
+    *CANDIDATE_ACTION_KINDS,
 }
 
 
@@ -186,24 +194,15 @@ def element_accuracy(predictions: list, examples: list) -> dict:
         target = e.get("targetIndex", e.get("target_index"))
         target_action = e.get("modelResponse", e.get("model_response", {})).get("action", {})
         expected_kind = target_action.get("kind")
-        canonicalize = lambda value: {
-            "clickCandidate": "click",
-            "click_candidate": "click",
-            "typeIntoCandidate": "typeText",
-            "type_into_candidate": "typeText",
-            "extractFromCandidate": "extractValue",
-            "extract_from_candidate": "extractValue",
-        }.get(value, value)
+        canonicalize = lambda value: LEGACY_ACTION_BY_CANDIDATE.get(
+            SNAKE_CASE_CANDIDATE_KINDS.get(value, value), value
+        )
         canonical_kind = canonicalize(kind)
         expected_kind = canonicalize(expected_kind)
 
         if kind in (
-            "clickCandidate",
-            "click_candidate",
-            "typeIntoCandidate",
-            "type_into_candidate",
-            "extractFromCandidate",
-            "extract_from_candidate",
+            *CANDIDATE_ACTION_KINDS,
+            *SNAKE_CASE_CANDIDATE_KINDS,
             "click",
             "typeText",
             "extractValue",
@@ -214,7 +213,7 @@ def element_accuracy(predictions: list, examples: list) -> dict:
         target_correct = False
         payload_required = False
         payload_correct = False
-        if kind in ("clickCandidate", "click_candidate", "typeIntoCandidate", "type_into_candidate", "extractFromCandidate", "extract_from_candidate"):
+        if kind in CANDIDATE_ACTION_KINDS or kind in SNAKE_CASE_CANDIDATE_KINDS:
             if target is None:
                 continue
             scored += 1
@@ -268,7 +267,7 @@ def is_correct(pred: dict | None, e: dict) -> bool | None:
     target = e.get("target_index")
     target_action = e.get("model_response", {}).get("action", {})
 
-    if kind in ("clickCandidate", "typeIntoCandidate", "extractFromCandidate"):
+    if kind in CANDIDATE_ACTION_KINDS:
         if target is None:
             return None
         return action.get("index") == target

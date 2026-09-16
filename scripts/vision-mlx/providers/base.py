@@ -27,6 +27,12 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from candidate_action_contract import (
+    CANDIDATE_ACTION_KINDS,
+    CANDIDATE_PROMPT_RULES,
+    SNAKE_CASE_CANDIDATE_KINDS,
+)
+
 log = logging.getLogger(__name__)
 
 
@@ -107,11 +113,7 @@ class ProposeResponse:
         if not isinstance(self.action, dict):
             raise ValueError("action must be an object")
         kind = self.action.get("kind")
-        candidate_kinds = (
-            "clickCandidate",
-            "typeIntoCandidate",
-            "extractFromCandidate",
-        )
+        candidate_kinds = CANDIDATE_ACTION_KINDS
         detect_kinds = ("challengeDetected", "noChallengeDetected")
         if kind not in ("click", "typeText", "extractValue", "challengeSolved", *candidate_kinds, *detect_kinds):
             raise ValueError(f"invalid action kind: {kind}")
@@ -179,8 +181,7 @@ class VisionProvider(ABC):
         '{"confidence": 0.0..1.0, "action": {"kind": "challengeDetected", "challengeType": string, "blocking": boolean, "region": {"x": number, "y": number, "width": number, "height": number} (optional)}}\n'
         '{"confidence": 0.0..1.0, "action": {"kind": "noChallengeDetected"}}\n'
         "When candidates are listed, select only by zero-based index: "
-        "clickCandidate for locate/submitAndVerify/follow/dismissObstruction, "
-        "typeIntoCandidate for fill/type, extractFromCandidate for extract. "
+        f"{CANDIDATE_PROMPT_RULES}. "
         "Candidate actions contain only kind and index; never emit typed or "
         "extracted values. Without candidates, click/typeText/extractValue "
         "remain supported. For solveChallenge requests, solve the visible "
@@ -336,7 +337,7 @@ class VisionProvider(ABC):
             normalized["y"] = float(y if y is not None else 0.0)
         elif kind == "typeText":
             normalized["text"] = str(action.get("text", action.get("value", "")))
-        elif kind in ("clickCandidate", "typeIntoCandidate", "extractFromCandidate"):
+        elif kind in CANDIDATE_ACTION_KINDS:
             normalized["index"] = action.get("index")
         else:
             normalized["value"] = str(action.get("value", action.get("text", "")))
@@ -351,7 +352,7 @@ class VisionProvider(ABC):
 
     @staticmethod
     def _canonical_action_kind(kind: str) -> str:
-        return {
+        aliases = {
             "left_click": "click",
             "leftClick": "click",
             "mouse_click": "click",
@@ -365,15 +366,11 @@ class VisionProvider(ABC):
             "extract_value": "extractValue",
             "read": "extractValue",
             "getValue": "extractValue",
-            # Models snake_case the camelCase schema they are shown; both the
-            # Rust packet path and several model families use this spelling.
-            "click_candidate": "clickCandidate",
-            "type_into_candidate": "typeIntoCandidate",
-            "extract_from_candidate": "extractFromCandidate",
             "challenge_solved": "challengeSolved",
             "challenge_detected": "challengeDetected",
             "no_challenge_detected": "noChallengeDetected",
-        }.get(kind, kind)
+        }
+        return {**aliases, **SNAKE_CASE_CANDIDATE_KINDS}.get(kind, kind)
 
     @staticmethod
     def _allowed_action_fields(kind: str):
@@ -381,9 +378,7 @@ class VisionProvider(ABC):
             "click": {"kind", "x", "y", "clickX", "clickY", "coordinate", "coordinates", "position"},
             "typeText": {"kind", "text", "value"},
             "extractValue": {"kind", "value", "text"},
-            "clickCandidate": {"kind", "index"},
-            "typeIntoCandidate": {"kind", "index"},
-            "extractFromCandidate": {"kind", "index"},
+            **{candidate_kind: {"kind", "index"} for candidate_kind in CANDIDATE_ACTION_KINDS},
             "challengeDetected": {"kind", "challengeType", "challenge_type", "region", "blocking"},
             "noChallengeDetected": {"kind"},
             "challengeSolved": {"kind"},

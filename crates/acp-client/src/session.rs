@@ -217,11 +217,9 @@ impl intent_engine::VisionAssist for AcpVisionAssist {
 }
 
 fn allowed_actions_for_intent(intent_kind: &str) -> Vec<String> {
-    match intent_kind {
-        "extract" => vec!["extract_from_candidate".into(), "extract_value".into()],
-        "fill" | "type" => vec!["type_into_candidate".into(), "type_text".into()],
-        _ => vec!["click_candidate".into(), "click".into()],
-    }
+    types::candidate_action_acp_kinds_for_intent(intent_kind)
+        .map(|(candidate, legacy)| vec![candidate.to_owned(), legacy.to_owned()])
+        .unwrap_or_else(|| vec!["click".into()])
 }
 
 fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
@@ -534,8 +532,12 @@ mod tests {
             vec!["type_into_candidate".to_owned(), "type_text".to_owned()]
         );
         assert_eq!(
-            allowed_actions_for_intent("submit"),
+            allowed_actions_for_intent("submitAndVerify"),
             vec!["click_candidate".to_owned(), "click".to_owned()]
+        );
+        assert_eq!(
+            allowed_actions_for_intent("unknown"),
+            vec!["click".to_owned()]
         );
     }
 }

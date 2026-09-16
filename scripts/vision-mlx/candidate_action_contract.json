@@ -1,0 +1,25 @@
+{
+  "actions": [
+    {
+      "kind": "clickCandidate",
+      "acpKind": "click_candidate",
+      "legacyKind": "click",
+      "legacyAcpKind": "click",
+      "intents": ["locate", "submitAndVerify", "follow", "dismissObstruction"]
+    },
+    {
+      "kind": "typeIntoCandidate",
+      "acpKind": "type_into_candidate",
+      "legacyKind": "typeText",
+      "legacyAcpKind": "type_text",
+      "intents": ["fill", "type"]
+    },
+    {
+      "kind": "extractFromCandidate",
+      "acpKind": "extract_from_candidate",
+      "legacyKind": "extractValue",
+      "legacyAcpKind": "extract_value",
+      "intents": ["extract"]
+    }
+  ]
+}
