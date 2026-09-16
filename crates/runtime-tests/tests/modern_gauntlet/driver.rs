@@ -352,6 +352,32 @@ impl ModernRuntime {
     }
 
     #[allow(dead_code)]
+    pub async fn reveal_atlas_link(&self) -> TestResult<Vec<Evidence>> {
+        self.follow(
+            "Atlas Labs",
+            "option",
+            "Atlas Labs",
+            Self::wait_named_cmd("link", "Atlas Labs"),
+            false,
+        )
+        .await?;
+        self.wait_named("link", "Atlas Labs").await
+    }
+
+    #[allow(dead_code)]
+    pub async fn open_atlas_customer(&self) -> TestResult<Vec<Evidence>> {
+        self.follow(
+            "Atlas Labs",
+            "link",
+            "Atlas Labs",
+            Self::wait_url_cmd("/customers/cus_atlas"),
+            false,
+        )
+        .await?;
+        self.wait_named("combobox", "Customer priority").await
+    }
+
+    #[allow(dead_code)]
     pub async fn click_named(
         &self,
         role: &str,

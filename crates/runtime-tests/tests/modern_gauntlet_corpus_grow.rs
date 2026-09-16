@@ -252,9 +252,8 @@ async fn grow_customer_update_traps_corpus() -> TestResult<()> {
         runtime
             .click("[aria-label='Search customers'] button", false)
             .await?;
-        runtime
-            .wait_visible("a[href='/customers/cus_atlas']")
-            .await?;
+        runtime.wait_named("option", "Atlas Labs").await?;
+        runtime.reveal_atlas_link().await?;
 
         collector
             .capture(
@@ -268,16 +267,7 @@ async fn grow_customer_update_traps_corpus() -> TestResult<()> {
                 &step("open_customer"),
             )
             .await?;
-        runtime
-            .follow(
-                "Atlas Labs",
-                "link",
-                "Atlas Labs",
-                ModernRuntime::wait_url_cmd("/customers/cus_atlas"),
-                false,
-            )
-            .await?;
-        runtime.wait_named("combobox", "Customer priority").await?;
+        runtime.open_atlas_customer().await?;
 
         collector
             .capture(
@@ -444,9 +434,8 @@ async fn grow_customer_update_corpus() -> TestResult<()> {
             runtime
                 .click("[aria-label='Search customers'] button", false)
                 .await?;
-            runtime
-                .wait_visible("a[href='/customers/cus_atlas']")
-                .await?;
+            runtime.wait_named("option", "Atlas Labs").await?;
+            runtime.reveal_atlas_link().await?;
 
             collector
                 .capture(
@@ -460,16 +449,7 @@ async fn grow_customer_update_corpus() -> TestResult<()> {
                     &step("open_customer"),
                 )
                 .await?;
-            runtime
-                .follow(
-                    "Atlas Labs",
-                    "link",
-                    "Atlas Labs",
-                    ModernRuntime::wait_url_cmd("/customers/cus_atlas"),
-                    false,
-                )
-                .await?;
-            runtime.wait_named("combobox", "Customer priority").await?;
+            runtime.open_atlas_customer().await?;
 
             collector
                 .capture(

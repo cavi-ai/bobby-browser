@@ -325,26 +325,18 @@ async fn customer_update_run(run_idx: usize) -> TestResult<usize> {
     {
         committed += 1;
     }
-    runtime
-        .wait_visible("a[href='/customers/cus_atlas']")
-        .await?;
+    runtime.wait_named("option", "Atlas Labs").await?;
+    runtime.reveal_atlas_link().await?;
 
     if escalate_or(
         &runtime,
         locate(OPEN_CUSTOMER[run_idx % OPEN_CUSTOMER.len()]),
-        runtime.follow(
-            "Atlas Labs",
-            "link",
-            "Atlas Labs",
-            ModernRuntime::wait_url_cmd("/customers/cus_atlas"),
-            false,
-        ),
+        runtime.open_atlas_customer(),
     )
     .await?
     {
         committed += 1;
     }
-    runtime.wait_named("combobox", "Customer priority").await?;
 
     if escalate_or(
         &runtime,
