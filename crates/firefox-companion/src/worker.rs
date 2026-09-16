@@ -5675,24 +5675,36 @@ fn deadline_unix_ms(timeout: Duration) -> i64 {
 }
 
 fn session_error(error: CompanionSessionError) -> CommandError {
-    match error {
+    let (code, retryable) = match &error {
         CompanionSessionError::DeadlineExceeded
         | CompanionSessionError::ResponseTimeout
-        | CompanionSessionError::BindingExpired => {
-            driver_error(ErrorCode::DeadlineExceeded, error.to_string(), true)
-        }
+        | CompanionSessionError::BindingExpired => (ErrorCode::DeadlineExceeded, true),
         CompanionSessionError::ConnectionClosed
         | CompanionSessionError::QueueClosed
-        | CompanionSessionError::ProfileUnavailable => {
-            driver_error(ErrorCode::BrowserCommandFailed, error.to_string(), true)
+        | CompanionSessionError::ProfileUnavailable
+        | CompanionSessionError::DiscoveryUnavailable
+        | CompanionSessionError::GrantUnavailable => (ErrorCode::BrowserCommandFailed, true),
+        CompanionSessionError::AttachmentMismatch | CompanionSessionError::ProfileMismatch => {
+            (ErrorCode::PolicyDenied, false)
         }
-        CompanionSessionError::PageMismatch => {
-            driver_error(ErrorCode::NotFound, error.to_string(), false)
-        }
+        CompanionSessionError::PageMismatch => (ErrorCode::NotFound, false),
+        CompanionSessionError::InvalidEvent => (ErrorCode::BrowserCommandFailed, false),
         CompanionSessionError::PendingCapacity | CompanionSessionError::BindingCapacity => {
-            driver_error(ErrorCode::ResourceExhausted, error.to_string(), true)
+            (ErrorCode::ResourceExhausted, true)
         }
-        _ => driver_error(ErrorCode::BrowserCommandFailed, error.to_string(), false),
+        CompanionSessionError::Registry(error) => registry_error_contract(error),
+    };
+    driver_error(code, error.to_string(), retryable)
+}
+
+fn registry_error_contract(error: &companion_core::RegistryError) -> (ErrorCode, bool) {
+    match error {
+        companion_core::RegistryError::PairingCodeInvalid
+        | companion_core::RegistryError::ProfileMismatch
+        | companion_core::RegistryError::Revoked
+        | companion_core::RegistryError::AttachmentExpired
+        | companion_core::RegistryError::CredentialInvalid => (ErrorCode::PolicyDenied, false),
+        companion_core::RegistryError::ProfileNotFound => (ErrorCode::NotFound, false),
     }
 }
 
@@ -5792,6 +5804,129 @@ fn driver_error(code: ErrorCode, message: impl Into<String>, retryable: bool) ->
         message: message.into(),
         layer: ErrorLayer::Driver,
         retryable,
+    }
+}
+
+#[cfg(test)]
+mod session_error_tests {
+    use super::*;
+    use companion_core::RegistryError;
+
+    fn assert_mapping(source: CompanionSessionError, code: ErrorCode, retryable: bool) {
+        let message = source.to_string();
+        let mapped = session_error(source);
+        assert_eq!(mapped.code, code);
+        assert_eq!(mapped.layer, ErrorLayer::Driver);
+        assert_eq!(mapped.retryable, retryable);
+        assert_eq!(mapped.message, message);
+    }
+
+    #[test]
+    fn session_failures_have_stable_public_error_contracts() {
+        for (source, code, retryable) in [
+            (
+                CompanionSessionError::ProfileUnavailable,
+                ErrorCode::BrowserCommandFailed,
+                true,
+            ),
+            (
+                CompanionSessionError::DiscoveryUnavailable,
+                ErrorCode::BrowserCommandFailed,
+                true,
+            ),
+            (
+                CompanionSessionError::GrantUnavailable,
+                ErrorCode::BrowserCommandFailed,
+                true,
+            ),
+            (
+                CompanionSessionError::AttachmentMismatch,
+                ErrorCode::PolicyDenied,
+                false,
+            ),
+            (
+                CompanionSessionError::PageMismatch,
+                ErrorCode::NotFound,
+                false,
+            ),
+            (
+                CompanionSessionError::ProfileMismatch,
+                ErrorCode::PolicyDenied,
+                false,
+            ),
+            (
+                CompanionSessionError::InvalidEvent,
+                ErrorCode::BrowserCommandFailed,
+                false,
+            ),
+            (
+                CompanionSessionError::ConnectionClosed,
+                ErrorCode::BrowserCommandFailed,
+                true,
+            ),
+            (
+                CompanionSessionError::QueueClosed,
+                ErrorCode::BrowserCommandFailed,
+                true,
+            ),
+            (
+                CompanionSessionError::DeadlineExceeded,
+                ErrorCode::DeadlineExceeded,
+                true,
+            ),
+            (
+                CompanionSessionError::ResponseTimeout,
+                ErrorCode::DeadlineExceeded,
+                true,
+            ),
+            (
+                CompanionSessionError::PendingCapacity,
+                ErrorCode::ResourceExhausted,
+                true,
+            ),
+            (
+                CompanionSessionError::BindingCapacity,
+                ErrorCode::ResourceExhausted,
+                true,
+            ),
+            (
+                CompanionSessionError::BindingExpired,
+                ErrorCode::DeadlineExceeded,
+                true,
+            ),
+        ] {
+            assert_mapping(source, code, retryable);
+        }
+    }
+
+    #[test]
+    fn registry_failures_preserve_security_and_lifecycle_semantics() {
+        for (source, code, retryable) in [
+            (
+                RegistryError::PairingCodeInvalid,
+                ErrorCode::PolicyDenied,
+                false,
+            ),
+            (RegistryError::ProfileNotFound, ErrorCode::NotFound, false),
+            (
+                RegistryError::ProfileMismatch,
+                ErrorCode::PolicyDenied,
+                false,
+            ),
+            (RegistryError::Revoked, ErrorCode::PolicyDenied, false),
+            (
+                RegistryError::AttachmentExpired,
+                ErrorCode::PolicyDenied,
+                false,
+            ),
+            (
+                RegistryError::CredentialInvalid,
+                ErrorCode::PolicyDenied,
+                false,
+            ),
+        ] {
+            assert_mapping(CompanionSessionError::Registry(source), code, retryable);
+        }
     }
 }
 
