@@ -733,6 +733,21 @@ impl CdpConnection {
         request: CdpRequest,
         _permit: &OwnedSemaphorePermit,
     ) -> CdpResponse {
+        let ctx = self
+            .handle
+            .context(Utc::now() + Duration::seconds(30), None);
+        if AuthorizationGuard::new(self.handle.clone())
+            .validate(&ctx)
+            .is_err()
+        {
+            return CdpResponse::failure(
+                &request,
+                CdpError::new(
+                    CdpErrorCode::RuntimeFailure,
+                    "authentication or capability check failed",
+                ),
+            );
+        }
         let Some(metadata) = self.registry.method(&request.method) else {
             return CdpResponse::failure(
                 &request,
@@ -751,15 +766,9 @@ impl CdpConnection {
                 CdpError::new(CdpErrorCode::InvalidParams, "params must be an object"),
             );
         }
-        let ctx = self
-            .handle
-            .context(Utc::now() + Duration::seconds(30), None);
-        if AuthorizationGuard::new(self.handle.clone())
-            .validate(&ctx)
-            .is_err()
-            || metadata
-                .capability()
-                .is_none_or(|capability| !ctx.capabilities.contains(capability))
+        if metadata
+            .capability()
+            .is_none_or(|capability| !ctx.capabilities.contains(capability))
         {
             return CdpResponse::failure(
                 &request,

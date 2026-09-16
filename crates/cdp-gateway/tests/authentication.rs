@@ -112,7 +112,7 @@ async fn discovery_and_upgrade_fail_closed_without_valid_bearer() {
 }
 
 #[tokio::test]
-async fn revoked_connection_is_rejected_again_at_method_dispatch() {
+async fn revoked_connection_is_rejected_before_method_lookup() {
     let authority = Arc::new(AuthorityStore::in_memory());
     let principal = PrincipalId::from_uuid(uuid::Uuid::new_v4());
     let token = authority
@@ -139,15 +139,27 @@ async fn revoked_connection_is_rejected_again_at_method_dispatch() {
         .unwrap();
     let connection = gateway.upgrade(path, Some(&token)).await.unwrap();
     authority.revoke(&principal).await.unwrap();
-    let response = connection
+    let known_method = connection
         .dispatch(cdp_gateway::CdpRequest::new(
             1,
             "Target.getTargets",
             serde_json::json!({}),
         ))
         .await;
+    let unknown_method = connection
+        .dispatch(cdp_gateway::CdpRequest::new(
+            2,
+            "Private.enumerateMethods",
+            serde_json::json!({}),
+        ))
+        .await;
     assert_eq!(
-        response.error().unwrap().code,
+        known_method.error().unwrap().code,
         cdp_gateway::CdpErrorCode::RuntimeFailure as i32
+    );
+    assert_eq!(
+        unknown_method.error(),
+        known_method.error(),
+        "revoked connections must not learn whether a CDP method is registered"
     );
 }
