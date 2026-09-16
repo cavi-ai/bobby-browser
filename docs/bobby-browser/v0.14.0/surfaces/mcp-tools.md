@@ -47,7 +47,7 @@ Tools are advertised only when the principal holds the required capability.
 | `intent_dismiss_obstruction` | `browser:mutate` + `intent:execute` | Dismiss a popup, overlay, or cookie banner (Reconciliable) |
 | `intent_extract` | `browser:mutate` + `intent:execute` | Read named fields without mutating (Replayable) |
 | `intent_fill` | `browser:mutate` + `intent:execute` | Fill one described control and verify the value (Reconciliable). `accessibleName` may be a form-snapshot `controlId` |
-| `intent_follow` | `browser:mutate` + `intent:execute` | Activate a link/control and verify the destination (Boundary when `boundary: true`) |
+| `intent_follow` | `browser:mutate` + `intent:execute` | Activate a link/control and verify the resulting state named by `expectedState` (alias `expectedDestination`); compact evidence by default (Boundary when `boundary: true`) |
 | `intent_locate` | `browser:mutate` + `intent:execute` | Locate an element by described purpose (Replayable) |
 | `intent_solve_challenge` | `browser:mutate` + `intent:execute` + `vision:assist` | Drive the vision solve loop against a captcha/verification widget until cleared or `timeoutMs` (Reconciliable) |
 | `intent_submit_and_verify` | `browser:mutate` + `intent:execute` | Submit and verify the expected state (Boundary) |
@@ -90,6 +90,11 @@ The advertised `maxBytes.maximum` is the effective runtime
 `[http].max_download_bytes` value. Values outside `1..=maximum` fail before
 network access with `invalidRequest` naming the exact limit; URL and
 destination-policy failures remain `networkPolicyDenied`.
+
+A result that registers a text-like download (`csv`, `htm`, `html`, `json`,
+`md`, `text`, `tsv`, `txt`, `xml`) also carries `downloadPreviews`: one
+`{filename, text, truncated}` entry per file, with `text` capped at 4 KiB.
+Other file types return only the artifact evidence.
 
 `control_action` accepts semantic `target` forms from `a11y_snapshot` and
 `form_snapshot`, and one of `setText`, `setChecked`, `selectOne`,
@@ -406,7 +411,10 @@ entries are gated by `artifact:read`):
 | `bobby://primitives` | The flat browser tools and the commands they mint |
 
 Captured screenshots and downloads also become readable `artifact://<id>`
-resources when the principal holds `artifact:capture`.
+resources when the principal holds `artifact:capture`. A tool result whose
+screenshot evidence names a readable artifact also carries the image itself
+as an MCP `image` content block (base64, up to 768 KiB encoded) next to the
+resource link.
 
 ## Prompts
 
@@ -476,16 +484,16 @@ compare hand-bounded `kind` variant sets to schemars output from the
 
 ## Toolset phases
 
-`tools/list` for a principal holding every capability is ~127,000 bytes. An
+`tools/list` for a principal holding every capability is ~113,000 bytes. An
 agent that only needs part of the surface can narrow it with `toolset_select`:
 
 | Phase | Contains | Payload |
 |---|---|---|
-| `explore` | read the page, navigate, wait, base controls (`click`, `type_text`, `control_action`, `upload_files`, `dialog`, `download_url`), plus `intent_complete_form` and `intent_submit_and_verify` — the standard form loop with no `toolset_select` first (default) | ~76 KB |
-| `act` | escape hatches (`command_execute`, `evaluate_javascript`, `emulate`), niche mutations, and job tools | ~69 KB |
-| `intent` | the `intent_*` family and `extract_structured` | ~74 KB |
-| `verify` | evidence, checkpoints, recovery, job tools | ~41 KB |
-| `full` | everything the principal's capabilities allow (including jobs when a job port is attached) | ~127 KB |
+| `explore` | read the page, navigate, wait, base controls (`click`, `click_and_wait_for_download`, `click_and_wait_for_popup`, `type_text`, `control_action`, `upload_files`, `dialog`, `download_url`), plus `intent_complete_form`, `intent_submit_and_verify`, `intent_follow`, and `intent_detect_challenge` — the standard loop with no `toolset_select` first (default) | ~73 KB |
+| `act` | escape hatches (`command_execute`, `evaluate_javascript`, `emulate`), niche mutations, and job tools | ~57 KB |
+| `intent` | the `intent_*` family and `extract_structured` | ~71 KB |
+| `verify` | evidence, checkpoints, recovery, job tools | ~37 KB |
+| `full` | everything the principal's capabilities allow (including jobs when a job port is attached) | ~113 KB |
 
 Session/page lifecycle, `runtime_info`, `toolset_select`, `workflow_start`, and
 `workflow_observe` appear in every phase. This includes servers configured to
