@@ -808,11 +808,20 @@ async fn recovery_rejects_another_principals_checkpoint_before_browser_dispatch(
         AuthenticatedRuntime::with_session_ownership(runtime, other_handle.clone(), recorder);
 
     let denial = other
-        .recover(other_handle.context(expiry(), None), checkpoint.workflow_id)
+        .recover(
+            other_handle.context(expiry(), None),
+            checkpoint.workflow_id.clone(),
+        )
         .await
         .unwrap_err();
 
     assert_eq!(denial.code, InterfaceErrorCode::NotFound);
+    let missing = other
+        .recover(other_handle.context(expiry(), None), WorkflowId::new())
+        .await
+        .unwrap_err();
+    assert_eq!(missing.code, denial.code);
+    assert_eq!(missing.message, denial.message);
 }
 
 #[tokio::test]
@@ -2194,9 +2203,10 @@ async fn recovery_status_returns_the_checkpoint_and_requires_ownership() {
     let handle = authority.verify(&token).await.unwrap();
     let (_ownership, recorder) = SessionOwnershipRegistry::bounded(4);
     recorder
-        .record_authenticated_session(principal, checkpoint.session_id.clone())
+        .record_authenticated_session(principal.clone(), checkpoint.session_id.clone())
         .unwrap();
-    let api = AuthenticatedRuntime::with_session_ownership(runtime, handle.clone(), recorder);
+    let api =
+        AuthenticatedRuntime::with_session_ownership(runtime, handle.clone(), recorder.clone());
 
     let status = api
         .recovery_status(
@@ -2208,8 +2218,20 @@ async fn recovery_status_returns_the_checkpoint_and_requires_ownership() {
     assert_eq!(status.checkpoint.checkpoint_id, checkpoint.checkpoint_id);
     assert!(status.receipts.is_empty());
 
+    recorder.release_authenticated_session(&principal, &checkpoint.session_id);
+    let unowned = api
+        .recovery_status(
+            handle.context(expiry(), None),
+            checkpoint.workflow_id.clone(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(unowned.code, InterfaceErrorCode::NotFound);
+
     let missing = api
         .recovery_status(handle.context(expiry(), None), WorkflowId::new())
-        .await;
-    assert!(missing.is_err());
+        .await
+        .unwrap_err();
+    assert_eq!(missing.code, unowned.code);
+    assert_eq!(missing.message, unowned.message);
 }
