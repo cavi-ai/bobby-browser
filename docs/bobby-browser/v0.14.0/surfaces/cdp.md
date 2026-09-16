@@ -76,12 +76,12 @@ export AUTOMATION_RUNTIME_TOKEN="$(bobby token)"
 Pinned clients in this repo (see `packages/interface-conformance/package.json`
 and `pnpm-lock.yaml`):
 
-- `playwright-core` **1.62.1**
-- `puppeteer-core` **25.5.0**
+- `playwright-core` **1.63.0**
+- `puppeteer-core` **25.10.0**
 
 Playwright is pinned by bundle identity, not by version string: the gateway
 carries the exact length and SHA-256 of each supported release's injected and
-utility scripts. Playwright 1.61 and 1.62 are covered. A newer release needs its
+utility scripts. Playwright 1.61, 1.62, and 1.63 are covered. A newer release needs its
 own entry — `docs/cdp-support.json`'s `playwright-1.61.1-*` revision labels name
 the schema shape those entries were first cut against, not the only version
 accepted.

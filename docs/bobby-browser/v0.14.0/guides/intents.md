@@ -329,9 +329,11 @@ await client.submit(
 Set `boundary: true` when activation may mutate (for example sign-out); requires a
 matching workflow checkpoint.
 
-The MCP tool defaults to compact evidence containing the current page
-generation, verified wait, and artifact references. Pass `evidenceDetail:
-"full"` for diagnostic evidence.
+The MCP tool `intent_follow` takes the verification as `expectedState`;
+`expectedDestination` is the same field under its earlier name, and exactly
+one of the two is accepted. It defaults to compact evidence containing the
+current page generation, verified wait, and artifact references. Pass
+`evidenceDetail: "full"` for diagnostic evidence.
 
 ### DismissObstruction (Reconciliable)
 
@@ -413,6 +415,32 @@ PNG via `screenshot_bytes` (Chromium and Firefox) and posts it to the backend.
 Empty frames are not sent. Both engines execute the returned coordinates
 natively — Chromium through CDP input, Firefox through BiDi pointer actions
 against the bounded accessibility snapshot's candidates.
+
+### Candidate actions
+
+A stuck step keeps up to 10 near-miss candidates. The provider sees the first
+5 that carry a name and one of the roles `button`, `link`, `textbox`,
+`spinbutton`, `combobox`, `listbox`, `checkbox`, `radio`, `tab`, `menuitem`,
+`searchbox`, or `switch`, and answers with one of them and an action
+compatible with the intent:
+
+| Action | Intents |
+|---|---|
+| `clickCandidate` | locate, submitAndVerify, follow, dismissObstruction |
+| `typeIntoCandidate` | fill, type |
+| `extractFromCandidate` | extract |
+
+Any other pairing is rejected. `typeIntoCandidate` applies the fill's own
+control action to the chosen candidate: `setText`, `selectOne`, `selectMany`,
+`setChecked`, or `clear`. A candidate whose role cannot take that action is
+rejected before anything is mutated. A file fill whose input does not
+resolve may choose a `button` candidate (a styled file picker): the runtime
+uploads the fill's own paths through `upload_files`, and an upload failure
+reaches vision records only as a fixed message.
+
+When the page has retained context, the near-miss list is ordered before the
+provider's 5 are taken; see
+[Context graph — Vision candidate ranking](../concepts/context-graph.md#vision-candidate-ranking).
 
 ## Vision prefill
 

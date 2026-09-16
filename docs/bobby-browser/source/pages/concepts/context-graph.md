@@ -42,6 +42,32 @@ Every `context_ask` answer says where it came from: `observedAt` is a live
 page generation or `persisted`, and remembered answers carry their `source`.
 A remembered answer never claims to be a live observation.
 
+## Vision candidate ranking
+
+When an intent escalates to vision on a page with retained context, the
+runtime orders the stuck step's near-miss candidates (up to 10) before the
+first 5 go to the provider, so a verified control outside the first 5 can
+still reach it. A retained control counts only for the same intent kind,
+with more verified successes than failures, matched to a candidate by role
+and accessible name. The
+candidate with the best record (net successes, then successes, then the most
+recent verification day, then observed over vision-promoted) moves first.
+
+- Two candidates tied for best leave the order unchanged
+  (`ambiguousRefusal`).
+- A retained record with no verification day is never used; when it is the
+  only match, the lookup reports `staleRejection`.
+- Ranking only reorders. The provider still chooses, and the action is still
+  verified.
+
+`runtime_info.operationalMetrics.contextRankedVision` counts these lookups
+without values, names, URLs, or selectors: `attempted`; the record source
+(`sourceObserved`, `sourceVisionPromoted`, `sourceUnreported`); the outcome
+(`hit`, `miss`, `ambiguousRefusal`, `staleRejection`, `error`); provider
+escalations by transport (`providerEscalations`, `providerHttp`,
+`providerAcp`, `providerDirectLocal`); `candidateRankingLatencyMs`;
+`confidence`; and `verificationAccepted` / `verificationRejected`.
+
 ## Retention and erasure
 
 - Records not verified within `[context].ttl_days` (default 90) are swept at

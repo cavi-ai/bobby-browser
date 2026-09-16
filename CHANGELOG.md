@@ -2,6 +2,103 @@
 
 ## Unreleased
 
+### Added
+
+- MCP `click_and_wait_for_download`: clicks, waits for the download that
+  click starts, and returns digest-verified artifact evidence. Requires
+  `browser:mutate` + `file:download`, accepts `workflowHandle`, takes an
+  auto-checkpoint boundary by default, and is advertised in the `explore`
+  and `act` toolsets.
+- A tool result that admits a text-like download (`csv`, `htm`, `html`,
+  `json`, `md`, `text`, `tsv`, `txt`, `xml`) carries `downloadPreviews`:
+  `{filename, text, truncated}` per file, with `text` capped at 4 KiB.
+- Screenshot evidence is also returned as an MCP `image` content block
+  (up to 768 KiB base64) next to its `artifact://` resource link.
+- `intent_follow` accepts `expectedState` as an alias of
+  `expectedDestination`; exactly one of the two is required.
+- `Evidence::PageGeneration { pageId, generation }`: page-scoped commands
+  report the retained page-context generation after bookkeeping.
+- ACP `session/prompt` accepts explicit operations next to automation
+  requests: `contextAsk`, `contextNeighbors`, `contextSite`,
+  `checkpointSave`, `recoveryStatus`, and `workflowRecover`. Automation
+  requests accept an optional stable `workflowId`. The capabilities matrix
+  lists ACP for `readContext`, `createCheckpoint`, `readCheckpoint`, and
+  `recoverWorkflow`.
+- Vision escalation executes candidate-grounded `selectOne`, `selectMany`,
+  `setChecked`, and `clear` control actions, and rejects a candidate whose
+  role cannot take the action before any mutation. `spinbutton` and
+  `listbox` join the vision candidate roles.
+- A file fill whose input does not resolve escalates to vision: a
+  vision-selected `button` candidate receives the files through the
+  runtime's `upload_files` path, and upload failure detail is replaced with
+  a fixed message before it reaches vision records.
+- Vision escalation orders a stuck step's candidates with retained page
+  context before the provider sees the first 5: the near-miss list grows
+  from 5 to 10 candidates, the verified candidate with the best record
+  moves to the front, a tie for best leaves the order unchanged, and a
+  retained match with no verification day is not used.
+- `contextRankedVision` operational metrics (value-free counters and
+  histograms for context source, lookup outcome, ranking latency, provider
+  escalation, confidence, and verification result) in
+  `runtime_info.operationalMetrics` and the Rust client's
+  `OperationalMetricsSnapshot`. Snapshots without the group read as zero.
+- The CDP gateway pins Playwright 1.63's injected bootstrap by length and
+  digest.
+- `InterfaceOperation::ALL` and `InterfaceOperation::as_str()` in
+  `bobby-browser-client`. The capabilities page's operation-support and
+  execution-policy tables are generated from interface metadata.
+
+### Changed
+
+- Successful `intent_follow` and `intent_submit_and_verify` results default
+  to compact evidence (`evidenceDetail: "compact"`), keeping
+  `pageGeneration`, `wait`, `screenshot`, `pdfArtifact`, `harArtifact`,
+  `download`, `submitSettlement`, and `formValidation`. Pass
+  `evidenceDetail: "full"` for everything; failures are never compacted.
+  Compact `intent_complete_form` results also keep `pageGeneration` and
+  artifact evidence.
+- ACP automation replies are one JSON `session/update` chunk with
+  `operation: "execute"`, `sessionId`, `pageId`, `workflowId`, `attemptId`,
+  and the full `CommandOutcome`, replacing the one-line text summary.
+- `bobby openshell install` takes `--agent codex|claude`, default `codex`
+  (allowlist `/usr/bin/codex`, `/usr/local/bin/codex`,
+  `/usr/lib/node_modules/@openai/**`). `--agent-binary` is now optional and
+  replaces the preset; the previous default was `/usr/local/bin/claude`.
+- `intent_follow` is advertised in the default `explore` toolset.
+- `screenshot`'s advertised `mode` is the real `oneOf` of viewport,
+  full-page, element, and clip shapes instead of an opaque object.
+- MCP `initialize` instructions and the `intent_follow` description route
+  verified link and control activation through `intent_follow` with
+  `expectedState`.
+- The HTTP vision backend, the vision proxy's OpenAI and Ollama adapters,
+  ACP profiles, and the Python providers read one candidate-action table
+  (`scripts/vision-mlx/candidate_action_contract.json`). The HTTP backend
+  now rejects a `clickCandidate` for `fill`, `type`, and `extract` intents.
+- TypeScript SDK contracts match runtime outcomes: error codes
+  `targetObscured` and `targetOutOfBounds`, execution reason `pageMutated`,
+  resolution path `visionPrefill`, and evidence kinds `pageGeneration`,
+  `structuredExtraction`, `challengeDetection`, `cookieState`,
+  `pdfArtifact`, `dialog`, `emulation`, and `harArtifact`.
+  `FormControlValidity.willValidate` is required.
+- Firefox companion and registry failures map to distinct error codes:
+  attachment, profile, pairing-code, revoked, expired-attachment, and
+  credential failures are non-retryable `policyDenied`; an unknown profile
+  is `notFound`; missing target discovery or attachment grant is retryable
+  `browserCommandFailed`; an invalid companion event is non-retryable
+  `browserCommandFailed`.
+- Dependency bump that reaches consumers: `dirs` 6 to 7.
+
+### Fixed
+
+- `workflow_observe` with `includeForms` reads forms from the handle's
+  current page, so after a followed popup closes it reports and reads the
+  opener instead of the closed popup.
+- `recovery_status` and `workflow_recover` return `notFound` for a missing
+  or unowned workflow instead of `internal`.
+- The MCP and CDP gateways revalidate connection authorization before
+  resolving a method, so a revoked connection cannot probe which methods
+  exist.
+
 ## 0.14.0 - 2026-09-10
 
 ### Added

@@ -232,6 +232,21 @@ Host-managed fingerprint cannot be flipped from the popup. After changing
 popup code, rebuild and re-run `make firefox` so the profile sideload
 refreshes.
 
+## Errors
+
+Companion failures reach the caller as typed command errors:
+
+| Failure | Code | Retryable |
+|---|---|---|
+| Action deadline, response timeout, or expired page binding | `deadlineExceeded` | yes |
+| Connection or outbound queue closed; paired profile has no active connection, no target discovery, or no attachment grant | `browserCommandFailed` | yes |
+| Invalid companion event | `browserCommandFailed` | no |
+| Attachment or profile does not match the active grant or connection | `policyDenied` | no |
+| Page does not match the attachment grant | `notFound` | no |
+| Pending command or page-binding capacity exhausted | `resourceExhausted` | yes |
+| Pairing code invalid or expired, profile mismatch, companion revoked, attachment lease expired, or credential invalid | `policyDenied` | no |
+| Paired profile not found | `notFound` | no |
+
 ## Limitations
 
 - The companion declares `nativeInput: false` and `nativeDialogs: false`;
