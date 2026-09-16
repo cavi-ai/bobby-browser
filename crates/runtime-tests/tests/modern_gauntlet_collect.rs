@@ -400,12 +400,8 @@ async fn collect_customer_update_corpus() -> TestResult<()> {
             "open_customer",
         )
         .await?;
-    runtime
-        .click_named("link", "Atlas Labs", false)
-        .await?;
-    runtime
-        .wait_named("combobox", "Customer priority")
-        .await?;
+    runtime.click_named("link", "Atlas Labs", false).await?;
+    runtime.wait_named("combobox", "Customer priority").await?;
 
     collector
         .capture(

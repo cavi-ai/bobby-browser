@@ -338,9 +338,7 @@ async fn customer_update_run(run_idx: usize) -> TestResult<usize> {
     {
         committed += 1;
     }
-    runtime
-        .wait_named("combobox", "Customer priority")
-        .await?;
+    runtime.wait_named("combobox", "Customer priority").await?;
 
     if escalate_or(
         &runtime,
