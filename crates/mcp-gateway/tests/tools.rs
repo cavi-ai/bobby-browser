@@ -571,6 +571,7 @@ async fn revocation_after_initialize_denies_every_enumeration_and_dispatch_bound
             "prompts/get",
             json!({"name":"fill_and_submit_form","arguments":{"sessionId":"s-1","pageId":"p-1"}}),
         ),
+        (37, "private/enumerateMethods", json!({})),
     ] {
         let response = server
             .handle_message(request(id, method, params))

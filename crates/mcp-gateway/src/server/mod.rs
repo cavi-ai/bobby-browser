@@ -525,6 +525,10 @@ impl Server {
     }
 
     async fn dispatch_request(&self, id: Value, method: &str, params: Value) -> Value {
+        let context = self.request_context();
+        if let Err(interface_error) = self.authorization.validate(&context) {
+            return interface_error_response(id, interface_error);
+        }
         match method {
             "ping" if empty_object(&params) => self.authenticated_empty(id, json!({})),
             "ping" => error(id, INVALID_PARAMS, "Invalid params", None),
