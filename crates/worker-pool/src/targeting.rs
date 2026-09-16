@@ -1189,6 +1189,9 @@ async fn discover_closed_shadow_roots(
         .map_err(cdp_error)?;
     let mut backend_ids = Vec::new();
     collect_closed_shadow_root_ids(&described.result.node, &mut backend_ids);
+    // chromiumoxide `Node` Drop is recursive. A pierce tree from the
+    // document root overflows Linux debug stacks; unwind first.
+    dismantle_cdp_node(described.result.node);
     let mut roots = Vec::with_capacity(backend_ids.len());
     for backend_node_id in backend_ids {
         let element = page
@@ -1198,6 +1201,21 @@ async fn discover_closed_shadow_roots(
         roots.push(Arc::new(element));
     }
     Ok(roots)
+}
+
+fn dismantle_cdp_node(node: CdpNode) {
+    let mut stack = vec![node];
+    while let Some(mut node) = stack.pop() {
+        if let Some(children) = node.children.take() {
+            stack.extend(children);
+        }
+        if let Some(roots) = node.shadow_roots.take() {
+            stack.extend(roots);
+        }
+        if let Some(document) = node.content_document.take() {
+            stack.push(*document);
+        }
+    }
 }
 
 /// Walks a `DOM.describeNode(pierce: true)` tree collecting the
@@ -1785,6 +1803,43 @@ mod tests {
         collect_closed_shadow_root_ids(&tree, &mut found);
 
         assert_eq!(found, vec![BackendNodeId::new(10), BackendNodeId::new(20)]);
+    }
+
+    #[test]
+    fn dismantle_cdp_node_unwinds_nested_and_iframe_trees() {
+        let iframe_document = cdp_node(
+            98,
+            None,
+            vec![cdp_node(
+                97,
+                None,
+                Vec::new(),
+                vec![cdp_node(
+                    99,
+                    Some(ShadowRootType::Closed),
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                )],
+                None,
+            )],
+            Vec::new(),
+            None,
+        );
+        let tree = cdp_node(
+            1,
+            None,
+            vec![cdp_node(
+                6,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Some(iframe_document),
+            )],
+            Vec::new(),
+            None,
+        );
+        dismantle_cdp_node(tree);
     }
 
     #[test]

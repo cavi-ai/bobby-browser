@@ -268,7 +268,15 @@ async fn grow_customer_update_traps_corpus() -> TestResult<()> {
                 &step("open_customer"),
             )
             .await?;
-        runtime.click_named("link", "Atlas Labs", false).await?;
+        runtime
+            .follow(
+                "Atlas Labs",
+                "link",
+                "Atlas Labs",
+                ModernRuntime::wait_url_cmd("/customers/cus_atlas"),
+                false,
+            )
+            .await?;
         runtime.wait_named("combobox", "Customer priority").await?;
 
         collector
@@ -452,7 +460,15 @@ async fn grow_customer_update_corpus() -> TestResult<()> {
                     &step("open_customer"),
                 )
                 .await?;
-            runtime.click_named("link", "Atlas Labs", false).await?;
+            runtime
+                .follow(
+                    "Atlas Labs",
+                    "link",
+                    "Atlas Labs",
+                    ModernRuntime::wait_url_cmd("/customers/cus_atlas"),
+                    false,
+                )
+                .await?;
             runtime.wait_named("combobox", "Customer priority").await?;
 
             collector

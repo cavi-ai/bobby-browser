@@ -332,7 +332,13 @@ async fn customer_update_run(run_idx: usize) -> TestResult<usize> {
     if escalate_or(
         &runtime,
         locate(OPEN_CUSTOMER[run_idx % OPEN_CUSTOMER.len()]),
-        runtime.click_named("link", "Atlas Labs", false),
+        runtime.follow(
+            "Atlas Labs",
+            "link",
+            "Atlas Labs",
+            ModernRuntime::wait_url_cmd("/customers/cus_atlas"),
+            false,
+        ),
     )
     .await?
     {

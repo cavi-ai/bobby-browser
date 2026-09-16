@@ -12,7 +12,7 @@ use types::{
     DismissObstructionIntent, ElementState, ErrorCode, Evidence, FillIntent, FollowIntent,
     FormControlTarget, InspectCommand, IntentCommand, IntentHints, ListPagesCommand,
     NavigateCommand, OpenPageRequest, PageId, PrimitiveCommand, RecoveryDecision, RuntimeCommand,
-    ScreenshotMode, SessionId, SolveChallengeIntent, SubmitAndVerifyIntent, TargetSpec,
+    ScreenshotMode, SessionId, SolveChallengeIntent, SubmitAndVerifyIntent, TargetSpec, TextMatch,
     TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil,
     WorkflowCheckpoint, WorkflowId,
 };
@@ -339,6 +339,16 @@ impl ModernRuntime {
             accessible_name,
         )))
         .await
+    }
+
+    #[allow(dead_code)]
+    pub fn wait_url_cmd(needle: &str) -> WaitForCommand {
+        WaitForCommand {
+            condition: WaitCondition::Url {
+                matcher: TextMatch::Contains(needle.into()),
+            },
+            timeout_ms: 10_000,
+        }
     }
 
     #[allow(dead_code)]
