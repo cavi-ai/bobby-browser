@@ -40,6 +40,7 @@ pub(crate) fn protected_router() -> Router<AppState> {
         )
         .route("/v1/commands", post(submit_command))
         .route("/v1/context/ask", get(context_ask))
+        .route("/v1/context/neighbors", get(context_neighbors))
         .route("/v1/context/site/{key}", get(context_site))
         .route("/v1/checkpoints", post(checkpoint))
         .route(
@@ -142,6 +143,31 @@ async fn context_ask(
         Some(answer) => serde_json::json!({ "answer": answer, "hit": true }),
         None => serde_json::json!({
             "answer": null,
+            "hit": false,
+            "reason": "notRemembered",
+            "nextStep": "a11y_snapshot"
+        }),
+    }))
+}
+
+async fn context_neighbors(
+    Extension(request): Extension<AuthenticatedRequest>,
+    Extension(query): Extension<ContextAskQuery>,
+) -> Result<Json<serde_json::Value>, ProtocolError> {
+    let neighbors = request
+        .runtime
+        .context_neighbors(
+            request.context,
+            query.session,
+            query.page,
+            query.description,
+        )
+        .await
+        .map_err(ProtocolError::from)?;
+    Ok(Json(match neighbors {
+        Some(neighbors) => serde_json::json!({ "neighbors": neighbors, "hit": true }),
+        None => serde_json::json!({
+            "neighbors": null,
             "hit": false,
             "reason": "notRemembered",
             "nextStep": "a11y_snapshot"
@@ -1028,7 +1054,7 @@ pub(crate) async fn validate_request_boundary(
             parsed.max_controls = value;
         }
         request.extensions_mut().insert(parsed);
-    } else if path == "/v1/context/ask" {
+    } else if matches!(path, "/v1/context/ask" | "/v1/context/neighbors") {
         let parsed = parse_context_ask_query(request.uri().query(), &correlation_id)?;
         request.extensions_mut().insert(parsed);
     } else if request.uri().query().is_some() {

@@ -4,6 +4,9 @@ import test from "node:test";
 
 import {
   isCommandOutcome,
+  isContextAskResponse,
+  isContextNeighborsResponse,
+  isContextSiteResponse,
   isEvidence,
   isEventBatch,
   isEventGap,
@@ -21,6 +24,19 @@ const ID = "00000000-0000-4000-8000-000000000001";
 const ID_2 = "00000000-0000-4000-8000-000000000002";
 const SHA = "0123456789abcdef".repeat(4);
 const TIME = "2026-07-17T12:34:56Z";
+
+const CONTEXT_ANSWER = {
+  target: { role: "textbox", accessibleName: "Email" },
+  confidence: 0.95,
+  observedAt: { kind: "generation", generation: 2 },
+  source: "observed",
+} as const;
+const CONTEXT_CONTROL = {
+  role: "button",
+  accessibleName: "Continue",
+  ordinal: 0,
+  intents: { click: { successCount: 3, failureCount: 1, lastVerifiedDay: 20_000, source: "observed" } },
+} as const;
 
 function target(): TargetSpec {
   return {
@@ -218,6 +234,20 @@ test("deep validators accept every exact public response variant", () => {
   assert.equal(isEvidence({ kind: "accessibilitySnapshot", pageId: ID, nodes: [{ role: "textbox", name: "Email", target: { role: "textbox", accessibleName: "Email", ordinal: 2048 } }], truncated: false }), false);
   assert.equal(isEventBatch({ events: [{ cursor: 1, kind: "command.outcome", payload: null }], latestAvailable: 1 }, 0, 100), true);
   assert.equal(isEventGap({ reason: "historyLost", earliestAvailable: 0 }), true);
+});
+
+test("context response validators accept hits and misses and reject malformed nested data", () => {
+  assert.equal(isContextAskResponse({ answer: CONTEXT_ANSWER, hit: true }), true);
+  assert.equal(isContextAskResponse({ answer: null, hit: false, reason: "notRemembered", nextStep: "a11y_snapshot" }), true);
+  assert.equal(isContextNeighborsResponse({ neighbors: { answer: CONTEXT_ANSWER, form: "signup", pagePattern: "/join", controls: [CONTEXT_CONTROL] }, hit: true }), true);
+  assert.equal(isContextNeighborsResponse({ neighbors: null, hit: false, reason: "notRemembered", nextStep: "a11y_snapshot" }), true);
+  assert.equal(isContextSiteResponse({ site: { siteKey: "https://example.test", pages: { "/join": { signup: [CONTEXT_CONTROL] } } } }), true);
+  assert.equal(isContextSiteResponse({ site: null }), true);
+
+  assert.equal(isContextAskResponse({ answer: { ...CONTEXT_ANSWER, confidence: 2 }, hit: true }), false);
+  assert.equal(isContextAskResponse({ answer: CONTEXT_ANSWER, hit: false }), false);
+  assert.equal(isContextNeighborsResponse({ neighbors: { answer: CONTEXT_ANSWER, form: "signup", pagePattern: "/join", controls: [{ ...CONTEXT_CONTROL, unexpected: true }] }, hit: true }), false);
+  assert.equal(isContextSiteResponse({ site: { siteKey: "https://example.test", pages: { "/join": { signup: [{ ...CONTEXT_CONTROL, intents: { click: { successCount: -1, failureCount: 0 } } }] } } } }), false);
 });
 
 test("session state accepts the selected vision node returned by the runtime", () => {

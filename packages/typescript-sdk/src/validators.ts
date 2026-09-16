@@ -11,6 +11,11 @@ import type {
   CommandError,
   CommandErrorCode,
   CommandOutcome,
+  ContextAnswer,
+  ContextAskResponse,
+  ContextNeighborControl,
+  ContextNeighborsResponse,
+  ContextSiteResponse,
   EventBatch,
   EventGap,
   Evidence,
@@ -220,6 +225,39 @@ export function isPageState(value: unknown): value is PageState {
     && (value.mode === "Document" || value.mode === "Interactive" || value.mode === "Render")
     && isString(value.ready_state)
     && isSafeUnsigned(value.pending_requests);
+}
+
+export function isContextAnswer(value: unknown): value is ContextAnswer {
+  if (!hasExactKeys(value, ["target", "confidence", "observedAt"], ["source"]) || !isAccessibilityTarget(value.target) || typeof value.confidence !== "number" || !Number.isFinite(value.confidence) || value.confidence < 0 || value.confidence > 1 || !isRecord(value.observedAt)) return false;
+  const observedAt = value.observedAt;
+  const validObservedAt = observedAt.kind === "generation"
+    ? hasExactKeys(observedAt, ["kind", "generation"]) && isSafeUnsigned(observedAt.generation)
+    : observedAt.kind === "persisted" && hasExactKeys(observedAt, ["kind"]);
+  return validObservedAt && (value.source === undefined || value.source === "observed" || value.source === "vision-promoted");
+}
+
+function isContextNeighborControl(value: unknown): value is ContextNeighborControl {
+  if (!hasExactKeys(value, ["role", "accessibleName", "intents"], ["ordinal"]) || !boundedText(value.role, 128) || !boundedText(value.accessibleName, 2048) || (value.ordinal !== undefined && !isSafeUnsigned(value.ordinal, 2047)) || !isRecord(value.intents)) return false;
+  return Object.entries(value.intents).every(([intent, stats]) => boundedText(intent, 128) && hasExactKeys(stats, ["successCount", "failureCount"], ["lastVerifiedDay", "source"]) && isSafeUnsigned(stats.successCount) && isSafeUnsigned(stats.failureCount) && (stats.lastVerifiedDay === undefined || isSafeUnsigned(stats.lastVerifiedDay, 4_294_967_295)) && (stats.source === undefined || stats.source === "observed" || stats.source === "vision-promoted"));
+}
+
+export function isContextAskResponse(value: unknown): value is ContextAskResponse {
+  return hasExactKeys(value, ["answer", "hit"], ["reason", "nextStep"])
+    && ((value.hit === true && isContextAnswer(value.answer) && value.reason === undefined && value.nextStep === undefined)
+      || (value.hit === false && value.answer === null && value.reason === "notRemembered" && value.nextStep === "a11y_snapshot"));
+}
+
+export function isContextNeighborsResponse(value: unknown): value is ContextNeighborsResponse {
+  if (!hasExactKeys(value, ["neighbors", "hit"], ["reason", "nextStep"])) return false;
+  if (value.hit === false) return value.neighbors === null && value.reason === "notRemembered" && value.nextStep === "a11y_snapshot";
+  return value.hit === true && value.reason === undefined && value.nextStep === undefined && hasExactKeys(value.neighbors, ["answer", "form", "pagePattern", "controls"]) && isContextAnswer(value.neighbors.answer) && boundedText(value.neighbors.form, 2048) && boundedText(value.neighbors.pagePattern, 2048) && Array.isArray(value.neighbors.controls) && value.neighbors.controls.every(isContextNeighborControl);
+}
+
+export function isContextSiteResponse(value: unknown): value is ContextSiteResponse {
+  if (!hasExactKeys(value, ["site"])) return false;
+  if (value.site === null) return true;
+  if (!hasExactKeys(value.site, ["siteKey", "pages"]) || !isString(value.site.siteKey) || value.site.siteKey.length === 0 || !isRecord(value.site.pages)) return false;
+  return Object.entries(value.site.pages).every(([page, forms]) => isString(page) && isRecord(forms) && Object.entries(forms).every(([form, controls]) => form.length > 0 && Array.isArray(controls) && controls.every(isContextNeighborControl)));
 }
 
 function isTextMatch(value: unknown): value is TextMatch {
