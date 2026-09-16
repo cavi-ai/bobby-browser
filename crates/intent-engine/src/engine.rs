@@ -1100,8 +1100,7 @@ fn file_control_failure(
 /// behind a styled "choose file" button, so the visible-only policy the
 /// normal fill path uses can legitimately find nothing for it; that must
 /// read as "this is a file control" rather than "target not found" so the
-/// caller gets sent to `upload_files` instead of a vision fallback that was
-/// never going to help either shape of failure.
+/// caller gets sent to `upload_files`.
 fn targets_file_control(target: &TargetSpec, candidates: &[Candidate]) -> bool {
     let file_candidates: Vec<Candidate> = candidates
         .iter()
@@ -1135,7 +1134,7 @@ async fn execute_fill(
     };
     let plan_summary = format!("{} value={}", summarize_target(&target), fill_kind(&value));
     let fill_payload = match value {
-        ControlAction::SetFiles { .. } | ControlAction::Activate => None,
+        ControlAction::Activate => None,
         _ => Some(VisionFillPayload {
             action: value.clone(),
         }),
@@ -3942,7 +3941,11 @@ async fn execute_vision_action(
             })?;
             let target = prompt_candidate_target("typeIntoCandidate", *index, prompt_candidates)?;
             let role = target.role.as_deref().unwrap_or_default();
-            if !compatible_role(&payload.action, role, false) {
+            let compatible = match &payload.action {
+                ControlAction::SetFiles { .. } => role == "button",
+                _ => compatible_role(&payload.action, role, false),
+            };
+            if !compatible {
                 return Err(CommandError {
                     code: ErrorCode::IntentActionMismatch,
                     message: format!(
@@ -3989,7 +3992,21 @@ async fn execute_vision_action(
                         )
                         .await?
                 }
-                ControlAction::SetFiles { .. } | ControlAction::Activate => {
+                ControlAction::SetFiles { paths } => browser
+                    .upload_files(
+                        page_id,
+                        &UploadFilesCommand {
+                            selector: String::new(),
+                            target: Some(target),
+                            paths: paths.clone(),
+                        },
+                    )
+                    .await
+                    .map_err(|error| CommandError {
+                        message: "typeIntoCandidate file upload failed".into(),
+                        ..error
+                    })?,
+                ControlAction::Activate => {
                     return Err(CommandError {
                         code: ErrorCode::IntentActionMismatch,
                         message: format!(

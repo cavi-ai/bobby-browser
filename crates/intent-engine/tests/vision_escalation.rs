@@ -43,8 +43,11 @@ struct FakeBrowser {
     click_xy_calls: Arc<AtomicUsize>,
     click_targets: Arc<std::sync::Mutex<Vec<Option<types::TargetSpec>>>>,
     type_text_calls: Arc<std::sync::Mutex<Vec<TypeTextCommand>>>,
+    upload_files_calls: Arc<std::sync::Mutex<Vec<UploadFilesCommand>>>,
     control_action_calls: Arc<std::sync::Mutex<Vec<ControlActionCommand>>>,
     type_text_evidence: Vec<Evidence>,
+    upload_files_evidence: Vec<Evidence>,
+    upload_files_error: Option<CommandError>,
     screenshot_png: Vec<u8>,
 }
 
@@ -104,9 +107,16 @@ impl IntentBrowser for FakeBrowser {
     async fn upload_files(
         &self,
         _page_id: &PageId,
-        _command: &UploadFilesCommand,
+        command: &UploadFilesCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported("upload_files"))
+        self.upload_files_calls
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(command.clone());
+        if let Some(error) = &self.upload_files_error {
+            return Err(error.clone());
+        }
+        Ok(self.upload_files_evidence.clone())
     }
 
     async fn control_action(
@@ -319,6 +329,12 @@ fn form_candidate(id: &str, role: &str, name: &str) -> dom_engine::Candidate {
     }
 }
 
+fn file_candidate(id: &str, name: &str) -> dom_engine::Candidate {
+    let mut candidate = form_candidate(id, "button", name);
+    candidate.attributes.insert("type".into(), "file".into());
+    candidate
+}
+
 fn fill(purpose: &str, role: &str, value: ControlAction) -> IntentCommand {
     IntentCommand::Fill(FillIntent {
         purpose: purpose.into(),
@@ -485,6 +501,142 @@ async fn type_into_candidate_uses_runtime_text_without_disclosing_it_to_the_prov
     assert!(!corpus.contains("runtime secret"));
     let record: serde_json::Value = serde_json::from_str(corpus.trim()).unwrap();
     assert_eq!(record["targetIndex"], 1);
+}
+
+#[tokio::test]
+async fn type_into_candidate_uploads_runtime_files_without_disclosing_paths() {
+    const PRIVATE_PATH: &str = "/private/runtime-resume-secret.pdf";
+    let request_debug = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let upload_files_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let assist = Arc::new(RecordingVision {
+        proposal: VisionProposal {
+            confidence: 0.95,
+            action: VisionAction::TypeIntoCandidate { index: 1 },
+        },
+        request_debug: request_debug.clone(),
+    });
+    let browser = FakeBrowser {
+        candidates: vec![
+            file_candidate("primary-resume", "Resume"),
+            file_candidate("secondary-resume", "Resume"),
+        ],
+        upload_files_calls: upload_files_calls.clone(),
+        upload_files_evidence: vec![Evidence::Upload {
+            selector: String::new(),
+            paths: vec![PRIVATE_PATH.into()],
+        }],
+        screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
+    };
+    let dir = tempfile::tempdir().expect("temp corpus directory");
+
+    let outcome = IntentEngine::execute(
+        &fill(
+            "Resume",
+            "button",
+            ControlAction::SetFiles {
+                paths: vec![PRIVATE_PATH.into()],
+            },
+        ),
+        &PageId::new(),
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(assist),
+            proposals: None,
+            defer_escalation: false,
+            prompt_context: None,
+            corpus: Some(VisionCorpus::new(dir.path()).expect("vision corpus")),
+            context_store: None,
+        },
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, IntentOutcome::Completed { .. }),
+        "expected completed upload, got {outcome:?}"
+    );
+    let requests = request_debug.lock().unwrap_or_else(|p| p.into_inner());
+    assert_eq!(requests.len(), 1);
+    assert!(!requests[0].contains(PRIVATE_PATH));
+    let calls = upload_files_calls.lock().unwrap_or_else(|p| p.into_inner());
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].paths, [PRIVATE_PATH]);
+    let target = calls[0].target.as_ref().expect("candidate target");
+    assert_eq!(target.role.as_deref(), Some("button"));
+    assert_eq!(target.accessible_name.as_deref(), Some("Resume"));
+    assert_eq!(target.ordinal, Some(1));
+    let corpus = std::fs::read_to_string(dir.path().join("vision-corpus.jsonl")).unwrap();
+    assert!(!corpus.contains(PRIVATE_PATH));
+}
+
+#[tokio::test]
+async fn type_into_candidate_redacts_runtime_file_paths_when_upload_fails() {
+    const PRIVATE_PATH: &str = "/private/runtime-resume-secret.pdf";
+    let upload_files_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let assist = Arc::new(FakeVision {
+        called: Arc::new(AtomicBool::new(false)),
+        proposal: VisionProposal {
+            confidence: 0.95,
+            action: VisionAction::TypeIntoCandidate { index: 0 },
+        },
+    });
+    let browser = FakeBrowser {
+        candidates: vec![
+            file_candidate("primary-resume", "Resume"),
+            file_candidate("secondary-resume", "Resume"),
+        ],
+        upload_files_calls: upload_files_calls.clone(),
+        upload_files_error: Some(CommandError {
+            code: ErrorCode::PolicyDenied,
+            message: format!("upload path is outside configured roots: {PRIVATE_PATH}"),
+            layer: types::ErrorLayer::Interface,
+            retryable: false,
+        }),
+        screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
+    };
+    let dir = tempfile::tempdir().expect("temp corpus directory");
+
+    let outcome = IntentEngine::execute(
+        &fill(
+            "Resume",
+            "button",
+            ControlAction::SetFiles {
+                paths: vec![PRIVATE_PATH.into()],
+            },
+        ),
+        &PageId::new(),
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(assist),
+            proposals: None,
+            defer_escalation: false,
+            prompt_context: None,
+            corpus: Some(VisionCorpus::new(dir.path()).expect("vision corpus")),
+            context_store: None,
+        },
+    )
+    .await;
+
+    assert_eq!(
+        upload_files_calls
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .len(),
+        1
+    );
+    let IntentOutcome::Failed { error, evidence } = outcome else {
+        panic!("expected upload failure, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::VisionAssistFailed);
+    assert!(!error.message.contains(PRIVATE_PATH));
+    assert!(!format!("{evidence:?}").contains(PRIVATE_PATH));
+    let corpus = std::fs::read_to_string(dir.path().join("vision-corpus.jsonl")).unwrap();
+    assert!(!corpus.contains(PRIVATE_PATH));
 }
 
 #[tokio::test]
