@@ -150,6 +150,39 @@ async fn tools_are_capability_filtered_sorted_and_have_closed_schemas() {
 }
 
 #[tokio::test]
+async fn click_and_wait_for_download_requires_file_download_and_accepts_a_workflow_handle() {
+    let without_download = fixture_server(vec![Capability::BrowserMutate]).await;
+    let denied = without_download
+        .handle_message(request(200, "tools/list", json!({})))
+        .await
+        .unwrap();
+    assert!(denied["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|tool| tool["name"] != "click_and_wait_for_download"));
+
+    let server = fixture_server(vec![Capability::BrowserMutate, Capability::FileDownload]).await;
+    let listed = server
+        .handle_message(request(201, "tools/list", json!({})))
+        .await
+        .unwrap();
+    let tool = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "click_and_wait_for_download")
+        .expect("download completion tool is advertised");
+    let branches = tool["inputSchema"]["oneOf"]
+        .as_array()
+        .expect("workflow-scoped tools advertise explicit-id and handle branches");
+    assert!(branches.iter().any(|branch| {
+        branch["required"] == json!(["workflowHandle"])
+            && branch["properties"]["workflowHandle"].is_object()
+    }));
+}
+
+#[tokio::test]
 async fn session_create_advertises_only_execution_policies_the_principal_can_grant() {
     let limited = fixture_server(vec![Capability::SessionWrite]).await;
     let limited_list = limited
@@ -4564,7 +4597,7 @@ async fn auto_checkpoint_saves_a_checkpoint_matching_the_boundary_command() {
 }
 
 #[tokio::test]
-async fn popup_auto_checkpoint_saves_a_checkpoint_matching_the_boundary_command() {
+async fn boundary_wait_tools_save_checkpoints_matching_their_commands() {
     let root = tempfile::tempdir().unwrap();
     let journal = Arc::new(
         JsonlJournal::open(root.path().join("journal.jsonl"))
@@ -4588,6 +4621,7 @@ async fn popup_auto_checkpoint_saves_a_checkpoint_matching_the_boundary_command(
                 Capability::SessionWrite,
                 Capability::PageWrite,
                 Capability::BrowserMutate,
+                Capability::FileDownload,
                 Capability::RecoveryWrite,
             ],
             Utc::now() + Duration::hours(1),
@@ -4661,6 +4695,43 @@ async fn popup_auto_checkpoint_saves_a_checkpoint_matching_the_boundary_command(
             .map(|id| id.0.to_string()),
         structured["commandId"].as_str().map(str::to_owned),
         "the checkpoint must name the popup command it guards"
+    );
+
+    let workflow_id = types::WorkflowId::new().0.to_string();
+    let submitted = server
+        .handle_message(request(
+            103,
+            "tools/call",
+            json!({
+                "name":"click_and_wait_for_download",
+                "arguments":{
+                    "sessionId":session_id.0.to_string(),
+                    "pageId":page_id,
+                    "workflowId":workflow_id,
+                    "target":{"role":"link","accessibleName":"Download"},
+                    "timeoutMs":1000
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    let structured = &submitted["result"]["structuredContent"];
+    assert!(
+        structured["checkpointId"].is_string(),
+        "click_and_wait_for_download must autoCheckpoint by default: {submitted}"
+    );
+    let saved = checkpoint_store
+        .load(&types::WorkflowId(workflow_id.parse().unwrap()))
+        .await
+        .expect("autoCheckpoint must persist a checkpoint under the envelope's workflow");
+    assert_eq!(saved.recovery_class, types::CommandClass::Boundary);
+    assert_eq!(
+        saved
+            .boundary_command_id
+            .as_ref()
+            .map(|id| id.0.to_string()),
+        structured["commandId"].as_str().map(str::to_owned),
+        "the checkpoint must name the download command it guards"
     );
 }
 

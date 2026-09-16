@@ -11,6 +11,7 @@ pub(super) const TOOLS: &[&str] = &[
     "command_execute",
     "navigate",
     "click",
+    "click_and_wait_for_download",
     "click_and_wait_for_popup",
     "type_text",
     "inspect",
@@ -134,6 +135,33 @@ impl Server {
                     }
                 }
                 result
+            }
+            "click_and_wait_for_download" => {
+                let input: ClickAndWaitForDownloadArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                let (context, mut envelope) = primitive_envelope(
+                    context,
+                    input.session_id,
+                    Some(input.page_id),
+                    input.workflow_id,
+                    types::PrimitiveCommand::ClickAndWaitForDownload(
+                        types::ClickAndWaitForDownloadCommand {
+                            selector: input.selector.unwrap_or_default(),
+                            target: input.target,
+                            timeout_ms: input.timeout_ms.unwrap_or(DEFAULT_COMMAND_TIMEOUT_MS),
+                        },
+                    ),
+                );
+                pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
+                if input.auto_checkpoint.unwrap_or(true) {
+                    self.submit_envelope_with_auto_checkpoint(context, envelope, handle)
+                        .await
+                } else {
+                    self.submit_envelope(context, envelope, handle, call.name.as_str())
+                        .await
+                }
             }
             "type_text" => {
                 let input: TypeTextArgs = match bounded_parse(call.arguments) {

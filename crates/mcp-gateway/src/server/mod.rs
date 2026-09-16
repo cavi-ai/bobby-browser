@@ -731,6 +731,7 @@ impl Server {
         for name in [
             "checkpoint_save",
             "click",
+            "click_and_wait_for_download",
             "click_and_wait_for_popup",
             "context_ask",
             "context_neighbors",

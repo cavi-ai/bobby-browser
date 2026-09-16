@@ -344,6 +344,7 @@ const DESTRUCTIVE: &[&str] = &[
 const OPEN_WORLD: &[&str] = &[
     "navigate",
     "download_url",
+    "click_and_wait_for_download",
     "extract_structured",
     "command_execute",
     // Navigates when given a URL.

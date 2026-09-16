@@ -25,6 +25,7 @@ Tools are advertised only when the principal holds the required capability.
 | `a11y_snapshot` | `browser:mutate` | Capture a compact accessibility tree with bounded form-control state, sensitive-value redaction, and command-ready semantic targets (`maxNodes` optional, 1…2048; default 256) |
 | `checkpoint_save` | `recovery:write` | Persist a verified workflow checkpoint |
 | `click` | `browser:mutate` | Click an element, optionally with native `shift`, `ctrl`, `alt`, or `meta` modifiers |
+| `click_and_wait_for_download` | `browser:mutate` + `file:download` | Click, wait for the resulting download, and return digest-verified artifact evidence (auto-checkpoint boundary by default) |
 | `click_and_wait_for_popup` | `browser:mutate` | Click, wait for a `window.open` popup, and sync that page into `page_list` (auto-checkpoint boundary by default) |
 | `command_execute` | `browser:mutate` | Execute one bounded `CommandEnvelope` |
 | `context_ask` | `page:read` | Ask the retained page context where a described control is |
@@ -132,6 +133,9 @@ is `true`. It can accept pinned `commandId` and `attemptId`, then persists a
 checkpoint for the resulting page-affecting click in the same call. The command
 also registers `window.open` targets into the current session page graph for
 `page_list`, so the next authorization step can use those page IDs directly.
+
+`click_and_wait_for_download` applies the same boundary checkpoint behavior,
+waits for the download started by the click, and returns the admitted artifact.
 
 `wait_for` uses explicit discriminated `WaitCondition` objects:
 
@@ -262,7 +266,8 @@ Example live result without forms:
 ```
 
 The handle can replace the explicit scope fields on this exact V1 allowlist:
-`a11y_snapshot`, `click`, `click_and_wait_for_popup`, `context_ask`, `context_neighbors`,
+`a11y_snapshot`, `click`, `click_and_wait_for_download`, `click_and_wait_for_popup`,
+`context_ask`, `context_neighbors`,
 `control_action`, `cookie_delete`, `cookie_get`, `cookie_set`, `dialog`,
 `download_url`, `emulate`, `evaluate_javascript`, `extract_structured`,
 `form_snapshot`, `inspect`, `intent_complete_form`,
