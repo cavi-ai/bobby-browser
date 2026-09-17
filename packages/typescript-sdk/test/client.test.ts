@@ -15,6 +15,7 @@ const REFERENCE_ID = "00000000-0000-4000-8000-000000000006";
 const CHECKPOINT_ID = "00000000-0000-4000-8000-000000000007";
 const CORRELATION_ID = "00000000-0000-4000-8000-000000000008";
 const PAGE_ID = "00000000-0000-4000-8000-000000000009";
+const JOB_ID = "job_00000000-0000-4000-8000-000000000010";
 
 async function withServer(
   handler: (request: IncomingMessage, response: ServerResponse) => void | Promise<void>,
@@ -125,6 +126,70 @@ test("listSessions returns the broker session array", async () => {
     const sessions = await client.listSessions();
     assert.equal(sessions.length, 1);
     assert.equal(sessions[0]?.id, SESSION_ID);
+  });
+});
+
+test("job helpers submit, read, and cancel through the typed HTTP contract", async () => {
+  const time = new Date().toISOString();
+  const requests: Array<{ method: string | undefined; url: string | undefined; idempotencyKey: string | undefined; body: unknown }> = [];
+  let call = 0;
+  await withServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    requests.push({
+      method: request.method,
+      url: request.url,
+      idempotencyKey: request.headers["idempotency-key"] as string | undefined,
+      body: chunks.length === 0 ? undefined : JSON.parse(Buffer.concat(chunks).toString("utf8")),
+    });
+    call += 1;
+    if (call === 1) return writeJson(response, 201, { jobId: JOB_ID, status: "pending" });
+    if (call === 2) return writeJson(response, 200, {
+      id: JOB_ID, name: "echo", priority: "high", status: "completed", payload: { hello: "world" },
+      createdAt: time, startedAt: time, completedAt: time, retryCount: 0, maxRetries: 1,
+      result: { jobId: JOB_ID, success: true, output: { hello: "world" }, error: null, completedAt: time },
+      error: null, timeoutMs: 5_000, correlationId: CORRELATION_ID,
+    });
+    response.writeHead(204);
+    response.end();
+  }, async (baseUrl) => {
+    const client = new BrowserRuntimeClient({ baseUrl, bearerToken: TOKEN });
+    const submitted = await client.submitJob(
+      { name: "echo", payload: { hello: "world" }, priority: "high", maxRetries: 1, timeoutMs: 5_000 },
+      { idempotencyKey: "echo-1" },
+    );
+    assert.equal(submitted.jobId, JOB_ID);
+    assert.equal((await client.jobStatus(JOB_ID)).status, "completed");
+    await client.cancelJob(JOB_ID);
+  });
+  assert.deepEqual(requests, [
+    { method: "POST", url: "/v1/jobs", idempotencyKey: "echo-1", body: { name: "echo", payload: { hello: "world" }, priority: "high", maxRetries: 1, timeoutMs: 5_000 } },
+    { method: "GET", url: `/v1/jobs/${JOB_ID}`, idempotencyKey: undefined, body: undefined },
+    { method: "DELETE", url: `/v1/jobs/${JOB_ID}`, idempotencyKey: undefined, body: undefined },
+  ]);
+});
+
+test("job helpers reject invalid inputs and malformed nested responses", async () => {
+  let calls = 0;
+  const offline = new BrowserRuntimeClient({
+    baseUrl: "https://runtime.invalid",
+    bearerToken: TOKEN,
+    fetch: async () => { calls += 1; throw new Error("unexpected transport"); },
+  });
+  await assert.rejects(offline.submitJob({ name: "   " }), (error: unknown) => error instanceof RuntimeClientError && error.kind === "protocol");
+  await assert.rejects(offline.jobStatus("not-a-job"), (error: unknown) => error instanceof RuntimeClientError && error.kind === "protocol");
+  await assert.rejects(offline.cancelJob("job_../escape"), (error: unknown) => error instanceof RuntimeClientError && error.kind === "protocol");
+  assert.equal(calls, 0);
+
+  await withServer((_request, response) => writeJson(response, 200, {
+    id: JOB_ID, name: "echo", priority: "normal", status: "completed", payload: null,
+    createdAt: new Date().toISOString(), startedAt: null, completedAt: new Date().toISOString(),
+    retryCount: 0, maxRetries: 3,
+    result: { jobId: JOB_ID, success: true, output: null, error: null, completedAt: "bad-time" },
+    error: null, timeoutMs: null, correlationId: null,
+  }), async (baseUrl) => {
+    const client = new BrowserRuntimeClient({ baseUrl, bearerToken: TOKEN });
+    await assert.rejects(client.jobStatus(JOB_ID), (error: unknown) => error instanceof RuntimeClientError && error.kind === "protocol");
   });
 });
 

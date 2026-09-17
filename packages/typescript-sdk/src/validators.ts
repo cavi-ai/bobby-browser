@@ -28,6 +28,10 @@ import type {
   FormValidationIssue,
   InterfaceEvent,
   JsonValue,
+  JobResult,
+  JobStatusResponse,
+  JobSubmitResponse,
+  SubmitJobRequest,
   NetworkResourceType,
   PageEvidence,
   PageState,
@@ -182,6 +186,64 @@ function isJsonValue(value: unknown, depth = 0): value is JsonValue {
   if (depth >= 64) return false;
   if (Array.isArray(value)) return value.every((item) => isJsonValue(item, depth + 1));
   return isRecord(value) && Object.values(value).every((item) => isJsonValue(item, depth + 1));
+}
+
+const JOB_PRIORITIES = ["low", "normal", "high", "critical"] as const;
+const JOB_STATUSES = ["pending", "running", "completed", "failed", "cancelled"] as const;
+
+export function isJobId(value: unknown): value is string {
+  return typeof value === "string" && value.startsWith("job_") && isUuid(value.slice(4));
+}
+
+export function isSubmitJobRequest(value: unknown): value is SubmitJobRequest {
+  return hasExactKeys(value, ["name"], ["payload", "priority", "maxRetries", "timeoutMs"])
+    && typeof value.name === "string"
+    && value.name.trim().length > 0
+    && optional(value, "payload", isJsonValue)
+    && optional(value, "priority", (priority): priority is SubmitJobRequest["priority"] => oneOf(priority, JOB_PRIORITIES))
+    && optional(value, "maxRetries", (retries): retries is number => isSafeUnsigned(retries, 4_294_967_295))
+    && optional(value, "timeoutMs", (timeout): timeout is number => isSafeUnsigned(timeout));
+}
+
+export function isJobSubmitResponse(value: unknown): value is JobSubmitResponse {
+  return hasExactKeys(value, ["jobId", "status"])
+    && isJobId(value.jobId)
+    && oneOf(value.status, JOB_STATUSES);
+}
+
+function isJobResult(value: unknown): value is JobResult {
+  return hasExactKeys(value, ["jobId", "success", "output", "error", "completedAt"])
+    && isJobId(value.jobId)
+    && typeof value.success === "boolean"
+    && isJsonValue(value.output)
+    && (value.error === null || isString(value.error))
+    && isIsoTimestamp(value.completedAt);
+}
+
+export function isJobStatusResponse(value: unknown): value is JobStatusResponse {
+  if (!hasExactKeys(value, ["id", "name", "priority", "status", "payload", "createdAt", "startedAt", "completedAt", "retryCount", "maxRetries", "result", "error", "timeoutMs", "correlationId"])
+    || !isJobId(value.id)
+    || typeof value.name !== "string" || value.name.trim().length === 0
+    || !oneOf(value.priority, JOB_PRIORITIES)
+    || !oneOf(value.status, JOB_STATUSES)
+    || !isJsonValue(value.payload)
+    || !isIsoTimestamp(value.createdAt)
+    || !(value.startedAt === null || isIsoTimestamp(value.startedAt))
+    || !(value.completedAt === null || isIsoTimestamp(value.completedAt))
+    || !isSafeUnsigned(value.retryCount, 4_294_967_295)
+    || !isSafeUnsigned(value.maxRetries, 4_294_967_295)
+    || value.retryCount > value.maxRetries
+    || !(value.result === null || isJobResult(value.result))
+    || !(value.error === null || (isString(value.error) && value.error.length > 0))
+    || !(value.timeoutMs === null || isSafeUnsigned(value.timeoutMs))
+    || !(value.correlationId === null || isUuid(value.correlationId))) return false;
+
+  if (value.result !== null && value.result.jobId !== value.id) return false;
+  if (value.status === "pending") return value.startedAt === null && value.completedAt === null && value.result === null && value.error === null;
+  if (value.status === "running") return value.startedAt !== null && value.completedAt === null && value.result === null && value.error === null;
+  if (value.status === "completed") return value.startedAt !== null && value.completedAt !== null && value.result !== null && value.result.success && value.result.error === null && value.error === null;
+  if (value.status === "failed") return value.startedAt !== null && value.completedAt !== null && value.result === null && value.error !== null;
+  return value.completedAt !== null && value.result === null && value.error === null;
 }
 
 export function isRuntimeInfo(value: unknown): value is RuntimeInfo {
