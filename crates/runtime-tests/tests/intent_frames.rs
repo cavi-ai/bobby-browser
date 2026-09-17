@@ -485,10 +485,36 @@ async fn intent_submit_with_text_expected_state_observes_the_confirmation() {
         matches!(outcome, CommandOutcome::Completed { .. }),
         "{outcome:?}"
     );
+    // Mirror the e2e gold path: pick the overlay option first (the bare
+    // href click can land on the open overlay and never change the URL),
+    // then follow the ledger link and wait for the customer URL before
+    // waiting on the combobox.
+    let outcome = submit(RuntimeCommand::Primitive(PrimitiveCommand::WaitFor(
+        WaitForCommand {
+            condition: WaitCondition::Element {
+                target: Box::new(TargetSpec {
+                    role: Some("option".into()),
+                    accessible_name: Some("Atlas Labs".into()),
+                    ..TargetSpec::default()
+                }),
+                state: types::ElementState::Visible,
+            },
+            timeout_ms: 5_000,
+        },
+    )))
+    .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
     let outcome = submit(RuntimeCommand::Primitive(PrimitiveCommand::Click(
         types::ClickCommand {
-            selector: "a[href='/customers/cus_atlas']".into(),
-            target: None,
+            selector: String::new(),
+            target: Some(TargetSpec {
+                role: Some("option".into()),
+                accessible_name: Some("Atlas Labs".into()),
+                ..TargetSpec::default()
+            }),
             boundary: false,
             expected_url: None,
             modifiers: Vec::new(),
@@ -498,6 +524,55 @@ async fn intent_submit_with_text_expected_state_observes_the_confirmation() {
     assert!(
         matches!(outcome, CommandOutcome::Completed { .. }),
         "{outcome:?}"
+    );
+    let outcome = submit(RuntimeCommand::Primitive(PrimitiveCommand::WaitFor(
+        WaitForCommand {
+            condition: WaitCondition::Element {
+                target: Box::new(TargetSpec {
+                    role: Some("link".into()),
+                    accessible_name: Some("Atlas Labs".into()),
+                    ..TargetSpec::default()
+                }),
+                state: types::ElementState::Visible,
+            },
+            timeout_ms: 5_000,
+        },
+    )))
+    .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
+    let outcome = submit(RuntimeCommand::Primitive(PrimitiveCommand::Click(
+        types::ClickCommand {
+            selector: String::new(),
+            target: Some(TargetSpec {
+                role: Some("link".into()),
+                accessible_name: Some("Atlas Labs".into()),
+                ..TargetSpec::default()
+            }),
+            boundary: false,
+            expected_url: None,
+            modifiers: Vec::new(),
+        },
+    )))
+    .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
+    let outcome = submit(RuntimeCommand::Primitive(PrimitiveCommand::WaitFor(
+        WaitForCommand {
+            condition: WaitCondition::Url {
+                matcher: types::TextMatch::Contains("/customers/cus_atlas".into()),
+            },
+            timeout_ms: 10_000,
+        },
+    )))
+    .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "customer detail URL was not reached: {outcome:?}"
     );
 
     let outcome = submit(RuntimeCommand::Primitive(PrimitiveCommand::WaitFor(
