@@ -57,7 +57,7 @@ pub enum ContextStoreError {
 pub enum RecordSource {
     /// Promoted from a verified runtime observation.
     Observed,
-    /// Promoted from a verified vision proposal (Spec B prefill).
+    /// Promoted from a verified vision proposal.
     VisionPromoted,
 }
 

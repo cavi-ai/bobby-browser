@@ -48,6 +48,7 @@ struct FakeBrowser {
     type_text_evidence: Vec<Evidence>,
     upload_files_evidence: Vec<Evidence>,
     upload_files_error: Option<CommandError>,
+    rejected_control_target: Option<String>,
     screenshot_png: Vec<u8>,
 }
 
@@ -128,6 +129,15 @@ impl IntentBrowser for FakeBrowser {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .push(command.clone());
+        if self.rejected_control_target.as_deref() == Some(command.target.accessible_name.as_str())
+        {
+            return Err(CommandError {
+                code: ErrorCode::TargetNotFound,
+                message: "target changed".into(),
+                layer: types::ErrorLayer::Page,
+                retryable: false,
+            });
+        }
         let (operation, state) = match &command.action {
             ControlAction::SelectOne { value } => (
                 FormControlOperation::SelectOne,
@@ -1363,9 +1373,22 @@ impl intent_engine::ProposalLookup for FakeProposals {
 
 fn cached_click(confidence: f32) -> intent_engine::CachedProposal {
     intent_engine::CachedProposal {
-        x: 12.0,
-        y: 34.0,
+        action: intent_engine::CachedProposalAction::Click { x: 12.0, y: 34.0 },
         confidence,
+    }
+}
+
+fn cached_type_candidate(name: &str) -> intent_engine::CachedProposal {
+    intent_engine::CachedProposal {
+        action: intent_engine::CachedProposalAction::TypeIntoCandidate {
+            candidates: vec![intent_engine::VisionPromptCandidate {
+                role: "checkbox".into(),
+                name: name.into(),
+                ordinal: None,
+            }],
+            index: 0,
+        },
+        confidence: 0.95,
     }
 }
 
@@ -1812,6 +1835,63 @@ async fn a_failed_cached_proposal_is_dropped_and_escalates_live() {
     };
 }
 
+#[tokio::test]
+async fn candidate_drift_drops_the_cached_identity_and_recovers_live() {
+    let called = Arc::new(AtomicBool::new(false));
+    let assist = Arc::new(FakeVision {
+        called: called.clone(),
+        proposal: VisionProposal {
+            confidence: 0.95,
+            action: VisionAction::TypeIntoCandidate { index: 0 },
+        },
+    });
+    let proposals = Arc::new(FakeProposals {
+        hits: [(
+            "notification contact".to_string(),
+            cached_type_candidate("Previous contact"),
+        )]
+        .into_iter()
+        .collect(),
+        consulted: Arc::new(AtomicBool::new(false)),
+        dropped: Arc::new(AtomicUsize::new(0)),
+    });
+    let dropped = proposals.dropped.clone();
+    let browser = FakeBrowser {
+        candidates: vec![
+            form_candidate("current", "checkbox", "Current contact"),
+            form_candidate("alternate", "checkbox", "Alternate contact"),
+        ],
+        rejected_control_target: Some("Previous contact".into()),
+        screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
+    };
+
+    let outcome = IntentEngine::execute(
+        &fill(
+            "Notification contact",
+            "checkbox",
+            ControlAction::SetChecked { checked: true },
+        ),
+        &PageId::new(),
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(assist),
+            proposals: Some(proposals),
+            defer_escalation: false,
+            prompt_context: None,
+            corpus: None,
+            context_store: None,
+        },
+    )
+    .await;
+
+    assert!(matches!(outcome, IntentOutcome::Completed { .. }));
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    assert!(called.load(Ordering::SeqCst));
+}
+
 /// A browser whose click_xy always fails, to exercise the cached-proposal
 /// drop path; everything else delegates to FakeBrowser.
 struct FailingClickBrowser {
@@ -1883,6 +1963,43 @@ struct CountingVision {
     metrics: OperationalMetrics,
 }
 
+struct ProactiveCandidateVision {
+    propose_calls: Arc<AtomicUsize>,
+    control_action_calls: Arc<std::sync::Mutex<Vec<ControlActionCommand>>>,
+    expected_first_candidate: &'static str,
+}
+
+#[async_trait]
+impl VisionAssist for ProactiveCandidateVision {
+    async fn propose(&self, request: VisionProposeRequest) -> Result<VisionProposal, CommandError> {
+        assert!(
+            self.control_action_calls
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_empty(),
+            "prefill ran after the form had already started mutating"
+        );
+        let candidates = request
+            .context
+            .as_ref()
+            .map(|context| context.candidates.as_slice())
+            .unwrap_or_default();
+        assert!(
+            !candidates.is_empty(),
+            "proactive prefill did not send a candidate-grounded window"
+        );
+        assert_eq!(
+            candidates[0].name, self.expected_first_candidate,
+            "verified retained context did not rank the proactive window"
+        );
+        self.propose_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(VisionProposal {
+            confidence: 0.95,
+            action: VisionAction::TypeIntoCandidate { index: 0 },
+        })
+    }
+}
+
 #[async_trait]
 impl VisionAssist for CountingVision {
     async fn propose(
@@ -1892,7 +2009,7 @@ impl VisionAssist for CountingVision {
         self.propose_calls.fetch_add(1, Ordering::SeqCst);
         Ok(VisionProposal {
             confidence: self.confidence,
-            action: VisionAction::Click { x: 10.0, y: 20.0 },
+            action: VisionAction::TypeIntoCandidate { index: 0 },
         })
     }
 
@@ -1946,6 +2063,266 @@ fn text_field(name: &str, purpose: &str) -> types::CompleteFormField {
     }
 }
 
+fn checked_field(
+    name: &str,
+    purpose: &str,
+    accessible_name: Option<&str>,
+) -> types::CompleteFormField {
+    types::CompleteFormField {
+        name: name.into(),
+        purpose: purpose.into(),
+        hints: IntentHints {
+            role: Some("checkbox".into()),
+            accessible_name: accessible_name.map(str::to_owned),
+            ..IntentHints::default()
+        },
+        value: types::ControlAction::SetChecked { checked: true },
+    }
+}
+
+#[tokio::test]
+async fn complete_form_prefills_ambiguous_fields_before_the_first_action() {
+    let temp = tempfile::tempdir().unwrap();
+    let (store, _) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
+    store
+        .upsert_site(
+            "https://example.test",
+            SiteContext {
+                pages: BTreeMap::from([(
+                    "/settings".into(),
+                    StoredPageContext {
+                        forms: BTreeMap::from([(
+                            "page".into(),
+                            FormContext {
+                                controls: vec![ControlContext {
+                                    role: "checkbox".into(),
+                                    accessible_name: "Backup contact".into(),
+                                    ordinal: None,
+                                    form_membership: "page".into(),
+                                    intents: BTreeMap::from([(
+                                        "fill".into(),
+                                        IntentStats {
+                                            success_count: 3,
+                                            failure_count: 0,
+                                            last_verified_day: Some(20_000),
+                                            source: Some(RecordSource::Observed),
+                                        },
+                                    )]),
+                                }],
+                            },
+                        )]),
+                    },
+                )]),
+                ..SiteContext::default()
+            },
+        )
+        .await;
+    let propose_calls = Arc::new(AtomicUsize::new(0));
+    let control_action_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let assist = Arc::new(ProactiveCandidateVision {
+        propose_calls: propose_calls.clone(),
+        control_action_calls: control_action_calls.clone(),
+        expected_first_candidate: "Backup contact",
+    });
+    let browser = FakeBrowser {
+        candidates: vec![
+            form_candidate("terms", "checkbox", "Accept terms"),
+            form_candidate("primary", "checkbox", "Primary contact"),
+            form_candidate("backup", "checkbox", "Backup contact"),
+        ],
+        control_action_calls: control_action_calls.clone(),
+        screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
+    };
+    let intent = IntentCommand::CompleteForm(types::CompleteFormIntent {
+        purpose: "configure notifications".into(),
+        fields: vec![
+            checked_field("terms", "Accept terms", Some("Accept terms")),
+            checked_field("contact", "Choose a contact", None),
+        ],
+    });
+
+    let outcome = IntentEngine::execute(
+        &intent,
+        &PageId::new(),
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(assist),
+            proposals: Some(Arc::new(RecordingProposals::default())),
+            defer_escalation: false,
+            prompt_context: Some(VisionPromptContext {
+                url: Some("https://example.test/settings".into()),
+                ..VisionPromptContext::default()
+            }),
+            corpus: None,
+            context_store: Some(Arc::new(store)),
+        },
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, IntentOutcome::Completed { .. }),
+        "expected proactive candidate prefill to complete the form, got {outcome:?}"
+    );
+    assert_eq!(propose_calls.load(Ordering::SeqCst), 1);
+    let actions = control_action_calls
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    assert_eq!(actions.len(), 2, "both runtime-owned actions must execute");
+    assert_eq!(actions[0].target.accessible_name, "Accept terms");
+}
+
+struct ConcurrentVision {
+    active: Arc<AtomicUsize>,
+    max_active: Arc<AtomicUsize>,
+}
+
+struct ActiveVisionCall(Arc<AtomicUsize>);
+
+impl Drop for ActiveVisionCall {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+struct PendingVision {
+    active: Arc<AtomicUsize>,
+    max_active: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl VisionAssist for PendingVision {
+    async fn propose(
+        &self,
+        _request: VisionProposeRequest,
+    ) -> Result<VisionProposal, CommandError> {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(active, Ordering::SeqCst);
+        let _call = ActiveVisionCall(self.active.clone());
+        std::future::pending::<()>().await;
+        unreachable!()
+    }
+}
+
+#[async_trait]
+impl VisionAssist for ConcurrentVision {
+    async fn propose(
+        &self,
+        _request: VisionProposeRequest,
+    ) -> Result<VisionProposal, CommandError> {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(active, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        Ok(VisionProposal {
+            confidence: 0.95,
+            action: VisionAction::TypeIntoCandidate { index: 0 },
+        })
+    }
+}
+
+#[tokio::test]
+async fn proactive_prefill_limits_provider_concurrency_to_four() {
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let browser = FakeBrowser {
+        candidates: vec![
+            form_candidate("primary", "checkbox", "Primary contact"),
+            form_candidate("backup", "checkbox", "Backup contact"),
+        ],
+        screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
+    };
+    let fields = (0..6)
+        .map(|index| checked_field(&format!("field-{index}"), &format!("choice-{index}"), None))
+        .collect();
+
+    let outcome = IntentEngine::execute(
+        &IntentCommand::CompleteForm(types::CompleteFormIntent {
+            purpose: "configure notifications".into(),
+            fields,
+        }),
+        &PageId::new(),
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(Arc::new(ConcurrentVision {
+                active: active.clone(),
+                max_active: max_active.clone(),
+            })),
+            proposals: Some(Arc::new(RecordingProposals::default())),
+            defer_escalation: false,
+            prompt_context: None,
+            corpus: None,
+            context_store: None,
+        },
+    )
+    .await;
+
+    assert!(matches!(outcome, IntentOutcome::Completed { .. }));
+    assert_eq!(max_active.load(Ordering::SeqCst), 4);
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn cancelling_proactive_prefill_cancels_in_flight_provider_calls() {
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let task_active = active.clone();
+    let task_max_active = max_active.clone();
+    let task = tokio::spawn(async move {
+        let browser = FakeBrowser {
+            candidates: vec![
+                form_candidate("primary", "checkbox", "Primary contact"),
+                form_candidate("backup", "checkbox", "Backup contact"),
+            ],
+            screenshot_png: b"png".to_vec(),
+            ..FakeBrowser::default()
+        };
+        let fields = (0..6)
+            .map(|index| checked_field(&format!("field-{index}"), &format!("choice-{index}"), None))
+            .collect();
+        IntentEngine::execute(
+            &IntentCommand::CompleteForm(types::CompleteFormIntent {
+                purpose: "configure notifications".into(),
+                fields,
+            }),
+            &PageId::new(),
+            &browser,
+            &VisionContext {
+                session_ok: true,
+                capability_ok: true,
+                assist: Some(Arc::new(PendingVision {
+                    active: task_active,
+                    max_active: task_max_active,
+                })),
+                proposals: Some(Arc::new(RecordingProposals::default())),
+                defer_escalation: false,
+                prompt_context: None,
+                corpus: None,
+                context_store: None,
+            },
+        )
+        .await
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while max_active.load(Ordering::SeqCst) < 4 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("provider calls did not start");
+    task.abort();
+    let _ = task.await;
+
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+    assert_eq!(max_active.load(Ordering::SeqCst), 4);
+}
+
 #[tokio::test]
 async fn complete_form_batches_one_screenshot_for_all_stuck_fields() {
     let propose_calls = Arc::new(AtomicUsize::new(0));
@@ -1957,18 +2334,24 @@ async fn complete_form_batches_one_screenshot_for_all_stuck_fields() {
         metrics: metrics.clone(),
     });
     let proposals = Arc::new(RecordingProposals::default());
-    // No candidates for any field: every fill gets stuck.
     let browser = CountingScreenshotBrowser {
-        inner: FakeBrowser::default(),
+        inner: FakeBrowser {
+            candidates: vec![
+                form_candidate("primary", "checkbox", "Primary value"),
+                form_candidate("alternate", "checkbox", "Alternate value"),
+            ],
+            screenshot_png: b"png".to_vec(),
+            ..FakeBrowser::default()
+        },
         screenshot_calls: screenshot_calls.clone(),
     };
     let page_id = PageId::new();
     let intent = IntentCommand::CompleteForm(types::CompleteFormIntent {
         purpose: "sign up".into(),
         fields: vec![
-            text_field("first", "First name"),
-            text_field("last", "Last name"),
-            text_field("city", "City"),
+            checked_field("first", "First choice", None),
+            checked_field("last", "Last choice", None),
+            checked_field("city", "City choice", None),
         ],
     });
 
@@ -2008,6 +2391,49 @@ async fn complete_form_batches_one_screenshot_for_all_stuck_fields() {
         .count();
     assert_eq!(prefill_records, 3, "every field resolved from the batch");
     assert_eq!(metrics.snapshot().vision.accepted, 3);
+}
+
+#[tokio::test]
+async fn deterministic_forms_do_not_call_the_prefill_provider_or_capture_a_screenshot() {
+    let called = Arc::new(AtomicBool::new(false));
+    let screenshot_calls = Arc::new(AtomicUsize::new(0));
+    let browser = CountingScreenshotBrowser {
+        inner: FakeBrowser {
+            candidates: vec![form_candidate("terms", "checkbox", "Accept terms")],
+            ..FakeBrowser::default()
+        },
+        screenshot_calls: screenshot_calls.clone(),
+    };
+
+    let outcome = IntentEngine::execute(
+        &IntentCommand::CompleteForm(types::CompleteFormIntent {
+            purpose: "accept terms".into(),
+            fields: vec![checked_field("terms", "Accept terms", Some("Accept terms"))],
+        }),
+        &PageId::new(),
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(Arc::new(FakeVision {
+                called: called.clone(),
+                proposal: VisionProposal {
+                    confidence: 0.95,
+                    action: VisionAction::TypeIntoCandidate { index: 0 },
+                },
+            })),
+            proposals: Some(Arc::new(RecordingProposals::default())),
+            defer_escalation: false,
+            prompt_context: None,
+            corpus: None,
+            context_store: None,
+        },
+    )
+    .await;
+
+    assert!(matches!(outcome, IntentOutcome::Completed { .. }));
+    assert!(!called.load(Ordering::SeqCst));
+    assert_eq!(screenshot_calls.load(Ordering::SeqCst), 0);
 }
 
 struct CountingScreenshotBrowser {
@@ -2052,6 +2478,13 @@ impl IntentBrowser for CountingScreenshotBrowser {
         command: &UploadFilesCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         self.inner.upload_files(page_id, command).await
+    }
+    async fn control_action(
+        &self,
+        page_id: &PageId,
+        command: &ControlActionCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.inner.control_action(page_id, command).await
     }
     async fn wait_for(
         &self,

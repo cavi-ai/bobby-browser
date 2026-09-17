@@ -23,6 +23,7 @@ tracing.workspace = true
 observability.workspace = true
 types.workspace = true
 context-store.workspace = true
+futures-util.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

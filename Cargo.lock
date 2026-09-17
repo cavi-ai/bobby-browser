@@ -2180,6 +2180,7 @@ dependencies = [
  "base64 0.23.1",
  "context-store",
  "dom-engine",
+ "futures-util",
  "hex",
  "observability",
  "reqwest",
