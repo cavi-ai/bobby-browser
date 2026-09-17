@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1155,16 +1155,7 @@ async fn collect_candidates_merged(
     };
 
     let mut owners = HashMap::new();
-    // Never `describeNode(pierce, depth: 24)` the document root. Chromium
-    // returns a recursive `Node` tree; serde + Drop overflow Linux debug
-    // stacks during AccessibilitySnapshot/Inspect on ordinary pages.
-    // Closed roots on an explicit shadow hop are found by
-    // `discover_closed_root_for_candidate` (depth 1) in `open_target_scope`.
-    let closed_roots = if matches!(scope, LocatorScope::Context(_)) && shadow_hosts.is_empty() {
-        Vec::new()
-    } else {
-        discover_closed_shadow_roots(page, scope, shadow_hosts).await?
-    };
+    let closed_roots = discover_closed_shadow_roots(page, scope, shadow_hosts).await?;
     for root in closed_roots {
         let nested_scope = TARGET_SCOPE.fetch_add(1, Ordering::Relaxed);
         let mut nested = collect_candidates_within(&root, &[], nested_scope).await?;
@@ -1177,32 +1168,56 @@ async fn collect_candidates_merged(
 }
 
 /// Discovers every closed shadow root reachable within the given scope via
-/// `DOM.describeNode(pierce: true)`, resolving each into a live `Element`
-/// handle. CDP sees closed roots at the backend level regardless of the
-/// JS-level restriction, so no page-prototype patching is needed.
+/// shallow `DOM.describeNode(pierce: true, depth: 1)` BFS. A single
+/// depth-24 pierce of `document` overflows Linux debug stacks on serde
+/// (the tree never reaches Drop unwind). CDP still sees closed roots at
+/// the backend level, so no page-prototype patching is needed.
 async fn discover_closed_shadow_roots(
     page: &Page,
     scope: &LocatorScope,
     shadow_hosts: &[String],
 ) -> Result<Vec<Arc<Element>>, CommandError> {
-    let object_id = scope_root_object_id(page, scope, shadow_hosts).await?;
-    let described = page
-        .execute(
-            DescribeNodeParams::builder()
-                .object_id(object_id)
-                .depth(24)
-                .pierce(true)
-                .build(),
-        )
-        .await
-        .map_err(cdp_error)?;
-    let mut backend_ids = Vec::new();
-    collect_closed_shadow_root_ids(&described.result.node, &mut backend_ids);
-    // chromiumoxide `Node` Drop is recursive. A pierce tree from the
-    // document root overflows Linux debug stacks; unwind first.
-    dismantle_cdp_node(described.result.node);
-    let mut roots = Vec::with_capacity(backend_ids.len());
-    for backend_node_id in backend_ids {
+    let mut pending = vec![scope_root_object_id(page, scope, shadow_hosts).await?];
+    let mut seen = HashSet::new();
+    let mut closed = Vec::new();
+    let mut inspected = 0usize;
+    while let Some(object_id) = pending.pop() {
+        inspected += 1;
+        if inspected > 2048 {
+            break;
+        }
+        let described = page
+            .execute(
+                DescribeNodeParams::builder()
+                    .object_id(object_id)
+                    .depth(1)
+                    .pierce(true)
+                    .build(),
+            )
+            .await
+            .map_err(cdp_error)?;
+        let node = described.result.node;
+        collect_closed_shadow_root_ids(&node, &mut closed);
+        let followups = pierce_followup_backend_ids(&node);
+        dismantle_cdp_node(node);
+        for backend_id in followups {
+            if !seen.insert(backend_id) {
+                continue;
+            }
+            if let Ok(element) = page.element_from_backend_node_id(backend_id).await {
+                pending.push(element.remote_object_id.clone());
+            }
+        }
+    }
+    let mut unique = Vec::new();
+    let mut have = HashSet::new();
+    for backend_id in closed {
+        if have.insert(backend_id) {
+            unique.push(backend_id);
+        }
+    }
+    let mut roots = Vec::with_capacity(unique.len());
+    for backend_node_id in unique {
         let element = page
             .element_from_backend_node_id(backend_node_id)
             .await
@@ -1210,6 +1225,29 @@ async fn discover_closed_shadow_roots(
         roots.push(Arc::new(element));
     }
     Ok(roots)
+}
+
+fn pierce_followup_backend_ids(root: &CdpNode) -> Vec<BackendNodeId> {
+    let mut out = Vec::new();
+    if let Some(roots) = &root.shadow_roots {
+        for node in roots {
+            if pierce_follow_node(node) {
+                out.push(node.backend_node_id);
+            }
+        }
+    }
+    if let Some(children) = &root.children {
+        for node in children {
+            if pierce_follow_node(node) {
+                out.push(node.backend_node_id);
+            }
+        }
+    }
+    out
+}
+
+fn pierce_follow_node(node: &CdpNode) -> bool {
+    matches!(node.node_type, 1 | 9 | 11)
 }
 
 fn dismantle_cdp_node(node: CdpNode) {
@@ -1812,6 +1850,39 @@ mod tests {
         collect_closed_shadow_root_ids(&tree, &mut found);
 
         assert_eq!(found, vec![BackendNodeId::new(10), BackendNodeId::new(20)]);
+    }
+
+    #[test]
+    fn pierce_followup_backend_ids_lists_element_children_and_skips_iframe_documents() {
+        let iframe_document = cdp_node(
+            98,
+            None,
+            vec![cdp_node(97, None, Vec::new(), Vec::new(), None)],
+            Vec::new(),
+            None,
+        );
+        let closed_root = cdp_node(
+            4,
+            Some(ShadowRootType::Closed),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+        let tree = cdp_node(
+            1,
+            None,
+            vec![
+                cdp_node(5, None, Vec::new(), vec![closed_root], None),
+                cdp_node(6, None, Vec::new(), Vec::new(), Some(iframe_document)),
+            ],
+            Vec::new(),
+            None,
+        );
+        let followups = pierce_followup_backend_ids(&tree);
+        assert_eq!(
+            followups,
+            vec![BackendNodeId::new(5), BackendNodeId::new(6)]
+        );
     }
 
     #[test]
