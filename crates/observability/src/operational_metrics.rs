@@ -2,12 +2,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::provider_health::{ProviderCallOutcome, ProviderHealthTracker};
+
 pub use types::{
     ConfidenceMetricsSnapshot, ContextMetricsSnapshot, ContextRankedVisionMetricsSnapshot,
     IntentMetricsSnapshot, LatencyBucketSnapshot, LatencyHistogramSnapshot,
-    OperationalMetricsSnapshot, PrefillMetricsSnapshot, ReconciliationMetricsSnapshot,
-    RetryMetricsSnapshot, VerificationMetricsSnapshot, VisionMetricsSnapshot,
-    WorkflowCallMetricsSnapshot,
+    OperationalMetricsSnapshot, PrefillMetricsSnapshot, ProviderHealthSnapshot,
+    ReconciliationMetricsSnapshot, RetryMetricsSnapshot, VerificationMetricsSnapshot,
+    VisionMetricsSnapshot, WorkflowCallMetricsSnapshot,
 };
 
 const LATENCY_UPPER_BOUNDS_MS: [u64; 10] =
@@ -145,6 +147,7 @@ pub struct OperationalMetrics {
 
 struct OperationalMetricsInner {
     started_at: Instant,
+    provider_health: ProviderHealthTracker,
     intent_kind: [AtomicU64; 10],
     resolution_source: [AtomicU64; 4],
     context: [AtomicU64; 5],
@@ -167,9 +170,19 @@ struct OperationalMetricsInner {
 
 impl Default for OperationalMetrics {
     fn default() -> Self {
+        Self::with_health_budget(None, 3)
+    }
+}
+
+impl OperationalMetrics {
+    /// Metrics with provider-health enforcement thresholds. `latency_budget_ms`
+    /// is `[vision].propose_budget_ms`; `failure_threshold` is
+    /// `[vision].health_failure_threshold`.
+    pub fn with_health_budget(latency_budget_ms: Option<u64>, failure_threshold: u32) -> Self {
         Self {
             inner: Arc::new(OperationalMetricsInner {
                 started_at: Instant::now(),
+                provider_health: ProviderHealthTracker::new(latency_budget_ms, failure_threshold),
                 intent_kind: atomic_array(),
                 resolution_source: atomic_array(),
                 context: atomic_array(),
@@ -191,9 +204,13 @@ impl Default for OperationalMetrics {
             }),
         }
     }
-}
 
-impl OperationalMetrics {
+    /// Per-provider health derived from recorded vision proposals and the
+    /// configured budgets. Report-only; empty until a provider serves a call.
+    pub fn provider_health(&self) -> Vec<ProviderHealthSnapshot> {
+        self.inner.provider_health.snapshot()
+    }
+
     pub fn record_intent_resolution(&self, kind: IntentMetricKind, source: ResolutionSource) {
         increment(&self.inner.intent_kind[kind as usize]);
         increment(&self.inner.resolution_source[source as usize]);
@@ -232,6 +249,21 @@ impl OperationalMetrics {
         increment(&self.inner.provider_mode[observation.provider_mode as usize]);
         increment_latency(&self.inner.latency, observation.latency_ms);
         increment_confidence(&self.inner.confidence, observation.confidence);
+        let call_outcome = match observation.outcome {
+            VisionProposalOutcome::Failed | VisionProposalOutcome::TimedOut => {
+                ProviderCallOutcome::Failure
+            }
+            // Accepted, rejected, and abstained proposals all mean the
+            // provider answered; the verdict belongs to verification metrics.
+            VisionProposalOutcome::Accepted
+            | VisionProposalOutcome::Rejected
+            | VisionProposalOutcome::Abstained => ProviderCallOutcome::Success,
+        };
+        self.inner.provider_health.record(
+            observation.provider_mode,
+            call_outcome,
+            observation.latency_ms,
+        );
     }
 
     pub fn record_verification(&self, result: VerificationMetricResult) {
@@ -440,5 +472,49 @@ mod tests {
         let counter = AtomicU64::new(u64::MAX);
         increment(&counter);
         assert_eq!(counter.load(Ordering::Acquire), u64::MAX);
+    }
+
+    #[test]
+    fn vision_proposals_drive_provider_health() {
+        let metrics = OperationalMetrics::with_health_budget(Some(500), 2);
+        let proposal = |outcome, latency_ms| VisionProposalMetric {
+            provider_mode: ProviderMode::Http,
+            latency_ms,
+            confidence: None,
+            outcome,
+        };
+        // A below-floor rejection is a verdict, not a provider failure.
+        metrics.record_vision_proposal(proposal(VisionProposalOutcome::Rejected, 100));
+        assert!(metrics.provider_health()[0].status == types::ProviderHealthStatus::Healthy);
+        metrics.record_vision_proposal(proposal(VisionProposalOutcome::Failed, 100));
+        metrics.record_vision_proposal(proposal(VisionProposalOutcome::TimedOut, 100));
+        let health = metrics.provider_health();
+        assert_eq!(health[0].status, types::ProviderHealthStatus::Unhealthy);
+        assert_eq!(health[0].failures, 2);
+        assert_eq!(health[0].successes, 1);
+    }
+
+    #[test]
+    fn vision_proposals_enforce_the_latency_budget() {
+        let metrics = OperationalMetrics::with_health_budget(Some(500), 2);
+        let slow = VisionProposalMetric {
+            provider_mode: ProviderMode::DirectLocal,
+            latency_ms: 900,
+            confidence: None,
+            outcome: VisionProposalOutcome::Accepted,
+        };
+        metrics.record_vision_proposal(slow);
+        metrics.record_vision_proposal(slow);
+        assert_eq!(
+            metrics.provider_health()[0].status,
+            types::ProviderHealthStatus::Degraded
+        );
+        // No budget configured: slow calls stay healthy.
+        let metrics = OperationalMetrics::default();
+        metrics.record_vision_proposal(slow);
+        assert_eq!(
+            metrics.provider_health()[0].status,
+            types::ProviderHealthStatus::Healthy
+        );
     }
 }

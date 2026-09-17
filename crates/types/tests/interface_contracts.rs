@@ -122,6 +122,46 @@ fn runtime_info_accepts_older_payloads_without_operational_metrics() {
 }
 
 #[test]
+fn runtime_info_accepts_older_payloads_without_provider_health() {
+    let info: RuntimeInfo = serde_json::from_value(json!({
+        "version": "0.14.0",
+        "capabilities": ["sdk"],
+        "active_sessions": 0,
+        "queued_jobs": 0,
+        "uptime_ms": 42
+    }))
+    .unwrap();
+
+    assert!(info.provider_health.is_none());
+    assert!(serde_json::to_value(info)
+        .unwrap()
+        .get("providerHealth")
+        .is_none());
+}
+
+#[test]
+fn provider_health_snapshot_uses_camel_case_wire_names() {
+    let snapshot: types::ProviderHealthSnapshot = serde_json::from_value(json!({
+        "providerMode": "http",
+        "status": "degraded",
+        "successes": 10,
+        "failures": 2,
+        "consecutiveFailures": 0,
+        "budgetViolations": 4,
+        "lastLatencyMs": 1900,
+        "latencyBudgetMs": 1500,
+        "failureThreshold": 3
+    }))
+    .unwrap();
+
+    assert_eq!(snapshot.status, types::ProviderHealthStatus::Degraded);
+    assert_eq!(snapshot.last_latency_ms, Some(1900));
+    let value = serde_json::to_value(snapshot).unwrap();
+    assert_eq!(value.get("providerMode").unwrap(), &json!("http"));
+    assert_eq!(value.get("budgetViolations").unwrap(), &json!(4));
+}
+
+#[test]
 fn operational_metrics_accept_an_older_snapshot_without_context_ranked_vision() {
     let snapshot: types::OperationalMetricsSnapshot = serde_json::from_value(json!({
         "observationWindowMs": 1,

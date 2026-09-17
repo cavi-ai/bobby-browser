@@ -11,7 +11,10 @@ export const INTERFACE_VERSION = "2026-08-19" as const;
 export type Id = string;
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
-export interface RuntimeInfo { version: string; capabilities: string[]; active_sessions: number; queued_jobs: number; uptime_ms: number; }
+/** Provider health classification from `/v1/runtime`. Report-only. */
+export type ProviderHealthStatus = "healthy" | "degraded" | "unhealthy";
+export interface ProviderHealthSnapshot { providerMode: string; status: ProviderHealthStatus; successes: number; failures: number; consecutiveFailures: number; budgetViolations: number; lastLatencyMs?: number; latencyBudgetMs?: number; failureThreshold: number; }
+export interface RuntimeInfo { version: string; capabilities: string[]; active_sessions: number; queued_jobs: number; uptime_ms: number; visionProposeBudgetMs?: number; /** Process-local operational metrics; nested counters stay opaque to this contract. */ operationalMetrics?: Record<string, JsonValue>; /** Present when a vision provider is configured. */ providerHealth?: ProviderHealthSnapshot[]; }
 export interface SessionState { id: Id; profile: string; proxy: string | null; page_ids: Id[]; created_at: string; last_used_at: string; execution_policy: { javascriptEvaluation: boolean; visionAssist: boolean; fingerprint: boolean; humanize: boolean; visionNode?: string }; /** Present iff true: a godmode session running the ZigZagZig recovery ladder. */ zigzagzig?: boolean; }
 export type PageMode = "Document" | "Interactive" | "Render";
 export interface PageState { id: Id; session_id: Id; url: string | null; mode: PageMode; ready_state: string; pending_requests: number; }

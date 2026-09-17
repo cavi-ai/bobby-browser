@@ -288,7 +288,10 @@ impl RuntimeService {
         vision_assist: Option<Arc<dyn VisionAssist>>,
         structured_extractor: Option<Arc<dyn intent_engine::StructuredExtractor>>,
     ) -> Result<Self, RuntimeError> {
-        let operational_metrics = OperationalMetrics::default();
+        let operational_metrics = OperationalMetrics::with_health_budget(
+            config.vision.propose_budget_ms,
+            config.vision.health_failure_threshold,
+        );
         let journal = Arc::new(
             JsonlJournal::open(&config.storage.journal_path)
                 .await
@@ -390,6 +393,8 @@ impl RuntimeService {
             uptime_ms: self.started_at.elapsed().as_millis() as u64,
             vision_propose_budget_ms: self.vision_propose_budget_ms,
             operational_metrics: Some(self.operational_metrics.snapshot()),
+            provider_health: (self.vision_assist_configured || self.vision_provider_configured)
+                .then(|| self.operational_metrics.provider_health()),
         }
     }
 

@@ -399,6 +399,9 @@ async fn authenticated_runtime_implements_the_versioned_interface() {
         .expect("current runtimes expose process-local operational metrics");
     assert_eq!(metrics.vision.attempted, 0);
     assert_eq!(metrics.workflow_calls.composite_workflow, 0);
+    // No vision provider is configured, so provider health is absent rather
+    // than an empty report.
+    assert!(info.provider_health.is_none());
     assert!(api.list_sessions(read_context).await.unwrap().is_empty());
 }
 

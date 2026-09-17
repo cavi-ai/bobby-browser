@@ -181,6 +181,12 @@ function checkpoint(): Record<string, unknown> {
 
 test("deep validators accept every exact public response variant", () => {
   assert.equal(isRuntimeInfo({ version: "1", capabilities: ["session:read"], active_sessions: 0, queued_jobs: 1, uptime_ms: Number.MAX_SAFE_INTEGER }), true);
+  assert.equal(isRuntimeInfo({
+    version: "1", capabilities: [], active_sessions: 0, queued_jobs: 0, uptime_ms: 0,
+    visionProposeBudgetMs: 1500,
+    operationalMetrics: { observationWindowMs: 10 },
+    providerHealth: [{ providerMode: "http", status: "degraded", successes: 8, failures: 2, consecutiveFailures: 0, budgetViolations: 4, lastLatencyMs: 1900, latencyBudgetMs: 1500, failureThreshold: 3 }],
+  }), true);
   assert.equal(isSessionState({ id: ID, profile: "default", proxy: null, page_ids: [ID_2], created_at: TIME, last_used_at: TIME, execution_policy: { javascriptEvaluation: false, visionAssist: false, fingerprint: false, humanize: false } }), true);
   assert.equal(isPageState({ id: ID, session_id: ID_2, url: null, mode: "Document", ready_state: "complete", pending_requests: 0 }), true);
 
@@ -344,6 +350,8 @@ test("validators reject invalid UUID, timestamp, digest, finite-number, and opti
 test("validators reject unknown and variant-incompatible keys at every object layer", () => {
   const withExtra = <T extends Record<string, unknown>>(value: T): T & { unexpected: boolean } => ({ ...value, unexpected: true });
   assert.equal(isRuntimeInfo(withExtra({ version: "1", capabilities: [], active_sessions: 0, queued_jobs: 0, uptime_ms: 0 })), false);
+  assert.equal(isRuntimeInfo({ version: "1", capabilities: [], active_sessions: 0, queued_jobs: 0, uptime_ms: 0, providerHealth: [{ providerMode: "http", status: "broken", successes: 0, failures: 0, consecutiveFailures: 0, budgetViolations: 0, failureThreshold: 3 }] }), false);
+  assert.equal(isRuntimeInfo({ version: "1", capabilities: [], active_sessions: 0, queued_jobs: 0, uptime_ms: 0, providerHealth: "http" }), false);
   assert.equal(isSessionState(withExtra({ id: ID, profile: "default", proxy: null, page_ids: [], created_at: TIME, last_used_at: TIME, execution_policy: { javascriptEvaluation: false, visionAssist: false, fingerprint: false, humanize: false } })), false);
   assert.equal(isPageState(withExtra({ id: ID, session_id: ID_2, url: null, mode: "Document", ready_state: "complete", pending_requests: 0 })), false);
 

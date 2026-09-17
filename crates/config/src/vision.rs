@@ -25,6 +25,15 @@ pub struct VisionConfig {
     /// no budget gate — the timeout stays the only bound.
     #[serde(default, alias = "proposeBudgetMs")]
     pub propose_budget_ms: Option<u64>,
+    /// Consecutive provider failures — or consecutive propose-budget
+    /// violations — before `/v1/runtime` reports the provider `unhealthy`
+    /// (failures) or `degraded` (budget). Report-only: vision escalation
+    /// behavior is unchanged.
+    #[serde(
+        default = "default_health_failure_threshold",
+        alias = "healthFailureThreshold"
+    )]
+    pub health_failure_threshold: u32,
     #[serde(default)]
     pub provider: Option<String>,
     #[serde(default)]
@@ -67,6 +76,7 @@ impl Default for VisionConfig {
             token_env: None,
             timeout_ms: default_vision_timeout_ms(),
             propose_budget_ms: None,
+            health_failure_threshold: default_health_failure_threshold(),
             provider: None,
             providers: BTreeMap::new(),
             backend: None,
@@ -177,6 +187,10 @@ impl VisionConfig {
 
 fn default_vision_timeout_ms() -> u64 {
     15_000
+}
+
+fn default_health_failure_threshold() -> u32 {
+    3
 }
 
 fn default_training_data_dir() -> std::path::PathBuf {

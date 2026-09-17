@@ -35,6 +35,7 @@ import type {
   NetworkResourceType,
   PageEvidence,
   PageState,
+  ProviderHealthSnapshot,
   RecoveryDecision,
   SessionState,
   RuntimeInfo,
@@ -246,13 +247,29 @@ export function isJobStatusResponse(value: unknown): value is JobStatusResponse 
   return value.completedAt !== null && value.result === null && value.error === null;
 }
 
+export function isProviderHealthSnapshot(value: unknown): value is ProviderHealthSnapshot {
+  return hasExactKeys(value, ["providerMode", "status", "successes", "failures", "consecutiveFailures", "budgetViolations", "failureThreshold"], ["lastLatencyMs", "latencyBudgetMs"])
+    && isString(value.providerMode)
+    && (value.status === "healthy" || value.status === "degraded" || value.status === "unhealthy")
+    && isSafeUnsigned(value.successes)
+    && isSafeUnsigned(value.failures)
+    && isSafeUnsigned(value.consecutiveFailures)
+    && isSafeUnsigned(value.budgetViolations)
+    && isSafeUnsigned(value.failureThreshold)
+    && optional(value, "lastLatencyMs", isSafeUnsigned)
+    && optional(value, "latencyBudgetMs", isSafeUnsigned);
+}
+
 export function isRuntimeInfo(value: unknown): value is RuntimeInfo {
-  return hasExactKeys(value, ["version", "capabilities", "active_sessions", "queued_jobs", "uptime_ms"])
+  return hasExactKeys(value, ["version", "capabilities", "active_sessions", "queued_jobs", "uptime_ms"], ["visionProposeBudgetMs", "operationalMetrics", "providerHealth"])
     && isString(value.version)
     && isStringArray(value.capabilities)
     && isSafeUnsigned(value.active_sessions)
     && isSafeUnsigned(value.queued_jobs)
-    && isSafeUnsigned(value.uptime_ms);
+    && isSafeUnsigned(value.uptime_ms)
+    && optional(value, "visionProposeBudgetMs", isSafeUnsigned)
+    && optional(value, "operationalMetrics", isRecord)
+    && optional(value, "providerHealth", (health): health is ProviderHealthSnapshot[] => Array.isArray(health) && health.every(isProviderHealthSnapshot));
 }
 
 function isSessionExecutionPolicy(value: unknown): value is SessionState["execution_policy"] {

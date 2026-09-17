@@ -1771,7 +1771,9 @@ pub(crate) fn run_doctor(
             match probe_healthz(&url) {
                 Ok(()) => {
                     report.ok("healthz", format!("{url} responded"));
-                    record_jobs_queue(&mut report, config, bootstrap_path_for_heal.as_deref());
+                    let info =
+                        record_jobs_queue(&mut report, config, bootstrap_path_for_heal.as_deref());
+                    record_operational_slos(&mut report, config, info.as_ref());
                 }
                 Err(_) => {
                     report.ok("healthz", "not running".to_string());
@@ -2293,7 +2295,11 @@ fn record_vision_corpus(report: &mut DoctorReport, path: &Path) {
     }
 }
 
-fn record_jobs_queue(report: &mut DoctorReport, config: &AppConfig, bootstrap: Option<&Path>) {
+fn record_jobs_queue(
+    report: &mut DoctorReport,
+    config: &AppConfig,
+    bootstrap: Option<&Path>,
+) -> Option<types::RuntimeInfo> {
     let bootstrap = bootstrap.unwrap_or_else(|| Path::new(""));
     let bearer = match crate::jobs_client::resolve_jobs_auth(None, bootstrap) {
         Ok(bearer) => bearer,
@@ -2302,7 +2308,7 @@ fn record_jobs_queue(report: &mut DoctorReport, config: &AppConfig, bootstrap: O
                 "jobs-queue",
                 format!("no bearer to read runtime ({error:#})"),
             );
-            return;
+            return None;
         }
     };
     let url = match crate::v1_client::v1_url(
@@ -2312,7 +2318,7 @@ fn record_jobs_queue(report: &mut DoctorReport, config: &AppConfig, bootstrap: O
         Ok(url) => url,
         Err(error) => {
             report.warn("jobs-queue", format!("{error:#}"));
-            return;
+            return None;
         }
     };
     match crate::v1_client::v1_request_with_limits(
@@ -2331,24 +2337,187 @@ fn record_jobs_queue(report: &mut DoctorReport, config: &AppConfig, bootstrap: O
                 "jobs-queue",
                 "credential cannot read runtime (HTTP 401)".to_string(),
             );
+            None
         }
         Ok(response) if response.status.is_success() => {
             match serde_json::from_str::<types::RuntimeInfo>(&response.body) {
-                Ok(info) => report.ok(
-                    "jobs-queue",
-                    format!(
-                        "queued_jobs={} · sessions={} · uptime_ms={}",
-                        info.queued_jobs, info.active_sessions, info.uptime_ms
-                    ),
-                ),
-                Err(error) => report.warn("jobs-queue", format!("GET /v1/runtime: {error:#}")),
+                Ok(info) => {
+                    report.ok(
+                        "jobs-queue",
+                        format!(
+                            "queued_jobs={} · sessions={} · uptime_ms={}",
+                            info.queued_jobs, info.active_sessions, info.uptime_ms
+                        ),
+                    );
+                    Some(info)
+                }
+                Err(error) => {
+                    report.warn("jobs-queue", format!("GET /v1/runtime: {error:#}"));
+                    None
+                }
             }
         }
-        Ok(response) => report.warn(
-            "jobs-queue",
-            format!("GET /v1/runtime HTTP {}", response.status),
+        Ok(response) => {
+            report.warn(
+                "jobs-queue",
+                format!("GET /v1/runtime HTTP {}", response.status),
+            );
+            None
+        }
+        Err(error) => {
+            report.warn("jobs-queue", format!("{error:#}"));
+            None
+        }
+    }
+}
+
+/// Operator-facing SLO enforcement: provider health from `/v1/runtime`, plus
+/// the `[observability.slo]` objectives evaluated against the runtime's
+/// operational metrics. Unset objectives are not evaluated.
+fn record_operational_slos(
+    report: &mut DoctorReport,
+    config: &AppConfig,
+    info: Option<&types::RuntimeInfo>,
+) {
+    let Some(info) = info else {
+        report.warn(
+            "provider-health",
+            "runtime unreadable; provider health and SLOs not evaluated".to_string(),
+        );
+        return;
+    };
+    match &info.provider_health {
+        None => report.ok(
+            "provider-health",
+            "no vision provider configured".to_string(),
         ),
-        Err(error) => report.warn("jobs-queue", format!("{error:#}")),
+        Some(modes) if modes.is_empty() => report.ok(
+            "provider-health",
+            "no provider calls recorded yet".to_string(),
+        ),
+        Some(modes) => {
+            let unhealthy: Vec<&str> = modes
+                .iter()
+                .filter(|mode| mode.status == types::ProviderHealthStatus::Unhealthy)
+                .map(|mode| mode.provider_mode.as_str())
+                .collect();
+            let degraded: Vec<&str> = modes
+                .iter()
+                .filter(|mode| mode.status == types::ProviderHealthStatus::Degraded)
+                .map(|mode| mode.provider_mode.as_str())
+                .collect();
+            if !unhealthy.is_empty() {
+                report.fail(
+                    "provider-health",
+                    format!(
+                        "unhealthy: {} (consecutive failures reached threshold)",
+                        unhealthy.join(", ")
+                    ),
+                );
+            } else if !degraded.is_empty() {
+                report.warn(
+                    "provider-health",
+                    format!(
+                        "degraded: {} (consecutive propose-budget violations reached threshold)",
+                        degraded.join(", ")
+                    ),
+                );
+            } else {
+                report.ok(
+                    "provider-health",
+                    modes
+                        .iter()
+                        .map(|mode| {
+                            format!(
+                                "{} ok ({} ok / {} failed)",
+                                mode.provider_mode, mode.successes, mode.failures
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" · "),
+                );
+            }
+        }
+    }
+    let violations: u64 = info
+        .provider_health
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|mode| mode.budget_violations)
+        .sum();
+    if let Some(budget_ms) = config.vision.propose_budget_ms {
+        if violations > 0 {
+            report.warn(
+                "slo-vision-latency-budget",
+                format!("{violations} propose round-trips exceeded the {budget_ms}ms budget"),
+            );
+        } else {
+            report.ok(
+                "slo-vision-latency-budget",
+                format!("no propose round-trip exceeded the {budget_ms}ms budget"),
+            );
+        }
+    }
+    let slo = &config.observability.slo;
+    let Some(metrics) = &info.operational_metrics else {
+        if slo.vision_max_failure_rate.is_some() || slo.vision_min_acceptance_rate.is_some() {
+            report.warn(
+                "slo-vision-rates",
+                "runtime reported no operational metrics; SLO rates not evaluated".to_string(),
+            );
+        }
+        return;
+    };
+    let attempted = metrics.vision.attempted;
+    if let Some(max_failure_rate) = slo.vision_max_failure_rate {
+        if attempted == 0 {
+            report.ok(
+                "slo-vision-failure-rate",
+                "no vision proposals observed".to_string(),
+            );
+        } else {
+            let failures = metrics.vision.failed + metrics.vision.timed_out;
+            let rate = failures as f64 / attempted as f64;
+            if rate > max_failure_rate {
+                report.fail(
+                    "slo-vision-failure-rate",
+                    format!("{failures}/{attempted} failed or timed out ({rate:.2} > {max_failure_rate:.2})"),
+                );
+            } else {
+                report.ok(
+                    "slo-vision-failure-rate",
+                    format!("{failures}/{attempted} failed or timed out ({rate:.2} <= {max_failure_rate:.2})"),
+                );
+            }
+        }
+    }
+    if let Some(min_acceptance_rate) = slo.vision_min_acceptance_rate {
+        if attempted == 0 {
+            report.ok(
+                "slo-vision-acceptance-rate",
+                "no vision proposals observed".to_string(),
+            );
+        } else {
+            let rate = metrics.vision.accepted as f64 / attempted as f64;
+            if rate < min_acceptance_rate {
+                report.fail(
+                    "slo-vision-acceptance-rate",
+                    format!(
+                        "{}/{} accepted ({rate:.2} < {min_acceptance_rate:.2})",
+                        metrics.vision.accepted, attempted
+                    ),
+                );
+            } else {
+                report.ok(
+                    "slo-vision-acceptance-rate",
+                    format!(
+                        "{}/{} accepted ({rate:.2} >= {min_acceptance_rate:.2})",
+                        metrics.vision.accepted, attempted
+                    ),
+                );
+            }
+        }
     }
 }
 
@@ -2664,5 +2833,252 @@ mod cdp_port_tests {
         let check = vision_probe_verdict(None, Some(500));
         assert_eq!(check.status, DoctorStatus::Warn);
         assert!(check.detail.contains("propose round-trip failed"));
+    }
+}
+
+#[cfg(test)]
+mod slo_tests {
+    use super::*;
+
+    fn health_snapshot(
+        status: types::ProviderHealthStatus,
+        budget_violations: u64,
+    ) -> types::ProviderHealthSnapshot {
+        types::ProviderHealthSnapshot {
+            provider_mode: "http".to_string(),
+            status,
+            successes: 8,
+            failures: 2,
+            consecutive_failures: 0,
+            budget_violations,
+            last_latency_ms: Some(120),
+            latency_budget_ms: Some(1_500),
+            failure_threshold: 3,
+        }
+    }
+
+    fn runtime_info(
+        provider_health: Option<Vec<types::ProviderHealthSnapshot>>,
+        metrics: &observability::OperationalMetrics,
+    ) -> types::RuntimeInfo {
+        types::RuntimeInfo {
+            version: "0.14.0".to_string(),
+            capabilities: Vec::new(),
+            active_sessions: 0,
+            queued_jobs: 0,
+            uptime_ms: 1,
+            vision_propose_budget_ms: None,
+            operational_metrics: Some(metrics.snapshot()),
+            provider_health,
+        }
+    }
+
+    fn config_with_slo(
+        max_failure: Option<f64>,
+        min_acceptance: Option<f64>,
+        budget_ms: Option<u64>,
+    ) -> AppConfig {
+        let mut config = AppConfig::default();
+        config.observability.slo.vision_max_failure_rate = max_failure;
+        config.observability.slo.vision_min_acceptance_rate = min_acceptance;
+        config.vision.propose_budget_ms = budget_ms;
+        config
+    }
+
+    fn record_proposals(
+        metrics: &observability::OperationalMetrics,
+        outcome: observability::VisionProposalOutcome,
+        count: u64,
+    ) {
+        for _ in 0..count {
+            metrics.record_vision_proposal(observability::VisionProposalMetric {
+                provider_mode: observability::ProviderMode::Http,
+                latency_ms: 100,
+                confidence: None,
+                outcome,
+            });
+        }
+    }
+
+    #[test]
+    fn unhealthy_provider_fails_doctor() {
+        let mut report = DoctorReport::default();
+        let info = runtime_info(
+            Some(vec![health_snapshot(
+                types::ProviderHealthStatus::Unhealthy,
+                0,
+            )]),
+            &observability::OperationalMetrics::default(),
+        );
+        record_operational_slos(&mut report, &config_with_slo(None, None, None), Some(&info));
+        let check = report.check("provider-health").expect("recorded");
+        assert_eq!(check.status, DoctorStatus::Fail, "{}", check.detail);
+        assert!(check.detail.contains("http"), "{}", check.detail);
+    }
+
+    #[test]
+    fn degraded_provider_warns_and_healthy_is_ok() {
+        let mut report = DoctorReport::default();
+        let info = runtime_info(
+            Some(vec![health_snapshot(
+                types::ProviderHealthStatus::Degraded,
+                2,
+            )]),
+            &observability::OperationalMetrics::default(),
+        );
+        record_operational_slos(&mut report, &config_with_slo(None, None, None), Some(&info));
+        assert_eq!(
+            report.check("provider-health").unwrap().status,
+            DoctorStatus::Warn
+        );
+
+        let mut report = DoctorReport::default();
+        let info = runtime_info(
+            Some(vec![health_snapshot(
+                types::ProviderHealthStatus::Healthy,
+                0,
+            )]),
+            &observability::OperationalMetrics::default(),
+        );
+        record_operational_slos(&mut report, &config_with_slo(None, None, None), Some(&info));
+        assert_eq!(
+            report.check("provider-health").unwrap().status,
+            DoctorStatus::Ok
+        );
+    }
+
+    #[test]
+    fn missing_provider_health_reads_as_no_provider_configured() {
+        let mut report = DoctorReport::default();
+        let info = runtime_info(None, &observability::OperationalMetrics::default());
+        record_operational_slos(&mut report, &config_with_slo(None, None, None), Some(&info));
+        let check = report.check("provider-health").unwrap();
+        assert_eq!(check.status, DoctorStatus::Ok);
+        assert!(
+            check.detail.contains("no vision provider"),
+            "{}",
+            check.detail
+        );
+    }
+
+    #[test]
+    fn unreadable_runtime_warns_instead_of_failing() {
+        let mut report = DoctorReport::default();
+        record_operational_slos(&mut report, &config_with_slo(Some(0.1), None, None), None);
+        assert_eq!(
+            report.check("provider-health").unwrap().status,
+            DoctorStatus::Warn
+        );
+        assert_eq!(report.failures(), 0);
+    }
+
+    #[test]
+    fn vision_failure_rate_slo_fails_only_when_breached() {
+        let metrics = observability::OperationalMetrics::default();
+        record_proposals(&metrics, observability::VisionProposalOutcome::Accepted, 3);
+        record_proposals(&metrics, observability::VisionProposalOutcome::Failed, 1);
+        let info = runtime_info(None, &metrics);
+
+        let mut report = DoctorReport::default();
+        record_operational_slos(
+            &mut report,
+            &config_with_slo(Some(0.5), None, None),
+            Some(&info),
+        );
+        assert_eq!(
+            report.check("slo-vision-failure-rate").unwrap().status,
+            DoctorStatus::Ok
+        );
+
+        let mut report = DoctorReport::default();
+        record_operational_slos(
+            &mut report,
+            &config_with_slo(Some(0.1), None, None),
+            Some(&info),
+        );
+        assert_eq!(
+            report.check("slo-vision-failure-rate").unwrap().status,
+            DoctorStatus::Fail
+        );
+    }
+
+    #[test]
+    fn vision_acceptance_rate_slo_fails_below_the_floor() {
+        let metrics = observability::OperationalMetrics::default();
+        record_proposals(&metrics, observability::VisionProposalOutcome::Accepted, 1);
+        record_proposals(&metrics, observability::VisionProposalOutcome::Rejected, 3);
+        let info = runtime_info(None, &metrics);
+
+        let mut report = DoctorReport::default();
+        record_operational_slos(
+            &mut report,
+            &config_with_slo(None, Some(0.5), None),
+            Some(&info),
+        );
+        assert_eq!(
+            report.check("slo-vision-acceptance-rate").unwrap().status,
+            DoctorStatus::Fail
+        );
+
+        let mut report = DoctorReport::default();
+        record_operational_slos(
+            &mut report,
+            &config_with_slo(None, Some(0.2), None),
+            Some(&info),
+        );
+        assert_eq!(
+            report.check("slo-vision-acceptance-rate").unwrap().status,
+            DoctorStatus::Ok
+        );
+    }
+
+    #[test]
+    fn latency_budget_violations_warn_without_failing() {
+        let mut report = DoctorReport::default();
+        let info = runtime_info(
+            Some(vec![health_snapshot(
+                types::ProviderHealthStatus::Healthy,
+                5,
+            )]),
+            &observability::OperationalMetrics::default(),
+        );
+        record_operational_slos(
+            &mut report,
+            &config_with_slo(None, None, Some(1_500)),
+            Some(&info),
+        );
+        let check = report.check("slo-vision-latency-budget").unwrap();
+        assert_eq!(check.status, DoctorStatus::Warn, "{}", check.detail);
+        assert!(check.detail.contains('5'), "{}", check.detail);
+
+        let mut report = DoctorReport::default();
+        let info = runtime_info(
+            Some(vec![health_snapshot(
+                types::ProviderHealthStatus::Healthy,
+                0,
+            )]),
+            &observability::OperationalMetrics::default(),
+        );
+        record_operational_slos(
+            &mut report,
+            &config_with_slo(None, None, Some(1_500)),
+            Some(&info),
+        );
+        assert_eq!(
+            report.check("slo-vision-latency-budget").unwrap().status,
+            DoctorStatus::Ok
+        );
+    }
+
+    #[test]
+    fn unset_slos_are_not_evaluated() {
+        let mut report = DoctorReport::default();
+        let metrics = observability::OperationalMetrics::default();
+        record_proposals(&metrics, observability::VisionProposalOutcome::Failed, 10);
+        let info = runtime_info(None, &metrics);
+        record_operational_slos(&mut report, &config_with_slo(None, None, None), Some(&info));
+        assert!(report.check("slo-vision-failure-rate").is_none());
+        assert!(report.check("slo-vision-acceptance-rate").is_none());
+        assert!(report.check("slo-vision-latency-budget").is_none());
     }
 }

@@ -165,6 +165,20 @@ escalation is unavailable even when the bearer and session opt in.
 | `token_env` | unset | Env var name holding the loopback bearer (never store the token here) |
 | `timeout_ms` | `15000` | Per-proposal HTTP timeout |
 | `propose_budget_ms` | unset | Health budget for one propose round-trip: `bobby doctor`'s vision probe warns when the measured round-trip exceeds it, and `/v1/runtime` advertises it as `visionProposeBudgetMs`. Unset means no budget gate — `timeout_ms` stays the only bound. |
+| `health_failure_threshold` | `3` | Consecutive provider failures before `/v1/runtime` reports the provider `unhealthy` in `providerHealth`; the same count of consecutive `propose_budget_ms` violations reports `degraded`. Report-only — escalation behavior is unchanged. |
+
+`bobby doctor` also evaluates operator-facing SLOs against the runtime's
+operational metrics. Objectives live under `[observability.slo]` and every
+one is optional — unset objectives are not evaluated:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `vision_max_failure_rate` | unset | Doctor fails when the fraction of vision proposals ending `failed` or `timed_out` exceeds this (0.0–1.0) |
+| `vision_min_acceptance_rate` | unset | Doctor fails when the fraction of accepted vision proposals falls below this (0.0–1.0) |
+
+Doctor's `provider-health` check fails on an `unhealthy` provider and warns
+on a `degraded` one; `slo-vision-latency-budget` warns when any propose
+round-trip exceeded `propose_budget_ms`.
 | `provider` | unset | Active profile name under `[vision.providers]` |
 | `providers.<name>` | unset | Named OpenAI-compatible upstream profiles |
 

@@ -144,6 +144,14 @@ async fn injected_vision_assist_counts_as_a_configured_provider() {
         })
         .await
         .expect("an injected vision provider satisfies the explicit opt-in");
+
+    // A configured provider opts runtime info into provider-health reporting.
+    let info = runtime.runtime_info().await;
+    assert_eq!(
+        info.provider_health,
+        Some(Vec::new()),
+        "no provider calls yet, so no mode has activity"
+    );
 }
 
 #[tokio::test]
