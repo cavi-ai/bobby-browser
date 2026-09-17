@@ -287,7 +287,7 @@ async fn grow_customer_update_traps_corpus() -> TestResult<()> {
             .capture(
                 &runtime,
                 &GroundTruth::Click {
-                    selector: "form[aria-label='Update customer priority'] button",
+                    selector: "form[aria-label='Update customer priority'] button[type='submit']",
                     purpose: "Save the priority change".into(),
                     ordinal: None,
                 },
@@ -295,10 +295,7 @@ async fn grow_customer_update_traps_corpus() -> TestResult<()> {
                 &step("save_priority"),
             )
             .await?;
-        runtime
-            .click("form[aria-label='Update customer priority'] button", true)
-            .await?;
-        runtime.wait_visible("[role='status']").await?;
+        runtime.save_customer_priority().await?;
         runtime.mark_completed(&format!("customer-update-traps-{run_idx}"))?;
     }
     let path = corpus_path("customer-update-traps");
@@ -504,7 +501,8 @@ async fn grow_customer_update_corpus() -> TestResult<()> {
                 .capture(
                     &runtime,
                     &GroundTruth::Click {
-                        selector: "form[aria-label='Update customer priority'] button",
+                        selector:
+                            "form[aria-label='Update customer priority'] button[type='submit']",
                         purpose: DISAMBIGUATED_SAVE_PRIORITY
                             [run_idx % DISAMBIGUATED_SAVE_PRIORITY.len()]
                         .into(),
@@ -550,7 +548,8 @@ async fn grow_customer_update_corpus() -> TestResult<()> {
                 .capture(
                     &runtime,
                     &GroundTruth::Click {
-                        selector: "form[aria-label='Update customer priority'] button",
+                        selector:
+                            "form[aria-label='Update customer priority'] button[type='submit']",
                         purpose: "Save the priority change".into(),
                         ordinal: None,
                     },
@@ -558,10 +557,7 @@ async fn grow_customer_update_corpus() -> TestResult<()> {
                     &step("save_priority"),
                 )
                 .await?;
-            runtime
-                .click("form[aria-label='Update customer priority'] button", true)
-                .await?;
-            runtime.wait_visible("[role='status']").await?;
+            runtime.save_customer_priority().await?;
             Ok(runtime)
         },
     )

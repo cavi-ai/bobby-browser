@@ -351,7 +351,7 @@ async fn customer_update_run(run_idx: usize) -> TestResult<usize> {
     if escalate_or(
         &runtime,
         locate(SAVE_PRIORITY[run_idx % SAVE_PRIORITY.len()]),
-        runtime.click("form[aria-label='Update customer priority'] button", true),
+        runtime.save_customer_priority(),
     )
     .await?
     {

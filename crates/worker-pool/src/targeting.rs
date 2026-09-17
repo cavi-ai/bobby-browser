@@ -4,9 +4,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chromiumoxide::browser::BrowserHandle;
+#[cfg(test)]
+use chromiumoxide::cdp::browser_protocol::dom::Node as CdpNode;
 use chromiumoxide::cdp::browser_protocol::dom::{
-    BackendNodeId, DescribeNodeParams, GetContentQuadsParams, GetFrameOwnerParams, Node as CdpNode,
-    SetFileInputFilesParams, ShadowRootType,
+    BackendNodeId, DescribeNodeParams, GetContentQuadsParams, GetFrameOwnerParams,
+    RequestNodeParams, SetFileInputFilesParams, ShadowRootType,
 };
 use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
 use chromiumoxide::cdp::browser_protocol::page::{
@@ -19,7 +21,7 @@ use chromiumoxide::cdp::js_protocol::runtime::{
 use chromiumoxide::keys::get_key_definition;
 use chromiumoxide::layout::{ElementQuad, Point};
 use chromiumoxide::page::ScreenshotParams;
-use chromiumoxide::{Element, Page};
+use chromiumoxide::{Command, Element, Method, Page};
 use dom_engine::{
     resolve_candidates, Candidate, CandidateState, ResolutionDecision, ResolutionPolicy,
 };
@@ -1167,59 +1169,45 @@ async fn collect_candidates_merged(
     Ok((candidates, owners))
 }
 
-/// Discovers every closed shadow root reachable within the given scope via
-/// shallow `DOM.describeNode(pierce: true, depth: 1)` BFS. A single
-/// depth-24 pierce of `document` overflows Linux debug stacks on serde
-/// (the tree never reaches Drop unwind). CDP still sees closed roots at
-/// the backend level, so no page-prototype patching is needed.
+/// Discovers every closed shadow root reachable within the given scope.
+///
+/// One `DOM.describeNode(pierce: true, depth: -1)` of the scan root, decoded
+/// as JSON (not the typed CDP `Node` tree). Typed pierce-trees overflow
+/// Linux debug serde; `serde_json::Value` does not. Walks children and
+/// shadow roots only — never `contentDocument`.
 async fn discover_closed_shadow_roots(
     page: &Page,
     scope: &LocatorScope,
     shadow_hosts: &[String],
 ) -> Result<Vec<Arc<Element>>, CommandError> {
-    let mut pending = vec![scope_root_object_id(page, scope, shadow_hosts).await?];
-    let mut seen = HashSet::new();
-    let mut closed = Vec::new();
-    let mut inspected = 0usize;
-    while let Some(object_id) = pending.pop() {
-        inspected += 1;
-        if inspected > 2048 {
-            break;
-        }
-        let described = page
-            .execute(
-                DescribeNodeParams::builder()
-                    .object_id(object_id)
-                    .depth(1)
-                    .pierce(true)
-                    .build(),
-            )
-            .await
-            .map_err(cdp_error)?;
-        let node = described.result.node;
-        collect_closed_shadow_root_ids(&node, &mut closed);
-        let followups = pierce_followup_backend_ids(&node);
-        dismantle_cdp_node(node);
-        for backend_id in followups {
-            if !seen.insert(backend_id) {
-                continue;
-            }
-            if let Ok(element) = page.element_from_backend_node_id(backend_id).await {
-                pending.push(element.remote_object_id.clone());
-            }
-        }
+    let scan_root = discovery_scan_root(page, scope, shadow_hosts).await?;
+    let described = page
+        .execute(DescribeNodeJson {
+            object_id: scan_root.remote_object_id.clone(),
+            depth: -1,
+            pierce: true,
+        })
+        .await
+        .map_err(cdp_error)?;
+    let mut found = Vec::new();
+    if let Some(node) = described.result.get("node") {
+        collect_closed_from_json(node, &mut found);
     }
+    drop(described);
     let mut unique = Vec::new();
-    let mut have = HashSet::new();
-    for backend_id in closed {
-        if have.insert(backend_id) {
+    let mut seen = HashSet::new();
+    for backend_id in found {
+        if seen.insert(backend_id) {
             unique.push(backend_id);
         }
     }
     let mut roots = Vec::with_capacity(unique.len());
-    for backend_node_id in unique {
+    for backend_id in unique {
+        if backend_id == scan_root.backend_node_id {
+            continue;
+        }
         let element = page
-            .element_from_backend_node_id(backend_node_id)
+            .element_from_backend_node_id(backend_id)
             .await
             .map_err(cdp_error)?;
         roots.push(Arc::new(element));
@@ -1227,6 +1215,86 @@ async fn discover_closed_shadow_roots(
     Ok(roots)
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DescribeNodeJson {
+    object_id: RemoteObjectId,
+    depth: i64,
+    pierce: bool,
+}
+
+impl Method for DescribeNodeJson {
+    fn identifier(&self) -> chromiumoxide::types::MethodId {
+        "DOM.describeNode".into()
+    }
+}
+
+impl Command for DescribeNodeJson {
+    type Response = serde_json::Value;
+}
+
+fn collect_closed_from_json(root: &serde_json::Value, out: &mut Vec<BackendNodeId>) {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let Some(object) = node.as_object() else {
+            continue;
+        };
+        if object
+            .get("shadowRootType")
+            .and_then(|value| value.as_str())
+            == Some("closed")
+        {
+            if let Some(id) = object.get("backendNodeId").and_then(|value| value.as_i64()) {
+                out.push(BackendNodeId::new(id));
+            }
+        }
+        if let Some(children) = object.get("children").and_then(|value| value.as_array()) {
+            for child in children {
+                stack.push(child);
+            }
+        }
+        if let Some(roots) = object.get("shadowRoots").and_then(|value| value.as_array()) {
+            for child in roots {
+                stack.push(child);
+            }
+        }
+    }
+}
+
+async fn discovery_scan_root(
+    page: &Page,
+    scope: &LocatorScope,
+    shadow_hosts: &[String],
+) -> Result<Element, CommandError> {
+    match scope {
+        LocatorScope::Context(_) if shadow_hosts.is_empty() => {
+            page.find_element("html").await.map_err(cdp_error)
+        }
+        LocatorScope::ClosedRoot(element) if shadow_hosts.is_empty() => page
+            .element_from_backend_node_id(element.backend_node_id)
+            .await
+            .map_err(cdp_error),
+        _ => {
+            element_from_remote_object(page, scope_root_object_id(page, scope, shadow_hosts).await?)
+                .await
+        }
+    }
+}
+
+async fn element_from_remote_object(
+    page: &Page,
+    object_id: RemoteObjectId,
+) -> Result<Element, CommandError> {
+    let node_id = page
+        .execute(RequestNodeParams::new(object_id))
+        .await
+        .map_err(cdp_error)?
+        .result
+        .node_id;
+    page.element_from_node_id(node_id).await.map_err(cdp_error)
+}
+
+#[cfg(test)]
 fn pierce_followup_backend_ids(root: &CdpNode) -> Vec<BackendNodeId> {
     let mut out = Vec::new();
     if let Some(roots) = &root.shadow_roots {
@@ -1246,10 +1314,12 @@ fn pierce_followup_backend_ids(root: &CdpNode) -> Vec<BackendNodeId> {
     out
 }
 
+#[cfg(test)]
 fn pierce_follow_node(node: &CdpNode) -> bool {
     matches!(node.node_type, 1 | 9 | 11)
 }
 
+#[cfg(test)]
 fn dismantle_cdp_node(node: CdpNode) {
     let mut stack = vec![node];
     while let Some(mut node) = stack.pop() {
@@ -1271,6 +1341,7 @@ fn dismantle_cdp_node(node: CdpNode) {
 /// not registered with the frontend. Must never descend into
 /// `content_document`: iframes require an explicit `frame_path`. Only
 /// `.children` and `.shadow_roots` are followed.
+#[cfg(test)]
 fn collect_closed_shadow_root_ids(node: &CdpNode, out: &mut Vec<BackendNodeId>) {
     let mut stack = vec![node];
     while let Some(node) = stack.pop() {
@@ -1308,8 +1379,7 @@ async fn discover_closed_root_for_candidate(
         .execute(
             DescribeNodeParams::builder()
                 .object_id(object_id)
-                .depth(1)
-                .pierce(true)
+                .depth(0)
                 .build(),
         )
         .await
@@ -1767,6 +1837,32 @@ mod tests {
             builder = builder.content_document(document);
         }
         builder.build().expect("synthetic CDP node")
+    }
+
+    #[test]
+    fn collect_closed_from_json_skips_iframe_content_document() {
+        let tree = serde_json::json!({
+            "backendNodeId": 1,
+            "children": [{
+                "backendNodeId": 5,
+                "shadowRoots": [{
+                    "backendNodeId": 4,
+                    "shadowRootType": "closed"
+                }]
+            }, {
+                "backendNodeId": 6,
+                "contentDocument": {
+                    "backendNodeId": 98,
+                    "shadowRoots": [{
+                        "backendNodeId": 99,
+                        "shadowRootType": "closed"
+                    }]
+                }
+            }]
+        });
+        let mut found = Vec::new();
+        collect_closed_from_json(&tree, &mut found);
+        assert_eq!(found, vec![BackendNodeId::new(4)]);
     }
 
     #[test]

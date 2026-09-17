@@ -378,6 +378,31 @@ impl ModernRuntime {
     }
 
     #[allow(dead_code)]
+    pub fn wait_status_named_cmd(name: &str) -> WaitForCommand {
+        WaitForCommand {
+            condition: WaitCondition::Text {
+                target: Box::new(TargetSpec {
+                    role: Some("status".into()),
+                    accessible_name: Some(name.into()),
+                    ..TargetSpec::default()
+                }),
+                matcher: TextMatch::Exact(name.into()),
+            },
+            timeout_ms: 10_000,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub async fn save_customer_priority(&self) -> TestResult<Vec<Evidence>> {
+        self.submit_and_verify(
+            "Save priority",
+            "Save priority",
+            Self::wait_status_named_cmd("Priority saved"),
+        )
+        .await
+    }
+
+    #[allow(dead_code)]
     pub async fn click_named(
         &self,
         role: &str,
