@@ -353,9 +353,7 @@ jobs:
           pnpm docs:build
           pnpm docs:verify
           pnpm docs:test
-          # The build regenerates the versioned artifact from source. If that
-          # produces a diff, the committed artifact had drifted -- a source
-          # edit landed without a rebuild, and the published docs are stale.
-          # manifest.json carries a build stamp that changes every run.
-          git diff --exit-code -- docs/bobby-browser \
-            ':!docs/bobby-browser/*/manifest.json'
+          # docs/bobby-browser/vX is untracked and rebuilt from source here and
+          # at release time. Version drift is caught by docs:verify (repo docs
+          # name only the current version) and docs:test (source uses tokens
+          # only).
