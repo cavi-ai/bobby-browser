@@ -773,6 +773,7 @@ impl ModernRuntime {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn click(&self, selector: &str, boundary: bool) -> TestResult<Vec<Evidence>> {
         let command = PrimitiveCommand::Click(ClickCommand {
             selector: selector.into(),
@@ -788,6 +789,7 @@ impl ModernRuntime {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn type_text(&self, selector: &str, value: &str) -> TestResult<Vec<Evidence>> {
         self.submit(PrimitiveCommand::TypeText(TypeTextCommand {
             selector: selector.into(),
