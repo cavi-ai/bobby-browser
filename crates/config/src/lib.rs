@@ -506,17 +506,17 @@ mod tests {
     }
 
     #[test]
-    fn vision_prefill_defaults_off_and_round_trips() {
+    fn vision_prefill_defaults_on_and_explicit_false_round_trips() {
         let config = super::VisionConfig::default();
-        assert!(!config.prefill, "prefill must default off");
+        assert!(config.prefill, "prefill must default on");
         let text = r#"
 [vision]
-prefill = true
+prefill = false
 "#;
         let parsed: super::AppConfig = toml::from_str(text).expect("parse prefill flag");
-        assert!(parsed.vision.prefill);
+        assert!(!parsed.vision.prefill);
         let absent: super::AppConfig = toml::from_str("[vision]\n").expect("parse empty vision");
-        assert!(!absent.vision.prefill);
+        assert!(absent.vision.prefill);
     }
 
     #[test]

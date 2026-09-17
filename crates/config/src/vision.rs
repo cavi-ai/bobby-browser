@@ -48,10 +48,9 @@ pub struct VisionConfig {
     pub acp_profiles: BTreeMap<String, VisionAcpProfile>,
     #[serde(default)]
     pub provider_profiles: BTreeMap<String, VisionDirectProfile>,
-    /// Lazy batch prefill: the first vision-eligible stuck field in a form
-    /// proposes for every remaining field purpose from one screenshot and
-    /// caches the results. Default off; the off path is byte-identical.
-    #[serde(default)]
+    /// Proactive candidate-grounded prefill for unresolved complete-form
+    /// fields. Explicitly disable it to retain per-field live escalation.
+    #[serde(default = "default_vision_prefill")]
     pub prefill: bool,
     /// When set, every vision escalation (executed or rejected) appends one
     /// JSONL corpus record to `<corpus_dir>/vision-corpus.jsonl` with the
@@ -84,12 +83,16 @@ impl Default for VisionConfig {
             fallback_profile: None,
             acp_profiles: BTreeMap::new(),
             provider_profiles: BTreeMap::new(),
-            prefill: false,
+            prefill: default_vision_prefill(),
             corpus_dir: None,
             collect_training_data: false,
             training_data_dir: default_training_data_dir(),
         }
     }
+}
+
+fn default_vision_prefill() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

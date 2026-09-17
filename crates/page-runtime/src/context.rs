@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use intent_engine::{CachedProposal, ProposalLookup};
+use intent_engine::{CachedProposal, CachedProposalAction, ProposalLookup};
 use types::{
     AccessibilityNode, AccessibilityTarget, CommandId, ContextAnswer, PageId, PrimitiveCommand,
     RuntimeCommand,
@@ -50,8 +50,7 @@ pub const MAX_RETAINED_PROPOSALS: usize = 32;
 pub struct CandidateProposal {
     /// Normalized purpose (trimmed, lowercased) the proposal answers.
     pub purpose_key: String,
-    pub x: f64,
-    pub y: f64,
+    pub action: CachedProposalAction,
     pub confidence: f32,
     pub source: ProposalSource,
 }
@@ -412,8 +411,7 @@ fn preserves_page_structure(command: &RuntimeCommand) -> bool {
 impl ProposalLookup for ContextGraph {
     fn proposal_for(&self, page: &PageId, purpose: &str) -> Option<CachedProposal> {
         ContextGraph::proposal_for(self, page, purpose).map(|proposal| CachedProposal {
-            x: proposal.x,
-            y: proposal.y,
+            action: proposal.action,
             confidence: proposal.confidence,
         })
     }
@@ -430,8 +428,7 @@ impl ProposalLookup for ContextGraph {
                 .into_iter()
                 .map(|(purpose, cached)| CandidateProposal {
                     purpose_key: purpose.trim().to_lowercase(),
-                    x: cached.x,
-                    y: cached.y,
+                    action: cached.action,
                     confidence: cached.confidence,
                     source: ProposalSource::Vision,
                 })
@@ -732,8 +729,7 @@ mod tests {
     fn proposal(purpose: &str, confidence: f32) -> CandidateProposal {
         CandidateProposal {
             purpose_key: purpose.trim().to_lowercase(),
-            x: 120.0,
-            y: 240.0,
+            action: CachedProposalAction::Click { x: 120.0, y: 240.0 },
             confidence,
             source: ProposalSource::Vision,
         }

@@ -444,20 +444,25 @@ provider's 5 are taken; see
 
 ## Vision prefill
 
-With `[vision].prefill = true` (default off), the first vision-eligible stuck
-field in a `complete_form` does one screenshot and proposes for every
-remaining field purpose, caching the results under the page's generation
-discipline. Later stuck fields resolve from the cache with no extra
-screenshots — one screenshot per stuck form instead of one per stuck field.
+With `[vision].prefill = true` (the default), `complete_form` preflights every
+field before the first page mutation. Deterministically resolved fields stay on
+the deterministic path. The remaining fields share one screenshot and use at
+most four concurrent provider calls. Set `prefill = false` to disable this
+pass.
+
+Each request contains at most five role-and-name candidates. Retained page
+context may rank that window only when its structural record is fresh and has
+observed or vision-promoted provenance. The cache stores the candidate window
+and selected index under the page generation; it never stores the field value.
+When the field executes, the runtime resolves that candidate identity against
+the current DOM and applies the value it already owns.
 
 Evidence distinguishes the paths: `resolutionPath` is `visionPrefill` for a
 cache-resolved field, `visionFallback` for a live stuck-rescue escalation,
-`deterministic` when no vision ran. A cached proposal that fails to execute
-is dropped and escalated live, never retried. Provider loss during a batch
-records nothing and degrades to the ordinary path.
-
-Only coordinate proposals are cached — a proposal carrying typed text is
-never stored, in memory or otherwise.
+`deterministic` when no vision ran. A cached proposal that no longer resolves
+or fails verification is dropped and escalated live. Provider loss records no
+cache entry and the form continues through the ordinary execution path.
+Cancelling the form cancels all in-flight prefill calls.
 
 ## Vision backend
 

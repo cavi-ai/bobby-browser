@@ -8,9 +8,11 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    CheckpointRequest, CommandEnvelope, CommandOutcome, CreateSessionRequest, FormSnapshot,
-    OpenPageRequest, PageId, PageState, RecoveryDecision, RecoveryStatus, RuntimeInfo, SessionId,
-    SessionState, WorkflowCheckpoint, WorkflowId, CURRENT_INTERFACE_VERSION,
+    CheckpointRequest, CommandEnvelope, CommandOutcome, ContextAskResponse, ContextMissReason,
+    ContextNeighborsResponse, ContextNextStep, ContextSiteResponse, CreateSessionRequest,
+    FormSnapshot, OpenPageRequest, PageId, PageState, RecoveryDecision, RecoveryStatus,
+    RuntimeInfo, SessionId, SessionState, WorkflowCheckpoint, WorkflowId,
+    CURRENT_INTERFACE_VERSION,
 };
 
 /// Client hard bounds for [`BrowserRuntimeClient::artifact`], mirroring the
@@ -179,6 +181,72 @@ impl BrowserRuntimeClient {
     ) -> Result<CommandOutcome, ClientError> {
         self.json(Method::POST, "/v1/commands", Some(input), options)
             .await
+    }
+
+    /// `GET /v1/context/ask` — resolve one described control from retained context.
+    pub async fn context_ask(
+        &self,
+        session_id: &SessionId,
+        page_id: &PageId,
+        description: &str,
+        options: Option<RequestOptions>,
+    ) -> Result<ContextAskResponse, ClientError> {
+        let path = context_query_path("ask", session_id, page_id, description)?;
+        let response: ContextAskResponse =
+            self.json(Method::GET, &path, None::<()>, options).await?;
+        if !valid_context_ask_response(&response) {
+            return Err(ClientError::Protocol(
+                "context ask response violates the hit/miss contract".into(),
+            ));
+        }
+        Ok(response)
+    }
+
+    /// `GET /v1/context/neighbors` — return the remembered form around one control.
+    pub async fn context_neighbors(
+        &self,
+        session_id: &SessionId,
+        page_id: &PageId,
+        description: &str,
+        options: Option<RequestOptions>,
+    ) -> Result<ContextNeighborsResponse, ClientError> {
+        let path = context_query_path("neighbors", session_id, page_id, description)?;
+        let response: ContextNeighborsResponse =
+            self.json(Method::GET, &path, None::<()>, options).await?;
+        if !valid_context_neighbors_response(&response) {
+            return Err(ClientError::Protocol(
+                "context neighbors response violates the hit/miss contract".into(),
+            ));
+        }
+        Ok(response)
+    }
+
+    /// `GET /v1/context/site/{key}` — return retained structure for one site key.
+    pub async fn context_site(
+        &self,
+        site_key: &str,
+        options: Option<RequestOptions>,
+    ) -> Result<ContextSiteResponse, ClientError> {
+        if site_key.is_empty() {
+            return Err(ClientError::Protocol("site key must not be empty".into()));
+        }
+        let mut encoded =
+            url::Url::parse("http://context.invalid/").expect("static context URL must parse");
+        encoded
+            .path_segments_mut()
+            .expect("hierarchical context URL has path segments")
+            .clear()
+            .push(site_key);
+        self.json(
+            Method::GET,
+            &format!(
+                "/v1/context/site/{}",
+                encoded.path().trim_start_matches('/')
+            ),
+            None::<()>,
+            options,
+        )
+        .await
     }
 
     async fn empty(
@@ -512,6 +580,44 @@ fn media_type_essence(value: &str) -> Option<String> {
     Some(essence.to_ascii_lowercase())
 }
 
+fn context_query_path(
+    kind: &str,
+    session_id: &SessionId,
+    page_id: &PageId,
+    description: &str,
+) -> Result<String, ClientError> {
+    if !(1..=256).contains(&description.len()) {
+        return Err(ClientError::Protocol(
+            "description must contain between 1 and 256 bytes".into(),
+        ));
+    }
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    query.append_pair("sessionId", &session_id.0.to_string());
+    query.append_pair("pageId", &page_id.0.to_string());
+    query.append_pair("description", description);
+    Ok(format!("/v1/context/{kind}?{}", query.finish()))
+}
+
+fn valid_context_ask_response(response: &ContextAskResponse) -> bool {
+    if response.hit {
+        response.answer.is_some() && response.reason.is_none() && response.next_step.is_none()
+    } else {
+        response.answer.is_none()
+            && response.reason == Some(ContextMissReason::NotRemembered)
+            && response.next_step == Some(ContextNextStep::A11ySnapshot)
+    }
+}
+
+fn valid_context_neighbors_response(response: &ContextNeighborsResponse) -> bool {
+    if response.hit {
+        response.neighbors.is_some() && response.reason.is_none() && response.next_step.is_none()
+    } else {
+        response.neighbors.is_none()
+            && response.reason == Some(ContextMissReason::NotRemembered)
+            && response.next_step == Some(ContextNextStep::A11ySnapshot)
+    }
+}
+
 fn normalize_base_url(value: String) -> String {
     let trimmed = value.trim_end_matches('/').to_string();
     if let Some(stripped) = trimmed.strip_suffix("/v1") {
@@ -670,6 +776,110 @@ mod tests {
             .form_snapshot(&session, &page, Some(513), None)
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn context_queries_encode_inputs_and_validate_responses() {
+        let answer = json!({
+            "target": { "role": "button", "accessibleName": "Continue" },
+            "confidence": 0.9,
+            "observedAt": { "kind": "persisted" },
+            "source": "observed",
+        });
+        let (base, mut ask_uri) = capture_uri(
+            "/v1/context/ask",
+            axum::Json(json!({ "answer": answer, "hit": true })),
+        )
+        .await;
+        let client = BrowserRuntimeClient::new(base, "test-token").unwrap();
+        let session = SessionId::new();
+        let page = PageId::new();
+        let response = client
+            .context_ask(&session, &page, "Continue & review", None)
+            .await
+            .unwrap();
+        assert!(response.hit);
+        assert_eq!(response.answer.unwrap().target.accessible_name, "Continue");
+        let uri = ask_uri.recv().await.unwrap();
+        let query = uri.split_once('?').unwrap().1;
+        let pairs = url::form_urlencoded::parse(query.as_bytes())
+            .into_owned()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(pairs.get("sessionId"), Some(&session.0.to_string()));
+        assert_eq!(pairs.get("pageId"), Some(&page.0.to_string()));
+        assert_eq!(
+            pairs.get("description").map(String::as_str),
+            Some("Continue & review")
+        );
+
+        let (base, mut neighbors_uri) = capture_uri(
+            "/v1/context/neighbors",
+            axum::Json(json!({
+                "neighbors": null,
+                "hit": false,
+                "reason": "notRemembered",
+                "nextStep": "a11y_snapshot"
+            })),
+        )
+        .await;
+        let client = BrowserRuntimeClient::new(base, "test-token").unwrap();
+        let response = client
+            .context_neighbors(&session, &page, "Continue", None)
+            .await
+            .unwrap();
+        assert!(!response.hit);
+        assert!(response.neighbors.is_none());
+        assert!(neighbors_uri
+            .recv()
+            .await
+            .unwrap()
+            .starts_with("/v1/context/neighbors?"));
+
+        let (base, _) = capture_uri(
+            "/v1/context/neighbors",
+            axum::Json(json!({ "neighbors": null, "hit": true })),
+        )
+        .await;
+        let client = BrowserRuntimeClient::new(base, "test-token").unwrap();
+        assert!(matches!(
+            client
+                .context_neighbors(&session, &page, "Continue", None)
+                .await,
+            Err(ClientError::Protocol(_))
+        ));
+        assert!(matches!(
+            client.context_ask(&session, &page, "", None).await,
+            Err(ClientError::Protocol(_))
+        ));
+        assert!(matches!(
+            client
+                .context_ask(&session, &page, &"x".repeat(257), None)
+                .await,
+            Err(ClientError::Protocol(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn context_site_encodes_one_path_segment() {
+        let (base, mut uri) = capture_uri(
+            "/v1/context/site/{key}",
+            axum::Json(json!({ "site": null })),
+        )
+        .await;
+        let client = BrowserRuntimeClient::new(base, "test-token").unwrap();
+        let response = client
+            .context_site("https://example.test/account settings", None)
+            .await
+            .unwrap();
+        assert!(response.site.is_none());
+        assert_eq!(
+            uri.recv().await.unwrap(),
+            "/v1/context/site/https:%2F%2Fexample.test%2Faccount%20settings"
+        );
+        assert!(matches!(
+            client.context_site("", None).await,
+            Err(ClientError::Protocol(_))
+        ));
     }
 
     #[tokio::test]

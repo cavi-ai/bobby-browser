@@ -14,8 +14,8 @@ pub use stuck::{never_escalates, StuckKind};
 pub use verify::{compatible, execution_record, summarize_target, verify_fill};
 pub use vision::{
     compile_vision_packet, instrument_vision_assist, proposal_sha256, validate_backend_result,
-    CachedProposal, ProposalLookup, VisionAction, VisionAssist, VisionBackendResult,
-    VisionContextBudget, VisionImageRegion, VisionPacketError, VisionPacketInput,
-    VisionPromptCandidate, VisionPromptContext, VisionProposal, VisionProposeRequest,
-    VisionTaskPacket, VISION_CONFIDENCE_FLOOR,
+    CachedProposal, CachedProposalAction, ProposalLookup, VisionAction, VisionAssist,
+    VisionBackendResult, VisionContextBudget, VisionImageRegion, VisionPacketError,
+    VisionPacketInput, VisionPromptCandidate, VisionPromptContext, VisionProposal,
+    VisionProposeRequest, VisionTaskPacket, VISION_CONFIDENCE_FLOOR,
 };

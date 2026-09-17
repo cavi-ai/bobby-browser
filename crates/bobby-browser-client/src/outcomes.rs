@@ -137,6 +137,56 @@ pub struct ContextSiteView {
     >,
 }
 
+/// Machine-readable reason returned when retained context has no answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum ContextMissReason {
+    #[serde(rename = "notRemembered")]
+    NotRemembered,
+}
+
+/// Repair step returned with a retained-context miss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum ContextNextStep {
+    #[serde(rename = "a11y_snapshot")]
+    A11ySnapshot,
+}
+
+/// Response from `GET /v1/context/ask`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContextAskResponse {
+    pub answer: Option<ContextAnswer>,
+    pub hit: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<ContextMissReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<ContextNextStep>,
+}
+
+/// Response from `GET /v1/context/neighbors`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContextNeighborsResponse {
+    pub neighbors: Option<ContextNeighbors>,
+    pub hit: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<ContextMissReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<ContextNextStep>,
+}
+
+/// Response from `GET /v1/context/site/{key}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ContextSiteResponse {
+    pub site: Option<ContextSiteView>,
+}
+
 /// One node in an `accessibilitySnapshot` result tree.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -461,8 +511,7 @@ pub enum Evidence {
 pub enum IntentResolutionPath {
     Deterministic,
     VisionFallback,
-    /// Resolved from a cached vision proposal (lazy batch prefill) rather
-    /// than a live stuck-rescue escalation.
+    /// Resolved from a cached proactive vision proposal.
     VisionPrefill,
 }
 
