@@ -20,6 +20,40 @@ export interface ExecutionPolicy { javascriptEvaluation?: boolean; visionAssist?
 export interface CreateSessionRequest { profile: string; proxy: string | null; executionPolicy?: ExecutionPolicy; /** Godmode session: every capability on + the ZigZagZig recovery ladder on every page-bound command. */ zigzagzig?: boolean; }
 export interface OpenPageRequest { session_id: Id; }
 
+export type JobPriority = "low" | "normal" | "high" | "critical";
+export type JobStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+export interface SubmitJobRequest {
+  name: string;
+  payload?: JsonValue;
+  priority?: JobPriority;
+  maxRetries?: number;
+  timeoutMs?: number;
+}
+export interface JobSubmitResponse { jobId: string; status: JobStatus; }
+export interface JobResult {
+  jobId: string;
+  success: boolean;
+  output: JsonValue | null;
+  error: string | null;
+  completedAt: string;
+}
+export interface JobStatusResponse {
+  id: string;
+  name: string;
+  priority: JobPriority;
+  status: JobStatus;
+  payload: JsonValue;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  retryCount: number;
+  maxRetries: number;
+  result: JobResult | null;
+  error: string | null;
+  timeoutMs: number | null;
+  correlationId: Id | null;
+}
+
 export type ErrorLayer = "interface" | "broker" | "workflow" | "page" | "driver" | "browser" | "network" | "site" | "journal";
 export type Capability = "session:read" | "session:write" | "page:read" | "page:write" | "context:read" | "browser:mutate" | "file:upload" | "file:download" | "javascript:evaluate" | "intent:execute" | "vision:assist" | "recovery:read" | "recovery:write" | "artifact:read" | "artifact:capture" | "job:submit" | "job:read" | "job:cancel" | "authority:admin" | "browser:fingerprint" | "browser:humanize";
 export type InterfaceErrorCode = "invalidRequest" | "unsupportedInterfaceVersion" | "invalidIdempotencyKey" | "idempotencyConflict" | "deadlineExceeded" | "authenticationFailed" | "tokenExpired" | "missingCapability" | "malformedScope" | "artifactDenied" | "unsupportedOperation" | "notFound" | "resourceExhausted" | "engineUnreachable" | "internal";

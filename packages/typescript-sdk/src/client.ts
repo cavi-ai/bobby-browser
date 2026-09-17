@@ -1,7 +1,7 @@
-import { INTERFACE_VERSION, type ArtifactReference, type CheckpointRequest, type CommandEnvelope, type CommandOutcome, type ContextAskResponse, type ContextNeighborsResponse, type ContextSiteResponse, type CreateSessionRequest, type EventOptions, type EventGap, type FormSnapshot, type FormSnapshotOptions, type InterfaceError, type InterfaceEvent, type OpenPageRequest, type RecoveryDecision, type RecoveryStatus, type RequestOptions, type RuntimeInfo, type SessionState, type PageState, type WorkflowCheckpoint } from "./contracts.js";
+import { INTERFACE_VERSION, type ArtifactReference, type CheckpointRequest, type CommandEnvelope, type CommandOutcome, type ContextAskResponse, type ContextNeighborsResponse, type ContextSiteResponse, type CreateSessionRequest, type EventOptions, type EventGap, type FormSnapshot, type FormSnapshotOptions, type InterfaceError, type InterfaceEvent, type JobStatusResponse, type JobSubmitResponse, type OpenPageRequest, type RecoveryDecision, type RecoveryStatus, type RequestOptions, type RuntimeInfo, type SessionState, type SubmitJobRequest, type PageState, type WorkflowCheckpoint } from "./contracts.js";
 import { RuntimeClientError, type RuntimeErrorRedactor } from "./errors.js";
 import { isInterfaceError } from "./events.js";
-import { hasExactKeys, isCommandOutcome, isContextAskResponse, isContextNeighborsResponse, isContextSiteResponse, isEventBatch, isEventGap, isFormSnapshot, isPageState, isRecoveryDecision, isRecoveryStatus, isRuntimeInfo, isSessionState, isSessionStateList, isUuid, isWorkflowCheckpoint } from "./validators.js";
+import { hasExactKeys, isCommandOutcome, isContextAskResponse, isContextNeighborsResponse, isContextSiteResponse, isEventBatch, isEventGap, isFormSnapshot, isJobId, isJobStatusResponse, isJobSubmitResponse, isPageState, isRecoveryDecision, isRecoveryStatus, isRuntimeInfo, isSessionState, isSessionStateList, isSubmitJobRequest, isUuid, isWorkflowCheckpoint } from "./validators.js";
 
 const JSON_CONTENT_TYPE = /^application\/json(?:\s*;|$)/i;
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -137,6 +137,31 @@ export class BrowserRuntimeClient {
   async contextSite(siteKey: string, options?: RequestOptions): Promise<ContextSiteResponse> {
     if (!siteKey) throw this.#protocol("site key must not be empty");
     return this.#json("GET", `/v1/context/site/${encodeURIComponent(siteKey)}`, undefined, options, isContextSiteResponse);
+  }
+
+  /** `POST /v1/jobs` — submit a bounded runtime job. */
+  async submitJob(input: SubmitJobRequest, options?: RequestOptions): Promise<JobSubmitResponse> {
+    if (!isSubmitJobRequest(input)) throw this.#protocol("job request has an invalid shape");
+    return this.#consumeJson("POST", "/v1/jobs", input, options, (response, payload) => {
+      if (response.status !== 201 || !isJobSubmitResponse(payload)) throw this.#responseError(response.status, payload);
+      return payload;
+    });
+  }
+
+  /** `GET /v1/jobs/{jobId}` — read the authenticated principal's job. */
+  async jobStatus(jobId: string, options?: RequestOptions): Promise<JobStatusResponse> {
+    if (!isJobId(jobId)) throw this.#protocol("job id must use the runtime job identifier format");
+    return this.#json("GET", `/v1/jobs/${encodeURIComponent(jobId)}`, undefined, options, isJobStatusResponse);
+  }
+
+  /** `DELETE /v1/jobs/{jobId}` — cancel the authenticated principal's job. */
+  async cancelJob(jobId: string, options?: RequestOptions): Promise<void> {
+    if (!isJobId(jobId)) throw this.#protocol("job id must use the runtime job identifier format");
+    const scoped = await this.#request("DELETE", `/v1/jobs/${encodeURIComponent(jobId)}`, undefined, options);
+    try {
+      if (scoped.response.status === 204) return;
+      throw this.#responseError(scoped.response.status, await this.#readJson(scoped.response, scoped.scope));
+    } finally { scoped.scope.dispose(); }
   }
 
   /**

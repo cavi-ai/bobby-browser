@@ -10,6 +10,8 @@ import {
   isEvidence,
   isEventBatch,
   isEventGap,
+  isJobStatusResponse,
+  isJobSubmitResponse,
   isPageState,
   isRecoveryDecision,
   isRuntimeInfo,
@@ -24,6 +26,7 @@ const ID = "00000000-0000-4000-8000-000000000001";
 const ID_2 = "00000000-0000-4000-8000-000000000002";
 const SHA = "0123456789abcdef".repeat(4);
 const TIME = "2026-07-17T12:34:56Z";
+const JOB_ID = "job_00000000-0000-4000-8000-000000000010";
 
 const CONTEXT_ANSWER = {
   target: { role: "textbox", accessibleName: "Email" },
@@ -36,6 +39,23 @@ const CONTEXT_CONTROL = {
   accessibleName: "Continue",
   ordinal: 0,
   intents: { click: { successCount: 3, failureCount: 1, lastVerifiedDay: 20_000, source: "observed" } },
+} as const;
+
+const JOB_STATUS = {
+  id: JOB_ID,
+  name: "echo",
+  priority: "high",
+  status: "completed",
+  payload: { hello: "world" },
+  createdAt: TIME,
+  startedAt: TIME,
+  completedAt: TIME,
+  retryCount: 0,
+  maxRetries: 3,
+  result: { jobId: JOB_ID, success: true, output: { hello: "world" }, error: null, completedAt: TIME },
+  error: null,
+  timeoutMs: 5_000,
+  correlationId: ID,
 } as const;
 
 function target(): TargetSpec {
@@ -248,6 +268,21 @@ test("context response validators accept hits and misses and reject malformed ne
   assert.equal(isContextAskResponse({ answer: CONTEXT_ANSWER, hit: false }), false);
   assert.equal(isContextNeighborsResponse({ neighbors: { answer: CONTEXT_ANSWER, form: "signup", pagePattern: "/join", controls: [{ ...CONTEXT_CONTROL, unexpected: true }] }, hit: true }), false);
   assert.equal(isContextSiteResponse({ site: { siteKey: "https://example.test", pages: { "/join": { signup: [{ ...CONTEXT_CONTROL, intents: { click: { successCount: -1, failureCount: 0 } } }] } } } }), false);
+});
+
+test("job response validators enforce exact lifecycle and nested result contracts", () => {
+  assert.equal(isJobSubmitResponse({ jobId: JOB_ID, status: "pending" }), true);
+  assert.equal(isJobStatusResponse(JOB_STATUS), true);
+  assert.equal(isJobStatusResponse({ ...JOB_STATUS, status: "failed", result: null, error: "handler failed" }), true);
+  assert.equal(isJobStatusResponse({ ...JOB_STATUS, status: "cancelled", result: null, error: null }), true);
+
+  assert.equal(isJobSubmitResponse({ jobId: "bad", status: "pending" }), false);
+  assert.equal(isJobSubmitResponse({ jobId: JOB_ID, status: "unknown" }), false);
+  assert.equal(isJobStatusResponse({ ...JOB_STATUS, result: { ...JOB_STATUS.result, jobId: "bad" } }), false);
+  assert.equal(isJobStatusResponse({ ...JOB_STATUS, result: { ...JOB_STATUS.result, unexpected: true } }), false);
+  assert.equal(isJobStatusResponse({ ...JOB_STATUS, retryCount: 4, maxRetries: 3 }), false);
+  assert.equal(isJobStatusResponse({ ...JOB_STATUS, status: "running", completedAt: TIME, result: null }), false);
+  assert.equal(isJobStatusResponse({ ...JOB_STATUS, unexpected: true }), false);
 });
 
 test("session state accepts the selected vision node returned by the runtime", () => {
