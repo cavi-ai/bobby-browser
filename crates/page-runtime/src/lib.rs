@@ -124,9 +124,7 @@ impl PageRuntime {
         self.promotion.as_ref()
     }
 
-    /// Enables lazy batch vision prefill against this runtime's context
-    /// graph (`[vision].prefill`). Off by default; when off, the intent path
-    /// is byte-identical to before.
+    /// Enables proactive vision prefill against this runtime's context graph.
     pub fn with_vision_prefill_enabled(mut self) -> Self {
         self.adaptive =
             std::mem::take(&mut self.adaptive).with_vision_prefill(self.context.clone());

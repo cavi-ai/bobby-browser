@@ -1,4 +1,4 @@
-//! Live Firefox proof of lazy batch vision prefill (Spec B T10), through the
+//! Live Firefox proof of proactive vision prefill through the
 //! installed-companion harness.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -29,7 +29,7 @@ impl VisionAssist for CountingVision {
         self.propose_calls.fetch_add(1, Ordering::SeqCst);
         Ok(VisionProposal {
             confidence: 0.95,
-            action: VisionAction::Click { x: 8.0, y: 8.0 },
+            action: VisionAction::TypeIntoCandidate { index: 0 },
         })
     }
 }

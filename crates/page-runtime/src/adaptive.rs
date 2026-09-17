@@ -904,8 +904,7 @@ impl AdaptivePageEngine {
         self
     }
 
-    /// Enables lazy batch prefill against this proposal cache (the
-    /// runtime's context graph). Off by default.
+    /// Enables proactive prefill against this proposal cache.
     pub fn with_vision_prefill(
         mut self,
         proposals: Arc<dyn intent_engine::ProposalLookup>,

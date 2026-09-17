@@ -1,5 +1,5 @@
-//! Live end-to-end proof of lazy batch vision prefill (Spec B T10):
-//! prefill on resolves a multi-stuck-field form through the batch with
+//! Live end-to-end proof of proactive vision prefill:
+//! prefill on resolves a multi-field form through the batch with
 //! `VisionPrefill` evidence; prefill off resolves the same form through
 //! per-field live escalation; provider loss never fails an intent the
 //! deterministic path can finish.
@@ -33,7 +33,7 @@ impl VisionAssist for CountingVision {
         self.propose_calls.fetch_add(1, Ordering::SeqCst);
         Ok(VisionProposal {
             confidence: 0.95,
-            action: VisionAction::Click { x: 8.0, y: 8.0 },
+            action: VisionAction::TypeIntoCandidate { index: 0 },
         })
     }
 }
