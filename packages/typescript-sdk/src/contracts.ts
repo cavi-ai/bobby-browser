@@ -21,7 +21,7 @@ export interface CreateSessionRequest { profile: string; proxy: string | null; e
 export interface OpenPageRequest { session_id: Id; }
 
 export type ErrorLayer = "interface" | "broker" | "workflow" | "page" | "driver" | "browser" | "network" | "site" | "journal";
-export type Capability = "session:read" | "session:write" | "page:read" | "page:write" | "browser:mutate" | "file:upload" | "file:download" | "javascript:evaluate" | "intent:execute" | "vision:assist" | "recovery:read" | "recovery:write" | "artifact:read" | "artifact:capture" | "job:submit" | "job:read" | "job:cancel" | "authority:admin" | "browser:fingerprint" | "browser:humanize";
+export type Capability = "session:read" | "session:write" | "page:read" | "page:write" | "context:read" | "browser:mutate" | "file:upload" | "file:download" | "javascript:evaluate" | "intent:execute" | "vision:assist" | "recovery:read" | "recovery:write" | "artifact:read" | "artifact:capture" | "job:submit" | "job:read" | "job:cancel" | "authority:admin" | "browser:fingerprint" | "browser:humanize";
 export type InterfaceErrorCode = "invalidRequest" | "unsupportedInterfaceVersion" | "invalidIdempotencyKey" | "idempotencyConflict" | "deadlineExceeded" | "authenticationFailed" | "tokenExpired" | "missingCapability" | "malformedScope" | "artifactDenied" | "unsupportedOperation" | "notFound" | "resourceExhausted" | "engineUnreachable" | "internal";
 export interface InterfaceError {
   code: InterfaceErrorCode;
@@ -335,7 +335,16 @@ export interface CommandEnvelope { schemaVersion: number; commandId: Id; workflo
 
 export type CommandClass = "replayable" | "reconciliable" | "boundary";
 export type CheckpointInvariant = { kind: "url"; value: string } | { kind: "title"; value: string } | { kind: "text"; selector: string; value: string };
-export interface ContextAnswer { target: AccessibilityTarget; confidence: number; }
+export type ContextObservedAt = { kind: "generation"; generation: number } | { kind: "persisted" };
+export type ContextAnswerSource = "observed" | "vision-promoted";
+export interface ContextAnswer { target: AccessibilityTarget; confidence: number; observedAt: ContextObservedAt; source?: ContextAnswerSource; }
+export interface ContextNeighborStats { successCount: number; failureCount: number; lastVerifiedDay?: number; source?: ContextAnswerSource; }
+export interface ContextNeighborControl { role: string; accessibleName: string; ordinal?: number; intents: Record<string, ContextNeighborStats>; }
+export interface ContextNeighbors { answer: ContextAnswer; form: string; pagePattern: string; controls: ContextNeighborControl[]; }
+export interface ContextSiteView { siteKey: string; pages: Record<string, Record<string, ContextNeighborControl[]>>; }
+export type ContextAskResponse = { answer: ContextAnswer; hit: true } | { answer: null; hit: false; reason: "notRemembered"; nextStep: "a11y_snapshot" };
+export type ContextNeighborsResponse = { neighbors: ContextNeighbors; hit: true } | { neighbors: null; hit: false; reason: "notRemembered"; nextStep: "a11y_snapshot" };
+export interface ContextSiteResponse { site: ContextSiteView | null; }
 export interface WorkflowCheckpoint { schemaVersion: number; checkpointId: Id; workflowId: Id; attemptId: Id; sessionId: Id; pageId: Id; restartUrl: string; currentUrl: string; cursor: Id | null; boundaryCommandId: Id | null; recoveryClass: CommandClass; invariants: CheckpointInvariant[]; replayableInputs: string[]; evidence: Evidence[]; recoveryHistory: RecoveryRecord[]; recoveryReceipts: unknown[]; createdAt: string; }
 export interface RecoveryRecord { recordedAt: string; decision: RecoveryDecision; }
 export interface RecoveryStatus { workflowId: Id; checkpoint: WorkflowCheckpoint; receipts: unknown[]; }

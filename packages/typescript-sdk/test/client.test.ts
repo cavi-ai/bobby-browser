@@ -128,6 +128,52 @@ test("listSessions returns the broker session array", async () => {
   });
 });
 
+test("context helpers encode inputs and validate response shapes", async () => {
+  const answer = { target: { role: "textbox", accessibleName: "Email" }, confidence: 0.9, observedAt: { kind: "persisted" }, source: "observed" } as const;
+  const requests: string[] = [];
+  await withServer((request, response) => {
+    requests.push(request.url ?? "");
+    if (request.url?.startsWith("/v1/context/ask?")) writeJson(response, 200, { answer, hit: true });
+    else if (request.url?.startsWith("/v1/context/neighbors?")) writeJson(response, 200, { neighbors: null, hit: false, reason: "notRemembered", nextStep: "a11y_snapshot" });
+    else writeJson(response, 200, { site: null });
+  }, async (baseUrl) => {
+    const client = new BrowserRuntimeClient({ baseUrl, bearerToken: TOKEN });
+    assert.equal((await client.contextAsk(SESSION_ID, PAGE_ID, "Email address")).answer?.target.accessibleName, "Email");
+    assert.equal((await client.contextNeighbors(SESSION_ID, PAGE_ID, "Next & continue")).neighbors, null);
+    assert.equal((await client.contextSite("https://example.test/a b")).site, null);
+  });
+  assert.deepEqual(requests, [
+    `/v1/context/ask?sessionId=${SESSION_ID}&pageId=${PAGE_ID}&description=Email+address`,
+    `/v1/context/neighbors?sessionId=${SESSION_ID}&pageId=${PAGE_ID}&description=Next+%26+continue`,
+    "/v1/context/site/https%3A%2F%2Fexample.test%2Fa%20b",
+  ]);
+});
+
+test("context helpers reject invalid input before transport", async () => {
+  let calls = 0;
+  const client = new BrowserRuntimeClient({
+    baseUrl: "https://runtime.invalid",
+    bearerToken: TOKEN,
+    fetch: async () => { calls += 1; throw new Error("unexpected transport"); },
+  });
+  await assert.rejects(client.contextAsk("bad", PAGE_ID, "Email"), (error: unknown) => error instanceof RuntimeClientError && error.kind === "protocol");
+  await assert.rejects(client.contextNeighbors(SESSION_ID, PAGE_ID, ""), (error: unknown) => error instanceof RuntimeClientError && error.kind === "protocol");
+  await assert.rejects(client.contextSite(""), (error: unknown) => error instanceof RuntimeClientError && error.kind === "protocol");
+  assert.equal(calls, 0);
+});
+
+test("context helpers preserve context capability errors", async () => {
+  const client = new BrowserRuntimeClient({
+    baseUrl: "https://runtime.invalid",
+    bearerToken: TOKEN,
+    fetch: async () => new Response(JSON.stringify({ error: {
+      code: "missingCapability", layer: "interface", message: "denied", correlationId: CORRELATION_ID,
+      commandId: null, retryable: false, retryAfterMs: null, reconciliationRequired: false, requiredCapability: "context:read",
+    } }), { status: 403, headers: { "content-type": "application/json" } }),
+  });
+  await assert.rejects(client.contextSite("https://example.test"), (error: unknown) => error instanceof RuntimeClientError && error.requiredCapability === "context:read");
+});
+
 test("recoveryStatus returns the checkpoint status", async () => {
   const time = new Date().toISOString();
   const checkpoint = {

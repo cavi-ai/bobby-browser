@@ -704,3 +704,35 @@ async fn context_ask_miss_names_the_not_remembered_reason_and_next_step() {
     assert_eq!(value["reason"], "notRemembered");
     assert_eq!(value["nextStep"], "a11y_snapshot");
 }
+
+#[tokio::test]
+async fn context_neighbors_miss_names_the_not_remembered_reason_and_next_step() {
+    let (app, token) = authenticated_app(
+        [Capability::ContextRead, Capability::PageRead],
+        InterfaceConfig::default(),
+    )
+    .await;
+    let session = uuid!("20000000-0000-0000-0000-000000000022");
+    let page = uuid!("30000000-0000-0000-0000-000000000032");
+
+    let response = app
+        .oneshot(authorized(
+            "GET",
+            &format!("/v1/context/neighbors?sessionId={session}&pageId={page}&description=Email"),
+            &token,
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({
+            "neighbors": null,
+            "hit": false,
+            "reason": "notRemembered",
+            "nextStep": "a11y_snapshot"
+        })
+    );
+}

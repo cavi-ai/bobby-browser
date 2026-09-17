@@ -1,7 +1,7 @@
-import { INTERFACE_VERSION, type ArtifactReference, type CheckpointRequest, type CommandEnvelope, type CommandOutcome, type CreateSessionRequest, type EventOptions, type EventGap, type FormSnapshot, type FormSnapshotOptions, type InterfaceError, type InterfaceEvent, type OpenPageRequest, type RecoveryDecision, type RecoveryStatus, type RequestOptions, type RuntimeInfo, type SessionState, type PageState, type WorkflowCheckpoint } from "./contracts.js";
+import { INTERFACE_VERSION, type ArtifactReference, type CheckpointRequest, type CommandEnvelope, type CommandOutcome, type ContextAskResponse, type ContextNeighborsResponse, type ContextSiteResponse, type CreateSessionRequest, type EventOptions, type EventGap, type FormSnapshot, type FormSnapshotOptions, type InterfaceError, type InterfaceEvent, type OpenPageRequest, type RecoveryDecision, type RecoveryStatus, type RequestOptions, type RuntimeInfo, type SessionState, type PageState, type WorkflowCheckpoint } from "./contracts.js";
 import { RuntimeClientError, type RuntimeErrorRedactor } from "./errors.js";
 import { isInterfaceError } from "./events.js";
-import { hasExactKeys, isCommandOutcome, isEventBatch, isEventGap, isFormSnapshot, isPageState, isRecoveryDecision, isRecoveryStatus, isRuntimeInfo, isSessionState, isSessionStateList, isUuid, isWorkflowCheckpoint } from "./validators.js";
+import { hasExactKeys, isCommandOutcome, isContextAskResponse, isContextNeighborsResponse, isContextSiteResponse, isEventBatch, isEventGap, isFormSnapshot, isPageState, isRecoveryDecision, isRecoveryStatus, isRuntimeInfo, isSessionState, isSessionStateList, isUuid, isWorkflowCheckpoint } from "./validators.js";
 
 const JSON_CONTENT_TYPE = /^application\/json(?:\s*;|$)/i;
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -126,6 +126,19 @@ export class BrowserRuntimeClient {
     return this.#json("GET", `/v1/sessions/${encodeURIComponent(sessionId)}/pages/${encodeURIComponent(pageId)}/forms${query}`, undefined, requestOptions, isFormSnapshot);
   }
 
+  async contextAsk(sessionId: string, pageId: string, description: string, options?: RequestOptions): Promise<ContextAskResponse> {
+    return this.#contextQuery("ask", sessionId, pageId, description, options, isContextAskResponse);
+  }
+
+  async contextNeighbors(sessionId: string, pageId: string, description: string, options?: RequestOptions): Promise<ContextNeighborsResponse> {
+    return this.#contextQuery("neighbors", sessionId, pageId, description, options, isContextNeighborsResponse);
+  }
+
+  async contextSite(siteKey: string, options?: RequestOptions): Promise<ContextSiteResponse> {
+    if (!siteKey) throw this.#protocol("site key must not be empty");
+    return this.#json("GET", `/v1/context/site/${encodeURIComponent(siteKey)}`, undefined, options, isContextSiteResponse);
+  }
+
   /**
    * `POST /v1/commands` — submit a {@link CommandEnvelope} (primitive or intent).
    * Validates that the HTTP status matches the outcome `status` mapping.
@@ -218,6 +231,14 @@ export class BrowserRuntimeClient {
       if (response.status !== 200 || !valid(payload)) throw this.#responseError(response.status, payload);
       return payload;
     });
+  }
+
+  async #contextQuery<T>(kind: "ask" | "neighbors", sessionId: string, pageId: string, description: string, options: RequestOptions | undefined, valid: (value: unknown) => value is T): Promise<T> {
+    if (!isUuid(sessionId) || !isUuid(pageId)) throw this.#protocol("session and page ids must be UUIDs");
+    const encoded = new TextEncoder().encode(description);
+    if (encoded.byteLength < 1 || encoded.byteLength > 256) throw this.#protocol("description must contain between 1 and 256 bytes");
+    const query = new URLSearchParams({ sessionId, pageId, description });
+    return this.#json("GET", `/v1/context/${kind}?${query}`, undefined, options, valid);
   }
 
   async #consumeJson<T>(method: string, path: string, body: unknown, options: RequestOptions | undefined, consume: (response: Response, payload: unknown) => T): Promise<T> {
