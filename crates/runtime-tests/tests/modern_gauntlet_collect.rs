@@ -22,12 +22,10 @@ fn corpus_path(journey: &str) -> std::path::PathBuf {
         .join(format!("{journey}.jsonl"))
 }
 
-#[tokio::test]
-async fn collect_onboarding_corpus() -> TestResult<()> {
-    let server = ScenarioServer::start(ScenarioConfig::seeded("onboarding")).await?;
-    let runtime = ModernRuntime::launch(&server, Journey::Onboarding).await?;
-    let mut collector = CorpusCollector::new();
-
+async fn collect_onboarding_identity(
+    runtime: &ModernRuntime,
+    collector: &mut CorpusCollector,
+) -> TestResult<()> {
     for (selector, value, field) in [
         ("input[aria-label='Full name']", "Maya Chen", "full name"),
         (
@@ -35,16 +33,10 @@ async fn collect_onboarding_corpus() -> TestResult<()> {
             "maya@atlas.example",
             "work email",
         ),
-        (
-            "input[aria-label='Company name']",
-            "Atlas Labs",
-            "company name",
-        ),
-        ("input[aria-label='Postal code']", "02110", "postal code"),
     ] {
         collector
             .capture(
-                &runtime,
+                runtime,
                 &GroundTruth::TypeText {
                     selector,
                     text: value,
@@ -57,10 +49,48 @@ async fn collect_onboarding_corpus() -> TestResult<()> {
             .await?;
         runtime.type_text(selector, value).await?;
     }
+    runtime.click_named("button", "Next", false).await?;
+    Ok(())
+}
 
+async fn collect_onboarding_company(
+    runtime: &ModernRuntime,
+    collector: &mut CorpusCollector,
+) -> TestResult<()> {
+    for (selector, value, field) in [
+        (
+            "input[aria-label='Company name']",
+            "Atlas Labs",
+            "company name",
+        ),
+        ("input[aria-label='Postal code']", "02110", "postal code"),
+    ] {
+        collector
+            .capture(
+                runtime,
+                &GroundTruth::TypeText {
+                    selector,
+                    text: value,
+                    purpose: format!("Enter '{value}' into the {field} field"),
+                    ordinal: None,
+                },
+                "onboarding",
+                &format!("type_{field}"),
+            )
+            .await?;
+        runtime.type_text(selector, value).await?;
+    }
+    runtime.click_named("button", "Next", false).await?;
+    Ok(())
+}
+
+async fn collect_onboarding_plan_and_submit(
+    runtime: &ModernRuntime,
+    collector: &mut CorpusCollector,
+) -> TestResult<()> {
     collector
         .capture(
-            &runtime,
+            runtime,
             &GroundTruth::Click {
                 selector: "select[aria-label='Plan']",
                 purpose: "Choose the growth plan".into(),
@@ -77,7 +107,7 @@ async fn collect_onboarding_corpus() -> TestResult<()> {
         .await?;
     collector
         .capture(
-            &runtime,
+            runtime,
             &GroundTruth::Click {
                 selector: "select[aria-label='Billing cycle']",
                 purpose: "Choose annual billing".into(),
@@ -91,7 +121,7 @@ async fn collect_onboarding_corpus() -> TestResult<()> {
 
     collector
         .capture(
-            &runtime,
+            runtime,
             &GroundTruth::Click {
                 selector: "form[aria-label='Customer onboarding'] button[type='submit']",
                 purpose: "Submit the onboarding form".into(),
@@ -113,7 +143,7 @@ async fn collect_onboarding_corpus() -> TestResult<()> {
 
     collector
         .capture(
-            &runtime,
+            runtime,
             &GroundTruth::TypeText {
                 selector: "input[aria-label='Postal code']",
                 text: "10001",
@@ -128,9 +158,12 @@ async fn collect_onboarding_corpus() -> TestResult<()> {
         .type_text("input[aria-label='Postal code']", "10001")
         .await?;
 
+    runtime.click_named("button", "Next", false).await?;
+    runtime.wait_named("button", "Create customer").await?;
+
     collector
         .capture(
-            &runtime,
+            runtime,
             &GroundTruth::Click {
                 selector: "form[aria-label='Customer onboarding'] button[type='submit']",
                 purpose: "Submit the onboarding form".into(),
@@ -149,6 +182,17 @@ async fn collect_onboarding_corpus() -> TestResult<()> {
     runtime
         .wait_visible("form[aria-label='Customer onboarding'] [role='status']")
         .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn collect_onboarding_corpus() -> TestResult<()> {
+    let server = ScenarioServer::start(ScenarioConfig::seeded("onboarding")).await?;
+    let runtime = ModernRuntime::launch(&server, Journey::Onboarding).await?;
+    let mut collector = CorpusCollector::new();
+    collect_onboarding_identity(&runtime, &mut collector).await?;
+    collect_onboarding_company(&runtime, &mut collector).await?;
+    collect_onboarding_plan_and_submit(&runtime, &mut collector).await?;
 
     let path = corpus_path("onboarding");
     collector.save(&path)?;
@@ -192,7 +236,7 @@ async fn collect_authorization_corpus() -> TestResult<()> {
         .capture(
             &runtime,
             &GroundTruth::Click {
-                selector: "button[aria-label='Dismiss notification preferences']",
+                selector: "button[aria-label='Dismiss notification']",
                 purpose: "Dismiss the notification preferences prompt".into(),
                 ordinal: None,
             },
@@ -201,10 +245,7 @@ async fn collect_authorization_corpus() -> TestResult<()> {
         )
         .await?;
     runtime
-        .click(
-            "button[aria-label='Dismiss notification preferences']",
-            false,
-        )
+        .click("button[aria-label='Dismiss notification']", false)
         .await?;
 
     let path = corpus_path("authorization");
@@ -310,16 +351,12 @@ async fn collect_documents_corpus() -> TestResult<()> {
     runtime
         .click("form[aria-label='Upload customer document'] button", true)
         .await?;
-    runtime.wait_visible("iframe[title^='Preview of']").await?;
 
-    // NOTE: the preview-confirmation button lives inside an iframe; the
-    // accessibility snapshot is main-frame scoped, so that step runs but is
-    // not captured until the collector learns frame-scoped snapshots.
     runtime
-        .wait_in_frame_button("#document-preview", "#confirm-preview")
+        .wait_shadow("#document-preview-widget", "#confirm-preview")
         .await?;
     runtime
-        .click_in_frame("#document-preview", "#confirm-preview")
+        .click_shadow("#document-preview-widget", "#confirm-preview", true)
         .await?;
     server.wait_for_preview_confirmation().await?;
 
@@ -358,7 +395,7 @@ async fn collect_customer_update_corpus() -> TestResult<()> {
         .capture(
             &runtime,
             &GroundTruth::Click {
-                selector: "form[aria-label='Customer search'] button",
+                selector: "[aria-label='Search customers'] button",
                 purpose: "Run the customer search".into(),
                 ordinal: None,
             },
@@ -367,11 +404,10 @@ async fn collect_customer_update_corpus() -> TestResult<()> {
         )
         .await?;
     runtime
-        .click("form[aria-label='Customer search'] button", false)
+        .click("[aria-label='Search customers'] button", false)
         .await?;
-    runtime
-        .wait_visible("a[href='/customers/cus_atlas']")
-        .await?;
+    runtime.wait_named("option", "Atlas Labs").await?;
+    runtime.reveal_atlas_link().await?;
 
     collector
         .capture(
@@ -385,18 +421,13 @@ async fn collect_customer_update_corpus() -> TestResult<()> {
             "open_customer",
         )
         .await?;
-    runtime
-        .click("a[href='/customers/cus_atlas']", false)
-        .await?;
-    runtime
-        .wait_visible("select[aria-label='Customer priority']")
-        .await?;
+    runtime.open_atlas_customer().await?;
 
     collector
         .capture(
             &runtime,
             &GroundTruth::Click {
-                selector: "select[aria-label='Customer priority']",
+                selector: "button[aria-label='Customer priority']",
                 purpose: "Choose the high priority".into(),
                 ordinal: None,
             },
@@ -404,13 +435,13 @@ async fn collect_customer_update_corpus() -> TestResult<()> {
             "select_priority",
         )
         .await?;
-    runtime.select_one("Customer priority", "high").await?;
+    runtime.choose_option("Customer priority", "High").await?;
 
     collector
         .capture(
             &runtime,
             &GroundTruth::Click {
-                selector: "form[aria-label='Update customer priority'] button",
+                selector: "form[aria-label='Update customer priority'] button[type='submit']",
                 purpose: "Save the priority change".into(),
                 ordinal: None,
             },
@@ -418,10 +449,7 @@ async fn collect_customer_update_corpus() -> TestResult<()> {
             "save_priority",
         )
         .await?;
-    runtime
-        .click("form[aria-label='Update customer priority'] button", true)
-        .await?;
-    runtime.wait_visible("[role='status']").await?;
+    runtime.save_customer_priority().await?;
 
     let path = corpus_path("customer-update");
     collector.save(&path)?;

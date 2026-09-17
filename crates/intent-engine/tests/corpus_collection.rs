@@ -118,6 +118,7 @@ fn candidate(role: &str, name: &str) -> Candidate {
     Candidate {
         id: name.into(),
         css: Some(format!("[aria-label='{name}']")),
+        tag: None,
         test_id: None,
         role: Some(role.into()),
         name: Some(name.into()),

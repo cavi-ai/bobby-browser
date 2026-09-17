@@ -106,6 +106,7 @@ fn link(name: &str) -> Candidate {
     Candidate {
         id: name.into(),
         css: Some(format!("#{name}")),
+        tag: None,
         test_id: None,
         role: Some("link".into()),
         name: Some(name.into()),

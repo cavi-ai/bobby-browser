@@ -146,6 +146,7 @@ fn candidate(name: &str, text: &str, attributes: BTreeMap<String, String>) -> Ca
     Candidate {
         id: name.into(),
         css: Some(format!("#{name}")),
+        tag: None,
         test_id: None,
         role: None,
         name: Some(name.into()),

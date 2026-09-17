@@ -1,12 +1,14 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chromiumoxide::browser::BrowserHandle;
+#[cfg(test)]
+use chromiumoxide::cdp::browser_protocol::dom::Node as CdpNode;
 use chromiumoxide::cdp::browser_protocol::dom::{
-    BackendNodeId, DescribeNodeParams, GetContentQuadsParams, GetFrameOwnerParams, Node as CdpNode,
-    SetFileInputFilesParams, ShadowRootType,
+    BackendNodeId, DescribeNodeParams, GetContentQuadsParams, GetFrameOwnerParams,
+    RequestNodeParams, SetFileInputFilesParams, ShadowRootType,
 };
 use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
 use chromiumoxide::cdp::browser_protocol::page::{
@@ -19,7 +21,7 @@ use chromiumoxide::cdp::js_protocol::runtime::{
 use chromiumoxide::keys::get_key_definition;
 use chromiumoxide::layout::{ElementQuad, Point};
 use chromiumoxide::page::ScreenshotParams;
-use chromiumoxide::{Element, Page};
+use chromiumoxide::{Command, Element, Method, Page};
 use dom_engine::{
     resolve_candidates, Candidate, CandidateState, ResolutionDecision, ResolutionPolicy,
 };
@@ -63,6 +65,7 @@ struct JsLocator {
 struct BrowserCandidate {
     id: String,
     css: Option<String>,
+    tag: Option<String>,
     test_id: Option<String>,
     role: Option<String>,
     name: Option<String>,
@@ -915,6 +918,7 @@ fn into_candidate(mut item: BrowserCandidate) -> Candidate {
     Candidate {
         id: item.id,
         css,
+        tag: item.tag.filter(|tag| !tag.is_empty()),
         test_id: item.test_id,
         role: item.role,
         name: item.name,
@@ -999,10 +1003,18 @@ pub async fn resolve_target_with_visibility(
         shadow_hosts: locator_shadow_hosts,
         id: candidate.id.clone(),
     };
+    // `find_element(css)` is only safe for a unique `#id`. Tag and
+    // `[aria-label=…]` stamps match more than one node; using them here
+    // would click the first hit (often a wrapper) instead of the candidate
+    // the resolver just chose. The JS locator keys off `data-bobby-target`.
     let native = if target.frame_path.is_empty() && target.shadow_path.is_empty() {
         match (&owner, candidate.css.as_deref()) {
-            (Some(element), Some(css)) => element.find_element(css).await.ok(),
-            (None, Some(css)) => scope.execution_page.find_element(css).await.ok(),
+            (Some(element), Some(css)) if css.starts_with('#') => {
+                element.find_element(css).await.ok()
+            }
+            (None, Some(css)) if css.starts_with('#') => {
+                scope.execution_page.find_element(css).await.ok()
+            }
             _ => None,
         }
     } else {
@@ -1157,37 +1169,170 @@ async fn collect_candidates_merged(
     Ok((candidates, owners))
 }
 
-/// Discovers every closed shadow root reachable within the given scope via
-/// `DOM.describeNode(pierce: true)`, resolving each into a live `Element`
-/// handle. CDP sees closed roots at the backend level regardless of the
-/// JS-level restriction, so no page-prototype patching is needed.
+/// Discovers every closed shadow root reachable within the given scope.
+///
+/// One `DOM.describeNode(pierce: true, depth: -1)` of the scan root, decoded
+/// as JSON (not the typed CDP `Node` tree). Typed pierce-trees overflow
+/// Linux debug serde; `serde_json::Value` does not. Walks children and
+/// shadow roots only — never `contentDocument`.
 async fn discover_closed_shadow_roots(
     page: &Page,
     scope: &LocatorScope,
     shadow_hosts: &[String],
 ) -> Result<Vec<Arc<Element>>, CommandError> {
-    let object_id = scope_root_object_id(page, scope, shadow_hosts).await?;
+    let scan_root = discovery_scan_root(page, scope, shadow_hosts).await?;
     let described = page
-        .execute(
-            DescribeNodeParams::builder()
-                .object_id(object_id)
-                .depth(-1)
-                .pierce(true)
-                .build(),
-        )
+        .execute(DescribeNodeJson {
+            object_id: scan_root.remote_object_id.clone(),
+            depth: -1,
+            pierce: true,
+        })
         .await
         .map_err(cdp_error)?;
-    let mut backend_ids = Vec::new();
-    collect_closed_shadow_root_ids(&described.result.node, &mut backend_ids);
-    let mut roots = Vec::with_capacity(backend_ids.len());
-    for backend_node_id in backend_ids {
+    let mut found = Vec::new();
+    if let Some(node) = described.result.get("node") {
+        collect_closed_from_json(node, &mut found);
+    }
+    drop(described);
+    let mut unique = Vec::new();
+    let mut seen = HashSet::new();
+    for backend_id in found {
+        if seen.insert(backend_id) {
+            unique.push(backend_id);
+        }
+    }
+    let mut roots = Vec::with_capacity(unique.len());
+    for backend_id in unique {
+        if backend_id == scan_root.backend_node_id {
+            continue;
+        }
         let element = page
-            .element_from_backend_node_id(backend_node_id)
+            .element_from_backend_node_id(backend_id)
             .await
             .map_err(cdp_error)?;
         roots.push(Arc::new(element));
     }
     Ok(roots)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DescribeNodeJson {
+    object_id: RemoteObjectId,
+    depth: i64,
+    pierce: bool,
+}
+
+impl Method for DescribeNodeJson {
+    fn identifier(&self) -> chromiumoxide::types::MethodId {
+        "DOM.describeNode".into()
+    }
+}
+
+impl Command for DescribeNodeJson {
+    type Response = serde_json::Value;
+}
+
+fn collect_closed_from_json(root: &serde_json::Value, out: &mut Vec<BackendNodeId>) {
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let Some(object) = node.as_object() else {
+            continue;
+        };
+        if object
+            .get("shadowRootType")
+            .and_then(|value| value.as_str())
+            == Some("closed")
+        {
+            if let Some(id) = object.get("backendNodeId").and_then(|value| value.as_i64()) {
+                out.push(BackendNodeId::new(id));
+            }
+        }
+        if let Some(children) = object.get("children").and_then(|value| value.as_array()) {
+            for child in children {
+                stack.push(child);
+            }
+        }
+        if let Some(roots) = object.get("shadowRoots").and_then(|value| value.as_array()) {
+            for child in roots {
+                stack.push(child);
+            }
+        }
+    }
+}
+
+async fn discovery_scan_root(
+    page: &Page,
+    scope: &LocatorScope,
+    shadow_hosts: &[String],
+) -> Result<Element, CommandError> {
+    match scope {
+        LocatorScope::Context(_) if shadow_hosts.is_empty() => {
+            page.find_element("html").await.map_err(cdp_error)
+        }
+        LocatorScope::ClosedRoot(element) if shadow_hosts.is_empty() => page
+            .element_from_backend_node_id(element.backend_node_id)
+            .await
+            .map_err(cdp_error),
+        _ => {
+            element_from_remote_object(page, scope_root_object_id(page, scope, shadow_hosts).await?)
+                .await
+        }
+    }
+}
+
+async fn element_from_remote_object(
+    page: &Page,
+    object_id: RemoteObjectId,
+) -> Result<Element, CommandError> {
+    let node_id = page
+        .execute(RequestNodeParams::new(object_id))
+        .await
+        .map_err(cdp_error)?
+        .result
+        .node_id;
+    page.element_from_node_id(node_id).await.map_err(cdp_error)
+}
+
+#[cfg(test)]
+fn pierce_followup_backend_ids(root: &CdpNode) -> Vec<BackendNodeId> {
+    let mut out = Vec::new();
+    if let Some(roots) = &root.shadow_roots {
+        for node in roots {
+            if pierce_follow_node(node) {
+                out.push(node.backend_node_id);
+            }
+        }
+    }
+    if let Some(children) = &root.children {
+        for node in children {
+            if pierce_follow_node(node) {
+                out.push(node.backend_node_id);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+fn pierce_follow_node(node: &CdpNode) -> bool {
+    matches!(node.node_type, 1 | 9 | 11)
+}
+
+#[cfg(test)]
+fn dismantle_cdp_node(node: CdpNode) {
+    let mut stack = vec![node];
+    while let Some(mut node) = stack.pop() {
+        if let Some(children) = node.children.take() {
+            stack.extend(children);
+        }
+        if let Some(roots) = node.shadow_roots.take() {
+            stack.extend(roots);
+        }
+        if let Some(document) = node.content_document.take() {
+            stack.push(*document);
+        }
+    }
 }
 
 /// Walks a `DOM.describeNode(pierce: true)` tree collecting the
@@ -1196,18 +1341,22 @@ async fn discover_closed_shadow_roots(
 /// not registered with the frontend. Must never descend into
 /// `content_document`: iframes require an explicit `frame_path`. Only
 /// `.children` and `.shadow_roots` are followed.
+#[cfg(test)]
 fn collect_closed_shadow_root_ids(node: &CdpNode, out: &mut Vec<BackendNodeId>) {
-    if let Some(shadow_roots) = &node.shadow_roots {
-        for root in shadow_roots {
-            if matches!(root.shadow_root_type, Some(ShadowRootType::Closed)) {
-                out.push(root.backend_node_id);
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        if let Some(shadow_roots) = &node.shadow_roots {
+            for root in shadow_roots {
+                if matches!(root.shadow_root_type, Some(ShadowRootType::Closed)) {
+                    out.push(root.backend_node_id);
+                }
+                stack.push(root);
             }
-            collect_closed_shadow_root_ids(root, out);
         }
-    }
-    if let Some(children) = &node.children {
-        for child in children {
-            collect_closed_shadow_root_ids(child, out);
+        if let Some(children) = &node.children {
+            for child in children.iter().rev() {
+                stack.push(child);
+            }
         }
     }
 }
@@ -1230,8 +1379,7 @@ async fn discover_closed_root_for_candidate(
         .execute(
             DescribeNodeParams::builder()
                 .object_id(object_id)
-                .depth(1)
-                .pierce(true)
+                .depth(0)
                 .build(),
         )
         .await
@@ -1254,7 +1402,7 @@ fn candidate_collector_operation(scope: u64) -> Result<String, CommandError> {
         r#"let n=0,out=[];
 const labelledBy=el=>(el.getAttribute('aria-labelledby')||'').split(/\s+/).filter(Boolean).map(id=>String(el.ownerDocument.getElementById(id)?.innerText||'').trim()||'').filter(Boolean).join(' ')||null;
 const implicitRole=el=>{{if(el.tagName==='BUTTON')return 'button';if(el.tagName==='A'&&el.hasAttribute('href'))return 'link';if(el.tagName==='IFRAME')return 'iframe';if(el.tagName==='TEXTAREA'||el.isContentEditable)return 'textbox';if(el.tagName==='SELECT')return el.multiple?'listbox':'combobox';if(el.tagName==='FORM')return 'form';if(el.tagName==='DIALOG')return 'dialog';if(el.tagName==='MAIN')return 'main';if(el.tagName==='NAV')return 'navigation';if(el.tagName==='ARTICLE')return 'article';if(el.tagName==='SECTION'&&(el.getAttribute('aria-label')||el.getAttribute('aria-labelledby')))return 'region';if(/^H[1-6]$/.test(el.tagName))return 'heading';if(el.tagName==='UL'||el.tagName==='OL'||el.tagName==='MENU'||el.tagName==='DL')return 'list';if(el.tagName==='LI')return 'listitem';if(el.tagName==='IMG')return 'img';if(el.tagName==='OPTION')return 'option';if(el.tagName==='TABLE')return 'table';if(el.tagName==='TR')return 'row';if(el.tagName==='TD')return 'cell';if(el.tagName==='TH')return 'columnheader';if(el.tagName==='P')return 'paragraph';if(el.tagName==='HR')return 'separator';if(el.tagName==='FIELDSET'||el.tagName==='DETAILS')return 'group';if(el.tagName==='ASIDE')return 'complementary';if(el.tagName==='HEADER')return 'banner';if(el.tagName==='FOOTER')return 'contentinfo';if(el.tagName==='PROGRESS')return 'progressbar';if(el.tagName==='METER')return 'meter';if(el.tagName==='OUTPUT')return 'status';if(el.tagName==='SUMMARY')return 'button';if(el.tagName==='FIGURE')return 'figure';if(el.tagName==='BLOCKQUOTE')return 'blockquote';if(el.tagName==='DT')return 'term';if(el.tagName==='DD')return 'definition';if(el.tagName==='AREA'&&el.hasAttribute('href'))return 'link';if(el.tagName==='TIME')return 'time';if(el.tagName!=='INPUT')return null;const type=(el.type||'text').toLowerCase();if(['button','submit','reset','image','file'].includes(type))return 'button';if(type==='checkbox')return 'checkbox';if(type==='radio')return 'radio';if(type==='range')return 'slider';if(type==='number')return 'spinbutton';if(type==='search')return 'searchbox';return type==='hidden'?null:'textbox'}};
-const visit=current=>{{for(const el of current.querySelectorAll('*')){{const id={prefix}+(++n);el.setAttribute('data-bobby-target',id);const style=getComputedStyle(el),rect=el.getBoundingClientRect();const label=el.labels&&el.labels.length?Array.from(el.labels).map(x=>String(x.innerText||'').trim()).filter(Boolean).join(' '):null;const role=el.getAttribute('role')||implicitRole(el);const name=el.getAttribute('aria-label')||labelledBy(el)||label||(el.tagName==='IMG'?el.getAttribute('alt'):null)||(el.tagName==='IFRAME'?el.getAttribute('title'):null)||String(el.innerText||'').trim()||null;const attributes={{}};for(const a of el.attributes)if(['name','type','src','href','placeholder','autocomplete','pattern','min','max','step','multiple','aria-invalid'].includes(a.name)||a.name.startsWith('data-'))attributes[a.name]=a.value;for(const booleanName of ['required','readonly','checked','multiple'])if(el[booleanName]===true)attributes[booleanName]='true';const css=el.id?`#${{CSS.escape(el.id)}}`:`[data-bobby-target="${{id}}"]`;out.push({{id,css,testId:el.getAttribute('data-testid'),role,name,label,text:String(el.innerText||el.value||'').trim(),attributes,attached:el.isConnected,visible:style.visibility!=='hidden'&&style.display!=='none'&&rect.width>0&&rect.height>0,enabled:!el.disabled&&el.getAttribute('aria-disabled')!=='true'&&!el.closest('fieldset[disabled]')}});if(el.shadowRoot)visit(el.shadowRoot)}}}};visit(root);return out"#
+const visit=current=>{{for(const el of current.querySelectorAll('*')){{const id={prefix}+(++n);el.setAttribute('data-bobby-target',id);const style=getComputedStyle(el),rect=el.getBoundingClientRect();const label=el.labels&&el.labels.length?Array.from(el.labels).map(x=>String(x.innerText||'').trim()).filter(Boolean).join(' '):null;const role=el.getAttribute('role')||implicitRole(el);const name=el.getAttribute('aria-label')||labelledBy(el)||label||(el.tagName==='IMG'?el.getAttribute('alt'):null)||(el.tagName==='IFRAME'?el.getAttribute('title'):null)||String(el.innerText||'').trim()||null;const tag=el.tagName.toLowerCase();const attributes={{}};for(const a of el.attributes)if(['id','name','type','src','href','placeholder','autocomplete','pattern','min','max','step','multiple','aria-invalid','aria-label','title'].includes(a.name)||a.name.startsWith('data-'))attributes[a.name]=a.value;for(const booleanName of ['required','readonly','checked','multiple'])if(el[booleanName]===true)attributes[booleanName]='true';const aria=el.getAttribute('aria-label');const css=el.id?`#${{CSS.escape(el.id)}}`:aria?`[aria-label="${{aria.replace(/\\\\/g,'\\\\\\\\').replace(/"/g,'\\\\"')}}"]`:tag;out.push({{id,css,tag,testId:el.getAttribute('data-testid'),role,name,label,text:String(el.innerText||el.value||'').trim(),attributes,attached:el.isConnected,visible:style.visibility!=='hidden'&&style.display!=='none'&&rect.width>0&&rect.height>0,enabled:!el.disabled&&el.getAttribute('aria-disabled')!=='true'&&!el.closest('fieldset[disabled]')}});if(el.shadowRoot)visit(el.shadowRoot)}}}};visit(root);return out"#
     ))
 }
 
@@ -1609,6 +1757,7 @@ mod tests {
         BrowserCandidate {
             id: "1".into(),
             css: css.map(str::to_owned),
+            tag: Some("input".into()),
             test_id: None,
             role: Some("textbox".into()),
             name: Some("Name".into()),
@@ -1654,6 +1803,13 @@ mod tests {
         let operation = candidate_collector_operation(1).expect("collector operation");
 
         assert!(operation.contains("'aria-invalid'"));
+        assert!(operation.contains("'aria-label'"));
+        assert!(operation.contains("'title'"));
+        assert!(operation.contains("const tag=el.tagName.toLowerCase()"));
+        assert!(
+            !operation.contains("[data-bobby-target="),
+            "stamped css must not advertise the per-gather tracking id"
+        );
     }
 
     fn cdp_node(
@@ -1681,6 +1837,32 @@ mod tests {
             builder = builder.content_document(document);
         }
         builder.build().expect("synthetic CDP node")
+    }
+
+    #[test]
+    fn collect_closed_from_json_skips_iframe_content_document() {
+        let tree = serde_json::json!({
+            "backendNodeId": 1,
+            "children": [{
+                "backendNodeId": 5,
+                "shadowRoots": [{
+                    "backendNodeId": 4,
+                    "shadowRootType": "closed"
+                }]
+            }, {
+                "backendNodeId": 6,
+                "contentDocument": {
+                    "backendNodeId": 98,
+                    "shadowRoots": [{
+                        "backendNodeId": 99,
+                        "shadowRootType": "closed"
+                    }]
+                }
+            }]
+        });
+        let mut found = Vec::new();
+        collect_closed_from_json(&tree, &mut found);
+        assert_eq!(found, vec![BackendNodeId::new(4)]);
     }
 
     #[test]
@@ -1767,6 +1949,76 @@ mod tests {
     }
 
     #[test]
+    fn pierce_followup_backend_ids_lists_element_children_and_skips_iframe_documents() {
+        let iframe_document = cdp_node(
+            98,
+            None,
+            vec![cdp_node(97, None, Vec::new(), Vec::new(), None)],
+            Vec::new(),
+            None,
+        );
+        let closed_root = cdp_node(
+            4,
+            Some(ShadowRootType::Closed),
+            Vec::new(),
+            Vec::new(),
+            None,
+        );
+        let tree = cdp_node(
+            1,
+            None,
+            vec![
+                cdp_node(5, None, Vec::new(), vec![closed_root], None),
+                cdp_node(6, None, Vec::new(), Vec::new(), Some(iframe_document)),
+            ],
+            Vec::new(),
+            None,
+        );
+        let followups = pierce_followup_backend_ids(&tree);
+        assert_eq!(
+            followups,
+            vec![BackendNodeId::new(5), BackendNodeId::new(6)]
+        );
+    }
+
+    #[test]
+    fn dismantle_cdp_node_unwinds_nested_and_iframe_trees() {
+        let iframe_document = cdp_node(
+            98,
+            None,
+            vec![cdp_node(
+                97,
+                None,
+                Vec::new(),
+                vec![cdp_node(
+                    99,
+                    Some(ShadowRootType::Closed),
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                )],
+                None,
+            )],
+            Vec::new(),
+            None,
+        );
+        let tree = cdp_node(
+            1,
+            None,
+            vec![cdp_node(
+                6,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Some(iframe_document),
+            )],
+            Vec::new(),
+            None,
+        );
+        dismantle_cdp_node(tree);
+    }
+
+    #[test]
     fn empty_target_fields_are_rejected_before_resolution() {
         let err = validate_target_spec(&TargetSpec {
             accessible_name: Some(String::new()),
@@ -1845,6 +2097,7 @@ mod tests {
         BrowserCandidate {
             id: "1".into(),
             css: None,
+            tag: Some("button".into()),
             test_id: None,
             role: role.map(str::to_owned),
             name: name.map(str::to_owned),

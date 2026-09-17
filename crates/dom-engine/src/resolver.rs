@@ -153,6 +153,147 @@ fn bounded_candidate_field(value: &str) -> String {
     }
 }
 
+/// `target.css` is a selector, not a string-equality against the stamped
+/// `candidate.css`. `#id`, `tag`, `[attr=value]`, `tag[attr]`, and `tag#id`
+/// match `tag` / stamped id / attributes (`aria-label`, `title`, `id`).
+/// Combinators, classes, and pseudos are unsupported: those still match only
+/// when `candidate.css` equals the selector verbatim (Firefox css_path).
+fn css_matches(wanted: &str, candidate: &Candidate) -> bool {
+    let wanted = wanted.trim();
+    if wanted.is_empty() {
+        return false;
+    }
+    if candidate.css.as_deref() == Some(wanted) {
+        return true;
+    }
+    let Some(parsed) = parse_simple_css(wanted) else {
+        return false;
+    };
+    if let Some(tag) = parsed.tag.as_deref() {
+        if !candidate
+            .tag
+            .as_deref()
+            .is_some_and(|actual| actual.eq_ignore_ascii_case(tag))
+        {
+            return false;
+        }
+    }
+    if let Some(id) = parsed.id.as_deref() {
+        let stamped = candidate
+            .css
+            .as_deref()
+            .and_then(|css| css.strip_prefix('#'));
+        let attr_id = candidate.attributes.get("id").map(String::as_str);
+        if stamped != Some(id) && attr_id != Some(id) {
+            return false;
+        }
+    }
+    for (name, value) in &parsed.attributes {
+        let actual = match name.as_str() {
+            "aria-label" => candidate
+                .attributes
+                .get("aria-label")
+                .or(candidate.name.as_ref()),
+            "title" => candidate
+                .attributes
+                .get("title")
+                .or(candidate.name.as_ref()),
+            other => candidate.attributes.get(other),
+        };
+        if actual.map(String::as_str) != Some(value.as_str()) {
+            return false;
+        }
+    }
+    true
+}
+
+#[derive(Default)]
+struct SimpleCss {
+    tag: Option<String>,
+    id: Option<String>,
+    attributes: Vec<(String, String)>,
+}
+
+fn quoted_regions_stripped(selector: &str) -> String {
+    let mut out = String::new();
+    let mut chars = selector.chars();
+    while let Some(character) = chars.next() {
+        if character == '"' || character == '\'' {
+            let quote = character;
+            for next in chars.by_ref() {
+                if next == quote {
+                    break;
+                }
+            }
+        } else {
+            out.push(character);
+        }
+    }
+    out
+}
+
+fn parse_simple_css(selector: &str) -> Option<SimpleCss> {
+    let mut rest = selector.trim();
+    let unquoted = quoted_regions_stripped(rest);
+    if rest.is_empty()
+        || unquoted.contains(char::is_whitespace)
+        || unquoted.contains('>')
+        || unquoted.contains('+')
+        || unquoted.contains('~')
+        || unquoted.contains(':')
+        || unquoted.contains('.')
+    {
+        return None;
+    }
+    let mut parsed = SimpleCss::default();
+    if rest.starts_with(|character: char| character.is_ascii_alphabetic() || character == '_') {
+        let end = rest
+            .find(|character: char| {
+                !character.is_ascii_alphanumeric() && character != '-' && character != '_'
+            })
+            .unwrap_or(rest.len());
+        parsed.tag = Some(rest[..end].to_ascii_lowercase());
+        rest = &rest[end..];
+    }
+    while !rest.is_empty() {
+        if let Some(stripped) = rest.strip_prefix('#') {
+            let end = stripped.find(['[', '#']).unwrap_or(stripped.len());
+            if end == 0 {
+                return None;
+            }
+            parsed.id = Some(stripped[..end].to_owned());
+            rest = &stripped[end..];
+        } else {
+            let stripped = rest.strip_prefix('[')?;
+            let close = stripped.find(']')?;
+            let body = &stripped[..close];
+            rest = &stripped[close + 1..];
+            parsed.attributes.push(parse_attr(body)?);
+        }
+    }
+    if parsed.tag.is_none() && parsed.id.is_none() && parsed.attributes.is_empty() {
+        return None;
+    }
+    Some(parsed)
+}
+
+fn parse_attr(body: &str) -> Option<(String, String)> {
+    let (name, value) = body.split_once('=')?;
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let value = value.trim();
+    let value = if (value.starts_with('"') && value.ends_with('"') && value.len() >= 2)
+        || (value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2)
+    {
+        value[1..value.len() - 1].to_owned()
+    } else {
+        value.to_owned()
+    };
+    Some((name.to_owned(), value))
+}
+
 /// Case-insensitive role match that also treats `img` and `image` as the
 /// same role: Chrome's a11y tree moved from `img` to `image`, but the DOM
 /// collector's implicit-role mapping still emits `img` for an `<img>`
@@ -184,7 +325,13 @@ fn score<'a>(
             }
         };
     }
-    exact!(target.css.as_ref(), candidate.css.as_ref(), 100, "exactCss");
+    if let Some(wanted) = target.css.as_ref() {
+        if !css_matches(wanted, candidate) {
+            return None;
+        }
+        score += 100;
+        reasons.push("css".into());
+    }
     exact!(
         target.test_id.as_ref(),
         candidate.test_id.as_ref(),

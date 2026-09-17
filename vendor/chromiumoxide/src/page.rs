@@ -559,7 +559,7 @@ impl Page {
             .execute(
                 DescribeNodeParams::builder()
                     .node_id(node_id)
-                    .depth(100)
+                    .depth(0)
                     .build(),
             )
             .await?;

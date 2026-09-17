@@ -17,6 +17,9 @@ use types::{
     WorkflowId,
 };
 
+#[path = "modern_gauntlet/unlock.rs"]
+mod northstar_unlock;
+
 fn chrome_executable() -> PathBuf {
     std::env::var("BOBBY_CHROME_EXECUTABLE")
         .map(PathBuf::from)
@@ -109,6 +112,9 @@ async fn plain_click_through_the_explicit_sequence_generates_one_report() {
         matches!(outcome, CommandOutcome::Completed { .. }),
         "{outcome:?}"
     );
+    northstar_unlock::unlock_northstar_session(&runtime, &session.id, &page.id)
+        .await
+        .unwrap();
 
     // No modifiers and humanization is off by default: this is the exact
     // shape that used to route through `resolved.click(&page)` instead of

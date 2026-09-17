@@ -1,5 +1,6 @@
 import type { NorthstarApi } from "../api.js";
 import { element, pageHeader } from "../components.js";
+import { chatOverlay, showToast } from "../overlays.js";
 
 const authorizationListeners = new WeakMap<Window, (event: MessageEvent) => void>();
 
@@ -15,14 +16,9 @@ export async function integrationsPage(document: Document, api: NorthstarApi): P
     card.append(element(document, "h2", { text: "Ledger Cloud" }));
     if (state.connected) {
       card.append(element(document, "p", { className: "connection-state", text: `Connected as ${state.identity ?? "authorized account"}` }));
-      const obstruction = element(document, "aside", { className: "obstruction" });
-      obstruction.setAttribute("role", "dialog");
-      obstruction.setAttribute("aria-label", "Notification preferences" );
-      obstruction.append(element(document, "p", { text: "Choose how Northstar should notify you about sync activity." }));
-      const dismiss = element(document, "button", { text: "Not now", ariaLabel: "Dismiss notification preferences" });
-      dismiss.addEventListener("click", () => obstruction.remove());
-      obstruction.append(dismiss);
-      card.append(obstruction);
+      showToast(document, "Ledger Cloud is syncing balances.");
+      document.querySelector(".chat-overlay")?.remove();
+      document.querySelector(".app-shell")?.append(chatOverlay(document));
       return;
     }
     const connect = element(document, "button", { text: "Connect Ledger Cloud", ariaLabel: "Connect Ledger Cloud" });

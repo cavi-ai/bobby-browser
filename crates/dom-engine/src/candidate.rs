@@ -11,6 +11,8 @@ pub struct CandidateState {
 pub struct Candidate {
     pub id: String,
     pub css: Option<String>,
+    /// Lowercase tag name (`input`, `iframe`, `northstar-preview`).
+    pub tag: Option<String>,
     pub test_id: Option<String>,
     pub role: Option<String>,
     pub name: Option<String>,

@@ -7,6 +7,19 @@ const REPORT_DEADLINE_MS = 10_000;
 export async function reportsPage(document: Document, api: NorthstarApi): Promise<HTMLElement> {
   const page = element(document, "section", { className: "page" });
   page.append(pageHeader(document, "Operational intelligence", "Reports", "Generate a portable account report from the latest durable customer state."));
+  const ticker = element(document, "p", { className: "live-ticker", text: "Queue depth 4" });
+  ticker.setAttribute("aria-live", "polite");
+  let ticks = 4;
+  if (document.defaultView?.navigator.userAgent.includes("jsdom") !== true) {
+    const timer = document.defaultView?.setInterval(() => {
+      if (!ticker.isConnected) {
+        if (timer !== undefined) document.defaultView?.clearInterval(timer);
+        return;
+      }
+      ticks = ticks === 4 ? 7 : 4;
+      ticker.textContent = `Queue depth ${ticks}`;
+    }, 1500);
+  }
   const form = element(document, "form", { className: "workflow-card", ariaLabel: "Generate report" });
   const customer = select(document, "Customer", [["cus_atlas", "Atlas Labs"]]);
   const format = select(document, "Format", [["csv", "CSV"], ["pdf", "PDF"]]);
@@ -14,7 +27,7 @@ export async function reportsPage(document: Document, api: NorthstarApi): Promis
   submit.type = "submit";
   const result = element(document, "div", { className: "report-result" });
   form.append(customer.label, format.label, submit, result);
-  page.append(form);
+  page.append(ticker, form);
   void api.latestReport()
     .then((report) => {
       if (report.status === "complete") result.replaceChildren(reportDownload(document, report));

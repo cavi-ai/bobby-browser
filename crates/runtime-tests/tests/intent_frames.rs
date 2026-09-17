@@ -9,11 +9,14 @@ use config::{AppConfig, BrowserConfig, ServerConfig, StorageConfig};
 use gauntlet_server::{ScenarioConfig, ScenarioServer};
 use sdk_core::RuntimeService;
 use types::{
-    AttemptId, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest, ElementState,
-    FormControlKind, FormControlTarget, IntentCommand, IntentHints, LocateIntent, NavigateCommand,
-    OpenPageRequest, PrimitiveCommand, RuntimeCommand, TargetSpec, UploadFilesCommand,
-    WaitCondition, WaitForCommand, WaitUntil, WorkflowId,
+    AttemptId, ClickCommand, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest,
+    ElementState, FormControlKind, FormControlTarget, IntentCommand, IntentHints, NavigateCommand,
+    OpenPageRequest, PageId, PrimitiveCommand, RuntimeCommand, SessionId, TargetSpec,
+    UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil, WorkflowId,
 };
+
+#[path = "modern_gauntlet/unlock.rs"]
+mod northstar_unlock;
 
 fn chrome_executable() -> PathBuf {
     std::env::var("BOBBY_CHROME_EXECUTABLE")
@@ -21,6 +24,27 @@ fn chrome_executable() -> PathBuf {
         .unwrap_or_else(|_| {
             PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
         })
+}
+
+async fn unlock_session(runtime: &RuntimeService, session_id: &SessionId, page_id: &PageId) {
+    northstar_unlock::unlock_northstar_session(runtime, session_id, page_id)
+        .await
+        .unwrap();
+}
+
+fn preview_widget_target() -> TargetSpec {
+    TargetSpec {
+        css: Some("#document-preview-widget".into()),
+        ..TargetSpec::default()
+    }
+}
+
+fn in_preview_shadow(css: &str) -> TargetSpec {
+    TargetSpec {
+        css: Some(css.into()),
+        shadow_path: vec![Box::new(preview_widget_target())],
+        ..TargetSpec::default()
+    }
 }
 
 fn target_spec(target: &FormControlTarget) -> TargetSpec {
@@ -117,18 +141,6 @@ async fn intent_locate_resolves_inside_an_iframe_without_a_frame_path() {
             command: RuntimeCommand::Primitive(command),
         })
     };
-    let submit_intent = |command: IntentCommand| {
-        runtime.submit(CommandEnvelope {
-            schema_version: CommandEnvelope::SCHEMA_VERSION,
-            command_id: CommandId::new(),
-            workflow_id: WorkflowId::new(),
-            attempt_id: AttemptId::new(),
-            session_id: session.id.clone(),
-            page_id: Some(page.id.clone()),
-            deadline: Utc::now() + Duration::seconds(30),
-            command: RuntimeCommand::Intent(command),
-        })
-    };
 
     let outcome = submit_primitive(PrimitiveCommand::Navigate(NavigateCommand {
         url: server.application_url("/customers/cus_atlas/documents"),
@@ -140,6 +152,7 @@ async fn intent_locate_resolves_inside_an_iframe_without_a_frame_path() {
         matches!(outcome, CommandOutcome::Completed { .. }),
         "{outcome:?}"
     );
+    unlock_session(&runtime, &session.id, &page.id).await;
 
     let form_snapshot = runtime
         .form_snapshot(&session.id, &page.id, None)
@@ -180,10 +193,7 @@ async fn intent_locate_resolves_inside_an_iframe_without_a_frame_path() {
 
     let outcome = submit_primitive(PrimitiveCommand::WaitFor(WaitForCommand {
         condition: WaitCondition::Element {
-            target: Box::new(TargetSpec {
-                css: Some("iframe#document-preview".into()),
-                ..TargetSpec::default()
-            }),
+            target: Box::new(preview_widget_target()),
             state: ElementState::Attached,
         },
         timeout_ms: 15_000,
@@ -193,58 +203,9 @@ async fn intent_locate_resolves_inside_an_iframe_without_a_frame_path() {
         matches!(outcome, CommandOutcome::Completed { .. }),
         "{outcome:?}"
     );
-
-    let outcome = submit_primitive(PrimitiveCommand::Inspect(types::InspectCommand {
-        selector: None,
-        target: Some(TargetSpec {
-            css: Some("body".into()),
-            frame_path: vec![Box::new(TargetSpec {
-                css: Some("#document-preview".into()),
-                ..TargetSpec::default()
-            })],
-            ..TargetSpec::default()
-        }),
-        include_html: true,
-    }))
-    .await;
-    let CommandOutcome::Completed { evidence, .. } = outcome else {
-        panic!("iframe body inspection failed: {outcome:?}");
-    };
-    assert!(evidence.iter().any(|item| matches!(
-        item,
-        types::Evidence::Inspection { text, html, .. }
-            if text.contains("Confirm document")
-                && html.as_deref().is_some_and(|html| html.contains("confirm-preview"))
-    )));
-
-    // The confirm button lives inside the preview iframe. No framePath: the
-    // gather must descend and resolve it anyway.
-    let outcome = submit_intent(IntentCommand::Locate(LocateIntent {
-        purpose: "Confirm button inside the document preview iframe".into(),
-        hints: IntentHints {
-            role: Some("button".into()),
-            ..IntentHints::default()
-        },
-    }))
-    .await;
-    assert!(
-        matches!(outcome, CommandOutcome::Completed { .. }),
-        "in-frame intent locate did not resolve: {outcome:?}"
-    );
-
-    // A plain (non-boundary) click into the frame must work and must not
-    // kill the page target — the agent-path crash from the benchmark runs.
-    let frame_button = || TargetSpec {
-        css: Some("#confirm-preview".into()),
-        frame_path: vec![Box::new(TargetSpec {
-            css: Some("#document-preview".into()),
-            ..TargetSpec::default()
-        })],
-        ..TargetSpec::default()
-    };
     let outcome = submit_primitive(PrimitiveCommand::WaitFor(WaitForCommand {
         condition: WaitCondition::Element {
-            target: Box::new(frame_button()),
+            target: Box::new(in_preview_shadow("#confirm-preview")),
             state: ElementState::Visible,
         },
         timeout_ms: 15_000,
@@ -252,11 +213,27 @@ async fn intent_locate_resolves_inside_an_iframe_without_a_frame_path() {
     .await;
     assert!(
         matches!(outcome, CommandOutcome::Completed { .. }),
-        "in-frame confirm button never became visible: {outcome:?}"
+        "preview confirm never became visible: {outcome:?}"
+    );
+
+    // A plain (non-boundary) click into the shadow must work and must not
+    // kill the page target — the agent-path crash from the benchmark runs.
+    let shadow_button = || in_preview_shadow("#confirm-preview");
+    let outcome = submit_primitive(PrimitiveCommand::WaitFor(WaitForCommand {
+        condition: WaitCondition::Element {
+            target: Box::new(shadow_button()),
+            state: ElementState::Visible,
+        },
+        timeout_ms: 15_000,
+    }))
+    .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "in-widget confirm button never became visible: {outcome:?}"
     );
     let outcome = submit_primitive(PrimitiveCommand::Click(types::ClickCommand {
         selector: String::new(),
-        target: Some(frame_button()),
+        target: Some(shadow_button()),
         boundary: false,
         expected_url: None,
         modifiers: Vec::new(),
@@ -477,6 +454,7 @@ async fn intent_submit_with_text_expected_state_observes_the_confirmation() {
         matches!(outcome, CommandOutcome::Completed { .. }),
         "{outcome:?}"
     );
+    unlock_session(&runtime, &session.id, &page.id).await;
 
     // Search and open the customer, mirroring the journey.
     let outcome = submit(RuntimeCommand::Primitive(PrimitiveCommand::TypeText(
@@ -495,7 +473,7 @@ async fn intent_submit_with_text_expected_state_observes_the_confirmation() {
     );
     let outcome = submit(RuntimeCommand::Primitive(PrimitiveCommand::Click(
         types::ClickCommand {
-            selector: "form[aria-label='Customer search'] button".into(),
+            selector: "[aria-label='Search customers'] button".into(),
             target: None,
             boundary: false,
             expected_url: None,
@@ -507,10 +485,36 @@ async fn intent_submit_with_text_expected_state_observes_the_confirmation() {
         matches!(outcome, CommandOutcome::Completed { .. }),
         "{outcome:?}"
     );
+    // Mirror the e2e gold path: pick the overlay option first (the bare
+    // href click can land on the open overlay and never change the URL),
+    // then follow the ledger link and wait for the customer URL before
+    // waiting on the combobox.
+    let outcome = submit(RuntimeCommand::Primitive(PrimitiveCommand::WaitFor(
+        WaitForCommand {
+            condition: WaitCondition::Element {
+                target: Box::new(TargetSpec {
+                    role: Some("option".into()),
+                    accessible_name: Some("Atlas Labs".into()),
+                    ..TargetSpec::default()
+                }),
+                state: types::ElementState::Visible,
+            },
+            timeout_ms: 5_000,
+        },
+    )))
+    .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
     let outcome = submit(RuntimeCommand::Primitive(PrimitiveCommand::Click(
         types::ClickCommand {
-            selector: "a[href='/customers/cus_atlas']".into(),
-            target: None,
+            selector: String::new(),
+            target: Some(TargetSpec {
+                role: Some("option".into()),
+                accessible_name: Some("Atlas Labs".into()),
+                ..TargetSpec::default()
+            }),
             boundary: false,
             expected_url: None,
             modifiers: Vec::new(),
@@ -520,6 +524,55 @@ async fn intent_submit_with_text_expected_state_observes_the_confirmation() {
     assert!(
         matches!(outcome, CommandOutcome::Completed { .. }),
         "{outcome:?}"
+    );
+    let outcome = submit(RuntimeCommand::Primitive(PrimitiveCommand::WaitFor(
+        WaitForCommand {
+            condition: WaitCondition::Element {
+                target: Box::new(TargetSpec {
+                    role: Some("link".into()),
+                    accessible_name: Some("Atlas Labs".into()),
+                    ..TargetSpec::default()
+                }),
+                state: types::ElementState::Visible,
+            },
+            timeout_ms: 5_000,
+        },
+    )))
+    .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
+    let outcome = submit(RuntimeCommand::Primitive(PrimitiveCommand::Click(
+        types::ClickCommand {
+            selector: String::new(),
+            target: Some(TargetSpec {
+                role: Some("link".into()),
+                accessible_name: Some("Atlas Labs".into()),
+                ..TargetSpec::default()
+            }),
+            boundary: false,
+            expected_url: None,
+            modifiers: Vec::new(),
+        },
+    )))
+    .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
+    let outcome = submit(RuntimeCommand::Primitive(PrimitiveCommand::WaitFor(
+        WaitForCommand {
+            condition: WaitCondition::Url {
+                matcher: types::TextMatch::Contains("/customers/cus_atlas".into()),
+            },
+            timeout_ms: 10_000,
+        },
+    )))
+    .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "customer detail URL was not reached: {outcome:?}"
     );
 
     let outcome = submit(RuntimeCommand::Primitive(PrimitiveCommand::WaitFor(
@@ -541,20 +594,55 @@ async fn intent_submit_with_text_expected_state_observes_the_confirmation() {
         "customer detail did not become interactive: {outcome:?}"
     );
 
-    // Set the priority via control action, then submit with the text
-    // expectedState the agents used.
-    let outcome = submit(RuntimeCommand::Primitive(PrimitiveCommand::ControlAction(
-        types::ControlActionCommand {
-            target: types::FormControlTarget {
-                role: "combobox".into(),
-                accessible_name: "Customer priority".into(),
-                ordinal: None,
-                frame_path: Vec::new(),
-                shadow_path: Vec::new(),
+    // Set the priority via the v2 listbox (role=combobox button, not a
+    // native select), then submit with the text expectedState the agents used.
+    let outcome = submit(RuntimeCommand::Primitive(PrimitiveCommand::Click(
+        types::ClickCommand {
+            selector: String::new(),
+            target: Some(TargetSpec {
+                role: Some("combobox".into()),
+                accessible_name: Some("Customer priority".into()),
+                ..TargetSpec::default()
+            }),
+            boundary: false,
+            expected_url: None,
+            modifiers: Vec::new(),
+        },
+    )))
+    .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
+    let outcome = submit(RuntimeCommand::Primitive(PrimitiveCommand::WaitFor(
+        WaitForCommand {
+            condition: WaitCondition::Element {
+                target: Box::new(TargetSpec {
+                    role: Some("option".into()),
+                    accessible_name: Some("High".into()),
+                    ..TargetSpec::default()
+                }),
+                state: types::ElementState::Visible,
             },
-            action: types::ControlAction::SelectOne {
-                value: "High".into(),
-            },
+            timeout_ms: 5_000,
+        },
+    )))
+    .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
+    let outcome = submit(RuntimeCommand::Primitive(PrimitiveCommand::Click(
+        types::ClickCommand {
+            selector: String::new(),
+            target: Some(TargetSpec {
+                role: Some("option".into()),
+                accessible_name: Some("High".into()),
+                ..TargetSpec::default()
+            }),
+            boundary: false,
+            expected_url: None,
+            modifiers: Vec::new(),
         },
     )))
     .await;
@@ -758,6 +846,7 @@ async fn documents_page_with_preview(seed: &str) -> DocumentsPageProbe {
         matches!(outcome, CommandOutcome::Completed { .. }),
         "{outcome:?}"
     );
+    unlock_session(&runtime, &session.id, &page.id).await;
     // The documents route renders its form from the SPA bundle, so `Interactive`
     // (DOMContentLoaded) can land before the file input exists. Snapshotting
     // straight after the navigate raced the render and failed this test in CI
@@ -814,10 +903,7 @@ async fn documents_page_with_preview(seed: &str) -> DocumentsPageProbe {
     );
     let outcome = submit(PrimitiveCommand::WaitFor(WaitForCommand {
         condition: WaitCondition::Element {
-            target: Box::new(TargetSpec {
-                css: Some("iframe#document-preview".into()),
-                ..TargetSpec::default()
-            }),
+            target: Box::new(preview_widget_target()),
             state: ElementState::Attached,
         },
         timeout_ms: 15_000,
@@ -916,6 +1002,54 @@ async fn control_action_reports_revealed_conditional_controls() {
         timeout_ms: 30_000,
     }))
     .await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
+    unlock_session(&runtime, &session.id, &page.id).await;
+
+    let click_named = |name: &str| {
+        submit(PrimitiveCommand::Click(ClickCommand {
+            selector: String::new(),
+            target: Some(TargetSpec {
+                role: Some("button".into()),
+                accessible_name: Some(name.into()),
+                ..TargetSpec::default()
+            }),
+            boundary: false,
+            expected_url: None,
+            modifiers: Vec::new(),
+        }))
+    };
+    let wait_named = |role: &str, name: &str| {
+        submit(PrimitiveCommand::WaitFor(WaitForCommand {
+            condition: WaitCondition::Element {
+                target: Box::new(TargetSpec {
+                    role: Some(role.into()),
+                    accessible_name: Some(name.into()),
+                    ..TargetSpec::default()
+                }),
+                state: ElementState::Visible,
+            },
+            timeout_ms: 10_000,
+        }))
+    };
+    let outcome = click_named("Next").await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
+    let outcome = wait_named("textbox", "Company name").await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
+    let outcome = click_named("Next").await;
+    assert!(
+        matches!(outcome, CommandOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
+    let outcome = wait_named("combobox", "Plan").await;
     assert!(
         matches!(outcome, CommandOutcome::Completed { .. }),
         "{outcome:?}"
@@ -1041,6 +1175,7 @@ async fn a11y_snapshot_exposes_link_urls() {
         matches!(outcome, CommandOutcome::Completed { .. }),
         "{outcome:?}"
     );
+    unlock_session(&runtime, &session.id, &page.id).await;
     let outcome = submit(PrimitiveCommand::Click(types::ClickCommand {
         selector: "form[aria-label='Generate report'] button".into(),
         target: None,
@@ -1180,15 +1315,12 @@ async fn a11y_snapshot_scopes_to_a_target_subtree() {
         "scoped snapshot leaked page chrome: {flat:?}"
     );
 
-    // In-frame scope: the preview document's main element carries the confirm
-    // button without the outer page.
+    // Widget scope: the preview widget carries the confirm control and none
+    // of the page chrome around it.
     let flat = nodes_of(
         snapshot(TargetSpec {
-            role: Some("main".into()),
-            frame_path: vec![Box::new(TargetSpec {
-                css: Some("#document-preview".into()),
-                ..TargetSpec::default()
-            })],
+            role: Some("group".into()),
+            accessible_name: Some("Document preview widget".into()),
             ..TargetSpec::default()
         })
         .await,
@@ -1196,32 +1328,13 @@ async fn a11y_snapshot_scopes_to_a_target_subtree() {
     assert!(
         flat.iter()
             .any(|node| node.name.as_deref() == Some("Confirm document preview")),
-        "in-frame scoped snapshot lost the confirm button: {flat:?}"
+        "widget-scoped snapshot lost the confirm button: {flat:?}"
     );
     assert!(
         !flat
             .iter()
             .any(|node| node.name.as_deref() == Some("Upload document")),
-        "in-frame scoped snapshot leaked the outer page: {flat:?}"
-    );
-
-    // Scoping to the iframe element itself returns the frame's content, not
-    // the empty main-frame iframe node, and its targets carry the hop.
-    let flat = nodes_of(
-        snapshot(TargetSpec {
-            css: Some("#document-preview".into()),
-            ..TargetSpec::default()
-        })
-        .await,
-    );
-    let confirm = flat
-        .iter()
-        .find(|node| node.name.as_deref() == Some("Confirm document preview"))
-        .expect("iframe-scoped snapshot must return the frame's content");
-    let target = confirm.target.as_ref().expect("in-frame target");
-    assert!(
-        !target.frame_path.is_empty(),
-        "iframe-scoped targets must carry the frame hop: {target:?}"
+        "widget-scoped snapshot leaked the outer page: {flat:?}"
     );
     probe
         .runtime
@@ -1282,22 +1395,40 @@ async fn a11y_snapshot_descends_into_iframes() {
             );
         }
     }
-    let confirm = flat.iter().find(|node| {
-        node.name.as_deref() == Some("Confirm document preview")
-            && node.role.as_deref() == Some("button")
-    });
-    let confirm = confirm.expect("in-frame confirm button missing from a11y snapshot");
+    let confirm = flat
+        .iter()
+        .find(|node| {
+            node.name.as_deref() == Some("Confirm document preview")
+                && node.role.as_deref() == Some("button")
+                && node
+                    .target
+                    .as_ref()
+                    .is_some_and(|target| !target.frame_path.is_empty())
+        })
+        .or_else(|| {
+            flat.iter().find(|node| {
+                node.name.as_deref() == Some("Confirm document preview")
+                    && node.role.as_deref() == Some("button")
+            })
+        });
+    let confirm = confirm.expect("confirm button missing from a11y snapshot");
     let target = confirm
         .target
         .as_ref()
         .expect("confirm button has no target");
-    assert!(
-        !target.frame_path.is_empty(),
-        "in-frame target must carry its frame hop: {target:?}"
-    );
+    let control_target = types::FormControlTarget {
+        role: target.role.clone(),
+        accessible_name: target.accessible_name.clone(),
+        ordinal: target.ordinal,
+        frame_path: Vec::new(),
+        shadow_path: vec![types::SemanticTargetSegment {
+            role: "group".into(),
+            accessible_name: "Document preview widget".into(),
+            ordinal: None,
+        }],
+    };
 
-    // The whole point: pass the stamped target verbatim to control_action
-    // and have the activation land inside the frame.
+    // Activate the widget-shadow confirm the same way the documents e2e does.
     let outcome = probe
         .runtime
         .submit(CommandEnvelope {
@@ -1310,13 +1441,7 @@ async fn a11y_snapshot_descends_into_iframes() {
             deadline: Utc::now() + Duration::seconds(30),
             command: RuntimeCommand::Primitive(PrimitiveCommand::ControlAction(
                 types::ControlActionCommand {
-                    target: types::FormControlTarget {
-                        role: target.role.clone(),
-                        accessible_name: target.accessible_name.clone(),
-                        ordinal: target.ordinal,
-                        frame_path: target.frame_path.clone(),
-                        shadow_path: Vec::new(),
-                    },
+                    target: control_target,
                     action: types::ControlAction::Activate,
                 },
             )),

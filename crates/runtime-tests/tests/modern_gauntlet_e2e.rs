@@ -7,36 +7,40 @@ use modern_gauntlet::driver::{Journey, ModernRuntime};
 use modern_gauntlet::evidence::{
     assert_effect_count, assert_file_digest, assert_journal_terminal_once, EvidenceBundle,
 };
-use modern_gauntlet::scenario::{ScenarioConfig, ScenarioServer};
+use modern_gauntlet::scenario::{
+    ScenarioConfig, ScenarioServer, MFA_CODE, OPERATOR_EMAIL, OPERATOR_PASSWORD, THREE_DS_CODE,
+};
 use sha2::{Digest, Sha256};
-use types::{Evidence, RecoveryDecision};
+use types::{ControlAction, Evidence, RecoveryDecision, TextMatch, WaitCondition, WaitForCommand};
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-const REQUIRED_JOURNEYS: [&str; 5] = [
+const REQUIRED_JOURNEYS: [&str; 7] = [
+    "session_survives_cmp_login_and_mfa",
     "customer_discovery_and_update_is_durable",
     "validated_onboarding_preserves_accepted_values",
     "document_upload_preview_and_confirmation_are_durable",
     "popup_authorization_survives_obstruction",
+    "checkout_address_calendar_and_3ds_charge_is_durable",
     "interrupted_report_recovers_once_and_downloads",
 ];
 
 #[test]
 fn release_suite_names_are_stable() {
-    assert_eq!(REQUIRED_JOURNEYS.len(), 5);
+    assert_eq!(REQUIRED_JOURNEYS.len(), 7);
     assert_eq!(
         REQUIRED_JOURNEYS
             .iter()
             .copied()
             .collect::<BTreeSet<_>>()
             .len(),
-        5
+        7
     );
     let source = include_str!("modern_gauntlet_e2e.rs");
     assert_eq!(
         source.matches("#[tokio::test]\nasync fn ").count(),
-        5,
-        "release file must contain exactly five Tokio browser tests"
+        7,
+        "release file must contain exactly seven Tokio browser tests"
     );
     assert!(
         !source.contains(concat!("#[", "ignore")),
@@ -80,16 +84,81 @@ fn level_two_recaptcha_training_ground() -> TestResult<()> {
 }
 
 #[tokio::test]
+async fn session_survives_cmp_login_and_mfa() -> TestResult<()> {
+    let server = ScenarioServer::start(ScenarioConfig::seeded("session")).await?;
+    let runtime = ModernRuntime::launch(&server, Journey::Session).await?;
+    runtime
+        .dismiss("Accept all cookies", "Accept all cookies")
+        .await?;
+    runtime
+        .complete_form(
+            "Operator sign in",
+            vec![
+                ModernRuntime::text_field("Work email", "Work email", OPERATOR_EMAIL),
+                ModernRuntime::text_field("Password", "Password", OPERATOR_PASSWORD),
+            ],
+        )
+        .await?;
+    runtime
+        .submit_and_verify(
+            "Continue",
+            "Continue",
+            ModernRuntime::wait_named_cmd("textbox", "Authentication code"),
+        )
+        .await?;
+    runtime
+        .fill_named(
+            "Authentication code",
+            "textbox",
+            "Authentication code",
+            ControlAction::SetText {
+                value: MFA_CODE.into(),
+                clear_first: true,
+            },
+        )
+        .await?;
+    runtime
+        .submit_and_verify(
+            "Verify code",
+            "Verify code",
+            ModernRuntime::wait_named_cmd("navigation", "Primary navigation"),
+        )
+        .await?;
+    let snapshot = server.snapshot().await;
+    persist_evidence("session", &server, &runtime).await?;
+    assert_eq!(snapshot.consent.as_deref(), Some("accept"));
+    assert_eq!(snapshot.session_email.as_deref(), Some(OPERATOR_EMAIL));
+    assert!(snapshot.mfa_completions >= 1);
+    runtime.mark_completed("session")?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn customer_discovery_and_update_is_durable() -> TestResult<()> {
     let server = ScenarioServer::start(ScenarioConfig::seeded("customer-update")).await?;
     let runtime = ModernRuntime::launch(&server, Journey::CustomerUpdate).await?;
     runtime
-        .type_text("input[aria-label='Search customers']", "Atlas")
+        .type_named("combobox", "Search customers", "Atlas")
         .await?;
     runtime
-        .click("form[aria-label='Customer search'] button", false)
+        .follow(
+            "Search",
+            "button",
+            "Search",
+            ModernRuntime::wait_named_cmd("option", "Atlas Labs"),
+            false,
+        )
         .await?;
-    if let Err(error) = runtime.wait_visible("a[href='/customers/cus_atlas']").await {
+    runtime
+        .follow(
+            "Atlas Labs",
+            "option",
+            "Atlas Labs",
+            ModernRuntime::wait_named_cmd("link", "Atlas Labs"),
+            false,
+        )
+        .await?;
+    if let Err(error) = runtime.wait_named("link", "Atlas Labs").await {
         let diagnostic = runtime
             .accessibility_snapshot()
             .await
@@ -98,16 +167,23 @@ async fn customer_discovery_and_update_is_durable() -> TestResult<()> {
         return Err(format!("{error}; browser accessibility: {diagnostic}").into());
     }
     runtime
-        .click("a[href='/customers/cus_atlas']", false)
+        .follow(
+            "Atlas Labs",
+            "link",
+            "Atlas Labs",
+            wait_url("/customers/cus_atlas"),
+            false,
+        )
         .await?;
+    runtime.wait_named("combobox", "Customer priority").await?;
+    runtime.choose_option("Customer priority", "High").await?;
     runtime
-        .wait_visible("select[aria-label='Customer priority']")
+        .submit_and_verify(
+            "Save priority",
+            "Save priority",
+            wait_status_named("Priority saved"),
+        )
         .await?;
-    runtime.select_one("Customer priority", "high").await?;
-    runtime
-        .click("form[aria-label='Update customer priority'] button", true)
-        .await?;
-    runtime.wait_visible("[role='status']").await?;
     let visible = runtime.inspect(Some("[role='status']")).await?;
     assert!(inspection_text(&visible).contains("Priority saved"));
     let snapshot = server.snapshot().await;
@@ -123,27 +199,57 @@ async fn customer_discovery_and_update_is_durable() -> TestResult<()> {
 async fn validated_onboarding_preserves_accepted_values() -> TestResult<()> {
     let server = ScenarioServer::start(ScenarioConfig::seeded("onboarding")).await?;
     let runtime = ModernRuntime::launch(&server, Journey::Onboarding).await?;
-    for (selector, value) in [
-        ("input[aria-label='Full name']", "Maya Chen"),
-        ("input[aria-label='Work email']", "maya@atlas.example"),
-        ("input[aria-label='Company name']", "Atlas Labs"),
-        ("input[aria-label='Postal code']", "02110"),
-    ] {
-        runtime.type_text(selector, value).await?;
-    }
-    runtime.select_one("Plan", "growth").await?;
     runtime
-        .wait_visible("select[aria-label='Billing cycle']")
-        .await?;
-    runtime.select_one("Billing cycle", "annual").await?;
-    runtime
-        .click(
-            "form[aria-label='Customer onboarding'] button[type='submit']",
-            true,
+        .complete_form(
+            "Customer identity",
+            vec![
+                ModernRuntime::text_field("Full name", "Full name", "Maya Chen"),
+                ModernRuntime::text_field("Work email", "Work email", "maya@atlas.example"),
+            ],
         )
         .await?;
     runtime
-        .wait_visible("input[aria-label='Postal code'][aria-invalid='true']")
+        .follow(
+            "Next",
+            "button",
+            "Next",
+            ModernRuntime::wait_named_cmd("textbox", "Company name"),
+            false,
+        )
+        .await?;
+    runtime
+        .complete_form(
+            "Company details",
+            vec![
+                ModernRuntime::text_field("Company name", "Company name", "Atlas Labs"),
+                ModernRuntime::text_field("Postal code", "Postal code", "02110"),
+            ],
+        )
+        .await?;
+    runtime
+        .follow(
+            "Back",
+            "button",
+            "Back",
+            ModernRuntime::wait_named_cmd("textbox", "Full name"),
+            false,
+        )
+        .await?;
+    let identity = runtime
+        .inspect(Some("input[aria-label='Full name']"))
+        .await?;
+    assert!(
+        inspection_text(&identity).contains("Maya Chen")
+            || inspection_html(&identity).contains("Maya Chen")
+    );
+    runtime
+        .follow(
+            "Next",
+            "button",
+            "Next",
+            ModernRuntime::wait_named_cmd("textbox", "Company name"),
+            false,
+        )
         .await?;
     let company = runtime
         .inspect(Some("input[aria-label='Company name']"))
@@ -153,16 +259,59 @@ async fn validated_onboarding_preserves_accepted_values() -> TestResult<()> {
             || inspection_html(&company).contains("Atlas Labs")
     );
     runtime
-        .type_text("input[aria-label='Postal code']", "10001")
+        .follow(
+            "Next",
+            "button",
+            "Next",
+            ModernRuntime::wait_named_cmd("combobox", "Plan"),
+            false,
+        )
         .await?;
+    runtime.select_one("Plan", "growth").await?;
+    runtime.wait_named("combobox", "Billing cycle").await?;
+    runtime.select_one("Billing cycle", "annual").await?;
     runtime
-        .click(
-            "form[aria-label='Customer onboarding'] button[type='submit']",
-            true,
+        .submit_and_verify(
+            "Create customer",
+            "Create customer",
+            WaitForCommand {
+                condition: WaitCondition::Element {
+                    target: Box::new(types::TargetSpec {
+                        css: Some("input[aria-label='Postal code'][aria-invalid='true']".into()),
+                        ..types::TargetSpec::default()
+                    }),
+                    state: types::ElementState::Visible,
+                },
+                timeout_ms: 10_000,
+            },
         )
         .await?;
     runtime
-        .wait_visible("form[aria-label='Customer onboarding'] [role='status']")
+        .fill_named(
+            "Postal code",
+            "textbox",
+            "Postal code",
+            ControlAction::SetText {
+                value: "10001".into(),
+                clear_first: true,
+            },
+        )
+        .await?;
+    runtime
+        .follow(
+            "Next",
+            "button",
+            "Next",
+            ModernRuntime::wait_named_cmd("combobox", "Plan"),
+            false,
+        )
+        .await?;
+    runtime
+        .submit_and_verify(
+            "Create customer",
+            "Create customer",
+            wait_status("Customer created"),
+        )
         .await?;
     let snapshot = server.snapshot().await;
     persist_evidence("onboarding", &server, &runtime).await?;
@@ -187,10 +336,7 @@ async fn document_upload_preview_and_confirmation_are_durable() -> TestResult<()
     let server = ScenarioServer::start(ScenarioConfig::seeded("documents")).await?;
     let runtime = ModernRuntime::launch(&server, Journey::Documents).await?;
     let fixture = runtime.fixture_path("approved-upload.txt");
-    if let Err(error) = runtime
-        .wait_visible("input[aria-label='Customer document']")
-        .await
-    {
+    if let Err(error) = runtime.wait_named("button", "Upload document").await {
         return Err(format!(
             "{error}; browser accessibility: {:?}",
             runtime.accessibility_snapshot().await?
@@ -201,15 +347,33 @@ async fn document_upload_preview_and_confirmation_are_durable() -> TestResult<()
         .upload("input[aria-label='Customer document']", &fixture)
         .await?;
     runtime
-        .click("form[aria-label='Upload customer document'] button", true)
+        .submit_and_verify(
+            "Upload document",
+            "Upload document",
+            wait_status("Upload complete"),
+        )
         .await?;
-    runtime.wait_visible("iframe[title^='Preview of']").await?;
     runtime
-        .wait_in_frame_button("#document-preview", "#confirm-preview")
+        .wait_named("group", "Document preview widget")
         .await?;
     runtime
-        .click_in_frame("#document-preview", "#confirm-preview")
+        .wait_shadow_named(
+            "group",
+            "Document preview widget",
+            "button",
+            "Confirm document preview",
+        )
         .await?;
+    runtime
+        .click_shadow_named(
+            "group",
+            "Document preview widget",
+            "button",
+            "Confirm document preview",
+            true,
+        )
+        .await?;
+    runtime.wait_named("status", "Document confirmed").await?;
     server.wait_for_preview_confirmation().await?;
     let snapshot = server.snapshot().await;
     let expected = hex::encode(Sha256::digest(std::fs::read(&fixture)?));
@@ -230,25 +394,114 @@ async fn document_upload_preview_and_confirmation_are_durable() -> TestResult<()
 async fn popup_authorization_survives_obstruction() -> TestResult<()> {
     let server = ScenarioServer::start(ScenarioConfig::seeded("authorization")).await?;
     let runtime = ModernRuntime::launch(&server, Journey::Authorization).await?;
-    runtime
-        .wait_visible("button[aria-label='Connect Ledger Cloud']")
-        .await?;
+    runtime.wait_named("button", "Connect Ledger Cloud").await?;
     let popup = runtime
-        .click_popup("button[aria-label='Connect Ledger Cloud']")
+        .click_popup_named("button", "Connect Ledger Cloud")
         .await?;
     runtime.click_on(&popup, "#authorize").await?;
     runtime.wait_visible("[data-connected='true']").await?;
     assert_eq!(runtime.page_count().await?, 1, "authorization popup leaked");
     runtime
-        .click(
-            "button[aria-label='Dismiss notification preferences']",
-            false,
-        )
+        .dismiss("Dismiss notification", "Dismiss notification")
+        .await?;
+    runtime
+        .dismiss("Dismiss workspace assistant", "Dismiss workspace assistant")
         .await?;
     let snapshot = server.snapshot().await;
     persist_evidence("authorization", &server, &runtime).await?;
     assert_effect_count("authorization grant", snapshot.authorization_grants, 1)?;
     runtime.mark_completed("authorization")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn checkout_address_calendar_and_3ds_charge_is_durable() -> TestResult<()> {
+    let server = ScenarioServer::start(ScenarioConfig::seeded("checkout")).await?;
+    let runtime = ModernRuntime::launch(&server, Journey::Checkout).await?;
+    runtime.select_one("Plan", "growth").await?;
+    runtime
+        .type_named("combobox", "Billing address", "Federal")
+        .await?;
+    runtime
+        .follow(
+            "Atlas Labs Boston",
+            "option",
+            "Atlas Labs Boston",
+            wait_value("textbox", "Street", "Federal"),
+            false,
+        )
+        .await?;
+    runtime
+        .follow(
+            "2026-01-06",
+            "gridcell",
+            "2026-01-06",
+            ModernRuntime::wait_named_cmd("gridcell", "2026-01-06"),
+            false,
+        )
+        .await?;
+    runtime
+        .follow(
+            "2026-01-20",
+            "gridcell",
+            "2026-01-20",
+            ModernRuntime::wait_named_cmd("gridcell", "2026-01-20"),
+            false,
+        )
+        .await?;
+    runtime.wait_named("iframe", "Card details").await?;
+    runtime
+        .wait_in_named_frame("Card details", "textbox", "Card number")
+        .await?;
+    runtime
+        .type_in_frame("Card details", "Card number", "4242424242424242")
+        .await?;
+    runtime
+        .type_in_frame("Card details", "Expiry", "12/28")
+        .await?;
+    runtime.type_in_frame("Card details", "CVC", "123").await?;
+    runtime
+        .click_in_named_frame("Card details", "button", "Save card")
+        .await?;
+    runtime.wait_named("iframe", "3-D Secure challenge").await?;
+    runtime
+        .wait_in_named_frame("3-D Secure challenge", "textbox", "Challenge code")
+        .await?;
+    runtime
+        .type_in_frame("3-D Secure challenge", "Challenge code", THREE_DS_CODE)
+        .await?;
+    runtime
+        .click_in_named_frame("3-D Secure challenge", "button", "Verify payment")
+        .await?;
+    runtime
+        .submit_and_verify(
+            "Charge Atlas Labs",
+            "Charge Atlas Labs",
+            wait_status("Charged 8400 cents"),
+        )
+        .await?;
+    let snapshot = server.snapshot().await;
+    persist_evidence("checkout", &server, &runtime).await?;
+    assert_eq!(snapshot.three_ds_completions, 1);
+    assert_eq!(
+        snapshot.charge.as_ref().map(|charge| charge.amount_cents),
+        Some(8400)
+    );
+    assert_eq!(
+        snapshot
+            .billing_address
+            .as_ref()
+            .map(|address| address.postal_code.as_str()),
+        Some("02110")
+    );
+    assert_eq!(
+        snapshot
+            .billing_period
+            .as_ref()
+            .map(|period| (period.start.as_str(), period.end.as_str())),
+        Some(("2026-01-06", "2026-01-20"))
+    );
+    runtime.mark_completed("checkout")?;
     Ok(())
 }
 
@@ -301,6 +554,52 @@ async fn interrupted_report_recovers_once_and_downloads() -> TestResult<()> {
     assert_journal_terminal_once(runtime.journal_path())?;
     runtime.mark_completed("report-recovery")?;
     Ok(())
+}
+
+fn wait_url(needle: &str) -> WaitForCommand {
+    WaitForCommand {
+        condition: WaitCondition::Url {
+            matcher: TextMatch::Contains(needle.into()),
+        },
+        timeout_ms: 10_000,
+    }
+}
+
+fn wait_status(contains: &str) -> WaitForCommand {
+    WaitForCommand {
+        condition: WaitCondition::Text {
+            target: Box::new(types::TargetSpec {
+                role: Some("status".into()),
+                ..types::TargetSpec::default()
+            }),
+            matcher: TextMatch::Contains(contains.into()),
+        },
+        timeout_ms: 10_000,
+    }
+}
+
+fn wait_status_named(name: &str) -> WaitForCommand {
+    WaitForCommand {
+        condition: WaitCondition::Text {
+            target: Box::new(types::TargetSpec {
+                role: Some("status".into()),
+                accessible_name: Some(name.into()),
+                ..types::TargetSpec::default()
+            }),
+            matcher: TextMatch::Exact(name.into()),
+        },
+        timeout_ms: 10_000,
+    }
+}
+
+fn wait_value(role: &str, name: &str, contains: &str) -> WaitForCommand {
+    WaitForCommand {
+        condition: WaitCondition::Value {
+            target: Box::new(ModernRuntime::named_target(role, name)),
+            matcher: TextMatch::Contains(contains.into()),
+        },
+        timeout_ms: 10_000,
+    }
 }
 
 fn inspection_text(evidence: &[Evidence]) -> String {

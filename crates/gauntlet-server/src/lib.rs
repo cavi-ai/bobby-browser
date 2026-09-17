@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::extract::{Multipart, Path as AxumPath, Query, State};
-use axum::http::{header, HeaderMap, Request, Response, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, Request, Response, StatusCode};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
@@ -162,6 +162,15 @@ pub struct ScenarioSnapshot {
     pub preview_confirmations: u64,
     pub authorization_grants: u64,
     pub report_generations: u64,
+    pub consent: Option<String>,
+    pub session_email: Option<String>,
+    pub mfa_code: String,
+    pub mfa_completions: u64,
+    pub three_ds_code: String,
+    pub three_ds_completions: u64,
+    pub billing_address: Option<BillingAddress>,
+    pub billing_period: Option<BillingPeriod>,
+    pub charge: Option<ChargeRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -173,6 +182,39 @@ pub struct OnboardingRecord {
     pub postal_code: String,
     pub plan: String,
     pub billing_cycle: String,
+}
+
+pub const OPERATOR_EMAIL: &str = "maya@northstar.example";
+pub const OPERATOR_PASSWORD: &str = "atlas-ops-2026";
+pub const MFA_CODE: &str = "246813";
+pub const THREE_DS_CODE: &str = "391726";
+const SESSION_COOKIE: &str = "northstar-session";
+const CONSENT_COOKIE: &str = "northstar-consent";
+const ATLAS_ROW: usize = 24;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BillingAddress {
+    pub street: String,
+    pub city: String,
+    pub postal_code: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BillingPeriod {
+    pub start: String,
+    pub end: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChargeRecord {
+    pub plan: String,
+    pub amount_cents: u64,
+    pub address: BillingAddress,
+    pub period: BillingPeriod,
 }
 
 #[derive(Debug)]
@@ -191,6 +233,15 @@ struct RunState {
     authorization_grants: u64,
     report_generations: u64,
     requests: Vec<String>,
+    consent: Option<String>,
+    session_email: Option<String>,
+    mfa_pending: bool,
+    mfa_completions: u64,
+    card_token: Option<String>,
+    three_ds_completions: u64,
+    billing_address: Option<BillingAddress>,
+    billing_period: Option<BillingPeriod>,
+    charge: Option<ChargeRecord>,
 }
 
 struct SharedState {
@@ -260,6 +311,15 @@ impl ScenarioServer {
                 authorization_grants: 0,
                 report_generations: 0,
                 requests: Vec::new(),
+                consent: None,
+                session_email: None,
+                mfa_pending: false,
+                mfa_completions: 0,
+                card_token: None,
+                three_ds_completions: 0,
+                billing_address: None,
+                billing_period: None,
+                charge: None,
             }),
             report_generated: Notify::new(),
             preview_confirmed: Notify::new(),
@@ -285,6 +345,16 @@ impl ScenarioServer {
             .route("/api/reports/latest", get(latest_report))
             .route("/api/reports/{id}", get(report_state))
             .route("/api/reports/{id}/download", get(download_report))
+            .route("/api/consent", get(consent_state).post(set_consent))
+            .route("/api/session", get(session_state))
+            .route("/api/session/login", post(login))
+            .route("/api/session/mfa", post(verify_mfa))
+            .route("/api/billing/addresses", get(billing_addresses))
+            .route("/api/billing/tokenize", post(tokenize_card))
+            .route("/api/billing/3ds", post(verify_three_ds))
+            .route("/api/billing/charge", post(charge_atlas))
+            .route("/pay/card", get(card_frame))
+            .route("/pay/3ds", get(three_ds_frame))
             // Tool-neutral verification surface for out-of-process drivers:
             // the same state `snapshot()` and `request_log()` expose
             // in-process, as JSON over HTTP.
@@ -383,6 +453,15 @@ impl Drop for ScenarioServer {
                     "previewConfirmations": inner.preview_confirmations,
                     "authorizationGrants": inner.authorization_grants,
                     "reportGenerations": inner.report_generations,
+                    "consent": inner.consent,
+                    "sessionEmail": inner.session_email,
+                    "mfaCode": MFA_CODE,
+                    "mfaCompletions": inner.mfa_completions,
+                    "threeDsCode": THREE_DS_CODE,
+                    "threeDsCompletions": inner.three_ds_completions,
+                    "billingAddress": inner.billing_address,
+                    "billingPeriod": inner.billing_period,
+                    "charge": inner.charge,
                 });
                 if let Ok(bytes) = serde_json::to_vec_pretty(&snapshot) {
                     let _ = std::fs::write(directory.join("server-state.json"), bytes);
@@ -411,12 +490,40 @@ fn require_run(headers: &HeaderMap, state: &SharedState) -> Result<(), (StatusCo
     }
 }
 
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
+    raw.split(';').find_map(|part| {
+        let (key, value) = part.trim().split_once('=')?;
+        (key == name).then(|| value.to_string())
+    })
+}
+
+fn require_session(
+    headers: &HeaderMap,
+    state: &SharedState,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    require_run(headers, state)?;
+    if cookie_value(headers, SESSION_COOKIE).as_deref() == Some("operator") {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "code": "unauthenticated", "message": "Sign in to continue." })),
+        ))
+    }
+}
+
+fn set_cookie(name: &str, value: &str) -> HeaderValue {
+    HeaderValue::from_str(&format!("{name}={value}; Path=/; SameSite=Lax"))
+        .expect("cookie header is valid")
+}
+
 async fn record(state: &SharedState, value: impl Into<String>) {
     state.inner.lock().await.requests.push(value.into());
 }
 
 async fn dashboard(State(state): State<Arc<SharedState>>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(error) = require_run(&headers, &state) {
+    if let Err(error) = require_session(&headers, &state) {
         return error.into_response();
     }
     record(&state, "GET /api/dashboard").await;
@@ -433,7 +540,7 @@ async fn customers(
     headers: HeaderMap,
     Query(query): Query<CustomerQuery>,
 ) -> impl IntoResponse {
-    if let Err(error) = require_run(&headers, &state) {
+    if let Err(error) = require_session(&headers, &state) {
         return error.into_response();
     }
     record(
@@ -445,16 +552,8 @@ async fn customers(
     )
     .await;
     let inner = state.inner.lock().await;
-    let matches = query
-        .q
-        .as_deref()
-        .is_none_or(|value| value.is_empty() || "atlas labs".contains(&value.to_ascii_lowercase()));
-    let values = if matches {
-        vec![customer_json(&inner)]
-    } else {
-        Vec::new()
-    };
-    Json(values).into_response()
+    let query = query.q.as_deref().unwrap_or_default();
+    Json(catalog(&inner, query)).into_response()
 }
 
 async fn customer(
@@ -462,19 +561,19 @@ async fn customer(
     headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> impl IntoResponse {
-    if let Err(error) = require_run(&headers, &state) {
+    if let Err(error) = require_session(&headers, &state) {
         return error.into_response();
     }
     record(&state, format!("GET /api/customers/{id}")).await;
-    if id != "cus_atlas" {
-        return (
+    let inner = state.inner.lock().await;
+    match customer_by_id(&inner, &id) {
+        Some(value) => Json(value).into_response(),
+        None => (
             StatusCode::NOT_FOUND,
             Json(json!({ "code": "not_found", "message": "Customer not found." })),
         )
-            .into_response();
+            .into_response(),
     }
-    let inner = state.inner.lock().await;
-    Json(customer_json(&inner)).into_response()
 }
 
 #[derive(Deserialize)]
@@ -488,7 +587,7 @@ async fn update_priority(
     AxumPath(id): AxumPath<String>,
     Json(body): Json<PriorityBody>,
 ) -> impl IntoResponse {
-    if let Err(error) = require_run(&headers, &state) {
+    if let Err(error) = require_session(&headers, &state) {
         return error.into_response();
     }
     if id != "cus_atlas" || !["low", "normal", "high"].contains(&body.priority.as_str()) {
@@ -511,6 +610,50 @@ fn customer_json(state: &RunState) -> Value {
     json!({ "id": "cus_atlas", "name": "Atlas Labs", "email": "ops@atlas.example", "company": "Atlas Labs", "joinedAt": "2026-01-15", "priority": state.atlas_priority, "status": "active" })
 }
 
+fn decoy_name(index: usize) -> String {
+    match index {
+        8 => "Atlas Maritime".into(),
+        11 => "Atlas Analytics".into(),
+        _ => format!("Helios Freight {index:02}"),
+    }
+}
+
+fn catalog(state: &RunState, query: &str) -> Vec<Value> {
+    let needle = query.trim().to_ascii_lowercase();
+    (0..40)
+        .filter_map(|index| {
+            let row = if index == ATLAS_ROW {
+                customer_json(state)
+            } else {
+                json!({
+                    "id": format!("cus_decoy_{index:02}"),
+                    "name": decoy_name(index),
+                    "email": format!("ops-{index}@decoy.example"),
+                    "company": decoy_name(index),
+                    "joinedAt": "2025-11-02",
+                    "priority": "normal",
+                    "status": if index == 3 { "paused" } else { "active" }
+                })
+            };
+            let name = row["name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let email = row["email"]
+                .as_str()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            (needle.is_empty() || name.contains(&needle) || email.contains(&needle)).then_some(row)
+        })
+        .collect()
+}
+
+fn customer_by_id(state: &RunState, id: &str) -> Option<Value> {
+    catalog(state, "")
+        .into_iter()
+        .find(|row| row["id"].as_str() == Some(id))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OnboardingBody {
@@ -524,7 +667,7 @@ async fn onboard(
     headers: HeaderMap,
     Json(body): Json<OnboardingBody>,
 ) -> impl IntoResponse {
-    if let Err(error) = require_run(&headers, &state) {
+    if let Err(error) = require_session(&headers, &state) {
         return error.into_response();
     }
     record(&state, "POST /api/onboarding").await;
@@ -573,7 +716,7 @@ async fn upload_document(
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
-    if let Err(error) = require_run(&headers, &state) {
+    if let Err(error) = require_session(&headers, &state) {
         return error.into_response();
     }
     let mut customer_id = None;
@@ -626,14 +769,14 @@ async fn confirm_preview(
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     state.inner.lock().await.preview_confirmations += 1;
     state.preview_confirmed.notify_waiters();
-    Html("<!doctype html><title>Document confirmed</title><p role=status>Document confirmed</p>")
+    Json(json!({ "status": "confirmed" })).into_response()
 }
 
 async fn integration_state(
     State(state): State<Arc<SharedState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Err(error) = require_run(&headers, &state) {
+    if let Err(error) = require_session(&headers, &state) {
         return error.into_response();
     }
     let inner = state.inner.lock().await;
@@ -647,7 +790,7 @@ async fn integration_state(
 
 async fn authorize_page() -> Html<&'static str> {
     Html(
-        r#"<!doctype html><title>Ledger Cloud authorization</title><main><h1>Authorize Ledger Cloud</h1><button id="authorize" type="button">Authorize account</button><p role="status"></p></main><script>document.querySelector('#authorize').addEventListener('click', async () => { await fetch('/api/integrations/ledger-cloud/complete', {method:'POST',headers:{'content-type':'application/json','x-northstar-run':sessionStorage.getItem('northstar.run') ?? new URLSearchParams(location.search).get('run') ?? ''},body:'{"code":"approved"}'}); document.querySelector('[role=status]').textContent='Authorization complete'; window.opener?.postMessage({type:'northstar.authorization.complete'}, location.origin); window.close(); });</script>"#,
+        r#"<!doctype html><title>Ledger Cloud authorization</title><main><h1>Authorize Ledger Cloud</h1><button id="authorize" type="button">Authorize account</button><p role="status"></p></main><script>document.querySelector('#authorize').addEventListener('click', async () => { await fetch('/api/integrations/ledger-cloud/complete', {method:'POST',credentials:'include',headers:{'content-type':'application/json','x-northstar-run':sessionStorage.getItem('northstar.run') ?? new URLSearchParams(location.search).get('run') ?? ''},body:'{"code":"approved"}'}); document.querySelector('[role=status]').textContent='Authorization complete'; window.opener?.postMessage({type:'northstar.authorization.complete'}, location.origin); window.close(); });</script>"#,
     )
 }
 
@@ -655,7 +798,7 @@ async fn complete_authorization(
     State(state): State<Arc<SharedState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Err(error) = require_run(&headers, &state) {
+    if let Err(error) = require_session(&headers, &state) {
         return error.into_response();
     }
     let mut inner = state.inner.lock().await;
@@ -670,7 +813,7 @@ async fn create_report(
     State(state): State<Arc<SharedState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Err(error) = require_run(&headers, &state) {
+    if let Err(error) = require_session(&headers, &state) {
         return error.into_response();
     }
     let mut inner = state.inner.lock().await;
@@ -686,7 +829,7 @@ async fn report_state(
     headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> impl IntoResponse {
-    if let Err(error) = require_run(&headers, &state) {
+    if let Err(error) = require_session(&headers, &state) {
         return error.into_response();
     }
     Json(json!({ "id": id, "status": "complete", "filename": "atlas-operations.csv", "mediaType": "text/csv", "downloadUrl": "/api/reports/rep_atlas_01/download", "sha256": hex::encode(Sha256::digest(b"customer,priority\nAtlas Labs,high\n")) })).into_response()
@@ -696,7 +839,7 @@ async fn latest_report(
     State(state): State<Arc<SharedState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Err(error) = require_run(&headers, &state) {
+    if let Err(error) = require_session(&headers, &state) {
         return error.into_response();
     }
     if state.inner.lock().await.report_generations == 0 {
@@ -785,7 +928,352 @@ fn snapshot_of(state: &RunState) -> ScenarioSnapshot {
         preview_confirmations: state.preview_confirmations,
         authorization_grants: state.authorization_grants,
         report_generations: state.report_generations,
+        consent: state.consent.clone(),
+        session_email: state.session_email.clone(),
+        mfa_code: MFA_CODE.into(),
+        mfa_completions: state.mfa_completions,
+        three_ds_code: THREE_DS_CODE.into(),
+        three_ds_completions: state.three_ds_completions,
+        billing_address: state.billing_address.clone(),
+        billing_period: state.billing_period.clone(),
+        charge: state.charge.clone(),
     }
+}
+
+#[derive(Deserialize)]
+struct ConsentBody {
+    choice: String,
+}
+
+async fn consent_state(
+    State(state): State<Arc<SharedState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(error) = require_run(&headers, &state) {
+        return error.into_response();
+    }
+    let from_cookie = cookie_value(&headers, CONSENT_COOKIE)
+        .filter(|choice| choice == "accept" || choice == "reject");
+    Json(json!({ "consent": from_cookie })).into_response()
+}
+
+async fn set_consent(
+    State(state): State<Arc<SharedState>>,
+    headers: HeaderMap,
+    Json(body): Json<ConsentBody>,
+) -> impl IntoResponse {
+    if let Err(error) = require_run(&headers, &state) {
+        return error.into_response();
+    }
+    if body.choice != "accept" && body.choice != "reject" {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "code": "invalid_consent", "message": "Choose accept or reject." })),
+        )
+            .into_response();
+    }
+    let mut inner = state.inner.lock().await;
+    inner.consent = Some(body.choice.clone());
+    inner
+        .requests
+        .push(format!("POST /api/consent {}", body.choice));
+    let mut response = Json(json!({ "consent": body.choice })).into_response();
+    response
+        .headers_mut()
+        .append(header::SET_COOKIE, set_cookie(CONSENT_COOKIE, &body.choice));
+    response
+}
+
+#[derive(Deserialize)]
+struct LoginBody {
+    email: String,
+    password: String,
+}
+
+async fn session_state(
+    State(state): State<Arc<SharedState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(error) = require_run(&headers, &state) {
+        return error.into_response();
+    }
+    let cookie_ok = cookie_value(&headers, SESSION_COOKIE).as_deref() == Some("operator");
+    let inner = state.inner.lock().await;
+    Json(json!({
+        "authenticated": cookie_ok && inner.session_email.is_some(),
+        "email": cookie_ok.then(|| inner.session_email.clone()).flatten(),
+        "mfaPending": cookie_ok && inner.mfa_pending,
+    }))
+    .into_response()
+}
+
+async fn login(
+    State(state): State<Arc<SharedState>>,
+    headers: HeaderMap,
+    Json(body): Json<LoginBody>,
+) -> impl IntoResponse {
+    if let Err(error) = require_run(&headers, &state) {
+        return error.into_response();
+    }
+    if cookie_value(&headers, CONSENT_COOKIE).is_none()
+        && state.inner.lock().await.consent.is_none()
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "code": "consent_required", "message": "Review cookie preferences first." })),
+        )
+            .into_response();
+    }
+    if body.email != OPERATOR_EMAIL || body.password != OPERATOR_PASSWORD {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "code": "invalid_credentials", "message": "Check the operator email and password." })),
+        )
+            .into_response();
+    }
+    let mut inner = state.inner.lock().await;
+    inner.mfa_pending = true;
+    inner.session_email = None;
+    inner.requests.push("POST /api/session/login".into());
+    Json(json!({ "status": "mfaRequired" })).into_response()
+}
+
+#[derive(Deserialize)]
+struct MfaBody {
+    code: String,
+}
+
+async fn verify_mfa(
+    State(state): State<Arc<SharedState>>,
+    headers: HeaderMap,
+    Json(body): Json<MfaBody>,
+) -> impl IntoResponse {
+    if let Err(error) = require_run(&headers, &state) {
+        return error.into_response();
+    }
+    let mut inner = state.inner.lock().await;
+    if !inner.mfa_pending {
+        return (
+            StatusCode::CONFLICT,
+            Json(
+                json!({ "code": "mfa_not_pending", "message": "Sign in before entering a code." }),
+            ),
+        )
+            .into_response();
+    }
+    if body.code.trim() != MFA_CODE {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "code": "invalid_mfa", "message": "That code is not valid." })),
+        )
+            .into_response();
+    }
+    inner.mfa_pending = false;
+    inner.session_email = Some(OPERATOR_EMAIL.into());
+    inner.mfa_completions += 1;
+    inner.requests.push("POST /api/session/mfa".into());
+    let mut response =
+        Json(json!({ "authenticated": true, "email": OPERATOR_EMAIL })).into_response();
+    response
+        .headers_mut()
+        .append(header::SET_COOKIE, set_cookie(SESSION_COOKIE, "operator"));
+    response
+}
+
+#[derive(Deserialize)]
+struct AddressQuery {
+    q: Option<String>,
+}
+
+fn atlas_address() -> BillingAddress {
+    BillingAddress {
+        street: "100 Federal Street".into(),
+        city: "Boston".into(),
+        postal_code: "02110".into(),
+        label: "Atlas Labs Boston".into(),
+    }
+}
+
+fn trap_address() -> BillingAddress {
+    BillingAddress {
+        street: "1 Atlantic Avenue".into(),
+        city: "Boston".into(),
+        postal_code: "02210".into(),
+        label: "Boston HQ".into(),
+    }
+}
+
+async fn billing_addresses(
+    State(state): State<Arc<SharedState>>,
+    headers: HeaderMap,
+    Query(query): Query<AddressQuery>,
+) -> impl IntoResponse {
+    if let Err(error) = require_session(&headers, &state) {
+        return error.into_response();
+    }
+    let needle = query.q.unwrap_or_default().to_ascii_lowercase();
+    if needle.trim().len() < 3 {
+        return Json(Vec::<BillingAddress>::new()).into_response();
+    }
+    let options = [trap_address(), atlas_address()];
+    Json(
+        options
+            .into_iter()
+            .filter(|address| {
+                address.label.to_ascii_lowercase().contains(&needle)
+                    || address.street.to_ascii_lowercase().contains(&needle)
+                    || address.city.to_ascii_lowercase().contains(&needle)
+            })
+            .collect::<Vec<_>>(),
+    )
+    .into_response()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CardBody {
+    number: String,
+    expiry: String,
+    cvc: String,
+}
+
+async fn tokenize_card(
+    State(state): State<Arc<SharedState>>,
+    headers: HeaderMap,
+    Json(body): Json<CardBody>,
+) -> impl IntoResponse {
+    if let Err(error) = require_session(&headers, &state) {
+        return error.into_response();
+    }
+    if body.number.replace(' ', "") != "4242424242424242"
+        || body.expiry != "12/28"
+        || body.cvc != "123"
+    {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "code": "invalid_card", "message": "Use the Atlas test card." })),
+        )
+            .into_response();
+    }
+    let mut inner = state.inner.lock().await;
+    inner.card_token = Some("tok_atlas".into());
+    inner.requests.push("POST /api/billing/tokenize".into());
+    Json(json!({ "token": "tok_atlas", "threeDsRequired": true })).into_response()
+}
+
+#[derive(Deserialize)]
+struct ThreeDsBody {
+    code: String,
+}
+
+async fn verify_three_ds(
+    State(state): State<Arc<SharedState>>,
+    headers: HeaderMap,
+    Json(body): Json<ThreeDsBody>,
+) -> impl IntoResponse {
+    if let Err(error) = require_session(&headers, &state) {
+        return error.into_response();
+    }
+    let mut inner = state.inner.lock().await;
+    if inner.card_token.as_deref() != Some("tok_atlas") {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "code": "card_required", "message": "Tokenize a card first." })),
+        )
+            .into_response();
+    }
+    if body.code.trim() != THREE_DS_CODE {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "code": "invalid_3ds", "message": "That challenge code is not valid." })),
+        )
+            .into_response();
+    }
+    inner.three_ds_completions += 1;
+    inner.requests.push("POST /api/billing/3ds".into());
+    Json(json!({ "status": "authenticated", "token": "tok_atlas" })).into_response()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChargeBody {
+    plan: String,
+    period: BillingPeriod,
+    address: BillingAddress,
+}
+
+async fn charge_atlas(
+    State(state): State<Arc<SharedState>>,
+    headers: HeaderMap,
+    Json(body): Json<ChargeBody>,
+) -> impl IntoResponse {
+    if let Err(error) = require_session(&headers, &state) {
+        return error.into_response();
+    }
+    let mut inner = state.inner.lock().await;
+    if inner.three_ds_completions == 0 {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "code": "3ds_required", "message": "Complete 3-D Secure before charging." })),
+        )
+            .into_response();
+    }
+    if body.period.start != "2026-01-06" || body.period.end != "2026-01-20" {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "code": "invalid_period", "message": "Bill 6 Jan 2026 through 20 Jan 2026." })),
+        )
+            .into_response();
+    }
+    if body.address.postal_code != "02110" {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "code": "invalid_address", "message": "Use the Atlas Labs Boston address." })),
+        )
+            .into_response();
+    }
+    let charge = ChargeRecord {
+        plan: body.plan,
+        amount_cents: 8400,
+        address: body.address.clone(),
+        period: body.period.clone(),
+    };
+    inner.billing_address = Some(body.address);
+    inner.billing_period = Some(body.period);
+    inner.charge = Some(charge.clone());
+    inner.requests.push("POST /api/billing/charge".into());
+    Json(charge).into_response()
+}
+
+async fn card_frame() -> Html<&'static str> {
+    Html(
+        r#"<!doctype html><title>Card</title><main><form aria-label="Card details"><label>Card number<input id="card-number" aria-label="Card number" name="number" autocomplete="cc-number"></label><label>Expiry<input id="card-expiry" aria-label="Expiry" name="expiry" autocomplete="cc-exp" placeholder="MM/YY"></label><label>CVC<input id="card-cvc" aria-label="CVC" name="cvc" autocomplete="cc-csc"></label><button id="save-card" type="submit">Save card</button></form><p role="status"></p></main><script>
+const run = sessionStorage.getItem('northstar.run') ?? new URLSearchParams(location.search).get('run') ?? '';
+document.querySelector('form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const body = { number: document.querySelector('[name=number]').value, expiry: document.querySelector('[name=expiry]').value, cvc: document.querySelector('[name=cvc]').value };
+  const response = await fetch('/api/billing/tokenize', { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json', 'x-northstar-run': run }, body: JSON.stringify(body) });
+  const payload = await response.json();
+  document.querySelector('[role=status]').textContent = response.ok ? 'Card saved' : (payload.message ?? 'Card rejected');
+  if (response.ok) window.parent.postMessage({ type: 'northstar.card.tokenized', token: payload.token }, location.origin);
+});
+</script>"#,
+    )
+}
+
+async fn three_ds_frame() -> Html<&'static str> {
+    Html(
+        r#"<!doctype html><title>3-D Secure</title><main><h1>Confirm this payment</h1><form aria-label="3-D Secure challenge"><label>Challenge code<input id="challenge-code" aria-label="Challenge code" name="code" inputmode="numeric"></label><button id="verify-payment" type="submit">Verify payment</button></form><p role="status"></p></main><script>
+const run = sessionStorage.getItem('northstar.run') ?? new URLSearchParams(location.search).get('run') ?? '';
+document.querySelector('form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const response = await fetch('/api/billing/3ds', { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json', 'x-northstar-run': run }, body: JSON.stringify({ code: document.querySelector('[name=code]').value }) });
+  const payload = await response.json();
+  document.querySelector('[role=status]').textContent = response.ok ? 'Payment authenticated' : (payload.message ?? 'Challenge failed');
+  if (response.ok) window.parent.postMessage({ type: 'northstar.3ds.complete' }, location.origin);
+});
+</script>"#,
+    )
 }
 
 async fn gauntlet_snapshot(State(state): State<Arc<SharedState>>) -> Json<ScenarioSnapshot> {
@@ -822,6 +1310,7 @@ fn sanitize(value: &str) -> String {
 mod tests {
     use super::{
         GauntletLevel, LevelTwoTrapPlan, RecaptchaVerifier, ScenarioConfig, ScenarioServer,
+        MFA_CODE, OPERATOR_EMAIL, OPERATOR_PASSWORD, THREE_DS_CODE,
     };
     use async_trait::async_trait;
     use std::sync::Arc;
@@ -837,6 +1326,57 @@ mod tests {
                 _ => Ok(false),
             }
         }
+    }
+
+    async fn operator_headers(server: &ScenarioServer) -> reqwest::header::HeaderMap {
+        let client = reqwest::Client::new();
+        let run = server.run_id();
+        client
+            .post(format!("{}/api/consent", server.base_url()))
+            .header("x-northstar-run", run)
+            .json(&serde_json::json!({ "choice": "accept" }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        client
+            .post(format!("{}/api/session/login", server.base_url()))
+            .header("x-northstar-run", run)
+            .header("cookie", "northstar-consent=accept")
+            .json(&serde_json::json!({ "email": OPERATOR_EMAIL, "password": OPERATOR_PASSWORD }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        let mfa = client
+            .post(format!("{}/api/session/mfa", server.base_url()))
+            .header("x-northstar-run", run)
+            .header("cookie", "northstar-consent=accept")
+            .json(&serde_json::json!({ "code": MFA_CODE }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        let cookie = mfa
+            .headers()
+            .get_all(reqwest::header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .find(|value| value.starts_with("northstar-session="))
+            .and_then(|value| value.split(';').next())
+            .expect("session cookie");
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-northstar-run", run.parse().unwrap());
+        headers.insert(
+            reqwest::header::COOKIE,
+            format!("northstar-consent=accept; {cookie}")
+                .parse()
+                .unwrap(),
+        );
+        headers
     }
 
     #[test]
@@ -868,12 +1408,13 @@ mod tests {
         let server = ScenarioServer::start(ScenarioConfig::seeded("customer-update"))
             .await
             .unwrap();
+        let headers = operator_headers(&server).await;
         let response = reqwest::Client::new()
             .patch(format!(
                 "{}/api/customers/cus_atlas/priority",
                 server.base_url()
             ))
-            .header("x-northstar-run", server.run_id())
+            .headers(headers)
             .json(&serde_json::json!({ "priority": "high" }))
             .send()
             .await
@@ -885,6 +1426,9 @@ mod tests {
         let state = server.snapshot().await;
         assert_eq!(state.atlas_priority, "high");
         assert_eq!(state.priority_updates, 1);
+        assert_eq!(state.session_email.as_deref(), Some(OPERATOR_EMAIL));
+        assert_eq!(state.mfa_completions, 1);
+        assert_eq!(state.consent.as_deref(), Some("accept"));
     }
 
     #[tokio::test]
@@ -896,6 +1440,7 @@ mod tests {
             .await
             .unwrap();
         let client = reqwest::Client::new();
+        let headers = operator_headers(&server).await;
         let record = serde_json::json!({
             "fullName": "Maya Chen",
             "email": "maya@atlas.example",
@@ -928,7 +1473,7 @@ mod tests {
             }
             let response = client
                 .post(format!("{}/api/onboarding", server.base_url()))
-                .header("x-northstar-run", server.run_id())
+                .headers(headers.clone())
                 .json(&body)
                 .send()
                 .await
@@ -945,12 +1490,102 @@ mod tests {
         accepted["recaptchaResponse"] = serde_json::Value::String("accepted-token".into());
         let response = client
             .post(format!("{}/api/onboarding", server.base_url()))
-            .header("x-northstar-run", server.run_id())
+            .headers(headers)
             .json(&accepted)
             .send()
             .await
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         assert_eq!(server.snapshot().await.onboarding_records, 1);
+    }
+
+    #[tokio::test]
+    async fn charge_requires_3ds_and_the_atlas_boston_address() {
+        let server = ScenarioServer::start(ScenarioConfig::seeded("billing"))
+            .await
+            .unwrap();
+        let client = reqwest::Client::new();
+        let headers = operator_headers(&server).await;
+        let period = serde_json::json!({ "start": "2026-01-06", "end": "2026-01-20" });
+        let address = serde_json::json!({
+            "street": "100 Federal Street",
+            "city": "Boston",
+            "postalCode": "02110",
+            "label": "Atlas Labs Boston"
+        });
+        let blocked = client
+            .post(format!("{}/api/billing/charge", server.base_url()))
+            .headers(headers.clone())
+            .json(&serde_json::json!({ "plan": "growth", "period": period, "address": address }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(blocked.status(), reqwest::StatusCode::FORBIDDEN);
+
+        client
+            .post(format!("{}/api/billing/tokenize", server.base_url()))
+            .headers(headers.clone())
+            .json(&serde_json::json!({ "number": "4242424242424242", "expiry": "12/28", "cvc": "123" }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        client
+            .post(format!("{}/api/billing/3ds", server.base_url()))
+            .headers(headers.clone())
+            .json(&serde_json::json!({ "code": THREE_DS_CODE }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        client
+            .post(format!("{}/api/billing/charge", server.base_url()))
+            .headers(headers)
+            .json(&serde_json::json!({ "plan": "growth", "period": period, "address": address }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        let snapshot = server.snapshot().await;
+        assert_eq!(snapshot.three_ds_completions, 1);
+        assert_eq!(snapshot.charge.as_ref().unwrap().amount_cents, 8400);
+        assert_eq!(
+            snapshot.billing_address.as_ref().unwrap().postal_code,
+            "02110"
+        );
+    }
+
+    #[tokio::test]
+    async fn payment_frames_include_card_and_challenge_fields() {
+        let server = ScenarioServer::start(ScenarioConfig::seeded("frames"))
+            .await
+            .unwrap();
+        let client = reqwest::Client::new();
+        let card = client
+            .get(format!("{}/pay/card", server.base_url()))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(card.contains("id=\"card-number\""), "{card}");
+        assert!(card.contains("Card number"), "{card}");
+        let challenge = client
+            .get(format!("{}/pay/3ds", server.base_url()))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(challenge.contains("Challenge code"), "{challenge}");
     }
 }

@@ -394,6 +394,7 @@ fn candidate(
     Candidate {
         id: id.into(),
         css: Some(format!("#{id}")),
+        tag: None,
         test_id: None,
         role: role.map(str::to_owned),
         name: Some(name.into()),

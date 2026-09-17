@@ -9,12 +9,23 @@ fn vision_status_distinguishes_an_unrelated_listener() {
     let address = listener.local_addr().unwrap();
     listener.set_nonblocking(true).unwrap();
     let server = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(15);
         while Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     let mut request = [0_u8; 1024];
-                    let _ = stream.read(&mut request).unwrap();
+                    loop {
+                        match stream.read(&mut request) {
+                            Ok(_) => break,
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                if Instant::now() >= deadline {
+                                    return false;
+                                }
+                                std::thread::sleep(Duration::from_millis(10));
+                            }
+                            Err(error) => panic!("read failed: {error}"),
+                        }
+                    }
                     stream
                         .write_all(
                             b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",

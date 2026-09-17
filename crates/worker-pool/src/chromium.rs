@@ -1415,7 +1415,18 @@ impl BrowserWorker for ChromiumWorker {
             )
             .await?;
             (text, html, Some(resolution))
-        } else if command.selector.is_some() || command.target.is_some() {
+        } else if is_document_body_inspect(command) {
+            // `find_element("body")` builds a chromiumoxide Element via
+            // DescribeNode depth=100. Deserializing that tree overflows the
+            // Linux debug stack on the Northstar cookie/consent page.
+            let text = read_page_body_text(&page).await?;
+            let html = if command.include_html {
+                Some(page.content().await.map_err(command_failed)?)
+            } else {
+                None
+            };
+            (text, html, None)
+        } else {
             let resolved = self
                 .resolve_target(
                     page_id,
@@ -1434,19 +1445,6 @@ impl BrowserWorker for ChromiumWorker {
                 None
             };
             (text, html, Some(resolved.evidence))
-        } else {
-            let body = page.find_element("body").await.map_err(command_failed)?;
-            let text = body
-                .inner_text()
-                .await
-                .map_err(command_failed)?
-                .unwrap_or_default();
-            let html = if command.include_html {
-                Some(page.content().await.map_err(command_failed)?)
-            } else {
-                None
-            };
-            (text, html, None)
         };
         let mut evidence = vec![Evidence::Inspection {
             selector: command.selector.clone(),
@@ -3501,8 +3499,10 @@ fn element_wait_missing_observation(
     state: &types::ElementState,
     error: &CommandError,
 ) -> Option<bool> {
-    let target_missing = matches!(error.code, ErrorCode::TargetNotFound)
-        || is_missing_css_node(error)
+    let target_missing = matches!(
+        error.code,
+        ErrorCode::TargetNotFound | ErrorCode::FrameNotFound | ErrorCode::ShadowRootUnavailable
+    ) || is_missing_css_node(error)
         || (matches!(error.code, ErrorCode::BrowserCommandFailed)
             && error
                 .message
@@ -3551,6 +3551,21 @@ fn is_page_scoped_css(css: &str) -> bool {
     matches!(css.to_ascii_lowercase().as_str(), "body" | "html" | ":root")
 }
 
+fn is_document_body_inspect(command: &InspectCommand) -> bool {
+    if command.target.is_some() {
+        return false;
+    }
+    match command
+        .selector
+        .as_deref()
+        .map(str::trim)
+        .filter(|css| !css.is_empty())
+    {
+        None => true,
+        Some(css) => is_page_scoped_css(css),
+    }
+}
+
 fn is_page_scoped_role(role: &str) -> bool {
     [
         "RootWebArea",
@@ -3589,20 +3604,13 @@ fn is_page_scoped_text_target(target: &types::TargetSpec) -> bool {
 }
 
 async fn read_page_body_text(page: &Page) -> Result<String, CommandError> {
-    if let Ok(result) = page
+    let result = page
         .evaluate("document.body ? (document.body.innerText || '') : ''")
         .await
-    {
-        if let Ok(value) = result.into_value::<String>() {
-            return Ok(value);
-        }
-    }
-    let body = page.find_element("body").await.map_err(command_failed)?;
-    Ok(body
-        .inner_text()
-        .await
-        .map_err(command_failed)?
-        .unwrap_or_default())
+        .map_err(command_failed)?;
+    result
+        .into_value::<String>()
+        .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))
 }
 
 async fn read_page_scoped_text(
@@ -4457,15 +4465,15 @@ mod tests {
         apply_state_commit, clamp_js_timeout_ms, click_dispatch_phase_for_step, compact_ax_tree,
         driver_error_is_retryable, element_wait_missing_observation,
         ensure_automatic_download_modifier_support, iframe_hop_ordinal, is_closed_page_message,
-        is_dead_worker_error, is_missing_css_node, should_retry_plain_click_target_drift,
-        should_retry_transient_click_loss, snapshot_cookie, text_matches,
-        unscoped_css_wait_selector, validate_clip, wait_should_retry_replaced_context,
-        ChromiumWorker, ClickDispatchPhase, HttpBridgeState, EDITABLE_CONTROL_CHECK_JS,
-        TARGET_GONE_MESSAGE,
+        is_dead_worker_error, is_document_body_inspect, is_missing_css_node,
+        should_retry_plain_click_target_drift, should_retry_transient_click_loss, snapshot_cookie,
+        text_matches, unscoped_css_wait_selector, validate_clip,
+        wait_should_retry_replaced_context, ChromiumWorker, ClickDispatchPhase, HttpBridgeState,
+        EDITABLE_CONTROL_CHECK_JS, TARGET_GONE_MESSAGE,
     };
     use types::{
-        ClickModifier, CommandError, ErrorCode, ErrorLayer, PageId, SessionId, TargetSpec,
-        TextMatch, WorkerId,
+        ClickModifier, CommandError, ErrorCode, ErrorLayer, InspectCommand, PageId, SessionId,
+        TargetSpec, TextMatch, WorkerId,
     };
 
     #[test]
@@ -4785,6 +4793,64 @@ mod tests {
     }
 
     #[test]
+    fn document_body_inspect_covers_bare_and_css_body() {
+        assert!(is_document_body_inspect(&InspectCommand::default()));
+        assert!(is_document_body_inspect(&InspectCommand {
+            selector: Some("body".into()),
+            target: None,
+            include_html: true,
+        }));
+        assert!(is_document_body_inspect(&InspectCommand {
+            selector: Some("HTML".into()),
+            target: None,
+            include_html: false,
+        }));
+        assert!(!is_document_body_inspect(&InspectCommand {
+            selector: Some("#ok".into()),
+            target: None,
+            include_html: false,
+        }));
+        assert!(!is_document_body_inspect(&InspectCommand {
+            selector: Some("body".into()),
+            target: Some(TargetSpec {
+                role: Some("button".into()),
+                ..TargetSpec::default()
+            }),
+            include_html: false,
+        }));
+    }
+
+    #[test]
+    fn element_wait_treats_unmapped_frame_as_not_yet_present() {
+        let error = types::CommandError {
+            code: ErrorCode::FrameNotFound,
+            message: "frame path component 0 did not map to a child frame".into(),
+            layer: types::ErrorLayer::Driver,
+            retryable: false,
+        };
+
+        assert_eq!(
+            element_wait_missing_observation(&types::ElementState::Visible, &error),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn element_wait_treats_unattached_shadow_as_not_yet_present() {
+        let error = types::CommandError {
+            code: ErrorCode::ShadowRootUnavailable,
+            message: "shadow path component 0 has no attached shadow root".into(),
+            layer: types::ErrorLayer::Driver,
+            retryable: false,
+        };
+
+        assert_eq!(
+            element_wait_missing_observation(&types::ElementState::Visible, &error),
+            Some(false)
+        );
+    }
+
+    #[test]
     fn detached_element_wait_accepts_target_loss_between_resolution_and_probe() {
         let error = types::CommandError {
             code: ErrorCode::BrowserCommandFailed,
@@ -4937,6 +5003,7 @@ mod tests {
         dom_engine::Candidate {
             id: id.into(),
             css: None,
+            tag: None,
             test_id: None,
             role: Some("iframe".into()),
             name: name.map(str::to_string),

@@ -26,6 +26,16 @@ export const LEVEL_ONE_RUN_CONFIG: RunConfig = {
   recaptchaSiteKey: null,
 };
 
+export interface ConsentState {
+  consent: "accept" | "reject" | null;
+}
+
+export interface SessionState {
+  authenticated: boolean;
+  email?: string | null;
+  mfaPending: boolean;
+}
+
 export interface DashboardSummary {
   activeCustomers: number;
   pendingOnboarding: number;
@@ -87,4 +97,29 @@ export interface ReportState {
   mediaType?: string;
   downloadUrl?: string;
   sha256?: string;
+}
+
+export interface BillingAddress {
+  street: string;
+  city: string;
+  postalCode: string;
+  label: string;
+}
+
+export interface BillingPeriod {
+  start: string;
+  end: string;
+}
+
+export interface ChargeRecord {
+  plan: Plan | string;
+  amountCents: number;
+  address: BillingAddress;
+  period: BillingPeriod;
+}
+
+export interface ChargeInput {
+  plan: Plan;
+  period: BillingPeriod;
+  address: BillingAddress;
 }

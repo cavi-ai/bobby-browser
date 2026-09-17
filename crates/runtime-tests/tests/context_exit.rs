@@ -18,9 +18,10 @@ use chrono::{Duration, Utc};
 use modern_gauntlet::scenario::{ScenarioConfig, ScenarioServer};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use types::{
-    AttemptId, Capability, CommandEnvelope, CommandId, CommandOutcome, ControlAction,
-    CreateSessionRequest, FillIntent, IntentCommand, IntentHints, NavigateCommand, OpenPageRequest,
-    PageId, PrimitiveCommand, RuntimeCommand, SessionId, WaitUntil, WorkflowId,
+    AttemptId, Capability, ClickCommand, CommandEnvelope, CommandId, CommandOutcome, ControlAction,
+    CreateSessionRequest, ElementState, FillIntent, IntentCommand, IntentHints, NavigateCommand,
+    OpenPageRequest, PageId, PrimitiveCommand, RuntimeCommand, SessionId, TargetSpec,
+    WaitCondition, WaitForCommand, WaitUntil, WorkflowId,
 };
 use worker_pool::ChromiumWorkerFactory;
 
@@ -138,7 +139,48 @@ impl Station {
                 },
             )))
             .await;
+        modern_gauntlet::unlock::unlock_northstar_session(
+            &station.runtime,
+            &station.session,
+            &station.page,
+        )
+        .await
+        .unwrap();
         station
+    }
+
+    async fn click_named(&mut self, role: &str, name: &str) {
+        self.submit(RuntimeCommand::Primitive(PrimitiveCommand::Click(
+            ClickCommand {
+                selector: String::new(),
+                target: Some(TargetSpec {
+                    role: Some(role.into()),
+                    accessible_name: Some(name.into()),
+                    ..TargetSpec::default()
+                }),
+                boundary: false,
+                expected_url: None,
+                modifiers: Vec::new(),
+            },
+        )))
+        .await;
+    }
+
+    async fn wait_named(&mut self, role: &str, name: &str) {
+        self.submit(RuntimeCommand::Primitive(PrimitiveCommand::WaitFor(
+            WaitForCommand {
+                condition: WaitCondition::Element {
+                    target: Box::new(TargetSpec {
+                        role: Some(role.into()),
+                        accessible_name: Some(name.into()),
+                        ..TargetSpec::default()
+                    }),
+                    state: ElementState::Visible,
+                },
+                timeout_ms: 10_000,
+            },
+        )))
+        .await;
     }
 
     async fn submit(&mut self, command: RuntimeCommand) -> Vec<types::Evidence> {
@@ -177,20 +219,18 @@ impl Station {
         .await;
     }
 
-    async fn complete_onboarding(&mut self, submit_selector: &str) {
-        for (purpose, value) in FIELDS {
+    async fn complete_onboarding(&mut self) {
+        for &(purpose, value) in &FIELDS[..2] {
             self.fill(purpose, value).await;
         }
-        self.submit(RuntimeCommand::Primitive(PrimitiveCommand::Click(
-            types::ClickCommand {
-                selector: submit_selector.into(),
-                target: None,
-                boundary: false,
-                expected_url: None,
-                modifiers: Vec::new(),
-            },
-        )))
-        .await;
+        self.click_named("button", "Next").await;
+        self.wait_named("textbox", "Company name").await;
+        for &(purpose, value) in &FIELDS[2..] {
+            self.fill(purpose, value).await;
+        }
+        self.click_named("button", "Next").await;
+        self.wait_named("button", "Create customer").await;
+        self.click_named("button", "Create customer").await;
     }
 
     async fn ask(&self, description: &str) -> Option<types::ContextAnswer> {
@@ -250,6 +290,7 @@ async fn remembered_site_completes_onboarding_with_fewer_commands() {
 
     // Session 1, cold: discovery snapshot, then the station.
     let mut cold = Station::open(&runtime, &authed, &url).await;
+    let cold_gate = cold.commands;
     for (purpose, _) in FIELDS {
         assert_eq!(
             cold.ask(purpose).await,
@@ -264,8 +305,7 @@ async fn remembered_site_completes_onboarding_with_fewer_commands() {
         }),
     ))
     .await;
-    cold.complete_onboarding("form[aria-label='Customer onboarding'] button[type='submit']")
-        .await;
+    cold.complete_onboarding().await;
     let cold_commands = cold.commands;
     cold.close().await;
 
@@ -284,12 +324,14 @@ async fn remembered_site_completes_onboarding_with_fewer_commands() {
         assert!(answer.confidence >= 0.75);
     }
     let warm_commands_before_station = warm.commands;
-    warm.complete_onboarding("form[aria-label='Customer onboarding'] button[type='submit']")
-        .await;
+    warm.complete_onboarding().await;
     let warm_commands = warm.commands;
     warm.close().await;
 
-    assert_eq!(warm_commands_before_station, 1, "only the navigate ran");
+    assert_eq!(
+        warm_commands_before_station, cold_gate,
+        "warm session must not snapshot before the station"
+    );
     assert!(
         warm_commands < cold_commands,
         "remembered session must run strictly fewer commands: warm={warm_commands} cold={cold_commands}"

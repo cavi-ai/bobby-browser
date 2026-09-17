@@ -254,12 +254,11 @@ async fn documents_run(run_idx: usize) -> TestResult<bool> {
     )
     .await?;
 
-    runtime.wait_visible("iframe[title^='Preview of']").await?;
     runtime
-        .wait_in_frame_button("#document-preview", "#confirm-preview")
+        .wait_shadow("#document-preview-widget", "#confirm-preview")
         .await?;
     runtime
-        .click_in_frame("#document-preview", "#confirm-preview")
+        .click_shadow("#document-preview-widget", "#confirm-preview", true)
         .await?;
     runtime.mark_completed(&format!("documents-harvest-{run_idx}"))?;
     Ok(committed)
@@ -320,33 +319,29 @@ async fn customer_update_run(run_idx: usize) -> TestResult<usize> {
     if escalate_or(
         &runtime,
         locate(RUN_SEARCH[run_idx % RUN_SEARCH.len()]),
-        runtime.click("form[aria-label='Customer search'] button", false),
+        runtime.click("[aria-label='Search customers'] button", false),
     )
     .await?
     {
         committed += 1;
     }
-    runtime
-        .wait_visible("a[href='/customers/cus_atlas']")
-        .await?;
+    runtime.wait_named("option", "Atlas Labs").await?;
+    runtime.reveal_atlas_link().await?;
 
     if escalate_or(
         &runtime,
         locate(OPEN_CUSTOMER[run_idx % OPEN_CUSTOMER.len()]),
-        runtime.click("a[href='/customers/cus_atlas']", false),
+        runtime.open_atlas_customer(),
     )
     .await?
     {
         committed += 1;
     }
-    runtime
-        .wait_visible("select[aria-label='Customer priority']")
-        .await?;
 
     if escalate_or(
         &runtime,
         select_one_intent(SELECT_PRIORITY[run_idx % SELECT_PRIORITY.len()], "high"),
-        runtime.select_one("Customer priority", "high"),
+        runtime.choose_option("Customer priority", "High"),
     )
     .await?
     {
@@ -356,7 +351,7 @@ async fn customer_update_run(run_idx: usize) -> TestResult<usize> {
     if escalate_or(
         &runtime,
         locate(SAVE_PRIORITY[run_idx % SAVE_PRIORITY.len()]),
-        runtime.click("form[aria-label='Update customer priority'] button", true),
+        runtime.save_customer_priority(),
     )
     .await?
     {
@@ -384,6 +379,19 @@ async fn onboarding_fields(runtime: &ModernRuntime, run_idx: usize) -> TestResul
             "input[aria-label='Work email']",
             "maya@atlas.example",
         ),
+    ] {
+        if escalate_or(
+            runtime,
+            fill_text(phrasings[run_idx % phrasings.len()], value),
+            runtime.type_text(selector, value),
+        )
+        .await?
+        {
+            committed += 1;
+        }
+    }
+    runtime.click_named("button", "Next", false).await?;
+    for (phrasings, selector, value) in [
         (
             &COMPANY[..],
             "input[aria-label='Company name']",
@@ -401,6 +409,7 @@ async fn onboarding_fields(runtime: &ModernRuntime, run_idx: usize) -> TestResul
             committed += 1;
         }
     }
+    runtime.click_named("button", "Next", false).await?;
 
     if escalate_or(
         runtime,
@@ -459,6 +468,9 @@ async fn onboarding_submit(
     {
         committed += 1;
     }
+
+    runtime.click_named("button", "Next", false).await?;
+    runtime.wait_named("button", "Create customer").await?;
 
     if escalate_or(
         runtime,
