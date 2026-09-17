@@ -15,15 +15,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::{Duration, Utc};
-use modern_gauntlet::scenario::{
-    ScenarioConfig, ScenarioServer, MFA_CODE, OPERATOR_EMAIL, OPERATOR_PASSWORD,
-};
+use modern_gauntlet::scenario::{ScenarioConfig, ScenarioServer};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use types::{
     AttemptId, Capability, ClickCommand, CommandEnvelope, CommandId, CommandOutcome, ControlAction,
     CreateSessionRequest, ElementState, FillIntent, IntentCommand, IntentHints, NavigateCommand,
     OpenPageRequest, PageId, PrimitiveCommand, RuntimeCommand, SessionId, TargetSpec,
-    TypeTextCommand, WaitCondition, WaitForCommand, WaitUntil, WorkflowId,
+    WaitCondition, WaitForCommand, WaitUntil, WorkflowId,
 };
 use worker_pool::ChromiumWorkerFactory;
 
@@ -141,7 +139,13 @@ impl Station {
                 },
             )))
             .await;
-        station.unlock_workspace().await;
+        modern_gauntlet::unlock::unlock_northstar_session(
+            &station.runtime,
+            &station.session,
+            &station.page,
+        )
+        .await
+        .unwrap();
         station
     }
 
@@ -162,23 +166,6 @@ impl Station {
         .await;
     }
 
-    async fn type_named(&mut self, role: &str, name: &str, value: &str) {
-        self.submit(RuntimeCommand::Primitive(PrimitiveCommand::TypeText(
-            TypeTextCommand {
-                selector: String::new(),
-                target: Some(TargetSpec {
-                    role: Some(role.into()),
-                    accessible_name: Some(name.into()),
-                    ..TargetSpec::default()
-                }),
-                value: value.into(),
-                clear_first: true,
-                expected_url: None,
-            },
-        )))
-        .await;
-    }
-
     async fn wait_named(&mut self, role: &str, name: &str) {
         self.submit(RuntimeCommand::Primitive(PrimitiveCommand::WaitFor(
             WaitForCommand {
@@ -194,22 +181,6 @@ impl Station {
             },
         )))
         .await;
-    }
-
-    async fn unlock_workspace(&mut self) {
-        self.wait_named("button", "Accept all cookies").await;
-        self.click_named("button", "Accept all cookies").await;
-        self.wait_named("textbox", "Work email").await;
-        self.type_named("textbox", "Work email", OPERATOR_EMAIL)
-            .await;
-        self.type_named("textbox", "Password", OPERATOR_PASSWORD)
-            .await;
-        self.click_named("button", "Continue").await;
-        self.wait_named("textbox", "Authentication code").await;
-        self.type_named("textbox", "Authentication code", MFA_CODE)
-            .await;
-        self.click_named("button", "Verify code").await;
-        self.wait_named("textbox", "Full name").await;
     }
 
     async fn submit(&mut self, command: RuntimeCommand) -> Vec<types::Evidence> {

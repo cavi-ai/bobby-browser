@@ -14,6 +14,9 @@ use types::{
     PrimitiveCommand, RuntimeCommand, WaitUntil, WorkflowId,
 };
 
+#[path = "modern_gauntlet/unlock.rs"]
+mod northstar_unlock;
+
 fn chrome_executable() -> PathBuf {
     std::env::var("BOBBY_CHROME_EXECUTABLE")
         .map(PathBuf::from)
@@ -106,6 +109,9 @@ async fn popup_opens_as_a_listed_page() {
         matches!(outcome, CommandOutcome::Completed { .. }),
         "{outcome:?}"
     );
+    northstar_unlock::unlock_northstar_session(&runtime, &session.id, &page.id)
+        .await
+        .unwrap();
 
     let outcome = submit(PrimitiveCommand::Click(ClickCommand {
         selector: "button[aria-label='Connect Ledger Cloud']".into(),
@@ -233,6 +239,9 @@ async fn popup_closed_from_inside_still_lists_the_opener() {
         matches!(outcome, CommandOutcome::Completed { .. }),
         "{outcome:?}"
     );
+    northstar_unlock::unlock_northstar_session(&runtime, &session.id, &opener.id)
+        .await
+        .unwrap();
 
     let outcome = submit(
         opener.id.clone(),

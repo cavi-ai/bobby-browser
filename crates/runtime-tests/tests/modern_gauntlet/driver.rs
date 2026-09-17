@@ -254,54 +254,8 @@ impl ModernRuntime {
     }
 
     pub async fn establish_session(&self) -> TestResult<()> {
-        if self
-            .probe_visible("nav[aria-label='Primary navigation']", 2_000)
+        super::unlock::unlock_northstar_session(&self.runtime, &self.session_id, &self.page_id)
             .await
-        {
-            return Ok(());
-        }
-        if self
-            .probe_visible("button[aria-label='Accept all cookies']", 8_000)
-            .await
-        {
-            self.click("button[aria-label='Accept all cookies']", false)
-                .await?;
-        }
-        if self
-            .probe_visible("form[aria-label='Operator sign in']", 8_000)
-            .await
-        {
-            self.type_text(
-                "input[aria-label='Work email']",
-                super::scenario::OPERATOR_EMAIL,
-            )
-            .await?;
-            self.type_text(
-                "input[aria-label='Password']",
-                super::scenario::OPERATOR_PASSWORD,
-            )
-            .await?;
-            self.click(
-                "form[aria-label='Operator sign in'] button[type='submit']",
-                false,
-            )
-            .await?;
-            self.wait_visible("form[aria-label='Multi-factor authentication']")
-                .await?;
-            self.type_text(
-                "input[aria-label='Authentication code']",
-                super::scenario::MFA_CODE,
-            )
-            .await?;
-            self.click(
-                "form[aria-label='Multi-factor authentication'] button[type='submit']",
-                false,
-            )
-            .await?;
-        }
-        self.wait_visible("nav[aria-label='Primary navigation']")
-            .await?;
-        Ok(())
     }
 
     #[allow(dead_code)]
@@ -862,30 +816,6 @@ impl ModernRuntime {
             timeout_ms,
         }))
         .await
-    }
-
-    async fn probe_visible(&self, selector: &str, timeout_ms: u64) -> bool {
-        matches!(
-            self.runtime
-                .submit(CommandEnvelope {
-                    schema_version: CommandEnvelope::SCHEMA_VERSION,
-                    command_id: CommandId::new(),
-                    workflow_id: WorkflowId::new(),
-                    attempt_id: AttemptId::new(),
-                    session_id: self.session_id.clone(),
-                    page_id: Some(self.page_id.clone()),
-                    deadline: Utc::now() + Duration::seconds(30),
-                    command: RuntimeCommand::Primitive(PrimitiveCommand::WaitFor(WaitForCommand {
-                        condition: WaitCondition::Element {
-                            target: Box::new(css_target(selector)),
-                            state: ElementState::Visible,
-                        },
-                        timeout_ms,
-                    })),
-                })
-                .await,
-            CommandOutcome::Completed { .. }
-        )
     }
 
     pub async fn inspect(&self, selector: Option<&str>) -> TestResult<Vec<Evidence>> {
