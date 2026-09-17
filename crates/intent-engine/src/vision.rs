@@ -318,14 +318,29 @@ pub struct VisionProposal {
     pub action: VisionAction,
 }
 
-/// A cached click proposal for one field purpose. Coordinates and confidence
-/// only — a cached proposal can never carry a typed value, because
-/// `TypeText` and `ExtractValue` actions are not cacheable.
+/// A cached structural proposal for one field purpose. It can never carry a
+/// typed value: candidate actions retain only the bounded role/name window
+/// the provider saw and the selected index.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CachedProposal {
-    pub x: f64,
-    pub y: f64,
+    pub action: CachedProposalAction,
     pub confidence: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CachedProposalAction {
+    Click {
+        x: f64,
+        y: f64,
+    },
+    ClickCandidate {
+        candidates: Vec<VisionPromptCandidate>,
+        index: u32,
+    },
+    TypeIntoCandidate {
+        candidates: Vec<VisionPromptCandidate>,
+        index: u32,
+    },
 }
 
 /// Proposal cache lookup, implemented by the runtime's context graph. The

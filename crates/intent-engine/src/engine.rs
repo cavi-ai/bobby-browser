@@ -2,6 +2,7 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
 use dom_engine::{resolve_candidates, Candidate, ResolutionDecision, ResolutionPolicy};
+use futures_util::{stream, StreamExt};
 use observability::{
     ContextCandidateRankingMetric, ContextLookupOutcome, ContextRankedVisionMetric,
     OperationalMetrics, ProviderMode, StructuralContextSource, VerificationMetricResult,
@@ -30,12 +31,11 @@ pub struct VisionContext {
     pub session_ok: bool,
     pub capability_ok: bool,
     pub assist: Option<Arc<dyn VisionAssist>>,
-    /// Prefill proposal cache. `None` unless `[vision].prefill` is on and
-    /// both gates are open, so the default path is byte-identical to before.
+    /// Prefill proposal cache. `None` when `[vision].prefill` is disabled or
+    /// either vision gate is closed.
     pub proposals: Option<Arc<dyn crate::ProposalLookup>>,
-    /// Set by `execute_complete_form` while driving fields: a stuck field
-    /// returns its plain stuck failure instead of escalating, so the form
-    /// can batch one screenshot for every remaining purpose.
+    /// When set, return the deterministic stuck result without live vision
+    /// escalation.
     pub defer_escalation: bool,
     /// Base prompt context (page url, recent command kinds) supplied by the
     /// runtime; the engine merges per-stuck candidates into it. `None`
@@ -241,22 +241,12 @@ async fn execute_complete_form(
     fields: Vec<CompleteFormFieldPlan>,
 ) -> IntentOutcome {
     let mut evidence = Vec::new();
-    // Lazy batch prefill: with a cache threaded through open gates, fields
-    // defer their own escalation; the first stuck field triggers one
-    // screenshot and one propose per remaining purpose.
-    let batching = vision.proposals.is_some()
-        && vision.session_ok
-        && vision.capability_ok
-        && vision.assist.is_some();
-    let mut deferred = vision.clone();
-    deferred.defer_escalation = batching;
-    let mut batched = false;
-    for (index, field) in fields.iter().enumerate() {
+    proactive_prefill(page_id, browser, vision, &fields).await;
+    for field in &fields {
         evidence.push(Evidence::Configuration {
             name: "completeFormField".into(),
             value: field.name.clone(),
         });
-        let field_vision = if batched { vision } else { &deferred };
         let intent = IntentCommand::Fill(types::FillIntent {
             purpose: field.purpose.clone(),
             hints: types::IntentHints::default(),
@@ -266,7 +256,7 @@ async fn execute_complete_form(
             &intent,
             page_id,
             browser,
-            field_vision,
+            vision,
             field.target.clone(),
             field.value.clone(),
         )
@@ -280,69 +270,87 @@ async fn execute_complete_form(
                 evidence: mut field_evidence,
             } => {
                 evidence.append(&mut field_evidence);
-                let eligible = batching
-                    && !batched
-                    && !never_escalates(error.code)
-                    && !matches!(
-                        error.code,
-                        ErrorCode::VisionAssistDenied | ErrorCode::VisionAssistFailed
-                    );
-                if !eligible {
-                    return IntentOutcome::Failed { error, evidence };
-                }
-                let purposes: Vec<String> = fields[index..]
-                    .iter()
-                    .map(|field| field.purpose.clone())
-                    .collect();
-                batch_prefill(page_id, browser, vision, purposes).await;
-                batched = true;
-                // Retry the stuck field once: the cache consult in the
-                // escalation path answers from the batch with no screenshot.
-                let intent = IntentCommand::Fill(types::FillIntent {
-                    purpose: field.purpose.clone(),
-                    hints: types::IntentHints::default(),
-                    value: field.value.clone(),
-                });
-                match execute_fill(
-                    &intent,
-                    page_id,
-                    browser,
-                    vision,
-                    field.target.clone(),
-                    field.value.clone(),
-                )
-                .await
-                {
-                    IntentOutcome::Completed {
-                        evidence: mut retry_evidence,
-                    } => evidence.append(&mut retry_evidence),
-                    IntentOutcome::Failed {
-                        error,
-                        evidence: mut retry_evidence,
-                    } => {
-                        evidence.append(&mut retry_evidence);
-                        return IntentOutcome::Failed { error, evidence };
-                    }
-                }
+                return IntentOutcome::Failed { error, evidence };
             }
         }
     }
     IntentOutcome::Completed { evidence }
 }
 
-/// One screenshot, one propose per remaining purpose, all cached. Every
-/// failure degrades silently: transport loss, an auth rejection, or a
-/// low-confidence proposal simply leaves that purpose uncached, and the
-/// deterministic path (or a live escalation) handles the field.
-async fn batch_prefill(
+struct PrefillRequest {
+    purpose: String,
+    stuck: StuckKind,
+    context: Option<crate::VisionPromptContext>,
+    context_ranked: bool,
+}
+
+const PREFILL_CONCURRENCY_LIMIT: usize = 4;
+
+/// Preflights every field without mutating the page, then asks vision only for
+/// fields the deterministic resolver cannot settle. Candidate identities are
+/// cached; typed values remain in the runtime and are applied only when the
+/// field executes.
+async fn proactive_prefill(
     page_id: &PageId,
     browser: &dyn IntentBrowser,
     vision: &VisionContext,
-    purposes: Vec<String>,
+    fields: &[CompleteFormFieldPlan],
 ) {
     let (Some(proposals), Some(assist)) = (&vision.proposals, &vision.assist) else {
         return;
     };
+    if !vision.session_ok || !vision.capability_ok {
+        return;
+    }
+
+    let mut requests = Vec::new();
+    for field in fields {
+        if proposals.proposal_for(page_id, &field.purpose).is_some() {
+            continue;
+        }
+        let Some((stuck, candidates)) = prefill_candidates(page_id, browser, field).await else {
+            continue;
+        };
+        let ranking_started = std::time::Instant::now();
+        let (candidates, context_ranking) =
+            rank_candidates_from_context(vision, "fill", candidates).await;
+        if let (Some(ranking), Some((metrics, _))) = (context_ranking, assist.operational_metrics())
+        {
+            metrics.record_context_lookup(ranking.outcome);
+            metrics.record_context_candidate_ranking(ContextCandidateRankingMetric {
+                source: ranking.source,
+                outcome: ranking.outcome,
+                latency_ms: ranking_started.elapsed().as_millis() as u64,
+            });
+        }
+        let prompt_candidates = candidates
+            .iter()
+            .filter(|candidate| {
+                vision_window_eligible(candidate.role.as_deref(), candidate.name.as_deref())
+            })
+            .take(CONTEXT_RANK_CANDIDATE_LIMIT)
+            .map(|candidate| crate::VisionPromptCandidate {
+                role: candidate.role.clone().expect("gated role"),
+                name: candidate.name.clone().expect("gated name"),
+                ordinal: None,
+            })
+            .collect::<Vec<_>>();
+        if prompt_candidates.is_empty() {
+            continue;
+        }
+        let mut context = vision.prompt_context.clone().unwrap_or_default();
+        context.candidates = prompt_candidates;
+        requests.push(PrefillRequest {
+            purpose: field.purpose.clone(),
+            stuck,
+            context: Some(context),
+            context_ranked: context_ranking.is_some(),
+        });
+    }
+    if requests.is_empty() {
+        return;
+    }
+
     let Ok((png, _)) = browser
         .capture_screenshot(
             page_id,
@@ -354,76 +362,140 @@ async fn batch_prefill(
     else {
         return;
     };
-    let mut batch = Vec::new();
     let metric_context = assist.operational_metrics();
-    for purpose in purposes {
-        let propose_started = std::time::Instant::now();
-        let proposal = match assist
-            .propose(VisionProposeRequest {
-                purpose: purpose.clone(),
-                intent_kind: "fill".to_owned(),
-                screenshot_png: png.clone(),
-                stuck: StuckKind::TargetMissing,
-                context: vision.prompt_context.clone(),
-            })
-            .await
-        {
-            Ok(proposal) => proposal,
-            Err(_) => {
-                record_vision_metric(
+    let batch = stream::iter(requests)
+        .map(|request| {
+            let assist = Arc::clone(assist);
+            let png = png.clone();
+            let metric_context = metric_context.clone();
+            async move {
+                let propose_started = std::time::Instant::now();
+                let proposal = match assist
+                    .propose(VisionProposeRequest {
+                        purpose: request.purpose.clone(),
+                        intent_kind: "fill".to_owned(),
+                        screenshot_png: png,
+                        stuck: request.stuck,
+                        context: request.context.clone(),
+                    })
+                    .await
+                {
+                    Ok(proposal) => proposal,
+                    Err(_) => {
+                        record_context_ranked_vision_metric(
+                            metric_context.as_ref(),
+                            request.context_ranked,
+                            propose_started.elapsed().as_millis() as u64,
+                            None,
+                            VisionProposalOutcome::Failed,
+                            None,
+                        );
+                        return None;
+                    }
+                };
+                let latency_ms = propose_started.elapsed().as_millis() as u64;
+                if proposal.confidence < VISION_CONFIDENCE_FLOOR {
+                    record_context_ranked_vision_metric(
+                        metric_context.as_ref(),
+                        request.context_ranked,
+                        latency_ms,
+                        Some(proposal.confidence),
+                        VisionProposalOutcome::Rejected,
+                        Some(VerificationMetricResult::OtherRejected),
+                    );
+                    return None;
+                }
+                let context = request.context.as_ref()?;
+                let VisionAction::TypeIntoCandidate { index } = proposal.action else {
+                    record_context_ranked_vision_metric(
+                        metric_context.as_ref(),
+                        request.context_ranked,
+                        latency_ms,
+                        Some(proposal.confidence),
+                        VisionProposalOutcome::Rejected,
+                        Some(VerificationMetricResult::OtherRejected),
+                    );
+                    return None;
+                };
+                if index as usize >= context.candidates.len() {
+                    record_context_ranked_vision_metric(
+                        metric_context.as_ref(),
+                        request.context_ranked,
+                        latency_ms,
+                        Some(proposal.confidence),
+                        VisionProposalOutcome::Rejected,
+                        Some(VerificationMetricResult::OtherRejected),
+                    );
+                    return None;
+                }
+                record_context_ranked_vision_metric(
                     metric_context.as_ref(),
-                    propose_started.elapsed().as_millis() as u64,
-                    None,
-                    VisionProposalOutcome::Failed,
+                    request.context_ranked,
+                    latency_ms,
+                    Some(proposal.confidence),
+                    VisionProposalOutcome::Accepted,
                     None,
                 );
-                continue;
+                Some((
+                    request.purpose,
+                    crate::CachedProposal {
+                        action: crate::CachedProposalAction::TypeIntoCandidate {
+                            candidates: context.candidates.clone(),
+                            index,
+                        },
+                        confidence: proposal.confidence,
+                    },
+                ))
             }
-        };
-        let latency_ms = propose_started.elapsed().as_millis() as u64;
-        if proposal.confidence < VISION_CONFIDENCE_FLOOR {
-            record_vision_metric(
-                metric_context.as_ref(),
-                latency_ms,
-                Some(proposal.confidence),
-                VisionProposalOutcome::Rejected,
-                Some(VerificationMetricResult::OtherRejected),
-            );
-            continue;
-        }
-        // Only coordinate actions are cached; a TypeText or ExtractValue
-        // proposal carries what the user typed and is never stored.
-        if let VisionAction::Click { x, y } = proposal.action {
-            record_vision_metric(
-                metric_context.as_ref(),
-                latency_ms,
-                Some(proposal.confidence),
-                VisionProposalOutcome::Accepted,
-                Some(VerificationMetricResult::Accepted),
-            );
-            batch.push((
-                purpose,
-                crate::CachedProposal {
-                    x,
-                    y,
-                    confidence: proposal.confidence,
-                },
-            ));
-        } else {
-            record_vision_metric(
-                metric_context.as_ref(),
-                latency_ms,
-                Some(proposal.confidence),
-                VisionProposalOutcome::Rejected,
-                Some(VerificationMetricResult::OtherRejected),
-            );
-        }
-    }
+        })
+        .buffer_unordered(PREFILL_CONCURRENCY_LIMIT)
+        .filter_map(async move |proposal| proposal)
+        .collect::<Vec<_>>()
+        .await;
     if !batch.is_empty() {
         tracing::info!(recorded = batch.len(), "vision.prefill_batch");
         proposals.record_proposals(page_id, batch);
     } else {
         tracing::info!("vision.prefill_batch_empty");
+    }
+}
+
+async fn prefill_candidates(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    field: &CompleteFormFieldPlan,
+) -> Option<(StuckKind, Vec<types::CandidateEvidence>)> {
+    let candidates = browser
+        .collect_candidates(page_id, &field.target)
+        .await
+        .ok()?;
+    let window_candidates = candidates.clone();
+    let compatible_candidates = candidates
+        .iter()
+        .filter(|candidate| compatible(&field.value, candidate))
+        .cloned()
+        .collect::<Vec<_>>();
+    let candidates = if compatible_candidates.is_empty() {
+        candidates
+    } else {
+        compatible_candidates
+    };
+    match resolve_candidates(&field.target, &candidates, &ResolutionPolicy::default()).ok()? {
+        ResolutionDecision::Resolved { .. } => None,
+        ResolutionDecision::NotFound => {
+            if !matches!(field.value, ControlAction::SetFiles { .. })
+                && targets_file_control(&field.target, &window_candidates)
+            {
+                return None;
+            }
+            Some((
+                StuckKind::TargetMissing,
+                ranked_near_miss_window(&window_candidates, Some(&field.purpose)),
+            ))
+        }
+        ResolutionDecision::Ambiguous { candidates } => {
+            Some((StuckKind::TargetAmbiguous, candidates))
+        }
     }
 }
 
@@ -3353,15 +3425,41 @@ async fn stuck_outcome_with_prior_evidence(
     if let Some(proposals) = &vision.proposals {
         let key = report.purpose.clone().unwrap_or_default();
         if let Some(cached) = proposals.proposal_for(page_id, &key) {
+            let (action, prompt_candidates) = match cached.action {
+                crate::CachedProposalAction::Click { x, y } if report.fill_payload.is_none() => {
+                    (VisionAction::Click { x, y }, Vec::new())
+                }
+                crate::CachedProposalAction::Click { .. } => {
+                    proposals.drop_proposal(page_id, &key);
+                    if let Some((metrics, _)) = assist.operational_metrics() {
+                        metrics.record_prefill(observability::PrefillOutcome::DroppedEntry);
+                    }
+                    return escalate_with_vision(
+                        report,
+                        stuck_evidence,
+                        prior_evidence,
+                        page_id,
+                        browser,
+                        assist.as_ref(),
+                        vision,
+                    )
+                    .await;
+                }
+                crate::CachedProposalAction::ClickCandidate { candidates, index } => (
+                    VisionAction::ClickCandidate { index },
+                    cached_candidate_evidence(candidates),
+                ),
+                crate::CachedProposalAction::TypeIntoCandidate { candidates, index } => (
+                    VisionAction::TypeIntoCandidate { index },
+                    cached_candidate_evidence(candidates),
+                ),
+            };
             match execute_vision_action(
                 page_id,
                 browser,
-                &VisionAction::Click {
-                    x: cached.x,
-                    y: cached.y,
-                },
-                &[],
-                None,
+                &action,
+                &prompt_candidates,
+                report.fill_payload.as_ref(),
             )
             .await
             {
@@ -3369,6 +3467,7 @@ async fn stuck_outcome_with_prior_evidence(
                     tracing::info!(intent = intent_kind, "vision.prefill_hit");
                     if let Some((metrics, _)) = assist.operational_metrics() {
                         metrics.record_prefill(observability::PrefillOutcome::Hit);
+                        metrics.record_verification(VerificationMetricResult::Accepted);
                     }
                     let mut evidence = prior_evidence;
                     evidence.append(&mut act_evidence);
@@ -3413,6 +3512,20 @@ async fn stuck_outcome_with_prior_evidence(
         vision,
     )
     .await
+}
+
+fn cached_candidate_evidence(
+    candidates: Vec<crate::VisionPromptCandidate>,
+) -> Vec<types::CandidateEvidence> {
+    candidates
+        .into_iter()
+        .map(|candidate| types::CandidateEvidence {
+            role: Some(candidate.role),
+            name: Some(candidate.name),
+            score: 0,
+            reasons: vec!["visionPrefill".into()],
+        })
+        .collect()
 }
 
 /// The `visionAssistDenied` message leads with the deterministic stuck
