@@ -160,6 +160,7 @@ pub async fn unlock_northstar_session(
     session_id: &SessionId,
     page_id: &PageId,
 ) -> UnlockResult<()> {
+    wait_visible(runtime, session_id, page_id, "#app > *").await?;
     let nodes = accessibility_snapshot(runtime, session_id, page_id).await?;
     if contains_accessible_node(&nodes, "navigation", "Primary navigation") {
         return Ok(());
