@@ -2,8 +2,10 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 pub mod locks;
 mod operational_metrics;
+pub mod provider_health;
 
 pub use operational_metrics::*;
+pub use provider_health::{ProviderCallOutcome, ProviderHealthTracker};
 
 pub mod fields {
     //! Standard field names. Bearer tokens, page content, and JS source are

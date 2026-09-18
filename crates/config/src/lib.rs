@@ -555,6 +555,40 @@ prefill = false
     }
 
     #[test]
+    fn vision_health_failure_threshold_defaults_and_parses() {
+        let config = super::VisionConfig::default();
+        assert_eq!(config.health_failure_threshold, 3);
+        let parsed: super::AppConfig =
+            toml::from_str("[vision]\nhealth_failure_threshold = 5\n").expect("parse threshold");
+        assert_eq!(parsed.vision.health_failure_threshold, 5);
+        let aliased: super::AppConfig = toml::from_str("[vision]\nhealthFailureThreshold = 5\n")
+            .expect("parse camelCase alias");
+        assert_eq!(aliased.vision.health_failure_threshold, 5);
+    }
+
+    #[test]
+    fn observability_slo_defaults_unset_and_parses() {
+        let config = super::ObservabilityConfig::default();
+        assert_eq!(config.slo, super::SloConfig::default());
+        let parsed: super::AppConfig = toml::from_str(
+            "[observability.slo]\nvision_max_failure_rate = 0.25\nvision_min_acceptance_rate = 0.5\n",
+        )
+        .expect("parse slo");
+        assert_eq!(parsed.observability.slo.vision_max_failure_rate, Some(0.25));
+        assert_eq!(
+            parsed.observability.slo.vision_min_acceptance_rate,
+            Some(0.5)
+        );
+        let aliased: super::AppConfig =
+            toml::from_str("[observability.slo]\nvisionMaxFailureRate = 0.25\n")
+                .expect("parse camelCase slo");
+        assert_eq!(
+            aliased.observability.slo.vision_max_failure_rate,
+            Some(0.25)
+        );
+    }
+
+    #[test]
     fn vision_providers_table_loads_and_selects() {
         let text = r#"
 [vision]
@@ -931,7 +965,7 @@ allow_loopback = true
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ObservabilityConfig {
     #[serde(default = "default_observability_level")]
@@ -940,6 +974,33 @@ pub struct ObservabilityConfig {
     pub format: LogFormat,
     #[serde(default)]
     pub sink: LogSink,
+    /// Operator-facing SLOs evaluated by `bobby doctor` against the runtime's
+    /// operational metrics. Every objective is optional; unset means the
+    /// objective is not evaluated and cannot fail a doctor run.
+    #[serde(default)]
+    pub slo: SloConfig,
+}
+
+/// Operator-facing SLO objectives (`[observability.slo]`). Rates are 0.0–1.0
+/// fractions of attempted vision proposals.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct SloConfig {
+    /// Maximum tolerated fraction of vision proposals ending `failed` or
+    /// `timed_out`. Doctor fails when the observed rate exceeds it.
+    #[serde(
+        default,
+        alias = "visionMaxFailureRate",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub vision_max_failure_rate: Option<f64>,
+    /// Minimum required fraction of vision proposals accepted. Doctor fails
+    /// when the observed rate falls below it.
+    #[serde(
+        default,
+        alias = "visionMinAcceptanceRate",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub vision_min_acceptance_rate: Option<f64>,
 }
 
 impl Default for ObservabilityConfig {
@@ -948,6 +1009,7 @@ impl Default for ObservabilityConfig {
             level: default_observability_level(),
             format: LogFormat::default(),
             sink: LogSink::default(),
+            slo: SloConfig::default(),
         }
     }
 }

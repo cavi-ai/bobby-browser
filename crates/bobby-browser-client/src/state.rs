@@ -37,6 +37,47 @@ pub struct RuntimeInfo {
         skip_serializing_if = "Option::is_none"
     )]
     pub operational_metrics: Option<OperationalMetricsSnapshot>,
+    /// Per-provider health derived from recorded vision proposal outcomes and
+    /// the configured budgets (`[vision].propose_budget_ms`,
+    /// `[vision].health_failure_threshold`). Report-only. Absent when no
+    /// vision provider is configured.
+    #[serde(
+        default,
+        rename = "providerHealth",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub provider_health: Option<Vec<ProviderHealthSnapshot>>,
+}
+
+/// Health classification of one vision provider boundary. `degraded` means
+/// consecutive propose-budget violations reached the failure threshold;
+/// `unhealthy` means consecutive provider failures did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum ProviderHealthStatus {
+    Healthy,
+    Degraded,
+    Unhealthy,
+}
+
+/// Operator-facing health of one vision provider mode. Carries the thresholds
+/// that produced `status` so consumers never re-derive them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderHealthSnapshot {
+    pub provider_mode: String,
+    pub status: ProviderHealthStatus,
+    pub successes: u64,
+    pub failures: u64,
+    pub consecutive_failures: u64,
+    pub budget_violations: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_latency_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_budget_ms: Option<u64>,
+    pub failure_threshold: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

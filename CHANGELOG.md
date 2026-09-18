@@ -4,6 +4,20 @@
 
 ### Added
 
+- Provider health enforcement on the operational metrics: every vision
+  propose round-trip updates per-mode success/failure, consecutive-failure,
+  and latency-budget counters. `[vision].health_failure_threshold` (default
+  3) classifies a provider `unhealthy` (consecutive failures) or `degraded`
+  (consecutive `propose_budget_ms` violations). `/v1/runtime` reports
+  `providerHealth` when a vision provider is configured, and the MCP
+  `runtime_info` output schema advertises it. Report-only: escalation
+  behavior is unchanged.
+- `bobby doctor` evaluates operator-facing SLOs from `/v1/runtime`:
+  `provider-health` (fails on `unhealthy`, warns on `degraded`),
+  `slo-vision-latency-budget` (warns on any propose-budget violation), and
+  the new `[observability.slo]` objectives `vision_max_failure_rate` and
+  `vision_min_acceptance_rate` (fail when breached; unset objectives are
+  not evaluated).
 - MCP `click_and_wait_for_download`: clicks, waits for the download that
   click starts, and returns digest-verified artifact evidence. Requires
   `browser:mutate` + `file:download`, accepts `workflowHandle`, takes an
@@ -90,6 +104,10 @@
 
 ### Fixed
 
+- TypeScript SDK: `isRuntimeInfo` accepts the `visionProposeBudgetMs`,
+  `operationalMetrics`, and `providerHealth` fields the runtime already
+  sends; the exact-keys validator previously rejected live `/v1/runtime`
+  payloads.
 - `workflow_observe` with `includeForms` reads forms from the handle's
   current page, so after a followed popup closes it reports and reads the
   opener instead of the closed popup.

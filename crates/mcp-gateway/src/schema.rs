@@ -770,7 +770,10 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
                 // Counters and latency histograms only (never prompts,
                 // values, or URLs); the full nested projection stays in the
                 // wire type and the metrics snapshot file, not the catalog.
-                "operationalMetrics":json!({"type":"object"})
+                "operationalMetrics":json!({"type":"object"}),
+                // Per-provider health (status, counters, thresholds); no
+                // request content. Nested fields stay in the wire type.
+                "providerHealth":array(json!({"type":"object"}), 8)
             }),
             &[
                 "version",
@@ -3715,6 +3718,7 @@ fn runtime_info_output_schema_advertises_operational_metrics_and_vision_budget()
         properties.contains_key("visionProposeBudgetMs"),
         "{properties:?}"
     );
+    assert!(properties.contains_key("providerHealth"), "{properties:?}");
     let advertised = advertised_tool_output_schema("runtime_info");
     assert!(
         advertised["properties"]["operationalMetrics"].is_object(),
