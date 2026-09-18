@@ -244,5 +244,6 @@ pnpm install && pnpm --filter @cavi-ai/bobby-browser test
 
 The CDP allowlist is published in
 [`docs/cdp-support.json`](docs/cdp-support.json). The same pages are built into
-an immutable versioned artifact under
-[`docs/bobby-browser/v0.14.0`](docs/bobby-browser/v0.14.0) for documentation hosts.
+an immutable versioned artifact, `bobby-browser-docs-v0.14.0.tar.gz` on the
+matching GitHub Release, for documentation hosts. The built tree is not
+tracked; `pnpm docs:build` regenerates it from `docs/bobby-browser/source`.

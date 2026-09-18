@@ -241,19 +241,13 @@ test("docs source pins versions only through tokens", async () => {
   }
 });
 
-test("committed docs artifact matches a rebuild from source tokens", async () => {
-  const committed = JSON.parse(
-    await readFile(path.join(REPO_ROOT, OUTPUT_REL, "manifest.json"), "utf8"),
-  );
-  const release = {
-    version: committed.version,
-    tag: committed.release.tag,
-    commit: committed.release.commit,
-    sourceDateEpoch: Math.floor(Date.parse(committed.generatedAt) / 1000),
-  };
-  const rebuilt = await buildBobbyBrowserDocs(REPO_ROOT, release);
-  assert.equal(rebuilt.manifest.contentSha256, committed.contentSha256);
-  await verifyBobbyBrowserDocs(REPO_ROOT, release);
+test("a rebuild from source tokens is byte-for-byte reproducible", async () => {
+  await withSourceFixture(async (fixtureRoot) => {
+    const first = await buildBobbyBrowserDocs(fixtureRoot, RELEASE);
+    const second = await buildBobbyBrowserDocs(fixtureRoot, RELEASE);
+    assert.equal(first.manifest.contentSha256, second.manifest.contentSha256);
+    await verifyBobbyBrowserDocs(fixtureRoot, RELEASE);
+  });
 });
 
 test("repo-root version references are rewritten to the package version", () => {
