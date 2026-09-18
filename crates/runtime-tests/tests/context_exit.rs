@@ -332,10 +332,12 @@ async fn remembered_site_completes_onboarding_with_fewer_commands() {
         warm_commands_before_station, cold_gate,
         "warm session must not snapshot before the station"
     );
-    assert!(
-        warm_commands < cold_commands,
-        "remembered session must run strictly fewer commands: warm={warm_commands} cold={cold_commands}"
-    );
+    modern_gauntlet::scorecard::enforce_remembered_site_reduction(
+        "onboarding",
+        cold_commands,
+        warm_commands,
+    )
+    .unwrap();
     let snapshot = server.snapshot().await;
     assert_eq!(snapshot.onboarding_records, 2);
 }

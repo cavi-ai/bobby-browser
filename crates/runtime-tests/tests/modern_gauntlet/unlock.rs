@@ -2,9 +2,9 @@ use chrono::{Duration, Utc};
 use gauntlet_server::{MFA_CODE, OPERATOR_EMAIL, OPERATOR_PASSWORD};
 use sdk_core::RuntimeService;
 use types::{
-    AttemptId, ClickCommand, CommandEnvelope, CommandId, CommandOutcome, ElementState, PageId,
-    PrimitiveCommand, RuntimeCommand, SessionId, TargetSpec, TypeTextCommand, WaitCondition,
-    WaitForCommand, WorkflowId,
+    AccessibilityNode, AccessibilitySnapshotCommand, AttemptId, ClickCommand, CommandEnvelope,
+    CommandId, CommandOutcome, ElementState, Evidence, PageId, PrimitiveCommand, RuntimeCommand,
+    SessionId, TargetSpec, TypeTextCommand, WaitCondition, WaitForCommand, WorkflowId,
 };
 
 pub type UnlockResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -40,28 +40,38 @@ fn completed(outcome: &CommandOutcome) -> bool {
     matches!(outcome, CommandOutcome::Completed { .. })
 }
 
-async fn probe_visible(
+fn contains_accessible_node(nodes: &[AccessibilityNode], role: &str, name: &str) -> bool {
+    nodes.iter().any(|node| {
+        (node.role.as_deref() == Some(role) && node.name.as_deref() == Some(name))
+            || contains_accessible_node(&node.children, role, name)
+    })
+}
+
+async fn accessibility_snapshot(
     runtime: &RuntimeService,
     session_id: &SessionId,
     page_id: &PageId,
-    selector: &str,
-    timeout_ms: u64,
-) -> bool {
-    completed(
-        &submit(
-            runtime,
-            session_id,
-            page_id,
-            PrimitiveCommand::WaitFor(WaitForCommand {
-                condition: WaitCondition::Element {
-                    target: Box::new(css_target(selector)),
-                    state: ElementState::Visible,
-                },
-                timeout_ms,
-            }),
-        )
-        .await,
+) -> UnlockResult<Vec<AccessibilityNode>> {
+    match submit(
+        runtime,
+        session_id,
+        page_id,
+        PrimitiveCommand::AccessibilitySnapshot(AccessibilitySnapshotCommand {
+            max_nodes: Some(256),
+            target: None,
+        }),
     )
+    .await
+    {
+        CommandOutcome::Completed { evidence, .. } => evidence
+            .into_iter()
+            .find_map(|item| match item {
+                Evidence::AccessibilitySnapshot { nodes, .. } => Some(nodes),
+                _ => None,
+            })
+            .ok_or_else(|| "accessibility snapshot completed without evidence".into()),
+        outcome => Err(format!("accessibility snapshot failed: {outcome:?}").into()),
+    }
 }
 
 async fn wait_visible(
@@ -150,26 +160,11 @@ pub async fn unlock_northstar_session(
     session_id: &SessionId,
     page_id: &PageId,
 ) -> UnlockResult<()> {
-    if probe_visible(
-        runtime,
-        session_id,
-        page_id,
-        "nav[aria-label='Primary navigation']",
-        2_000,
-    )
-    .await
-    {
+    let nodes = accessibility_snapshot(runtime, session_id, page_id).await?;
+    if contains_accessible_node(&nodes, "navigation", "Primary navigation") {
         return Ok(());
     }
-    if probe_visible(
-        runtime,
-        session_id,
-        page_id,
-        "button[aria-label='Accept all cookies']",
-        8_000,
-    )
-    .await
-    {
+    if contains_accessible_node(&nodes, "button", "Accept all cookies") {
         click(
             runtime,
             session_id,
@@ -178,61 +173,58 @@ pub async fn unlock_northstar_session(
         )
         .await?;
     }
-    if probe_visible(
+    wait_visible(
         runtime,
         session_id,
         page_id,
         "form[aria-label='Operator sign in']",
-        8_000,
     )
-    .await
-    {
-        type_text(
-            runtime,
-            session_id,
-            page_id,
-            "input[aria-label='Work email']",
-            OPERATOR_EMAIL,
-        )
-        .await?;
-        type_text(
-            runtime,
-            session_id,
-            page_id,
-            "input[aria-label='Password']",
-            OPERATOR_PASSWORD,
-        )
-        .await?;
-        click(
-            runtime,
-            session_id,
-            page_id,
-            "form[aria-label='Operator sign in'] button[type='submit']",
-        )
-        .await?;
-        wait_visible(
-            runtime,
-            session_id,
-            page_id,
-            "form[aria-label='Multi-factor authentication']",
-        )
-        .await?;
-        type_text(
-            runtime,
-            session_id,
-            page_id,
-            "input[aria-label='Authentication code']",
-            MFA_CODE,
-        )
-        .await?;
-        click(
-            runtime,
-            session_id,
-            page_id,
-            "form[aria-label='Multi-factor authentication'] button[type='submit']",
-        )
-        .await?;
-    }
+    .await?;
+    type_text(
+        runtime,
+        session_id,
+        page_id,
+        "input[aria-label='Work email']",
+        OPERATOR_EMAIL,
+    )
+    .await?;
+    type_text(
+        runtime,
+        session_id,
+        page_id,
+        "input[aria-label='Password']",
+        OPERATOR_PASSWORD,
+    )
+    .await?;
+    click(
+        runtime,
+        session_id,
+        page_id,
+        "form[aria-label='Operator sign in'] button[type='submit']",
+    )
+    .await?;
+    wait_visible(
+        runtime,
+        session_id,
+        page_id,
+        "form[aria-label='Multi-factor authentication']",
+    )
+    .await?;
+    type_text(
+        runtime,
+        session_id,
+        page_id,
+        "input[aria-label='Authentication code']",
+        MFA_CODE,
+    )
+    .await?;
+    click(
+        runtime,
+        session_id,
+        page_id,
+        "form[aria-label='Multi-factor authentication'] button[type='submit']",
+    )
+    .await?;
     wait_visible(
         runtime,
         session_id,
