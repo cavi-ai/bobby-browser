@@ -45,6 +45,9 @@ docs/specs/**
 plans/
 plans/**
 
+# Built docs artifact, regenerated from docs/bobby-browser/source by `pnpm docs:build`.
+/docs/bobby-browser/v*/
+
 QODER.md
 AGENTS.md
 CODEBUDDY.md
