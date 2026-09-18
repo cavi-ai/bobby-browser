@@ -32,6 +32,13 @@ pub struct Scorecard {
     pub failure_taxonomy: FailureTaxonomy,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JourneyBudget {
+    pub max_tool_calls: u64,
+    pub max_action_count: u64,
+    pub max_snapshots: u64,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ProviderMode {
@@ -238,6 +245,118 @@ impl Scorecard {
             failed_commands,
             failure_taxonomy,
         })
+    }
+
+    pub fn enforce_release_budget(&self) -> Result<(), ScorecardError> {
+        let budget = release_budget_for(&self.station, &self.engine).ok_or_else(|| {
+            ScorecardError(format!(
+                "no release budget for station={} engine={}",
+                self.station, self.engine
+            ))
+        })?;
+        let mut violations = Vec::new();
+        if !self.passed {
+            violations.push("passed=false".to_string());
+        }
+        if self.tool_calls > budget.max_tool_calls {
+            violations.push(format!(
+                "toolCalls={}>{}",
+                self.tool_calls, budget.max_tool_calls
+            ));
+        }
+        if self.action_count > budget.max_action_count {
+            violations.push(format!(
+                "actionCount={}>{}",
+                self.action_count, budget.max_action_count
+            ));
+        }
+        if self.snapshots_taken > budget.max_snapshots {
+            violations.push(format!(
+                "snapshotsTaken={}>{}",
+                self.snapshots_taken, budget.max_snapshots
+            ));
+        }
+        if self.failed_commands != 0 {
+            violations.push(format!("failedCommands={}", self.failed_commands));
+        }
+        if self.vision_escalations_accepted > self.vision_escalations_attempted {
+            violations.push(format!(
+                "visionAccepted={}>visionAttempted={}",
+                self.vision_escalations_accepted, self.vision_escalations_attempted
+            ));
+        }
+        if self.vision_escalations_attempted > 0 && self.vision_source == VisionSource::None {
+            violations.push("visionSource=none with attempted escalation".to_string());
+        }
+        if violations.is_empty() {
+            Ok(())
+        } else {
+            Err(ScorecardError(format!(
+                "release budget exceeded for station={} engine={}: {}",
+                self.station,
+                self.engine,
+                violations.join(", ")
+            )))
+        }
+    }
+}
+
+pub fn release_budget_for(station: &str, engine: &str) -> Option<JourneyBudget> {
+    if engine != "chromium" {
+        return None;
+    }
+    let budget = match station {
+        "session" => JourneyBudget {
+            max_tool_calls: 11,
+            max_action_count: 8,
+            max_snapshots: 1,
+        },
+        "customer-update" => JourneyBudget {
+            max_tool_calls: 25,
+            max_action_count: 16,
+            max_snapshots: 2,
+        },
+        "onboarding" => JourneyBudget {
+            max_tool_calls: 30,
+            max_action_count: 21,
+            max_snapshots: 2,
+        },
+        "documents" => JourneyBudget {
+            max_tool_calls: 22,
+            max_action_count: 12,
+            max_snapshots: 2,
+        },
+        "authorization" => JourneyBudget {
+            max_tool_calls: 22,
+            max_action_count: 14,
+            max_snapshots: 2,
+        },
+        "checkout" => JourneyBudget {
+            max_tool_calls: 32,
+            max_action_count: 21,
+            max_snapshots: 2,
+        },
+        "report-recovery" => JourneyBudget {
+            max_tool_calls: 30,
+            max_action_count: 18,
+            max_snapshots: 3,
+        },
+        _ => return None,
+    };
+    Some(budget)
+}
+
+pub fn enforce_remembered_site_reduction(
+    station: &str,
+    cold_calls: usize,
+    remembered_calls: usize,
+) -> Result<(), ScorecardError> {
+    if remembered_calls < cold_calls {
+        Ok(())
+    } else {
+        Err(ScorecardError(format!(
+            "remembered-site call budget exceeded for station={station}: rememberedCalls={remembered_calls}, coldCalls={cold_calls}"
+        )))
     }
 }
 

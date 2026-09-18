@@ -635,5 +635,6 @@ async fn persist_evidence(
     bundle.write_json("scorecard.json", &scorecard)?;
     bundle.write_json("run-manifest.json", &serde_json::json!({ "journey": journey, "runId": server.run_id(), "browser": "installed-chromium", "console": "unavailable", "network": "request-log.json" }))?;
     bundle.copy_if_present("commands.jsonl", runtime.journal_path())?;
+    scorecard.enforce_release_budget()?;
     Ok(())
 }
