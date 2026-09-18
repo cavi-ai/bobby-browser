@@ -49,6 +49,7 @@ impl Default for CollectConfig {
 /// A single training example collected from a gauntlet run.
 #[derive(Debug, Clone, Serialize)]
 pub struct GauntletTrainingExample {
+    pub privacy_version: u8,
     /// Base64 encoded PNG screenshot
     pub image_b64: String,
     /// User's stated purpose (e.g., "Fill login form")
@@ -68,6 +69,7 @@ pub struct GauntletTrainingExample {
     /// Step within journey
     pub step: String,
     /// Optional error message
+    #[serde(skip_serializing)]
     pub error_message: Option<String>,
     /// Timestamp
     pub timestamp: String,
@@ -83,7 +85,7 @@ impl GauntletTrainingExample {
     // A flat training record: one argument per field, as in
     // `VisionTrainingExample::new`.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    fn new(
         screenshot_png_b64: String,
         purpose: String,
         intent_kind: String,
@@ -110,20 +112,33 @@ impl GauntletTrainingExample {
             "unknown".to_string()
         };
 
+        let context = context.and_then(sanitize_context);
+        let model_response = model_response.map(|mut response| {
+            if let Some(object) = response.as_object_mut() {
+                let action = object.remove("action").unwrap_or_default();
+                object.insert(
+                    "action".into(),
+                    intent_engine::sanitize_corpus_action(&action, None),
+                );
+            }
+            response
+        });
+
         Self {
+            privacy_version: 1,
             image_b64: screenshot_png_b64,
-            purpose,
-            intent_kind,
-            stuck,
+            purpose: intent_engine::sanitize_corpus_label(&purpose),
+            intent_kind: intent_engine::sanitize_corpus_label(&intent_kind),
+            stuck: intent_engine::sanitize_corpus_label(&stuck),
             context,
             model_response,
             success,
-            journey,
-            step,
-            error_message,
+            journey: intent_engine::sanitize_corpus_label(&journey),
+            step: intent_engine::sanitize_corpus_label(&step),
+            error_message: error_message.map(|_| "[redacted]".into()),
             timestamp: chrono::Utc::now().to_rfc3339(),
-            run_id,
-            model_name,
+            run_id: intent_engine::sanitize_corpus_label(&run_id),
+            model_name: intent_engine::sanitize_corpus_label(&model_name),
             image_hash,
         }
     }
@@ -145,6 +160,7 @@ impl GauntletDataCollector {
     pub fn new(config: CollectConfig) -> Result<Self> {
         // Create output directory
         std::fs::create_dir_all(&config.output_dir).context("failed to create output directory")?;
+        set_private_dir_permissions(&config.output_dir)?;
 
         let data_collector = Arc::new(VisionDataCollector::new(DataCollectorConfig {
             output_dir: config.output_dir.clone(),
@@ -183,7 +199,11 @@ impl GauntletDataCollector {
         journey: String,
         step: String,
         error_message: Option<String>,
+        screenshot_sanitized: bool,
     ) -> Result<GauntletTrainingExample> {
+        if !screenshot_sanitized {
+            anyhow::bail!("training screenshot must be sanitized before collection");
+        }
         let example = GauntletTrainingExample::new(
             screenshot_png_b64,
             purpose,
@@ -207,12 +227,12 @@ impl GauntletDataCollector {
 
         // Also log to data collector for real-time collection
         self.data_collector.log_proposal(
-            example.image_b64.clone(),
             &ProposeInput {
                 purpose: example.purpose.clone(),
                 intent_kind: example.intent_kind.clone(),
                 stuck: example.stuck.clone(),
                 screenshot_png_b64: example.image_b64.clone(),
+                corpus_screenshot_png_b64: Some(example.image_b64.clone()),
                 context: None, // Would need to extract from context
             },
             example.model_response.as_ref().and_then(|r| {
@@ -239,12 +259,17 @@ impl GauntletDataCollector {
     pub fn save(&self) -> Result<PathBuf> {
         let output_path = self.config.output_dir.join("training_data.jsonl");
 
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
+        let mut options = OpenOptions::new();
+        options.create(true).write(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options
             .open(&output_path)
             .context("failed to open training data file")?;
+        set_private_file_permissions(&output_path)?;
 
         for example in &self.examples {
             let json = example.to_json();
@@ -274,6 +299,53 @@ impl GauntletDataCollector {
         let failed = total - success;
         (total, success, failed)
     }
+}
+
+fn sanitize_context(context: serde_json::Value) -> Option<serde_json::Value> {
+    let object = context.as_object()?;
+    let url = object
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .and_then(intent_engine::sanitize_corpus_url);
+    let candidates = object
+        .get("candidates")
+        .and_then(serde_json::Value::as_array)
+        .map(|candidates| {
+            candidates
+                .iter()
+                .filter_map(|candidate| {
+                    let candidate = candidate.as_object()?;
+                    Some(serde_json::json!({
+                        "role": intent_engine::sanitize_corpus_label(candidate.get("role")?.as_str()?),
+                        "name": intent_engine::sanitize_corpus_label(candidate.get("name")?.as_str()?),
+                    }))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Some(serde_json::json!({"url": url, "candidates": candidates}))
+}
+
+#[cfg(unix)]
+fn set_private_dir_permissions(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn set_private_dir_permissions(_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_file_permissions(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn set_private_file_permissions(_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn parse_model_action(action: &serde_json::Value) -> Option<VisionAction> {
@@ -442,6 +514,7 @@ mod tests {
                     "journey".into(),
                     "step".into(),
                     None,
+                    true,
                 )
                 .unwrap();
         }

@@ -12,6 +12,10 @@ pub const VISION_CONFIDENCE_FLOOR: f32 = 0.75;
 pub trait VisionAssist: Send + Sync {
     async fn propose(&self, request: VisionProposeRequest) -> Result<VisionProposal, CommandError>;
 
+    fn collects_training_data(&self) -> bool {
+        false
+    }
+
     /// Process-local aggregate metrics for this provider boundary. Providers
     /// that are not attached to a runtime registry preserve legacy behavior.
     fn operational_metrics(
@@ -51,6 +55,44 @@ impl VisionAssist for InstrumentedVisionAssist {
     fn provider_mode(&self) -> observability::ProviderMode {
         self.inner.provider_mode()
     }
+
+    fn collects_training_data(&self) -> bool {
+        self.inner.collects_training_data()
+    }
+}
+
+struct TrainingDataVisionAssist {
+    inner: std::sync::Arc<dyn VisionAssist>,
+}
+
+#[async_trait]
+impl VisionAssist for TrainingDataVisionAssist {
+    async fn propose(&self, request: VisionProposeRequest) -> Result<VisionProposal, CommandError> {
+        self.inner.propose(request).await
+    }
+
+    fn operational_metrics(
+        &self,
+    ) -> Option<(
+        observability::OperationalMetrics,
+        observability::ProviderMode,
+    )> {
+        self.inner.operational_metrics()
+    }
+
+    fn provider_mode(&self) -> observability::ProviderMode {
+        self.inner.provider_mode()
+    }
+
+    fn collects_training_data(&self) -> bool {
+        true
+    }
+}
+
+pub fn collect_vision_training_data(
+    inner: std::sync::Arc<dyn VisionAssist>,
+) -> std::sync::Arc<dyn VisionAssist> {
+    std::sync::Arc::new(TrainingDataVisionAssist { inner })
 }
 
 pub fn instrument_vision_assist(
@@ -65,6 +107,9 @@ pub struct VisionProposeRequest {
     pub purpose: String,
     pub intent_kind: String,
     pub screenshot_png: Vec<u8>,
+    /// Separately masked frame for opt-in corpus collection. Providers never
+    /// use this image for inference; collectors skip when it is absent.
+    pub corpus_screenshot_png: Option<Vec<u8>>,
     pub stuck: StuckKind,
     /// Optional context block enriching the provider prompt. Structure and
     /// command kinds only — never typed values or page text.

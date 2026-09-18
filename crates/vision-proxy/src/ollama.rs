@@ -129,7 +129,6 @@ impl Upstream for OllamaUpstream {
             match &result {
                 Ok(response) => {
                     collector.log_proposal(
-                        input.screenshot_png_b64.clone(),
                         &input,
                         Some(response.clone()),
                         None, // journey — set by runtime
@@ -142,7 +141,6 @@ impl Upstream for OllamaUpstream {
                 }
                 Err(_) => {
                     collector.log_proposal(
-                        input.screenshot_png_b64.clone(),
                         &input,
                         None,
                         None,

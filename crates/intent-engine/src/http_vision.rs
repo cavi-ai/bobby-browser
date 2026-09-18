@@ -29,6 +29,8 @@ struct ProposeBody<'a> {
     stuck: &'a str,
     screenshot_png: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    corpus_screenshot_png: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     context: Option<crate::VisionPromptContext>,
 }
 
@@ -191,6 +193,10 @@ impl VisionAssist for HttpVisionAssist {
             intent_kind: &request.intent_kind,
             stuck: stuck_name(request.stuck),
             screenshot_png: BASE64.encode(&request.screenshot_png),
+            corpus_screenshot_png: request
+                .corpus_screenshot_png
+                .as_ref()
+                .map(|png| BASE64.encode(png)),
             context: request.context.clone(),
         };
         let mut call = self
@@ -426,6 +432,7 @@ mod tests {
                 purpose: "fill or extract a field".into(),
                 intent_kind: intent_kind.into(),
                 screenshot_png: b"png".to_vec(),
+                corpus_screenshot_png: None,
                 stuck: StuckKind::TargetMissing,
                 context,
             })
@@ -521,6 +528,7 @@ mod tests {
                 purpose: "Continue".into(),
                 intent_kind: "locate".into(),
                 screenshot_png: b"png".to_vec(),
+                corpus_screenshot_png: None,
                 stuck: StuckKind::TargetMissing,
                 context: None,
             })

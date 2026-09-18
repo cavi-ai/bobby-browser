@@ -282,6 +282,7 @@ async fn adapter_rejects_evidence_substitution_from_the_harness() {
             intent_kind: "submit".into(),
             stuck: StuckKind::TargetMissing,
             screenshot_png: png,
+            corpus_screenshot_png: None,
             context: None,
         })
         .await

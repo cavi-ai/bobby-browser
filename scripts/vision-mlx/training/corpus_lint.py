@@ -30,7 +30,7 @@ import json
 import sys
 from collections import Counter, defaultdict
 
-from mlx_finetune import normalize_corpus_example
+from mlx_finetune import corpus_privacy_errors, normalize_corpus_example
 
 ACTIONABLE_ROLES = frozenset(
     [
@@ -90,6 +90,8 @@ def lint(rows: list, *, check_balance: bool = True) -> tuple:
         for field in REQUIRED_FIELDS:
             if field not in row:
                 errors.append(f"{where}: missing required field {field!r}")
+
+        errors.extend(f"{where}: {error}" for error in corpus_privacy_errors(row))
 
         kind = row.get("intent_kind")
         if kind is not None and kind not in INTENT_KINDS:

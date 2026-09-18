@@ -83,7 +83,6 @@ impl Upstream for MlxUpstream {
         if let Some(collector) = &self.data_collector {
             match &result {
                 Ok(response) => collector.log_proposal(
-                    input.screenshot_png_b64.clone(),
                     &input,
                     Some(response.clone()),
                     None,
@@ -94,7 +93,6 @@ impl Upstream for MlxUpstream {
                     Some(DEFAULT_MODEL.to_string()),
                 ),
                 Err(_) => collector.log_proposal(
-                    input.screenshot_png_b64.clone(),
                     &input,
                     None,
                     None,
@@ -184,6 +182,7 @@ mod tests {
                 intent_kind: "locate".into(),
                 stuck: "targetMissing".into(),
                 screenshot_png_b64: "png".into(),
+                corpus_screenshot_png_b64: None,
                 context: None,
             })
             .await

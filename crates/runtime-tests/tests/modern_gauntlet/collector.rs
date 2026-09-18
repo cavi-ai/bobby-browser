@@ -9,7 +9,10 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use serde_json::{json, Value};
-use types::{AccessibilitySnapshotCommand, Evidence, InspectCommand, PrimitiveCommand};
+use types::{
+    AccessibilitySnapshotCommand, EvaluateJavaScriptCommand, Evidence, InspectCommand,
+    PrimitiveCommand,
+};
 
 use super::driver::{ModernRuntime, TestResult};
 
@@ -154,26 +157,36 @@ impl CorpusCollector {
         // training time. There is no pixel ground truth (no bbox source in
         // the runtime evidence), so x,y are omitted by design.
         let action = match truth {
-            GroundTruth::Click { .. } => json!({"kind": "click"}),
-            GroundTruth::TypeText { text, .. } => json!({"kind": "typeText", "text": text}),
-            GroundTruth::Extract { .. } => json!({"kind": "extractValue"}),
+            GroundTruth::Click { .. } => {
+                json!({"kind": "clickCandidate", "index": target_index})
+            }
+            GroundTruth::TypeText { .. } => {
+                json!({"kind": "typeIntoCandidate", "index": target_index})
+            }
+            GroundTruth::Extract { .. } => {
+                json!({"kind": "extractFromCandidate", "index": target_index})
+            }
         };
 
         self.records.push(json!({
             "image_b64": image_b64,
-            "purpose": truth.purpose(),
+            "purpose": intent_engine::sanitize_corpus_label(truth.purpose()),
             "intent_kind": truth.intent_kind(),
             "stuck": "targetMissing",
-            "context_url": url,
+            "context_url": url.as_deref().and_then(intent_engine::sanitize_corpus_url),
             "context_candidates": candidates
                 .iter()
-                .map(|c| json!({"role": c.role, "name": c.name}))
+                .map(|c| json!({
+                    "role": intent_engine::sanitize_corpus_label(&c.role),
+                    "name": intent_engine::sanitize_corpus_label(&c.name),
+                }))
                 .collect::<Vec<_>>(),
             "target_index": target_index,
             "model_response": {"confidence": 1.0, "action": action},
             "success": true,
-            "journey": journey,
-            "step": step,
+            "journey": intent_engine::sanitize_corpus_label(journey),
+            "step": intent_engine::sanitize_corpus_label(step),
+            "privacy_version": 1,
         }));
         Ok(())
     }
@@ -230,20 +243,24 @@ impl CorpusCollector {
 
         self.records.push(json!({
             "image_b64": image_b64,
-            "purpose": purpose,
+            "purpose": intent_engine::sanitize_corpus_label(purpose),
             "intent_kind": "locate",
             "stuck": "targetAmbiguous",
-            "context_url": url,
+            "context_url": url.as_deref().and_then(intent_engine::sanitize_corpus_url),
             "context_candidates": candidates
                 .iter()
-                .map(|c| json!({"role": c.role, "name": c.name}))
+                .map(|c| json!({
+                    "role": intent_engine::sanitize_corpus_label(&c.role),
+                    "name": intent_engine::sanitize_corpus_label(&c.name),
+                }))
                 .collect::<Vec<_>>(),
             "target_index": Value::Null,
-            "model_response": {"confidence": 0.0, "action": {"kind": "click"}},
+            "model_response": {"confidence": 0.0, "action": {"kind": "abstain"}},
             "success": false,
-            "journey": journey,
-            "step": step,
+            "journey": intent_engine::sanitize_corpus_label(journey),
+            "step": intent_engine::sanitize_corpus_label(step),
             "outcome_stage": "scriptedAmbiguous",
+            "privacy_version": 1,
         }));
         Ok(())
     }
@@ -251,6 +268,7 @@ impl CorpusCollector {
     pub fn save(&self, path: &Path) -> TestResult<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
+            set_private_dir_permissions(parent)?;
         }
         let mut out = String::new();
         for record in &self.records {
@@ -263,6 +281,7 @@ impl CorpusCollector {
         pending.write_all(out.as_bytes())?;
         pending.as_file().sync_all()?;
         pending.persist(path)?;
+        set_private_file_permissions(path)?;
         Ok(())
     }
 }
@@ -376,6 +395,32 @@ fn find_candidate(
 }
 
 async fn capture_screenshot_b64(runtime: &ModernRuntime) -> TestResult<String> {
+    let token = format!("gauntlet-corpus-{}", uuid::Uuid::new_v4());
+    let (install, cleanup) = worker_pool::corpus_mask_scripts(&token);
+    runtime
+        .submit(PrimitiveCommand::EvaluateJavaScript(
+            EvaluateJavaScriptCommand {
+                expression: install,
+                timeout_ms: 5_000,
+                await_promise: false,
+            },
+        ))
+        .await?;
+    let capture = capture_screenshot_artifact_b64(runtime).await;
+    let restored = runtime
+        .submit(PrimitiveCommand::EvaluateJavaScript(
+            EvaluateJavaScriptCommand {
+                expression: cleanup,
+                timeout_ms: 5_000,
+                await_promise: false,
+            },
+        ))
+        .await;
+    restored?;
+    capture
+}
+
+async fn capture_screenshot_artifact_b64(runtime: &ModernRuntime) -> TestResult<String> {
     let evidence = runtime.capture_viewport_screenshot().await?;
     for item in &evidence {
         if let Evidence::Screenshot { artifact_id, .. } = item {
@@ -386,6 +431,28 @@ async fn capture_screenshot_b64(runtime: &ModernRuntime) -> TestResult<String> {
         }
     }
     Err("screenshot evidence missing".into())
+}
+
+#[cfg(unix)]
+fn set_private_dir_permissions(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn set_private_dir_permissions(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_file_permissions(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn set_private_file_permissions(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn find_artifact_file(root: &Path, artifact_id: &str, extension: &str) -> Option<PathBuf> {

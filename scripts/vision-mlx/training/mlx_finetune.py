@@ -45,7 +45,7 @@ class MLXFineTuneConfig:
     seed: int = 42
     mask_prompt: bool = True
     train_ratio: float = 0.9
-    schema: str = "coords"  # "coords" (x,y regression) or "candidate" (index classification)
+    schema: str = "candidate"  # candidate index is the privacy-safe corpus boundary
 
 
 SYSTEM_PROMPT = (
@@ -66,7 +66,7 @@ CANDIDATE_SYSTEM_PROMPT = (
 )
 
 
-def build_prompt(example: dict, schema: str = "coords") -> str:
+def build_prompt(example: dict, schema: str = "candidate") -> str:
     example = normalize_corpus_example(example)
     if schema == "v1":
         return build_v1_prompt(example)
@@ -127,15 +127,127 @@ def normalize_corpus_example(example: dict) -> dict:
         ("targetIndex", "target_index"),
         ("modelResponse", "model_response"),
         ("outcomeStage", "outcome_stage"),
+        ("privacyVersion", "privacy_version"),
     ):
         if camel in example and snake in example and example[camel] != example[snake]:
             raise ValueError(f"conflicting {camel}/{snake} fields")
         if camel in example:
             normalized[snake] = example[camel]
+    context = normalized.get("context")
+    if isinstance(context, dict):
+        for source, target in (
+            ("url", "context_url"),
+            ("candidates", "context_candidates"),
+            ("recentCommandKinds", "context_recent_commands"),
+        ):
+            if source not in context:
+                continue
+            if target in normalized and normalized[target] != context[source]:
+                raise ValueError(f"conflicting context.{source}/{target} fields")
+            normalized[target] = context[source]
     return normalized
 
 
-def supervised_examples(examples: list, schema: str = "coords") -> list:
+def corpus_privacy_errors(example: dict) -> list[str]:
+    """Return reasons a record is unsafe to persist or train on."""
+    example = normalize_corpus_example(example)
+    errors = []
+    if example.get("privacy_version") != 1:
+        errors.append("privacy_version must be 1")
+
+    url = example.get("context_url")
+    if url:
+        from urllib.parse import urlsplit
+
+        parsed = urlsplit(url)
+        if (
+            parsed.scheme not in ("http", "https")
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            errors.append("unsafe context_url")
+        previous_sensitive = False
+        for segment in parsed.path.split("/"):
+            compact = "".join(ch for ch in segment if ch.isalnum())
+            uuid_shape = len(segment) == 36 and all(
+                segment[index] == "-" for index in (8, 13, 18, 23)
+            )
+            if previous_sensitive and segment != ":id":
+                errors.append("unsafe context_url path segment")
+            elif uuid_shape or (
+                len(segment) >= 24
+                and len(compact) * 10 >= len(segment) * 8
+                and any(ch.isdigit() for ch in segment)
+                and any(ch.isalpha() for ch in segment)
+            ):
+                errors.append("unsafe context_url path segment")
+            previous_sensitive = segment.lower() in {
+                "auth", "code", "credential", "invite", "key", "magic",
+                "password", "reset", "secret", "session", "token",
+            }
+
+    action = model_response(example).get("action") or {}
+    if action.get("kind") in ("typeText", "extractValue") or any(
+        field in action for field in ("text", "value")
+    ):
+        errors.append("payload-bearing action is forbidden")
+
+    forbidden_fields = {
+        "password",
+        "token",
+        "secret",
+        "authorization",
+        "cookie",
+        "modeltext",
+        "modelextracted",
+        "errormessage",
+    }
+    opaque_metadata_fields = {
+        "imageb64",
+        "imagehash",
+        "contexturl",
+        "timestamp",
+    }
+
+    def inspect(value, path="record"):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                compact = "".join(ch for ch in key.lower() if ch.isalnum())
+                if compact in forbidden_fields:
+                    errors.append(f"forbidden sensitive field {path}.{key}")
+                if compact not in opaque_metadata_fields:
+                    inspect(child, f"{path}.{key}")
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                inspect(child, f"{path}[{index}]")
+        elif isinstance(value, str):
+            lower = value.lower()
+            explicit = any(
+                marker in lower
+                for marker in ("bearer ", "basic ", "sk-", "ghp_", "github_pat_", "akia")
+            )
+            tokens = [token.strip("\"'()[]{}<>,;:!?") for token in value.split()]
+            email = any(
+                "@" in token and "." in token.rsplit("@", 1)[-1]
+                for token in tokens
+            )
+            high_entropy = any(
+                len(token) >= 24
+                and sum(ch.isalnum() for ch in token) * 10 >= len(token) * 8
+                and any(ch.isdigit() for ch in token)
+                and any(ch.isalpha() for ch in token)
+                for token in tokens
+            )
+            if explicit or email or high_entropy:
+                errors.append(f"sensitive value at {path}")
+
+    inspect(example)
+    return list(dict.fromkeys(errors))
+
+
+def supervised_examples(examples: list, schema: str = "candidate") -> list:
     """Exclude diagnostic failure records from supervised model paths.
 
     V1 keeps abstain-labeled negatives (success=False with no target
@@ -146,7 +258,7 @@ def supervised_examples(examples: list, schema: str = "coords") -> list:
     supervised = []
     for example in examples:
         normalized = normalize_corpus_example(example)
-        if normalized.get("success") is not False:
+        if normalized.get("success") is True:
             supervised.append(normalized)
         elif schema == "v1" and selected_index(normalized) is None:
             supervised.append(normalized)
@@ -170,7 +282,7 @@ def model_response(example: dict) -> dict:
     return camel if camel is not None else (snake or {})
 
 
-def build_completion(example: dict, schema: str = "coords") -> str:
+def build_completion(example: dict, schema: str = "candidate") -> str:
     example = normalize_corpus_example(example)
     if (
         example.get("success") is False
@@ -184,7 +296,7 @@ def build_completion(example: dict, schema: str = "coords") -> str:
         confidence = response.get("confidence", 0.5)
         index = selected_index(example)
         if index is None:
-            index = 0
+            raise ValueError("candidate corpus record requires target_index")
         action = response.get("action", {})
         kind = action.get("kind", "click")
         if kind in ("typeText", "type_into_candidate", "typeIntoCandidate"):
@@ -197,6 +309,15 @@ def build_completion(example: dict, schema: str = "coords") -> str:
 
     response = model_response(example)
     action = response.get("action", {})
+    if example.get("privacy_version") == 1 or action.get("kind") in (
+        "clickCandidate",
+        "typeIntoCandidate",
+        "extractFromCandidate",
+        "click_candidate",
+        "type_into_candidate",
+        "extract_from_candidate",
+    ):
+        raise ValueError("candidate-only corpus requires the candidate or v1 schema")
     confidence = response.get("confidence", 0.5)
     kind = action.get("kind")
 
@@ -211,16 +332,20 @@ def build_completion(example: dict, schema: str = "coords") -> str:
     return json.dumps(out)
 
 
-def load_examples(path: str, schema: str = "coords") -> list:
+def load_examples(path: str, schema: str = "candidate") -> list:
     examples = []
     with open(path, "r") as f:
         for line in f:
             if line.strip():
-                examples.append(json.loads(line))
+                example = json.loads(line)
+                errors = corpus_privacy_errors(example)
+                if errors:
+                    raise ValueError("unsafe corpus record: " + "; ".join(errors))
+                examples.append(example)
     return supervised_examples(examples, schema)
 
 
-def write_mlx_dataset(examples: list, out_dir: Path, train_ratio: float, seed: int, schema: str = "coords") -> dict:
+def write_mlx_dataset(examples: list, out_dir: Path, train_ratio: float, seed: int, schema: str = "candidate") -> dict:
     import random
 
     records = [
@@ -359,7 +484,7 @@ def main():
     parser.add_argument("--num-layers", type=int, default=16, help="Number of trailing layers to convert to LoRA")
     parser.add_argument("--max-seq-length", type=int, default=1024, help="Max sequence length")
     parser.add_argument("--seed", type=int, default=42, help="Shuffle seed")
-    parser.add_argument("--schema", choices=["coords", "candidate", "v1"], default="coords", help="Output schema: x,y regression or candidate-index classification")
+    parser.add_argument("--schema", choices=["coords", "candidate", "v1"], default="candidate", help="Output schema: candidate-index classification, x,y regression, or v1 index")
     args = parser.parse_args()
 
     config = MLXFineTuneConfig(

@@ -20,8 +20,8 @@ subtle.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 types.workspace = true
+intent-engine.workspace = true
 
 [dev-dependencies]
-intent-engine.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tower = { workspace = true, features = ["util"] }

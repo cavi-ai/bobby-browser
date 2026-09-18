@@ -23,6 +23,7 @@ def record(**overrides):
         "success": True,
         "journey": "unit",
         "step": "s",
+        "privacy_version": 1,
     }
     base.update(overrides)
     return base
@@ -132,6 +133,28 @@ class CorpusLintTests(unittest.TestCase):
         rows = [record(step=f"s{i}") for i in range(45)] + [negative("vague")]
         errors, _ = lint(rows)
         self.assertTrue(any("outside the healthy band" in e for e in errors))
+
+    def test_rejects_records_without_privacy_boundary(self):
+        unsafe = record()
+        del unsafe["privacy_version"]
+        errors, _ = lint([unsafe, negative("vague")], check_balance=False)
+        self.assertTrue(any("privacy_version" in e for e in errors))
+
+    def test_rejects_payload_bearing_actions_and_unsafe_urls(self):
+        unsafe = record(
+            context_url="https://user:pass@example.com/form?token=secret#value",
+            model_response={
+                "confidence": 1.0,
+                "action": {"kind": "typeText", "text": "secret"},
+            },
+        )
+        errors, _ = lint([unsafe, negative("vague")], check_balance=False)
+        self.assertTrue(any("unsafe context_url" in e for e in errors))
+        self.assertTrue(any("payload-bearing action" in e for e in errors))
+
+        path_secret = record(context_url="https://example.com/reset/abc123")
+        errors, _ = lint([path_secret, negative("vague")], check_balance=False)
+        self.assertTrue(any("unsafe context_url path segment" in e for e in errors))
 
 
 if __name__ == "__main__":

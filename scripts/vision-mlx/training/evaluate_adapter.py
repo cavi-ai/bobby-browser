@@ -108,7 +108,7 @@ def parse_v1_response(text: str, n_candidates: int) -> int | None:
     return None
 
 
-def generate_predictions(model, tokenizer, examples: list, max_tokens: int, schema: str = "coords") -> list:
+def generate_predictions(model, tokenizer, examples: list, max_tokens: int, schema: str = "candidate") -> list:
     examples = supervised_examples(examples, schema)
     from mlx_lm.generate import generate
 
@@ -425,7 +425,7 @@ def main():
     parser.add_argument("--lora-rank", type=int, default=16, help="LoRA rank used at training time")
     parser.add_argument("--lora-alpha", type=float, default=32.0, help="LoRA alpha used at training time")
     parser.add_argument("--num-layers", type=int, default=16, help="Trailing LoRA layers used at training time")
-    parser.add_argument("--schema", choices=["coords", "candidate", "v1"], default="coords", help="Output schema the model was trained with")
+    parser.add_argument("--schema", choices=["coords", "candidate", "v1"], default="candidate", help="Output schema the model was trained with")
     args = parser.parse_args()
 
     from mlx_lm import load

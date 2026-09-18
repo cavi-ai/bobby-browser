@@ -137,13 +137,17 @@ auth = "advertised"
 | Field | Default | Meaning |
 |---|---|---|
 | `prefill` | `true` | Before a form mutates, one screenshot proposes candidate-grounded targets for unresolved fields, with at most four provider calls in flight. Set `false` to disable |
-| `corpus_dir` | unset | When set, every vision escalation — executed or rejected — appends one JSONL record to `<corpus_dir>/vision-corpus.jsonl`: the screenshot, the exact candidate list sent to the model, the proposal, the terminal outcome, and, for verified clicks, the resolved target index. Unset writes nothing |
-| `collect_training_data` | `false` | Capture proxy request/proposal pairs for the local training pipeline. Independent of `corpus_dir` |
+| `corpus_dir` | unset | When set, vision escalations append privacy-minimized JSONL records to `<corpus_dir>/vision-corpus.jsonl`: a separately masked screenshot, sanitized site context, candidate-only action, terminal outcome, and resolved target index. Records are skipped if a masked screenshot cannot be captured. Unset writes nothing |
+| `collect_training_data` | `false` | Capture proxy request/proposal pairs only when the request carries the separately masked corpus screenshot. Raw-only requests are not persisted. These unlabeled pairs are excluded from supervised training until an outcome and target are attached. Independent of `corpus_dir` |
 | `training_data_dir` | `vision-training-data` | Destination for `collect_training_data` captures |
 
-`corpus_dir` and `training_data_dir` write page screenshots and candidate text
-to disk. Point them at a path you control, and treat their contents as page
-data with the same sensitivity as the pages Bobby visited.
+Corpus collection supports authenticated pages without persisting typed or
+extracted values. Before capture, Bobby covers editable controls,
+credential-marked elements, and inaccessible embedded frames while preserving
+their geometry. URLs lose credentials, query strings, fragments, and dynamic
+identifiers; action labels retain candidate indexes instead of values. On Unix,
+directories use mode `0700` and files use `0600`. Non-editable page content can
+still appear in screenshots, so keep both paths local and access-controlled.
 
 Supported auth paths are `advertised`, `oauth-authorization-code`,
 `oauth-device-code`, `environment`, `existing-session`, and `none`. Bobby maps

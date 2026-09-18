@@ -245,6 +245,7 @@ async fn a_local_session_sends_page_material_only_to_its_loopback_node() {
             purpose: "Continue".into(),
             intent_kind: "locate".into(),
             screenshot_png: b"page-material".to_vec(),
+            corpus_screenshot_png: None,
             stuck: StuckKind::TargetMissing,
             context: None,
         })

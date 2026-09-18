@@ -95,6 +95,13 @@ impl IntentBrowser for FakeBrowser {
             }],
         ))
     }
+
+    async fn capture_sanitized_screenshot(
+        &self,
+        _page_id: &PageId,
+    ) -> Result<Vec<u8>, CommandError> {
+        Ok(self.screenshot_png.clone())
+    }
 }
 
 struct FakeVision {

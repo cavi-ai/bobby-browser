@@ -27,8 +27,9 @@ from providers import create_provider, ProposeRequest
 def _target_from_example(ex: dict) -> dict:
     """Build the canonical target from either flat collector fields or a
     nested model_response dict."""
-    if ex.get("model_response"):
-        return ex["model_response"]
+    response = ex.get("model_response") or ex.get("modelResponse")
+    if response:
+        return response
     kind = ex.get("model_action_kind", "click")
     action = {"kind": kind}
     if kind == "click":

@@ -865,6 +865,7 @@ fn check_vision_propose_probe(
                     purpose: "doctor probe".to_string(),
                     intent_kind: "locate".to_string(),
                     screenshot_png: DOCTOR_PROBE_PNG.to_vec(),
+                    corpus_screenshot_png: None,
                     stuck: intent_engine::StuckKind::TargetMissing,
                     context: None,
                 },

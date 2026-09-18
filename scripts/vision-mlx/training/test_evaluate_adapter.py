@@ -47,7 +47,7 @@ class MixedActionEvaluationTests(unittest.TestCase):
 
     def test_failed_candidate_records_are_not_supervised(self):
         for stage in ("visionRejectionFloor", "visionActFailed"):
-            record = {"success": False, "outcomeStage": stage, "targetIndex": 1, "modelResponse": {"confidence": 0.1, "action": {"kind": "typeIntoCandidate", "index": 1}}}
+            record = {"privacyVersion": 1, "success": False, "outcomeStage": stage, "targetIndex": 1, "modelResponse": {"confidence": 0.1, "action": {"kind": "typeIntoCandidate", "index": 1}}}
             with self.assertRaisesRegex(ValueError, "not supervised"):
                 build_completion(record, schema="candidate")
             with tempfile.NamedTemporaryFile("w+", suffix=".jsonl") as corpus:
@@ -60,6 +60,7 @@ class MixedActionEvaluationTests(unittest.TestCase):
         # their completion is "-1". A schema-blind success filter silently
         # drops the class (whitepaper §4e/§4f).
         negative = {
+            "privacyVersion": 1,
             "success": False,
             "outcomeStage": "visionRejectionFloor",
             "purpose": "the button that moves forward",
@@ -78,13 +79,46 @@ class MixedActionEvaluationTests(unittest.TestCase):
             self.assertEqual(load_examples(corpus.name, "candidate"), [])
 
     def test_v1_failed_record_with_a_target_stays_a_diagnostic(self):
-        record = {"success": False, "targetIndex": 1, "modelResponse": {"action": {"kind": "clickCandidate", "index": 1}}}
+        record = {"privacyVersion": 1, "success": False, "targetIndex": 1, "modelResponse": {"action": {"kind": "clickCandidate", "index": 1}}}
         with self.assertRaisesRegex(ValueError, "not supervised"):
             build_completion(record, schema="v1")
         with tempfile.NamedTemporaryFile("w+", suffix=".jsonl") as corpus:
             corpus.write(json.dumps(record) + "\n")
             corpus.flush()
             self.assertEqual(load_examples(corpus.name, "v1"), [])
+
+    def test_unlabeled_proxy_capture_is_not_supervised(self):
+        record = {
+            "privacyVersion": 1,
+            "purpose": "Select Save",
+            "intentKind": "locate",
+            "stuck": "targetMissing",
+            "context": {
+                "url": "https://example.com/settings",
+                "candidates": [{"role": "button", "name": "Save"}],
+            },
+            "modelResponse": {
+                "confidence": 0.9,
+                "action": {"kind": "clickCandidate", "index": 0},
+            },
+            "success": None,
+        }
+        with tempfile.NamedTemporaryFile("w+", suffix=".jsonl") as corpus:
+            corpus.write(json.dumps(record) + "\n")
+            corpus.flush()
+            self.assertEqual(load_examples(corpus.name), [])
+
+    def test_training_rejects_records_outside_the_privacy_boundary(self):
+        record = {
+            "purpose": "Enter maya@atlas.example in the email field",
+            "privacyVersion": 1,
+            "modelResponse": {"action": {"kind": "typeIntoCandidate", "index": 0}},
+        }
+        with tempfile.NamedTemporaryFile("w+", suffix=".jsonl") as corpus:
+            corpus.write(json.dumps(record) + "\n")
+            corpus.flush()
+            with self.assertRaisesRegex(ValueError, "sensitive value"):
+                load_examples(corpus.name, "candidate")
 
 
     def test_candidate_typing_scores_the_selected_target_without_content(self):
@@ -125,6 +159,35 @@ class MixedActionEvaluationTests(unittest.TestCase):
             completion["action"], {"kind": "typeIntoCandidate", "index": 1}
         )
         self.assertNotIn("runtime secret", json.dumps(completion))
+
+    def test_candidate_schema_is_default_for_private_corpus(self):
+        record = {
+            "privacyVersion": 1,
+            "targetIndex": 1,
+            "modelResponse": {
+                "confidence": 0.9,
+                "action": {"kind": "typeIntoCandidate", "index": 1},
+            },
+        }
+
+        completion = json.loads(build_completion(record))
+
+        self.assertEqual(
+            completion["action"], {"kind": "typeIntoCandidate", "index": 1}
+        )
+
+    def test_coordinate_schema_rejects_candidate_only_corpus(self):
+        record = {
+            "privacyVersion": 1,
+            "targetIndex": 0,
+            "modelResponse": {
+                "confidence": 0.9,
+                "action": {"kind": "clickCandidate", "index": 0},
+            },
+        }
+
+        with self.assertRaisesRegex(ValueError, "candidate-only corpus"):
+            build_completion(record, schema="coords")
 
     def test_production_camel_case_record_flows_to_completion_and_evaluator(self):
         record = {
