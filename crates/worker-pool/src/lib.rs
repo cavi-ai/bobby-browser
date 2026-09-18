@@ -11,6 +11,7 @@ mod targeting;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
@@ -317,6 +318,57 @@ pub trait BrowserWorker: Send + Sync {
         Err(unsupported_error())
     }
 
+    /// Captures a privacy-minimized viewport while preserving control geometry.
+    /// Editable and credential-marked regions are temporarily covered in the
+    /// page realm, then restored even when capture fails.
+    async fn sanitized_screenshot_bytes(&self, page_id: &PageId) -> Result<Vec<u8>, CommandError> {
+        static MASK_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+        let token = format!(
+            "bobby-corpus-mask-{}",
+            MASK_SEQUENCE.fetch_add(1, AtomicOrdering::Relaxed)
+        );
+        let install = corpus_mask_install_script(&token);
+        let install_result = self
+            .evaluate_javascript(
+                page_id,
+                &EvaluateJavaScriptCommand {
+                    expression: install,
+                    timeout_ms: 5_000,
+                    await_promise: false,
+                },
+            )
+            .await;
+        if let Err(error) = install_result {
+            let _ = self
+                .evaluate_javascript(
+                    page_id,
+                    &EvaluateJavaScriptCommand {
+                        expression: corpus_mask_cleanup_script(&token),
+                        timeout_ms: 5_000,
+                        await_promise: false,
+                    },
+                )
+                .await;
+            return Err(error);
+        }
+        let capture = self.screenshot_bytes(page_id).await;
+        let cleanup = self
+            .evaluate_javascript(
+                page_id,
+                &EvaluateJavaScriptCommand {
+                    expression: corpus_mask_cleanup_script(&token),
+                    timeout_ms: 5_000,
+                    await_promise: false,
+                },
+            )
+            .await;
+        match (capture, cleanup) {
+            (Ok(bytes), Ok(_)) => Ok(bytes),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
     async fn a11y_snapshot(
         &self,
         _page_id: &PageId,
@@ -457,6 +509,48 @@ pub trait BrowserWorker: Send + Sync {
     async fn reconnect_live_process(&self) -> Result<Vec<Evidence>, CommandError> {
         Err(unsupported_error())
     }
+}
+
+pub fn corpus_mask_scripts(token: &str) -> (String, String) {
+    (
+        corpus_mask_install_script(token),
+        corpus_mask_cleanup_script(token),
+    )
+}
+
+fn corpus_mask_install_script(token: &str) -> String {
+    format!(
+        r#"(() => {{
+const token={token:?};
+const attr='data-bobby-corpus-mask';
+const selector='input,textarea,select,[contenteditable]:not([contenteditable="false"]),[data-secret],[data-sensitive],[autocomplete*="password" i],[autocomplete*="token" i],[name*="password" i],[name*="token" i],[name*="secret" i],[name*="api-key" i],[id*="password" i],[id*="token" i],[id*="secret" i],[id*="api-key" i]';
+const css=`${{selector}}{{color:transparent!important;-webkit-text-fill-color:transparent!important;text-shadow:none!important;caret-color:transparent!important;}}`;
+const cover=(doc,element)=>{{const rect=element.getBoundingClientRect();if(rect.width<=0||rect.height<=0)return;const node=doc.createElement('div');node.setAttribute(attr,token);Object.assign(node.style,{{position:'fixed',left:`${{rect.left}}px`,top:`${{rect.top}}px`,width:`${{rect.width}}px`,height:`${{rect.height}}px`,background:'#d1d5db',zIndex:'2147483647',pointerEvents:'none'}});doc.documentElement.appendChild(node);}};
+const visitRoot=(root,doc)=>{{const style=doc.createElement('style');style.setAttribute(attr,token);style.textContent=css;(root===doc?(doc.head||doc.documentElement):root).appendChild(style);for(const element of root.querySelectorAll(selector))cover(doc,element);for(const element of root.querySelectorAll('*'))if(element.shadowRoot)visitRoot(element.shadowRoot,doc);}};
+const visit=(doc)=>{{
+  visitRoot(doc,doc);
+  for(const frame of doc.querySelectorAll('iframe,frame')){{
+    const rect=frame.getBoundingClientRect();
+    try{{if(frame.contentDocument){{visit(frame.contentDocument);continue;}}}}catch(_error){{}}
+    if(rect.width<=0||rect.height<=0)continue;
+    const cover=doc.createElement('div');cover.setAttribute(attr,token);Object.assign(cover.style,{{position:'fixed',left:`${{rect.left}}px`,top:`${{rect.top}}px`,width:`${{rect.width}}px`,height:`${{rect.height}}px`,background:'#d1d5db',zIndex:'2147483647',pointerEvents:'none'}});doc.documentElement.appendChild(cover);
+  }}
+}};
+visit(document);
+return true;
+}})()"#
+    )
+}
+
+fn corpus_mask_cleanup_script(token: &str) -> String {
+    format!(
+        r#"(() => {{
+const token={token:?};const attr='data-bobby-corpus-mask';
+const cleanRoot=(root)=>{{for(const element of root.querySelectorAll('*'))if(element.shadowRoot)cleanRoot(element.shadowRoot);for(const node of [...root.querySelectorAll(`[${{attr}}="${{token}}"]`)])node.remove();}};
+const visit=(doc)=>{{cleanRoot(doc);for(const frame of doc.querySelectorAll('iframe,frame')){{try{{if(frame.contentDocument)visit(frame.contentDocument);}}catch(_error){{}}}}}};
+visit(document);return true;
+}})()"#
+    )
 }
 
 fn unsupported_error() -> CommandError {
@@ -826,5 +920,31 @@ fn replacement_timeout_error() -> CommandError {
         message: "browser worker replacement cleanup exceeded its deadline".into(),
         layer: types::ErrorLayer::Driver,
         retryable: true,
+    }
+}
+
+#[cfg(test)]
+mod corpus_privacy_tests {
+    use super::*;
+
+    #[test]
+    fn mask_scripts_cover_editable_and_credential_regions() {
+        let (install, cleanup) = corpus_mask_scripts("test-token");
+        for selector in [
+            "input",
+            "textarea",
+            "select",
+            "contenteditable",
+            "password",
+            "token",
+            "api-key",
+        ] {
+            assert!(install.contains(selector), "missing selector {selector}");
+        }
+        assert!(install.contains("iframe,frame"));
+        assert!(install.contains("shadowRoot"));
+        assert!(install.contains("test-token"));
+        assert!(cleanup.contains("test-token"));
+        assert!(cleanup.contains("remove()"));
     }
 }

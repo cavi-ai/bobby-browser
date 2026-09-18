@@ -144,6 +144,18 @@ pub trait IntentBrowser: Send + Sync {
         command: &CaptureScreenshotCommand,
     ) -> Result<(Vec<u8>, Vec<Evidence>), CommandError>;
 
+    async fn capture_sanitized_screenshot(
+        &self,
+        _page_id: &PageId,
+    ) -> Result<Vec<u8>, CommandError> {
+        Err(CommandError {
+            code: ErrorCode::ScreenshotCaptureFailed,
+            message: "sanitized screenshot capture is not supported by this worker".into(),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        })
+    }
+
     /// Compact, value-free invalid-control evidence after a soft submit wait.
     /// An empty vector means the settled page did not retain a rejected form.
     async fn validation_issues(
@@ -362,11 +374,17 @@ async fn proactive_prefill(
     else {
         return;
     };
+    let corpus_screenshot_png = if assist.collects_training_data() {
+        capture_sanitized_corpus_screenshot(browser, page_id).await
+    } else {
+        None
+    };
     let metric_context = assist.operational_metrics();
     let batch = stream::iter(requests)
         .map(|request| {
             let assist = Arc::clone(assist);
             let png = png.clone();
+            let corpus_screenshot_png = corpus_screenshot_png.clone();
             let metric_context = metric_context.clone();
             async move {
                 let propose_started = std::time::Instant::now();
@@ -375,6 +393,7 @@ async fn proactive_prefill(
                         purpose: request.purpose.clone(),
                         intent_kind: "fill".to_owned(),
                         screenshot_png: png,
+                        corpus_screenshot_png,
                         stuck: request.stuck,
                         context: request.context.clone(),
                     })
@@ -2616,7 +2635,11 @@ async fn escalate_extract_field_with_vision(
         })
         .collect();
 
-    let screenshot_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &png);
+    let corpus_screenshot_png = if vision.corpus.is_some() || assist.collects_training_data() {
+        capture_sanitized_corpus_screenshot(browser, page_id).await
+    } else {
+        None
+    };
     let propose_started = std::time::Instant::now();
     let metric_context = assist.operational_metrics();
     let proposal = match assist
@@ -2624,6 +2647,7 @@ async fn escalate_extract_field_with_vision(
             purpose: field.purpose.clone(),
             intent_kind: "extract".to_owned(),
             screenshot_png: png,
+            corpus_screenshot_png: corpus_screenshot_png.clone(),
             stuck,
             context,
         })
@@ -2678,7 +2702,7 @@ async fn escalate_extract_field_with_vision(
         }),
     );
 
-    if let Some(corpus) = &vision.corpus {
+    if let (Some(corpus), Some(screenshot_png)) = (&vision.corpus, corpus_screenshot_png) {
         let context_candidates = prompt_window
             .iter()
             .map(|candidate| crate::CorpusCandidate {
@@ -2696,7 +2720,10 @@ async fn escalate_extract_field_with_vision(
                 _ => None,
             };
             corpus.record(&crate::CorpusRecord {
-                image_b64: screenshot_b64,
+                image_b64: base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    screenshot_png,
+                ),
                 purpose: field.purpose.clone(),
                 intent_kind: "extract".into(),
                 stuck: stuck_label(stuck).into(),
@@ -2709,7 +2736,7 @@ async fn escalate_extract_field_with_vision(
                 resolved_element: None,
                 model_response: crate::corpus::CorpusModelResponse {
                     confidence: proposal.confidence,
-                    action: crate::corpus::raw_action(&proposal.action),
+                    action: crate::corpus::raw_action(&proposal.action, target_index),
                 },
                 success: value.is_some(),
                 journey: "production".into(),
@@ -3002,6 +3029,7 @@ async fn execute_solve_challenge(
                 purpose: propose_purpose.clone(),
                 intent_kind: "solveChallenge".into(),
                 screenshot_png: png,
+                corpus_screenshot_png: None,
                 stuck: StuckKind::ChallengePresent,
                 context: vision.prompt_context.clone(),
             })
@@ -3242,6 +3270,7 @@ async fn execute_detect_challenge(
                 purpose: propose_purpose.clone(),
                 intent_kind: "detectChallenge".into(),
                 screenshot_png: png,
+                corpus_screenshot_png: None,
                 stuck: StuckKind::ChallengePresent,
                 context: vision.prompt_context.clone(),
             })
@@ -3653,9 +3682,14 @@ async fn escalate_with_vision(
     }
     // Corpus capture: snapshot the exact prompt inputs before they move into
     // the request, so the record shows what the model actually saw.
-    let corpus_inputs = corpus.as_ref().map(|_| {
+    let corpus_screenshot_png = if corpus.is_some() || assist.collects_training_data() {
+        capture_sanitized_corpus_screenshot(browser, page_id).await
+    } else {
+        None
+    };
+    let corpus_inputs = corpus_screenshot_png.as_ref().map(|image| {
         (
-            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &png),
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, image),
             context.as_ref().and_then(|c| c.url.clone()),
             context
                 .as_ref()
@@ -3678,6 +3712,7 @@ async fn escalate_with_vision(
             purpose: purpose.clone().unwrap_or_default(),
             intent_kind: intent_kind.to_owned(),
             screenshot_png: png,
+            corpus_screenshot_png,
             stuck: kind,
             context,
         })
@@ -3893,6 +3928,23 @@ async fn escalate_with_vision(
     IntentOutcome::Completed { evidence }
 }
 
+async fn capture_sanitized_corpus_screenshot(
+    browser: &dyn IntentBrowser,
+    page_id: &PageId,
+) -> Option<Vec<u8>> {
+    match browser.capture_sanitized_screenshot(page_id).await {
+        Ok(bytes) if !bytes.is_empty() => Some(bytes),
+        Ok(_) => {
+            tracing::warn!("vision.corpus_skipped_empty_sanitized_screenshot");
+            None
+        }
+        Err(error) => {
+            tracing::warn!(code = ?error.code, "vision.corpus_skipped_unsanitized_screenshot");
+            None
+        }
+    }
+}
+
 fn record_context_ranked_vision_metric(
     metric_context: Option<&(OperationalMetrics, ProviderMode)>,
     context_ranked: bool,
@@ -3995,7 +4047,7 @@ fn record_escalation(
         resolved_element,
         model_response: crate::corpus::CorpusModelResponse {
             confidence: proposal.confidence,
-            action: crate::corpus::raw_action(&proposal.action),
+            action: crate::corpus::raw_action(&proposal.action, target_index),
         },
         success,
         journey: "production".into(),

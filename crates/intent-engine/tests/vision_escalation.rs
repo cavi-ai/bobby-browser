@@ -8,9 +8,9 @@ use context_store::{
     RecordSource, SiteContext,
 };
 use intent_engine::{
-    instrument_vision_assist, IntentBrowser, IntentEngine, IntentOutcome, VisionAction,
-    VisionAssist, VisionContext, VisionCorpus, VisionPromptContext, VisionProposal,
-    VisionProposeRequest, VISION_CONFIDENCE_FLOOR,
+    collect_vision_training_data, instrument_vision_assist, IntentBrowser, IntentEngine,
+    IntentOutcome, VisionAction, VisionAssist, VisionContext, VisionCorpus, VisionPromptContext,
+    VisionProposal, VisionProposeRequest, VISION_CONFIDENCE_FLOOR,
 };
 use observability::{OperationalMetrics, ProviderMode};
 use types::{
@@ -201,6 +201,13 @@ impl IntentBrowser for FakeBrowser {
             }],
         ))
     }
+
+    async fn capture_sanitized_screenshot(
+        &self,
+        _page_id: &PageId,
+    ) -> Result<Vec<u8>, CommandError> {
+        Ok(self.screenshot_png.clone())
+    }
 }
 
 fn unsupported(op: &str) -> CommandError {
@@ -307,6 +314,18 @@ async fn vision_metrics_distinguish_rejected_from_verified_actions() {
 struct RecordingVision {
     proposal: VisionProposal,
     request_debug: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+struct CorpusFrameVision {
+    frame: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+}
+
+#[async_trait]
+impl VisionAssist for CorpusFrameVision {
+    async fn propose(&self, request: VisionProposeRequest) -> Result<VisionProposal, CommandError> {
+        *self.frame.lock().unwrap_or_else(|p| p.into_inner()) = request.corpus_screenshot_png;
+        Ok(click_proposal(0.91))
+    }
 }
 
 #[async_trait]
@@ -709,10 +728,10 @@ async fn type_into_candidate_verification_failure_redacts_runtime_text_from_corp
     let corpus = std::fs::read_to_string(dir.path().join("vision-corpus.jsonl"))
         .expect("recorded corpus entry");
     assert!(!corpus.contains(SECRET));
-    assert!(corpus.contains("typeIntoCandidate verification failed"));
     let record: serde_json::Value = serde_json::from_str(corpus.trim()).unwrap();
     assert_eq!(record["success"], false);
     assert!(record.get("targetIndex").is_none());
+    assert!(record.get("errorMessage").is_none());
 }
 
 #[tokio::test]
@@ -1158,6 +1177,41 @@ async fn stuck_with_gates_uses_vision_propose_and_execute() {
     assert_eq!(record.resolution_path, IntentResolutionPath::VisionFallback);
     assert!(record.vision_proposal_sha256.is_some());
     assert_eq!(record.verification, "visionFallback");
+}
+
+#[tokio::test]
+async fn proxy_collection_receives_a_masked_frame_without_local_corpus() {
+    let frame = Arc::new(std::sync::Mutex::new(None));
+    let assist = collect_vision_training_data(Arc::new(CorpusFrameVision {
+        frame: frame.clone(),
+    }));
+    let browser = FakeBrowser {
+        screenshot_png: b"masked-frame".to_vec(),
+        ..FakeBrowser::default()
+    };
+
+    let outcome = IntentEngine::execute(
+        &locate(),
+        &PageId::new(),
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(assist),
+            proposals: None,
+            defer_escalation: false,
+            prompt_context: None,
+            corpus: None,
+            context_store: None,
+        },
+    )
+    .await;
+
+    assert!(matches!(outcome, IntentOutcome::Completed { .. }));
+    assert_eq!(
+        frame.lock().unwrap_or_else(|p| p.into_inner()).as_deref(),
+        Some(b"masked-frame".as_slice())
+    );
 }
 
 #[tokio::test]

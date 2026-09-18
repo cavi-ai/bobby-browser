@@ -106,6 +106,7 @@ pub struct ModernRuntime {
     artifacts_dir: PathBuf,
     profile: String,
     journey: String,
+    execution_policy: types::ExecutionPolicy,
 }
 
 impl fmt::Debug for ModernRuntime {
@@ -121,8 +122,23 @@ impl fmt::Debug for ModernRuntime {
 
 impl ModernRuntime {
     pub async fn launch(server: &ScenarioServer, journey: Journey) -> TestResult<Self> {
+        Self::launch_with_javascript_policy(server, journey, false).await
+    }
+
+    #[allow(dead_code)]
+    pub async fn launch_for_corpus(server: &ScenarioServer, journey: Journey) -> TestResult<Self> {
+        Self::launch_with_javascript_policy(server, journey, true).await
+    }
+
+    async fn launch_with_javascript_policy(
+        server: &ScenarioServer,
+        journey: Journey,
+        javascript_evaluation: bool,
+    ) -> TestResult<Self> {
         let dist = repository_root().join("packages/bobby-gauntlet/dist");
-        let runtime = Self::launch_at(&dist, journey.id()).await?;
+        let runtime =
+            Self::launch_at_with_javascript_policy(&dist, journey.id(), javascript_evaluation)
+                .await?;
         runtime.write_run_manifest(journey.id(), "running", None)?;
         runtime
             .navigate(&server.application_url(match journey {
@@ -149,6 +165,14 @@ impl ModernRuntime {
     }
 
     pub async fn launch_at(dist: &Path, journey: &str) -> TestResult<Self> {
+        Self::launch_at_with_javascript_policy(dist, journey, false).await
+    }
+
+    async fn launch_at_with_javascript_policy(
+        dist: &Path,
+        journey: &str,
+        javascript_evaluation: bool,
+    ) -> TestResult<Self> {
         if !dist.join("index.html").is_file()
             || !dist.join("app.js").is_file()
             || !dist.join("app.css").is_file()
@@ -217,11 +241,12 @@ impl ModernRuntime {
         };
         let profile = format!("northstar-{journey}");
         let runtime = RuntimeService::build(&config).await?;
+        let execution_policy = gauntlet_execution_policy(javascript_evaluation);
         let session = runtime
             .create_session(CreateSessionRequest {
                 profile: profile.clone(),
                 proxy: None,
-                execution_policy: gauntlet_execution_policy(),
+                execution_policy: execution_policy.clone(),
                 zigzagzig: false,
             })
             .await?;
@@ -241,6 +266,7 @@ impl ModernRuntime {
             artifacts_dir,
             profile,
             journey: journey.to_owned(),
+            execution_policy,
         })
     }
 
@@ -1326,6 +1352,7 @@ impl ModernRuntime {
             artifacts_dir,
             profile,
             journey,
+            execution_policy,
             ..
         } = self;
         drop(runtime);
@@ -1343,7 +1370,7 @@ impl ModernRuntime {
             .create_session(CreateSessionRequest {
                 profile: format!("{profile}-replacement"),
                 proxy: None,
-                execution_policy: Default::default(),
+                execution_policy: execution_policy.clone(),
                 zigzagzig: false,
             })
             .await?;
@@ -1363,6 +1390,7 @@ impl ModernRuntime {
             artifacts_dir,
             profile,
             journey,
+            execution_policy,
         };
         replacement.navigate(application_url).await?;
         replacement.establish_session().await?;
@@ -1562,11 +1590,12 @@ fn gauntlet_vision_config() -> config::VisionConfig {
     }
 }
 
-fn gauntlet_execution_policy() -> types::ExecutionPolicy {
+fn gauntlet_execution_policy(javascript_evaluation: bool) -> types::ExecutionPolicy {
     let vision_assist = std::env::var("BOBBY_GAUNTLET_VISION_ENDPOINT")
         .is_ok_and(|endpoint| !endpoint.trim().is_empty());
     types::ExecutionPolicy {
         vision_assist,
+        javascript_evaluation,
         // The legacy `[vision]` endpoint registers as the "vision" node; the
         // session must name it or no provider resolves (deny-by-default).
         vision_node: vision_assist.then(|| "vision".to_string()),

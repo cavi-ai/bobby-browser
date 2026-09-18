@@ -188,7 +188,7 @@ async fn collect_onboarding_plan_and_submit(
 #[tokio::test]
 async fn collect_onboarding_corpus() -> TestResult<()> {
     let server = ScenarioServer::start(ScenarioConfig::seeded("onboarding")).await?;
-    let runtime = ModernRuntime::launch(&server, Journey::Onboarding).await?;
+    let runtime = ModernRuntime::launch_for_corpus(&server, Journey::Onboarding).await?;
     let mut collector = CorpusCollector::new();
     collect_onboarding_identity(&runtime, &mut collector).await?;
     collect_onboarding_company(&runtime, &mut collector).await?;
@@ -205,7 +205,7 @@ async fn collect_onboarding_corpus() -> TestResult<()> {
 #[tokio::test]
 async fn collect_authorization_corpus() -> TestResult<()> {
     let server = ScenarioServer::start(ScenarioConfig::seeded("authorization")).await?;
-    let runtime = ModernRuntime::launch(&server, Journey::Authorization).await?;
+    let runtime = ModernRuntime::launch_for_corpus(&server, Journey::Authorization).await?;
     let mut collector = CorpusCollector::new();
 
     runtime
@@ -259,7 +259,7 @@ async fn collect_authorization_corpus() -> TestResult<()> {
 #[tokio::test]
 async fn collect_report_recovery_corpus() -> TestResult<()> {
     let server = ScenarioServer::start(ScenarioConfig::seeded("report-recovery")).await?;
-    let runtime = ModernRuntime::launch(&server, Journey::ReportRecovery).await?;
+    let runtime = ModernRuntime::launch_for_corpus(&server, Journey::ReportRecovery).await?;
     let mut collector = CorpusCollector::new();
 
     collector
@@ -313,7 +313,7 @@ async fn collect_report_recovery_corpus() -> TestResult<()> {
 #[tokio::test]
 async fn collect_documents_corpus() -> TestResult<()> {
     let server = ScenarioServer::start(ScenarioConfig::seeded("documents")).await?;
-    let runtime = ModernRuntime::launch(&server, Journey::Documents).await?;
+    let runtime = ModernRuntime::launch_for_corpus(&server, Journey::Documents).await?;
     let mut collector = CorpusCollector::new();
     let fixture = runtime.fixture_path("approved-upload.txt");
     runtime
@@ -371,7 +371,7 @@ async fn collect_documents_corpus() -> TestResult<()> {
 #[tokio::test]
 async fn collect_customer_update_corpus() -> TestResult<()> {
     let server = ScenarioServer::start(ScenarioConfig::seeded("customer-update")).await?;
-    let runtime = ModernRuntime::launch(&server, Journey::CustomerUpdate).await?;
+    let runtime = ModernRuntime::launch_for_corpus(&server, Journey::CustomerUpdate).await?;
     let mut collector = CorpusCollector::new();
 
     collector

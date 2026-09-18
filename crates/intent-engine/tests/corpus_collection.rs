@@ -103,6 +103,13 @@ impl IntentBrowser for FakeBrowser {
     ) -> Result<(Vec<u8>, Vec<Evidence>), CommandError> {
         Ok((b"png-bytes".to_vec(), vec![]))
     }
+
+    async fn capture_sanitized_screenshot(
+        &self,
+        _page_id: &PageId,
+    ) -> Result<Vec<u8>, CommandError> {
+        Ok(b"sanitized-png-bytes".to_vec())
+    }
 }
 
 fn unsupported(op: &str) -> CommandError {
@@ -260,7 +267,11 @@ async fn completed_escalation_writes_a_corpus_record_with_target_index() {
     assert_eq!(record["resolvedElement"]["name"], "Continue");
     assert_eq!(record["stuck"], "targetMissing");
     assert_eq!(record["purpose"], "Continue to checkout");
-    assert_eq!(record["modelResponse"]["action"]["kind"], "click");
+    assert_eq!(
+        record["modelResponse"]["action"],
+        serde_json::json!({"kind": "clickCandidate", "index": 0})
+    );
+    assert_eq!(record["privacyVersion"], 1);
     let candidates = record["contextCandidates"].as_array().unwrap();
     assert_eq!(candidates.len(), 2);
     assert_eq!(candidates[0]["name"], "Continue");

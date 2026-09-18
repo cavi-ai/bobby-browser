@@ -2,9 +2,10 @@
 //!
 //! When `[vision].corpus_dir` is configured, every escalation through
 //! `escalate_with_vision` appends one JSONL record to
-//! `<corpus_dir>/vision-corpus.jsonl`: the screenshot, the exact candidate
-//! list the model saw, the proposal, the terminal outcome stage, and — for
-//! verified clicks — the target index resolved via `element_at_point`.
+//! `<corpus_dir>/vision-corpus.jsonl`: a masked screenshot, sanitized
+//! structural context, a candidate-only proposal, the terminal outcome stage,
+//! and — for verified clicks — the target index resolved via
+//! `element_at_point`.
 //!
 //! Records are schema-agnostic (raw action kinds + `target_index`), matching
 //! the gauntlet corpus contract; `build_completion` converts at training time.
@@ -12,6 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
+use serde_json::{Map, Value};
 
 use crate::vision::VisionAction;
 
@@ -82,13 +84,15 @@ pub struct VisionCorpus {
 impl VisionCorpus {
     pub fn new(dir: &Path) -> std::io::Result<Self> {
         std::fs::create_dir_all(dir)?;
+        set_private_dir_permissions(dir)?;
         Ok(Self {
             path: dir.join("vision-corpus.jsonl"),
         })
     }
 
     pub fn record(&self, record: &CorpusRecord) {
-        let line = match serde_json::to_string(record) {
+        let line = match sanitized_record(record).and_then(|record| serde_json::to_string(&record))
+        {
             Ok(line) => line,
             Err(error) => {
                 tracing::warn!(%error, "vision.corpus_serialize_failed");
@@ -148,13 +152,245 @@ impl VisionCorpus {
 
 fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
     use std::io::Write as _;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    set_private_file_permissions(path)?;
     file.write_all(line.as_bytes())?;
     file.write_all(b"\n")?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_dir_permissions(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn set_private_dir_permissions(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_file_permissions(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn set_private_file_permissions(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn sanitized_record(record: &CorpusRecord) -> Result<Value, serde_json::Error> {
+    let mut value = serde_json::to_value(record)?;
+    let Some(object) = value.as_object_mut() else {
+        return Ok(value);
+    };
+    object.insert("privacyVersion".into(), Value::from(1));
+    object.remove("errorMessage");
+    sanitize_optional_url(object, "contextUrl");
+    sanitize_text_field(object, "purpose");
+    sanitize_text_field(object, "stuck");
+    sanitize_text_field(object, "journey");
+    sanitize_text_field(object, "step");
+    sanitize_text_field(object, "outcomeStage");
+    sanitize_named_rows(object.get_mut("contextCandidates"));
+    sanitize_named_row(object.get_mut("resolvedElement"));
+
+    let target_index = object.get("targetIndex").and_then(Value::as_u64);
+    if let Some(response) = object
+        .get_mut("modelResponse")
+        .and_then(Value::as_object_mut)
+    {
+        let action = response.remove("action").unwrap_or(Value::Null);
+        response.insert(
+            "action".into(),
+            sanitize_corpus_action(&action, target_index),
+        );
+    }
+    Ok(value)
+}
+
+fn sanitize_optional_url(object: &mut Map<String, Value>, field: &str) {
+    let replacement = object
+        .get(field)
+        .and_then(Value::as_str)
+        .and_then(sanitize_corpus_url)
+        .map(Value::String);
+    match replacement {
+        Some(value) => {
+            object.insert(field.to_owned(), value);
+        }
+        None => {
+            object.remove(field);
+        }
+    }
+}
+
+fn sanitize_text_field(object: &mut Map<String, Value>, field: &str) {
+    if let Some(value) = object.get_mut(field) {
+        if let Some(text) = value.as_str() {
+            *value = Value::String(sanitize_corpus_label(text));
+        }
+    }
+}
+
+fn sanitize_named_rows(value: Option<&mut Value>) {
+    if let Some(rows) = value.and_then(Value::as_array_mut) {
+        for row in rows {
+            sanitize_named_row(Some(row));
+        }
+    }
+}
+
+fn sanitize_named_row(value: Option<&mut Value>) {
+    if let Some(row) = value.and_then(Value::as_object_mut) {
+        sanitize_text_field(row, "role");
+        sanitize_text_field(row, "name");
+    }
+}
+
+pub fn sanitize_corpus_action(action: &Value, target_index: Option<u64>) -> Value {
+    let kind = action
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("abstain");
+    let index = target_index.or_else(|| action.get("index").and_then(Value::as_u64));
+    match (kind, index) {
+        ("typeText" | "typeIntoCandidate" | "type_into_candidate", Some(index)) => {
+            serde_json::json!({"kind": "typeIntoCandidate", "index": index})
+        }
+        ("extractValue" | "extractFromCandidate" | "extract_from_candidate", Some(index)) => {
+            serde_json::json!({"kind": "extractFromCandidate", "index": index})
+        }
+        ("click" | "clickCandidate" | "click_candidate", Some(index)) => {
+            serde_json::json!({"kind": "clickCandidate", "index": index})
+        }
+        ("challengeSolved", _) => serde_json::json!({"kind": "challengeSolved"}),
+        ("noChallengeDetected", _) => serde_json::json!({"kind": "noChallengeDetected"}),
+        ("challengeDetected", _) => serde_json::json!({"kind": "challengeDetected"}),
+        _ => serde_json::json!({"kind": "abstain"}),
+    }
+}
+
+/// Retains stable site and route identity while removing all URL-carried secrets.
+pub fn sanitize_corpus_url(raw: &str) -> Option<String> {
+    let mut url = url::Url::parse(raw).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    url.set_username("").ok()?;
+    url.set_password(None).ok()?;
+    url.set_query(None);
+    url.set_fragment(None);
+    let segments = url
+        .path_segments()
+        .map(|segments| {
+            let mut previous_sensitive = false;
+            segments
+                .map(|segment| {
+                    let redact = previous_sensitive || dynamic_path_segment(segment);
+                    previous_sensitive = sensitive_path_key(segment);
+                    if redact {
+                        ":id".to_owned()
+                    } else {
+                        segment.to_owned()
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if let Ok(mut path) = url.path_segments_mut() {
+        path.clear();
+        path.extend(segments);
+    }
+    let mut output = url.to_string();
+    if output.ends_with('/') && url.path() != "/" {
+        output.pop();
+    }
+    Some(output)
+}
+
+fn sensitive_path_key(segment: &str) -> bool {
+    matches!(
+        segment.to_ascii_lowercase().as_str(),
+        "auth"
+            | "code"
+            | "credential"
+            | "invite"
+            | "key"
+            | "magic"
+            | "password"
+            | "reset"
+            | "secret"
+            | "session"
+            | "token"
+    )
+}
+
+fn dynamic_path_segment(segment: &str) -> bool {
+    let compact = segment
+        .bytes()
+        .filter(|byte| byte.is_ascii_alphanumeric())
+        .count();
+    let uuid_shape = segment.len() == 36
+        && [8, 13, 18, 23]
+            .into_iter()
+            .all(|index| segment.as_bytes().get(index) == Some(&b'-'));
+    uuid_shape
+        || (segment.len() >= 24
+            && compact * 10 >= segment.len() * 8
+            && segment.bytes().any(|byte| byte.is_ascii_digit())
+            && segment.bytes().any(|byte| byte.is_ascii_alphabetic()))
+}
+
+pub fn sanitize_corpus_label(raw: &str) -> String {
+    let text = raw
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(512)
+        .collect::<String>();
+    let lower = text.to_ascii_lowercase();
+    let credential_prefix = ["bearer ", "basic ", "sk-", "ghp_", "github_pat_", "akia"]
+        .into_iter()
+        .any(|marker| lower.contains(marker));
+    if credential_prefix {
+        return "[redacted]".into();
+    }
+    text.split_whitespace()
+        .map(|token| {
+            let inspected = token.trim_matches(|ch: char| {
+                !ch.is_ascii_alphanumeric() && !matches!(ch, '@' | '.' | '_' | '-')
+            });
+            let email_value = inspected.contains('@')
+                && inspected
+                    .rsplit_once('@')
+                    .is_some_and(|(_, domain)| domain.contains('.'));
+            let high_entropy = inspected.len() >= 24
+                && inspected
+                    .bytes()
+                    .filter(|byte| byte.is_ascii_alphanumeric())
+                    .count()
+                    * 10
+                    >= inspected.len() * 8
+                && inspected.bytes().any(|byte| byte.is_ascii_digit())
+                && inspected.bytes().any(|byte| byte.is_ascii_alphabetic());
+            if email_value || high_entropy {
+                "[redacted]"
+            } else {
+                token
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Match a resolved (role, name) onto the candidates the model saw. Exact
@@ -186,17 +422,22 @@ pub fn match_resolved(
         })
 }
 
-/// Serialize a vision action into the raw action shape the training format
-/// expects candidate-grounded and legacy action tags.
-pub fn raw_action(action: &VisionAction) -> serde_json::Value {
+/// Serialize a vision action without runtime-owned text or extracted values.
+pub fn raw_action(action: &VisionAction, target_index: Option<usize>) -> serde_json::Value {
+    let index = target_index.and_then(|index| u64::try_from(index).ok());
     match action {
-        VisionAction::Click { x, y } => serde_json::json!({"kind": "click", "x": x, "y": y}),
-        VisionAction::TypeText { text } => {
-            serde_json::json!({"kind": "typeText", "text": text})
-        }
-        VisionAction::ExtractValue { value } => {
-            serde_json::json!({"kind": "extractValue", "value": value})
-        }
+        VisionAction::Click { .. } => index.map_or_else(
+            || serde_json::json!({"kind": "abstain"}),
+            |index| serde_json::json!({"kind": "clickCandidate", "index": index}),
+        ),
+        VisionAction::TypeText { .. } => index.map_or_else(
+            || serde_json::json!({"kind": "abstain"}),
+            |index| serde_json::json!({"kind": "typeIntoCandidate", "index": index}),
+        ),
+        VisionAction::ExtractValue { .. } => index.map_or_else(
+            || serde_json::json!({"kind": "abstain"}),
+            |index| serde_json::json!({"kind": "extractFromCandidate", "index": index}),
+        ),
         VisionAction::ClickCandidate { index } => {
             serde_json::json!({"kind": "clickCandidate", "index": index})
         }
@@ -230,6 +471,7 @@ pub fn raw_action(action: &VisionAction) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::VisionAction;
 
     fn candidate(role: &str, name: &str) -> CorpusCandidate {
         CorpusCandidate {
@@ -299,5 +541,88 @@ mod tests {
         let health = VisionCorpus::inspect(dir.path().join("nope.jsonl")).unwrap();
         assert!(!health.exists);
         assert_eq!(health.bytes, 0);
+    }
+
+    #[test]
+    fn corpus_url_drops_credentials_query_fragment_and_dynamic_ids() {
+        assert_eq!(
+            sanitize_corpus_url(
+                "https://alice:secret@example.com/accounts/550e8400-e29b-41d4-a716-446655440000/edit?token=secret#recovery"
+            ),
+            Some("https://example.com/accounts/:id/edit".into())
+        );
+        assert_eq!(
+            sanitize_corpus_url("https://example.com/reset/abc123"),
+            Some("https://example.com/reset/:id".into())
+        );
+    }
+
+    #[test]
+    fn corpus_labels_redact_embedded_contact_and_credential_values() {
+        assert_eq!(
+            sanitize_corpus_label("Enter 'maya@atlas.example' in the email field"),
+            "Enter [redacted] in the email field"
+        );
+        assert_eq!(
+            sanitize_corpus_label("Use Bearer sk-live-secret"),
+            "[redacted]"
+        );
+    }
+
+    #[test]
+    fn corpus_actions_never_serialize_runtime_payloads() {
+        for action in [
+            VisionAction::TypeText {
+                text: "must-not-survive".into(),
+            },
+            VisionAction::ExtractValue {
+                value: "must-not-survive".into(),
+            },
+        ] {
+            let encoded = raw_action(&action, Some(2)).to_string();
+            assert!(!encoded.contains("must-not-survive"));
+            assert_eq!(encoded.parse::<serde_json::Value>().unwrap()["index"], 2);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn corpus_storage_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("corpus");
+        let corpus = VisionCorpus::new(&dir).unwrap();
+        let record = CorpusRecord {
+            image_b64: "c2FuaXRpemVk".into(),
+            purpose: "Find password input".into(),
+            intent_kind: "fill".into(),
+            stuck: "targetMissing".into(),
+            context_url: Some("https://example.com/login?token=secret".into()),
+            context_candidates: vec![candidate("textbox", "Password")],
+            target_index: Some(0),
+            resolved_element: None,
+            model_response: CorpusModelResponse {
+                confidence: 1.0,
+                action: serde_json::json!({"kind":"typeText","text":"secret"}),
+            },
+            success: true,
+            journey: "production".into(),
+            step: "fill".into(),
+            outcome_stage: "visionFallback".into(),
+            error_message: Some("Authorization: Bearer secret".into()),
+        };
+        corpus.record(&record);
+
+        let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        let path = dir.join("vision-corpus.jsonl");
+        let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let stored = std::fs::read_to_string(path).unwrap();
+        assert_eq!(dir_mode, 0o700);
+        assert_eq!(file_mode, 0o600);
+        assert!(stored.contains("\"privacyVersion\":1"));
+        assert!(stored.contains("https://example.com/login"));
+        assert!(!stored.contains("secret"));
+        assert!(!stored.contains("errorMessage"));
     }
 }

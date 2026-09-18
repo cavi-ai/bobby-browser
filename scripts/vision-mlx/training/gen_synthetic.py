@@ -4,11 +4,8 @@ Deterministic synthetic data generator for the candidate-index experiment.
 
 Each example is a page with 3-8 non-overlapping candidate elements (button,
 link, textbox) placed on a 1280x800 canvas. Every candidate carries a bbox.
-The ground-truth click point is sampled inside the target candidate's bbox,
-so both output schemas can be derived from one record:
-
-  coords:    {"kind": "click", "x": ..., "y": ...}
-  candidate: {"kind": "clickCandidate", "index": ...}
+The ground truth is a candidate index; runtime-owned typed and extracted
+values are excluded.
 
 Usage:
     python gen_synthetic.py --n 200 --seed 42 --output data/synth.jsonl
@@ -27,8 +24,6 @@ NOUNS = ["Account", "Order", "Report", "Settings", "Profile", "Invoice", "Ticket
          "Document", "Payment", "Subscription", "Filter", "Export", "Draft", "User"]
 PURPOSES = ["Fill form", "Submit request", "Open settings", "Confirm dialog",
             "Navigate to next step", "Save changes", "Search records", "Upload file"]
-TEXT_VALUES = ["alice@example.com", "hunter2", "Acme Corp", "2026-08-08",
-               "+1-555-0100", "42", "john.doe", "CA-94110"]
 JOURNEYS = ["onboarding", "customer-update", "documents", "authorization", "report-recovery"]
 
 
@@ -53,10 +48,8 @@ def make_example(rng: random.Random, i: int, negative: bool = False) -> dict:
 
     # Learnable rules, one per action kind:
     #   click:        purpose "Verb the noun"        -> candidate "Verb Noun"
-    #   typeText:     purpose "Enter '<text>' ..."   -> the only textbox
-    #   extractValue: purpose "Read the <noun>"      -> candidate whose name's
-    #                 noun matches; value is that candidate's name
-    # Positions stay random so x,y remain unpredictable from the prompt.
+    #   typeText:     purpose "Enter the value ..."  -> the only textbox
+    #   extractValue: purpose "Read the <noun>"      -> matching candidate
     # `negative` removes the target's verb from the pool so the purpose has
     # no valid match: ground truth for abstention (target_index omitted).
     kind = rng.choices(["click", "typeText", "extractValue"], weights=[0.5, 0.25, 0.25])[0]
@@ -78,11 +71,6 @@ def make_example(rng: random.Random, i: int, negative: bool = False) -> dict:
         })
 
     target = candidates[target_index]
-    bbox = target["bbox"]
-    margin_x = max(4, int(bbox["w"] * 0.15))
-    margin_y = max(4, int(bbox["h"] * 0.15))
-    cx = rng.randint(bbox["x"] + margin_x, bbox["x"] + bbox["w"] - margin_x)
-    cy = rng.randint(bbox["y"] + margin_y, bbox["y"] + bbox["h"] - margin_y)
     confidence = round(rng.uniform(0.7, 0.95), 2)
 
     if negative:
@@ -90,8 +78,9 @@ def make_example(rng: random.Random, i: int, negative: bool = False) -> dict:
         # no ground-truth target, and the correct response is abstention.
         noun = rng.choice(nouns).lower()
         purpose = f"{absent_verb} the {noun}"
-        action = {"kind": "click", "x": 0.0, "y": 0.0}
+        action = {"kind": "abstain"}
         record = {
+            "privacy_version": 1,
             "image_b64": "",
             "purpose": purpose,
             "intent_kind": "locate",
@@ -102,7 +91,7 @@ def make_example(rng: random.Random, i: int, negative: bool = False) -> dict:
                 "confidence": confidence,
                 "action": action,
             },
-            "success": True,
+            "success": False,
             "journey": rng.choice(JOURNEYS),
             "step": f"step_{i}",
             "negative": True,
@@ -111,23 +100,22 @@ def make_example(rng: random.Random, i: int, negative: bool = False) -> dict:
 
     if kind == "click":
         purpose = f"{verbs[target_index]} the {target['name'].split(' ', 1)[1].lower()}"
-        action = {"kind": "click", "x": float(cx), "y": float(cy)}
+        action = {"kind": "clickCandidate", "index": target_index}
     elif kind == "typeText":
-        # Exactly one textbox; the purpose quotes the text to enter.
         target["role"] = "textbox"
         for j, c in enumerate(candidates):
             if j != target_index and c["role"] == "textbox":
                 c["role"] = "button"
-        text = rng.choice(TEXT_VALUES)
         noun = target["name"].split(" ", 1)[1].lower()
-        purpose = f"Enter '{text}' into the {noun} field"
-        action = {"kind": "typeText", "text": text}
+        purpose = f"Enter the value into the {noun} field"
+        action = {"kind": "typeIntoCandidate", "index": target_index}
     else:
         noun = target["name"].split(" ", 1)[1].lower()
         purpose = f"Read the {noun}"
-        action = {"kind": "extractValue", "value": target["name"]}
+        action = {"kind": "extractFromCandidate", "index": target_index}
 
     return {
+        "privacy_version": 1,
         "image_b64": "",
         "purpose": purpose,
         "intent_kind": "locate",
@@ -157,13 +145,17 @@ def main():
 
     rng = random.Random(args.seed)
     out = Path(args.output)
+    parent_existed = out.parent.exists()
     out.parent.mkdir(parents=True, exist_ok=True)
+    if not parent_existed:
+        out.parent.chmod(0o700)
     negatives = 0
     with open(out, "w") as f:
         for i in range(args.n):
             negative = rng.random() < args.neg_frac
             negatives += int(negative)
             f.write(json.dumps(make_example(rng, i, negative)) + "\n")
+    out.chmod(0o600)
     print(f"wrote {args.n} examples to {out} (seed {args.seed}, {negatives} negatives)")
 
 

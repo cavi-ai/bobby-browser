@@ -330,6 +330,7 @@ async fn http_vision_assist_contract_over_bound_proxy() {
             purpose: "Continue".into(),
             intent_kind: "locate".into(),
             screenshot_png: b"png-bytes".to_vec(),
+            corpus_screenshot_png: None,
             stuck: StuckKind::TargetMissing,
             context: None,
         })
@@ -473,6 +474,7 @@ async fn http_vision_assist_maps_candidate_actions_over_the_bound_proxy() {
                 purpose: "Continue".into(),
                 intent_kind: intent_kind.into(),
                 screenshot_png: b"png-bytes".to_vec(),
+                corpus_screenshot_png: None,
                 stuck: StuckKind::TargetMissing,
                 context: Some(context),
             })

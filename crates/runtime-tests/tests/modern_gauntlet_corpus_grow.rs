@@ -65,7 +65,7 @@ where
     for run_idx in 0..runs_per_journey() {
         let seed = format!("{journey}-grow-{run_idx}");
         let server = ScenarioServer::start(ScenarioConfig::seeded(&seed)).await?;
-        let runtime = ModernRuntime::launch(
+        let runtime = ModernRuntime::launch_for_corpus(
             &server,
             match journey {
                 "customer-update" => Journey::CustomerUpdate,
@@ -102,7 +102,7 @@ async fn grow_documents_traps_corpus() -> TestResult<()> {
     for run_idx in 0..runs_per_journey() {
         let seed = format!("documents-traps-{run_idx}");
         let server = ScenarioServer::start(trap_config(&seed, run_idx)).await?;
-        let runtime = ModernRuntime::launch(&server, Journey::Documents).await?;
+        let runtime = ModernRuntime::launch_for_corpus(&server, Journey::Documents).await?;
         let step = |name: &str| format!("{name}_t{run_idx}");
 
         if run_idx.is_multiple_of(2)
@@ -193,7 +193,7 @@ async fn grow_customer_update_traps_corpus() -> TestResult<()> {
     for run_idx in 0..runs_per_journey() {
         let seed = format!("customer-update-traps-{run_idx}");
         let server = ScenarioServer::start(trap_config(&seed, run_idx)).await?;
-        let runtime = ModernRuntime::launch(&server, Journey::CustomerUpdate).await?;
+        let runtime = ModernRuntime::launch_for_corpus(&server, Journey::CustomerUpdate).await?;
         let step = |name: &str| format!("{name}_t{run_idx}");
 
         // Dismiss the interruption modal when this trap combo shows one.
@@ -798,7 +798,7 @@ async fn grow_authorization_traps_corpus() -> TestResult<()> {
     for run_idx in 0..runs_per_journey() {
         let seed = format!("authorization-traps-{run_idx}");
         let server = ScenarioServer::start(trap_config(&seed, run_idx)).await?;
-        let runtime = ModernRuntime::launch(&server, Journey::Authorization).await?;
+        let runtime = ModernRuntime::launch_for_corpus(&server, Journey::Authorization).await?;
         let step = |name: &str| format!("{name}_t{run_idx}");
 
         if run_idx.is_multiple_of(2)
@@ -1047,7 +1047,7 @@ async fn grow_report_recovery_traps_corpus() -> TestResult<()> {
     for run_idx in 0..runs_per_journey() {
         let seed = format!("report-recovery-traps-{run_idx}");
         let server = ScenarioServer::start(trap_config(&seed, run_idx)).await?;
-        let runtime = ModernRuntime::launch(&server, Journey::ReportRecovery).await?;
+        let runtime = ModernRuntime::launch_for_corpus(&server, Journey::ReportRecovery).await?;
         let step = |name: &str| format!("{name}_t{run_idx}");
 
         if run_idx.is_multiple_of(2)

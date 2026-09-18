@@ -21,10 +21,11 @@ import os
 import sys
 import time
 import hashlib
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 from PIL import Image, ImageDraw
@@ -43,17 +44,13 @@ class VisionTrainingExample:
     purpose: str  # User's stated purpose
     intent_kind: str  # Intent type (locate, typeText, extractValue, etc.)
     stuck: str  # Stuck reason (targetMissing, targetAmbiguous, etc.)
+    privacy_version: int = 1
     context_url: Optional[str] = None  # Current page URL
     context_candidates: list = None  # DOM candidates
     context_recent_commands: list = None  # Recent action types
     
-    # Output (from vision model)
-    model_action_kind: str = ""  # click, typeText, extractValue
-    model_confidence: float = 0.0
-    model_click_x: float = 0.0
-    model_click_y: float = 0.0
-    model_text: str = ""
-    model_extracted: str = ""
+    target_index: Optional[int] = None
+    model_response: dict = field(default_factory=dict)
     
     # Ground truth (did the action succeed?)
     success: bool = False
@@ -76,7 +73,9 @@ class VisionTrainingExample:
             self.timestamp = datetime.now(timezone.utc).isoformat()
     
     def to_dict(self) -> dict:
-        return asdict(self)
+        data = asdict(self)
+        data.pop("error_message", None)
+        return data
     
     @classmethod
     def from_dict(cls, data: dict) -> "VisionTrainingExample":
@@ -109,8 +108,11 @@ class VisionDataCollector:
         journey: str = "",
         step: str = "",
         error_message: str = "",
+        screenshot_sanitized: bool = False,
     ) -> VisionTrainingExample:
         """Create a training example from a vision proposal."""
+        if not screenshot_sanitized:
+            raise ValueError("training screenshot must be sanitized before collection")
         
         # Compute image hash for deduplication
         try:
@@ -119,48 +121,30 @@ class VisionDataCollector:
         except:
             image_hash = "unknown"
         
-        # Extract model response
-        action_kind = ""
-        confidence = 0.0
-        click_x = 0.0
-        click_y = 0.0
-        text = ""
-        extracted = ""
-        
-        if model_response:
-            action = model_response.get("action", {})
-            action_kind = action.get("kind", "")
-            confidence = model_response.get("confidence", 0.0)
-            
-            if action_kind == "click":
-                click_x = action.get("x", 0.0)
-                click_y = action.get("y", 0.0)
-            elif action_kind == "typeText":
-                text = action.get("text", "")
-            elif action_kind == "extractValue":
-                extracted = action.get("value", "")
+        safe_response, target_index = sanitize_model_response(model_response)
+        if success and target_index is None:
+            raise ValueError("successful training examples require a candidate index")
         
         example = VisionTrainingExample(
             image_b64=screenshot_b64,
-            purpose=purpose,
-            intent_kind=intent_kind,
-            stuck=stuck,
-            context_url=context.get("url") if context else None,
-            context_candidates=context.get("candidates", []) if context else [],
-            context_recent_commands=context.get("recentCommandKinds", []) if context else [],
-            model_action_kind=action_kind,
-            model_confidence=confidence,
-            model_click_x=click_x,
-            model_click_y=click_y,
-            model_text=text,
-            model_extracted=extracted,
+            purpose=sanitize_text(purpose),
+            intent_kind=sanitize_text(intent_kind),
+            stuck=sanitize_text(stuck),
+            context_url=sanitize_url(context.get("url")) if context else None,
+            context_candidates=sanitize_candidates(context.get("candidates", [])) if context else [],
+            context_recent_commands=[
+                sanitize_text(kind)
+                for kind in (context.get("recentCommandKinds", []) if context else [])
+            ],
+            target_index=target_index,
+            model_response=safe_response,
             success=success,
-            journey=journey,
-            step=step,
-            error_message=error_message,
+            journey=sanitize_text(journey),
+            step=sanitize_text(step),
+            error_message="",
             timestamp=datetime.now(timezone.utc).isoformat(),
-            run_id=self.run_id,
-            model_name=self.model_name,
+            run_id=sanitize_text(self.run_id),
+            model_name=sanitize_text(self.model_name),
             image_hash=image_hash,
         )
         
@@ -170,9 +154,11 @@ class VisionDataCollector:
     def save_dataset(self, filename: str = "training_data.jsonl"):
         """Save collected dataset to file."""
         output_path = self.output_dir / filename
+        os.chmod(self.output_dir, 0o700)
         with open(output_path, "w") as f:
             for example in self.examples:
                 f.write(json.dumps(example.to_dict()) + "\n")
+        os.chmod(output_path, 0o600)
         
         # Print summary
         journeys = {}
@@ -227,6 +213,7 @@ class VisionDataCollector:
                 journey=journey,
                 step=f"step_{i}",
                 error_message=step.get("error_message", ""),
+                screenshot_sanitized=step.get("screenshot_sanitized", False),
             )
 
 
@@ -265,7 +252,7 @@ def integrate_with_bobby_vision_proxy():
             if self.collector:
                 try:
                     self.collector.collect_vision_proposal(
-                        screenshot_b64=request.get("screenshotPng", ""),
+                        screenshot_b64=request.get("corpusScreenshotPng", ""),
                         purpose=request.get("purpose", ""),
                         intent_kind=request.get("intentKind", "locate"),
                         stuck=request.get("stuck", "targetMissing"),
@@ -274,6 +261,7 @@ def integrate_with_bobby_vision_proxy():
                         success=False,  # Unknown until gauntlet completes
                         journey="unknown",
                         step="unknown",
+                        screenshot_sanitized=bool(request.get("corpusScreenshotPng")),
                     )
                 except Exception as e:
                     print(f"Error logging proposal: {e}")
@@ -348,19 +336,115 @@ def generate_synthetic_data(output_dir: str = "data", num_examples: int = 1000):
                 },
                 model_response={
                     "confidence": random.uniform(0.5, 0.95),
-                    "action": {
-                        "kind": "click",
-                        "x": random.uniform(50, 350),
-                        "y": random.uniform(50, 250),
-                    },
+                    "action": (
+                        {"kind": "clickCandidate", "index": 0}
+                        if success else {"kind": "abstain"}
+                    ),
                 },
                 success=success,
                 journey=journey,
                 step=f"step_{i}",
                 error_message="" if success else "Target element not found",
+                screenshot_sanitized=True,
             )
     
     collector.save_dataset()
+
+
+def sanitize_url(raw: Optional[str]) -> Optional[str]:
+    if not raw:
+        return None
+    parsed = urlsplit(raw)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return None
+    host = parsed.hostname
+    if parsed.port:
+        host = f"{host}:{parsed.port}"
+    segments = []
+    previous_sensitive = False
+    for segment in parsed.path.split("/"):
+        compact = "".join(ch for ch in segment if ch.isalnum())
+        uuid_shape = len(segment) == 36 and all(segment[i] == "-" for i in (8, 13, 18, 23))
+        dynamic = uuid_shape or (
+            len(segment) >= 24
+            and len(compact) * 10 >= len(segment) * 8
+            and any(ch.isdigit() for ch in segment)
+            and any(ch.isalpha() for ch in segment)
+        )
+        segments.append(":id" if previous_sensitive or dynamic else segment)
+        previous_sensitive = segment.lower() in {
+            "auth", "code", "credential", "invite", "key", "magic",
+            "password", "reset", "secret", "session", "token",
+        }
+    return urlunsplit((parsed.scheme, host, "/".join(segments), "", ""))
+
+
+def sanitize_text(raw: str) -> str:
+    text = "".join(ch for ch in str(raw).strip()[:512] if ch.isprintable())
+    lower = text.lower()
+    if any(marker in lower for marker in ("bearer ", "basic ", "sk-", "ghp_", "github_pat_", "akia")):
+        return "[redacted]"
+    cleaned = []
+    for token in text.split():
+        inspected = token.strip("\"'()[]{}<>,;:!?")
+        domain = inspected.rsplit("@", 1)[-1] if "@" in inspected else ""
+        email = bool(domain and "." in domain)
+        compact = "".join(ch for ch in inspected if ch.isalnum())
+        high_entropy = (
+            len(inspected) >= 24
+            and len(compact) * 10 >= len(inspected) * 8
+            and any(ch.isdigit() for ch in inspected)
+            and any(ch.isalpha() for ch in inspected)
+        )
+        cleaned.append("[redacted]" if email or high_entropy else token)
+    return " ".join(cleaned)
+
+
+def sanitize_candidates(candidates: list) -> list:
+    cleaned = []
+    for candidate in candidates:
+        role = sanitize_text(str(candidate.get("role", ""))[:128])
+        name = sanitize_text(str(candidate.get("name", ""))[:512])
+        safe = {"role": role, "name": name}
+        ordinal = candidate.get("ordinal")
+        if isinstance(ordinal, int) and not isinstance(ordinal, bool) and ordinal >= 0:
+            safe["ordinal"] = ordinal
+        bbox = candidate.get("bbox")
+        if isinstance(bbox, dict) and all(
+            isinstance(bbox.get(key), (int, float)) and not isinstance(bbox.get(key), bool)
+            for key in ("x", "y", "w", "h")
+        ):
+            safe["bbox"] = {key: bbox[key] for key in ("x", "y", "w", "h")}
+        cleaned.append(safe)
+    return cleaned
+
+
+def sanitize_model_response(model_response: Optional[dict]) -> tuple[dict, Optional[int]]:
+    response = model_response or {}
+    action = response.get("action") or {}
+    index = action.get("index")
+    if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+        index = None
+    canonical_kind = {
+        "click": "clickCandidate",
+        "clickCandidate": "clickCandidate",
+        "click_candidate": "clickCandidate",
+        "typeText": "typeIntoCandidate",
+        "typeIntoCandidate": "typeIntoCandidate",
+        "type_into_candidate": "typeIntoCandidate",
+        "extractValue": "extractFromCandidate",
+        "extractFromCandidate": "extractFromCandidate",
+        "extract_from_candidate": "extractFromCandidate",
+    }.get(action.get("kind"))
+    confidence = response.get("confidence", 0.0)
+    if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
+        confidence = 0.0
+    if canonical_kind is None or index is None:
+        return {"confidence": confidence, "action": {"kind": "abstain"}}, None
+    return {
+        "confidence": confidence,
+        "action": {"kind": canonical_kind, "index": index},
+    }, index
 
 
 # ---------------------------------------------------------------------------

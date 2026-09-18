@@ -33,6 +33,7 @@ impl Default for DataCollectorConfig {
 /// A single training example collected from a vision proposal.
 #[derive(Debug, Serialize)]
 pub struct VisionTrainingExample {
+    pub privacy_version: u8,
     /// Base64 encoded PNG screenshot
     pub image_b64: String,
     /// User's stated purpose (e.g., "Fill login form")
@@ -52,6 +53,7 @@ pub struct VisionTrainingExample {
     /// Step within journey
     pub step: Option<String>,
     /// Optional error message
+    #[serde(skip_serializing)]
     pub error_message: Option<String>,
     /// Timestamp
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -73,7 +75,6 @@ impl VisionTrainingExample {
     // that wants splitting.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        screenshot_png_b64: String,
         input: &ProposeInput,
         response: Option<ProposeResponse>,
         journey: Option<String>,
@@ -82,7 +83,8 @@ impl VisionTrainingExample {
         error_message: Option<String>,
         run_id: Option<String>,
         model_name: Option<String>,
-    ) -> Self {
+    ) -> Option<Self> {
+        let screenshot_png_b64 = input.corpus_screenshot_png_b64.clone()?;
         // Compute image hash
         let image_hash = if !screenshot_png_b64.is_empty() {
             let bytes = base64::Engine::decode(
@@ -98,44 +100,8 @@ impl VisionTrainingExample {
 
         // Extract model response
         let model_response = response.map(|r| {
-            let action = match &r.action {
-                crate::wire::VisionAction::Click { x, y } => {
-                    serde_json::json!({"kind": "click", "x": x, "y": y})
-                }
-                crate::wire::VisionAction::TypeText { text } => {
-                    serde_json::json!({"kind": "typeText", "text": text})
-                }
-                crate::wire::VisionAction::ExtractValue { value } => {
-                    serde_json::json!({"kind": "extractValue", "value": value})
-                }
-                crate::wire::VisionAction::ClickCandidate { index } => {
-                    serde_json::json!({"kind": "clickCandidate", "index": index})
-                }
-                crate::wire::VisionAction::TypeIntoCandidate { index } => {
-                    serde_json::json!({"kind": "typeIntoCandidate", "index": index})
-                }
-                crate::wire::VisionAction::ExtractFromCandidate { index } => {
-                    serde_json::json!({"kind": "extractFromCandidate", "index": index})
-                }
-                crate::wire::VisionAction::ChallengeSolved => {
-                    serde_json::json!({"kind": "challengeSolved"})
-                }
-                crate::wire::VisionAction::ChallengeDetected {
-                    challenge_type,
-                    region,
-                    blocking,
-                } => {
-                    serde_json::json!({
-                        "kind": "challengeDetected",
-                        "challengeType": challenge_type,
-                        "region": region,
-                        "blocking": blocking,
-                    })
-                }
-                crate::wire::VisionAction::NoChallengeDetected => {
-                    serde_json::json!({"kind": "noChallengeDetected"})
-                }
-            };
+            let action = serde_json::to_value(&r.action).unwrap_or_default();
+            let action = intent_engine::sanitize_corpus_action(&action, None);
             serde_json::json!({
                 "confidence": r.confidence,
                 "action": action,
@@ -145,47 +111,56 @@ impl VisionTrainingExample {
         // Extract context
         let context = input.context.as_ref().map(|c| {
             serde_json::json!({
-                "url": c.url,
-                "candidates": c.candidates,
-                "recentCommandKinds": c.recent_command_kinds,
+                "url": c.url.as_deref().and_then(intent_engine::sanitize_corpus_url),
+                "candidates": c.candidates.iter().map(|candidate| serde_json::json!({
+                    "role": intent_engine::sanitize_corpus_label(&candidate.role),
+                    "name": intent_engine::sanitize_corpus_label(&candidate.name),
+                    "ordinal": candidate.ordinal,
+                })).collect::<Vec<_>>(),
+                "recentCommandKinds": c.recent_command_kinds.iter()
+                    .map(|kind| intent_engine::sanitize_corpus_label(kind))
+                    .collect::<Vec<_>>(),
             })
         });
 
-        Self {
+        Some(Self {
+            privacy_version: 1,
             image_b64: screenshot_png_b64,
-            purpose: input.purpose.clone(),
-            intent_kind: input.intent_kind.clone(),
-            stuck: input.stuck.clone(),
+            purpose: intent_engine::sanitize_corpus_label(&input.purpose),
+            intent_kind: intent_engine::sanitize_corpus_label(&input.intent_kind),
+            stuck: intent_engine::sanitize_corpus_label(&input.stuck),
             context,
             model_response,
             success,
-            journey,
-            step,
-            error_message,
+            journey: journey.map(|value| intent_engine::sanitize_corpus_label(&value)),
+            step: step.map(|value| intent_engine::sanitize_corpus_label(&value)),
+            error_message: error_message.map(|_| "[redacted]".into()),
             timestamp: Some(chrono::Utc::now().to_rfc3339()),
-            run_id,
-            model_name,
+            run_id: run_id.map(|value| intent_engine::sanitize_corpus_label(&value)),
+            model_name: model_name.map(|value| intent_engine::sanitize_corpus_label(&value)),
             image_hash,
-        }
+        })
     }
 }
 
 /// Thread-safe data collector that logs vision proposals to disk.
 pub struct VisionDataCollector {
     config: DataCollectorConfig,
+    storage_ready: bool,
     buffer: Arc<Mutex<Vec<VisionTrainingExample>>>,
     last_flush: Mutex<Option<std::time::Instant>>,
 }
 
 impl VisionDataCollector {
     pub fn new(config: DataCollectorConfig) -> Self {
-        // Create output directory if enabled
-        if config.enabled {
-            std::fs::create_dir_all(&config.output_dir).ok();
-        }
+        let storage_ready = !config.enabled
+            || std::fs::create_dir_all(&config.output_dir)
+                .and_then(|_| set_private_dir_permissions(&config.output_dir))
+                .is_ok();
 
         Self {
             config,
+            storage_ready,
             buffer: Arc::new(Mutex::new(Vec::new())),
             last_flush: Mutex::new(None),
         }
@@ -201,7 +176,6 @@ impl VisionDataCollector {
     #[allow(clippy::too_many_arguments)]
     pub fn log_proposal(
         &self,
-        screenshot_png_b64: String,
         input: &ProposeInput,
         response: Option<ProposeResponse>,
         journey: Option<String>,
@@ -211,12 +185,11 @@ impl VisionDataCollector {
         run_id: Option<String>,
         model_name: Option<String>,
     ) {
-        if !self.config.enabled {
+        if !self.config.enabled || !self.storage_ready {
             return;
         }
 
-        let example = VisionTrainingExample::new(
-            screenshot_png_b64,
+        let Some(example) = VisionTrainingExample::new(
             input,
             response,
             journey,
@@ -225,7 +198,9 @@ impl VisionDataCollector {
             error_message,
             run_id,
             model_name,
-        );
+        ) else {
+            return;
+        };
 
         let mut buffer = self.buffer.lock().unwrap();
         buffer.push(example);
@@ -250,11 +225,19 @@ impl VisionDataCollector {
         // Create output file if not exists
         let output_path = self.config.output_dir.join("training_data.jsonl");
 
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let file = options
             .open(&output_path)
             .expect("failed to open training data file");
+        if set_private_file_permissions(&output_path).is_err() {
+            return;
+        }
 
         let mut writer = std::io::BufWriter::new(file);
 
@@ -279,6 +262,28 @@ impl VisionDataCollector {
     }
 }
 
+#[cfg(unix)]
+fn set_private_dir_permissions(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn set_private_dir_permissions(_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_file_permissions(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn set_private_file_permissions(_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,12 +291,12 @@ mod tests {
     #[test]
     fn test_example_creation() {
         let example = VisionTrainingExample::new(
-            "dGVzdA==".to_string(), // base64 "test"
             &ProposeInput {
-                purpose: "test".into(),
+                purpose: "Enter maya@atlas.example in the email field".into(),
                 intent_kind: "locate".into(),
                 stuck: "targetMissing".into(),
                 screenshot_png_b64: "dGVzdA==".to_string(),
+                corpus_screenshot_png_b64: Some("dGVzdA==".to_string()),
                 context: None,
             },
             None,
@@ -301,9 +306,10 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .expect("sanitized screenshot");
 
-        assert_eq!(example.purpose, "test");
+        assert_eq!(example.purpose, "Enter [redacted] in the email field");
         assert_eq!(example.intent_kind, "locate");
         assert!(example.image_hash.is_some());
     }
@@ -315,6 +321,7 @@ mod tests {
             intent_kind: "fill".into(),
             stuck: "targetMissing".into(),
             screenshot_png_b64: "dGVzdA==".into(),
+            corpus_screenshot_png_b64: Some("dGVzdA==".into()),
             context: None,
         };
 
@@ -323,7 +330,6 @@ mod tests {
             crate::wire::VisionAction::ExtractFromCandidate { index: 1 },
         ] {
             let example = VisionTrainingExample::new(
-                "dGVzdA==".into(),
                 &input,
                 Some(ProposeResponse {
                     confidence: 0.9,
@@ -335,7 +341,8 @@ mod tests {
                 None,
                 None,
                 None,
-            );
+            )
+            .expect("sanitized screenshot");
             let action = &example.model_response.expect("response")["action"];
             assert!(matches!(
                 action["kind"].as_str(),
@@ -346,5 +353,85 @@ mod tests {
             assert!(action.get("value").is_none());
             assert!(action.get("clear_first").is_none());
         }
+    }
+
+    #[test]
+    fn legacy_payload_actions_are_not_persisted() {
+        let input = ProposeInput {
+            purpose: "fill password".into(),
+            intent_kind: "fill".into(),
+            stuck: "targetMissing".into(),
+            screenshot_png_b64: "cmF3".into(),
+            corpus_screenshot_png_b64: Some("c2FuaXRpemVk".into()),
+            context: None,
+        };
+        let example = VisionTrainingExample::new(
+            &input,
+            Some(ProposeResponse {
+                confidence: 0.9,
+                action: crate::wire::VisionAction::TypeText {
+                    text: "must-not-survive".into(),
+                },
+            }),
+            None,
+            None,
+            Some(true),
+            Some("Authorization: Bearer must-not-survive".into()),
+            None,
+            None,
+        )
+        .expect("sanitized screenshot");
+        let encoded = serde_json::to_string(&example).unwrap();
+        assert_eq!(example.model_response.unwrap()["action"]["kind"], "abstain");
+        assert!(!encoded.contains("must-not-survive"));
+        assert!(!encoded.contains("error_message"));
+    }
+
+    #[test]
+    fn raw_only_input_is_not_collectable() {
+        let input = ProposeInput {
+            purpose: "fill password".into(),
+            intent_kind: "fill".into(),
+            stuck: "targetMissing".into(),
+            screenshot_png_b64: "cmF3".into(),
+            corpus_screenshot_png_b64: None,
+            context: None,
+        };
+        assert!(
+            VisionTrainingExample::new(&input, None, None, None, None, None, None, None,).is_none()
+        );
+    }
+
+    #[test]
+    fn collection_stays_disabled_when_private_storage_cannot_be_created() {
+        let unique = format!(
+            "bobby-vision-collector-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let output_dir = std::env::temp_dir().join(unique);
+        std::fs::write(&output_dir, b"not a directory").unwrap();
+        let collector = VisionDataCollector::new(DataCollectorConfig {
+            output_dir: output_dir.clone(),
+            enabled: true,
+            flush_interval_ms: 0,
+        });
+        let input = ProposeInput {
+            purpose: "select the target".into(),
+            intent_kind: "locate".into(),
+            stuck: "targetMissing".into(),
+            screenshot_png_b64: "cmF3".into(),
+            corpus_screenshot_png_b64: Some("c2FuaXRpemVk".into()),
+            context: None,
+        };
+
+        collector.log_proposal(&input, None, None, None, None, None, None, None);
+
+        assert_eq!(collector.stats(), (0, 0));
+        assert_eq!(std::fs::read(&output_dir).unwrap(), b"not a directory");
+        std::fs::remove_file(output_dir).unwrap();
     }
 }

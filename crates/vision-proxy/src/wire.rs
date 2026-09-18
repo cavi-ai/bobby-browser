@@ -7,6 +7,10 @@ pub struct ProposeRequest {
     pub intent_kind: String,
     pub stuck: String,
     pub screenshot_png: String,
+    /// A separately masked frame for corpus persistence. Never forwarded to
+    /// the inference provider.
+    #[serde(default)]
+    pub corpus_screenshot_png: Option<String>,
     /// Optional context block: page url, candidate controls, recent command
     /// kinds. Structure only; rendered into the upstream prompt.
     #[serde(default)]

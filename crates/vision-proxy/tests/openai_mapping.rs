@@ -83,6 +83,7 @@ async fn propose_posts_expected_openai_body_and_maps_response() {
             intent_kind: "click".into(),
             stuck: "targetMissing".into(),
             screenshot_png_b64: "aGVsbG8=".into(),
+            corpus_screenshot_png_b64: None,
             context: None,
         })
         .await
@@ -137,6 +138,7 @@ async fn malformed_model_json_returns_invalid() {
             intent_kind: "click".into(),
             stuck: "targetMissing".into(),
             screenshot_png_b64: "abc".into(),
+            corpus_screenshot_png_b64: None,
             context: None,
         })
         .await
@@ -156,6 +158,7 @@ async fn empty_api_key_omits_authorization_header() {
             intent_kind: "click".into(),
             stuck: "targetMissing".into(),
             screenshot_png_b64: "aGVsbG8=".into(),
+            corpus_screenshot_png_b64: None,
             context: None,
         })
         .await
@@ -204,6 +207,7 @@ async fn propose_renders_the_context_block_into_the_prompt() {
             intent_kind: "fill".into(),
             stuck: "targetMissing".into(),
             screenshot_png_b64: "aGVsbG8=".into(),
+            corpus_screenshot_png_b64: None,
             context: Some(vision_proxy::wire::ProposeContext {
                 url: Some("https://example.test/signup".into()),
                 candidates: vec![

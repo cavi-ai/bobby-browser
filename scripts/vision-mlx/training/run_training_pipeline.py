@@ -10,9 +10,11 @@ Usage:
 """
 
 import argparse
+import base64
 import json
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 # Add scripts directory to path
@@ -162,16 +164,16 @@ class VisionTrainingPipeline:
                     },
                     model_response={
                         "confidence": random.uniform(0.5, 0.95),
-                        "action": {
-                            "kind": "click",
-                            "x": random.uniform(50, 350),
-                            "y": random.uniform(50, 250),
-                        },
+                        "action": (
+                            {"kind": "clickCandidate", "index": 0}
+                            if success else {"kind": "abstain"}
+                        ),
                     },
                     success=success,
                     journey=journey,
                     step=f"step_{i}",
                     error_message="" if success else "Target element not found",
+                    screenshot_sanitized=True,
                 )
     
     def _split_dataset(self):
@@ -201,6 +203,8 @@ class VisionTrainingPipeline:
         # Save
         train_path.write_text("\n".join(train_lines))
         test_path.write_text("\n".join(test_lines))
+        os.chmod(train_path, 0o600)
+        os.chmod(test_path, 0o600)
         
         print(f"Train: {len(train_lines)} examples")
         print(f"Test: {len(test_lines)} examples")

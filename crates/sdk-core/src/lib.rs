@@ -74,6 +74,7 @@ pub struct RuntimeService {
     /// `visionAssistFailed` repairs diverge on exactly this).
     vision_assist_configured: bool,
     vision_provider_configured: bool,
+    collect_training_data: bool,
     /// The operator's `[vision].propose_budget_ms`, echoed on `runtime_info`
     /// so a caller can judge the metrics latency histogram against the
     /// configured budget without config access.
@@ -115,6 +116,7 @@ impl RuntimeService {
             nodes: Arc::new(NodeRegistry::default()),
             vision_assist_configured: false,
             vision_provider_configured: false,
+            collect_training_data: false,
             vision_propose_budget_ms: None,
             operational_metrics: OperationalMetrics::default(),
             started_at: std::time::Instant::now(),
@@ -135,6 +137,7 @@ impl RuntimeService {
             nodes: Arc::new(NodeRegistry::default()),
             vision_assist_configured: false,
             vision_provider_configured: false,
+            collect_training_data: false,
             vision_propose_budget_ms: None,
             operational_metrics: OperationalMetrics::default(),
             started_at: std::time::Instant::now(),
@@ -158,6 +161,11 @@ impl RuntimeService {
 
     fn with_vision_propose_budget(mut self, budget_ms: Option<u64>) -> Self {
         self.vision_propose_budget_ms = budget_ms;
+        self
+    }
+
+    fn with_training_data_collection(mut self, enabled: bool) -> Self {
+        self.collect_training_data = enabled;
         self
     }
 
@@ -365,6 +373,7 @@ impl RuntimeService {
             .with_workers(workers)
             .with_nodes(nodes)
             .with_vision_state(vision_assist_present, provider_present)
+            .with_training_data_collection(config.vision.collect_training_data)
             .with_vision_propose_budget(config.vision.propose_budget_ms)
             .with_operational_metrics(operational_metrics))
     }
@@ -603,6 +612,7 @@ impl RuntimeService {
             vision,
             fingerprint: policy.fingerprint,
             humanize: policy.humanize,
+            collect_training_data: self.collect_training_data,
             vision_node,
         };
         let closed_page = match &envelope.command {

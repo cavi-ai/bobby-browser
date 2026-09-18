@@ -39,6 +39,7 @@ pub struct SessionGate {
     pub vision: VisionGate,
     pub fingerprint: bool,
     pub humanize: bool,
+    pub collect_training_data: bool,
     /// The outcome of resolving this session's named vision node.
     pub vision_node: NodeSelection,
 }
@@ -98,6 +99,7 @@ impl std::fmt::Debug for SessionGate {
             .field("vision", &self.vision)
             .field("fingerprint", &self.fingerprint)
             .field("humanize", &self.humanize)
+            .field("collect_training_data", &self.collect_training_data)
             .field("vision_node", &self.vision_node)
             .finish()
     }
@@ -321,6 +323,16 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
             .capture_screenshot(page_id, command)
             .await?;
         Ok((bytes, evidence))
+    }
+
+    async fn capture_sanitized_screenshot(
+        &self,
+        page_id: &PageId,
+    ) -> Result<Vec<u8>, CommandError> {
+        self.lease
+            .worker()
+            .sanitized_screenshot_bytes(page_id)
+            .await
     }
 }
 
@@ -1062,6 +1074,13 @@ impl AdaptivePageEngine {
             let assist = gate
                 .vision_node
                 .provider(self.vision_assist.clone())
+                .map(|assist| {
+                    if gate.collect_training_data {
+                        intent_engine::collect_vision_training_data(assist)
+                    } else {
+                        assist
+                    }
+                })
                 .map(|assist| match &self.operational_metrics {
                     Some(metrics) => {
                         intent_engine::instrument_vision_assist(assist, metrics.clone())

@@ -2341,6 +2341,63 @@ async fn captures_viewport_full_page_element_and_clip_as_private_artifacts() {
 
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
+async fn corpus_capture_masks_editable_content_and_restores_the_page() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: "data:text/html,<body style='background:white'><input id=secret value='vault-secret-92' style='margin:80px;width:240px;height:40px;font-size:24px'></body>".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let raw = worker.screenshot_bytes(&page_id).await.unwrap();
+    let sanitized = worker.sanitized_screenshot_bytes(&page_id).await.unwrap();
+    assert_ne!(raw, sanitized);
+
+    let evidence = worker
+        .evaluate_javascript(
+            &page_id,
+            &EvaluateJavaScriptCommand {
+                expression: "({value:document.querySelector('#secret').value,masks:document.querySelectorAll('[data-bobby-corpus-mask]').length})".into(),
+                timeout_ms: 5_000,
+                await_promise: false,
+            },
+        )
+        .await
+        .unwrap();
+    match evidence.as_slice() {
+        [Evidence::JavaScriptResult { value, .. }] => {
+            assert_eq!(value["value"], "vault-secret-92");
+            assert_eq!(value["masks"], 0);
+        }
+        other => panic!("expected JavaScript result, got {other:?}"),
+    }
+    worker.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
 async fn resolves_nested_cross_origin_frames_and_open_shadow_roots() {
     let fixture = test_site::spawn().await;
     let host = test_site::spawn_frame_host(&fixture.base_url()).await;

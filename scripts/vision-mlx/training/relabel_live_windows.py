@@ -20,6 +20,10 @@ outcome_stage="liveWindowScriptedLabel" for provenance.
 
 import argparse
 import json
+import os
+
+from collect_training_data import sanitize_candidates, sanitize_text, sanitize_url
+from mlx_finetune import corpus_privacy_errors
 
 # purpose -> (target candidate name, action kind, step)
 STEP_BY_PURPOSE = {}
@@ -125,6 +129,10 @@ for purpose in ["Open the likes tab"]:
 for purpose in ["Open the learning tab"]:
     STEP_BY_PURPOSE[purpose] = ("Learning", "click", "absent_probe")
 
+STEP_BY_PURPOSE = {
+    sanitize_text(purpose): mapping for purpose, mapping in STEP_BY_PURPOSE.items()
+}
+
 
 def relabel(record):
     mapping = STEP_BY_PURPOSE.get(record.get("purpose"))
@@ -138,17 +146,23 @@ def relabel(record):
     )
     if index is None:
         return None
+    action = {
+        "typeText": "typeIntoCandidate",
+        "extractValue": "extractFromCandidate",
+    }.get(action_kind, "clickCandidate")
     return {
+        "privacy_version": 1,
         "image_b64": record.get("imageB64") or record.get("image_b64"),
-        "purpose": record["purpose"],
+        "purpose": sanitize_text(record["purpose"]),
         "intent_kind": record.get("intentKind") or record.get("intent_kind"),
         "stuck": record.get("stuck", "targetMissing"),
-        "context_url": record.get("contextUrl") or record.get("context_url"),
-        "context_candidates": [
-            {"role": c.get("role"), "name": c.get("name")} for c in candidates
-        ],
+        "context_url": sanitize_url(record.get("contextUrl") or record.get("context_url")),
+        "context_candidates": sanitize_candidates(candidates),
         "target_index": index,
-        "model_response": {"confidence": 1.0, "action": {"kind": action_kind}},
+        "model_response": {
+            "confidence": 1.0,
+            "action": {"kind": action, "index": index},
+        },
         "success": True,
         "journey": "gauntlet-live",
         "step": step,
@@ -210,6 +224,9 @@ def main():
             if not line.strip():
                 continue
             record = json.loads(line)
+            privacy_errors = corpus_privacy_errors(record)
+            if privacy_errors:
+                raise ValueError("unsafe input record: " + "; ".join(privacy_errors))
             # Only abstain/failure records need relabeling; verified
             # positives are validated against the scripted target — a
             # mechanically-verified wrong pick is poison (§4w lesson).
@@ -223,11 +240,17 @@ def main():
                 relabeled.append(out)
 
     validated_positives, dropped_wrong = validate_positives(validated_positives)
+    output_parent = os.path.dirname(os.path.abspath(args.output))
+    parent_existed = os.path.exists(output_parent)
+    os.makedirs(output_parent, mode=0o700, exist_ok=True)
+    if not parent_existed:
+        os.chmod(output_parent, 0o700)
     with open(args.output, "w") as f:
         # Output = validated production positives (as captured) + relabeled
         # ground truth; both are fit for the corpus, negatives stay out.
         for record in validated_positives + relabeled:
             f.write(json.dumps(record) + "\n")
+    os.chmod(args.output, 0o600)
     for purpose, wanted, picked in dropped_wrong:
         print(f"dropped wrong pick: {purpose!r} picked {picked!r}, wanted {wanted!r}")
     print(

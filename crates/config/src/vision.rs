@@ -53,15 +53,14 @@ pub struct VisionConfig {
     #[serde(default = "default_vision_prefill")]
     pub prefill: bool,
     /// When set, every vision escalation (executed or rejected) appends one
-    /// JSONL corpus record to `<corpus_dir>/vision-corpus.jsonl` with the
-    /// screenshot, the exact candidate list sent to the model, the proposal,
-    /// the terminal outcome, and — for verified clicks — the resolved target
-    /// index. Default unset: no records are written.
+    /// privacy-minimized JSONL record to `<corpus_dir>/vision-corpus.jsonl` with a
+    /// masked screenshot, sanitized structural context, candidate-only action,
+    /// terminal outcome, and resolved target index. Default unset: no records
+    /// are written.
     #[serde(default, alias = "corpusDir")]
     pub corpus_dir: Option<std::path::PathBuf>,
-    /// Capture proxy request/proposal pairs for the local training pipeline.
-    /// This is independent from runtime corpus evidence and remains off unless
-    /// the operator explicitly enables it.
+    /// Capture masked proxy request/proposal pairs for later outcome labeling.
+    /// This remains off unless the operator explicitly enables it.
     #[serde(default, alias = "collectTrainingData")]
     pub collect_training_data: bool,
     #[serde(default = "default_training_data_dir", alias = "trainingDataDir")]
