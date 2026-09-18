@@ -24,10 +24,13 @@ tier and runs with Chrome + a running proxy.
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+from model_promotion import PROMOTION_FLOORS, build_assessment
 
 HERE = Path(__file__).parent
 
@@ -73,6 +76,9 @@ SUITES = {
     },
 }
 
+for _suite_name, _promotion_floors in PROMOTION_FLOORS.items():
+    SUITES[_suite_name]["floors"].update(_promotion_floors)
+
 
 def run_suite(model, adapter, input_path, workdir):
     out_dir = tempfile.mkdtemp(prefix="freshness-")
@@ -115,11 +121,44 @@ def check(suite, metrics, floors):
     return failures
 
 
+def write_promotion_assessment(
+    adapter_dir,
+    corpus_path,
+    base_model,
+    schema,
+    metrics_by_suite,
+    output_path,
+):
+    suites = {
+        name: {
+            "metrics": metrics,
+            "floors": SUITES[name]["floors"],
+        }
+        for name, metrics in metrics_by_suite.items()
+    }
+    assessment = build_assessment(
+        adapter_dir,
+        corpus_path,
+        base_model,
+        schema,
+        suites,
+    )
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(assessment, sort_keys=True, indent=2) + "\n")
+    os.chmod(output_path, 0o600)
+    return assessment
+
+
 def main():
     parser = argparse.ArgumentParser(description="Adapter freshness gate")
     parser.add_argument("--adapter", required=True, help="adapter directory (with adapter_config.json)")
     parser.add_argument("--model", default="mlx-community/Qwen2.5-7B-Instruct-4bit")
     parser.add_argument("--corpus", default="data/vision-corpus-v7.jsonl")
+    parser.add_argument(
+        "--report",
+        help="write a content-bound promotion assessment after all selected suites pass",
+    )
     parser.add_argument(
         "--suites",
         nargs="*",
@@ -131,11 +170,13 @@ def main():
 
     workdir = Path.cwd()
     all_failures = {}
+    metrics_by_suite = {}
     for name in args.suites:
         suite = SUITES[name]
         input_path = args.corpus if name == "corpus" else suite["input"]
         print(f"[{name}] evaluating {input_path} ...", flush=True)
         metrics = run_suite(args.model, args.adapter, input_path, workdir)
+        metrics_by_suite[name] = metrics
         failures = check(name, metrics, suite["floors"])
         summary = ", ".join(
             f"{k}={v:.4f}" if isinstance(v, float) else f"{k}={v}"
@@ -152,6 +193,16 @@ def main():
             for failure in failures:
                 print(f"  [{name}] {failure}")
         sys.exit(1)
+    if args.report:
+        write_promotion_assessment(
+            args.adapter,
+            args.corpus,
+            args.model,
+            "v1",
+            metrics_by_suite,
+            args.report,
+        )
+        print(f"promotion assessment: {args.report}")
     print("\nfreshness gate: all suites pass")
 
 
