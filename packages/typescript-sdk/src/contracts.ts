@@ -182,23 +182,26 @@ export type CommandOutcome =
 
 export type WaitUntil = "commit" | "domContentLoaded" | "interactive" | "networkIdle";
 export interface NavigateCommand { url: string; waitUntil: WaitUntil; timeoutMs: number; }
-export interface DownloadUrlCommand { url: string; expectedContentType: string | null; maxBytes: number; }
-export interface InspectCommand { selector: string | null; target: TargetSpec | null; includeHtml: boolean; }
+export interface DownloadUrlCommand { url: string; expectedContentType?: string | null; maxBytes: number; saveAs?: string | null; }
+export interface InspectCommand { selector?: string | null; target?: TargetSpec | null; includeHtml: boolean; }
 export type ClickModifier = "shift" | "ctrl" | "alt" | "meta";
-export interface ClickCommand { selector: string; target: TargetSpec | null; boundary: boolean; expectedUrl: string | null; modifiers?: ClickModifier[]; }
-export interface TypeTextCommand { selector: string; target: TargetSpec | null; value: string; clearFirst: boolean; expectedUrl?: string | null; }
-export interface UploadFilesCommand { selector: string; target: TargetSpec | null; paths: string[]; }
+export interface ClickCommand { selector: string; target?: TargetSpec | null; boundary: boolean; expectedUrl?: string | null; modifiers?: ClickModifier[]; }
+export interface TypeTextCommand { selector: string; target?: TargetSpec | null; value: string; clearFirst: boolean; expectedUrl?: string | null; }
+export interface UploadFilesCommand { selector: string; target?: TargetSpec | null; paths: string[]; }
 export interface UploadAndConfirmCommand { upload: UploadFilesCommand; expectedState: WaitForCommand; }
-export interface OpenPageCommand { url: string | null; }
+export interface OpenPageCommand { url?: string | null; }
 export interface ClosePageCommand { pageId: Id; }
 export interface ActivatePageCommand { pageId: Id; }
-export interface AccessibilitySnapshotCommand { maxNodes?: number | null }
+export interface AccessibilitySnapshotCommand { maxNodes?: number | null; target?: TargetSpec | null; }
 export interface ExtractStructuredCommand { schema: unknown; purpose?: string | null }
 export interface CookieRecord { name: string; value: string; domain: string; path: string; secure: boolean; httpOnly: boolean; sameSite?: string; expiresUnix?: number }
 export interface SetCookieParam { name: string; value: string; url: string; path?: string | null; secure?: boolean; httpOnly?: boolean; sameSite?: string | null; expiresUnix?: number | null }
 export interface GetCookiesCommand { urls?: string[] }
 export interface SetCookiesCommand { cookies: SetCookieParam[] }
 export interface DeleteCookiesCommand { urls?: string[]; names?: string[] }
+export interface NetworkLogCommand { clear?: boolean; }
+export interface EmulateCommand { viewport?: ViewportSize | null; geolocation?: GeolocationCoordinates | null; mobile?: boolean | null; }
+export interface HandleDialogCommand { action: "accept" | "dismiss"; timeoutMs?: number | null; }
 export interface PrintToPdfCommand { landscape?: boolean; printBackground?: boolean; scale?: number | null; pageRanges?: string | null }
 export interface AccessibilityTarget { role: string; accessibleName: string; ordinal?: number; framePath?: SemanticTargetSegment[] }
 export interface AccessibilityNode {
@@ -254,16 +257,19 @@ export interface ControlActionCommand { target: FormControlTarget; action: Contr
 export interface RevealedControl { controlKind: FormControlKind; accessibleName?: string; target?: FormControlTarget; }
 export interface ControlActionEvidence { operation: FormControlOperation; target: FormControlTarget; state: FormControlState; validity: FormControlValidity; nodeReplaced: boolean; revealedControls?: RevealedControl[]; }
 export interface ViewportSize { width: number; height: number; }
-export interface GeolocationCoordinates { latitude: number; longitude: number; accuracy: number | null; }
+export interface GeolocationCoordinates { latitude: number; longitude: number; accuracy?: number | null; }
 export type ChallengeType = "recaptchaV2Checkbox" | "recaptchaV3" | "textCaptcha" | "imageGridCaptcha" | "mfaCodeEntry";
 export interface ChallengeDetectionRegion { x: number; y: number; width: number; height: number; }
 export interface ChallengeDetectionHints { target_field_purpose?: string; instruction_text?: string; }
 export interface ChallengeDetection { challenge_type: ChallengeType; confidence: number; region?: ChallengeDetectionRegion; blocking: boolean; hints?: ChallengeDetectionHints; }
-export interface ClickAndWaitForPopupCommand { selector: string; target: TargetSpec | null; timeoutMs: number; }
-export interface ClickAndWaitForDownloadCommand { selector: string; target: TargetSpec | null; timeoutMs: number; }
+export interface ClickAndWaitForPopupCommand { selector: string; target?: TargetSpec | null; timeoutMs: number; }
+export interface ClickAndWaitForDownloadCommand { selector: string; target?: TargetSpec | null; timeoutMs: number; }
 export interface WaitForCommand { condition: WaitCondition; timeoutMs: number; }
 export type ScreenshotMode = { kind: "viewport" | "fullPage" } | { kind: "element"; target: TargetSpec } | { kind: "clip"; x: number; y: number; width: number; height: number };
 export interface CaptureScreenshotCommand { mode: ScreenshotMode; }
+export interface SetFocusEmulationCommand { enabled: boolean; }
+export interface SetEmulatedMediaCommand { media: string; features: Record<string, string>; }
+export interface EvaluateJavaScriptCommand { expression: string; timeoutMs: number; awaitPromise?: boolean; }
 export type PrimitiveCommand =
   | { kind: "navigate"; input: NavigateCommand }
   | { kind: "downloadUrl"; input: DownloadUrlCommand }
@@ -281,11 +287,17 @@ export type PrimitiveCommand =
   | { kind: "getCookies"; input: GetCookiesCommand }
   | { kind: "setCookies"; input: SetCookiesCommand }
   | { kind: "deleteCookies"; input: DeleteCookiesCommand }
+  | { kind: "networkLog"; input: NetworkLogCommand }
+  | { kind: "emulate"; input: EmulateCommand }
+  | { kind: "handleDialog"; input: HandleDialogCommand }
   | { kind: "printToPdf"; input: PrintToPdfCommand }
   | { kind: "clickAndWaitForPopup"; input: ClickAndWaitForPopupCommand }
   | { kind: "clickAndWaitForDownload"; input: ClickAndWaitForDownloadCommand }
   | { kind: "waitFor"; input: WaitForCommand }
   | { kind: "captureScreenshot"; input: CaptureScreenshotCommand }
+  | { kind: "setFocusEmulation"; input: SetFocusEmulationCommand }
+  | { kind: "setEmulatedMedia"; input: SetEmulatedMediaCommand }
+  | { kind: "evaluateJavaScript"; input: EvaluateJavaScriptCommand }
   | { kind: "controlAction"; input: ControlActionCommand };
 
 export interface IntentHints {
@@ -368,6 +380,32 @@ export type IntentCommand =
 export type RuntimeCommand =
   | { kind: "primitive"; input: PrimitiveCommand }
   | { kind: "intent"; input: IntentCommand };
+
+type GeneratedCommandContract = typeof import("./generated/command-contract.js").COMMAND_CONTRACT;
+type Equal<Left, Right> =
+  (<Value>() => Value extends Left ? 1 : 2) extends
+  (<Value>() => Value extends Right ? 1 : 2) ? true : false;
+type RequiredKeys<Value> = Value extends object
+  ? { [Key in keyof Value]-?: object extends Pick<Value, Key> ? never : Key }[keyof Value]
+  : never;
+type CommandKinds<Command> = Command extends { kind: infer Kind extends string } ? Kind : never;
+type CommandInput<Command, Kind extends string> =
+  Extract<Command, { kind: Kind }> extends { input: infer Input } ? Input : never;
+type ContractGroup = Record<string, { fields: readonly string[]; required: readonly string[] }>;
+type VariantsMatch<Command, Contract extends ContractGroup> = {
+  [Kind in keyof Contract]: Kind extends string
+    ? Equal<Extract<keyof CommandInput<Command, Kind>, string>, Contract[Kind]["fields"][number]> extends true
+      ? Equal<Extract<RequiredKeys<CommandInput<Command, Kind>>, string>, Contract[Kind]["required"][number]>
+      : false
+    : false;
+}[keyof Contract] extends true ? true : false;
+type ContractMatches<Command, Contract extends ContractGroup> =
+  Equal<CommandKinds<Command>, Extract<keyof Contract, string>> extends true
+    ? VariantsMatch<Command, Contract>
+    : false;
+type Assert<Condition extends true> = Condition;
+type PrimitiveCommandContract = Assert<ContractMatches<PrimitiveCommand, GeneratedCommandContract["primitive"]>>;
+type IntentCommandContract = Assert<ContractMatches<IntentCommand, GeneratedCommandContract["intent"]>>;
 
 /** Envelope submitted to `POST /v1/commands`. */
 export interface CommandEnvelope { schemaVersion: number; commandId: Id; workflowId: Id; attemptId: Id; sessionId: Id; pageId: Id | null; deadline: string; command: RuntimeCommand; }

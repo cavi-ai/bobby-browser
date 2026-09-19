@@ -1161,12 +1161,7 @@ components:
           format: uuid
         deadline: { type: string, format: date-time }
         command:
-          type: object
-          description: "{ kind: primitive|intent, input: … }"
-          required: [kind, input]
-          properties:
-            kind: { type: string, enum: [primitive, intent] }
-            input: { type: object }
+          $ref: "./command.schema.json"
     CommandOutcome:
       type: object
       additionalProperties: true
