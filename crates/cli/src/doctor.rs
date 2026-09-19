@@ -67,11 +67,75 @@ pub(crate) struct DoctorFixOptions {
     pub(crate) bootstrap_env: Option<PathBuf>,
     pub(crate) check_health: bool,
     pub(crate) download_model: bool,
+    pub(crate) profile: Option<crate::deployment_profiles::DeploymentProfile>,
 }
 
 pub(crate) struct DoctorFixReport {
     pub(crate) actions: Vec<DoctorFixAction>,
     pub(crate) post_fix: DoctorReport,
+}
+
+fn record_host_config_checks(report: &mut DoctorReport, project_root: &Path) {
+    match onboarding::configured_host_statuses(project_root) {
+        Ok(statuses) => {
+            for (kind, path, status) in statuses {
+                let name = format!("host-{}", kind.name());
+                match status {
+                    onboarding::HostConfigStatus::Missing => {}
+                    onboarding::HostConfigStatus::Current => {
+                        report.ok(&name, path.display().to_string())
+                    }
+                    onboarding::HostConfigStatus::Drifted => {
+                        report.fail(&name, format!("{} has a stale Bobby entry", path.display()))
+                    }
+                    onboarding::HostConfigStatus::Invalid => {
+                        report.fail(&name, format!("{} is not valid host JSON", path.display()))
+                    }
+                }
+            }
+        }
+        Err(error) => report.fail("host-config", format!("{error:#}")),
+    }
+}
+
+fn repair_host_configs(project_root: &Path) -> Vec<DoctorFixAction> {
+    let statuses = match onboarding::configured_host_statuses(project_root) {
+        Ok(statuses) => statuses,
+        Err(error) => {
+            return vec![DoctorFixAction {
+                status: DoctorFixStatus::Failed,
+                name: "host-config".to_string(),
+                detail: error.to_string(),
+            }]
+        }
+    };
+    let mut actions = Vec::new();
+    for (kind, path, status) in statuses {
+        let name = format!("host-{}", kind.name());
+        match status {
+            onboarding::HostConfigStatus::Drifted => {
+                match onboarding::merge_host_config(kind, project_root) {
+                    Ok(_) => actions.push(DoctorFixAction {
+                        status: DoctorFixStatus::Fixed,
+                        name,
+                        detail: format!("updated {}", path.display()),
+                    }),
+                    Err(error) => actions.push(DoctorFixAction {
+                        status: DoctorFixStatus::Failed,
+                        name,
+                        detail: error.to_string(),
+                    }),
+                }
+            }
+            onboarding::HostConfigStatus::Invalid => actions.push(DoctorFixAction {
+                status: DoctorFixStatus::NeedsAction,
+                name,
+                detail: format!("repair invalid JSON in {}", path.display()),
+            }),
+            onboarding::HostConfigStatus::Missing | onboarding::HostConfigStatus::Current => {}
+        }
+    }
+    actions
 }
 
 impl DoctorFixReport {
@@ -108,6 +172,7 @@ pub(crate) fn run_doctor_fix(options: DoctorFixOptions) -> Result<DoctorFixRepor
     let config_path = resolve_config_path(options.config.clone());
     let bootstrap_path = resolve_bootstrap_path(options.bootstrap_env.clone())?;
     let mut actions = Vec::new();
+    actions.extend(repair_host_configs(&std::env::current_dir()?));
 
     if bootstrap_path.exists() {
         match bootstrap_local::ensure_unrestricted_bootstrap(&bootstrap_path) {
@@ -271,10 +336,11 @@ pub(crate) fn run_doctor_fix(options: DoctorFixOptions) -> Result<DoctorFixRepor
         }
     }
 
-    let post_fix = run_doctor(
+    let post_fix = run_doctor_with_profile(
         Some(config_path),
         Some(bootstrap_path),
         options.check_health,
+        options.profile,
     )?;
     Ok(DoctorFixReport { actions, post_fix })
 }
@@ -1137,12 +1203,23 @@ fn push_doctor_check(report: &mut DoctorReport, check: DoctorCheck) {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn run_doctor(
     config_cli: Option<PathBuf>,
     bootstrap_cli: Option<PathBuf>,
     check_health: bool,
 ) -> Result<DoctorReport> {
+    run_doctor_with_profile(config_cli, bootstrap_cli, check_health, None)
+}
+
+pub(crate) fn run_doctor_with_profile(
+    config_cli: Option<PathBuf>,
+    bootstrap_cli: Option<PathBuf>,
+    check_health: bool,
+    profile: Option<crate::deployment_profiles::DeploymentProfile>,
+) -> Result<DoctorReport> {
     let mut report = DoctorReport::default();
+    record_host_config_checks(&mut report, &std::env::current_dir()?);
 
     let config_path = resolve_config_path(config_cli);
     let bootstrap_path = resolve_bootstrap_path(bootstrap_cli.clone()).ok();
@@ -1161,6 +1238,23 @@ pub(crate) fn run_doctor(
             None
         }
     };
+
+    if let (Some(profile), Some(config)) = (profile, config.as_ref()) {
+        let profile_name = profile.contract().name;
+        report.ok("deployment-profile", profile_name.to_string());
+        for check in crate::deployment_profiles::evaluate(
+            profile,
+            config,
+            bootstrap_path.as_deref().is_some_and(Path::exists),
+        ) {
+            let name = format!("deployment-{}", check.name);
+            if check.ok {
+                report.ok(&name, check.detail);
+            } else {
+                report.fail(&name, check.detail);
+            }
+        }
+    }
 
     if let Some(config) = &config {
         report.ok(
@@ -2569,6 +2663,43 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(not(unix))]
 fn is_executable(_path: &Path) -> bool {
     true
+}
+
+#[cfg(test)]
+mod host_config_tests {
+    use super::*;
+
+    #[test]
+    fn doctor_reports_and_repairs_drifted_host_entries() {
+        let root = tempfile::tempdir().unwrap();
+        let path =
+            onboarding::merge_host_config(onboarding::HostKind::Claude, root.path()).unwrap();
+        let mut config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        config["mcpServers"]["bobby-browser"]["args"] = serde_json::json!(["serve"]);
+        std::fs::write(&path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+
+        let mut report = DoctorReport::default();
+        record_host_config_checks(&mut report, root.path());
+        assert_eq!(
+            report.check("host-claude").unwrap().status,
+            DoctorStatus::Fail
+        );
+
+        let actions = repair_host_configs(root.path());
+        let action = actions
+            .iter()
+            .find(|action| action.name == "host-claude")
+            .unwrap();
+        assert_eq!(action.status, DoctorFixStatus::Fixed);
+
+        let mut repaired = DoctorReport::default();
+        record_host_config_checks(&mut repaired, root.path());
+        assert_eq!(
+            repaired.check("host-claude").unwrap().status,
+            DoctorStatus::Ok
+        );
+    }
 }
 
 #[cfg(test)]

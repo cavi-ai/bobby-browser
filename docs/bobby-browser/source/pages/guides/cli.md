@@ -64,6 +64,7 @@ does not rewrite bootstrap capabilities or create directories.
 | `--bootstrap-env <path>` | Same as `serve` |
 | `--skip-health` | Do not probe `/healthz` or `GET /v1/runtime` (default: probe) |
 | `--json` | Print a versioned JSON report on stdout (no human lines) |
+| `--profile <name>` | Validate `desktop`, `headless-ci`, `openshell`, or `remote` profile requirements |
 | `--fix` | Repair safe Bobby-owned state, create missing storage dirs, readiness-test the selected provider, then run doctor again |
 | `--download-model` | With `--fix`, explicitly allow downloading the already-selected MLX model |
 
@@ -87,6 +88,12 @@ If `/healthz` is unreachable, the `healthz` check is **ok** with detail
 `not running` (start `bobby serve` when you want a live runtime). `--json`
 with `--fix` still prints repair labels on stderr; stdout is the post-fix
 report.
+
+### `bobby profiles`
+
+List the stable deployment profiles. Add `--json` for the machine-readable
+contract covering transport, authentication, bind scope, browser, storage, and
+start command.
 
 ### `bobby jobs`
 

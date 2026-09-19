@@ -35,6 +35,19 @@ For a non-interactive host-specific install:
 bobby install --host claude --yes
 ```
 
+Supported host contracts:
+
+| Host | Protocol | Config |
+|---|---|---|
+| Claude Code | MCP stdio | project `.mcp.json` |
+| VS Code | MCP stdio | project `.vscode/mcp.json` |
+| Zed | MCP stdio | user `zed/settings.json` |
+| ACP host | ACP stdio | project `.acp.json` |
+| NVIDIA OpenShell | MCP streamable HTTP | project `openshell/mcp.json` |
+
+Host entries launch Bobby without embedding credentials. Run `bobby doctor`
+to detect stale entries and `bobby doctor --fix` to update them.
+
 Selecting an agent host generates a missing agent bootstrap credential.
 Vision setup generates a separate owner-only local vision credential. Bobby
 does not print either secret during routine install or doctor output.
