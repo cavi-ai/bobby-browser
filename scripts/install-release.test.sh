@@ -5,7 +5,7 @@ repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 root="$(mktemp -d)"
 trap 'rm -rf "$root"' EXIT
 
-version="0.14.0"
+version="0.15.0"
 case "$(uname -s)" in
   Linux) asset_os="linux" ;;
   Darwin) asset_os="macos" ;;
@@ -21,7 +21,7 @@ stage="$root/$stage_name"
 archive="$root/${stage_name}.tar.gz"
 
 mkdir -p "$stage/scripts/vision-mlx/providers" "$stage/firefox-companion"
-printf '%s\n' '#!/usr/bin/env bash' 'if [[ "${1:-}" == "--version" ]]; then echo "bobby-browser 0.14.0"; exit 0; fi' 'if [[ "${1:-}" == "profiles" && "${2:-}" == "--json" ]]; then echo '\''[{"name":"desktop"},{"name":"headless-ci"},{"name":"openshell"},{"name":"remote"}]'\''; exit 0; fi' 'exit 2' > "$stage/bobby"
+printf '%s\n' '#!/usr/bin/env bash' 'if [[ "${1:-}" == "--version" ]]; then echo "bobby-browser 0.15.0"; exit 0; fi' 'if [[ "${1:-}" == "profiles" && "${2:-}" == "--json" ]]; then echo '\''[{"name":"desktop"},{"name":"headless-ci"},{"name":"openshell"},{"name":"remote"}]'\''; exit 0; fi' 'exit 2' > "$stage/bobby"
 printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$stage/mcp-gateway"
 printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$stage/acp-gateway"
 chmod +x "$stage/bobby" "$stage/mcp-gateway" "$stage/acp-gateway"
