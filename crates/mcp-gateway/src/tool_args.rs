@@ -386,6 +386,8 @@ page_scoped_args!(UploadFilesArgs {
     target: Option<types::TargetSpec>,
     control_id: Option<String>,
     paths: Vec<String>,
+    expected_state: Option<types::WaitForCommand>,
+    auto_checkpoint: Option<bool>,
 });
 
 page_scoped_args!(EvaluateJavaScriptArgs {
@@ -627,6 +629,22 @@ mod tests {
         .expect("controlId upload arguments parse");
         assert_eq!(args.control_id.as_deref(), Some("control-4"));
         assert!(args.selector.is_none() && args.target.is_none());
+    }
+
+    #[test]
+    fn upload_files_accepts_application_confirmation_state() {
+        let args = serde_json::from_value::<UploadFilesArgs>(serde_json::json!({
+            "sessionId":"00000000-0000-0000-0000-000000000001",
+            "pageId":"00000000-0000-0000-0000-000000000002",
+            "selector":"#resume",
+            "paths":["/allowed/resume.pdf"],
+            "expectedState":{
+                "condition":{"kind":"url","matcher":{"kind":"contains","value":"uploaded"}},
+                "timeoutMs":5000
+            }
+        }))
+        .expect("confirmation upload arguments parse");
+        assert!(args.expected_state.is_some());
     }
 
     /// `intent_fill`'s top-level `hints` shape must also parse on

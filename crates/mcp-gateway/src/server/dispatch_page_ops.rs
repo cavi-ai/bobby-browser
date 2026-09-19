@@ -446,19 +446,35 @@ impl Server {
                 } else {
                     input.target
                 };
+                let upload = types::UploadFilesCommand {
+                    selector: input.selector.unwrap_or_default(),
+                    target,
+                    paths: input.paths,
+                };
+                let confirmed = input.expected_state.is_some();
+                let command = match input.expected_state {
+                    Some(expected_state) => {
+                        types::PrimitiveCommand::UploadAndConfirm(types::UploadAndConfirmCommand {
+                            upload,
+                            expected_state,
+                        })
+                    }
+                    None => types::PrimitiveCommand::UploadFiles(upload),
+                };
                 let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
                     Some(input.page_id),
                     input.workflow_id,
-                    types::PrimitiveCommand::UploadFiles(types::UploadFilesCommand {
-                        selector: input.selector.unwrap_or_default(),
-                        target,
-                        paths: input.paths,
-                    }),
+                    command,
                 );
-                self.submit_envelope(context, envelope, handle, call.name.as_str())
-                    .await
+                if confirmed && input.auto_checkpoint.unwrap_or(true) {
+                    self.submit_envelope_with_auto_checkpoint(context, envelope, handle)
+                        .await
+                } else {
+                    self.submit_envelope(context, envelope, handle, call.name.as_str())
+                        .await
+                }
             }
             "evaluate_javascript" => {
                 let input: EvaluateJavaScriptArgs = match bounded_parse(call.arguments) {

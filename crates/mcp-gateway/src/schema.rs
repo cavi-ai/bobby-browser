@@ -380,7 +380,9 @@ pub(crate) fn tool_schema(name: &str) -> Value {
                 "selector": string(1, MAX_STRING_BYTES),
                 "target": nullable(json!({"$ref":"#/$defs/TargetSpec"})),
                 "controlId": string(1, 128),
-                "paths": array(string(1, 4096), 16)
+                "paths": array(string(1, 4096), 16),
+                "expectedState": {"$ref":"#/$defs/WaitForCommand"},
+                "autoCheckpoint":{"type":"boolean"}
             }),
             vec!["sessionId", "pageId", "paths"],
         ),
@@ -1966,6 +1968,25 @@ fn primitive_commands() -> Vec<Value> {
                     "paths":array(string(1, MAX_STRING_BYTES), 64)
                 }),
                 &["selector", "target", "paths"],
+            ),
+        ),
+        tagged_input(
+            "uploadAndConfirm",
+            object(
+                json!({
+                    "upload": {
+                        "type":"object",
+                        "additionalProperties":false,
+                        "properties":{
+                            "selector":string(0, MAX_STRING_BYTES),
+                            "target":nullable(json!({"$ref":"#/$defs/TargetSpec"})),
+                            "paths":array(string(1, MAX_STRING_BYTES), 64)
+                        },
+                        "required":["selector", "target", "paths"]
+                    },
+                    "expectedState":{"$ref":"#/$defs/WaitForCommand"}
+                }),
+                &["upload", "expectedState"],
             ),
         ),
         tagged_input(

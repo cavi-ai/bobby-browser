@@ -1163,6 +1163,21 @@ impl PageRuntime {
                     Err(verification_error("upload returned no file evidence"))
                 }
             }
+            PrimitiveCommand::UploadAndConfirm(_) => {
+                let uploaded = evidence
+                    .iter()
+                    .any(|item| matches!(item, Evidence::Upload { .. }));
+                let confirmed = evidence
+                    .iter()
+                    .any(|item| matches!(item, Evidence::Wait { .. }));
+                if uploaded && confirmed {
+                    Ok(evidence)
+                } else {
+                    Err(verification_error(
+                        "upload confirmation returned incomplete evidence",
+                    ))
+                }
+            }
             PrimitiveCommand::AccessibilitySnapshot(_) => {
                 if evidence
                     .iter()

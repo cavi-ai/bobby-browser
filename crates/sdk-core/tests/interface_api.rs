@@ -22,8 +22,8 @@ use types::{
     CommandId, CommandOutcome, CompleteFormField, CompleteFormIntent, ControlAction,
     CreateSessionRequest, Evidence, ExecutionPolicy, FillIntent, IdempotencyKey, InspectCommand,
     IntentCommand, IntentHints, InterfaceErrorCode, LocateIntent, NavigateCommand, OpenPageRequest,
-    PageId, PrincipalId, RequestContext, RuntimeCommand, SessionId, TargetSpec, TypeTextCommand,
-    WorkerId, WorkflowCheckpoint, WorkflowId,
+    PageId, PrincipalId, RequestContext, RuntimeCommand, SessionId, TargetSpec, TextMatch,
+    TypeTextCommand, WaitCondition, WaitForCommand, WorkerId, WorkflowCheckpoint, WorkflowId,
 };
 use uuid::uuid;
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
@@ -1094,6 +1094,27 @@ fn upload_files_envelope() -> CommandEnvelope {
     }
 }
 
+fn upload_and_confirm_envelope() -> CommandEnvelope {
+    CommandEnvelope {
+        command: RuntimeCommand::Primitive(types::PrimitiveCommand::UploadAndConfirm(
+            types::UploadAndConfirmCommand {
+                upload: types::UploadFilesCommand {
+                    selector: "input[type=file]".into(),
+                    target: None,
+                    paths: vec!["/tmp/example.txt".into()],
+                },
+                expected_state: WaitForCommand {
+                    condition: WaitCondition::Url {
+                        matcher: TextMatch::Contains("uploaded".into()),
+                    },
+                    timeout_ms: 1_000,
+                },
+            },
+        )),
+        ..submit_request()
+    }
+}
+
 fn solve_challenge_envelope() -> CommandEnvelope {
     CommandEnvelope {
         command: RuntimeCommand::Intent(types::IntentCommand::SolveChallenge(
@@ -1163,6 +1184,29 @@ async fn upload_files_without_file_upload_capability_is_denied_before_dispatch()
 
     let error = api
         .submit(context, upload_files_envelope())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, InterfaceErrorCode::MissingCapability);
+    assert_eq!(error.required_capability, Some(Capability::FileUpload));
+    assert_eq!(api.submit_dispatch_count(), 0);
+}
+
+#[tokio::test]
+async fn upload_and_confirm_without_file_upload_capability_is_denied_before_dispatch() {
+    let (api, handle) = authenticated_with(
+        RuntimeService::default(),
+        [
+            Capability::SessionWrite,
+            Capability::PageWrite,
+            Capability::BrowserMutate,
+        ],
+    )
+    .await;
+    let context = handle.context(expiry(), None);
+
+    let error = api
+        .submit(context, upload_and_confirm_envelope())
         .await
         .unwrap_err();
 

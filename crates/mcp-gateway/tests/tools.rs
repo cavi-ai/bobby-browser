@@ -669,7 +669,7 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
             .as_array()
             .unwrap()
             .len(),
-        27
+        28
     );
     let runtime_command = &validation_schema["$defs"]["RuntimeCommand"]["oneOf"];
     assert_eq!(
@@ -2106,6 +2106,14 @@ async fn flat_browser_tools_are_listed_and_follow_capability_grants() {
         .find(|tool| tool["name"] == "upload_files")
         .unwrap();
     assert_eq!(upload_files["inputSchema"]["required"], json!(["paths"]));
+    assert_eq!(
+        upload_files["inputSchema"]["properties"]["expectedState"]["$ref"],
+        "#/$defs/WaitForCommand"
+    );
+    assert_eq!(
+        upload_files["inputSchema"]["properties"]["autoCheckpoint"]["type"],
+        "boolean"
+    );
     assert!(
         upload_files["inputSchema"]["oneOf"]
             .as_array()
@@ -4600,6 +4608,8 @@ async fn auto_checkpoint_saves_a_checkpoint_matching_the_boundary_command() {
 #[tokio::test]
 async fn boundary_wait_tools_save_checkpoints_matching_their_commands() {
     let root = tempfile::tempdir().unwrap();
+    let upload_path = root.path().join("resume.pdf");
+    tokio::fs::write(&upload_path, b"fixture").await.unwrap();
     let journal = Arc::new(
         JsonlJournal::open(root.path().join("journal.jsonl"))
             .await
@@ -4623,6 +4633,7 @@ async fn boundary_wait_tools_save_checkpoints_matching_their_commands() {
                 Capability::PageWrite,
                 Capability::BrowserMutate,
                 Capability::FileDownload,
+                Capability::FileUpload,
                 Capability::RecoveryWrite,
             ],
             Utc::now() + Duration::hours(1),
@@ -4733,6 +4744,47 @@ async fn boundary_wait_tools_save_checkpoints_matching_their_commands() {
             .map(|id| id.0.to_string()),
         structured["commandId"].as_str().map(str::to_owned),
         "the checkpoint must name the download command it guards"
+    );
+
+    let workflow_id = types::WorkflowId::new().0.to_string();
+    let submitted = server
+        .handle_message(request(
+            104,
+            "tools/call",
+            json!({
+                "name":"upload_files",
+                "arguments":{
+                    "sessionId":session_id.0.to_string(),
+                    "pageId":page_id,
+                    "workflowId":workflow_id,
+                    "selector":"#resume",
+                    "paths":[upload_path.to_string_lossy()],
+                    "expectedState":{
+                        "condition":{"kind":"document","ready":"interactive"},
+                        "timeoutMs":1000
+                    }
+                }
+            }),
+        ))
+        .await
+        .unwrap();
+    let structured = &submitted["result"]["structuredContent"];
+    assert!(
+        structured["checkpointId"].is_string(),
+        "upload_files with expectedState must autoCheckpoint by default: {submitted}"
+    );
+    let saved = checkpoint_store
+        .load(&types::WorkflowId(workflow_id.parse().unwrap()))
+        .await
+        .expect("autoCheckpoint must persist a checkpoint under the envelope's workflow");
+    assert_eq!(saved.recovery_class, types::CommandClass::Boundary);
+    assert_eq!(
+        saved
+            .boundary_command_id
+            .as_ref()
+            .map(|id| id.0.to_string()),
+        structured["commandId"].as_str().map(str::to_owned),
+        "the checkpoint must name the upload command it guards"
     );
 }
 

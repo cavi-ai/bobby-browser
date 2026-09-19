@@ -76,6 +76,9 @@ pub(super) fn expected_postcondition(command: &RuntimeCommand) -> &'static str {
         PrimitiveCommand::TypeText(_) => "typed value is observed at the original target",
         PrimitiveCommand::Inspect(_) => "inspection evidence is observed",
         PrimitiveCommand::UploadFiles(_) => "upload evidence is observed",
+        PrimitiveCommand::UploadAndConfirm(_) => {
+            "upload evidence and confirmation state are observed"
+        }
         PrimitiveCommand::OpenPage(_) => "opened page evidence is observed",
         PrimitiveCommand::ListPages(_) => "page list evidence is observed",
         PrimitiveCommand::ClosePage(_) => "page closure evidence is observed",
@@ -117,6 +120,9 @@ pub(super) fn alternate_interaction_envelope(
         }
         RuntimeCommand::Primitive(PrimitiveCommand::UploadFiles(command)) => {
             alternate_target(&mut command.selector, &mut command.target)
+        }
+        RuntimeCommand::Primitive(PrimitiveCommand::UploadAndConfirm(command)) => {
+            alternate_target(&mut command.upload.selector, &mut command.upload.target)
         }
         RuntimeCommand::Primitive(PrimitiveCommand::ClickAndWaitForPopup(command)) => {
             alternate_target(&mut command.selector, &mut command.target)
@@ -168,6 +174,14 @@ fn preserves_postcondition(original: &RuntimeCommand, alternate: &RuntimeCommand
             RuntimeCommand::Primitive(PrimitiveCommand::UploadFiles(left)),
             RuntimeCommand::Primitive(PrimitiveCommand::UploadFiles(right)),
         ) => left.paths == right.paths,
+        (
+            RuntimeCommand::Primitive(PrimitiveCommand::UploadAndConfirm(left)),
+            RuntimeCommand::Primitive(PrimitiveCommand::UploadAndConfirm(right)),
+        ) => {
+            left.upload.paths == right.upload.paths
+                && serde_json::to_value(&left.expected_state).ok()
+                    == serde_json::to_value(&right.expected_state).ok()
+        }
         (
             RuntimeCommand::Primitive(PrimitiveCommand::ClickAndWaitForPopup(left)),
             RuntimeCommand::Primitive(PrimitiveCommand::ClickAndWaitForPopup(right)),

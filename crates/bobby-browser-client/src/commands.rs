@@ -270,6 +270,7 @@ pub enum PrimitiveCommand {
     Click(ClickCommand),
     TypeText(TypeTextCommand),
     UploadFiles(UploadFilesCommand),
+    UploadAndConfirm(UploadAndConfirmCommand),
     OpenPage(OpenPageCommand),
     ListPages(ListPagesCommand),
     ClosePage(ClosePageCommand),
@@ -319,6 +320,11 @@ impl PrimitiveCommand {
                     *path = format!("upload://input/{index}");
                 }
             }
+            Self::UploadAndConfirm(command) => {
+                for (index, path) in command.upload.paths.iter_mut().enumerate() {
+                    *path = format!("upload://input/{index}");
+                }
+            }
             Self::OpenPage(command) => {
                 if let Some(url) = &mut command.url {
                     sanitize(url);
@@ -364,9 +370,9 @@ impl PrimitiveCommand {
             | Self::ClosePage(_)
             | Self::EvaluateJavaScript(_) => CommandClass::Reconciliable,
             Self::ControlAction(_) => CommandClass::Reconciliable,
-            Self::ClickAndWaitForPopup(_) | Self::ClickAndWaitForDownload(_) => {
-                CommandClass::Boundary
-            }
+            Self::ClickAndWaitForPopup(_)
+            | Self::ClickAndWaitForDownload(_)
+            | Self::UploadAndConfirm(_) => CommandClass::Boundary,
             Self::Click(command) if command.boundary => CommandClass::Boundary,
             Self::Click(_) => CommandClass::Reconciliable,
             Self::SetFocusEmulation(_) => CommandClass::Reconciliable,
@@ -556,6 +562,14 @@ pub struct UploadFilesCommand {
     pub selector: String,
     pub target: Option<TargetSpec>,
     pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct UploadAndConfirmCommand {
+    pub upload: UploadFilesCommand,
+    pub expected_state: WaitForCommand,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

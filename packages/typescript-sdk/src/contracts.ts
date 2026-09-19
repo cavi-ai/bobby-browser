@@ -188,6 +188,7 @@ export type ClickModifier = "shift" | "ctrl" | "alt" | "meta";
 export interface ClickCommand { selector: string; target: TargetSpec | null; boundary: boolean; expectedUrl: string | null; modifiers?: ClickModifier[]; }
 export interface TypeTextCommand { selector: string; target: TargetSpec | null; value: string; clearFirst: boolean; expectedUrl?: string | null; }
 export interface UploadFilesCommand { selector: string; target: TargetSpec | null; paths: string[]; }
+export interface UploadAndConfirmCommand { upload: UploadFilesCommand; expectedState: WaitForCommand; }
 export interface OpenPageCommand { url: string | null; }
 export interface ClosePageCommand { pageId: Id; }
 export interface ActivatePageCommand { pageId: Id; }
@@ -270,6 +271,7 @@ export type PrimitiveCommand =
   | { kind: "click"; input: ClickCommand }
   | { kind: "typeText"; input: TypeTextCommand }
   | { kind: "uploadFiles"; input: UploadFilesCommand }
+  | { kind: "uploadAndConfirm"; input: UploadAndConfirmCommand }
   | { kind: "openPage"; input: OpenPageCommand }
   | { kind: "listPages"; input: null }
   | { kind: "closePage"; input: ClosePageCommand }
