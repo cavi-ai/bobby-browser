@@ -79,6 +79,16 @@ curl -fsSL https://raw.githubusercontent.com/cavi-ai/bobby-browser/main/scripts/
 
 Optional: `BOBBY_VERSION={{PRODUCT_VERSION}}` (no leading `v`) and `INSTALL_DIR=~/.local/bin`.
 
+PowerShell (Windows x64):
+
+```powershell
+irm https://raw.githubusercontent.com/cavi-ai/bobby-browser/main/scripts/install.ps1 | iex
+```
+
+Set `BOBBY_VERSION` and `INSTALL_DIR` to pin the version or destination. Rerun
+the same installer to upgrade. Managed binaries, vision files, and Firefox
+companion files are replaced; files outside those managed paths are preserved.
+
 ### Homebrew (macOS / Linuxbrew)
 
 Not on [homebrew-core](https://github.com/Homebrew/homebrew-core) yet. From a

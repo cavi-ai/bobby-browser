@@ -81,6 +81,9 @@ jobs:
         # 0.3.1 while the last sdk-v* tag was 0.3.0 because nothing checked.
         run: python3 scripts/check-version-agreement.py
 
+      - name: Release installer regressions
+        run: scripts/install-release.test.sh
+
       - name: Vision experiment regressions
         working-directory: scripts/vision-mlx
         run: python3 -m unittest test_provider_base.py test_v1_provider.py training/test_evaluate_adapter.py training/test_corpus_lint.py training/test_relabel_live_windows.py training/test_model_promotion.py
