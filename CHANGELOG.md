@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.15.0 - 2026-09-19
+
 ### Added
 
 - Provider health enforcement on the operational metrics: every vision

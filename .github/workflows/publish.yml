@@ -53,6 +53,7 @@ jobs:
       # `--provenance` is explicit: it is documented as automatic under trusted
       # publishing but is not reliably applied without the flag.
       - name: Publish
+        if: startsWith(github.ref, 'refs/tags/v')
         working-directory: packages/typescript-sdk
         env:
           EVENT_NAME: ${{ github.event_name }}
