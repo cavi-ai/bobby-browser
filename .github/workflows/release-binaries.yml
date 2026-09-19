@@ -1,6 +1,20 @@
 name: Release binaries
 
 on:
+  pull_request:
+    paths:
+      - ".github/workflows/release-binaries.yml"
+      - "scripts/install.sh"
+      - "scripts/install.ps1"
+      - "scripts/certify-release-install.py"
+      - "scripts/install-release.test.sh"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/cli/**"
+      - "crates/mcp-gateway/**"
+      - "crates/acp-gateway/**"
+      - "packages/firefox-companion/**"
+      - "scripts/vision-mlx/**"
   workflow_dispatch:
     inputs:
       tag:
@@ -16,7 +30,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -58,6 +72,9 @@ jobs:
         with:
           node-version: 24.18.1
           cache: pnpm
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
       - name: Build Firefox companion bundle
         run: |
           pnpm install --frozen-lockfile
@@ -74,7 +91,7 @@ jobs:
             --target "${{ matrix.target }}"
           VERSION="${GITHUB_REF_NAME#v}"
           if [[ "$VERSION" == "$GITHUB_REF_NAME" ]]; then
-            VERSION="$(python3 -c "import pathlib,re; m=re.search(r'\[workspace\.package\][^[]*?\bversion\s*=\s*\"([^\"]+)\"', pathlib.Path('Cargo.toml').read_text(), re.S); print(m.group(1))")"
+            VERSION="$(python -c "import pathlib,re; m=re.search(r'\[workspace\.package\][^[]*?\bversion\s*=\s*\"([^\"]+)\"', pathlib.Path('Cargo.toml').read_text(), re.S); print(m.group(1))")"
           fi
           STAGE="bobby-browser-${VERSION}-${{ matrix.asset_os }}-${{ matrix.asset_arch }}"
           OUT="target/${{ matrix.target }}/release"
@@ -86,7 +103,7 @@ jobs:
             cp "$OUT/bobby.exe" "$STAGE/bobby.exe"
             cp "$OUT/mcp-gateway.exe" "$STAGE/mcp-gateway.exe"
             cp "$OUT/acp-gateway.exe" "$STAGE/acp-gateway.exe"
-            tar -a -cf "${STAGE}.zip" "$STAGE"
+            python -m zipfile -c "${STAGE}.zip" "$STAGE"
             echo "ASSET=${STAGE}.zip" >> "$GITHUB_ENV"
           else
             # Drop debug symbols from released binaries; local cargo builds stay unstripped.
@@ -94,10 +111,11 @@ jobs:
             cp "$OUT/bobby" "$STAGE/bobby"
             cp "$OUT/mcp-gateway" "$STAGE/mcp-gateway"
             cp "$OUT/acp-gateway" "$STAGE/acp-gateway"
-            tar -czf "${STAGE}.tar.gz" "$STAGE"
+            COPYFILE_DISABLE=1 tar -czf "${STAGE}.tar.gz" "$STAGE"
             echo "ASSET=${STAGE}.tar.gz" >> "$GITHUB_ENV"
           fi
           echo "STAGE_DIR=${STAGE}" >> "$GITHUB_ENV"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
       - name: Smoke release binaries --help
         shell: bash
         run: |
@@ -117,6 +135,13 @@ jobs:
             test -x "./${STAGE_DIR}/mcp-gateway"
             test -x "./${STAGE_DIR}/acp-gateway"
           fi
+      - name: Certify clean install and upgrade
+        shell: bash
+        run: >-
+          python scripts/certify-release-install.py
+          --archive "$ASSET"
+          --asset-os "${{ matrix.asset_os }}"
+          --version "$VERSION"
       - uses: actions/upload-artifact@v7
         with:
           name: bobby-browser-${{ matrix.asset_os }}-${{ matrix.asset_arch }}
@@ -182,6 +207,8 @@ jobs:
   # documentation artifact is invoked directly rather than left to the event.
   docs:
     needs: release
+    permissions:
+      contents: write
     uses: ./.github/workflows/publish-docs.yml
     with:
       version: ${{ needs.release.outputs.version }}

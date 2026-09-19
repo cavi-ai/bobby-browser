@@ -6,10 +6,13 @@
 # Optional env:
 #   BOBBY_VERSION=0.6.0   # without leading v; default = latest release tag
 #   INSTALL_DIR=~/.local/bin
+#   BOBBY_SHARE_DIR=~/.local/share/bobby-browser
+#   BOBBY_ARCHIVE=/path/to/release.tar.gz
 set -euo pipefail
 
 REPO="${BOBBY_REPO:-cavi-ai/bobby-browser}"
 INSTALL_DIR="${INSTALL_DIR:-${HOME}/.local/bin}"
+BOBBY_SHARE_DIR="${BOBBY_SHARE_DIR:-$(dirname "$INSTALL_DIR")/share/bobby-browser}"
 
 need() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -18,7 +21,6 @@ need() {
   }
 }
 
-need curl
 need tar
 need uname
 
@@ -28,7 +30,7 @@ case "$os" in
   linux) asset_os=linux ;;
   darwin) asset_os=macos ;;
   *)
-    echo "install.sh: unsupported OS: $os (use linux or macos; Windows: download the .zip from Releases)" >&2
+    echo "install.sh: unsupported OS: $os (use install.ps1 on Windows)" >&2
     exit 1
     ;;
 esac
@@ -45,6 +47,11 @@ if [[ -n "${BOBBY_VERSION:-}" ]]; then
   VERSION="${BOBBY_VERSION#v}"
   TAG="v${VERSION}"
 else
+  if [[ -n "${BOBBY_ARCHIVE:-}" ]]; then
+    echo "install.sh: BOBBY_VERSION is required with BOBBY_ARCHIVE" >&2
+    exit 1
+  fi
+  need curl
   need python3
   TAG="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')"
@@ -58,9 +65,19 @@ STAGE="bobby-browser-${VERSION}-${asset_os}-${asset_arch}"
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
-echo "install.sh: fetching ${URL}"
-curl -fsSL -o "${tmpdir}/${ASSET}" "$URL"
-tar -xzf "${tmpdir}/${ASSET}" -C "$tmpdir"
+if [[ -n "${BOBBY_ARCHIVE:-}" ]]; then
+  archive="${BOBBY_ARCHIVE}"
+  if [[ ! -f "$archive" ]]; then
+    echo "install.sh: archive not found: ${archive}" >&2
+    exit 1
+  fi
+else
+  need curl
+  archive="${tmpdir}/${ASSET}"
+  echo "install.sh: fetching ${URL}"
+  curl -fsSL -o "$archive" "$URL"
+fi
+tar -xzf "$archive" -C "$tmpdir"
 
 src_dir="${tmpdir}/${STAGE}"
 if [[ ! -f "${src_dir}/bobby" ]]; then
@@ -68,30 +85,57 @@ if [[ ! -f "${src_dir}/bobby" ]]; then
   exit 1
 fi
 
+install_binary() {
+  local source="$1"
+  local destination="$2"
+  local pending="${destination}.new.$$"
+  install -m 755 "$source" "$pending"
+  mv -f "$pending" "$destination"
+}
+
+replace_tree() {
+  local source="$1"
+  local destination="$2"
+  local pending="${destination}.new.$$"
+  local previous="${destination}.old.$$"
+  rm -rf "$pending" "$previous"
+  mkdir -p "$(dirname "$destination")"
+  cp -R "$source" "$pending"
+  if [[ -e "$destination" || -L "$destination" ]]; then
+    mv "$destination" "$previous"
+  fi
+  if mv "$pending" "$destination"; then
+    rm -rf "$previous"
+  else
+    if [[ -e "$previous" || -L "$previous" ]]; then
+      mv "$previous" "$destination"
+    fi
+    return 1
+  fi
+}
+
 mkdir -p "$INSTALL_DIR"
-install -m 755 "${src_dir}/bobby" "${INSTALL_DIR}/bobby"
+install_binary "${src_dir}/bobby" "${INSTALL_DIR}/bobby"
 echo "install.sh: installed ${INSTALL_DIR}/bobby"
 
 for bin in mcp-gateway acp-gateway; do
   if [[ -f "${src_dir}/${bin}" ]]; then
-    install -m 755 "${src_dir}/${bin}" "${INSTALL_DIR}/${bin}"
+    install_binary "${src_dir}/${bin}" "${INSTALL_DIR}/${bin}"
     echo "install.sh: installed ${INSTALL_DIR}/${bin}"
   else
     echo "install.sh: warn: archive missing ${bin} (older release?); MCP/ACP hosts need it beside bobby" >&2
   fi
 done
 
-vision_share="$(dirname "$INSTALL_DIR")/share/bobby-browser/scripts"
+vision_share="${BOBBY_SHARE_DIR}/scripts/vision-mlx"
 if [[ -d "${src_dir}/scripts/vision-mlx" ]]; then
-  mkdir -p "$vision_share"
-  cp -R "${src_dir}/scripts/vision-mlx" "$vision_share/vision-mlx"
-  echo "install.sh: installed ${vision_share}/vision-mlx"
+  replace_tree "${src_dir}/scripts/vision-mlx" "$vision_share"
+  echo "install.sh: installed ${vision_share}"
 fi
 
-companion_share="$(dirname "$INSTALL_DIR")/share/bobby-browser/firefox-companion"
+companion_share="${BOBBY_SHARE_DIR}/firefox-companion"
 if [[ -d "${src_dir}/firefox-companion" ]]; then
-  mkdir -p "$companion_share"
-  cp -R "${src_dir}/firefox-companion/." "$companion_share/"
+  replace_tree "${src_dir}/firefox-companion" "$companion_share"
   echo "install.sh: installed ${companion_share}"
 fi
 

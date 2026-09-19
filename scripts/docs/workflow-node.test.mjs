@@ -57,6 +57,27 @@ test("binary releases carry the Firefox companion through supported installers",
   assert.match(workflow, /@cavi-ai\/bobby-firefox-companion build/);
   assert.match(workflow, /packages\/firefox-companion\/dist \"\$STAGE\/firefox-companion\"/);
   assert.match(workflow, /firefox-companion\/manifest\.json/);
-  assert.match(installer, /share\/bobby-browser\/firefox-companion/);
+  assert.match(installer, /BOBBY_SHARE_DIR.*firefox-companion/s);
   assert.match(formula, /install \"firefox-companion\"/);
+});
+
+test("release archives certify clean installs and upgrades on every release platform", async () => {
+  const [releaseWorkflow, ciWorkflow, windowsInstaller, certifier] = await Promise.all([
+    readFile(new URL("../../.github/workflows/release-binaries.yml", import.meta.url), "utf8"),
+    readFile(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8"),
+    readFile(new URL("../install.ps1", import.meta.url), "utf8"),
+    readFile(new URL("../certify-release-install.py", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(releaseWorkflow, /pull_request:/);
+  assert.match(releaseWorkflow, /certify-release-install\.py/);
+  assert.match(releaseWorkflow, /--asset-os "\$\{\{ matrix\.asset_os \}\}"/);
+  assert.match(releaseWorkflow, /python -m zipfile -c/);
+  assert.match(releaseWorkflow, /permissions:\n  contents: read/);
+  assert.equal(releaseWorkflow.match(/contents: write/g)?.length, 2);
+  assert.match(ciWorkflow, /scripts\/install-release\.test\.sh/);
+  assert.match(windowsInstaller, /BOBBY_ARCHIVE/);
+  assert.match(windowsInstaller, /File\]::Replace/);
+  assert.match(certifier, /powershell\.exe/);
+  assert.match(certifier, /upgrade retained stale managed files/);
 });
