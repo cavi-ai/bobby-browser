@@ -263,6 +263,9 @@ pub enum JobError {
     #[error("job store error: {0}")]
     Store(String),
 
+    #[error("missing capability: {0:?}")]
+    MissingCapability(types::Capability),
+
     #[error("scheduler drain timed out")]
     DrainTimeout,
 }

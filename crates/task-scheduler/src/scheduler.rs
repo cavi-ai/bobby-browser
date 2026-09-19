@@ -14,6 +14,7 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use std::collections::HashMap;
+use std::io::{self, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -27,10 +28,16 @@ use crate::job::{Job, JobConfig, JobId, JobStatus};
 use crate::queue::{JobQueue, RetryConfig};
 use crate::store::{JobEvent, JobStore, JournalJobStore, MemoryJobStore, StoreError};
 use crate::{JobResult, SchedulerConfig, SchedulerStats};
+use types::{Capability, CapabilitySet};
 
 /// Trait for job execution handlers.
 #[async_trait]
 pub trait JobHandler: Send + Sync {
+    /// Additional capabilities required by this handler beyond `job:submit`.
+    fn required_capabilities(&self) -> &'static [Capability] {
+        &[]
+    }
+
     /// Execute a job and return the result.
     async fn execute(&self, job: &Job) -> Result<serde_json::Value, String>;
 }
@@ -160,6 +167,26 @@ impl JobScheduler {
         );
         self.wake.notify_one();
         Ok(id)
+    }
+
+    /// Submit after enforcing the selected handler's additional capabilities.
+    /// Unknown handlers keep the existing asynchronous failure behavior.
+    pub async fn submit_authorized(
+        &self,
+        config: JobConfig,
+        capabilities: &CapabilitySet,
+    ) -> Result<JobId, crate::JobError> {
+        if let Some(handler) = self.handlers.get(&config.name) {
+            if let Some(required) = handler
+                .required_capabilities()
+                .iter()
+                .copied()
+                .find(|capability| !capabilities.contains(*capability))
+            {
+                return Err(crate::JobError::MissingCapability(required));
+            }
+        }
+        self.submit(config).await
     }
 
     /// Request the run loop to stop (pending jobs are kept; in-flight drain per timeout).
@@ -560,11 +587,21 @@ impl JobScheduler {
         };
 
         match handler.execute(job).await {
-            Ok(output) => JobResult {
+            Ok(output) if output_within_bound(&output, self.config.max_output_bytes) => JobResult {
                 job_id: job_id.clone(),
                 success: true,
                 output: Some(output),
                 error: None,
+                completed_at: Utc::now(),
+            },
+            Ok(_) => JobResult {
+                job_id: job_id.clone(),
+                success: false,
+                output: None,
+                error: Some(format!(
+                    "job output exceeds {} bytes",
+                    self.config.max_output_bytes
+                )),
                 completed_at: Utc::now(),
             },
             Err(e) => JobResult {
@@ -669,6 +706,29 @@ impl JobScheduler {
             }
         }
     }
+}
+
+struct OutputCounter {
+    written: usize,
+    limit: usize,
+}
+
+impl Write for OutputCounter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.written.saturating_add(bytes.len()) > self.limit {
+            return Err(io::Error::other("job output limit exceeded"));
+        }
+        self.written += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn output_within_bound(output: &serde_json::Value, limit: usize) -> bool {
+    serde_json::to_writer(OutputCounter { written: 0, limit }, output).is_ok()
 }
 
 struct PermitGuard {

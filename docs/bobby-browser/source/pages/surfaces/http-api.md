@@ -29,7 +29,7 @@ Shared headers for every `/v1/*` call: [Authentication](../guides/auth.md).
 | GET | `/v1/events` | Read events (`after`, `limit` query) | `session:read` |
 | GET | `/v1/artifacts/{id}` | Read artifact bytes | `artifact:read` |
 | GET | `/v1/sessions/{session}/pages/{page}/forms` | Form snapshot (`maxControls` query, 1–512) | `page:read` |
-| POST | `/v1/jobs` | Submit a scheduled job | `job:submit` |
+| POST | `/v1/jobs` | Submit a scheduled job | `job:submit` (+ `network:egress` for HTTP handlers) |
 | GET | `/v1/jobs/{job}` | Job status | `job:read` |
 | DELETE | `/v1/jobs/{job}` | Cancel a job | `job:cancel` |
 | POST | `/v1/principals` | Issue scoped bearer | `authority:admin` |

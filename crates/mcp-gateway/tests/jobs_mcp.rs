@@ -11,11 +11,15 @@ use types::{Capability, PrincipalId};
 use uuid::uuid;
 
 async fn server_with_jobs() -> Server {
+    server_with_capabilities(Capability::ALL.to_vec()).await
+}
+
+async fn server_with_capabilities(capabilities: Vec<Capability>) -> Server {
     let authority = AuthorityStore::with_capacity(1);
     let token = authority
         .issue(
             PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000061")),
-            Capability::ALL.to_vec(),
+            capabilities,
             Utc::now() + Duration::hours(1),
         )
         .await
@@ -43,6 +47,32 @@ async fn server_with_jobs() -> Server {
         .handle_message(json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}))
         .await;
     server
+}
+
+#[tokio::test]
+async fn network_jobs_require_network_egress_capability() {
+    let server = server_with_capabilities(vec![
+        Capability::JobSubmit,
+        Capability::JobRead,
+        Capability::JobCancel,
+    ])
+    .await;
+    let submitted = server
+        .handle_message(json!({
+            "jsonrpc":"2.0","id":3,"method":"tools/call",
+            "params":{"name":"job_submit","arguments":{
+                "name":"http_probe",
+                "payload":{"url":"https://example.com/","method":"HEAD"},
+                "maxRetries":0
+            }}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(submitted["error"]["data"]["code"], "missingCapability");
+    assert_eq!(
+        submitted["error"]["data"]["requiredCapability"],
+        "network:egress"
+    );
 }
 
 #[tokio::test]

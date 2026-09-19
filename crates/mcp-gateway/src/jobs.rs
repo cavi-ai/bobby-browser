@@ -10,11 +10,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use task_scheduler::{
-    Job, JobConfig, JobError, JobHandler, JobId, JobPriority, JobScheduler, JobStatus,
+    register_builtin_handlers, Job, JobConfig, JobError, JobId, JobPriority, JobScheduler,
+    JobStatus,
 };
-use types::PrincipalId;
+use types::{Capability, PrincipalId, RequestContext};
 
-/// One `job_submit` request, less the owner.
+/// One `job_submit` request.
 ///
 /// A struct rather than a parameter list: the six fields travel together from
 /// the tool call to the scheduler config, and as loose arguments they were one
@@ -33,7 +34,7 @@ pub struct JobSubmission {
 pub trait JobPort: Send + Sync {
     async fn submit(
         &self,
-        owner: &PrincipalId,
+        context: &RequestContext,
         request: JobSubmission,
     ) -> Result<JobSubmitWire, JobPortError>;
 
@@ -135,6 +136,7 @@ pub enum JobPortError {
     NotFound,
     InvalidName,
     InvalidPriority,
+    MissingCapability(Capability),
     Unavailable(String),
 }
 
@@ -145,6 +147,9 @@ impl JobPortError {
             Self::InvalidName => "job name must be nonempty".to_owned(),
             Self::InvalidPriority => {
                 "priority must be one of low, normal, high, critical".to_owned()
+            }
+            Self::MissingCapability(capability) => {
+                format!("job handler requires {}", capability.as_str())
             }
             Self::Unavailable(detail) => detail.clone(),
         }
@@ -173,154 +178,6 @@ impl InProcessJobPort {
         register_builtin_handlers(&mut scheduler);
         let scheduler = Arc::new(scheduler);
         (Self::new(Arc::clone(&scheduler)), scheduler)
-    }
-}
-
-fn register_builtin_handlers(scheduler: &mut JobScheduler) {
-    scheduler.register_handler("echo".to_string(), Arc::new(EchoHandler));
-    scheduler.register_handler("sleep".to_string(), Arc::new(SleepHandler));
-    scheduler.register_handler("http_probe".to_string(), Arc::new(HttpProbeHandler));
-    scheduler.register_handler("http_wait".to_string(), Arc::new(HttpWaitHandler));
-    scheduler.register_handler("http_fetch".to_string(), Arc::new(HttpFetchHandler));
-}
-
-struct EchoHandler;
-
-#[async_trait]
-impl JobHandler for EchoHandler {
-    async fn execute(&self, job: &Job) -> Result<Value, String> {
-        Ok(job.payload.clone())
-    }
-}
-
-struct SleepHandler;
-
-#[async_trait]
-impl JobHandler for SleepHandler {
-    async fn execute(&self, job: &Job) -> Result<Value, String> {
-        let ms = job
-            .payload
-            .get("ms")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(1_000)
-            .min(30_000);
-        tokio::time::sleep(Duration::from_millis(ms)).await;
-        Ok(json!({ "sleptMs": ms }))
-    }
-}
-
-struct HttpProbeHandler;
-
-#[async_trait]
-impl JobHandler for HttpProbeHandler {
-    async fn execute(&self, job: &Job) -> Result<Value, String> {
-        let url = job
-            .payload
-            .get("url")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| "http_probe requires payload.url".to_owned())?;
-        let method = job
-            .payload
-            .get("method")
-            .and_then(|value| value.as_str())
-            .map(|raw| {
-                network_engine::HttpProbeMethod::parse(raw)
-                    .ok_or_else(|| format!("http_probe method must be HEAD or GET, got {raw}"))
-            })
-            .transpose()?
-            .unwrap_or(network_engine::HttpProbeMethod::Head);
-        let timeout_ms = job
-            .payload
-            .get("timeoutMs")
-            .and_then(|value| value.as_u64());
-        network_engine::http_probe(
-            url,
-            method,
-            timeout_ms,
-            network_engine::NetworkPolicy::default(),
-        )
-        .await
-    }
-}
-
-struct HttpWaitHandler;
-
-#[async_trait]
-impl JobHandler for HttpWaitHandler {
-    async fn execute(&self, job: &Job) -> Result<Value, String> {
-        let url = job
-            .payload
-            .get("url")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| "http_wait requires payload.url".to_owned())?;
-        let method = job
-            .payload
-            .get("method")
-            .and_then(|value| value.as_str())
-            .map(|raw| {
-                network_engine::HttpProbeMethod::parse(raw)
-                    .ok_or_else(|| format!("http_wait method must be HEAD or GET, got {raw}"))
-            })
-            .transpose()?
-            .unwrap_or(network_engine::HttpProbeMethod::Head);
-        let options = network_engine::HttpWaitOptions {
-            timeout_ms: job
-                .payload
-                .get("timeoutMs")
-                .and_then(|value| value.as_u64()),
-            interval_ms: job
-                .payload
-                .get("intervalMs")
-                .and_then(|value| value.as_u64()),
-            probe_timeout_ms: job
-                .payload
-                .get("probeTimeoutMs")
-                .and_then(|value| value.as_u64()),
-            contains: job.payload.get("contains").and_then(|value| value.as_str()),
-            max_body_bytes: job
-                .payload
-                .get("maxBodyBytes")
-                .and_then(|value| value.as_u64())
-                .map(|value| value as usize),
-        };
-        network_engine::http_wait(
-            url,
-            method,
-            options,
-            network_engine::NetworkPolicy::default(),
-        )
-        .await
-    }
-}
-
-struct HttpFetchHandler;
-
-#[async_trait]
-impl JobHandler for HttpFetchHandler {
-    async fn execute(&self, job: &Job) -> Result<Value, String> {
-        let url = job
-            .payload
-            .get("url")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| "http_fetch requires payload.url".to_owned())?;
-        let timeout_ms = job
-            .payload
-            .get("timeoutMs")
-            .and_then(|value| value.as_u64());
-        let max_body_bytes = job
-            .payload
-            .get("maxBodyBytes")
-            .and_then(|value| value.as_u64())
-            .map(|value| value as usize);
-        let contains = job.payload.get("contains").and_then(|value| value.as_str());
-        network_engine::http_fetch(
-            url,
-            timeout_ms,
-            max_body_bytes,
-            contains,
-            network_engine::NetworkPolicy::default(),
-        )
-        .await
     }
 }
 
@@ -375,6 +232,7 @@ fn job_to_wire(job: Job) -> JobStatusWire {
 fn map_scheduler_error(error: JobError) -> JobPortError {
     match error {
         JobError::NotFound(_) => JobPortError::NotFound,
+        JobError::MissingCapability(capability) => JobPortError::MissingCapability(capability),
         other => JobPortError::Unavailable(other.to_string()),
     }
 }
@@ -383,7 +241,7 @@ fn map_scheduler_error(error: JobError) -> JobPortError {
 impl JobPort for InProcessJobPort {
     async fn submit(
         &self,
-        owner: &PrincipalId,
+        context: &RequestContext,
         request: JobSubmission,
     ) -> Result<JobSubmitWire, JobPortError> {
         let JobSubmission {
@@ -400,7 +258,7 @@ impl JobPort for InProcessJobPort {
         let mut config = JobConfig::new(name, payload)
             .with_priority(priority.into_scheduler())
             .with_max_retries(max_retries)
-            .with_owner(owner.clone());
+            .with_owner(context.principal_id.clone());
         if let Some(timeout_ms) = timeout_ms {
             config = config.with_timeout(Duration::from_millis(timeout_ms));
         }
@@ -409,7 +267,7 @@ impl JobPort for InProcessJobPort {
         }
         let id = self
             .scheduler
-            .submit(config)
+            .submit_authorized(config, &context.capabilities)
             .await
             .map_err(map_scheduler_error)?;
         let status = self

@@ -75,7 +75,7 @@ impl Server {
                 };
                 match jobs
                     .submit(
-                        &context.principal_id,
+                        &context,
                         crate::jobs::JobSubmission {
                             name: input.name,
                             payload: input.payload.unwrap_or(Value::Null),

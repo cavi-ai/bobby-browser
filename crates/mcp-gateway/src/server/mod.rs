@@ -2086,6 +2086,16 @@ fn job_port_error_response(id: Value, port_error: crate::jobs::JobPortError) -> 
                 "message": port_error.message(),
             })),
         ),
+        crate::jobs::JobPortError::MissingCapability(capability) => error(
+            id,
+            INTERFACE_ERROR,
+            "Runtime interface error",
+            Some(json!({
+                "code":"missingCapability",
+                "message": port_error.message(),
+                "requiredCapability": capability.as_str(),
+            })),
+        ),
         crate::jobs::JobPortError::Unavailable(detail) => error(
             id,
             INTERFACE_ERROR,
