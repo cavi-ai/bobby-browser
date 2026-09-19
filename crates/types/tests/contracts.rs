@@ -12,7 +12,8 @@ use types::{
     InspectCommand, IntentCommand, IntentHints, IntentResolutionPath, ListPagesCommand,
     LocateIntent, NetworkResourceType, OpenPageCommand, PageId, PrimitiveCommand, RuntimeCommand,
     ScreenshotMode, SessionId, SubmitAndVerifyIntent, TargetSpec, TextMatch, TypeTextCommand,
-    UploadFilesCommand, WaitCondition, WaitForCommand, WaitForStateIntent, WaitUntil, WorkflowId,
+    UploadAndConfirmCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitForStateIntent,
+    WaitUntil, WorkflowId,
 };
 use uuid::Uuid;
 
@@ -481,6 +482,37 @@ fn workflow_io_commands_have_stable_json_and_recovery_classes() {
         assert_eq!(command.class(), class);
         assert_eq!(serde_json::to_value(command).unwrap()["kind"], json!(kind));
     }
+}
+
+#[test]
+fn upload_and_confirm_is_a_boundary_and_redacts_paths_in_journal() {
+    let command = PrimitiveCommand::UploadAndConfirm(UploadAndConfirmCommand {
+        upload: UploadFilesCommand {
+            selector: "#resume".into(),
+            target: None,
+            paths: vec!["/private/resume.pdf".into()],
+        },
+        expected_state: WaitForCommand {
+            condition: WaitCondition::Text {
+                matcher: TextMatch::Contains("Upload complete".into()),
+                target: Box::new(TargetSpec::default()),
+            },
+            timeout_ms: 5_000,
+        },
+    });
+
+    assert_eq!(command.class(), CommandClass::Boundary);
+    assert_eq!(
+        serde_json::to_value(&command).unwrap()["kind"],
+        "uploadAndConfirm"
+    );
+
+    let safe = test_envelope(command).journal_safe();
+    let RuntimeCommand::Primitive(PrimitiveCommand::UploadAndConfirm(command)) = safe.command
+    else {
+        panic!("journal command changed kind");
+    };
+    assert_eq!(command.upload.paths, vec!["upload://input/0"]);
 }
 
 #[test]

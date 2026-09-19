@@ -1612,6 +1612,20 @@ async fn browser_execute(
                 .upload_files(page_id.expect("validated page id"), command)
                 .await?
         }
+        PrimitiveCommand::UploadAndConfirm(command) => {
+            let page_id = page_id.expect("validated page id");
+            let mut evidence = lease
+                .worker()
+                .upload_files(page_id, &command.upload)
+                .await?;
+            evidence.extend(
+                lease
+                    .worker()
+                    .wait_for(page_id, &command.expected_state)
+                    .await?,
+            );
+            evidence
+        }
         PrimitiveCommand::OpenPage(command) => lease.worker().open_page_command(command).await?,
         PrimitiveCommand::ListPages(command) => lease.worker().list_pages(command).await?,
         PrimitiveCommand::ClosePage(command) => lease.worker().close_page_command(command).await?,

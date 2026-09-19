@@ -13,8 +13,8 @@ use types::{
     ExecutionReason, FollowIntent, FormControlOperation, FormControlState, FormControlTarget,
     FormControlValidity, InspectCommand, IntentCommand, IntentHints, NavigateCommand, PageEvidence,
     PageId, PrimitiveCommand, RuntimeCommand, SessionId, SubmitAndVerifyIntent, TargetSpec,
-    TextMatch, TypeTextCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId,
-    WorkflowCheckpoint, WorkflowId,
+    TextMatch, TypeTextCommand, UploadAndConfirmCommand, UploadFilesCommand, WaitCondition,
+    WaitForCommand, WaitUntil, WorkerId, WorkflowCheckpoint, WorkflowId,
 };
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
 use workflow_journal::{
@@ -522,6 +522,17 @@ impl BrowserWorker for FakeWorker {
             observed: None,
         }])
     }
+    async fn upload_files(
+        &self,
+        _: &PageId,
+        command: &UploadFilesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.events.lock().await.push("browser:upload_files".into());
+        Ok(vec![Evidence::Upload {
+            selector: command.selector.clone(),
+            paths: command.paths.clone(),
+        }])
+    }
     async fn close(&self) -> Result<(), CommandError> {
         Ok(())
     }
@@ -577,6 +588,92 @@ impl BrowserWorker for FakeWorker {
             Ok(())
         }
     }
+}
+
+#[tokio::test]
+async fn upload_and_confirm_returns_upload_and_confirmation_evidence() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let journal = Arc::new(RecordingJournal {
+        events: events.clone(),
+        fail_on: None,
+        pause_on: None,
+        paused: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
+    });
+    let workers = Arc::new(WorkerPool::new(
+        1,
+        Arc::new(FakeFactory {
+            events: events.clone(),
+            mode: DriverMode::Succeed,
+            launches: Default::default(),
+        }),
+    ));
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let runtime = page_runtime::PageRuntime::new_with_checkpoints(journal, workers, store.clone());
+    let session = SessionId::new();
+    let page = runtime.open_browser(session.clone()).await.unwrap();
+    let request = envelope(
+        session.clone(),
+        page.id.clone(),
+        PrimitiveCommand::UploadAndConfirm(UploadAndConfirmCommand {
+            upload: UploadFilesCommand {
+                selector: "#resume".into(),
+                target: None,
+                paths: vec!["/uploads/resume.pdf".into()],
+            },
+            expected_state: WaitForCommand {
+                condition: WaitCondition::Text {
+                    matcher: TextMatch::Contains("Upload complete".into()),
+                    target: Box::new(TargetSpec::default()),
+                },
+                timeout_ms: 5_000,
+            },
+        }),
+    );
+    store
+        .save(&WorkflowCheckpoint {
+            schema_version: WorkflowCheckpoint::SCHEMA_VERSION,
+            checkpoint_id: CheckpointId::new(),
+            workflow_id: request.workflow_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            session_id: session,
+            page_id: page.id,
+            restart_url: "https://example.test/".into(),
+            current_url: "https://example.test/".into(),
+            cursor: None,
+            boundary_command_id: Some(request.command_id.clone()),
+            recovery_class: CommandClass::Boundary,
+            invariants: Vec::new(),
+            replayable_inputs: Vec::new(),
+            evidence: Vec::new(),
+            recovery_history: Vec::new(),
+            recovery_receipts: Vec::new(),
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    let outcome = runtime.execute(request).await;
+    let CommandOutcome::Completed { evidence, .. } = outcome else {
+        panic!("unexpected outcome: {outcome:?}");
+    };
+    assert!(evidence
+        .iter()
+        .any(|item| matches!(item, Evidence::Upload { .. })));
+    assert!(evidence
+        .iter()
+        .any(|item| matches!(item, Evidence::Wait { .. })));
+    let observed = events.lock().await.clone();
+    let upload = observed
+        .iter()
+        .position(|event| event == "browser:upload_files")
+        .unwrap();
+    let wait = observed
+        .iter()
+        .position(|event| event == "browser:wait_for")
+        .unwrap();
+    assert!(upload < wait);
 }
 
 async fn adaptive_runtime(

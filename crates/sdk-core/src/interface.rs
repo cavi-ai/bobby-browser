@@ -728,7 +728,8 @@ impl RuntimeInterface for AuthenticatedRuntime {
 /// would silently inherit `browser:mutate` as sufficient authorization.
 fn command_extra_capabilities(command: &RuntimeCommand) -> Vec<Capability> {
     match command {
-        RuntimeCommand::Primitive(PrimitiveCommand::UploadFiles(_)) => {
+        RuntimeCommand::Primitive(PrimitiveCommand::UploadFiles(_))
+        | RuntimeCommand::Primitive(PrimitiveCommand::UploadAndConfirm(_)) => {
             vec![Capability::FileUpload]
         }
         RuntimeCommand::Primitive(PrimitiveCommand::ControlAction(command))
