@@ -200,6 +200,33 @@ async fn missing_job_capability_is_forbidden() {
 }
 
 #[tokio::test]
+async fn network_jobs_require_network_egress_capability() {
+    let (app, _, admin) = app_with_admin(8).await;
+    let bearer = issue_bearer(
+        &app,
+        &admin,
+        Uuid::from_u128(0x20000000000000000000000000000002),
+        &["job:submit"],
+    )
+    .await;
+    let body = json!({
+        "name": "http_probe",
+        "payload": {"url": "https://example.com/", "method": "HEAD"},
+        "maxRetries": 0
+    });
+    let req = context_headers(Request::post("/v1/jobs"), &bearer)
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let response = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let error: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(error["error"]["code"], "missingCapability");
+    assert_eq!(error["error"]["requiredCapability"], "network:egress");
+}
+
+#[tokio::test]
 async fn jobs_are_invisible_and_immovable_across_principals() {
     let (app, _, admin) = app_with_admin(8).await;
     let body = json!({ "name": "echo", "payload": {"secret": "owner-only"}, "maxRetries": 0 });

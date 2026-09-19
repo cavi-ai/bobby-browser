@@ -612,6 +612,7 @@ fn intent_and_vision_capabilities_round_trip() {
     );
     assert_eq!(Capability::IntentExecute.as_str(), "intent:execute");
     assert_eq!(Capability::VisionAssist.as_str(), "vision:assist");
+    assert_eq!(Capability::NetworkEgress.as_str(), "network:egress");
     assert_eq!(Capability::JobSubmit.as_str(), "job:submit");
     assert_eq!(Capability::JobRead.as_str(), "job:read");
     assert_eq!(Capability::JobCancel.as_str(), "job:cancel");
@@ -645,6 +646,7 @@ fn every_capability_round_trips_its_wire_string_through_from_str() {
         Capability::PageRead,
         Capability::PageWrite,
         Capability::BrowserMutate,
+        Capability::NetworkEgress,
         Capability::FileUpload,
         Capability::FileDownload,
         Capability::JavascriptEvaluate,

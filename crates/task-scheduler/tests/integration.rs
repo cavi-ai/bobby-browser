@@ -7,6 +7,7 @@ use task_scheduler::{
     JobStatus, JobStore, JournalJobStore, RetryConfig, SchedulerConfig,
 };
 use tokio::sync::Mutex;
+use types::{Capability, CapabilitySet};
 
 // ===== Job tests =====
 
@@ -361,6 +362,28 @@ impl JobHandler for HangHandler {
     }
 }
 
+struct NetworkHandler;
+
+#[async_trait]
+impl JobHandler for NetworkHandler {
+    fn required_capabilities(&self) -> &'static [Capability] {
+        &[Capability::NetworkEgress]
+    }
+
+    async fn execute(&self, _job: &Job) -> Result<serde_json::Value, String> {
+        Ok(serde_json::json!({"ok": true}))
+    }
+}
+
+struct LargeOutputHandler;
+
+#[async_trait]
+impl JobHandler for LargeOutputHandler {
+    async fn execute(&self, _job: &Job) -> Result<serde_json::Value, String> {
+        Ok(serde_json::json!({"data": "x".repeat(128)}))
+    }
+}
+
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -654,6 +677,70 @@ fn scheduler_fails_without_handler() {
     });
 }
 
+#[test]
+fn scheduler_enforces_handler_capabilities_before_queueing() {
+    let mut scheduler = JobScheduler::new(SchedulerConfig::default());
+    scheduler.register_handler("network".to_string(), Arc::new(NetworkHandler));
+    let rt = runtime();
+
+    rt.block_on(async {
+        let denied = scheduler
+            .submit_authorized(
+                JobConfig::new("network".to_string(), serde_json::json!({})),
+                &CapabilitySet::default(),
+            )
+            .await;
+        assert_eq!(
+            denied,
+            Err(JobError::MissingCapability(Capability::NetworkEgress))
+        );
+        assert_eq!(scheduler.stats().await.total_submitted, 0);
+
+        scheduler
+            .submit_authorized(
+                JobConfig::new("network".to_string(), serde_json::json!({})),
+                &CapabilitySet::new([Capability::NetworkEgress]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(scheduler.stats().await.total_submitted, 1);
+    });
+}
+
+#[test]
+fn scheduler_rejects_handler_output_over_the_serialized_limit() {
+    let mut scheduler = JobScheduler::new(
+        SchedulerConfig::default()
+            .with_max_output_bytes(32)
+            .with_max_retries(0),
+    );
+    scheduler.register_handler("large".to_string(), Arc::new(LargeOutputHandler));
+    let scheduler = Arc::new(scheduler);
+    let rt = runtime();
+
+    rt.block_on(async {
+        let id = scheduler
+            .submit(JobConfig::new("large".to_string(), serde_json::json!({})).with_max_retries(0))
+            .await
+            .unwrap();
+        let runner = {
+            let scheduler = Arc::clone(&scheduler);
+            tokio::spawn(async move { scheduler.run().await })
+        };
+        let job = wait_status(&scheduler, &id, JobStatus::Failed, 50).await;
+        assert!(job
+            .result
+            .as_ref()
+            .is_some_and(|result| result.output.is_none()));
+        assert!(job
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("output exceeds 32 bytes")));
+        scheduler.request_shutdown();
+        runner.await.unwrap().unwrap();
+    });
+}
+
 // ===== SchedulerConfig tests =====
 
 #[test]
@@ -665,6 +752,7 @@ fn scheduler_config_default_values() {
     assert_eq!(config.retry_backoff_base_ms, 1000);
     assert_eq!(config.retry_backoff_max_ms, 60000);
     assert_eq!(config.job_timeout_ms, 300000);
+    assert_eq!(config.max_output_bytes, 64 * 1024);
     assert_eq!(config.drain_timeout_ms, 30000);
     assert!(config.journal_path.is_none());
 }
@@ -677,6 +765,7 @@ fn scheduler_config_chain() {
         .with_max_retries(5)
         .with_backoff_range(500, 30000)
         .with_job_timeout(60000)
+        .with_max_output_bytes(4096)
         .with_drain_timeout(1000)
         .with_journal_path("/tmp/jobs.jsonl");
 
@@ -686,6 +775,7 @@ fn scheduler_config_chain() {
     assert_eq!(config.retry_backoff_base_ms, 500);
     assert_eq!(config.retry_backoff_max_ms, 30000);
     assert_eq!(config.job_timeout_ms, 60000);
+    assert_eq!(config.max_output_bytes, 4096);
     assert_eq!(config.drain_timeout_ms, 1000);
     assert_eq!(
         config.journal_path.as_deref(),

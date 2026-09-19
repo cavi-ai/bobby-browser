@@ -393,6 +393,7 @@ test("validators reject unknown and variant-incompatible keys at every object la
   assert.equal(isEventBatch({ events: [{ cursor: 1, kind: "x", payload: null, unexpected: true }], latestAvailable: 1 }, 0, 1), false);
   assert.equal(isEventBatch({ events: [{ cursor: 1, kind: "x", payload: null }], latestAvailable: 1, unexpected: true }, 0, 1), false);
   assert.equal(isEventGap({ reason: "historyLost", earliestAvailable: 1, unexpected: true }), false);
+  assert.equal(isInterfaceError({ code: "missingCapability", layer: "interface", message: "x", correlationId: ID, commandId: null, retryable: false, retryAfterMs: null, reconciliationRequired: false, requiredCapability: "network:egress" }), true);
   assert.equal(isInterfaceError({ code: "internal", layer: "interface", message: "x", correlationId: ID, commandId: null, retryable: false, retryAfterMs: null, reconciliationRequired: false, requiredCapability: null, unexpected: true }), false);
 });
 

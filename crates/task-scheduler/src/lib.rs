@@ -11,11 +11,13 @@
 //!   [`SchedulerConfig::journal_path`] — append-only JSONL with fsync; on reopen,
 //!   `Running` jobs are recovered as `Pending`.
 
+mod handlers;
 mod job;
 mod queue;
 mod scheduler;
 mod store;
 
+pub use handlers::{register_builtin_handlers, BUILTIN_JOB_HANDLERS};
 pub use job::{Job, JobConfig, JobError, JobId, JobPriority, JobStatus};
 pub use queue::{JobQueue, RetryConfig};
 pub use scheduler::{JobHandler, JobScheduler};
@@ -43,6 +45,9 @@ pub struct SchedulerConfig {
     pub retry_backoff_max_ms: u64,
     #[serde(default = "default_job_timeout_ms")]
     pub job_timeout_ms: u64,
+    /// Maximum serialized handler output retained in status and the journal.
+    #[serde(default = "default_max_output_bytes")]
+    pub max_output_bytes: usize,
     /// How long `run` waits for in-flight work after shutdown before aborting.
     #[serde(default = "default_drain_timeout_ms")]
     pub drain_timeout_ms: u64,
@@ -64,6 +69,7 @@ impl Default for SchedulerConfig {
             retry_backoff_base_ms: default_retry_base_ms(),
             retry_backoff_max_ms: default_retry_max_ms(),
             job_timeout_ms: default_job_timeout_ms(),
+            max_output_bytes: default_max_output_bytes(),
             drain_timeout_ms: default_drain_timeout_ms(),
             retained_terminal_jobs: default_retained_terminal_jobs(),
             journal_path: None,
@@ -93,6 +99,10 @@ fn default_retry_max_ms() -> u64 {
 
 fn default_job_timeout_ms() -> u64 {
     300000 // 5 minutes
+}
+
+fn default_max_output_bytes() -> usize {
+    64 * 1024
 }
 
 fn default_retained_terminal_jobs() -> usize {
@@ -127,6 +137,11 @@ impl SchedulerConfig {
 
     pub fn with_job_timeout(mut self, timeout_ms: u64) -> Self {
         self.job_timeout_ms = timeout_ms;
+        self
+    }
+
+    pub fn with_max_output_bytes(mut self, bytes: usize) -> Self {
+        self.max_output_bytes = bytes;
         self
     }
 

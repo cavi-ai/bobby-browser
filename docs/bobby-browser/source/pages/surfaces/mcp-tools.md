@@ -54,7 +54,7 @@ Tools are advertised only when the principal holds the required capability.
 | `intent_wait_for_state` | `browser:mutate` + `intent:execute` | Wait for a described page state (Replayable) |
 | `job_cancel` | `job:cancel` | Cancel one owned job by id |
 | `job_status` | `job:read` | Read one owned job by id |
-| `job_submit` | `job:submit` | Submit a named job (`echo` / `sleep` / `http_probe` / `http_wait` / `http_fetch`; advertised in full/act/verify) |
+| `job_submit` | `job:submit` (+ `network:egress` for HTTP handlers) | Submit a named job (`echo` / `sleep` / `http_probe` / `http_wait` / `http_fetch`; advertised in full/act/verify) |
 | `navigate` | `browser:mutate` | Navigate a page to a URL |
 | `network_log` | `browser:mutate` | Dump recorded network log as HAR |
 | `page_activate` | `browser:mutate` | Bring a page to the front |

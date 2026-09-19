@@ -38,6 +38,8 @@ pub enum Capability {
     PageWrite,
     #[serde(rename = "browser:mutate")]
     BrowserMutate,
+    #[serde(rename = "network:egress")]
+    NetworkEgress,
     #[serde(rename = "file:upload")]
     FileUpload,
     #[serde(rename = "file:download")]
@@ -77,12 +79,13 @@ impl Capability {
     /// notably the `tools/list` byte-budget gate, which under-measures the connect
     /// payload if it misses a capability that advertises a tool. `all_is_exhaustive`
     /// fails to compile when a variant is added without being listed here.
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::SessionRead,
         Self::SessionWrite,
         Self::PageRead,
         Self::PageWrite,
         Self::BrowserMutate,
+        Self::NetworkEgress,
         Self::FileUpload,
         Self::FileDownload,
         Self::JavascriptEvaluate,
@@ -108,6 +111,7 @@ impl Capability {
             Self::PageRead => "page:read",
             Self::PageWrite => "page:write",
             Self::BrowserMutate => "browser:mutate",
+            Self::NetworkEgress => "network:egress",
             Self::FileUpload => "file:upload",
             Self::FileDownload => "file:download",
             Self::JavascriptEvaluate => "javascript:evaluate",
@@ -146,6 +150,7 @@ impl std::str::FromStr for Capability {
             "page:read" => Self::PageRead,
             "page:write" => Self::PageWrite,
             "browser:mutate" => Self::BrowserMutate,
+            "network:egress" => Self::NetworkEgress,
             "file:upload" => Self::FileUpload,
             "file:download" => Self::FileDownload,
             "javascript:evaluate" => Self::JavascriptEvaluate,
@@ -246,6 +251,7 @@ mod tests {
                 | Capability::PageRead
                 | Capability::PageWrite
                 | Capability::BrowserMutate
+                | Capability::NetworkEgress
                 | Capability::FileUpload
                 | Capability::FileDownload
                 | Capability::JavascriptEvaluate

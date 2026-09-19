@@ -692,6 +692,16 @@ fn job_status_response(job: Job) -> JobStatusResponse {
 
 fn job_error(err: JobError, correlation_id: CorrelationId) -> ProtocolError {
     match err {
+        JobError::MissingCapability(capability) => {
+            let mut error = interface_error(
+                InterfaceErrorCode::MissingCapability,
+                "job handler requires an additional capability",
+                correlation_id,
+                None,
+            );
+            error.required_capability = Some(capability);
+            ProtocolError::from(error)
+        }
         JobError::NotFound(_) => ProtocolError::from(interface_error(
             InterfaceErrorCode::InvalidRequest,
             "job not found",
@@ -736,7 +746,7 @@ async fn dispatch_submit_job(
     config = config.with_owner(request.context.principal_id.clone());
     let id = state
         .scheduler
-        .submit(config)
+        .submit_authorized(config, &request.context.capabilities)
         .await
         .map_err(|e| job_error(e, request.context.correlation_id.clone()))?;
     let status = state

@@ -1317,7 +1317,8 @@ const JOB_HANDLERS_BODY: &str = r#"# Built-in job handlers
 `job_submit` / `job_status` / `job_cancel` mirror HTTP `/v1/jobs`. They need
 `job:submit`, `job:read`, and `job:cancel` respectively, and a job port on the
 gateway (`bobby mcp-stdio` / `bobby serve` MCP HTTP). They advertise in the
-`full`, `act`, and `verify` phases.
+`full`, `act`, and `verify` phases. The `http_probe`, `http_wait`, and
+`http_fetch` handlers also require `network:egress`.
 
 Jobs are not intents: an intent resolves and verifies a page effect; a job
 runs a named scheduler handler off the page timeline. Prefer `intent_*` for

@@ -636,7 +636,7 @@ paths:
       operationId: submitJob
       tags: [jobs]
       summary: Submit scheduled job
-      description: Requires `job:submit`.
+      description: Requires `job:submit`; HTTP handlers also require `network:egress`.
       parameters:
         - $ref: "#/components/parameters/Authorization"
         - $ref: "#/components/parameters/InterfaceVersion"
@@ -992,6 +992,7 @@ components:
         - page:read
         - page:write
         - browser:mutate
+        - network:egress
         - file:upload
         - file:download
         - javascript:evaluate

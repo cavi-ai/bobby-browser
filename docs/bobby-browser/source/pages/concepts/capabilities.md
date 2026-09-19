@@ -14,6 +14,7 @@ Wire strings (camelCase JSON uses these exact values):
 | Session read / write | `session:read` / `session:write` |
 | Page read / write | `page:read` / `page:write` |
 | Browser mutate | `browser:mutate` |
+| Network egress | `network:egress` |
 | File upload / download | `file:upload` / `file:download` |
 | JavaScript evaluate | `javascript:evaluate` |
 | Intent execute | `intent:execute` |
