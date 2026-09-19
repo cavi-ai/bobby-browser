@@ -384,6 +384,28 @@ pub enum HostKind {
     Openshell,
 }
 
+impl HostKind {
+    pub(crate) const DRIFT_CHECKED: [Self; 4] = [Self::Claude, Self::Zed, Self::Vscode, Self::Acp];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Zed => "zed",
+            Self::Vscode => "vscode",
+            Self::Acp => "acp",
+            Self::Openshell => "openshell",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostConfigStatus {
+    Missing,
+    Current,
+    Drifted,
+    Invalid,
+}
+
 const SKILL_SOURCE: &str = include_str!("../../../skill/SKILL.md");
 const SKILL_NAME: &str = "bobby-browser";
 
@@ -433,6 +455,91 @@ fn host_config_path(kind: HostKind, project_root: &Path) -> Result<PathBuf> {
     }
 }
 
+fn expected_host_entry(kind: HostKind) -> Result<(&'static str, serde_json::Value)> {
+    match kind {
+        HostKind::Claude => {
+            let (command, args) = static_server_entry()?;
+            Ok((
+                "mcpServers",
+                serde_json::json!({"command": command, "args": args}),
+            ))
+        }
+        HostKind::Vscode => {
+            let (command, args) = static_server_entry()?;
+            Ok((
+                "servers",
+                serde_json::json!({"type": "stdio", "command": command, "args": args}),
+            ))
+        }
+        HostKind::Zed => {
+            let (command, args) = static_server_entry()?;
+            Ok((
+                "context_servers",
+                serde_json::json!({"command": {"path": command, "args": args, "env": {}}}),
+            ))
+        }
+        HostKind::Acp => {
+            let (command, args) = static_acp_host_entry()?;
+            Ok((
+                "agentServers",
+                serde_json::json!({"command": command, "args": args}),
+            ))
+        }
+        HostKind::Openshell => {
+            let emitted =
+                crate::openshell::emit_mcp_config(&crate::openshell::PackOptions::default());
+            let config: serde_json::Value = serde_json::from_str(&emitted)?;
+            Ok(("mcpServers", config["mcpServers"]["bobby-browser"].clone()))
+        }
+    }
+}
+
+fn host_config_status_at(kind: HostKind, path: &Path) -> Result<HostConfigStatus> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(HostConfigStatus::Missing)
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let config: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(config) => config,
+        Err(_) if text.contains("bobby-browser") => return Ok(HostConfigStatus::Invalid),
+        Err(_) => return Ok(HostConfigStatus::Missing),
+    };
+    let (section, expected) = expected_host_entry(kind)?;
+    match config.pointer(&format!("/{section}/bobby-browser")) {
+        Some(actual) if json_contains(actual, &expected) => Ok(HostConfigStatus::Current),
+        Some(_) | None => Ok(HostConfigStatus::Drifted),
+    }
+}
+
+fn json_contains(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {
+    match (actual, expected) {
+        (serde_json::Value::Object(actual), serde_json::Value::Object(expected)) => {
+            expected.iter().all(|(key, value)| {
+                actual
+                    .get(key)
+                    .is_some_and(|actual| json_contains(actual, value))
+            })
+        }
+        _ => actual == expected,
+    }
+}
+
+pub(crate) fn configured_host_statuses(
+    project_root: &Path,
+) -> Result<Vec<(HostKind, PathBuf, HostConfigStatus)>> {
+    HostKind::DRIFT_CHECKED
+        .into_iter()
+        .map(|kind| {
+            let path = host_config_path(kind, project_root)?;
+            let status = host_config_status_at(kind, &path)?;
+            Ok((kind, path, status))
+        })
+        .collect()
+}
+
 /// Merge the bobby-browser server entry into one host's config file,
 /// preserving everything already there. Returns the file written.
 pub fn merge_host_config(kind: HostKind, project_root: &Path) -> Result<PathBuf> {
@@ -449,39 +556,7 @@ pub fn merge_host_config(kind: HostKind, project_root: &Path) -> Result<PathBuf>
             .with_context(|| format!("{} is not valid JSON", path.display()))?,
         _ => serde_json::json!({}),
     };
-    let (entry, section) = match kind {
-        HostKind::Claude => {
-            let (command, args) = static_server_entry()?;
-            (
-                serde_json::json!({"command": command, "args": args}),
-                "mcpServers",
-            )
-        }
-        HostKind::Vscode => {
-            let (command, args) = static_server_entry()?;
-            (
-                serde_json::json!({"type": "stdio", "command": command, "args": args}),
-                "servers",
-            )
-        }
-        HostKind::Zed => {
-            let (command, args) = static_server_entry()?;
-            (
-                serde_json::json!({"command": {"path": command, "args": args, "env": {}}}),
-                "context_servers",
-            )
-        }
-        HostKind::Acp => {
-            // Same zero-wiring shape as MCP: bobby acp-stdio loads bootstrap
-            // and execs acp-gateway. No secrets in the host config file.
-            let (command, args) = static_acp_host_entry()?;
-            (
-                serde_json::json!({"command": command, "args": args}),
-                "agentServers",
-            )
-        }
-        HostKind::Openshell => unreachable!("openshell returned above"),
-    };
+    let (section, entry) = expected_host_entry(kind)?;
     let table = config
         .as_object_mut()
         .ok_or_else(|| anyhow!("{} must contain a JSON object", path.display()))?;
@@ -1683,6 +1758,55 @@ mod install_tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN"));
         assert!(!text.contains("mcp-stdio"));
+    }
+
+    #[test]
+    fn host_config_status_detects_current_and_drifted_bobby_entries() {
+        let root = tempfile::tempdir().unwrap();
+        let path = merge_host_config(HostKind::Claude, root.path()).unwrap();
+        assert_eq!(
+            host_config_status_at(HostKind::Claude, &path).unwrap(),
+            HostConfigStatus::Current
+        );
+
+        let mut config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        config["mcpServers"]["bobby-browser"]["args"] = serde_json::json!(["serve"]);
+        std::fs::write(&path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+        assert_eq!(
+            host_config_status_at(HostKind::Claude, &path).unwrap(),
+            HostConfigStatus::Drifted
+        );
+
+        merge_host_config(HostKind::Claude, root.path()).unwrap();
+        let mut config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        config["mcpServers"]["bobby-browser"]["disabled"] = serde_json::json!(false);
+        std::fs::write(&path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+        assert_eq!(
+            host_config_status_at(HostKind::Claude, &path).unwrap(),
+            HostConfigStatus::Current
+        );
+    }
+
+    #[test]
+    fn host_config_status_distinguishes_missing_and_invalid_files() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(".mcp.json");
+        assert_eq!(
+            host_config_status_at(HostKind::Claude, &path).unwrap(),
+            HostConfigStatus::Missing
+        );
+        std::fs::write(&path, "not-json").unwrap();
+        assert_eq!(
+            host_config_status_at(HostKind::Claude, &path).unwrap(),
+            HostConfigStatus::Missing
+        );
+        std::fs::write(&path, "bobby-browser: not-json").unwrap();
+        assert_eq!(
+            host_config_status_at(HostKind::Claude, &path).unwrap(),
+            HostConfigStatus::Invalid
+        );
     }
 
     #[test]

@@ -1,4 +1,5 @@
 mod bootstrap_local;
+mod deployment_profiles;
 mod doctor;
 mod jobs_client;
 mod onboarding;
@@ -267,6 +268,15 @@ enum CliCommand {
         #[arg(long, requires = "fix")]
         download_model: bool,
         /// Print the report as JSON on stdout
+        #[arg(long)]
+        json: bool,
+        /// Validate a deployment profile (desktop, headless-ci, openshell, remote)
+        #[arg(long, value_enum)]
+        profile: Option<deployment_profiles::DeploymentProfile>,
+    },
+    /// List supported deployment profiles and their operational contract
+    Profiles {
+        /// Print the catalog as JSON
         #[arg(long)]
         json: bool,
     },
@@ -803,6 +813,7 @@ pub async fn run() -> Result<()> {
             fix,
             download_model,
             json,
+            profile,
         } => {
             if fix {
                 let report = doctor::run_doctor_fix(doctor::DoctorFixOptions {
@@ -810,6 +821,7 @@ pub async fn run() -> Result<()> {
                     bootstrap_env,
                     check_health: !skip_health,
                     download_model,
+                    profile,
                 })?;
                 if json {
                     report.render_actions();
@@ -823,7 +835,8 @@ pub async fn run() -> Result<()> {
                     std::process::exit(1);
                 }
             } else {
-                let report = doctor::run_doctor(config, bootstrap_env, !skip_health)?;
+                let report =
+                    doctor::run_doctor_with_profile(config, bootstrap_env, !skip_health, profile)?;
                 if json {
                     report.render_json_to(&mut std::io::stdout().lock())?;
                 } else {
@@ -834,6 +847,7 @@ pub async fn run() -> Result<()> {
                 }
             }
         }
+        CliCommand::Profiles { json } => deployment_profiles::print_catalog(json),
         CliCommand::Token {
             bootstrap_env,
             stdout,
@@ -2511,9 +2525,10 @@ impl NativeHostEnroll for NativeHostFirefoxEnroll {
 mod tests {
     use super::doctor::{
         check_bootstrap_expiry, check_vision_acp, check_vision_provider, check_vision_upstream_key,
-        handshake_error_status, run_doctor, run_doctor_fix, sidecar_version_status,
-        vision_auth_discovery_check, vision_endpoint_unreachable_detail, DoctorColorMode,
-        DoctorFixOptions, DoctorFixStatus, DoctorReport, DoctorStatus, BOOTSTRAP_EXPIRY_WARN_DAYS,
+        handshake_error_status, run_doctor, run_doctor_fix, run_doctor_with_profile,
+        sidecar_version_status, vision_auth_discovery_check, vision_endpoint_unreachable_detail,
+        DoctorColorMode, DoctorFixOptions, DoctorFixStatus, DoctorReport, DoctorStatus,
+        BOOTSTRAP_EXPIRY_WARN_DAYS,
     };
     use super::*;
     use auth_broker::{AuthCapabilities, AuthStrategy};
@@ -2631,6 +2646,18 @@ mod tests {
                 assert!(json);
                 assert!(!fix);
             }
+            _ => panic!("expected doctor command"),
+        }
+    }
+
+    #[test]
+    fn doctor_cli_parses_deployment_profile() {
+        let cli = Cli::try_parse_from(["bobby", "doctor", "--profile", "headless-ci"]).unwrap();
+        match cli.command {
+            Some(CliCommand::Doctor { profile, .. }) => assert_eq!(
+                profile,
+                Some(deployment_profiles::DeploymentProfile::HeadlessCi)
+            ),
             _ => panic!("expected doctor command"),
         }
     }
@@ -3621,6 +3648,39 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
     }
 
     #[test]
+    fn doctor_validates_the_selected_deployment_profile() {
+        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
+        let env = DoctorEnvGuard::clear();
+        env.set(
+            "AUTOMATION_RUNTIME_BROWSER_SELECTION",
+            r#"{"preference":{"mode":"managedChromium"}}"#,
+        );
+        let root = tempfile::tempdir().unwrap();
+        let config = doctor_config_fixture(root.path());
+        let bootstrap = root.path().join("bootstrap.env");
+        let material = bootstrap_local::generate_bootstrap(chrono::Duration::days(30)).unwrap();
+        bootstrap_local::write_bootstrap_env(&bootstrap, &material, true).unwrap();
+
+        let report = run_doctor_with_profile(
+            Some(config),
+            Some(bootstrap),
+            false,
+            Some(deployment_profiles::DeploymentProfile::HeadlessCi),
+        )
+        .unwrap();
+        for name in [
+            "deployment-profile",
+            "deployment-transport",
+            "deployment-auth",
+            "deployment-bind",
+            "deployment-browser",
+            "deployment-storage",
+        ] {
+            assert_eq!(report.check(name).unwrap().status, DoctorStatus::Ok);
+        }
+    }
+
+    #[test]
     fn doctor_reports_context_store_without_claiming_its_lock() {
         let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
         let env = DoctorEnvGuard::clear();
@@ -4092,6 +4152,7 @@ endpoint_url = "http://127.0.0.1:8080/propose"
             bootstrap_env: Some(bootstrap.clone()),
             check_health: false,
             download_model: false,
+            profile: None,
         })
         .unwrap();
 
@@ -4142,6 +4203,7 @@ token_env = "BOBBY_VISION_TOKEN"
             bootstrap_env: Some(bootstrap.clone()),
             check_health: false,
             download_model: false,
+            profile: None,
         })
         .unwrap();
 

@@ -27,6 +27,23 @@ and the [HTTP API reference](../surfaces/http-api.md).
 
 `bobby doctor` can probe `/healthz` after the server is up.
 
+## Deployment profiles
+
+`bobby profiles --json` prints the machine-readable profile contract. Validate
+the active configuration with `bobby doctor --profile <name>`.
+
+| Profile | Transport | Bind | Browser | Storage | Start command |
+|---|---|---|---|---|---|
+| `desktop` | stdio | loopback | Firefox selection | durable local | `bobby mcp-stdio` |
+| `headless-ci` | HTTP | isolated runtime | headless | ephemeral or mounted | `bobby serve` |
+| `openshell` | streamable HTTP | loopback | host managed | host durable | `bobby openshell install` |
+| `remote` | HTTP | operator controlled | remote managed | operator managed | `bobby serve --config <path>` |
+
+Every profile requires a bootstrap credential. `doctor` also checks browser
+selection, storage paths, and any configured Claude, VS Code, Zed, ACP, or
+OpenShell entry. `bobby doctor --fix` updates stale Bobby-owned entries while
+leaving unrelated host configuration intact.
+
 With the server running, submit and inspect jobs via the broker HTTP API:
 
 ```bash
