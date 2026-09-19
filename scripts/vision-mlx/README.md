@@ -85,5 +85,45 @@ variants degrade to `{"kind": "click", "x": 0.0, "y": 0.0}` rather than failing.
 
 ## Training data
 
-Collect with `bobby serve --vision --collect-training-data` (Rust) or generate
-synthetic data with `bobby_vision_collector.py --generate --num-examples 1000`.
+Collect a sanitized corpus with `bobby serve --vision --collect-training-data`,
+then train the candidate-index adapter:
+
+```bash
+python training/mlx_finetune.py --schema v1 \
+  --input data/vision-corpus.jsonl --output models
+```
+
+Evaluate every required suite and write the content-bound assessment:
+
+```bash
+python training/adapter_freshness.py \
+  --adapter models/mlx-lora-bobby-v1 \
+  --corpus data/vision-corpus.jsonl \
+  --report data/adapter-assessment.json
+```
+
+Create an immutable local release after the assessment passes:
+
+```bash
+python training/model_promotion.py promote \
+  --adapter models/mlx-lora-bobby-v1 \
+  --corpus data/vision-corpus.jsonl \
+  --assessment data/adapter-assessment.json \
+  --store promoted --version v1
+```
+
+Run the canary provider against `promoted/releases/v1`, then activate it:
+
+```bash
+python training/model_promotion.py activate --store promoted --version v1
+```
+
+Long-running providers can use the adapter directory at `promoted/current`.
+
+Rollback by activating a previously verified release:
+
+```bash
+python training/model_promotion.py activate --store promoted --version previous-version
+```
+
+`data/`, `models/`, and `promoted/` stay local and untracked.

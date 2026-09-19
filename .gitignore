@@ -69,5 +69,7 @@ __pycache__/
 
 
 models/
+scripts/vision-mlx/data/
+scripts/vision-mlx/promoted/
 .worktrees/
 config.toml

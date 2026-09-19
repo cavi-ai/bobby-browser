@@ -17,6 +17,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import shutil
 import tempfile
@@ -265,6 +266,25 @@ def supervised_examples(examples: list, schema: str = "candidate") -> list:
     return supervised
 
 
+def deduplicate_examples(examples: list) -> list:
+    """Drop replayed supervision while preserving distinct targets."""
+    unique = []
+    seen = set()
+    for example in examples:
+        semantic = normalize_corpus_example(example)
+        semantic = {
+            key: value
+            for key, value in semantic.items()
+            if key not in {"timestamp", "run_id", "model_name", "image_hash"}
+        }
+        identity = json.dumps(semantic, sort_keys=True, separators=(",", ":"))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(example)
+    return unique
+
+
 def selected_index(example: dict):
     """Read the corpus boundary explicitly (Rust camelCase or legacy snake_case)."""
     camel = example.get("targetIndex")
@@ -342,7 +362,7 @@ def load_examples(path: str, schema: str = "candidate") -> list:
                 if errors:
                     raise ValueError("unsafe corpus record: " + "; ".join(errors))
                 examples.append(example)
-    return supervised_examples(examples, schema)
+    return deduplicate_examples(supervised_examples(examples, schema))
 
 
 def write_mlx_dataset(examples: list, out_dir: Path, train_ratio: float, seed: int, schema: str = "candidate") -> dict:
@@ -366,6 +386,44 @@ def write_mlx_dataset(examples: list, out_dir: Path, train_ratio: float, seed: i
     return {"train": len(train), "valid": len(valid), "data_dir": str(out_dir)}
 
 
+def _sha256_file(path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def build_training_metadata(
+    config: MLXFineTuneConfig,
+    counts: dict,
+    *,
+    corpus_records: int,
+    supervised_examples: int,
+) -> dict:
+    return {
+        "base_model": config.model_name,
+        "schema": config.schema,
+        "adapter_file": "adapters.safetensors",
+        "training_corpus": {
+            "sha256": _sha256_file(config.input_path),
+            "records": corpus_records,
+            "supervised_examples": supervised_examples,
+        },
+        "iters": config.iters,
+        "batch_size": config.batch_size,
+        "learning_rate": config.learning_rate,
+        "lora_rank": config.lora_rank,
+        "lora_alpha": config.lora_alpha,
+        "lora_dropout": config.lora_dropout,
+        "num_layers": config.num_layers,
+        "train_examples": counts["train"],
+        "valid_examples": counts["valid"],
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "mode": "text-only LoRA (prompt carries page context; images stay on the Ollama path)",
+    }
+
+
 def run_mlx_finetune(config: MLXFineTuneConfig) -> dict:
     import types
 
@@ -375,6 +433,8 @@ def run_mlx_finetune(config: MLXFineTuneConfig) -> dict:
     from mlx_lm.tuner.datasets import CacheDataset, load_dataset
     from mlx_lm.tuner.utils import linear_to_lora_layers
 
+    with open(config.input_path) as corpus_source:
+        corpus_records = sum(1 for line in corpus_source if line.strip())
     examples = load_examples(config.input_path, config.schema)
     if not examples:
         raise SystemExit(f"no training examples in {config.input_path}")
@@ -431,23 +491,12 @@ def run_mlx_finetune(config: MLXFineTuneConfig) -> dict:
             args=args,
         )
 
-        metadata = {
-            "base_model": config.model_name,
-            "schema": config.schema,
-            "adapter_file": adapter_file,
-            "training_data": config.input_path,
-            "iters": config.iters,
-            "batch_size": config.batch_size,
-            "learning_rate": config.learning_rate,
-            "lora_rank": config.lora_rank,
-            "lora_alpha": config.lora_alpha,
-            "lora_dropout": config.lora_dropout,
-            "num_layers": config.num_layers,
-            "train_examples": counts["train"],
-            "valid_examples": counts["valid"],
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "mode": "text-only LoRA (prompt carries page context; images stay on the Ollama path)",
-        }
+        metadata = build_training_metadata(
+            config,
+            counts,
+            corpus_records=corpus_records,
+            supervised_examples=len(examples),
+        )
         (output_path / "metadata.json").write_text(json.dumps(metadata, indent=2))
 
         # mlx_lm.load(adapter_path=...) requires adapter_config.json beside
