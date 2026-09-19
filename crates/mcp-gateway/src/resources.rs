@@ -1230,7 +1230,7 @@ closes, the handle falls back to that opener (`notFound`, above).
 
     "input": {
       "selector": string,          // required, may be ""
-      "target": TargetSpec | null, // required key; null to use the selector
+      "target": TargetSpec | null, // optional; omit or use null for the selector
       "timeoutMs": integer         // required, 1..=300000
     }
 
@@ -1253,7 +1253,7 @@ the downloaded file as an artifact.
 
     "input": {
       "selector": string,          // required, may be ""
-      "target": TargetSpec | null, // required key; null to use the selector
+      "target": TargetSpec | null, // optional; omit or use null for the selector
       "timeoutMs": integer         // required, 1..=300000
     }
 

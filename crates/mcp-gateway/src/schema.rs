@@ -1925,9 +1925,10 @@ fn primitive_commands() -> Vec<Value> {
             object(
                 json!({
                     "url":string(1, MAX_URL_BYTES), "expectedContentType":nullable(string(0, 256)),
-                    "maxBytes":{"type":"integer","minimum":1,"maximum":1073741824u64}
+                    "maxBytes":{"type":"integer","minimum":1,"maximum":1073741824u64},
+                    "saveAs":nullable(string(1, 4096))
                 }),
-                &["url", "expectedContentType", "maxBytes"],
+                &["url", "maxBytes"],
             ),
         ),
         tagged_input(
@@ -1937,7 +1938,7 @@ fn primitive_commands() -> Vec<Value> {
                     "selector":nullable(string(0, MAX_STRING_BYTES)), "target":nullable(json!({"$ref":"#/$defs/TargetSpec"})),
                     "includeHtml":{"type":"boolean"}
                 }),
-                &["selector", "target", "includeHtml"],
+                &["includeHtml"],
             ),
         ),
         tagged_input(
@@ -1945,9 +1946,13 @@ fn primitive_commands() -> Vec<Value> {
             object(
                 json!({
                     "selector":string(0, MAX_STRING_BYTES), "target":nullable(json!({"$ref":"#/$defs/TargetSpec"})),
-                    "boundary":{"type":"boolean"}, "expectedUrl":nullable(string(0, MAX_URL_BYTES))
+                    "boundary":{"type":"boolean"}, "expectedUrl":nullable(string(0, MAX_URL_BYTES)),
+                    "modifiers":{
+                        "type":"array", "maxItems":4, "uniqueItems":true,
+                        "items":{"type":"string","enum":["shift","ctrl","alt","meta"]}
+                    }
                 }),
-                &["selector", "target", "boundary", "expectedUrl"],
+                &["selector", "boundary"],
             ),
         ),
         tagged_input(
@@ -1955,9 +1960,10 @@ fn primitive_commands() -> Vec<Value> {
             object(
                 json!({
                     "selector":string(0, MAX_STRING_BYTES), "target":nullable(json!({"$ref":"#/$defs/TargetSpec"})),
-                    "value":string(0, MAX_STRING_BYTES), "clearFirst":{"type":"boolean"}
+                    "value":string(0, MAX_STRING_BYTES), "clearFirst":{"type":"boolean"},
+                    "expectedUrl":nullable(string(0, MAX_URL_BYTES))
                 }),
-                &["selector", "target", "value", "clearFirst"],
+                &["selector", "value", "clearFirst"],
             ),
         ),
         tagged_input(
@@ -1967,7 +1973,7 @@ fn primitive_commands() -> Vec<Value> {
                     "selector":string(0, MAX_STRING_BYTES), "target":nullable(json!({"$ref":"#/$defs/TargetSpec"})),
                     "paths":array(string(1, MAX_STRING_BYTES), 64)
                 }),
-                &["selector", "target", "paths"],
+                &["selector", "paths"],
             ),
         ),
         tagged_input(
@@ -1982,7 +1988,7 @@ fn primitive_commands() -> Vec<Value> {
                             "target":nullable(json!({"$ref":"#/$defs/TargetSpec"})),
                             "paths":array(string(1, MAX_STRING_BYTES), 64)
                         },
-                        "required":["selector", "target", "paths"]
+                        "required":["selector", "paths"]
                     },
                     "expectedState":{"$ref":"#/$defs/WaitForCommand"}
                 }),
@@ -2020,7 +2026,7 @@ fn primitive_commands() -> Vec<Value> {
         ),
         tagged_input(
             "openPage",
-            object(json!({"url":nullable(string(0, MAX_URL_BYTES))}), &["url"]),
+            object(json!({"url":nullable(string(0, MAX_URL_BYTES))}), &[]),
         ),
         tagged_input("listPages", json!({"type":"null"})),
         tagged_input("closePage", object(json!({"pageId":id()}), &["pageId"])),
@@ -2086,7 +2092,10 @@ fn primitive_commands() -> Vec<Value> {
         tagged_input(
             "accessibilitySnapshot",
             object(
-                json!({"maxNodes":{"type":"integer","minimum":1,"maximum":2048}}),
+                json!({
+                    "maxNodes":{"type":"integer","minimum":1,"maximum":2048},
+                    "target":nullable(json!({"$ref":"#/$defs/TargetSpec"}))
+                }),
                 &[],
             ),
         ),
@@ -2135,7 +2144,7 @@ fn primitive_commands() -> Vec<Value> {
                     "timeoutMs":{"type":"integer","minimum":1,"maximum":MAX_TIMEOUT_MS},
                     "awaitPromise":{"type":"boolean"}
                 }),
-                &["expression", "timeoutMs", "awaitPromise"],
+                &["expression", "timeoutMs"],
             ),
         ),
     ]
@@ -2147,7 +2156,7 @@ fn click_wait_input() -> Value {
             "selector":string(0, MAX_STRING_BYTES), "target":nullable(json!({"$ref":"#/$defs/TargetSpec"})),
             "timeoutMs":{"type":"integer","minimum":1,"maximum":MAX_TIMEOUT_MS}
         }),
-        &["selector", "target", "timeoutMs"],
+        &["selector", "timeoutMs"],
     )
 }
 
