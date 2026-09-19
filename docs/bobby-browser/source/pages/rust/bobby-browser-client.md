@@ -50,6 +50,7 @@ Every request sends `Authorization: Bearer …`, `x-interface-version`,
 | `open_page` | `POST /v1/pages` |
 | `form_snapshot` | `GET /v1/sessions/{session}/pages/{page}/forms` |
 | `context_ask` / `context_neighbors` / `context_site` | context reads |
+| `submit_job` / `job_status` / `cancel_job` | jobs |
 | `submit` | `POST /v1/commands` |
 | `checkpoint` | `POST /v1/checkpoints` |
 | `recovery_status` / `recover` | recovery |

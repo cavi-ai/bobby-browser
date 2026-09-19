@@ -10,9 +10,9 @@ use uuid::Uuid;
 use crate::{
     CheckpointRequest, CommandEnvelope, CommandOutcome, ContextAskResponse, ContextMissReason,
     ContextNeighborsResponse, ContextNextStep, ContextSiteResponse, CreateSessionRequest,
-    FormSnapshot, OpenPageRequest, PageId, PageState, RecoveryDecision, RecoveryStatus,
-    RuntimeInfo, SessionId, SessionState, WorkflowCheckpoint, WorkflowId,
-    CURRENT_INTERFACE_VERSION,
+    FormSnapshot, JobId, JobStatusResponse, JobSubmitResponse, OpenPageRequest, PageId, PageState,
+    RecoveryDecision, RecoveryStatus, RuntimeInfo, SessionId, SessionState, SubmitJobRequest,
+    WorkflowCheckpoint, WorkflowId, CURRENT_INTERFACE_VERSION,
 };
 
 /// Client hard bounds for [`BrowserRuntimeClient::artifact`], mirroring the
@@ -249,11 +249,75 @@ impl BrowserRuntimeClient {
         .await
     }
 
+    /// `POST /v1/jobs` — submit a bounded runtime job.
+    pub async fn submit_job(
+        &self,
+        input: &SubmitJobRequest,
+        options: Option<RequestOptions>,
+    ) -> Result<JobSubmitResponse, ClientError> {
+        input
+            .validate()
+            .map_err(|message| ClientError::Protocol(message.into()))?;
+        self.json_with_status(
+            Method::POST,
+            "/v1/jobs",
+            Some(input),
+            options,
+            Some(reqwest::StatusCode::CREATED),
+        )
+        .await
+    }
+
+    /// `GET /v1/jobs/{job_id}` — read the authenticated principal's job.
+    pub async fn job_status(
+        &self,
+        job_id: &JobId,
+        options: Option<RequestOptions>,
+    ) -> Result<JobStatusResponse, ClientError> {
+        let response: JobStatusResponse = self
+            .json(
+                Method::GET,
+                &format!("/v1/jobs/{job_id}"),
+                None::<()>,
+                options,
+            )
+            .await?;
+        response
+            .validate()
+            .map_err(|message| ClientError::Protocol(message.into()))?;
+        Ok(response)
+    }
+
+    /// `DELETE /v1/jobs/{job_id}` — cancel the authenticated principal's job.
+    pub async fn cancel_job(
+        &self,
+        job_id: &JobId,
+        options: Option<RequestOptions>,
+    ) -> Result<(), ClientError> {
+        self.empty_with_status(
+            Method::DELETE,
+            &format!("/v1/jobs/{job_id}"),
+            options,
+            Some(reqwest::StatusCode::NO_CONTENT),
+        )
+        .await
+    }
+
     async fn empty(
         &self,
         method: Method,
         path: &str,
         options: Option<RequestOptions>,
+    ) -> Result<(), ClientError> {
+        self.empty_with_status(method, path, options, None).await
+    }
+
+    async fn empty_with_status(
+        &self,
+        method: Method,
+        path: &str,
+        options: Option<RequestOptions>,
+        expected_status: Option<reqwest::StatusCode>,
     ) -> Result<(), ClientError> {
         let options = options.unwrap_or_default();
         let timeout = options.timeout.unwrap_or(self.default_timeout);
@@ -279,10 +343,16 @@ impl BrowserRuntimeClient {
             ClientError::Transport(error.to_string()).redact(&self.bearer_token)
         })?;
         let status = response.status();
-        if status == reqwest::StatusCode::NO_CONTENT || status.is_success() {
+        if expected_status.map_or_else(|| status.is_success(), |expected| status == expected) {
             return Ok(());
         }
         let text = response.text().await.unwrap_or_default();
+        if status.is_success() {
+            return Err(ClientError::Protocol(format!(
+                "unexpected HTTP status {}",
+                status.as_u16()
+            )));
+        }
         Err(ClientError::Http {
             status: status.as_u16(),
             message: text,
@@ -296,6 +366,22 @@ impl BrowserRuntimeClient {
         path: &str,
         body: Option<B>,
         options: Option<RequestOptions>,
+    ) -> Result<T, ClientError>
+    where
+        B: Serialize,
+        T: DeserializeOwned,
+    {
+        self.json_with_status(method, path, body, options, None)
+            .await
+    }
+
+    async fn json_with_status<B, T>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<B>,
+        options: Option<RequestOptions>,
+        expected_status: Option<reqwest::StatusCode>,
     ) -> Result<T, ClientError>
     where
         B: Serialize,
@@ -339,6 +425,12 @@ impl BrowserRuntimeClient {
                 message: text,
             }
             .redact(&self.bearer_token));
+        }
+        if expected_status.is_some_and(|expected| status != expected) {
+            return Err(ClientError::Protocol(format!(
+                "unexpected HTTP status {}",
+                status.as_u16()
+            )));
         }
         serde_json::from_str(&text).map_err(|error| {
             ClientError::Protocol(format!("invalid JSON body: {error}")).redact(&self.bearer_token)
@@ -630,7 +722,9 @@ fn normalize_base_url(value: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AttemptId, CheckpointId, CommandId};
+    use crate::{
+        AttemptId, CheckpointId, CommandId, JobId, JobPriority, JobStatus, SubmitJobRequest,
+    };
     use axum::http::HeaderMap;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
@@ -880,6 +974,150 @@ mod tests {
             client.context_site("", None).await,
             Err(ClientError::Protocol(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn submit_job_posts_the_public_wire_shape() {
+        let job_id = JobId::new();
+        let response_job_id = job_id.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let app = Router::new().route(
+            "/v1/jobs",
+            axum::routing::post(move |body: String| {
+                let tx = tx.clone();
+                let response_job_id = response_job_id.clone();
+                async move {
+                    let _ = tx.send(body).await;
+                    (
+                        StatusCode::CREATED,
+                        axum::Json(json!({
+                            "jobId": response_job_id,
+                            "status": "pending",
+                        })),
+                    )
+                }
+            }),
+        );
+        let client = BrowserRuntimeClient::new(spawn(app).await, "test-token").unwrap();
+        let response = client
+            .submit_job(
+                &SubmitJobRequest {
+                    name: "fetch-report".into(),
+                    payload: Some(json!({ "reportId": "weekly" })),
+                    priority: Some(JobPriority::High),
+                    max_retries: Some(2),
+                    timeout_ms: Some(5_000),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.job_id, job_id);
+        assert_eq!(response.status, JobStatus::Pending);
+        let body: serde_json::Value = serde_json::from_str(&rx.recv().await.unwrap()).unwrap();
+        assert_eq!(
+            body,
+            json!({
+                "name": "fetch-report",
+                "payload": { "reportId": "weekly" },
+                "priority": "high",
+                "maxRetries": 2,
+                "timeoutMs": 5_000,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn job_status_and_cancel_use_the_runtime_job_identifier() {
+        let job_id = JobId::new();
+        let (base, mut status_rx) = capture_uri(
+            "/v1/jobs/{job}",
+            axum::Json(json!({
+                "id": job_id,
+                "name": "fetch-report",
+                "priority": "normal",
+                "status": "running",
+                "payload": null,
+                "createdAt": "2026-09-19T00:00:00Z",
+                "startedAt": "2026-09-19T00:00:01Z",
+                "completedAt": null,
+                "retryCount": 0,
+                "maxRetries": 3,
+                "result": null,
+                "error": null,
+                "timeoutMs": null,
+                "correlationId": null,
+            })),
+        )
+        .await;
+        let client = BrowserRuntimeClient::new(base, "test-token").unwrap();
+        let status = client.job_status(&job_id, None).await.unwrap();
+        assert_eq!(status.id, job_id);
+        assert_eq!(status.status, JobStatus::Running);
+        assert_eq!(
+            status_rx.recv().await.unwrap(),
+            format!("/v1/jobs/{job_id}")
+        );
+
+        let (base, mut cancel_rx) = capture_uri("/v1/jobs/{job}", StatusCode::NO_CONTENT).await;
+        let client = BrowserRuntimeClient::new(base, "test-token").unwrap();
+        client.cancel_job(&job_id, None).await.unwrap();
+        assert_eq!(
+            cancel_rx.recv().await.unwrap(),
+            format!("/v1/jobs/{job_id}")
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_job_rejects_an_empty_name_before_transport() {
+        let client = BrowserRuntimeClient::new("http://127.0.0.1:1", "test-token").unwrap();
+        let error = client
+            .submit_job(
+                &SubmitJobRequest {
+                    name: "  ".into(),
+                    payload: None,
+                    priority: None,
+                    max_retries: None,
+                    timeout_ms: None,
+                },
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ClientError::Protocol(_)));
+    }
+
+    #[tokio::test]
+    async fn job_helpers_require_their_exact_success_statuses() {
+        let job_id = JobId::new();
+        let app = Router::new().route(
+            "/v1/jobs",
+            axum::routing::post({
+                let job_id = job_id.clone();
+                move || async move { axum::Json(json!({ "jobId": job_id, "status": "pending" })) }
+            }),
+        );
+        let client = BrowserRuntimeClient::new(spawn(app).await, "test-token").unwrap();
+        let submit_error = client
+            .submit_job(
+                &SubmitJobRequest {
+                    name: "fetch-report".into(),
+                    payload: None,
+                    priority: None,
+                    max_retries: None,
+                    timeout_ms: None,
+                },
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(submit_error, ClientError::Protocol(_)));
+
+        let (base, _) = capture_uri("/v1/jobs/{job}", StatusCode::OK).await;
+        let client = BrowserRuntimeClient::new(base, "test-token").unwrap();
+        let cancel_error = client.cancel_job(&job_id, None).await.unwrap_err();
+        assert!(matches!(cancel_error, ClientError::Protocol(_)));
     }
 
     #[tokio::test]
