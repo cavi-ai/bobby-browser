@@ -103,7 +103,7 @@ jobs:
             cp "$OUT/bobby.exe" "$STAGE/bobby.exe"
             cp "$OUT/mcp-gateway.exe" "$STAGE/mcp-gateway.exe"
             cp "$OUT/acp-gateway.exe" "$STAGE/acp-gateway.exe"
-            tar -a -cf "${STAGE}.zip" "$STAGE"
+            python -m zipfile -c "${STAGE}.zip" "$STAGE"
             echo "ASSET=${STAGE}.zip" >> "$GITHUB_ENV"
           else
             # Drop debug symbols from released binaries; local cargo builds stay unstripped.

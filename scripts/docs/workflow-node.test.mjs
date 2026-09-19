@@ -72,6 +72,7 @@ test("release archives certify clean installs and upgrades on every release plat
   assert.match(releaseWorkflow, /pull_request:/);
   assert.match(releaseWorkflow, /certify-release-install\.py/);
   assert.match(releaseWorkflow, /--asset-os "\$\{\{ matrix\.asset_os \}\}"/);
+  assert.match(releaseWorkflow, /python -m zipfile -c/);
   assert.match(releaseWorkflow, /permissions:\n  contents: read/);
   assert.equal(releaseWorkflow.match(/contents: write/g)?.length, 2);
   assert.match(ciWorkflow, /scripts\/install-release\.test\.sh/);
