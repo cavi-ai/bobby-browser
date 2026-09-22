@@ -48,12 +48,15 @@ impl SessionManager {
         };
         if let Some(workers) = &self.workers {
             workers.lease(session.id.clone()).await.map_err(|error| {
-                if error.code == types::ErrorCode::BrowserLaunchFailed {
+                if error.code == types::ErrorCode::BrowserLaunchFailed
+                    || error.code == types::ErrorCode::DeadlineExceeded
+                {
                     // Keep the diagnostic prefix leading the message: the MCP
                     // gateway allowlists it by prefix before letting any runtime
-                    // detail cross to an external agent.
+                    // detail cross to an external agent. Preserve the concrete
+                    // factory/companion/lease error body after the prefix.
                     RuntimeError::EngineUnreachable(format!(
-                        "browser launch failed: {}; run `bobby doctor` -- another runtime may hold the Firefox companion bind (default 127.0.0.1:9876) or the BiDi endpoint",
+                        "browser launch failed: {}; run `bobby doctor` -- check Firefox BiDi endpoint readiness and companion bind (configured may be ephemeral 127.0.0.1:0; install default is 127.0.0.1:9876)",
                         error.message
                     ))
                 } else {

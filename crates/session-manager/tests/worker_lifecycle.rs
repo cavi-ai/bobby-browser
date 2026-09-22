@@ -205,3 +205,39 @@ async fn failed_release_keeps_the_session_registered_for_retry() {
     assert!(manager.delete(&session.id).await.is_err());
     assert!(manager.get(&session.id).await.is_ok());
 }
+
+struct DeadlineFactory;
+
+#[async_trait]
+impl WorkerFactory for DeadlineFactory {
+    async fn launch(&self, _: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
+        Err(CommandError {
+            code: types::ErrorCode::DeadlineExceeded,
+            message: "BiDi connection deadline exceeded".into(),
+            layer: types::ErrorLayer::Driver,
+            retryable: true,
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_launch_deadline_keeps_the_allowlisted_launch_diagnostic() {
+    let pool = Arc::new(WorkerPool::new(8, Arc::new(DeadlineFactory)));
+    let manager = SessionManager::new(pool);
+    let error = manager
+        .create(CreateSessionRequest {
+            profile: "default".into(),
+            proxy: None,
+            execution_policy: Default::default(),
+            zigzagzig: false,
+        })
+        .await
+        .expect_err("a launch deadline must fail session creation");
+    let types::RuntimeError::EngineUnreachable(message) = error else {
+        panic!("expected EngineUnreachable, got {error:?}");
+    };
+    assert!(
+        message.starts_with("browser launch failed: BiDi connection deadline exceeded;"),
+        "{message}"
+    );
+}

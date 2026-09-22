@@ -7,7 +7,9 @@
 use anyhow::Result;
 use artifact_store::ArtifactStore;
 use async_trait::async_trait;
-use companion_core::{CompanionServer, CompanionServerConfig, CompanionServerHandle};
+use companion_core::{
+    CompanionServer, CompanionServerConfig, CompanionServerError, CompanionServerHandle,
+};
 use companion_protocol::{BrowserEngine, CompanionCapabilities};
 use config::{
     AppConfig, BrowserEngineConfig, BrowserSelectionConfig, EnginePreferenceConfig,
@@ -145,6 +147,7 @@ pub async fn start_firefox_profile_enrollment(
         config.pairing_code_ttl,
         config.attachment_ttl,
         pairing_code_observer,
+        BindPolicy::Configured,
     )
     .await?;
     Ok(FirefoxProfileEnrollment {
@@ -337,17 +340,54 @@ impl ConfiguredFirefoxFactory {
             recycle_enrolled_firefox(&self.config).await?;
             return crate::BidiClient::connect_session(configured, self.config.timeout).await;
         }
-        let Some(live) = live_endpoint_override(&self.config.profile_dir, &configured) else {
-            // No live endpoint file, or it agrees with the enrolled URL: the
-            // first failure is the real one.
-            return Err(error);
-        };
-        tracing::warn!(
-            configured = %configured,
-            live = %live,
-            "enrolled Firefox BiDi endpoint unreachable; retrying on the profile's live endpoint"
-        );
-        crate::BidiClient::connect_session(live, self.config.timeout).await
+        let mut live_error = None;
+        if let Some(live) = live_endpoint_override(&self.config.profile_dir, &configured) {
+            tracing::warn!(
+                configured = %configured,
+                live = %live,
+                "enrolled Firefox BiDi endpoint unreachable; retrying on the profile's live endpoint"
+            );
+            match crate::BidiClient::connect_session(live.clone(), self.config.timeout).await {
+                Ok(client) => return Ok(client),
+                Err(error) => {
+                    tracing::warn!(
+                        live = %live,
+                        error = %error.message,
+                        "live Firefox BiDi endpoint also failed"
+                    );
+                    live_error = Some(error);
+                }
+            }
+        }
+        if connect_failure_needs_recycle(&error, live_error.as_ref()) {
+            tracing::warn!(
+                url = %configured,
+                error = %error.message,
+                "Firefox BiDi endpoint unreachable; recycling enrolled profile"
+            );
+            match recycle_enrolled_firefox(&self.config).await {
+                Ok(()) => {
+                    let retry_url = live_endpoint_override(&self.config.profile_dir, &configured)
+                        .unwrap_or(configured);
+                    return crate::BidiClient::connect_session(retry_url, self.config.timeout)
+                        .await;
+                }
+                Err(recycle_error) => {
+                    return Err(CommandError {
+                        code: ErrorCode::BrowserLaunchFailed,
+                        message: format!(
+                            "{}; Firefox recycle after unreachable BiDi also failed: {}",
+                            error.message, recycle_error.message
+                        ),
+                        layer: ErrorLayer::Driver,
+                        retryable: true,
+                    });
+                }
+            }
+        }
+        // A live endpoint that answered with its own failure is the more
+        // current diagnosis; otherwise the enrolled failure stands.
+        Err(live_error.unwrap_or(error))
     }
 
     async fn ensure_bidi_slot(&self) -> Result<(), CommandError> {
@@ -362,6 +402,22 @@ impl ConfiguredFirefoxFactory {
                 );
                 recycle_enrolled_firefox(&self.config).await
             }
+            // A refused probe with no live endpoint elsewhere means Firefox's
+            // BiDi listener is down: recycle once instead of failing late.
+            Err(error)
+                if unreachable_probe_needs_recycle(
+                    &self.config.profile_dir,
+                    &self.config.bidi_url,
+                    &error,
+                ) =>
+            {
+                tracing::warn!(
+                    url = %self.config.bidi_url,
+                    error = %error.message,
+                    "firefox BiDi endpoint probe failed; recycling enrolled profile"
+                );
+                recycle_enrolled_firefox(&self.config).await
+            }
             Err(_) => Ok(()),
         }
     }
@@ -373,6 +429,7 @@ impl ConfiguredFirefoxFactory {
             self.config.pairing_code_ttl,
             self.config.attachment_ttl,
             Arc::clone(&self.pairing_code_observer),
+            BindPolicy::FallBackWhenTaken,
         )
         .await
     }
@@ -399,6 +456,7 @@ pub async fn warm_companion_servers(
             config.pairing_code_ttl,
             config.attachment_ttl,
             Arc::new(|_| {}),
+            BindPolicy::FallBackWhenTaken,
         )
         .await;
         match attempt {
@@ -423,22 +481,52 @@ pub async fn warm_companion_servers(
     handles
 }
 
+/// Whether a taken companion port may move to a dynamic one. Enrollment keeps
+/// the configured port so the operator gets `bindInUse`; a runtime launch
+/// only needs a reachable companion and may move.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BindPolicy {
+    Configured,
+    FallBackWhenTaken,
+}
+
 async fn start_bootstrap_attempt(
     companion_bind: SocketAddr,
     descriptor_path: PathBuf,
     pairing_code_ttl: Duration,
     attachment_ttl: Duration,
     pairing_code_observer: Arc<dyn Fn(&str) + Send + Sync>,
+    bind: BindPolicy,
 ) -> Result<FirefoxBootstrapAttempt, CommandError> {
-    let server = Arc::new(
-        CompanionServer::bind_loopback(CompanionServerConfig {
-            bind_addr: companion_bind,
-            pairing_code_ttl,
-            attachment_ttl,
-        })
-        .await
-        .map_err(|error| companion_error(error.to_string()))?,
-    );
+    let server = match CompanionServer::bind_loopback(CompanionServerConfig {
+        bind_addr: companion_bind,
+        pairing_code_ttl,
+        attachment_ttl,
+    })
+    .await
+    {
+        Ok(server) => Arc::new(server),
+        Err(error)
+            if bind == BindPolicy::FallBackWhenTaken
+                && bind_fallback_allowed(&error, companion_bind, &descriptor_path) =>
+        {
+            tracing::warn!(
+                bind = %companion_bind,
+                error = %error,
+                "configured companion port is taken by a non-companion listener; falling back to a dynamic loopback port"
+            );
+            Arc::new(
+                CompanionServer::bind_loopback(CompanionServerConfig {
+                    bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+                    pairing_code_ttl,
+                    attachment_ttl,
+                })
+                .await
+                .map_err(companion_error)?,
+            )
+        }
+        Err(error) => return Err(companion_error(error)),
+    };
     let pairing_code = server.registry().issue_pairing_code().await;
     pairing_code_observer(&pairing_code);
     let descriptor = NativeHostDescriptor {
@@ -747,6 +835,63 @@ fn companion_error(error: impl std::fmt::Display) -> CommandError {
     }
 }
 
+/// A taken companion port may fall back to a dynamic one only when the
+/// descriptor does not publish that port: a descriptor pointing at it means
+/// another runtime's live companion, which the fallback would evict by
+/// rewriting the descriptor.
+fn bind_fallback_allowed(
+    error: &CompanionServerError,
+    companion_bind: SocketAddr,
+    descriptor_path: &Path,
+) -> bool {
+    let CompanionServerError::Bind { source, .. } = error else {
+        return false;
+    };
+    if companion_bind.port() == 0 || source.kind() != std::io::ErrorKind::AddrInUse {
+        return false;
+    }
+    let published = std::fs::read(descriptor_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<NativeHostDescriptor>(&bytes).ok())
+        .and_then(|descriptor| Url::parse(&descriptor.endpoint).ok())
+        .and_then(|endpoint| endpoint.port());
+    published != Some(companion_bind.port())
+}
+
+/// Recycle after a failed connect only when every endpoint the profile
+/// offers refused the transport. A live endpoint that answered (for example
+/// with a taken session slot) is a running Firefox, and recycling the
+/// enrolled port would spawn a second one on the locked profile.
+fn connect_failure_needs_recycle(
+    enrolled_error: &CommandError,
+    live_error: Option<&CommandError>,
+) -> bool {
+    bidi_endpoint_unreachable(enrolled_error) && live_error.is_none_or(bidi_endpoint_unreachable)
+}
+
+fn bidi_endpoint_unreachable(error: &CommandError) -> bool {
+    if error.code != ErrorCode::BrowserLaunchFailed && error.code != ErrorCode::DeadlineExceeded {
+        return false;
+    }
+    let message = error.message.to_ascii_lowercase();
+    message.contains("failed to connect")
+        || message.contains("connection refused")
+        || message.contains("bidi connection deadline exceeded")
+        || message.contains("os error 61")
+        || message.contains("os error 111")
+}
+
+/// A refused probe of the enrolled URL means a dead browser only when the
+/// profile has no live endpoint elsewhere; a moved listener is left to
+/// `connect_bidi`, which retries on it.
+fn unreachable_probe_needs_recycle(
+    profile_dir: &Path,
+    configured: &Url,
+    error: &CommandError,
+) -> bool {
+    bidi_endpoint_unreachable(error) && live_endpoint_override(profile_dir, configured).is_none()
+}
+
 struct OwnedDescriptorFile {
     path: PathBuf,
     ownership_id: String,
@@ -1048,6 +1193,7 @@ fn compose_worker_factory_inner(
                     factory.config.pairing_code_ttl,
                     factory.config.attachment_ttl,
                     Arc::clone(&factory.pairing_code_observer),
+                    BindPolicy::FallBackWhenTaken,
                 )
                 .await;
                 match attempt {
@@ -1344,6 +1490,164 @@ mod tests {
         assert!(live_endpoint_override(profile.path(), &configured).is_none());
     }
 
+    fn launch_error(code: ErrorCode, message: &str) -> CommandError {
+        CommandError {
+            code,
+            message: message.into(),
+            layer: ErrorLayer::Driver,
+            retryable: true,
+        }
+    }
+
+    #[test]
+    fn only_transport_refusals_count_as_an_unreachable_bidi_endpoint() {
+        for message in [
+            "failed to connect to ws://127.0.0.1:9222/session",
+            "Connection refused (os error 61)",
+            "io error: os error 111",
+            "BiDi connection deadline exceeded",
+        ] {
+            assert!(
+                bidi_endpoint_unreachable(&launch_error(ErrorCode::BrowserLaunchFailed, message)),
+                "{message}"
+            );
+        }
+        assert!(bidi_endpoint_unreachable(&launch_error(
+            ErrorCode::DeadlineExceeded,
+            "bidi connection deadline exceeded"
+        )));
+        assert!(!bidi_endpoint_unreachable(&launch_error(
+            ErrorCode::PolicyDenied,
+            "connection refused"
+        )));
+        assert!(!bidi_endpoint_unreachable(&launch_error(
+            ErrorCode::BrowserLaunchFailed,
+            "session not created: maximum number of active sessions"
+        )));
+    }
+
+    /// Discovery already proved Firefox is running, so a refused enrolled URL
+    /// with a live endpoint file on another port is a moved listener, not a
+    /// dead browser: recycling would spawn a second Firefox on a locked profile.
+    #[test]
+    fn a_refused_probe_recycles_only_when_no_live_endpoint_exists() {
+        let profile = tempfile::tempdir().unwrap();
+        let configured = Url::parse("ws://127.0.0.1:9222/session").unwrap();
+        let refused = launch_error(ErrorCode::BrowserLaunchFailed, "connection refused");
+        assert!(unreachable_probe_needs_recycle(
+            profile.path(),
+            &configured,
+            &refused
+        ));
+        write_endpoint(profile.path(), 9224);
+        assert!(!unreachable_probe_needs_recycle(
+            profile.path(),
+            &configured,
+            &refused
+        ));
+        let unrelated = launch_error(ErrorCode::BrowserLaunchFailed, "protocol error");
+        let empty = tempfile::tempdir().unwrap();
+        assert!(!unreachable_probe_needs_recycle(
+            empty.path(),
+            &configured,
+            &unrelated
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_taken_companion_bind_falls_back_to_a_dynamic_loopback_port() {
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let taken = held.local_addr().unwrap();
+        let descriptor =
+            PathBuf::from("target").join(format!("bind-fallback-{}.json", uuid::Uuid::new_v4()));
+        let attempt = start_bootstrap_attempt(
+            taken,
+            descriptor.clone(),
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+            Arc::new(|_| {}),
+            BindPolicy::FallBackWhenTaken,
+        )
+        .await
+        .expect("a taken configured port must fall back, not fail");
+        let bound = attempt.server().local_addr();
+        assert!(bound.ip().is_loopback());
+        assert_ne!(bound.port(), taken.port());
+        let published: NativeHostDescriptor =
+            serde_json::from_slice(&std::fs::read(&descriptor).unwrap()).unwrap();
+        assert_eq!(published.endpoint, format!("ws://{bound}/v1/companion"));
+        drop(attempt);
+        let _ = std::fs::remove_file(descriptor);
+    }
+
+    #[tokio::test]
+    async fn enrollment_keeps_its_configured_port_when_taken() {
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let taken = held.local_addr().unwrap();
+        let descriptor =
+            PathBuf::from("target").join(format!("enroll-bind-{}.json", uuid::Uuid::new_v4()));
+        let result = start_bootstrap_attempt(
+            taken,
+            descriptor.clone(),
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+            Arc::new(|_| {}),
+            BindPolicy::Configured,
+        )
+        .await;
+        assert!(result.is_err(), "enrollment must not move off its port");
+        assert!(!descriptor.exists());
+    }
+
+    #[tokio::test]
+    async fn a_port_published_by_a_live_companion_is_never_taken_over() {
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let taken = held.local_addr().unwrap();
+        let descriptor =
+            PathBuf::from("target").join(format!("live-companion-{}.json", uuid::Uuid::new_v4()));
+        let live = serde_json::to_vec(&NativeHostDescriptor {
+            endpoint: format!("ws://{taken}/v1/companion"),
+            pairing_code: "live-runtime".into(),
+            ownership_id: uuid::Uuid::new_v4().to_string(),
+        })
+        .unwrap();
+        std::fs::write(&descriptor, &live).unwrap();
+        let result = start_bootstrap_attempt(
+            taken,
+            descriptor.clone(),
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+            Arc::new(|_| {}),
+            BindPolicy::FallBackWhenTaken,
+        )
+        .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("bootstrap evicted a live companion's descriptor"),
+        };
+        assert_eq!(error.code, ErrorCode::BrowserLaunchFailed);
+        assert!(
+            error.message.contains(&taken.to_string()),
+            "{}",
+            error.message
+        );
+        assert_eq!(std::fs::read(&descriptor).unwrap(), live);
+        let _ = std::fs::remove_file(descriptor);
+    }
+
+    #[test]
+    fn a_live_endpoint_that_answered_blocks_the_recycle() {
+        let refused = launch_error(ErrorCode::BrowserLaunchFailed, "connection refused");
+        let slot_taken = launch_error(
+            ErrorCode::BrowserLaunchFailed,
+            "session not created: maximum number of active sessions",
+        );
+        assert!(connect_failure_needs_recycle(&refused, None));
+        assert!(connect_failure_needs_recycle(&refused, Some(&refused)));
+        assert!(!connect_failure_needs_recycle(&refused, Some(&slot_taken)));
+        assert!(!connect_failure_needs_recycle(&slot_taken, None));
+    }
+
     #[test]
     fn bidi_listen_port_reads_the_enrolled_websocket_port() {
         let url = Url::parse("ws://127.0.0.1:9224/session").unwrap();
@@ -1508,6 +1812,7 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(30),
             Arc::new(|_| {}),
+            BindPolicy::Configured,
         )
         .await
         .unwrap();
@@ -1520,6 +1825,7 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(30),
             Arc::new(|_| {}),
+            BindPolicy::Configured,
         )
         .await;
         let attempt = recovered.unwrap_or_else(|error| {
@@ -1535,6 +1841,7 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(30),
             Arc::new(|_| {}),
+            BindPolicy::Configured,
         )
         .await;
         assert!(foreign.is_err());
