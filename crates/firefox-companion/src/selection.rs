@@ -1611,6 +1611,7 @@ mod tests {
             ownership_id: uuid::Uuid::new_v4().to_string(),
         })
         .unwrap();
+        std::fs::create_dir_all(descriptor.parent().unwrap()).unwrap();
         std::fs::write(&descriptor, &live).unwrap();
         let result = start_bootstrap_attempt(
             taken,
