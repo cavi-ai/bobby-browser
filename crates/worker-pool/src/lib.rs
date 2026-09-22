@@ -37,7 +37,7 @@ pub use network_quiet::{
 };
 pub use selection::{
     BrowserWorkerSelector, EnginePreference, FactoryRegistration, RequiredCapabilities,
-    SelectedWorkerFactory, DEFAULT_REPLACEMENT_CLEANUP_TIMEOUT,
+    SelectedWorkerFactory, DEFAULT_LEASE_LAUNCH_TIMEOUT, DEFAULT_REPLACEMENT_CLEANUP_TIMEOUT,
 };
 pub use skill_adapter::{
     skill_engine, ChromiumSkillAdapter, FirefoxSkillAdapter,
@@ -602,6 +602,10 @@ struct PoolInner {
     // The registry mutex is released before waiting on a session gate.
     session_gates: Mutex<HashMap<SessionId, Weak<RwLock<()>>>>,
     replacement_cleanup_timeout: std::time::Duration,
+    /// Hard outer bound around `factory.launch` during first lease. Without this,
+    /// a hung companion/BiDi launch can sit until the host MCP client empties the
+    /// tool result (~80-90s) with no structured error.
+    lease_launch_timeout: std::time::Duration,
 }
 
 struct WorkerEntry {
@@ -652,7 +656,12 @@ impl WorkerLease {
 
 impl WorkerPool {
     pub fn new(max_active: usize, factory: Arc<dyn WorkerFactory>) -> Self {
-        Self::with_replacement_timeout(max_active, factory, DEFAULT_REPLACEMENT_CLEANUP_TIMEOUT)
+        Self::with_timeouts(
+            max_active,
+            factory,
+            DEFAULT_REPLACEMENT_CLEANUP_TIMEOUT,
+            DEFAULT_LEASE_LAUNCH_TIMEOUT,
+        )
     }
 
     pub fn with_replacement_timeout(
@@ -660,7 +669,25 @@ impl WorkerPool {
         factory: Arc<dyn WorkerFactory>,
         replacement_cleanup_timeout: std::time::Duration,
     ) -> Self {
+        Self::with_timeouts(
+            max_active,
+            factory,
+            replacement_cleanup_timeout,
+            DEFAULT_LEASE_LAUNCH_TIMEOUT,
+        )
+    }
+
+    pub fn with_timeouts(
+        max_active: usize,
+        factory: Arc<dyn WorkerFactory>,
+        replacement_cleanup_timeout: std::time::Duration,
+        lease_launch_timeout: std::time::Duration,
+    ) -> Self {
         assert!(max_active > 0, "worker pool capacity must be positive");
+        assert!(
+            !lease_launch_timeout.is_zero(),
+            "lease launch timeout must be positive"
+        );
         Self {
             inner: Arc::new(PoolInner {
                 factory,
@@ -668,6 +695,7 @@ impl WorkerPool {
                 entries: Mutex::new(HashMap::new()),
                 session_gates: Mutex::new(HashMap::new()),
                 replacement_cleanup_timeout,
+                lease_launch_timeout,
             }),
         }
     }
@@ -703,7 +731,7 @@ impl WorkerPool {
         let inner = Arc::clone(&self.inner);
         let task_entry = Arc::clone(&entry);
         let task_session = session_id.clone();
-        let result = tokio::spawn(async move {
+        let mut launch_task = tokio::spawn(async move {
             let factory = Arc::clone(&inner.factory);
             let launch_session = task_session.clone();
             let result = task_entry
@@ -731,10 +759,26 @@ impl WorkerPool {
                 inner.factory.release_session(&task_session).await;
             }
             result.map(|worker| (worker, active_permit, session_use))
-        })
-        .await
-        .map_err(|error| resource_error(format!("worker launch task failed: {error}")))?;
-        cancellation.armed = false;
+        });
+
+        let result =
+            match tokio::time::timeout(self.inner.lease_launch_timeout, &mut launch_task).await {
+                Ok(join_result) => {
+                    cancellation.armed = false;
+                    join_result.map_err(|error| {
+                        resource_error(format!("worker launch task failed: {error}"))
+                    })?
+                }
+                Err(_) => {
+                    // The caller gets its answer now, but the launch keeps
+                    // running: `cancellation` stays armed, so a late worker is
+                    // terminated and the task runs its own failure cleanup.
+                    // Only a launch still hung after a second deadline is
+                    // aborted.
+                    self.reap_hung_launch(launch_task, session_id.clone(), entry);
+                    return Err(lease_launch_deadline_error(self.inner.lease_launch_timeout));
+                }
+            };
 
         match result {
             Ok((worker, active_permit, session_use)) => {
@@ -747,6 +791,39 @@ impl WorkerPool {
             }
             Err(error) => Err(error),
         }
+    }
+
+    fn reap_hung_launch<T: Send + 'static>(
+        &self,
+        mut launch_task: tokio::task::JoinHandle<T>,
+        session_id: SessionId,
+        entry: Arc<WorkerEntry>,
+    ) {
+        let pool = self.clone();
+        tokio::spawn(async move {
+            let grace = pool.inner.lease_launch_timeout;
+            if tokio::time::timeout(grace, &mut launch_task).await.is_ok() {
+                return;
+            }
+            launch_task.abort();
+            let _ = launch_task.await;
+            // The exclusive gate waits out any concurrent lease that took over
+            // this entry's initialization, so an entry still uninitialized
+            // here has no launch in flight and is safe to scrub.
+            let session_gate = pool.session_gate(&session_id).await;
+            let _session_exclusive = session_gate.write_owned().await;
+            let scrubbed = {
+                let mut entries = pool.inner.entries.lock().await;
+                let stale = entries.get(&session_id).is_some_and(|current| {
+                    Arc::ptr_eq(current, &entry) && !current.worker.initialized()
+                });
+                stale && entries.remove(&session_id).is_some()
+            };
+            if scrubbed {
+                pool.inner.factory.release_session(&session_id).await;
+            }
+            tracing::warn!(session_id = %session_id.0, scrubbed, "worker.launch_reaped");
+        });
     }
 
     pub async fn release_session(&self, session_id: &SessionId) -> Result<(), CommandError> {
@@ -918,6 +995,20 @@ fn replacement_timeout_error() -> CommandError {
     CommandError {
         code: types::ErrorCode::DeadlineExceeded,
         message: "browser worker replacement cleanup exceeded its deadline".into(),
+        layer: types::ErrorLayer::Driver,
+        retryable: true,
+    }
+}
+
+fn lease_launch_deadline_error(timeout: std::time::Duration) -> CommandError {
+    CommandError {
+        // BrowserLaunchFailed (not bare DeadlineExceeded) so session_manager and
+        // MCP keep the allowlisted "browser launch failed:" diagnostic prefix.
+        code: types::ErrorCode::BrowserLaunchFailed,
+        message: format!(
+            "browser worker launch exceeded its {}s outer deadline before factory.launch completed; run `bobby doctor` for companion/BiDi readiness",
+            timeout.as_secs().max(1)
+        ),
         layer: types::ErrorLayer::Driver,
         retryable: true,
     }

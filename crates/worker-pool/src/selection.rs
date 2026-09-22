@@ -9,6 +9,11 @@ use crate::{policy_error, BrowserWorker, WorkerFactory};
 
 pub const DEFAULT_REPLACEMENT_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Outer bound for first-lease `factory.launch`. Kept under typical host MCP
+/// tool timeouts (~80-90s) so a hung Firefox companion/BiDi path fails closed
+/// with a structured BrowserLaunchFailed instead of an empty tool result.
+pub const DEFAULT_LEASE_LAUNCH_TIMEOUT: Duration = Duration::from_secs(45);
+
 type SessionSelection = Arc<Mutex<Option<Arc<dyn WorkerFactory>>>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
