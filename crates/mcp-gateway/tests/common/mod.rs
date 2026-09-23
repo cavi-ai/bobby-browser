@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
 
@@ -92,6 +92,17 @@ pub struct LiveProbe {
     /// what the intent compiler actually resolved hints to, so a test can
     /// tell a real control target apart from the bare-name fallback.
     pub last_collect_candidates_target: std::sync::Mutex<Option<types::TargetSpec>>,
+    /// Opt-in override for `collect_candidates`: empty (the default) keeps
+    /// every existing test's deterministic no-DOM `targetNotFound` outcome;
+    /// a test that needs an intent to actually land sets one candidate here
+    /// first.
+    pub candidates: std::sync::Mutex<Vec<dom_engine::Candidate>>,
+    /// Opt-in override for `wait_for`: `false` (the default) keeps every
+    /// existing test's `wait_for` on this fake worker unsupported (there is
+    /// no real page behind it to poll); a test proving a `Boundary` submit
+    /// or follow can complete sets this so the post-click verification
+    /// wait, not just candidate resolution, also succeeds.
+    pub satisfy_wait: AtomicBool,
 }
 
 /// Mirrors `worker_pool::chromium`'s `page_missing()`: the exact
@@ -311,6 +322,31 @@ impl BrowserWorker for LiveWorker {
         }])
     }
 
+    async fn wait_for(
+        &self,
+        _page_id: &PageId,
+        command: &types::WaitForCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        if self.probe.satisfy_wait.load(Ordering::SeqCst) {
+            return Ok(vec![Evidence::Wait {
+                condition: command.condition.clone(),
+                elapsed_ms: 0,
+                observations: 1,
+                excluded_classes: Vec::new(),
+                observed: None,
+            }]);
+        }
+        // No real page behind the fake to poll -- unsupported by default,
+        // exactly like the worker-pool trait's own default body, unless a
+        // test opted in above.
+        Err(CommandError {
+            code: ErrorCode::BrowserCommandFailed,
+            message: "browser primitive is not supported by this worker".into(),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        })
+    }
+
     async fn a11y_snapshot(
         &self,
         page_id: &PageId,
@@ -410,8 +446,14 @@ impl BrowserWorker for LiveWorker {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(target.clone());
         // No DOM behind the fake: intents that must resolve a target fail
         // with the engine's own domain error (e.g. targetNotFound), which is
-        // exactly the deterministic terminal outcome tests assert against.
-        Ok(Vec::new())
+        // exactly the deterministic terminal outcome tests assert against --
+        // unless a test opted in with `probe.candidates`.
+        Ok(self
+            .probe
+            .candidates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone())
     }
 
     fn supports_http_state(&self) -> bool {

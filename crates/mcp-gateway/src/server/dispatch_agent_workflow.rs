@@ -26,6 +26,17 @@ fn project_observation_outcome(mut outcome: Value, detail: EvidenceDetail) -> Va
     outcome
 }
 
+/// [`Server::live_workflow_observation`]'s result: the compact outcome
+/// object (`status`/`source`/`sessionId`/`pageId`/`workflowId`/
+/// `retainedAnswer`/`observationOutcome`/`formSnapshot`/`workflowHandle`),
+/// plus the pieces `dispatch_workflow_observe` still layers a caller-scoped
+/// `formSnapshot` on top of afterward.
+struct LiveObservation {
+    status: String,
+    active_page_id: types::PageId,
+    outcome: Value,
+}
+
 #[derive(Clone, Debug)]
 struct CleanupResult {
     page_closed: bool,
@@ -237,42 +248,29 @@ impl Server {
             }
         }
 
-        let (submit_context, envelope) = primitive_envelope(
-            context.clone(),
-            session_id.clone(),
-            Some(page_id.clone()),
-            workflow_id.clone(),
-            types::PrimitiveCommand::AccessibilitySnapshot(types::AccessibilitySnapshotCommand {
-                max_nodes: Some(max_nodes),
-                target: input.target,
-            }),
-        );
-        let observation_outcome = match self
-            .submit_envelope(submit_context, envelope, handle, "workflow_observe")
+        let live = match self
+            .live_workflow_observation(
+                context.clone(),
+                session_id.clone(),
+                page_id,
+                workflow_id,
+                handle,
+                max_nodes,
+                input.target,
+                evidence_detail,
+            )
             .await
         {
-            Ok(outcome) => outcome,
+            Ok(live) => live,
             Err(error) => return interface_error_response(id, error),
         };
-        let Some(status) = observation_outcome
-            .get("status")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-        else {
-            return interface_error_response(id, workflow_internal_error(&context));
-        };
-        let active_page_id = handle
-            .and_then(|handle| self.workflow_handles.resolve(handle).ok())
-            .map(|binding| binding.page_id)
-            .unwrap_or(page_id);
-        let observation_outcome = project_observation_outcome(observation_outcome, evidence_detail);
-        let form_snapshot = if status == "completed" && input.include_forms {
+        let form_snapshot = if live.status == "completed" && input.include_forms {
             match self
                 .runtime
                 .form_snapshot(
                     context,
                     session_id.clone(),
-                    active_page_id.clone(),
+                    live.active_page_id.clone(),
                     Some(max_controls),
                 )
                 .await
@@ -284,6 +282,55 @@ impl Server {
             None
         };
 
+        let mut outcome = live.outcome;
+        outcome["formSnapshot"] = json!(form_snapshot);
+        self.workflow_observe_success(id, outcome, defaulted_handle)
+            .await
+    }
+
+    /// The compact observation an `AccessibilitySnapshot` against a handle's
+    /// current page produces -- the same live path `dispatch_workflow_observe`
+    /// runs when the caller supplies no `goal`. Shared with
+    /// [`Server::attach_post_state`] (C2) so a mutating action's `postState`
+    /// and a caller's next `workflow_observe` are built by one function,
+    /// never two copies that can drift apart.
+    #[allow(clippy::too_many_arguments)]
+    async fn live_workflow_observation(
+        &self,
+        context: types::RequestContext,
+        session_id: types::SessionId,
+        page_id: types::PageId,
+        workflow_id: Option<types::WorkflowId>,
+        handle: Option<&str>,
+        max_nodes: u32,
+        target: Option<types::TargetSpec>,
+        evidence_detail: EvidenceDetail,
+    ) -> interface_core::InterfaceResult<LiveObservation> {
+        let (submit_context, envelope) = primitive_envelope(
+            context.clone(),
+            session_id.clone(),
+            Some(page_id.clone()),
+            workflow_id.clone(),
+            types::PrimitiveCommand::AccessibilitySnapshot(types::AccessibilitySnapshotCommand {
+                max_nodes: Some(max_nodes),
+                target,
+            }),
+        );
+        let observation_outcome = self
+            .submit_envelope(submit_context, envelope, handle, "workflow_observe")
+            .await?;
+        let Some(status) = observation_outcome
+            .get("status")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            return Err(workflow_internal_error(&context));
+        };
+        let active_page_id = handle
+            .and_then(|handle| self.workflow_handles.resolve(handle).ok())
+            .map(|binding| binding.page_id)
+            .unwrap_or(page_id);
+        let observation_outcome = project_observation_outcome(observation_outcome, evidence_detail);
         let mut outcome = json!({
             "status":status,
             "source":"live",
@@ -292,13 +339,65 @@ impl Server {
             "workflowId":workflow_id,
             "retainedAnswer":Value::Null,
             "observationOutcome":observation_outcome,
-            "formSnapshot":form_snapshot,
+            "formSnapshot":Value::Null,
         });
         if let Some(handle) = handle {
             outcome["workflowHandle"] = json!(handle);
         }
-        self.workflow_observe_success(id, outcome, defaulted_handle)
-            .await
+        Ok(LiveObservation {
+            status,
+            active_page_id,
+            outcome,
+        })
+    }
+
+    /// Appends `postState` to a completed action outcome: the same compact
+    /// observation `workflow_observe` would return for this handle's page
+    /// right now, built by [`Server::live_workflow_observation`] with
+    /// default bounds -- so the caller can skip the redundant re-observe
+    /// (2026-09-23 transcripts: 7-9 `workflow_observe` calls per run, one
+    /// after nearly every action). A failed action outcome is returned
+    /// unchanged; a `live_workflow_observation` that itself errors leaves
+    /// the action's own outcome exactly as it would have been without this
+    /// call -- `postState` is an elision, never a requirement for the
+    /// action's success.
+    ///
+    /// `workflowId` is read back from the completed outcome, not threaded in
+    /// by the caller: an omitted `workflowId` argument mints a fresh one
+    /// inside `intent_envelope`/`primitive_envelope`, and only the outcome
+    /// (`submit_envelope_once` echoes `envelope.workflow_id` onto it) ever
+    /// names the one the action actually ran under.
+    pub(super) async fn attach_post_state(
+        &self,
+        result: interface_core::InterfaceResult<Value>,
+        context: types::RequestContext,
+        session_id: types::SessionId,
+        page_id: types::PageId,
+        handle: Option<&str>,
+    ) -> interface_core::InterfaceResult<Value> {
+        let mut outcome = result?;
+        if outcome.get("status").and_then(Value::as_str) == Some("completed") {
+            let workflow_id = outcome
+                .get("workflowId")
+                .cloned()
+                .and_then(|value| serde_json::from_value::<types::WorkflowId>(value).ok());
+            if let Ok(live) = self
+                .live_workflow_observation(
+                    context,
+                    session_id,
+                    page_id,
+                    workflow_id,
+                    handle,
+                    DEFAULT_WORKFLOW_OBSERVE_MAX_NODES,
+                    None,
+                    EvidenceDetail::Compact,
+                )
+                .await
+            {
+                outcome["postState"] = live.outcome;
+            }
+        }
+        Ok(outcome)
     }
 
     async fn workflow_observe_success(

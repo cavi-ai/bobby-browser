@@ -165,6 +165,8 @@ impl Server {
                     Ok(()) => {}
                     Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
                 }
+                let session_id = input.session_id.clone();
+                let page_id = input.page_id.clone();
                 let (context, mut envelope) = intent_envelope(
                     context,
                     input.session_id,
@@ -173,11 +175,15 @@ impl Server {
                     intent,
                 );
                 pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
-                self.submit_envelope(context, envelope, handle, call.name.as_str())
+                let observe_context = context.clone();
+                let result = self
+                    .submit_envelope(context, envelope, handle, call.name.as_str())
                     .await
                     .map(|outcome| {
                         project_complete_form_outcome(outcome, evidence_detail, &field_names)
-                    })
+                    });
+                self.attach_post_state(result, observe_context, session_id, page_id, handle)
+                    .await
             }
             "intent_submit_and_verify" => {
                 let input: IntentSubmitAndVerifyArgs = match bounded_parse(call.arguments) {
@@ -222,6 +228,8 @@ impl Server {
                     Ok(()) => {}
                     Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
                 }
+                let session_id = input.session_id.clone();
+                let page_id = input.page_id.clone();
                 let (context, mut envelope) = intent_envelope(
                     context,
                     input.session_id,
@@ -230,6 +238,7 @@ impl Server {
                     intent,
                 );
                 pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
+                let observe_context = context.clone();
                 let boundary_command_id = envelope.command_id.clone();
                 // Keyed on the caller-supplied workflow id only: an omitted
                 // workflowId resolves to the envelope default, which must
@@ -273,7 +282,10 @@ impl Server {
                             .await;
                     }
                 }
-                result.map(|outcome| project_verified_action_outcome(outcome, evidence_detail))
+                let result =
+                    result.map(|outcome| project_verified_action_outcome(outcome, evidence_detail));
+                self.attach_post_state(result, observe_context, session_id, page_id, handle)
+                    .await
             }
             "intent_wait_for_state" => {
                 let input: IntentWaitForStateArgs = match bounded_parse(call.arguments) {
@@ -315,6 +327,8 @@ impl Server {
                     Ok(()) => {}
                     Err(()) => return invalid_params_reason(id, "invalidIdempotencyKey"),
                 }
+                let session_id = input.session_id.clone();
+                let page_id = input.page_id.clone();
                 let (context, mut envelope) = intent_envelope(
                     context,
                     input.session_id,
@@ -323,6 +337,7 @@ impl Server {
                     intent,
                 );
                 pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
+                let observe_context = context.clone();
                 let result = if input.auto_checkpoint.unwrap_or(true) {
                     self.submit_envelope_with_auto_checkpoint(context, envelope, handle)
                         .await
@@ -330,7 +345,10 @@ impl Server {
                     self.submit_envelope(context, envelope, handle, call.name.as_str())
                         .await
                 };
-                result.map(|outcome| project_verified_action_outcome(outcome, evidence_detail))
+                let result =
+                    result.map(|outcome| project_verified_action_outcome(outcome, evidence_detail));
+                self.attach_post_state(result, observe_context, session_id, page_id, handle)
+                    .await
             }
             "intent_dismiss_obstruction" => {
                 let input: IntentDismissObstructionArgs = match bounded_parse(call.arguments) {

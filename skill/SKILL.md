@@ -41,6 +41,10 @@ calls. Rules that govern every call:
   `page_open`. Prefer `workflow_observe` for context: it answers from
   retained page memory first and only pays for a live snapshot when nothing
   is remembered.
+- On success, `intent_follow`, `intent_submit_and_verify`, `intent_complete_form`,
+  and a Boundary `click` already return `postState` — the same compact
+  observation `workflow_observe` would; read it from the result and call
+  `workflow_observe` only when it is absent.
 - **Read before write.** On a site this runtime has seen before, `context_ask`
   first — a remembered answer (marked `persisted`) beats a snapshot.
   Otherwise `a11y_snapshot`, and pass its targets straight into intent or

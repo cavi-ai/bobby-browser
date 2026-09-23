@@ -30,8 +30,9 @@ mod workflow_handles;
 ///
 /// Kept under ~500 characters so it does not push connect payloads.
 pub const INITIALIZE_INSTRUCTIONS: &str = "\
-Start workflow_start; reuse workflowHandle (ids only if it dies). \
-Use workflow_observe. Verify links/controls with intent_follow expectedState. \
+Start workflow_start; reuse workflowHandle (only if it dies). \
+A postState skips workflow_observe. \
+Verify links/controls with intent_follow expectedState. \
 Form: intent_complete_form, then intent_submit_and_verify. \
 Pass target {role,accessibleName,ordinal} verbatim. Check structuredContent.status; \
 follow error.repair. Boundary defaults autoCheckpoint. Deferred schemas load together. \

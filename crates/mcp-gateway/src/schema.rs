@@ -794,29 +794,24 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
         ),
         "session_create" => output_ref("SessionState"),
         "workflow_start" => workflow_start_output_schema(),
-        "workflow_observe" => object(
-            json!({
-                "status":string(1, 32),
-                "source":string(1, 128),
-                "workflowHandle":workflow_handle(),
-                "sessionId":id(),
-                "pageId":id(),
-                "workflowId":id(),
-                "retainedAnswer":nullable(json!({"type":"object"})),
-                "observationOutcome":workflow_observation_outcome_schema(),
-                "formSnapshot":nullable(json!({"$ref":"#/$defs/FormSnapshot"}))
-            }),
-            &[
-                "status",
-                "source",
-                "workflowHandle",
-                "sessionId",
-                "pageId",
-                "workflowId",
-                "retainedAnswer",
-                "observationOutcome",
-                "formSnapshot",
-            ],
+        "workflow_observe" => workflow_observe_result_schema(),
+        // C2: on success only, these four append `postState` -- the same
+        // compact observation `workflow_observe` returns, built by the same
+        // function -- so a follow-up `workflow_observe` call is redundant.
+        // Not required: absent on a failed outcome.
+        "intent_follow" | "intent_submit_and_verify" | "intent_complete_form" | "click" => object(
+            {
+                let mut properties = command_outcome_properties();
+                merge_properties(
+                    &mut properties,
+                    json!({
+                        "workflowId": id(),
+                        "postState": workflow_observe_result_schema(),
+                    }),
+                );
+                properties
+            },
+            &["status", "commandId", "workflowId"],
         ),
         "session_close" => object(
             json!({"closed":{"type":"boolean","const":true}}),
@@ -1053,6 +1048,20 @@ pub(crate) fn advertised_tool_output_schema(name: &str) -> Value {
                 .remove("$defs");
             schema
         }
+        // C2: same opaque collapse as every other command-outcome tool below,
+        // but `postState` is named rather than folded into the opaque
+        // object -- an agent reading `tools/list` should see it is there to
+        // read, without the full nested `workflow_observe` shape (that
+        // would re-add the bytes the opaque collapse exists to avoid).
+        "intent_follow" | "intent_submit_and_verify" | "intent_complete_form" | "click" => json!({
+            "type": "object",
+            "properties": {
+                "postState": {
+                    "type": "object",
+                    "description": "Present on success: the same compact observation `workflow_observe` returns for this handle's page. Read it instead of calling `workflow_observe` again."
+                }
+            }
+        }),
         _ => {
             // Command-outcome envelopes are identical across primitives and
             // intents. Advertising the full shape on every tool duplicates
@@ -1274,6 +1283,38 @@ fn workflow_observation_outcome_schema() -> Value {
     let mut properties = command_outcome_properties();
     merge_properties(&mut properties, json!({"workflowId":id()}));
     nullable(object(properties, &["status", "commandId", "workflowId"]))
+}
+
+/// `workflow_observe`'s full result shape. Also the shape of `postState`,
+/// the four C2 tools' (`intent_follow`, `intent_submit_and_verify`,
+/// `intent_complete_form`, boundary `click`) redundant-observe elision --
+/// both are built by [`Server::live_workflow_observation`], so both
+/// advertise the one schema.
+fn workflow_observe_result_schema() -> Value {
+    object(
+        json!({
+            "status":string(1, 32),
+            "source":string(1, 128),
+            "workflowHandle":workflow_handle(),
+            "sessionId":id(),
+            "pageId":id(),
+            "workflowId":id(),
+            "retainedAnswer":nullable(json!({"type":"object"})),
+            "observationOutcome":workflow_observation_outcome_schema(),
+            "formSnapshot":nullable(json!({"$ref":"#/$defs/FormSnapshot"}))
+        }),
+        &[
+            "status",
+            "source",
+            "workflowHandle",
+            "sessionId",
+            "pageId",
+            "workflowId",
+            "retainedAnswer",
+            "observationOutcome",
+            "formSnapshot",
+        ],
+    )
 }
 
 fn merge_values(mut left: Value, right: Value) -> Value {
@@ -3039,10 +3080,18 @@ mod tests {
     }
 
     #[test]
-    fn advertised_click_output_schema_is_an_opaque_object() {
+    fn advertised_click_output_schema_advertises_post_state() {
         assert_eq!(
             advertised_tool_output_schema("click"),
-            json!({"type": "object"})
+            json!({
+                "type": "object",
+                "properties": {
+                    "postState": {
+                        "type": "object",
+                        "description": "Present on success: the same compact observation `workflow_observe` returns for this handle's page. Read it instead of calling `workflow_observe` again."
+                    }
+                }
+            })
         );
     }
 

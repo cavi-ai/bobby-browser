@@ -76,6 +76,9 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
+                let boundary = input.boundary.unwrap_or(false);
+                let session_id = input.session_id.clone();
+                let page_id = input.page_id.clone();
                 let (context, mut envelope) = primitive_envelope(
                     context,
                     input.session_id,
@@ -84,18 +87,30 @@ impl Server {
                     types::PrimitiveCommand::Click(types::ClickCommand {
                         selector: input.selector.unwrap_or_default(),
                         target: input.target,
-                        boundary: input.boundary.unwrap_or(false),
+                        boundary,
                         expected_url: input.expected_url,
                         modifiers: input.modifiers,
                     }),
                 );
                 pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
-                if input.boundary.unwrap_or(false) && input.auto_checkpoint.unwrap_or(true) {
+                // Only a Boundary click earns a `postState`: a read-only click
+                // is not one of the four action tools C2 covers, and cloning
+                // the context for an observe it will never use would be
+                // wasted work on the hot path.
+                let observe_context = boundary.then(|| context.clone());
+                let result = if boundary && input.auto_checkpoint.unwrap_or(true) {
                     self.submit_envelope_with_auto_checkpoint(context, envelope, handle)
                         .await
                 } else {
                     self.submit_envelope(context, envelope, handle, call.name.as_str())
                         .await
+                };
+                match observe_context {
+                    Some(observe_context) => {
+                        self.attach_post_state(result, observe_context, session_id, page_id, handle)
+                            .await
+                    }
+                    None => result,
                 }
             }
             "click_and_wait_for_popup" => {
