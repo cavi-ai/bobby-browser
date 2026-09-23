@@ -23,7 +23,8 @@ use chromiumoxide::layout::{ElementQuad, Point};
 use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide::{Command, Element, Method, Page};
 use dom_engine::{
-    resolve_candidates, Candidate, CandidateState, ResolutionDecision, ResolutionPolicy,
+    rank_candidates, resolve_candidates, Candidate, CandidateState, ResolutionDecision,
+    ResolutionPolicy,
 };
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -1046,6 +1047,59 @@ pub async fn resolve_target_with_visibility(
             best_match_authorized,
         },
     })
+}
+
+/// For a `Text`/`Value` wait whose target matches more than one candidate:
+/// reads every ranked candidate's live innerText/value instead of erroring
+/// with `TargetAmbiguous`, so the caller's matcher (not identity) decides
+/// which one satisfies the wait. Returns them best-ranked first; an empty
+/// result means no attached (and, if required, visible) candidate remained,
+/// which the caller treats the same as `TargetNotFound` (keep polling).
+pub async fn resolve_ambiguous_wait_values(
+    page: &Page,
+    target: &TargetSpec,
+    is_value: bool,
+    browser: Option<&BrowserHandle>,
+) -> Result<Vec<String>, CommandError> {
+    validate_target_spec(target)?;
+    let scope = open_target_scope(page, target, browser).await?;
+    let base_scope = scope.locator_scope();
+    let (raw, owners) = collect_candidates_merged(
+        &scope.execution_page,
+        &base_scope,
+        &scope.shadow_hosts,
+        scope.scope_id,
+    )
+    .await?;
+    let candidates: Vec<Candidate> = raw.into_iter().map(into_candidate).collect();
+    let policy = ResolutionPolicy {
+        require_visible: true,
+        ..ResolutionPolicy::default()
+    };
+    let ranked = rank_candidates(target, &candidates, &policy)
+        .map_err(|error| target_error(ErrorCode::InvalidRequest, error))?;
+    let operation = if is_value {
+        "return el.value || ''"
+    } else {
+        "return el.innerText || ''"
+    };
+    let mut values = Vec::with_capacity(ranked.len());
+    for (candidate, _evidence) in ranked {
+        let owner = owners.get(&candidate.id).cloned();
+        let (locator_scope, locator_shadow_hosts) = match &owner {
+            Some(element) => (LocatorScope::ClosedRoot(Arc::clone(element)), Vec::new()),
+            None => (base_scope.clone(), scope.shadow_hosts.clone()),
+        };
+        let locator = JsLocator {
+            scope: locator_scope,
+            shadow_hosts: locator_shadow_hosts,
+            id: candidate.id.clone(),
+        };
+        let expression = locator_expression(&locator, operation)?;
+        let value: String = eval_scoped(&scope.execution_page, &locator.scope, expression).await?;
+        values.push(value);
+    }
+    Ok(values)
 }
 
 /// Backoff schedule for the targetNotFound re-collect loop: 25, 50, 100, 200,

@@ -3,7 +3,8 @@
 # WARNING: `policy set` replaces the entire sandbox policy. Prefer merging
 # openshell/policy-network.yaml into your existing policy when you already
 # customize FS/process.
-# Replace binaries.path with the agent binary that will call MCP.
+# The binaries allowlist matches the agent selected when this pack was generated.
+# Use --agent-binary when a custom agent installation calls MCP.
 # Reachability uses OpenShell's supervisor proxy — do not expose bobby beyond
 # the host gateway address the sandbox can dial (host.docker.internal /
 # host.containers.internal / LAN host). Keep bobby bind loopback+gateway only.
@@ -40,4 +41,6 @@ network_policies:
           - method: tools/call
             tool: job_cancel
     binaries:
-      - path: /usr/local/bin/claude
+      - path: /usr/bin/codex
+      - path: /usr/local/bin/codex
+      - path: /usr/lib/node_modules/@openai/**

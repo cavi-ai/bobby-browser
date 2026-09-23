@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Fixed
+
+- A `wait_for`/post-click `Text` or `Value` wait whose target matches more
+  than one candidate no longer fails with `targetAmbiguous`: the matcher
+  now runs against every ranked candidate's live text/value, and the wait
+  is satisfied when any of them matches (Chromium and Firefox).
+- `intent_follow`: a post-click wait error caused only by targeting trouble
+  (`targetAmbiguous`, `targetNotFound`, `invalidRequest`) is now reported as
+  `verificationFailed` ("activation landed; expectedState could not be
+  verified: ...") instead of the raw error, so the click's own evidence is
+  visible and the repair does not read as an invitation to re-click.
+
 ## 0.15.0 - 2026-09-19
 
 ### Added
