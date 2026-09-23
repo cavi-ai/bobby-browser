@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.16.0 - 2026-09-23
+
 ### Added
 
 - Python SDK (`packages/python-sdk`, package `bobby-browser`, stdlib only):
@@ -45,6 +47,20 @@
 
 ### Fixed
 
+- A worker's first lease no longer waits indefinitely on a hung browser
+  launch: the launch gets an outer deadline (45 s by default,
+  `WorkerPool::with_timeouts`), after which the call fails with the
+  `browser launch failed: ...` diagnostic. A worker that
+  arrives after the deadline is terminated, and a launch still hung after a
+  second deadline is aborted without disturbing a concurrent lease that
+  took over the session.
+- Firefox companion: the enrolled Firefox is recycled only when every BiDi
+  endpoint the profile offers refuses the probe or connect; a live endpoint
+  that answers with its own failure returns that failure instead. A
+  companion port held by a non-companion listener falls back to a dynamic
+  loopback port; a port published by a live companion still fails the
+  bootstrap, and enrollment keeps its configured port and reports
+  `bindInUse`.
 - `SkillRecoveryCoordinator`'s owned-pool tactics (`ReconcileCheckpoint`,
   `FreshGhostSession`, `SelectCompatibleEngine`, `RestartDurableBoundary`)
   now abort their detached helper task when the caller stops waiting on it

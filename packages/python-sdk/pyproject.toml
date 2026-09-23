@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bobby-browser"
-version = "0.15.0"
+version = "0.16.0"
 description = "Typed client for the authenticated Bobby Browser runtime interface"
 readme = "README.md"
 license = { text = "MIT" }
