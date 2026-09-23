@@ -2673,3 +2673,48 @@ async fn page_activate_with_handle_and_page_id_activates_and_rebinds() {
     // The original page id is untouched for raw-id callers.
     assert_eq!(page_id, start_outcome["pageId"], "{page_id}");
 }
+
+/// C3 (`fix/invalid-params-shapes`): the six `Invalid params` rejections in
+/// the paid-for benchmark transcripts were `intent_follow` calls with
+/// `purpose` + `hints` and no `expectedDestination`/`expectedState` at all
+/// (dismissing a notification, accepting a cookie banner). CHANGELOG 0.15.0
+/// documents the contract as "exactly one of the two is required", so this
+/// is refused, not defaulted -- with the fix named verbatim in
+/// `error.message` rather than the generic `malformedArguments` text.
+#[tokio::test]
+async fn intent_follow_without_expected_state_names_the_fix() {
+    let live = live_with_capabilities(vec![
+        Capability::SessionWrite,
+        Capability::PageWrite,
+        Capability::BrowserMutate,
+        Capability::IntentExecute,
+    ])
+    .await;
+    let mut next_id = 10;
+    let (session_id, page_id) = create_session_and_page(&live.server, &mut next_id).await;
+
+    let response = call_tool(
+        &live.server,
+        20,
+        "intent_follow",
+        json!({
+            "sessionId": session_id.0.to_string(),
+            "pageId": page_id.0.to_string(),
+            "purpose": "Dismiss the Ledger Cloud syncing status notification",
+            "hints": {"role": "button", "accessibleName": "Dismiss notification"}
+        }),
+    )
+    .await;
+
+    assert_eq!(response["error"]["code"], -32602, "{response}");
+    assert_eq!(
+        response["error"]["data"]["reason"], "malformedArguments",
+        "{response}"
+    );
+    assert_eq!(
+        response["error"]["message"],
+        "intent_follow needs exactly one of expectedState or expectedDestination \
+         (a WaitForCommand: {condition, timeoutMs})",
+        "{response}"
+    );
+}

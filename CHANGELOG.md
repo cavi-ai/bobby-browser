@@ -42,6 +42,12 @@
   the closed vision gate. `visionAssistDenied` now reports only from
   `extract_structured`, `intent_solve_challenge`, and
   `intent_detect_challenge`, where vision is the operation itself.
+- `intent_follow` called with neither `expectedDestination` nor
+  `expectedState` still fails `Invalid params (malformedArguments)` (per the
+  0.15.0 contract, exactly one is required), but `error.message` now names
+  the fix verbatim instead of the generic bound-outside-the-schema text:
+  "intent_follow needs exactly one of expectedState or expectedDestination
+  (a WaitForCommand: {condition, timeoutMs})".
 
 ### Changed
 

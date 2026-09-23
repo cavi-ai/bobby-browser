@@ -255,11 +255,21 @@ intent_args!(IntentWaitForStateArgs {
     timeout_ms: u64,
 });
 
+// `expectedDestination`/`expectedState` is `Option` here only so the dispatch
+// arm can tell "absent" apart from "malformed" and reject the former with a
+// message naming the exact fix -- CHANGELOG 0.15.0: "exactly one of the two
+// is required". It used to fail `bounded_parse` outright (schema's
+// `required` list never named it -- see `schema.rs`'s `"intent_follow"`
+// arm -- so `validate_tool_arguments` passed and the rejection came from a
+// bound this struct alone enforced, with a message that did not say why).
+// Do not add a default here or in the dispatch arm: a follow with neither is
+// an unverified click, and defaulting a wait silently would misreport one as
+// verified.
 intent_args!(IntentFollowArgs {
     purpose: String,
     hints: Option<types::IntentHints>,
     #[serde(alias = "expectedState")]
-    expected_destination: types::WaitForCommand,
+    expected_destination: Option<types::WaitForCommand>,
     evidence_detail: Option<EvidenceDetail>,
     boundary: Option<bool>,
     auto_checkpoint: Option<bool>,
@@ -691,6 +701,13 @@ mod tests {
         both["expectedDestination"] = wait.clone();
         both["expectedState"] = wait;
         assert!(serde_json::from_value::<IntentFollowArgs>(both).is_err());
-        assert!(serde_json::from_value::<IntentFollowArgs>(base).is_err());
+        // Neither spelling: this struct alone must not reject it (it stays
+        // `Option` so the dispatch arm -- not `bounded_parse` -- can name the
+        // fix instead of a generic `malformedArguments`). See
+        // `intent_follow_without_expected_state_names_the_fix` in
+        // `tests/workflow_handles.rs` for the end-to-end rejection message.
+        let args = serde_json::from_value::<IntentFollowArgs>(base)
+            .expect("expectedDestination-less intent_follow still parses");
+        assert!(args.expected_destination.is_none());
     }
 }

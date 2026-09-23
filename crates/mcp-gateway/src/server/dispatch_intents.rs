@@ -316,11 +316,21 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
+                // CHANGELOG 0.15.0: "exactly one of the two is required". A
+                // follow with neither is an unverified click -- reject it
+                // rather than defaulting a wait silently, which would let the
+                // caller believe a destination was checked when none was.
+                let Some(expected_destination) = input.expected_destination else {
+                    let mut response = invalid_params_reason(id, "malformedArguments");
+                    response["error"]["message"] =
+                        json!(INTENT_FOLLOW_MISSING_EXPECTED_STATE_MESSAGE);
+                    return response;
+                };
                 let evidence_detail = input.evidence_detail.unwrap_or(EvidenceDetail::Compact);
                 let intent = types::IntentCommand::Follow(types::FollowIntent {
                     purpose: input.purpose,
                     hints: input.hints.unwrap_or_default(),
-                    expected_destination: input.expected_destination,
+                    expected_destination,
                     boundary: input.boundary.unwrap_or(false),
                 });
                 match apply_idempotency_key(&mut context, input.idempotency_key) {
@@ -455,6 +465,13 @@ impl Server {
         self.finish_tool(id, result, defaulted_handle).await
     }
 }
+
+/// Verbatim `error.message` when `intent_follow` names neither
+/// `expectedState` nor `expectedDestination`. `error.data.reason` stays
+/// `malformedArguments`; this replaces only the derived message with the
+/// exact fix so an agent reading `error.message` alone still sees the shape.
+const INTENT_FOLLOW_MISSING_EXPECTED_STATE_MESSAGE: &str = "intent_follow needs exactly one of \
+    expectedState or expectedDestination (a WaitForCommand: {condition, timeoutMs})";
 
 fn project_verified_action_outcome(mut outcome: Value, detail: EvidenceDetail) -> Value {
     if detail == EvidenceDetail::Full || outcome["status"] != "completed" {
