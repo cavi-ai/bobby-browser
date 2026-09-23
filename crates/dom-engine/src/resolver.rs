@@ -410,6 +410,9 @@ fn score<'a>(
         };
         reasons.push("text".into());
     }
+    if let Some(hop) = candidate.frame_path.last() {
+        reasons.push(describe_frame_hop(hop));
+    }
     Some((
         candidate,
         CandidateEvidence {
@@ -419,4 +422,20 @@ fn score<'a>(
             reasons,
         },
     ))
+}
+
+/// Names the iframe a candidate was gathered inside, so two contenders with
+/// the same role and accessible name still read apart when one sits in a
+/// frame: the hop's accessible name, else its CSS selector, else "iframe".
+fn describe_frame_hop(hop: &TargetSpec) -> String {
+    match (
+        hop.accessible_name
+            .as_deref()
+            .filter(|name| !name.is_empty()),
+        hop.css.as_deref(),
+    ) {
+        (Some(name), _) => format!("inside iframe \"{name}\""),
+        (None, Some(css)) => format!("inside iframe {css}"),
+        (None, None) => "inside iframe".to_string(),
+    }
 }

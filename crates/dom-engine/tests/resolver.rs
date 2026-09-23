@@ -379,3 +379,49 @@ fn image_role_matches_img_candidate_role() {
         matches!(resolve_candidates(&target, &[logo], &ResolutionPolicy::default()).unwrap(), ResolutionDecision::Resolved { candidate, .. } if candidate.id == "logo")
     );
 }
+
+/// Two contenders with the same role and accessible name still read apart
+/// when one was gathered inside an iframe: its evidence names the frame.
+#[test]
+fn ambiguous_contenders_name_the_iframe_they_sit_in() {
+    let target = TargetSpec {
+        role: Some("button".into()),
+        accessible_name: Some("Confirm document preview".into()),
+        ..TargetSpec::default()
+    };
+    let in_shadow = candidate("shadow", "Confirm document preview", true);
+    let mut in_frame = candidate("framed", "Confirm document preview", true);
+    in_frame.frame_path = vec![Box::new(TargetSpec {
+        role: Some("iframe".into()),
+        accessible_name: Some("Document preview".into()),
+        ..TargetSpec::default()
+    })];
+    match resolve_candidates(
+        &target,
+        &[in_shadow, in_frame],
+        &ResolutionPolicy::default(),
+    )
+    .expect("resolution")
+    {
+        ResolutionDecision::Ambiguous { candidates } => {
+            assert_eq!(candidates.len(), 2);
+            assert!(
+                candidates[0]
+                    .reasons
+                    .iter()
+                    .all(|reason| !reason.contains("iframe")),
+                "main-document contender must not claim a frame: {:?}",
+                candidates[0].reasons
+            );
+            assert!(
+                candidates[1]
+                    .reasons
+                    .iter()
+                    .any(|reason| reason == "inside iframe \"Document preview\""),
+                "framed contender names its iframe: {:?}",
+                candidates[1].reasons
+            );
+        }
+        other => panic!("expected ambiguity, got {other:?}"),
+    }
+}

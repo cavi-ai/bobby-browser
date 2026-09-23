@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- Ambiguous target evidence names the iframe a contender was gathered
+  inside (`inside iframe "<name>"` in its `reasons`), and the
+  `targetAmbiguous` message repeats it and points at `framePath`, so two
+  controls with the same role and accessible name in different frames read
+  apart instead of as duplicates.
 - `intent_submit_and_verify`: a pre-satisfied `expectedState` (the matcher
   already holds before the act runs, so nothing is clicked) now reports
   plain `failed` with `expectedStatePreSatisfied`, not
