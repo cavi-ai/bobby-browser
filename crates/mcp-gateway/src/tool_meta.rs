@@ -174,7 +174,7 @@ pub(crate) fn tool_description(name: &str) -> &'static str {
         "cookie_get" => "Read cookies visible to a page, optionally filtered by URL. Requires browser:mutate.",
         "checkpoint_save" => "Persist a verified checkpoint from evidenceRefs. Requires recovery:write. Save before Boundary commands with pinned boundary IDs. On failure, confirm each referenced command completed.",
         "workflow_recover" => "Recover from the last verified checkpoint. Requires recovery:write. Returns resume, restart, or reconciliation evidence. On failure with notFound, verify session ownership with session_list.",
-        "workflow_start" => "Create and bind a session, page, and retained workflow, optionally navigating to url; the canonical first call. Requires session:read, session:write, page:write. On failure, inspect session_list.",
+        "workflow_start" => "Create and bind a session, page, and workflow, optionally navigating to url; the first call. Requires session:read, session:write, page:write. On failure, inspect session_list.",
         "workflow_observe" => "Observe retained or live accessibility evidence. Requires browser:mutate; forms require page:read. Defaults evidenceDetail=compact; pass full for diagnostics.",
         "session_create" => "Create a browser session with a profile and execution policy. Requires session:write. On failure with resourceExhausted, close an idle session.",
         "session_close" => "Close a session and release its resources. Requires session:write. Destructive. On failure, confirm with session_list.",
@@ -200,7 +200,7 @@ pub(crate) fn tool_description(name: &str) -> &'static str {
         "command_execute" => "Execute one bounded browser command envelope naming its own capability and evidence. Requires browser:mutate, plus whatever the wrapped command needs. Produces the same evidence as the named command it wraps. On failure with deadlineOutOfRange, set the envelope's deadline within the allowed window and resubmit.",
         "intent_locate" => "Locate an element by described purpose and hints, without acting on it (Replayable). Requires browser:mutate and intent:execute. Produces resolution evidence with the matched target's fingerprint. On failure with targetNotFound or targetAmbiguous, narrow the purpose or hints and retry.",
         "intent_fill" => "Fill one described form control and verify the value (Reconciliable). Requires browser:mutate and intent:execute. accessibleName may be a controlId from form_snapshot. Produces fill evidence carrying the browser's own validity state. On failure with verificationFailed, read the retained validation message and re-fill; on targetNotFound, take a fresh a11y_snapshot and pass the new target.",
-        "intent_complete_form" => "Fill ordered named fields in one verified intent; never submits. Pass workflowHandle. Requires browser:mutate and intent:execute. Prefer over repeated intent_fill calls. Fields resolve just-in-time: conditional fields resolve even when absent. Success defaults evidenceDetail=compact. On failure, retry remaining fields.",
+        "intent_complete_form" => "Fill ordered named fields in one verified intent; never submits. Pass workflowHandle. Requires browser:mutate and intent:execute. Fields resolve just-in-time; a field's revealedBy is activated first. Defaults evidenceDetail=compact. On failure, retry remaining fields.",
         "intent_submit_and_verify" => "Submit once and verify post-state. Pass workflowHandle. Requires browser:mutate and intent:execute. networkQuiet returns submitSettlement=settled|validationRejected; on rejection, do not inspect or blindly resubmit. On failure with needsReconciliation, call recovery_status.",
         "intent_wait_for_state" => "Wait for a described page state to hold (Replayable). Requires browser:mutate and intent:execute. On failure with waitConditionTimedOut, retry with a longer timeout.",
         "intent_follow" => "Activate and verify a described control. Prefer over click plus wait_for. Requires browser:mutate and intent:execute. Defaults evidenceDetail=compact. On failure with needsReconciliation, do not retry; call recovery_status.",
@@ -224,18 +224,12 @@ mod tests {
     fn form_intents_describe_the_compact_verified_loop() {
         let complete = tool_description("intent_complete_form");
         assert!(
-            complete.contains("Prefer over repeated intent_fill calls"),
-            "whole-form intent must advertise its round-trip advantage"
-        );
-        assert!(
             complete.contains("evidenceDetail=compact"),
             "whole-form intent must advertise compact success evidence"
         );
         assert!(
-            complete.contains("just-in-time")
-                && complete.contains("conditional fields")
-                && complete.contains("absent"),
-            "whole-form intent must explain that ordered conditional fields resolve against fresh page state"
+            complete.contains("just-in-time") && complete.contains("revealedBy"),
+            "whole-form intent must explain that fields resolve just-in-time and name revealedBy as the activation hook for a field that only appears once revealed"
         );
 
         let submit = tool_description("intent_submit_and_verify");

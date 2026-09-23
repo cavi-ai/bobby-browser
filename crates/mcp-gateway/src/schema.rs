@@ -1932,7 +1932,8 @@ fn complete_form_field() -> Value {
             "name":string(1, MAX_STRING_BYTES),
             "purpose":string(1, 256),
             "hints":{"$ref":"#/$defs/IntentHints"},
-            "value":{"$ref":"#/$defs/FillValue"}
+            "value":{"$ref":"#/$defs/FillValue"},
+            "revealedBy":{"$ref":"#/$defs/IntentHints","description":"Activate this control first; the field appears after it."}
         }),
         &["name", "purpose", "value"],
     )
