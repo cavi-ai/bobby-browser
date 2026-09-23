@@ -22,7 +22,8 @@ use companion_protocol::{
     ActionRequest, BrowserEngine, CompanionEvent, InteractionPath, PROTOCOL_VERSION,
 };
 use dom_engine::{
-    resolve_candidates, Candidate, CandidateState, ResolutionDecision, ResolutionPolicy,
+    rank_candidates, resolve_candidates, Candidate, CandidateState, ResolutionDecision,
+    ResolutionPolicy,
 };
 use fingerprinting::FingerprintApplyPlan;
 use fingerprinting::FingerprintConfig;
@@ -1684,16 +1685,16 @@ impl FirefoxCompanionWorker {
             })
     }
 
-    async fn resolve_input_target(
+    /// Validates `target` and descends its `frame_path`, returning the
+    /// context its candidates (or direct selector) resolve against. Shared
+    /// by [`Self::resolve_input_target`] and
+    /// [`Self::resolve_ambiguous_wait_selectors`], which both need the same
+    /// context before diverging on how they turn a target into a selector.
+    async fn resolve_input_context(
         &self,
-        page_id: &PageId,
         top_context: &str,
-        selector: &str,
-        target: Option<&types::TargetSpec>,
-    ) -> Result<(String, String), CommandError> {
-        let Some(target) = target else {
-            return Ok((top_context.to_owned(), selector.to_owned()));
-        };
+        target: &types::TargetSpec,
+    ) -> Result<String, CommandError> {
         if target.frame_path.len() > MAX_FRAME_PATH_DEPTH {
             return Err(driver_error(
                 ErrorCode::InvalidRequest,
@@ -1733,9 +1734,17 @@ impl FirefoxCompanionWorker {
                 .descend_frame_context(&context, &frame_selector)
                 .await?;
         }
-        if let Some(selector) = direct_target_selector(target) {
-            return Ok((context, selector));
-        }
+        Ok(context)
+    }
+
+    /// Observes the page and turns its controls into semantic-resolution
+    /// candidates, without choosing a match. Shared by
+    /// [`Self::resolve_input_target`] and
+    /// [`Self::resolve_ambiguous_wait_selectors`].
+    async fn gather_input_candidates(
+        &self,
+        page_id: &PageId,
+    ) -> Result<Vec<Candidate>, CommandError> {
         let observation = self
             .observer
             .observe(
@@ -1749,7 +1758,7 @@ impl FirefoxCompanionWorker {
             )
             .await?;
         validate_observation(&observation)?;
-        let candidates = observation
+        Ok(observation
             .controls
             .into_iter()
             .enumerate()
@@ -1778,7 +1787,24 @@ impl FirefoxCompanionWorker {
                     frame_path: Vec::new(),
                 }
             })
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>())
+    }
+
+    async fn resolve_input_target(
+        &self,
+        page_id: &PageId,
+        top_context: &str,
+        selector: &str,
+        target: Option<&types::TargetSpec>,
+    ) -> Result<(String, String), CommandError> {
+        let Some(target) = target else {
+            return Ok((top_context.to_owned(), selector.to_owned()));
+        };
+        let context = self.resolve_input_context(top_context, target).await?;
+        if let Some(selector) = direct_target_selector(target) {
+            return Ok((context, selector));
+        }
+        let candidates = self.gather_input_candidates(page_id).await?;
         match resolve_candidates(target, &candidates, &ResolutionPolicy::default()) {
             Ok(ResolutionDecision::Resolved { candidate, .. }) => candidate
                 .css
@@ -1806,6 +1832,26 @@ impl FirefoxCompanionWorker {
                 false,
             )),
         }
+    }
+
+    /// For a `Text`/`Value` wait whose target matches more than one Firefox
+    /// candidate: returns every ranked candidate's `(context, selector)`
+    /// instead of erroring with `TargetAmbiguous`, so the caller's matcher
+    /// (not identity) decides which one satisfies the wait.
+    async fn resolve_ambiguous_wait_selectors(
+        &self,
+        page_id: &PageId,
+        top_context: &str,
+        target: &types::TargetSpec,
+    ) -> Result<Vec<(String, String)>, CommandError> {
+        let context = self.resolve_input_context(top_context, target).await?;
+        let candidates = self.gather_input_candidates(page_id).await?;
+        let ranked = rank_candidates(target, &candidates, &ResolutionPolicy::default())
+            .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
+        Ok(ranked
+            .into_iter()
+            .filter_map(|(candidate, _)| candidate.css.clone().map(|css| (context.clone(), css)))
+            .collect())
     }
 
     /// Select one option by value or label and return the committed option
@@ -4258,6 +4304,52 @@ impl BrowserWorker for FirefoxCompanionWorker {
                                 )
                             }
                             Err(error) if error.code == ErrorCode::TargetNotFound => (false, None),
+                            // The click already landed; a matcher-satisfying
+                            // candidate among several is still a match, not
+                            // an ambiguity the caller must narrow before the
+                            // wait can even be evaluated.
+                            Err(error) if error.code == ErrorCode::TargetAmbiguous => {
+                                let selectors = self
+                                    .resolve_ambiguous_wait_selectors(page_id, &context, target)
+                                    .await?;
+                                let mut satisfied = false;
+                                let mut observed = String::new();
+                                for (selector_context, selector) in selectors {
+                                    let selector_json =
+                                        serde_json::to_string(&selector).map_err(|error| {
+                                            driver_error(
+                                                ErrorCode::InvalidRequest,
+                                                error.to_string(),
+                                                false,
+                                            )
+                                        })?;
+                                    let read = if is_value {
+                                        format!(
+                                            "document.querySelector({selector_json})?.value ?? ''"
+                                        )
+                                    } else {
+                                        format!(
+                                            "document.querySelector({selector_json})?.innerText ?? ''"
+                                        )
+                                    };
+                                    let response = self.transport.send("script.evaluate", json!({
+                                        "expression": read,
+                                        "target": {"context": selector_context, "sandbox": COMPANION_SANDBOX},
+                                        "awaitPromise": false,
+                                        "resultOwnership": "none",
+                                    })).await?;
+                                    observed = response
+                                        .pointer("/result/value")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_owned();
+                                    if bounded_text_matches(matcher, &observed)? {
+                                        satisfied = true;
+                                        break;
+                                    }
+                                }
+                                (satisfied, Some(bound_observed(&observed)))
+                            }
                             Err(error) => return Err(error),
                         }
                     }

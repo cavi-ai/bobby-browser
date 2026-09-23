@@ -55,8 +55,9 @@ use types::{
 use crate::{
     process_registry, resolve_upload_paths, session_download_dir,
     targeting::{
-        gather_candidates, inspect_page_scoped_target, resolve_target as resolve_browser_target,
-        resolve_target_with_visibility, TARGET_GONE_MESSAGE,
+        gather_candidates, inspect_page_scoped_target, resolve_ambiguous_wait_values,
+        resolve_target as resolve_browser_target, resolve_target_with_visibility,
+        TARGET_GONE_MESSAGE,
     },
     BrowserWorker, WorkerFactory,
 };
@@ -3402,6 +3403,25 @@ async fn wait_condition_satisfied(
                 Ok(resolved) => resolved,
                 Err(error) if matches!(error.code, ErrorCode::TargetNotFound) => {
                     return Ok(WaitPoll::matched(false))
+                }
+                // The click already landed; a matcher-satisfying candidate
+                // among several is still a match, not an ambiguity the
+                // caller must narrow before the wait can even be evaluated.
+                Err(error) if matches!(error.code, ErrorCode::TargetAmbiguous) => {
+                    let handle = browser.lock().await.as_ref().map(Browser::handle);
+                    let values =
+                        resolve_ambiguous_wait_values(page, target, is_value, handle.as_ref())
+                            .await?;
+                    let mut satisfied = false;
+                    let mut observed = String::new();
+                    for value in values {
+                        observed = value;
+                        if text_matches(matcher, &observed)? {
+                            satisfied = true;
+                            break;
+                        }
+                    }
+                    return Ok(WaitPoll::saw(satisfied, observed));
                 }
                 Err(error) => return Err(error),
             };

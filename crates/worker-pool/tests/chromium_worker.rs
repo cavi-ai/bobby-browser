@@ -1803,6 +1803,103 @@ async fn waits_for_dynamic_element_content_url_document_and_network_quiet() {
     worker.close().await.unwrap();
 }
 
+/// B1: a `Text` wait whose target matches more than one candidate must not
+/// error with `targetAmbiguous` — the matcher, not identity, decides which
+/// candidate satisfies it. Three `<p>` elements only one of which contains
+/// the wanted text (an onboarding-step paragraph); nine `<a>` links only one
+/// of which contains "Download" (a report-recovery link).
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn wait_for_text_resolves_an_ambiguous_target_by_matcher() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    // `#` is a URL fragment delimiter even inside a `data:` URI's body, so an
+    // `href="#"` here would truncate the page at the first link. Use a
+    // fragment-free placeholder href instead.
+    let links = (0..9)
+        .map(|index| {
+            if index == 4 {
+                "<a href=\"javascript:void(0)\">Download report</a>".to_string()
+            } else {
+                format!("<a href=\"javascript:void(0)\">Link {index}</a>")
+            }
+        })
+        .collect::<String>();
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: format!(
+                    "data:text/html,{}",
+                    concat!(
+                        "<p>Step 1 of 3</p><p>Step 2 of 3</p><p>Step 3 of 3</p>",
+                        "{links}"
+                    )
+                    .replace("{links}", &links)
+                ),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let paragraph_evidence = worker
+        .wait_for(
+            &page_id,
+            &WaitForCommand {
+                condition: WaitCondition::Text {
+                    target: Box::new(TargetSpec {
+                        role: Some("paragraph".into()),
+                        ..TargetSpec::default()
+                    }),
+                    matcher: TextMatch::Contains("Step 2 of 3".into()),
+                },
+                timeout_ms: 2_000,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(&paragraph_evidence[0], Evidence::Wait { observations, .. } if *observations > 0)
+    );
+
+    let link_evidence = worker
+        .wait_for(
+            &page_id,
+            &WaitForCommand {
+                condition: WaitCondition::Text {
+                    target: Box::new(TargetSpec {
+                        role: Some("link".into()),
+                        ..TargetSpec::default()
+                    }),
+                    matcher: TextMatch::Contains("Download".into()),
+                },
+                timeout_ms: 2_000,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(&link_evidence[0], Evidence::Wait { observations, .. } if *observations > 0));
+
+    worker.close().await.unwrap();
+}
+
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn page_scoped_text_wait_sees_async_body_updates() {

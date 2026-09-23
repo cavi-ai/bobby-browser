@@ -2,4 +2,6 @@ mod candidate;
 mod resolver;
 
 pub use candidate::{Candidate, CandidateState};
-pub use resolver::{resolve_candidates, ResolutionDecision, ResolutionError, ResolutionPolicy};
+pub use resolver::{
+    rank_candidates, resolve_candidates, ResolutionDecision, ResolutionError, ResolutionPolicy,
+};

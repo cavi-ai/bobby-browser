@@ -761,6 +761,62 @@ async fn submit_and_verify_wait_timeout_after_landed_click_is_not_a_resubmit_inv
     assert_eq!(log.waits.len(), 2);
 }
 
+/// Same shape as the timeout case above, but for the wait error B1 targets
+/// directly: the post-act wait's target matched more than one candidate.
+/// The click already landed, so this is `VerificationFailed`, not a
+/// retryable `TargetAmbiguous`.
+#[tokio::test]
+async fn submit_and_verify_recodes_ambiguous_postclick_wait_as_verification_failed() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let expected_state = WaitForCommand {
+        condition: WaitCondition::Element {
+            target: Box::new(TargetSpec {
+                role: Some("alert".into()),
+                ..TargetSpec::default()
+            }),
+            state: types::ElementState::Visible,
+        },
+        timeout_ms: 1_000,
+    };
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![button("Submit")]),
+        calls: Arc::clone(&calls),
+        click_evidence: vec![Evidence::Element {
+            selector: "#Submit".into(),
+            text: None,
+        }],
+        click_error: None,
+        wait_evidence: Vec::new(),
+        wait_error: Some(CommandError {
+            code: ErrorCode::TargetAmbiguous,
+            message: "target is ambiguous: alert \"\" score=10".into(),
+            layer: types::ErrorLayer::Page,
+            retryable: true,
+        }),
+    };
+
+    let outcome = IntentEngine::execute(
+        &submit("Submit", Some("button"), expected_state),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    let IntentOutcome::Failed { error, .. } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::VerificationFailed);
+    assert!(!error.retryable);
+    assert!(error.message.contains("submit click landed"), "{error:?}");
+    assert!(
+        error.message.contains("Do not resubmit blindly"),
+        "{error:?}"
+    );
+    let log = calls.lock().expect("call log");
+    assert_eq!(log.clicks.len(), 1, "the click ran exactly once");
+}
+
 #[tokio::test]
 async fn submit_and_verify_refuses_a_pre_satisfied_expected_state_without_clicking() {
     let calls = Arc::new(Mutex::new(CallLog::default()));
