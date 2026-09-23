@@ -119,8 +119,20 @@ async fn context_answers_are_identical_over_mcp_and_http() {
         .unwrap();
     let http_answer: Value = serde_json::from_slice(&body).unwrap();
 
+    // `pageDerived` is the MCP result annotation that tells an agent the text
+    // came from the page; HTTP callers are programs and the wire answer does
+    // not carry it. Everything else must be identical.
+    let mut mcp_payload = mcp_answer["result"]["structuredContent"].clone();
     assert_eq!(
-        mcp_answer["result"]["structuredContent"], http_answer,
+        mcp_payload
+            .as_object_mut()
+            .expect("structuredContent is an object")
+            .remove("pageDerived"),
+        Some(Value::Bool(true)),
+        "MCP context_ask marks its answer as page-derived"
+    );
+    assert_eq!(
+        mcp_payload, http_answer,
         "MCP and HTTP context_ask answers diverged for the same principal"
     );
 
