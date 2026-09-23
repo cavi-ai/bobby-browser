@@ -1129,11 +1129,28 @@ fn compose_worker_factory_inner(
         frames: true,
         native_dialogs: false,
     };
+    // A Chromium exact selection with a profile id opts into the same
+    // durable-profile contract Firefox's enrolled companions carry: the
+    // worker factory persists its user-data-dir instead of disposing it per
+    // session, and EnginePreferenceConfig::durable_profile_id (read by the
+    // caller before this function's `selection` is consumed) attaches
+    // context-graph promotion under the same id.
+    let chromium_durable_profile_id = match &selection.preference {
+        EnginePreferenceConfig::Exact {
+            engine: BrowserEngineConfig::Chromium,
+            profile_id: Some(profile_id),
+        } => Some(profile_id.clone()),
+        _ => None,
+    };
+    let mut chromium_factory = ChromiumWorkerFactory::new(config.browser.clone());
+    if let Some(profile_id) = chromium_durable_profile_id {
+        chromium_factory = chromium_factory.with_durable_profile(profile_id);
+    }
     let mut registrations = vec![FactoryRegistration::new(
         BrowserEngine::Chromium,
         None,
         chromium_capabilities,
-        Arc::new(ChromiumWorkerFactory::new(config.browser.clone())),
+        Arc::new(chromium_factory),
     )];
     let firefox_required = crate::required_extension_capabilities();
     let mut enrolled = enrollment.map(|enrollment| (enrollment.profile_id, enrollment.server));
@@ -1242,12 +1259,23 @@ fn compose_worker_factory_inner(
 fn preference(config: EnginePreferenceConfig) -> Result<EnginePreference> {
     Ok(match config {
         EnginePreferenceConfig::ManagedChromium => EnginePreference::ManagedChromium,
-        EnginePreferenceConfig::Exact { engine, profile_id } => EnginePreference::Exact {
-            engine: browser_engine(engine),
-            profile_id: profile_id
-                .map(|value| uuid::Uuid::parse_str(&value).map(ProfileId))
-                .transpose()?,
-        },
+        EnginePreferenceConfig::Exact { engine, profile_id } => {
+            let engine = browser_engine(engine);
+            let profile_id = match engine {
+                // A Chromium exact selection's profile id already picked the
+                // durable-vs-disposable user-data-dir when the worker
+                // factory was composed (see chromium_durable_profile_id
+                // above); there is only ever one Chromium registration, so
+                // routing needs no profile_id to match against, and the
+                // Firefox-only ProfileId (a UUID) cannot carry an arbitrary
+                // Chromium profile name anyway.
+                BrowserEngine::Chromium => None,
+                _ => profile_id
+                    .map(|value| uuid::Uuid::parse_str(&value).map(ProfileId))
+                    .transpose()?,
+            };
+            EnginePreference::Exact { engine, profile_id }
+        }
         EnginePreferenceConfig::Prefer { engines } => EnginePreference::Prefer {
             engines: engines.into_iter().map(browser_engine).collect(),
         },

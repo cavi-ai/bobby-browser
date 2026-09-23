@@ -46,13 +46,16 @@ impl Default for EnginePreferenceConfig {
 
 impl EnginePreferenceConfig {
     /// The durable profile identity a runtime promotes verified intent
-    /// outcomes under. Only an exact Firefox selection with an explicit
-    /// profile id carries one; managed Chromium is ephemeral by design, and a
-    /// profile-less exact selection has nothing stable to key memory on.
+    /// outcomes under. An exact Firefox or Chromium selection with an
+    /// explicit profile id carries one -- Chromium's persists at
+    /// `<profiles_dir>/chromium/<profileId>` instead of a disposable
+    /// per-session directory. Managed Chromium without a profile id stays
+    /// ephemeral by design, and a profile-less exact selection has nothing
+    /// stable to key memory on.
     pub fn durable_profile_id(&self) -> Option<&str> {
         match self {
             Self::Exact {
-                engine: BrowserEngineConfig::Firefox,
+                engine: BrowserEngineConfig::Firefox | BrowserEngineConfig::Chromium,
                 profile_id: Some(profile_id),
             } => Some(profile_id.as_str()),
             _ => None,
@@ -520,7 +523,7 @@ prefill = false
     }
 
     #[test]
-    fn durable_profile_id_only_exists_for_exact_firefox_with_a_profile() {
+    fn durable_profile_id_exists_for_exact_firefox_or_chromium_with_a_profile() {
         let firefox = super::EnginePreferenceConfig::Exact {
             engine: super::BrowserEngineConfig::Firefox,
             profile_id: Some("work".to_string()),
@@ -531,11 +534,21 @@ prefill = false
             profile_id: None,
         };
         assert_eq!(profile_less.durable_profile_id(), None);
+        // Chromium's exact-engine form now carries a durable profile id the
+        // same way Firefox's does: the worker factory persists its
+        // user-data-dir at <profiles_dir>/chromium/<profileId>.
         let chromium = super::EnginePreferenceConfig::Exact {
             engine: super::BrowserEngineConfig::Chromium,
             profile_id: Some("work".to_string()),
         };
-        assert_eq!(chromium.durable_profile_id(), None);
+        assert_eq!(chromium.durable_profile_id(), Some("work"));
+        let chromium_profile_less = super::EnginePreferenceConfig::Exact {
+            engine: super::BrowserEngineConfig::Chromium,
+            profile_id: None,
+        };
+        assert_eq!(chromium_profile_less.durable_profile_id(), None);
+        // Managed Chromium (disposable-by-default selection) never carries a
+        // profile id and stays ephemeral.
         assert_eq!(
             super::EnginePreferenceConfig::ManagedChromium.durable_profile_id(),
             None

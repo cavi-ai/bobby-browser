@@ -67,6 +67,12 @@ pub struct ChromiumWorkerFactory {
     config: BrowserConfig,
     pid_registry_dir: PathBuf,
     fingerprint: FingerprintConfig,
+    /// Opt-in durable profile identity. `None` (the default) keeps every
+    /// session's user-data-dir disposable, keyed by `SessionId` and removed
+    /// with the session. `Some(id)` persists it at
+    /// `<profiles_dir>/chromium/<id>` across sessions instead, the Chromium
+    /// counterpart to a Firefox companion's enrolled profile.
+    durable_profile_id: Option<String>,
 }
 
 impl ChromiumWorkerFactory {
@@ -81,6 +87,7 @@ impl ChromiumWorkerFactory {
             config,
             pid_registry_dir,
             fingerprint: FingerprintConfig::default(),
+            durable_profile_id: None,
         }
     }
 
@@ -94,6 +101,7 @@ impl ChromiumWorkerFactory {
             config,
             pid_registry_dir,
             fingerprint: FingerprintConfig::default(),
+            durable_profile_id: None,
         }
     }
 
@@ -101,12 +109,25 @@ impl ChromiumWorkerFactory {
         self.fingerprint = fingerprint;
         self
     }
+
+    /// Opts every session this factory launches into the same persistent
+    /// user-data-dir at `<profiles_dir>/chromium/<profile_id>`, instead of a
+    /// disposable one keyed by `SessionId`. Mirrors
+    /// `EnginePreferenceConfig::durable_profile_id`, which gates whether the
+    /// runtime attaches context-graph promotion for this profile.
+    pub fn with_durable_profile(mut self, profile_id: String) -> Self {
+        self.durable_profile_id = Some(profile_id);
+        self
+    }
 }
 
 #[async_trait]
 impl WorkerFactory for ChromiumWorkerFactory {
     async fn launch(&self, session_id: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
-        let profile_dir = self.config.profiles_dir.join(session_id.0.to_string());
+        let profile_dir = match &self.durable_profile_id {
+            Some(profile_id) => self.config.profiles_dir.join("chromium").join(profile_id),
+            None => self.config.profiles_dir.join(session_id.0.to_string()),
+        };
         let download_dir = session_download_dir(&self.config.downloads_dir, session_id);
         tokio::fs::create_dir_all(&profile_dir)
             .await
