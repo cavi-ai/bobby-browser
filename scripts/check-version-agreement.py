@@ -70,6 +70,21 @@ def package_versions(expected: str) -> list[str]:
     return problems
 
 
+def python_package_version(expected: str) -> list[str]:
+    """`packages/python-sdk` ships as `pyproject.toml`, not `package.json`,
+    so `package_versions()` above never sees it. Same one-tag-many-artifacts
+    failure mode applies: check it here explicitly."""
+    path = REPO / "packages" / "python-sdk" / "pyproject.toml"
+    if not path.is_file():
+        return [f"{path.relative_to(REPO)}: missing"]
+    match = re.search(r'^version = "([^"]+)"', path.read_text(), re.M)
+    if not match:
+        return [f"{path.relative_to(REPO)}: no [project] version declared"]
+    if match.group(1) != expected:
+        return [f"bobby-browser (python): {match.group(1)} != {expected}"]
+    return []
+
+
 def firefox_companion_extension_version(expected: str) -> list[str]:
     """Firefox about:addons shows packages/firefox-companion/manifest.json,
     not package.json. Keep them locked together."""
@@ -129,6 +144,7 @@ def main() -> int:
     problems = (
         crate_versions(expected)
         + package_versions(expected)
+        + python_package_version(expected)
         + firefox_companion_extension_version(expected)
         + homebrew_formula_version(expected)
         + npm_scope()

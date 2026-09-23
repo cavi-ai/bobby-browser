@@ -190,6 +190,21 @@ let _session = client
 [API docs on docs.rs](https://docs.rs/bobby-browser-client) ·
 [Crate book](docs/bobby-browser/source/pages/rust/index.md)
 
+## Use from Python
+
+```bash
+pip install bobby-browser
+```
+
+```python
+from bobby_browser import BrowserRuntimeClient
+
+client = BrowserRuntimeClient("http://127.0.0.1:7777", os.environ["AUTOMATION_RUNTIME_TOKEN"])
+```
+
+[Python SDK guide](docs/bobby-browser/source/pages/surfaces/python-sdk.md) ·
+installable from this repo path with `pip install -e packages/python-sdk`
+
 ## Published artifacts
 
 One version, one `v*` tag, three artifacts:

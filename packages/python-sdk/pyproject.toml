@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bobby-browser"
+version = "0.15.0"
+description = "Typed client for the authenticated Bobby Browser runtime interface"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Sasan Sotoodehfar" }]
+requires-python = ">=3.10"
+dependencies = []
+keywords = ["browser-automation", "cdp", "mcp", "playwright", "puppeteer", "bobby-browser"]
+
+[project.urls]
+Homepage = "https://cavi-ai.xyz/docs/bobby-browser"
+Repository = "https://github.com/cavi-ai/bobby-browser"
+Issues = "https://github.com/cavi-ai/bobby-browser/issues"
+
+[tool.setuptools.packages.find]
+include = ["bobby_browser*"]
+
+[tool.setuptools.package-data]
+bobby_browser = ["py.typed"]
