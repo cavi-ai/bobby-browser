@@ -5,6 +5,20 @@
 
 use super::*;
 
+/// Tools whose `structuredContent` carries text read from the page (node
+/// names/labels, extracted values, a `context_ask` answer). `finish_tool`
+/// and `workflow_observe_success` stamp these with `pageDerived: true` so an
+/// agent host can tell page data from its own instructions -- see
+/// `docs/bobby-browser/source/pages/security/prompt-injection.md`.
+pub(super) const PAGE_DERIVED_TOOLS: &[&str] = &[
+    "a11y_snapshot",
+    "workflow_observe",
+    "inspect",
+    "intent_extract",
+    "extract_structured",
+    "context_ask",
+];
+
 impl Server {
     /// `handle` is the workflow handle `call_tool` resolved for this call
     /// (`None` for a raw-id call). The `WORKFLOW_SCOPE_TOOLS` dispatchers
@@ -85,9 +99,13 @@ impl Server {
         id: Value,
         result: interface_core::InterfaceResult<Value>,
         defaulted_handle: Option<&str>,
+        name: &str,
     ) -> Value {
         match result {
             Ok(mut value) => {
+                if PAGE_DERIVED_TOOLS.contains(&name) {
+                    value["pageDerived"] = json!(true);
+                }
                 if let Some(handle) = defaulted_handle {
                     push_evidence(&mut value, workflow_handle_defaulted_evidence(handle));
                 }

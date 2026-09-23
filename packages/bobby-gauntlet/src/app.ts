@@ -1,6 +1,7 @@
 import { NorthstarApi } from "./api.js";
 import { element } from "./components.js";
 import { cookieBanner, signInPage } from "./gate.js";
+import { agentCanaryPage } from "./pages/canary.js";
 import { billingPage } from "./pages/billing.js";
 import { dashboardPage } from "./pages/dashboard.js";
 import { customerDetailPage, customersPage } from "./pages/customers.js";
@@ -21,6 +22,15 @@ export function mountNorthstar(root: HTMLElement, api: NorthstarApi, config: Run
   const router = createRouter(window);
   let interruptionShown = false;
   const render = async (route: Route): Promise<void> => {
+    // Phase 3 slice D3 prompt-injection canary: deliberately public, no
+    // consent/session gate. It exists only for a runtime test to read; it
+    // never needs the seeded operator account, and gating it behind login
+    // would only mean re-authenticating a fixture that proves nothing about
+    // auth itself.
+    if (route.segments[0] === "agent-canary") {
+      root.replaceChildren(agentCanaryPage(document));
+      return;
+    }
     const consent = await api.consent();
     if (consent.consent === null) {
       root.replaceChildren(cookieBanner(document, api, () => render(route)));

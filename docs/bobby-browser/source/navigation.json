@@ -189,6 +189,10 @@
         {
           "title": "Reporting vulnerabilities",
           "path": "security/reporting.md"
+        },
+        {
+          "title": "Prompt injection",
+          "path": "security/prompt-injection.md"
         }
       ]
     },

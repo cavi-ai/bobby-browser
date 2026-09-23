@@ -124,3 +124,14 @@ northstar-preview { display: grid; gap: 12px; }
   .data-table td { display: block; padding: 8px 16px; border: 0; }
   .data-table tr { display: block; padding: 12px 0; border-top: 1px solid var(--line); }
 }
+
+/* Visually hidden but accessible (screen-reader-only pattern): an
+   accessibility-tree read still reaches this text, unlike `display:none`. */
+.canary-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}

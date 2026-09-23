@@ -184,6 +184,6 @@ impl Server {
             }
             _ => unreachable!("dispatch_lifecycle received a tool it does not own"),
         };
-        self.finish_tool(id, result, None).await
+        self.finish_tool(id, result, None, call.name.as_str()).await
     }
 }
