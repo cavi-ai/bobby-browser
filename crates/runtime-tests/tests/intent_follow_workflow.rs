@@ -2,14 +2,18 @@ use std::path::PathBuf;
 
 use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, ServerConfig, StorageConfig};
+use gauntlet_server::{ScenarioConfig, ScenarioServer};
 use sdk_core::RuntimeService;
 use types::{
     AttemptId, CheckpointId, CheckpointInvariant, CommandClass, CommandEnvelope, CommandId,
     CommandOutcome, CreateSessionRequest, ErrorCode, Evidence, ExecutionRecord, FollowIntent,
     IntentCommand, IntentHints, IntentResolutionPath, NavigateCommand, OpenPageRequest, PageId,
-    PrimitiveCommand, RuntimeCommand, SessionId, TextMatch, WaitCondition, WaitForCommand,
-    WaitUntil, WorkflowCheckpoint, WorkflowId,
+    PrimitiveCommand, RuntimeCommand, SessionId, TargetSpec, TextMatch, WaitCondition,
+    WaitForCommand, WaitUntil, WorkflowCheckpoint, WorkflowId,
 };
+
+#[path = "modern_gauntlet/unlock.rs"]
+mod northstar_unlock;
 
 fn primitive_envelope(
     session_id: &SessionId,
@@ -305,4 +309,82 @@ async fn follow_intent_is_deterministic_on_live_chromium_for_both_boundary_state
         panic!("follow (boundary:true) did not complete: {follow_outcome:?}");
     };
     assert_deterministic_followed(&intent_record(&evidence));
+}
+
+/// Live Chromium: the Northstar onboarding header has three `<p>` elements
+/// ("New relationship", the intro line, and the "Step N of 3" stepper) that
+/// tie on `{role: paragraph}`. A follow whose expected state is a text wait on
+/// that bare role must let the matcher pick the stepper after the "Next"
+/// click, not fail the verification with `targetAmbiguous`.
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn follow_text_expected_state_narrows_tied_paragraphs_by_matcher() {
+    let server = ScenarioServer::start(ScenarioConfig::seeded("follow-tied-paragraphs"))
+        .await
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let runtime = build_runtime(root.path()).await;
+    let session = runtime
+        .create_session(CreateSessionRequest {
+            profile: "follow-tied-paragraphs".into(),
+            proxy: None,
+            execution_policy: Default::default(),
+            zigzagzig: false,
+        })
+        .await
+        .unwrap();
+    let page = runtime
+        .open_page(OpenPageRequest {
+            session_id: session.id.clone(),
+        })
+        .await
+        .unwrap();
+    completed_primitive(
+        &runtime,
+        &session.id,
+        &page.id,
+        PrimitiveCommand::Navigate(NavigateCommand {
+            url: server.application_url("/onboarding"),
+            wait_until: WaitUntil::Interactive,
+            timeout_ms: 30_000,
+        }),
+    )
+    .await;
+    northstar_unlock::unlock_northstar_session(&runtime, &session.id, &page.id)
+        .await
+        .unwrap();
+
+    let outcome = runtime
+        .submit(intent_envelope(
+            &session.id,
+            &page.id,
+            WorkflowId::new(),
+            AttemptId::new(),
+            CommandId::new(),
+            IntentCommand::Follow(FollowIntent {
+                purpose: "Advance to step 2 of onboarding form".into(),
+                hints: IntentHints {
+                    role: Some("button".into()),
+                    accessible_name: Some("Next".into()),
+                    ..IntentHints::default()
+                },
+                expected_destination: WaitForCommand {
+                    condition: WaitCondition::Text {
+                        target: Box::new(TargetSpec {
+                            role: Some("paragraph".into()),
+                            ..TargetSpec::default()
+                        }),
+                        matcher: TextMatch::Contains("Step 2 of 3".into()),
+                    },
+                    timeout_ms: 10_000,
+                },
+                boundary: false,
+            }),
+        ))
+        .await;
+    let CommandOutcome::Completed { evidence, .. } = outcome else {
+        panic!("follow with a tied paragraph text wait did not complete: {outcome:?}");
+    };
+    assert_deterministic_followed(&intent_record(&evidence));
+    runtime.sessions.delete(&session.id).await.unwrap();
 }
