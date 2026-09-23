@@ -826,29 +826,24 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
         ),
         "session_create" => output_ref("SessionState"),
         "workflow_start" => workflow_start_output_schema(),
-        "workflow_observe" => object(
-            json!({
-                "status":string(1, 32),
-                "source":string(1, 128),
-                "workflowHandle":workflow_handle(),
-                "sessionId":id(),
-                "pageId":id(),
-                "workflowId":id(),
-                "retainedAnswer":nullable(json!({"type":"object"})),
-                "observationOutcome":workflow_observation_outcome_schema(),
-                "formSnapshot":nullable(json!({"$ref":"#/$defs/FormSnapshot"}))
-            }),
-            &[
-                "status",
-                "source",
-                "workflowHandle",
-                "sessionId",
-                "pageId",
-                "workflowId",
-                "retainedAnswer",
-                "observationOutcome",
-                "formSnapshot",
-            ],
+        "workflow_observe" => workflow_observe_result_schema(),
+        // C2: on success only, these four append `postState` -- the same
+        // compact observation `workflow_observe` returns, built by the same
+        // function -- so a follow-up `workflow_observe` call is redundant.
+        // Not required: absent on a failed outcome.
+        "intent_follow" | "intent_submit_and_verify" | "intent_complete_form" | "click" => object(
+            {
+                let mut properties = command_outcome_properties();
+                merge_properties(
+                    &mut properties,
+                    json!({
+                        "workflowId": id(),
+                        "postState": workflow_observe_result_schema(),
+                    }),
+                );
+                properties
+            },
+            &["status", "commandId", "workflowId"],
         ),
         "session_close" => object(
             json!({"closed":{"type":"boolean","const":true}}),
@@ -1090,6 +1085,20 @@ pub(crate) fn advertised_tool_output_schema(name: &str) -> Value {
             // intents. Advertising the full shape on every tool duplicates
             // ~700 bytes per catalog entry. tools/call still validates with
             // `tool_output_schema`.
+            //
+            // Correction pass (post-C1-merge): `intent_follow`,
+            // `intent_submit_and_verify`, `intent_complete_form`, and `click`
+            // fall through to this same opaque collapse for `postState` too.
+            // C1 left only 67 bytes of explore-catalog headroom; even the
+            // smallest non-empty JSON Schema mention of the property
+            // (`"postState":{}`, no description) costs ~30 bytes per tool,
+            // ~120 across the four, which alone blows the ceiling -- there is
+            // no description short enough to fit a *named* property back in.
+            // `postState` stays fully specified in `tool_output_schema` (the
+            // wire schema `tools/call` validates against, still built from
+            // `workflow_observe_result_schema()`) and is exercised live by
+            // `tests/post_state.rs`; only its `tools/list` advertisement is
+            // dieted away, same as every other field this arm already opacifies.
             json!({"type": "object"})
         }
     }
@@ -1306,6 +1315,38 @@ fn workflow_observation_outcome_schema() -> Value {
     let mut properties = command_outcome_properties();
     merge_properties(&mut properties, json!({"workflowId":id()}));
     nullable(object(properties, &["status", "commandId", "workflowId"]))
+}
+
+/// `workflow_observe`'s full result shape. Also the shape of `postState`,
+/// the four C2 tools' (`intent_follow`, `intent_submit_and_verify`,
+/// `intent_complete_form`, boundary `click`) redundant-observe elision --
+/// both are built by [`Server::live_workflow_observation`], so both
+/// advertise the one schema.
+fn workflow_observe_result_schema() -> Value {
+    object(
+        json!({
+            "status":string(1, 32),
+            "source":string(1, 128),
+            "workflowHandle":workflow_handle(),
+            "sessionId":id(),
+            "pageId":id(),
+            "workflowId":id(),
+            "retainedAnswer":nullable(json!({"type":"object"})),
+            "observationOutcome":workflow_observation_outcome_schema(),
+            "formSnapshot":nullable(json!({"$ref":"#/$defs/FormSnapshot"}))
+        }),
+        &[
+            "status",
+            "source",
+            "workflowHandle",
+            "sessionId",
+            "pageId",
+            "workflowId",
+            "retainedAnswer",
+            "observationOutcome",
+            "formSnapshot",
+        ],
+    )
 }
 
 fn merge_values(mut left: Value, right: Value) -> Value {
@@ -3071,11 +3112,28 @@ mod tests {
     }
 
     #[test]
-    fn advertised_click_output_schema_is_an_opaque_object() {
-        assert_eq!(
-            advertised_tool_output_schema("click"),
-            json!({"type": "object"})
-        );
+    fn advertised_post_state_tools_collapse_to_the_opaque_form_but_wire_schema_keeps_post_state() {
+        // Correction pass: the explore catalog has zero byte headroom, so
+        // `tools/list` cannot name `postState` for any of the four tools --
+        // they fall through to the same opaque collapse as every other
+        // command-outcome tool.
+        for name in [
+            "click",
+            "intent_follow",
+            "intent_submit_and_verify",
+            "intent_complete_form",
+        ] {
+            assert_eq!(
+                advertised_tool_output_schema(name),
+                json!({"type": "object"}),
+                "{name}'s advertised output schema must stay opaque"
+            );
+            assert_eq!(
+                tool_output_schema(name)["properties"]["postState"],
+                workflow_observe_result_schema(),
+                "{name}'s wire output schema must still fully specify postState"
+            );
+        }
     }
 
     #[test]

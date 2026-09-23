@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- `intent_follow`, `intent_submit_and_verify`, `intent_complete_form`, and a
+  Boundary `click` now carry `postState` on a completed result: the same
+  compact observation `workflow_observe` would return for the handle's
+  current page (page generation, url/title, changed or retained controls,
+  verified wait), built by the one function both share. Absent on a failed
+  outcome. Output schemas of the four tools advertise it; the `initialize`
+  instructions and skill guide agents to read it before calling
+  `workflow_observe` again.
+
 ### Fixed
 
 - Ambiguous target evidence names the iframe a contender was gathered
