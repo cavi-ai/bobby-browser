@@ -346,7 +346,7 @@ pub(crate) fn preset(name: &str) -> Option<(String, VisionProviderConfig)> {
             api_key_env: Some("OPENAI_API_KEY".into()),
         },
         "ollama" => VisionProviderConfig {
-            base_url: "http://127.0.0.1:11434/v1".into(),
+            base_url: "http://127.0.0.1:11434".into(),
             model: "llava".into(),
             api_key_env: None,
         },
@@ -541,7 +541,7 @@ mod tests {
         assert_eq!(openai.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
 
         let (_, ollama) = preset("ollama").unwrap();
-        assert_eq!(ollama.base_url, "http://127.0.0.1:11434/v1");
+        assert_eq!(ollama.base_url, "http://127.0.0.1:11434");
         assert_eq!(ollama.model, "llava");
         assert!(ollama.api_key_env.is_none());
 

@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
+use serde_json::Value;
 use tower::ServiceExt;
 use vision_proxy::{
     router, AppState, ExtractInput, ExtractResponse, ProposeInput, ProposeResponse, Upstream,
@@ -55,6 +56,33 @@ fn test_app(upstream: Arc<MockUpstream>) -> Router {
         path: "/vision".to_string(),
         bearer_token: "test-token".to_string(),
         upstream,
+    })
+}
+
+struct ErrorUpstream {
+    error: UpstreamError,
+}
+
+#[async_trait]
+impl Upstream for ErrorUpstream {
+    async fn propose(&self, _input: ProposeInput) -> Result<ProposeResponse, UpstreamError> {
+        match &self.error {
+            UpstreamError::Transport(message) => Err(UpstreamError::Transport(message.clone())),
+            UpstreamError::Rejected(message) => Err(UpstreamError::Rejected(message.clone())),
+            UpstreamError::Invalid(message) => Err(UpstreamError::Invalid(message.clone())),
+        }
+    }
+
+    async fn extract(&self, _input: ExtractInput) -> Result<ExtractResponse, UpstreamError> {
+        Err(UpstreamError::Invalid("extract not configured".into()))
+    }
+}
+
+fn error_app(error: UpstreamError) -> Router {
+    router(AppState {
+        path: "/vision".to_string(),
+        bearer_token: "test-token".to_string(),
+        upstream: Arc::new(ErrorUpstream { error }),
     })
 }
 
@@ -495,4 +523,106 @@ async fn http_vision_assist_maps_candidate_actions_over_the_bound_proxy() {
         }
         assert_eq!(upstream.propose_calls.load(Ordering::SeqCst), 1);
     }
+}
+
+#[tokio::test]
+async fn wrong_bearer_returns_bounded_auth_diagnostic() {
+    let upstream = Arc::new(MockUpstream::new(
+        ProposeResponse {
+            confidence: 0.9,
+            action: VisionAction::Click { x: 0.0, y: 0.0 },
+        },
+        ExtractResponse {
+            value: serde_json::json!(null),
+        },
+    ));
+    let mut app = test_app(upstream);
+
+    let (status, body) = post(
+        &mut app,
+        Some("wrong"),
+        r#"{"purpose":"p","intentKind":"k","stuck":"s","screenshotPng":"abc"}"#,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let parsed: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed["error"]["code"], "visionAuthRejected");
+    assert_eq!(parsed["error"]["kind"], "auth");
+}
+
+#[tokio::test]
+async fn transport_error_returns_transport_diagnostic() {
+    let mut app = error_app(UpstreamError::Transport("connection refused".into()));
+
+    let (status, body) = post(
+        &mut app,
+        Some("test-token"),
+        r#"{"purpose":"p","intentKind":"k","stuck":"s","screenshotPng":"abc"}"#,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    let parsed: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed["error"]["code"], "visionUpstreamTransport");
+    assert_eq!(parsed["error"]["kind"], "transport");
+}
+
+#[tokio::test]
+async fn invalid_model_reply_returns_bounded_diagnostic() {
+    let leaked_marker = "MODEL_OR_UPSTREAM_SECRET";
+    let mut app = error_app(UpstreamError::Invalid(format!(
+        "{}{}",
+        leaked_marker,
+        "x".repeat(900)
+    )));
+
+    let (status, body) = post(
+        &mut app,
+        Some("test-token"),
+        r#"{"purpose":"p","intentKind":"k","stuck":"s","screenshotPng":"abc"}"#,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    let parsed: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed["error"]["code"], "visionInvalidModelReply");
+    assert_eq!(parsed["error"]["kind"], "invalid-model-reply");
+    assert!(parsed["error"]["message"].as_str().unwrap().len() <= 512);
+    assert!(
+        !parsed["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(leaked_marker),
+        "diagnostic leaked model/upstream content: {body}"
+    );
+}
+
+#[tokio::test]
+async fn unsafe_challenge_action_is_refused_by_request_validation() {
+    let upstream = Arc::new(MockUpstream::new(
+        ProposeResponse {
+            confidence: 0.9,
+            action: VisionAction::ChallengeSolved,
+        },
+        ExtractResponse {
+            value: serde_json::json!(null),
+        },
+    ));
+    let mut app = test_app(upstream);
+
+    let (status, body) = post(
+        &mut app,
+        Some("test-token"),
+        r#"{"purpose":"p","intentKind":"locate","stuck":"s","screenshotPng":"abc"}"#,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    let parsed: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed["error"]["code"], "visionInvalidModelReply");
+    assert!(parsed["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("challengeSolved"));
 }

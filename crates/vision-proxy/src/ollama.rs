@@ -37,7 +37,7 @@ impl OllamaUpstream {
         Self {
             client: reqwest::Client::new(),
             model,
-            base_url,
+            base_url: normalize_base_url(&base_url),
             data_collector: None,
         }
     }
@@ -74,6 +74,9 @@ impl OllamaUpstream {
 
         let body = ChatRequest {
             model: &self.model,
+            response_format: ResponseFormat {
+                format_type: "json_object",
+            },
             messages: vec![
                 ChatMessage {
                     role: "system",
@@ -97,9 +100,14 @@ impl OllamaUpstream {
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.unwrap_or_default();
+            let code = status.as_u16();
+            let class = if matches!(code, 401 | 403) {
+                "authentication failed"
+            } else {
+                "request rejected"
+            };
             return Err(UpstreamError::Rejected(format!(
-                "Ollama returned {status}: {text}"
+                "Ollama upstream {class}; status={code}"
             )));
         }
 
@@ -221,7 +229,31 @@ fn parse_json_content(content: &str) -> Result<Value, UpstreamError> {
     let trimmed = content.trim();
     let json_str = strip_markdown_fences(trimmed);
     serde_json::from_str(json_str)
-        .map_err(|e| UpstreamError::Invalid(format!("model content is not valid JSON: {e}")))
+        .or_else(|_| match extract_json_object(json_str) {
+            Some(json) => serde_json::from_str(json),
+            None => serde_json::from_str(json_str),
+        })
+        .map_err(|e| {
+            UpstreamError::Invalid(format!(
+                "Ollama model reply was not valid proposal JSON: {e}"
+            ))
+        })
+}
+
+fn normalize_base_url(base_url: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    trimmed
+        .strip_suffix("/v1/chat/completions")
+        .or_else(|| trimmed.strip_suffix("/chat/completions"))
+        .or_else(|| trimmed.strip_suffix("/v1"))
+        .unwrap_or(trimmed)
+        .to_owned()
+}
+
+fn extract_json_object(content: &str) -> Option<&str> {
+    let start = content.find('{')?;
+    let end = content.rfind('}')?;
+    (start <= end).then_some(&content[start..=end])
 }
 
 fn strip_markdown_fences(s: &str) -> &str {
@@ -233,7 +265,14 @@ fn strip_markdown_fences(s: &str) -> &str {
 #[derive(Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
+    response_format: ResponseFormat,
     messages: Vec<ChatMessage<'a>>,
+}
+
+#[derive(Serialize)]
+struct ResponseFormat {
+    #[serde(rename = "type")]
+    format_type: &'static str,
 }
 
 #[derive(Serialize)]
@@ -301,6 +340,33 @@ mod tests {
             parse_json_content(r#"{"confidence":0.5,"action":{"kind":"click","x":1.0,"y":2.0}}"#)
                 .unwrap();
         assert_eq!(v["confidence"], serde_json::json!(0.5));
+    }
+
+    #[test]
+    fn normalizes_ollama_base_url_without_double_v1() {
+        let upstream = OllamaUpstream::new("llava".into(), "http://127.0.0.1:11434/v1".into());
+        assert_eq!(
+            upstream.completions_url(),
+            "http://127.0.0.1:11434/v1/chat/completions"
+        );
+
+        let upstream = OllamaUpstream::new(
+            "llava".into(),
+            "http://127.0.0.1:11434/v1/chat/completions".into(),
+        );
+        assert_eq!(
+            upstream.completions_url(),
+            "http://127.0.0.1:11434/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn parses_json_object_wrapped_in_model_commentary() {
+        let v = parse_json_content(
+            "Here is the JSON: {\"confidence\":0.5,\"action\":{\"kind\":\"click\",\"x\":1.0,\"y\":2.0}}",
+        )
+        .unwrap();
+        assert_eq!(v["action"]["kind"], serde_json::json!("click"));
     }
 
     #[test]

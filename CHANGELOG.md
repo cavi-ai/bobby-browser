@@ -10,6 +10,22 @@
   `Parse error` (-32700) with a null id, and never ran the request. The
   partial frame now survives until its newline arrives, and a frame already
   over the size limit stays rejected as `frameTooLarge`.
+- Vision proxy, Ollama upstream: a `base_url` ending in `/v1` or
+  `/v1/chat/completions` no longer doubles the path (`/v1/v1/...`); host-only,
+  `/v1`, and full-endpoint forms all reach `<host>/v1/chat/completions`. The
+  `ollama` preset now writes the host-only `http://127.0.0.1:11434`. Requests
+  ask for `response_format: {"type": "json_object"}`, and a reply that wraps
+  its JSON object in commentary is still parsed.
+
+### Changed
+
+- Vision proxy error responses are a structured object,
+  `{"error": {"code", "kind", "message", "retryable"}}` (codes
+  `visionAuthRejected`, `visionInvalidRequest`, `visionUpstreamTransport`,
+  `visionUpstreamRejected`, `visionInvalidModelReply`), with `message` capped
+  at 512 characters; a 401 now carries this body too. An upstream rejection
+  reports only its status class and code, never the upstream response body,
+  and an unparseable model reply is reported with a fixed message.
 
 ### Changed
 
