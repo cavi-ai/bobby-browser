@@ -40,4 +40,5 @@ Operational setup: [Authentication](../guides/auth.md). Capability matrix:
 
 See [SECURITY.md](https://github.com/cavi-ai/bobby-browser/blob/main/SECURITY.md)
 in the repository root for the full policy (this page summarizes only).
-Reporting: [Reporting vulnerabilities](reporting.md).
+Reporting: [Reporting vulnerabilities](reporting.md). Untrusted page text:
+[Prompt injection](prompt-injection.md).

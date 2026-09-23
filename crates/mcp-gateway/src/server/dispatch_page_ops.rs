@@ -432,6 +432,7 @@ impl Server {
                                         id,
                                         Ok(closed_page_prerequisite_failure(evidence)),
                                         defaulted_handle,
+                                        call.name.as_str(),
                                     )
                                     .await
                                 }
@@ -497,6 +498,7 @@ impl Server {
             }
             _ => unreachable!("dispatch_page_ops received a tool it does not own"),
         };
-        self.finish_tool(id, result, defaulted_handle).await
+        self.finish_tool(id, result, defaulted_handle, call.name.as_str())
+            .await
     }
 }
