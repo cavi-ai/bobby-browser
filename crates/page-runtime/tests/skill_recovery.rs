@@ -974,7 +974,14 @@ fn stuck_click_envelope(session_id: SessionId, page_id: PageId) -> CommandEnvelo
         attempt_id: AttemptId::new(),
         session_id,
         page_id: Some(page_id),
-        deadline: Utc::now() + Duration::seconds(5),
+        // Generous total deadline: `detection_rung_fixture` hands this
+        // envelope to a strategy whose per-tactic budget can be 10s, and each
+        // tactic is separately capped by `tactic_budget` (the min of the outer
+        // remaining deadline, the decision deadline, and the tactic budget).
+        // A 5s outer value left no slack for scheduling delay under sibling
+        // test contention: `remaining_duration` could elapse before the
+        // DeafDetectVision ladder finished, surfacing DeadlineExceeded.
+        deadline: Utc::now() + Duration::seconds(30),
         command: RuntimeCommand::Primitive(PrimitiveCommand::Click(ClickCommand {
             selector: "#blocked-target".into(),
             target: None,
