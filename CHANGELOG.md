@@ -93,6 +93,11 @@
   filling it, so a cookie-banner-then-credentials-then-MFA sign-in gate now
   completes in three calls (`intent_follow`, one `intent_complete_form`, one
   `intent_submit_and_verify`) instead of seven.
+- `intent_complete_form`'s advertised MCP tool schema now names `revealedBy`
+  on each field (reusing the shared `IntentHints` `$def`), so an agent can
+  discover the hint without reading source; bought back with shorter
+  `intent_complete_form`/`workflow_start` tool descriptions to stay under
+  the `explore` `tools/list` byte ceiling.
 
 ## 0.15.0 - 2026-09-19
 

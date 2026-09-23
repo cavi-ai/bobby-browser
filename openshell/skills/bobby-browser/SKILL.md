@@ -30,9 +30,11 @@ calls. Rules that govern every call:
    tool schemas behind a tool search, issue ONE search selecting every tool
    the task will need (`select:` accepts a comma-separated list) — each extra
    round trip is a full model turn. The explore toolset already advertises
-   the standard loop (observe, navigate, click, type, upload, dialogs,
-   downloads, `intent_follow`, `intent_complete_form`, `intent_submit_and_verify`,
-   `intent_detect_challenge`); search only for what is genuinely missing.
+   the standard loop (observe via `a11y_snapshot`, navigate, click, type,
+   upload, `intent_follow`, `intent_complete_form`, `intent_submit_and_verify`);
+   `dialog`, `download_url`, `screenshot`, `cookie_get`, `intent_detect_challenge`,
+   and the rest widen through `toolset_select`. Search only for what is
+   genuinely missing.
 
 ## Core loop
 
@@ -41,6 +43,10 @@ calls. Rules that govern every call:
   `page_open`. Prefer `workflow_observe` for context: it answers from
   retained page memory first and only pays for a live snapshot when nothing
   is remembered.
+- On success, `intent_follow`, `intent_submit_and_verify`, `intent_complete_form`,
+  and a Boundary `click` already return `postState` — the same compact
+  observation `workflow_observe` would; read it from the result and call
+  `workflow_observe` only when it is absent.
 - **Read before write.** On a site this runtime has seen before, `context_ask`
   first — a remembered answer (marked `persisted`) beats a snapshot.
   Otherwise `a11y_snapshot`, and pass its targets straight into intent or
@@ -65,15 +71,29 @@ calls. Rules that govern every call:
 - Form with multiple fields: one `intent_complete_form` (fields resolve
   just-in-time; include conditional fields after their revealer even if
   initially absent) — never a `intent_fill` per field unless fields must
-  resolve in reaction to each other.
+  resolve in reaction to each other. A field that only exists after
+  submitting the fields filled so far (an MFA code shown once email and
+  password are submitted) still belongs in the same call: give it
+  `revealedBy` hints naming the control to click first (defaults to
+  `role: "button"`); the runtime clicks it and waits for the field before
+  filling it — no separate submit-then-refill round trip.
 - Submit: `intent_submit_and_verify` with an `expectedState` that only holds
   after the submit (a confirmation id, status change, or new element).
+- **A cookie-banner-then-credentials-then-MFA sign-in gate is three calls,
+  not seven:** `intent_follow` the cookie-accept control, one
+  `intent_complete_form` with email + password + the MFA code (the code
+  field carries `revealedBy` naming the sign-in submit button), then one
+  `intent_submit_and_verify` on the verify control with `expectedState`
+  proving authentication. Each call already verifies its own effect before
+  returning `completed`; a `workflow_observe` between them re-checks
+  nothing new.
 - Data out: `intent_extract` (named fields, per-field errors) or
   `extract_structured` (schema-shaped JSON via vision — needs `vision:assist`).
 - A popup/overlay blocks the page: `intent_dismiss_obstruction`.
 - **A captcha or verification widget blocks the page:**
-  `intent_detect_challenge` (also advertised in explore) classifies it
-  read-only; `intent_solve_challenge` runs the vision solve loop. Both need
+  `intent_detect_challenge` (widen to `intent` or `full` with
+  `toolset_select`) classifies it read-only; `intent_solve_challenge` runs
+  the vision solve loop. Both need
   `vision:assist` plus the session's `executionPolicy.visionAssist` — the
   capability alone is not enough. The runtime never bypasses a challenge;
   when the solve loop cannot clear it, surface the page to the operator.
