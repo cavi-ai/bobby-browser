@@ -30,9 +30,11 @@ calls. Rules that govern every call:
    tool schemas behind a tool search, issue ONE search selecting every tool
    the task will need (`select:` accepts a comma-separated list) — each extra
    round trip is a full model turn. The explore toolset already advertises
-   the standard loop (observe, navigate, click, type, upload, dialogs,
-   downloads, `intent_follow`, `intent_complete_form`, `intent_submit_and_verify`,
-   `intent_detect_challenge`); search only for what is genuinely missing.
+   the standard loop (observe via `a11y_snapshot`, navigate, click, type,
+   upload, `intent_follow`, `intent_complete_form`, `intent_submit_and_verify`);
+   `dialog`, `download_url`, `screenshot`, `cookie_get`, `intent_detect_challenge`,
+   and the rest widen through `toolset_select`. Search only for what is
+   genuinely missing.
 
 ## Core loop
 
@@ -72,8 +74,9 @@ calls. Rules that govern every call:
   `extract_structured` (schema-shaped JSON via vision — needs `vision:assist`).
 - A popup/overlay blocks the page: `intent_dismiss_obstruction`.
 - **A captcha or verification widget blocks the page:**
-  `intent_detect_challenge` (also advertised in explore) classifies it
-  read-only; `intent_solve_challenge` runs the vision solve loop. Both need
+  `intent_detect_challenge` (widen to `intent` or `full` with
+  `toolset_select`) classifies it read-only; `intent_solve_challenge` runs
+  the vision solve loop. Both need
   `vision:assist` plus the session's `executionPolicy.visionAssist` — the
   capability alone is not enough. The runtime never bypasses a challenge;
   when the solve loop cannot clear it, surface the page to the operator.

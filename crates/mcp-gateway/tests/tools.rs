@@ -4261,12 +4261,12 @@ async fn download_url_requires_and_threads_a_page_id() {
             .any(|branch| branch["required"] == json!(["sessionId", "pageId", "workflowId"])),
         "download_url must advertise pageId as required: {tool}"
     );
-    assert!(
-        tool["inputSchema"]["oneOf"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|branch| branch["properties"]["saveAs"] == json!({"oneOf":[{"type":"string","minLength":1,"maxLength":4096},{"type":"null"}]})),
+    // `saveAs` is declared once, in the schema's own top-level `properties`;
+    // it applies under both oneOf scope branches without being restated in
+    // either (see `apply_workflow_scope_advertisement`).
+    assert_eq!(
+        tool["inputSchema"]["properties"]["saveAs"],
+        json!({"oneOf":[{"type":"string","minLength":1,"maxLength":4096},{"type":"null"}]}),
         "download_url must advertise optional saveAs: {tool}"
     );
 
