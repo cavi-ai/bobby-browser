@@ -568,7 +568,16 @@ async fn cancelled_boundary_recovery_persists_receipt_without_duplicate_click() 
         attempt_id,
         session_id,
         page_id: Some(page.id.clone()),
-        deadline: Utc::now() + Duration::milliseconds(200),
+        // Generous total deadline: each recovery tactic below is separately
+        // capped at 20ms (see `SkillZigZagZig::new` below), so this envelope
+        // deadline governs only the outer `remaining_duration` check. A tight
+        // 200ms value left no slack for scheduling delay under sibling
+        // contention (workspace-parallel runs): `first` could get polled for
+        // the first time only after its own deadline had already elapsed,
+        // finishing without ever calling `inspect`, which left the busy-wait
+        // loop below spinning forever waiting for a count that would never
+        // increase.
+        deadline: Utc::now() + Duration::seconds(5),
         command: RuntimeCommand::Primitive(PrimitiveCommand::Click(ClickCommand {
             selector: "#purchase".into(),
             target: None,
@@ -583,28 +592,47 @@ async fn cancelled_boundary_recovery_persists_receipt_without_duplicate_click() 
         let page = page.clone();
         async move { coordinator.execute_with_adaptation(&envelope, page).await }
     });
-    while inspections.load(Ordering::SeqCst) == 0 {
-        tokio::task::yield_now().await;
-    }
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while inspections.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first attempt must call inspect within the post-click budget");
     first.abort();
+
+    // Under heavy sibling contention (workspace-parallel runs), the aborted
+    // task's cleanup can be scheduled late. Bound every post-abort call so a
+    // regression here fails loudly in seconds instead of hanging the whole
+    // `cargo test` invocation.
+    const POST_ABORT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 
     let mut different = envelope.clone();
     different.command_id = CommandId::new();
-    let mismatch = coordinator
-        .execute_with_adaptation(&different, page.clone())
-        .await
-        .unwrap_err();
+    let mismatch = tokio::time::timeout(
+        POST_ABORT_BUDGET,
+        coordinator.execute_with_adaptation(&different, page.clone()),
+    )
+    .await
+    .expect("mismatched command must not hang past the post-abort budget")
+    .unwrap_err();
     assert_eq!(mismatch.code, ErrorCode::InvalidRequest);
     assert_eq!(mutations.load(Ordering::SeqCst), 1);
 
-    let execution = coordinator
-        .execute_with_adaptation(&envelope, page.clone())
-        .await
-        .unwrap();
-    let replayed = coordinator
-        .execute_with_adaptation(&envelope, page)
-        .await
-        .unwrap();
+    let execution = tokio::time::timeout(
+        POST_ABORT_BUDGET,
+        coordinator.execute_with_adaptation(&envelope, page.clone()),
+    )
+    .await
+    .expect("replay after abort must not hang past the post-abort budget")
+    .unwrap();
+    let replayed = tokio::time::timeout(
+        POST_ABORT_BUDGET,
+        coordinator.execute_with_adaptation(&envelope, page),
+    )
+    .await
+    .expect("second replay after abort must not hang past the post-abort budget")
+    .unwrap();
 
     assert_eq!(mutations.load(Ordering::SeqCst), 1);
     assert_eq!(launches.load(Ordering::SeqCst), 1);

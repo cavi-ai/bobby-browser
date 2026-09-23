@@ -19,6 +19,33 @@ fn owned_task_error(error: tokio::task::JoinError) -> CommandError {
     )
 }
 
+/// Wraps a spawned task's `JoinHandle` and aborts the task on drop if it has
+/// not finished. `tokio::spawn` detaches its task from the handle -- dropping
+/// a `JoinHandle` alone never stops the task. Without this, an owned-pool
+/// tactic that outran its budget (or whose caller was itself cancelled, e.g.
+/// by `JoinHandle::abort` on the coordinator call) kept running in the
+/// background, holding `stabilization_gate` and a worker-pool lease
+/// indefinitely and wedging every later call on the same coordinator.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> std::future::Future for AbortOnDrop<T> {
+    type Output = Result<T, tokio::task::JoinError>;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        std::pin::Pin::new(&mut this.0).poll(cx)
+    }
+}
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 pub(super) fn is_owned_recovery_tactic(tactic: SkillTactic) -> bool {
     matches!(
         tactic,
@@ -279,12 +306,12 @@ impl SkillRecoveryCoordinator {
         let coordinator = self.clone();
         let owned_decision = decision.clone();
         let owned_envelope = envelope.clone();
-        let mut pool_phase = tokio::spawn(async move {
+        let mut pool_phase = AbortOnDrop(tokio::spawn(async move {
             let _stabilization = coordinator.stabilization_gate.lock().await;
             coordinator
                 .prepare_owned_pool_tactic(&owned_decision, &owned_envelope, checkpoint)
                 .await
-        });
+        }));
 
         let prepared = match tokio::time::timeout(budget, &mut pool_phase).await {
             Ok(joined) => joined.map_err(owned_task_error)??,
