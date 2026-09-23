@@ -199,6 +199,56 @@ async fn the_full_surface_has_room_for_at_least_one_more_small_tool() {
     );
 }
 
+/// Phase 2 slice C1: the fixed cost of every call is the catalog an agent
+/// re-downloads on every `tools/list`. These ceilings are half (explore) and
+/// two thirds (full) of the pre-diet sizes measured on 7bdb7948 (75,648 and
+/// 115,089 bytes).
+const EXPLORE_BYTE_CEILING: usize = 32 * 1024;
+const FULL_BYTE_CEILING: usize = 80 * 1024;
+
+#[tokio::test]
+async fn explore_and_full_catalogs_stay_under_the_diet_ceilings() {
+    let server = server().await;
+    let full = bytes(&list_tools(&server).await);
+
+    select(&server, Toolset::Explore).await;
+    let explore_tools = list_tools(&server).await;
+    let explore = bytes(&explore_tools);
+
+    // Breakdown computed unconditionally (cheap, small N) so a failure message
+    // names the offenders instead of just the totals.
+    let mut sizes = explore_tools
+        .iter()
+        .map(|tool| {
+            (
+                serde_json::to_string(tool).expect("serializable").len(),
+                tool["name"].as_str().unwrap_or("?").to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    sizes.sort_unstable();
+    sizes.reverse();
+    let breakdown = sizes
+        .iter()
+        .map(|(size, name)| format!("{name}={size}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    println!(
+        "explore: {explore} bytes (ceiling {EXPLORE_BYTE_CEILING}); \
+         full: {full} bytes (ceiling {FULL_BYTE_CEILING})"
+    );
+
+    assert!(
+        explore <= EXPLORE_BYTE_CEILING,
+        "explore tools/list is {explore} bytes, over the {EXPLORE_BYTE_CEILING} byte \
+         ceiling: {breakdown}"
+    );
+    assert!(
+        full <= FULL_BYTE_CEILING,
+        "full tools/list is {full} bytes, over the {FULL_BYTE_CEILING} byte ceiling"
+    );
+}
+
 #[tokio::test]
 async fn selecting_a_phase_changes_what_is_advertised() {
     let server = server().await;

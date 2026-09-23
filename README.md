@@ -13,13 +13,13 @@ An agent pays for every token it reads and every round trip it makes. The
 runtime is shaped around both.
 
 **A catalog you can afford.** `tools/list` opens on a phase, not the whole
-surface. The default `explore` phase is 63 KiB and already covers the
-standard loop — observe, navigate, click, type, upload, download — so there
-is no `toolset_select` before the first action; `full` is 124 KiB.
-`toolset_select` widens at any time, and hidden tools stay callable —
-phases change what is advertised, never what is permitted. Capability gates
-remain the only enforcement boundary. Set the opening phase with
-`BOBBY_MCP_TOOLSET` or `[mcp] startup_toolset`.
+surface. The default `explore` phase is under 32 KiB and already covers the
+standard loop — observe, navigate, click, type, upload, complete and submit
+a form — so there is no `toolset_select` before the first action; `full` is
+under 80 KiB. `toolset_select` widens at any time, and hidden tools stay
+callable — phases change what is advertised, never what is permitted.
+Capability gates remain the only enforcement boundary. Set the opening phase
+with `BOBBY_MCP_TOOLSET` or `[mcp] startup_toolset`.
 
 **Say what you want, not how to click it.** Intents take a purpose — "the
 submit button", "the email field" — and resolve it against the accessibility

@@ -617,25 +617,30 @@ pub(crate) fn apply_runtime_tool_limits(name: &str, schema: &mut Value, max_down
     if name != "download_url" {
         return;
     }
-    let maximum = json!(max_download_bytes);
-    schema["properties"]["maxBytes"]["maximum"] = maximum.clone();
-    if let Some(branches) = schema.get_mut("oneOf").and_then(Value::as_array_mut) {
-        for branch in branches {
-            branch["properties"]["maxBytes"]["maximum"] = maximum.clone();
-        }
-    }
+    // The oneOf scope branches no longer restate `maxBytes` (see
+    // `apply_workflow_scope_advertisement`); the top-level `properties` entry
+    // applies regardless of which branch an instance matches, so patching it
+    // alone is enough.
+    schema["properties"]["maxBytes"]["maximum"] = json!(max_download_bytes);
 }
 
 /// Adds the handle alternative only to the advertised schema. The dispatcher
 /// continues to validate normalized explicit ids against `tool_schema`.
+///
+/// Only the scope keys (`workflowHandle` vs. `sessionId`/`pageId`/`workflowId`)
+/// differ between the two forms a call can take. Every other property is
+/// already declared once in the schema's own top-level `properties`, and a
+/// JSON Schema `oneOf` branch constrains only the keys it names -- so cloning
+/// the full business property set into each branch (the pre-diet shape) added
+/// two extra copies of it to every scoped tool's advertised schema for no
+/// validation gain: `tools/call` never reaches this shape, since
+/// `normalize_arguments` (`workflow_handles.rs`) resolves a handle to explicit
+/// ids before `tool_schema` (the real validation schema, which has no
+/// `workflowHandle` at all) ever sees the call.
 fn apply_workflow_scope_advertisement(name: &str, schema: &mut Value) {
     let Some(scope) = workflow_scope_for_tool(name) else {
         return;
     };
-    let business_properties = schema["properties"]
-        .as_object()
-        .expect("tool schemas have object properties")
-        .clone();
     let properties = schema["properties"]
         .as_object_mut()
         .expect("tool schemas have object properties");
@@ -650,22 +655,19 @@ fn apply_workflow_scope_advertisement(name: &str, schema: &mut Value) {
         WorkflowScope::SessionPage => json!(["sessionId", "pageId"]),
         WorkflowScope::SessionPageWorkflow => json!(["sessionId", "pageId", "workflowId"]),
     };
-    let mut handle_properties = business_properties.clone();
-    handle_properties.insert("workflowHandle".to_owned(), json!({"$ref":"#/$defs/H"}));
-    handle_properties.insert("sessionId".to_owned(), Value::Bool(false));
-    handle_properties.insert("pageId".to_owned(), Value::Bool(false));
-    handle_properties.insert("workflowId".to_owned(), Value::Bool(false));
-
-    let mut explicit_properties = business_properties;
-    explicit_properties.insert("workflowHandle".to_owned(), Value::Bool(false));
     schema["oneOf"] = json!([
         {
             "required":["workflowHandle"],
-            "properties":handle_properties
+            "properties":{
+                "workflowHandle":{"$ref":"#/$defs/H"},
+                "sessionId":false,
+                "pageId":false,
+                "workflowId":false
+            }
         },
         {
             "required":explicit_required,
-            "properties":explicit_properties
+            "properties":{"workflowHandle":false}
         }
     ]);
 }
@@ -676,8 +678,7 @@ fn workflow_handle() -> Value {
     json!({
         "type":"string",
         "minLength":35,
-        "maxLength":35,
-        "description":"wf_ + 32 lowercase hex."
+        "maxLength":35
     })
 }
 
@@ -701,30 +702,61 @@ fn apply_advertised_input_patches(patched: &mut Map<String, Value>) {
     );
     patched.insert(
         "WaitCondition".to_owned(),
-        // Not opaque: an agent must be able to author a condition without
-        // guessing `kind` tags. Tags, required fields, and enums are real;
-        // nested shapes (`target`, `matcher`) stay generic — the full union
-        // is enforced at tools/call. Closed with the full property list per
-        // variant, per the repo's advertised-schema invariant.
-        json!({"oneOf":[
-            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"element"},"target":{"type":"object"},"state":{"type":"string","enum":["attached","detached","visible","hidden","enabled","disabled"]}},"required":["kind","target","state"]},
-            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"text"},"target":{"type":"object"},"matcher":{"$ref":"#/$defs/TextMatch"}},"required":["kind","target","matcher"]},
-            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"value"},"target":{"type":"object"},"matcher":{"$ref":"#/$defs/TextMatch"}},"required":["kind","target","matcher"]},
-            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"url"},"matcher":{"$ref":"#/$defs/TextMatch"}},"required":["kind","matcher"]},
-            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"document"},"ready":{"type":"string","enum":["commit","domContentLoaded","interactive","networkIdle"]}},"required":["kind","ready"]},
-            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"networkQuiet"},"idleMs":{"type":"integer"},"maxInFlight":{"type":"integer"},"ignoreUrlSubstrings":{"type":"array"},"ignoreResourceTypes":{"type":"array"},"ignoreLongLived":{"type":"boolean"}},"required":["kind","idleMs","maxInFlight"]}
-        ]}),
+        // Opaque, like `TargetSpec`: the `kind` tags are named in the
+        // description instead of a full oneOf, since spelling out every
+        // variant's required fields and enums here (the pre-diet shape) cost
+        // ~1.3 KB and is `wait_for`'s only reachable use of `TextMatch` too.
+        // Full shape enforced at tools/call.
+        json!({
+            "type":"object",
+            "description":"kind=element|text|value|url|document|networkQuiet; full shape enforced at tools/call."
+        }),
     );
     patched.insert(
         "TargetSpec".to_owned(),
         json!({
             "type":"object",
-            "description":"Resolved target or selector path. Full TargetSpec enforced at tools/call."
+            "description":"Resolved target or selector; full shape enforced at tools/call."
         }),
     );
     patched.insert(
         "ScreenshotMode".to_owned(),
         json!({"oneOf": screenshot_modes()}),
+    );
+    patched.insert(
+        "ControlActionKind".to_owned(),
+        json!({
+            "type":"object",
+            "description":"kind=setText|setChecked|selectOne|selectMany|setFiles|clear|activate; full shape enforced at tools/call."
+        }),
+    );
+    patched.insert(
+        "ControlTarget".to_owned(),
+        json!({
+            "type":"object",
+            "description":"role + accessibleName suffice; frame/shadow hops default to empty. Full shape enforced at tools/call."
+        }),
+    );
+    patched.insert(
+        "FillValue".to_owned(),
+        json!({
+            "type":"object",
+            "description":"kind=setText|setChecked|selectOne|selectMany|setFiles|clear; full shape enforced at tools/call."
+        }),
+    );
+    // `upload_files`/`intent_submit_and_verify`/`intent_follow` only ever use
+    // this as an optional post-action check; the tool they are about is not
+    // "author a wait condition" (that is `wait_for`, which keeps the full
+    // `WaitCondition` detail on its own `condition` field via the reachability
+    // walk above). Opacifying it here drops `WaitCondition` + `TextMatch`
+    // (~1.8 KB) from those three tools' advertised `$defs` entirely; the full
+    // shape is still enforced at `tools/call` through `tool_schema`.
+    patched.insert(
+        "WaitForCommand".to_owned(),
+        json!({
+            "type":"object",
+            "description":"Post-action wait condition; full shape enforced at tools/call."
+        }),
     );
 }
 
@@ -3243,14 +3275,26 @@ mod tests {
     }
 
     #[test]
-    fn workflow_scope_branches_repeat_business_properties_and_keep_parent_requirements() {
+    fn workflow_scope_branches_declare_business_properties_once_at_the_parent() {
+        // The pre-diet shape cloned every business property into both oneOf
+        // branches -- three copies of the same schema per tool for no
+        // validation gain, since `tools/call` never reaches this shape
+        // (`normalize_arguments` resolves a handle to explicit ids before
+        // `tool_schema`, which has no `workflowHandle` at all, ever sees the
+        // call). A JSON Schema `oneOf` branch constrains only the keys it
+        // names; every other key stays governed by the schema's own
+        // top-level `properties`, so declaring it once is equivalent and the
+        // branches now carry only the scope keys.
         for (name, business_property) in [
             ("navigate", "url"),
             ("intent_fill", "value"),
             ("wait_for", "condition"),
         ] {
             let schema = advertised_tool_schema(name);
-            let expected = schema["properties"][business_property].clone();
+            assert!(
+                schema["properties"][business_property].is_object(),
+                "{name} declares {business_property} at the parent"
+            );
             assert!(
                 schema["required"]
                     .as_array()
@@ -3259,9 +3303,9 @@ mod tests {
                 "{name} keeps {business_property} required at the parent"
             );
             for branch in schema["oneOf"].as_array().expect("scope branches") {
-                assert_eq!(
-                    branch["properties"][business_property], expected,
-                    "{name} branch carries {business_property}'s full schema"
+                assert!(
+                    branch["properties"].get(business_property).is_none(),
+                    "{name} branch restates {business_property}, duplicating the parent schema"
                 );
             }
         }

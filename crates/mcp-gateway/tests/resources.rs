@@ -289,6 +289,16 @@ async fn create_session_page(server: &Server) -> (SessionId, PageId) {
 #[tokio::test]
 async fn download_tool_advertises_the_runtime_configured_byte_limit() {
     let (server, _root) = fixture().await;
+    // `download_url` narrowed out of the default `explore` catalog (Phase 2
+    // slice C1); it is still fully callable, just advertised in `act`.
+    server
+        .handle_message(request(
+            1,
+            "tools/call",
+            json!({"name":"toolset_select","arguments":{"toolset":"act"}}),
+        ))
+        .await
+        .expect("toolset_select response");
     let listed = server
         .handle_message(request(2, "tools/list", json!({})))
         .await
@@ -300,12 +310,13 @@ async fn download_tool_advertises_the_runtime_configured_byte_limit() {
         .find(|tool| tool["name"] == "download_url")
         .expect("download_url is advertised");
 
-    for branch in download["inputSchema"]["oneOf"]
-        .as_array()
-        .expect("workflow scope branches")
-    {
-        assert_eq!(branch["properties"]["maxBytes"]["maximum"], 4096);
-    }
+    // `maxBytes` is declared once, in the schema's own top-level `properties`;
+    // it applies under both oneOf scope branches without being restated in
+    // either (see `apply_workflow_scope_advertisement`).
+    assert_eq!(
+        download["inputSchema"]["properties"]["maxBytes"]["maximum"],
+        4096
+    );
     assert!(
         download["description"]
             .as_str()
