@@ -2653,6 +2653,119 @@ async fn wait_for_url_uses_exact_bounded_matcher_semantics() {
     ));
 }
 
+fn ambiguous_status_control(css_path: &str) -> ExtensionControl {
+    ExtensionControl {
+        css_path: css_path.into(),
+        test_id: None,
+        role: Some("status".into()),
+        name: None,
+        label: None,
+        value: None,
+        attributes: BTreeMap::new(),
+        disabled: false,
+    }
+}
+
+fn detached_error() -> CommandError {
+    CommandError {
+        code: ErrorCode::BrowserCommandFailed,
+        message: "Error: target detached".into(),
+        layer: ErrorLayer::Driver,
+        retryable: false,
+    }
+}
+
+/// Firefox sibling of the Chromium `resolve_ambiguous_wait_values` fix: a
+/// `Text` wait whose target matches more than one candidate must not fail
+/// the whole wait when one candidate's `script.evaluate` read fails (e.g. it
+/// detached between ranking and the read) — it must skip that candidate and
+/// let the others decide. Two controls share the same role so the target is
+/// ambiguous; `#gone`'s read is scripted to fail, `#keep`'s succeeds with
+/// the wanted text.
+#[tokio::test]
+async fn wait_for_text_skips_an_ambiguous_candidate_whose_read_fails() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Err(detached_error()),
+        Ok(json!({"result": {"type": "string", "value": "Step 2 of 3"}})),
+    ]);
+    let mut ambiguous = observation();
+    ambiguous.controls = vec![
+        ambiguous_status_control("#gone"),
+        ambiguous_status_control("#keep"),
+    ];
+    let worker = worker(bidi, FakeObserver::new(ambiguous)).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    let evidence = worker
+        .wait_for(
+            &page,
+            &WaitForCommand {
+                condition: WaitCondition::Text {
+                    target: Box::new(TargetSpec {
+                        role: Some("status".into()),
+                        ..TargetSpec::default()
+                    }),
+                    matcher: TextMatch::Contains("Step 2 of 3".into()),
+                },
+                timeout_ms: 100,
+            },
+        )
+        .await
+        .unwrap();
+
+    match &evidence[0] {
+        Evidence::Wait { observed, .. } => {
+            assert_eq!(observed.as_deref(), Some("Step 2 of 3"));
+        }
+        other => panic!("expected Evidence::Wait, got {other:?}"),
+    }
+}
+
+/// Same race, but every ambiguous candidate's read fails. The wait must
+/// keep polling — reporting "not yet satisfied" — instead of surfacing the
+/// per-candidate read error, and time out normally like any other
+/// unsatisfied wait.
+#[tokio::test]
+async fn wait_for_text_times_out_instead_of_failing_when_every_ambiguous_candidate_read_fails() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Err(detached_error()),
+        Err(detached_error()),
+    ]);
+    let mut ambiguous = observation();
+    ambiguous.controls = vec![
+        ambiguous_status_control("#gone1"),
+        ambiguous_status_control("#gone2"),
+    ];
+    let worker = worker(bidi, FakeObserver::new(ambiguous)).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    let error = worker
+        .wait_for(
+            &page,
+            &WaitForCommand {
+                condition: WaitCondition::Text {
+                    target: Box::new(TargetSpec {
+                        role: Some("status".into()),
+                        ..TargetSpec::default()
+                    }),
+                    matcher: TextMatch::Contains("Step 2 of 3".into()),
+                },
+                timeout_ms: 60,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.code,
+        ErrorCode::WaitConditionTimedOut,
+        "every candidate failing to read must time out, not fail with {error:?}"
+    );
+}
+
 fn network_quiet_wait(timeout_ms: u64) -> WaitForCommand {
     WaitForCommand {
         condition: WaitCondition::NetworkQuiet {

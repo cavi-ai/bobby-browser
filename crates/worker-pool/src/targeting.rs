@@ -1052,8 +1052,10 @@ pub async fn resolve_target_with_visibility(
 /// For a `Text`/`Value` wait whose target matches more than one candidate:
 /// reads every ranked candidate's live innerText/value instead of erroring
 /// with `TargetAmbiguous`, so the caller's matcher (not identity) decides
-/// which one satisfies the wait. Returns them best-ranked first; an empty
-/// result means no attached (and, if required, visible) candidate remained,
+/// which one satisfies the wait. Returns them best-ranked first; a candidate
+/// whose read fails (e.g. it detached between ranking and the read) is
+/// skipped rather than failing the whole call. An empty result means no
+/// attached (and, if required, visible) candidate could be read at all,
 /// which the caller treats the same as `TargetNotFound` (keep polling).
 pub async fn resolve_ambiguous_wait_values(
     page: &Page,
@@ -1096,8 +1098,24 @@ pub async fn resolve_ambiguous_wait_values(
             id: candidate.id.clone(),
         };
         let expression = locator_expression(&locator, operation)?;
-        let value: String = eval_scoped(&scope.execution_page, &locator.scope, expression).await?;
-        values.push(value);
+        let read: Result<String, CommandError> =
+            eval_scoped(&scope.execution_page, &locator.scope, expression).await;
+        match read {
+            Ok(value) => values.push(value),
+            // A candidate that matched at collection time can detach (or the
+            // page can re-render it away) before its value is read on this
+            // same poll. That is "this candidate did not match on this
+            // poll", not a wait failure: skip it and let the remaining
+            // candidates — or the next poll, if every candidate here failed
+            // — decide.
+            Err(error) => {
+                tracing::debug!(
+                    candidate_id = %candidate.id,
+                    error = %error.message,
+                    "skipping ambiguous wait candidate that failed to read"
+                );
+            }
+        }
     }
     Ok(values)
 }

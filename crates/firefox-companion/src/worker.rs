@@ -4332,12 +4332,32 @@ impl BrowserWorker for FirefoxCompanionWorker {
                                             "document.querySelector({selector_json})?.innerText ?? ''"
                                         )
                                     };
-                                    let response = self.transport.send("script.evaluate", json!({
+                                    let response = match self.transport.send("script.evaluate", json!({
                                         "expression": read,
                                         "target": {"context": selector_context, "sandbox": COMPANION_SANDBOX},
                                         "awaitPromise": false,
                                         "resultOwnership": "none",
-                                    })).await?;
+                                    })).await {
+                                        Ok(response) => response,
+                                        // A candidate that matched at
+                                        // collection time can detach (or the
+                                        // page can re-render it away) before
+                                        // its value is read on this same
+                                        // poll. That is "this candidate did
+                                        // not match on this poll", not a
+                                        // wait failure: skip it and let the
+                                        // remaining selectors — or the next
+                                        // poll, if every selector here
+                                        // failed — decide.
+                                        Err(error) => {
+                                            tracing::debug!(
+                                                selector = %selector,
+                                                error = %error.message,
+                                                "skipping ambiguous wait selector that failed to read"
+                                            );
+                                            continue;
+                                        }
+                                    };
                                     observed = response
                                         .pointer("/result/value")
                                         .and_then(Value::as_str)
