@@ -82,6 +82,14 @@ def python_package_version(expected: str) -> list[str]:
         return [f"{path.relative_to(REPO)}: no [project] version declared"]
     if match.group(1) != expected:
         return [f"bobby-browser (python): {match.group(1)} != {expected}"]
+    init = REPO / "packages" / "python-sdk" / "bobby_browser" / "__init__.py"
+    if not init.is_file():
+        return [f"{init.relative_to(REPO)}: missing"]
+    match = re.search(r'^__version__ = "([^"]+)"', init.read_text(), re.M)
+    if not match:
+        return [f"{init.relative_to(REPO)}: no __version__ declared"]
+    if match.group(1) != expected:
+        return [f"bobby_browser.__version__: {match.group(1)} != {expected}"]
     return []
 
 
