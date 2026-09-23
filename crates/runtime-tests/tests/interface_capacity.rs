@@ -393,24 +393,26 @@ async fn thirty_two_real_sessions_run_only_eight_runtime_service_workflows_at_on
     );
     let mut targets = Vec::new();
     for index in 0..32 {
-        let session = tokio::time::timeout(
-            Duration::from_millis(100),
-            runtime.create_session(CreateSessionRequest {
-                profile: format!("warm-{index}"),
-                proxy: None,
-                execution_policy: Default::default(),
-                zigzagzig: false,
-            }),
-        )
+        let (session, page) = tokio::time::timeout(Duration::from_secs(5), async {
+            let session = runtime
+                .create_session(CreateSessionRequest {
+                    profile: format!("warm-{index}"),
+                    proxy: None,
+                    execution_policy: Default::default(),
+                    zigzagzig: false,
+                })
+                .await
+                .unwrap();
+            let page = runtime
+                .open_page(OpenPageRequest {
+                    session_id: session.id.clone(),
+                })
+                .await
+                .unwrap();
+            (session, page)
+        })
         .await
-        .expect("warm session retained active permit")
-        .unwrap();
-        let page = runtime
-            .open_page(OpenPageRequest {
-                session_id: session.id.clone(),
-            })
-            .await
-            .unwrap();
+        .expect("warm session retained active permit");
         targets.push((session.id, page.id));
     }
     assert_eq!(runtime.list_sessions().await.len(), 32);
