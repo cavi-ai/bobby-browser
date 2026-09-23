@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- `intent_submit_and_verify`: a pre-satisfied `expectedState` (the matcher
+  already holds before the act runs, so nothing is clicked) now reports
+  plain `failed` with `expectedStatePreSatisfied`, not
+  `needsReconciliation`, so the boundary-once ledger no longer records the
+  attempt and a corrected `expectedState` resubmits without `reSubmit: true`.
 - A `wait_for`/post-click `Text` or `Value` wait whose target matches more
   than one candidate no longer fails with `targetAmbiguous`: the matcher
   now runs against every ranked candidate's live text/value, and the wait

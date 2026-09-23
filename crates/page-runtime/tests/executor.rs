@@ -1665,6 +1665,89 @@ async fn boundary_wait_timeout_is_failed_not_needs_reconciliation() {
     assert!(error.message.contains("click landed"), "{error:?}");
 }
 
+/// A pre-satisfied expected state means the matcher hit static page copy
+/// before the submit ran; nothing was clicked, so the effect provably never
+/// landed. Keep it a plain `failed` (fix expectedState, then resubmit)
+/// instead of `needsReconciliation` (never-retry recovery), which would
+/// force the caller into `recovery_status`/`workflow_recover` for an act
+/// that never happened.
+#[tokio::test]
+async fn expected_state_pre_satisfied_is_failed_not_needs_reconciliation() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let journal = Arc::new(RecordingJournal {
+        events: events.clone(),
+        fail_on: None,
+        pause_on: None,
+        paused: Arc::new(tokio::sync::Notify::new()),
+        resume: Arc::new(tokio::sync::Notify::new()),
+    });
+    let workers = Arc::new(WorkerPool::new(
+        1,
+        Arc::new(FakeFactory {
+            events: events.clone(),
+            mode: DriverMode::Succeed,
+            launches: Default::default(),
+        }),
+    ));
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let runtime = page_runtime::PageRuntime::new_with_checkpoints(journal, workers, store.clone());
+    let session = SessionId::new();
+    let page = runtime.open_browser(session.clone()).await.unwrap();
+    let submit = IntentCommand::SubmitAndVerify(SubmitAndVerifyIntent {
+        purpose: "Save priority".into(),
+        hints: IntentHints {
+            role: Some("button".into()),
+            accessible_name: Some("Save".into()),
+            ..IntentHints::default()
+        },
+        expected_state: WaitForCommand {
+            condition: WaitCondition::Text {
+                target: Box::new(TargetSpec {
+                    role: Some("main".into()),
+                    ..TargetSpec::default()
+                }),
+                matcher: TextMatch::Contains("preview".into()),
+            },
+            timeout_ms: 1_000,
+        },
+    });
+    let request = intent_envelope(session.clone(), page.id.clone(), submit);
+    store
+        .save(&WorkflowCheckpoint {
+            schema_version: WorkflowCheckpoint::SCHEMA_VERSION,
+            checkpoint_id: CheckpointId::new(),
+            workflow_id: request.workflow_id.clone(),
+            attempt_id: request.attempt_id.clone(),
+            session_id: session,
+            page_id: page.id,
+            restart_url: "https://example.test/".into(),
+            current_url: "https://example.test/".into(),
+            cursor: None,
+            boundary_command_id: Some(request.command_id.clone()),
+            recovery_class: CommandClass::Boundary,
+            invariants: Vec::new(),
+            replayable_inputs: Vec::new(),
+            evidence: Vec::new(),
+            recovery_history: Vec::new(),
+            recovery_receipts: Vec::new(),
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+    let outcome = runtime.execute(request).await;
+    let CommandOutcome::Failed { error, .. } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::ExpectedStatePreSatisfied);
+    assert!(!error.retryable);
+    let observed = events.lock().await.clone();
+    assert!(
+        !observed.iter().any(|event| event == "browser:click"),
+        "nothing should be clicked when the expected state already holds: {observed:?}"
+    );
+}
+
 // A dead target during a boundary click is transient target loss: the
 // runtime revives the browser and reports a plain failed outcome that tells
 // the agent to re-issue, never needsReconciliation (the double-save trap).
