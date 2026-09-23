@@ -801,6 +801,7 @@ fn intent_commands_round_trip_and_classes() {
                 value: "a@b.co".into(),
                 clear_first: true,
             },
+            revealed_by: None,
         }],
     });
     assert_eq!(complete_form.class(), CommandClass::Reconciliable);

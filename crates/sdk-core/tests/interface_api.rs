@@ -1634,6 +1634,7 @@ fn complete_form_files_intent_envelope(session_id: SessionId) -> CommandEnvelope
                 value: ControlAction::SetFiles {
                     paths: vec!["./data/uploads/cv.pdf".into()],
                 },
+                revealed_by: None,
             }],
         })),
         ..submit_request()

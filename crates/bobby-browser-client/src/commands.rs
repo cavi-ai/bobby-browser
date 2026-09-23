@@ -156,6 +156,14 @@ pub struct CompleteFormField {
     #[serde(default)]
     pub hints: IntentHints,
     pub value: ControlAction,
+    /// Hints for a control to click before this field is resolved -- set
+    /// when the field only exists once the fields filled so far are
+    /// submitted (for example an MFA code field revealed after email and
+    /// password are submitted). Resolved and clicked the same way a
+    /// `SubmitAndVerify` button is, then this field's own target is waited
+    /// for before it is filled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revealed_by: Option<IntentHints>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

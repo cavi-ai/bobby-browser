@@ -20,6 +20,7 @@ fn compile_complete_form_preserves_order_and_rejects_duplicate_names() {
             value: name.into(),
             clear_first: true,
         },
+        revealed_by: None,
     };
     let plan = compile_intent(&IntentCommand::CompleteForm(CompleteFormIntent {
         purpose: "complete application".into(),
@@ -61,6 +62,7 @@ fn compile_complete_form_uses_field_name_when_target_hints_are_empty() {
                 value: "Ada Lovelace".into(),
                 clear_first: true,
             },
+            revealed_by: None,
         }],
     }))
     .expect("compile");

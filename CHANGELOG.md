@@ -66,6 +66,14 @@
   the `act`/`intent`/`verify` phases they already advertised in (still
   callable from `explore`; phases narrow advertisement only, never
   capability); every tool description is now one to two sentences.
+- `intent_complete_form` fields accept a new optional `revealedBy` hints
+  object naming a control to click before that field is resolved, for a
+  field that does not exist until the fields filled so far are submitted
+  (an MFA code shown after email and password are submitted). The engine
+  clicks the named control and waits for the field to become visible before
+  filling it, so a cookie-banner-then-credentials-then-MFA sign-in gate now
+  completes in three calls (`intent_follow`, one `intent_complete_form`, one
+  `intent_submit_and_verify`) instead of seven.
 
 ## 0.15.0 - 2026-09-19
 

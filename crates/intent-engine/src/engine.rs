@@ -10,10 +10,10 @@ use observability::{
 };
 use types::{
     CaptureScreenshotCommand, ClickCommand, CommandError, ControlAction, ControlActionCommand,
-    ErrorCode, ErrorLayer, Evidence, ExecutionRecord, ExtractValueKind, FormControlTarget,
-    IntentCommand, IntentResolutionPath, PageId, ScreenshotMode, SemanticTargetSegment,
-    TargetFingerprint, TargetSpec, TypeTextCommand, UploadFilesCommand, WaitCondition,
-    WaitForCommand,
+    ElementState, ErrorCode, ErrorLayer, Evidence, ExecutionRecord, ExtractValueKind,
+    FormControlTarget, IntentCommand, IntentResolutionPath, PageId, ScreenshotMode,
+    SemanticTargetSegment, TargetFingerprint, TargetSpec, TypeTextCommand, UploadFilesCommand,
+    WaitCondition, WaitForCommand,
 };
 
 use crate::compiler::{compile_intent, CompleteFormFieldPlan, ExtractFieldPlan, IntentPlan};
@@ -246,6 +246,10 @@ impl IntentEngine {
     }
 }
 
+/// How long to wait for a field revealed by `CompleteFormField::revealed_by`
+/// to become visible after its reveal control is clicked.
+const REVEAL_WAIT_TIMEOUT_MS: u64 = 10_000;
+
 async fn execute_complete_form(
     page_id: &PageId,
     browser: &dyn IntentBrowser,
@@ -255,6 +259,29 @@ async fn execute_complete_form(
     let mut evidence = Vec::new();
     proactive_prefill(page_id, browser, vision, &fields).await;
     for field in &fields {
+        if let Some(reveal_target) = &field.revealed_by {
+            match reveal_field(
+                page_id,
+                browser,
+                vision,
+                &field.purpose,
+                reveal_target,
+                &field.target,
+            )
+            .await
+            {
+                IntentOutcome::Completed {
+                    evidence: mut reveal_evidence,
+                } => evidence.append(&mut reveal_evidence),
+                IntentOutcome::Failed {
+                    error,
+                    evidence: mut fail_evidence,
+                } => {
+                    evidence.append(&mut fail_evidence);
+                    return IntentOutcome::Failed { error, evidence };
+                }
+            }
+        }
         evidence.push(Evidence::Configuration {
             name: "completeFormField".into(),
             value: field.name.clone(),
@@ -289,6 +316,185 @@ async fn execute_complete_form(
     IntentOutcome::Completed { evidence }
 }
 
+/// Click the control that reveals a `CompleteForm` field which does not
+/// exist in the DOM until the fields filled so far are submitted (for
+/// example an MFA code field shown only after email and password are
+/// submitted). Resolves `reveal_target` and clicks it the same way
+/// `SubmitAndVerify` resolves and clicks its button, then waits for
+/// `revealed_field_target` to become visible so the caller can fill it
+/// deterministically instead of racing the page.
+async fn reveal_field(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    vision: &VisionContext,
+    purpose: &str,
+    reveal_target: &TargetSpec,
+    revealed_field_target: &TargetSpec,
+) -> IntentOutcome {
+    let plan_summary = format!("reveal {}", summarize_target(reveal_target));
+    let candidates = match browser.collect_candidates(page_id, reveal_target).await {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            return non_escalating_failure(
+                error,
+                intent_evidence(execution_record(
+                    "completeForm",
+                    Some(purpose.to_owned()),
+                    plan_summary,
+                    Vec::new(),
+                    None,
+                    "revealGatherFailed",
+                )),
+            );
+        }
+    };
+
+    let decision =
+        match resolve_candidates(reveal_target, &candidates, &ResolutionPolicy::default()) {
+            Ok(decision) => decision,
+            Err(error) => {
+                return IntentOutcome::Failed {
+                    error: CommandError {
+                        code: ErrorCode::InvalidRequest,
+                        message: error.to_string(),
+                        layer: ErrorLayer::Page,
+                        retryable: false,
+                    },
+                    evidence: vec![intent_evidence(execution_record(
+                        "completeForm",
+                        Some(purpose.to_owned()),
+                        plan_summary,
+                        Vec::new(),
+                        None,
+                        "revealResolveFailed",
+                    ))],
+                };
+            }
+        };
+
+    let mut click_evidence = match decision {
+        ResolutionDecision::Resolved {
+            candidate,
+            evidence: candidate_evidence,
+            best_match_authorized,
+        } => {
+            let resolution = Evidence::Resolution {
+                target: Box::new(reveal_target.clone()),
+                fingerprint: Box::new(fingerprint(page_id, &candidate)),
+                candidates: vec![candidate_evidence.clone()],
+                best_match_authorized,
+            };
+            let (selector, action_target) = action_target(&candidate, reveal_target);
+            let click = ClickCommand {
+                selector,
+                target: Some(action_target),
+                boundary: true,
+                expected_url: None,
+                modifiers: Vec::new(),
+            };
+            match browser.click(page_id, &click).await {
+                Ok(mut evidence) => {
+                    let mut all = vec![resolution];
+                    all.append(&mut evidence);
+                    all
+                }
+                Err(error) => {
+                    return IntentOutcome::Failed {
+                        error,
+                        evidence: vec![
+                            resolution,
+                            intent_evidence(execution_record(
+                                "completeForm",
+                                Some(purpose.to_owned()),
+                                plan_summary,
+                                vec![candidate_evidence],
+                                None,
+                                "revealActFailed",
+                            )),
+                        ],
+                    };
+                }
+            }
+        }
+        ResolutionDecision::NotFound => {
+            return stuck_outcome(
+                StuckReport {
+                    intent_kind: "completeForm",
+                    kind: StuckKind::TargetMissing,
+                    purpose: Some(purpose.to_owned()),
+                    plan_summary,
+                    candidates: Vec::new(),
+                    verification: "revealTargetNotFound",
+                    fill_payload: None,
+                },
+                page_id,
+                browser,
+                vision,
+            )
+            .await;
+        }
+        ResolutionDecision::Ambiguous { candidates } => {
+            return stuck_outcome(
+                StuckReport {
+                    intent_kind: "completeForm",
+                    kind: StuckKind::TargetAmbiguous,
+                    purpose: Some(purpose.to_owned()),
+                    plan_summary,
+                    candidates,
+                    verification: "revealTargetAmbiguous",
+                    fill_payload: None,
+                },
+                page_id,
+                browser,
+                vision,
+            )
+            .await;
+        }
+    };
+
+    let wait = WaitForCommand {
+        condition: WaitCondition::Element {
+            target: Box::new(revealed_field_target.clone()),
+            state: ElementState::Visible,
+        },
+        timeout_ms: REVEAL_WAIT_TIMEOUT_MS,
+    };
+    match browser.wait_for(page_id, &wait).await {
+        Ok(mut wait_evidence) => {
+            click_evidence.append(&mut wait_evidence);
+            click_evidence.push(intent_evidence(execution_record(
+                "completeForm",
+                Some(purpose.to_owned()),
+                format!("revealed field visible timeout_ms={REVEAL_WAIT_TIMEOUT_MS}"),
+                Vec::new(),
+                None,
+                "revealed",
+            )));
+            IntentOutcome::Completed {
+                evidence: click_evidence,
+            }
+        }
+        Err(error) => {
+            let error = recode_postclick_verification_error(
+                error,
+                "reveal control clicked; revealed field did not become visible",
+            );
+            click_evidence.push(intent_evidence(execution_record(
+                "completeForm",
+                Some(purpose.to_owned()),
+                "revealed field visibility wait",
+                Vec::new(),
+                None,
+                "revealVerifyFailed",
+            )));
+            IntentOutcome::Failed {
+                error,
+                evidence: click_evidence,
+            }
+        }
+    }
+}
+
 struct PrefillRequest {
     purpose: String,
     stuck: StuckKind,
@@ -317,6 +523,11 @@ async fn proactive_prefill(
 
     let mut requests = Vec::new();
     for field in fields {
+        if field.revealed_by.is_some() {
+            // Not yet in the DOM; nothing to preflight until its reveal
+            // control is clicked in `execute_complete_form`.
+            continue;
+        }
         if proposals.proposal_for(page_id, &field.purpose).is_some() {
             continue;
         }

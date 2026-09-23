@@ -444,6 +444,7 @@ async fn run_mcp_sample(
                         value: "Ada Lovelace".into(),
                         clear_first: true,
                     },
+                    revealed_by: None,
                 }],
             })),
         },

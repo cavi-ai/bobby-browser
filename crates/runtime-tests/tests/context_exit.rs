@@ -291,7 +291,16 @@ async fn remembered_site_completes_onboarding_with_fewer_commands() {
     // Session 1, cold: discovery snapshot, then the station.
     let mut cold = Station::open(&runtime, &authed, &url).await;
     let cold_gate = cold.commands;
+    // The sign-in gate overlays this same /onboarding route and verifies its
+    // own "Work email"/"Password"/"Authentication code" fields inside
+    // `Station::open` (packages/bobby-gauntlet/src/gate.ts), so those
+    // purposes are legitimately remembered already; skip them here and keep
+    // asserting cold for every other onboarding field.
+    const GATE_VERIFIED_PURPOSES: [&str; 3] = ["Work email", "Password", "Authentication code"];
     for (purpose, _) in FIELDS {
+        if GATE_VERIFIED_PURPOSES.contains(&purpose) {
+            continue;
+        }
         assert_eq!(
             cold.ask(purpose).await,
             None,

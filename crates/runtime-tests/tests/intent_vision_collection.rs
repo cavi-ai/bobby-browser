@@ -223,6 +223,7 @@ fn stuck_form() -> IntentCommand {
                     value: "Ada".into(),
                     clear_first: true,
                 },
+                revealed_by: None,
             },
             CompleteFormField {
                 name: "last".into(),
@@ -232,6 +233,7 @@ fn stuck_form() -> IntentCommand {
                     value: "Lovelace".into(),
                     clear_first: true,
                 },
+                revealed_by: None,
             },
         ],
     })
