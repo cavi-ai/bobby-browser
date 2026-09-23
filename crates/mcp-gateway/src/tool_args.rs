@@ -255,11 +255,18 @@ intent_args!(IntentWaitForStateArgs {
     timeout_ms: u64,
 });
 
+// `expectedDestination`/`expectedState` is optional on the wire (the schema's
+// `required` list never named it -- see `schema.rs`'s `"intent_follow"` arm):
+// a caller dismissing a notification or accepting a cookie banner has no
+// destination to name. Missing entirely, it used to fail `bounded_parse` with
+// `malformedArguments` even though `validate_tool_arguments` passed -- a bound
+// enforced only by this struct, not the advertised schema. The dispatch arm
+// fills a cheap default (`document ready=commit`, short timeout) when absent.
 intent_args!(IntentFollowArgs {
     purpose: String,
     hints: Option<types::IntentHints>,
     #[serde(alias = "expectedState")]
-    expected_destination: types::WaitForCommand,
+    expected_destination: Option<types::WaitForCommand>,
     evidence_detail: Option<EvidenceDetail>,
     boundary: Option<bool>,
     auto_checkpoint: Option<bool>,
@@ -691,6 +698,22 @@ mod tests {
         both["expectedDestination"] = wait.clone();
         both["expectedState"] = wait;
         assert!(serde_json::from_value::<IntentFollowArgs>(both).is_err());
-        assert!(serde_json::from_value::<IntentFollowArgs>(base).is_err());
+    }
+
+    /// C3 rejection: the agent dismissing a notification/cookie banner sends
+    /// `intent_follow` with `purpose` + `hints` and no `expectedDestination`
+    /// at all -- a reasonable reading of the schema, whose `required` list
+    /// never named it. This used to fail `bounded_parse` with
+    /// `malformedArguments`; the dispatch arm now defaults it instead.
+    #[test]
+    fn intent_follow_accepts_omitted_expected_destination() {
+        let args = serde_json::from_value::<IntentFollowArgs>(serde_json::json!({
+            "sessionId":"00000000-0000-0000-0000-000000000001",
+            "pageId":"00000000-0000-0000-0000-000000000002",
+            "purpose":"Dismiss the Ledger Cloud syncing status notification",
+            "hints":{"role":"button","accessibleName":"Dismiss notification"}
+        }))
+        .expect("expectedDestination-less intent_follow parses");
+        assert!(args.expected_destination.is_none());
     }
 }

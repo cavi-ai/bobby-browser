@@ -308,7 +308,9 @@ impl Server {
                 let intent = types::IntentCommand::Follow(types::FollowIntent {
                     purpose: input.purpose,
                     hints: input.hints.unwrap_or_default(),
-                    expected_destination: input.expected_destination,
+                    expected_destination: input
+                        .expected_destination
+                        .unwrap_or_else(default_follow_expected_destination),
                     boundary: input.boundary.unwrap_or(false),
                 });
                 match apply_idempotency_key(&mut context, input.idempotency_key) {
@@ -435,6 +437,19 @@ impl Server {
             _ => unreachable!("dispatch_intents received a tool it does not own"),
         };
         self.finish_tool(id, result, defaulted_handle).await
+    }
+}
+
+/// `intent_follow`'s `expectedDestination` when the caller names none: the
+/// cheapest condition (`document` already at `ready=commit`, which a
+/// non-navigating dismiss/accept click leaves satisfied) on a short timeout,
+/// so a genuine navigation still gets a bounded wait instead of none at all.
+fn default_follow_expected_destination() -> types::WaitForCommand {
+    types::WaitForCommand {
+        condition: types::WaitCondition::Document {
+            ready: types::WaitUntil::Commit,
+        },
+        timeout_ms: 1_000,
     }
 }
 

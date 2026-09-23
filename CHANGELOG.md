@@ -31,6 +31,12 @@
   the closed vision gate. `visionAssistDenied` now reports only from
   `extract_structured`, `intent_solve_challenge`, and
   `intent_detect_challenge`, where vision is the operation itself.
+- `intent_follow` no longer rejects a call that omits
+  `expectedDestination`/`expectedState` with `malformedArguments`: the
+  advertised schema never listed it as required, so a caller dismissing a
+  notification or accepting a cookie banner with no destination to name is a
+  reasonable reading of the schema. The parser now accepts the omission and
+  the dispatcher fills a short `document ready=commit` default.
 
 ### Changed
 
