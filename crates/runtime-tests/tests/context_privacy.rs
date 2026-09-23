@@ -3,6 +3,11 @@
 //! afterwards every byte under the context store is scanned and the canary
 //! must be absent. The store must also be non-empty — a scan over an empty
 //! store proves nothing.
+//!
+//! The worker factory is opted into a durable Chromium profile
+//! (`.with_durable_profile`) rather than the disposable per-session default,
+//! so this canary also covers the persistent `<profiles_dir>/chromium/<id>`
+//! code path a managed-Chromium durable profile now uses in production.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -137,7 +142,10 @@ async fn typed_values_never_reach_the_context_store() {
         },
         nodes: Default::default(),
     };
-    let factory = Arc::new(ChromiumWorkerFactory::new(config.browser.clone()));
+    let factory = Arc::new(
+        ChromiumWorkerFactory::new(config.browser.clone())
+            .with_durable_profile("canary-profile".to_string()),
+    );
     let runtime = RuntimeService::build_with_context_promotion(&config, factory, "canary-profile")
         .await
         .unwrap();

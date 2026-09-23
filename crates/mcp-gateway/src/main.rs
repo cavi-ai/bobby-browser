@@ -45,9 +45,10 @@ async fn run() -> anyhow::Result<()> {
     })?;
     config.validate().map_err(anyhow::Error::msg)?;
     let (selection, _source) = firefox_companion::selection::resolve_browser_selection()?;
-    // Mirror `bobby serve`: a durable Firefox profile identity promotes
-    // verified intent outcomes into the shared context store. Agents run
-    // over stdio, so without this the remembered-site path was serve-only.
+    // Mirror `bobby serve`: a durable profile identity (Firefox companion
+    // enrollment, or a named managed-Chromium profile) promotes verified
+    // intent outcomes into the shared context store. Agents run over stdio,
+    // so without this the remembered-site path was serve-only.
     let durable_profile_id = selection.preference.durable_profile_id().map(str::to_owned);
     if durable_profile_id.is_some() && config.context.dir.is_none() {
         config.context.dir = Some(

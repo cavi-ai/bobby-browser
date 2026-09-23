@@ -50,6 +50,14 @@ one canonical order:
 A source that is present but malformed is always an error, never skipped.
 `bobby doctor` reports which source resolved.
 
+A managed-Chromium selection can opt into a durable profile the same way an
+enrolled Firefox profile does, by naming it in the exact-engine form:
+`{"mode": "exact", "engine": "chromium", "profileId": "<name>"}`. That
+persists the session's user-data-dir at `<profiles_dir>/chromium/<name>`
+instead of a disposable per-session directory, and attaches context-graph
+promotion under the same id (see `[context]` below). A managed-Chromium
+selection with no `profileId` stays disposable, unchanged.
+
 ## `[storage]`
 
 | Field | Default | Meaning |
@@ -62,9 +70,10 @@ A source that is present but malformed is always an error, never skipped.
 ## `[context]`
 
 Durable shared context graph (remembered form structure per site). Only
-runtimes whose engine selection carries a durable profile identity (Firefox
-companion enrollment) open the store; Chromium sessions read and write
-nothing.
+runtimes whose engine selection carries a durable profile identity open the
+store: a Firefox companion enrollment, or a managed-Chromium selection with an
+explicit `profileId` (see `[browser]` above). A managed-Chromium session
+without a `profileId` still reads and writes nothing.
 
 | Field | Default | Meaning |
 |---|---|---|
