@@ -484,16 +484,16 @@ compare hand-bounded `kind` variant sets to schemars output from the
 
 ## Toolset phases
 
-`tools/list` for a principal holding every capability is ~113,000 bytes. An
+`tools/list` for a principal holding every capability is ~77,000 bytes. An
 agent that only needs part of the surface can narrow it with `toolset_select`:
 
 | Phase | Contains | Payload |
 |---|---|---|
-| `explore` | read the page, navigate, wait, base controls (`click`, `click_and_wait_for_download`, `click_and_wait_for_popup`, `type_text`, `control_action`, `upload_files`, `dialog`, `download_url`), plus `intent_complete_form`, `intent_submit_and_verify`, `intent_follow`, and `intent_detect_challenge` — the standard loop with no `toolset_select` first (default) | ~73 KB |
-| `act` | escape hatches (`command_execute`, `evaluate_javascript`, `emulate`), niche mutations, and job tools | ~57 KB |
-| `intent` | the `intent_*` family and `extract_structured` | ~71 KB |
-| `verify` | evidence, checkpoints, recovery, job tools | ~37 KB |
-| `full` | everything the principal's capabilities allow (including jobs when a job port is attached) | ~113 KB |
+| `explore` | read the page (`a11y_snapshot`), navigate, base controls (`click`, `click_and_wait_for_popup`, `type_text`, `control_action`, `upload_files`), plus `intent_complete_form`, `intent_submit_and_verify`, and `intent_follow` — the standard loop with no `toolset_select` first (default) | ~33 KB |
+| `act` | escape hatches (`command_execute`, `evaluate_javascript`, `emulate`), `wait_for`, downloads, dialogs, cookies, `network_log`, and job tools | ~43 KB |
+| `intent` | the `intent_*` family (including `intent_detect_challenge`) and `extract_structured` | ~48 KB |
+| `verify` | evidence, checkpoints, recovery, job tools | ~32 KB |
+| `full` | everything the principal's capabilities allow (including jobs when a job port is attached) | ~77 KB |
 
 Session/page lifecycle, `runtime_info`, `toolset_select`, `workflow_start`, and
 `workflow_observe` appear in every phase. This includes servers configured to

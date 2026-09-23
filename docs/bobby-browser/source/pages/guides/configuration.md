@@ -95,11 +95,11 @@ bytes already paid for. Starting narrow can:
 
 | Phase | `tools/list` |
 |---|---|
-| `full` | ~127 KB |
-| `explore` | ~76 KB |
-| `verify` | ~41 KB |
-| `act` | ~69 KB |
-| `intent` | ~74 KB |
+| `full` | ~77 KB |
+| `explore` | ~33 KB |
+| `verify` | ~32 KB |
+| `act` | ~43 KB |
+| `intent` | ~48 KB |
 
 Narrowing changes only what is *advertised*. Hidden tools stay callable, and
 every phase keeps session/page lifecycle plus `toolset_select`, so an agent
