@@ -4,6 +4,15 @@
 
 ### Added
 
+- Managed Chromium can opt into a durable profile the same way an enrolled
+  Firefox companion does: `{"mode": "exact", "engine": "chromium", "profileId":
+  "<name>"}` persists the session's user-data-dir at
+  `<profiles_dir>/chromium/<name>` instead of a disposable one, and
+  `EnginePreferenceConfig::durable_profile_id` attaches context-graph
+  promotion under the same id, so `context_ask` and `bobby doctor`/`bobby
+  context list`/`forget` work for it exactly as they do for Firefox. A
+  `profileId`-less managed-Chromium selection is unchanged: disposable, reads
+  and writes nothing.
 - `intent_follow`, `intent_submit_and_verify`, `intent_complete_form`, and a
   Boundary `click` now carry `postState` on a completed result: the same
   compact observation `workflow_observe` would return for the handle's
