@@ -26,6 +26,7 @@ use agent_client_protocol::schema::v1::{
 use agent_client_protocol::{Agent, Client, ConnectionTo, Result as AcpResult, Stdio};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
+use intent_engine::vision_gate_closed;
 use interface_core::{CapabilityHandle, InterfaceResult, RuntimeInterface};
 use sdk_core::AuthenticatedRuntime;
 use tokio::sync::Mutex;
@@ -802,9 +803,7 @@ impl AcpServer {
         )?;
         match &outcome {
             CommandOutcome::Completed { .. } => Ok(PromptResponse::new(StopReason::EndTurn)),
-            CommandOutcome::Failed { error, .. }
-                if error.code == types::ErrorCode::VisionAssistDenied =>
-            {
+            CommandOutcome::Failed { error, .. } if vision_gate_closed(error) => {
                 self.maybe_escalate(
                     connection,
                     &acp_session_id,

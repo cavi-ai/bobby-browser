@@ -3563,6 +3563,16 @@ fn cached_candidate_evidence(
         .collect()
 }
 
+/// The session-level vision gate sentence, shared verbatim with
+/// [`vision_gate_closed`] so the ACP gateway can recognize a closed gate by
+/// message content when the stuck path already claimed the error code.
+pub const VISION_SESSION_GATE_MESSAGE: &str =
+    "vision assist is off for this session (executionPolicy.visionAssist)";
+
+/// The capability-level vision gate sentence, shared verbatim with
+/// [`vision_gate_closed`].
+pub const VISION_CAPABILITY_GATE_MESSAGE: &str = "the principal lacks the vision:assist capability";
+
 /// The `visionAssistDenied` message leads with the deterministic stuck
 /// reason (the actionable part: which target was missing or ambiguous) and
 /// then names the closed gate, so an agent that never asked for vision can
@@ -3573,11 +3583,90 @@ fn cached_candidate_evidence(
 /// (`extract_structured`, `intent_solve_challenge`, `intent_detect_challenge`).
 fn vision_denied_message(vision: &VisionContext, verification: &str) -> String {
     let gate = if !vision.session_ok {
-        "vision assist is off for this session (executionPolicy.visionAssist)"
+        VISION_SESSION_GATE_MESSAGE
     } else {
-        "the principal lacks the vision:assist capability"
+        VISION_CAPABILITY_GATE_MESSAGE
     };
     format!("{verification}; no vision fallback ran because {gate}")
+}
+
+/// True when `error` reports a vision gate the ACP gateway's "ask the human
+/// for vision, then retry" consent escalation can unblock: either the
+/// dedicated `VisionAssistDenied` code, or a deterministic stuck code
+/// (`TargetNotFound` | `TargetAmbiguous` | `ObstructionSuspected`) whose
+/// message carries one of the gate sentences above. A stuck code whose
+/// message instead says no vision provider is configured returns false,
+/// since approval cannot help there. The ACP gateway
+/// (`crates/acp-gateway/src/server.rs`) keys its consent escalation on this
+/// predicate rather than on the error code alone, so prose drift in the
+/// stuck path can no longer silently break the escalation.
+pub fn vision_gate_closed(error: &types::CommandError) -> bool {
+    if error.code == types::ErrorCode::VisionAssistDenied {
+        return true;
+    }
+    let is_escalatable_stuck_code = matches!(
+        error.code,
+        types::ErrorCode::TargetNotFound
+            | types::ErrorCode::TargetAmbiguous
+            | types::ErrorCode::ObstructionSuspected
+    );
+    is_escalatable_stuck_code
+        && (error.message.contains(VISION_SESSION_GATE_MESSAGE)
+            || error.message.contains(VISION_CAPABILITY_GATE_MESSAGE))
+}
+
+#[cfg(test)]
+mod vision_gate_closed_tests {
+    use super::*;
+
+    fn error(code: ErrorCode, message: &str) -> types::CommandError {
+        types::CommandError {
+            code,
+            message: message.to_owned(),
+            layer: ErrorLayer::Page,
+            retryable: false,
+        }
+    }
+
+    #[test]
+    fn vision_assist_denied_code_is_always_closed() {
+        assert!(vision_gate_closed(&error(
+            ErrorCode::VisionAssistDenied,
+            "anything"
+        )));
+    }
+
+    #[test]
+    fn target_not_found_with_session_gate_sentence_is_closed() {
+        assert!(vision_gate_closed(&error(
+            ErrorCode::TargetNotFound,
+            &format!("stuck; no vision fallback ran because {VISION_SESSION_GATE_MESSAGE}")
+        )));
+    }
+
+    #[test]
+    fn target_ambiguous_with_capability_gate_sentence_is_closed() {
+        assert!(vision_gate_closed(&error(
+            ErrorCode::TargetAmbiguous,
+            &format!("stuck; no vision fallback ran because {VISION_CAPABILITY_GATE_MESSAGE}")
+        )));
+    }
+
+    #[test]
+    fn target_not_found_with_no_provider_configured_is_not_closed() {
+        assert!(!vision_gate_closed(&error(
+            ErrorCode::TargetNotFound,
+            "stuck; no vision fallback ran because no vision provider is configured"
+        )));
+    }
+
+    #[test]
+    fn unrelated_code_with_gate_sentence_is_not_closed() {
+        assert!(!vision_gate_closed(&error(
+            ErrorCode::VerificationFailed,
+            &format!("stuck; no vision fallback ran because {VISION_SESSION_GATE_MESSAGE}")
+        )));
+    }
 }
 
 fn vision_denied_or_unavailable(
