@@ -7,8 +7,8 @@
 - `intent_submit_and_verify`: a pre-satisfied `expectedState` (the matcher
   already holds before the act runs, so nothing is clicked) now reports
   plain `failed` with `expectedStatePreSatisfied`, not
-  `needsReconciliation`. The boundary-once ledger never recorded this case,
-  so a corrected `expectedState` can resubmit without `reSubmit: true`.
+  `needsReconciliation`, so the boundary-once ledger no longer records the
+  attempt and a corrected `expectedState` resubmits without `reSubmit: true`.
 
 ## 0.15.0 - 2026-09-19
 
