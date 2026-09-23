@@ -45,6 +45,12 @@
 
 ### Fixed
 
+- MCP stdio no longer drops a request whose line arrives in more than one
+  read: when a response or notification write finished while a request was
+  half-read, the gateway discarded the bytes already read, answered
+  `Parse error` (-32700) with a null id, and never ran the request. The
+  partial frame now survives until its newline arrives, and a frame already
+  over the size limit stays rejected as `frameTooLarge`.
 - `SkillRecoveryCoordinator`'s owned-pool tactics (`ReconcileCheckpoint`,
   `FreshGhostSession`, `SelectCompatibleEngine`, `RestartDurableBoundary`)
   now abort their detached helper task when the caller stops waiting on it
