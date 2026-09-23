@@ -4,6 +4,14 @@
 
 ### Added
 
+- Python SDK (`packages/python-sdk`, package `bobby-browser`, stdlib only):
+  `BrowserRuntimeClient` mirrors the TypeScript client's `/v1` surface --
+  sessions, pages, `submit_command` with the `CommandOutcome` status
+  discriminator preserved, checkpoints, recovery, context reads, verified
+  artifact fetch, and jobs -- with the same auth header contract,
+  idempotency-key passthrough, and a typed `RuntimeClientError`. Installable
+  today with `pip install -e packages/python-sdk`; not yet published to
+  PyPI.
 - Managed Chromium can opt into a durable profile the same way an enrolled
   Firefox companion does: `{"mode": "exact", "engine": "chromium", "profileId":
   "<name>"}` persists the session's user-data-dir at

@@ -351,6 +351,12 @@ jobs:
         # conformance needs a real Chrome and runs on the chromium job.
         run: pnpm --filter @cavi-ai/bobby-interface-conformance test:unit
 
+      - name: Python SDK
+        # Fake-HTTP-server unit tests only. test_live_runtime.py starts the
+        # real `bobby` binary and skips cleanly when BOBBY_CHROME_EXECUTABLE
+        # is unset, which it is here.
+        run: python3 -m unittest discover -s packages/python-sdk/tests
+
       - name: Docs artifact
         run: |
           pnpm docs:build

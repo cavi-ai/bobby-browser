@@ -63,9 +63,10 @@ crates/interface-conformance/data/
 crates/cli/data/
 /benchmarks/results/
 
-# Python test/import caches.
+# Python test/import caches, and packages/python-sdk's `pip install -e` metadata.
 __pycache__/
 *.py[cod]
+*.egg-info/
 
 
 models/

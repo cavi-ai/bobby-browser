@@ -72,6 +72,10 @@
           "path": "surfaces/rust-sdk.md"
         },
         {
+          "title": "Python SDK",
+          "path": "surfaces/python-sdk.md"
+        },
+        {
           "title": "MCP tools",
           "path": "surfaces/mcp-tools.md"
         },

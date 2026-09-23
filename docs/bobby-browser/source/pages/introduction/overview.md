@@ -20,6 +20,7 @@ credentials are never accepted in URLs or query strings.
 | Install / run the CLI | [Installation](installation.md) · [CLI reference](../guides/cli.md) |
 | First successful navigate | [First browser session](first-session.md) |
 | Application code in Node/TS | [TypeScript SDK](../surfaces/typescript-sdk.md) |
+| Application code in Python | [Python SDK](../surfaces/python-sdk.md) |
 | Application code in Rust (HTTP) | [bobby-browser-client](../rust/bobby-browser-client.md) |
 | Embed in Rust | [Rust crate book](../rust/index.md) · [Rust SDK](../surfaces/rust-sdk.md) |
 | Raw HTTP / curl | [HTTP API](../surfaces/http-api.md) + [Authentication](../guides/auth.md) |
