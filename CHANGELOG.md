@@ -32,6 +32,24 @@
   `extract_structured`, `intent_solve_challenge`, and
   `intent_detect_challenge`, where vision is the operation itself.
 
+### Changed
+
+- MCP catalog diet: the default `explore` `tools/list` payload dropped from
+  75,648 to under 32,768 bytes and `full` from 115,089 to under 81,920 bytes
+  (`cargo test -p mcp-gateway --test toolsets
+  explore_and_full_catalogs_stay_under_the_diet_ceilings`). Duplicated
+  workflow-scope branches in every advertised schema now declare business
+  properties once instead of cloning them into both `oneOf` branches;
+  `WaitCondition`, `WaitForCommand`, `ControlActionKind`, `ControlTarget`,
+  and `FillValue` advertise as opaque objects (full shape still enforced at
+  `tools/call`); `cookie_get`, `dialog`, `download_url`, `screenshot`,
+  `form_snapshot`, `inspect`, `wait_for`, `network_log`,
+  `click_and_wait_for_download`, `context_ask`, `context_neighbors`, and
+  `intent_detect_challenge` moved out of the default `explore` phase into
+  the `act`/`intent`/`verify` phases they already advertised in (still
+  callable from `explore`; phases narrow advertisement only, never
+  capability); every tool description is now one to two sentences.
+
 ## 0.15.0 - 2026-09-19
 
 ### Added

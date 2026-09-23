@@ -2,7 +2,7 @@
 //! keeping the response inside the 131,072-byte budget.
 //!
 //! [`Toolset::Explore`] is the default so the first `tools/list` covers the
-//! standard working loop (~76 KiB): observe, navigate, act with the base
+//! standard working loop (<= 32 KiB): observe, navigate, act with the base
 //! control primitives, complete a form, and submit it once with verification.
 //! An agent widens with `toolset_select` (or starts on
 //! `full` via `BOBBY_MCP_TOOLSET` / `[mcp] startup_toolset`), which also emits
@@ -10,11 +10,16 @@
 //!
 //! Phases follow the runtime's working loop:
 //!
-//! - [`Toolset::Explore`]: observation, lifecycle, navigation, and the base
-//!   controls (click, type, upload, dialog, download), whole-form completion,
-//!   and verified submit. The remaining heavyweight `intent_*` tools, escape
-//!   hatches, and niche mutations stay out, so the common form loop needs no
-//!   phase switch while the startup catalog remains bounded.
+//! - [`Toolset::Explore`]: a11y observation, lifecycle, navigation, and the
+//!   base controls (click, type, upload), whole-form completion, and
+//!   verified submit. `form_snapshot`, `inspect`, `wait_for`, `cookie_get`,
+//!   `dialog`, `download_url`, `screenshot`, and the read-only `context_*` /
+//!   `network_log` / `intent_detect_challenge` tools moved to the lazy
+//!   `act`/`intent`/`verify` phases they were already advertised in, to keep
+//!   the startup catalog bounded; a call to any of them still dispatches from
+//!   `explore` (phases narrow advertisement, not capability). The remaining
+//!   heavyweight `intent_*` tools and niche mutations stay out, so the
+//!   common form loop needs no phase switch.
 //! - [`Toolset::Act`]: the primitives that change the page, plus the
 //!   `command_execute` / `evaluate_javascript` escape hatches.
 //! - [`Toolset::Intent`]: the `intent_*` family.
@@ -144,34 +149,24 @@ const ALWAYS: &[&str] = &[
 
 const EXPLORE: &[&str] = &[
     "a11y_snapshot",
-    "form_snapshot",
-    "inspect",
-    "screenshot",
-    "context_ask",
-    "context_neighbors",
     "navigate",
-    "wait_for",
-    "network_log",
-    "cookie_get",
-    // Base controls: the default loop must click, type, upload, answer
-    // dialogs, and download without a toolset_select + schema-discovery
-    // round trip first. Escape hatches and niche mutations stay in `act`.
+    // Base controls: the default loop must click, type, and upload without a
+    // toolset_select + schema-discovery round trip first. `form_snapshot`,
+    // `inspect`, `wait_for`, `click_and_wait_for_download`, `dialog`,
+    // `download_url`, `cookie_get`, `screenshot`, `network_log`, and the
+    // read-only `context_*`/`intent_detect_challenge` tools cost real catalog
+    // bytes for a less-common path; they widen through `act`/`intent`/`verify`
+    // (still callable from here -- phases narrow advertisement, not
+    // capability).
     "click",
-    "click_and_wait_for_download",
     "click_and_wait_for_popup",
     "type_text",
     "control_action",
     "upload_files",
-    "dialog",
-    "download_url",
     // Composite intents for common workflows stay in the default phase.
     "intent_complete_form",
     "intent_submit_and_verify",
     "intent_follow",
-    // Read-only challenge detection: a stuck agent learns "this is a captcha"
-    // without a phase switch or any page mutation. The solve loop itself
-    // stays in the intent phase.
-    "intent_detect_challenge",
 ];
 
 /// Raw primitives. `command_execute` is the escape hatch for a caller minting
@@ -189,9 +184,11 @@ const ACT: &[&str] = &[
     "wait_for",
     "download_url",
     "evaluate_javascript",
+    "cookie_get",
     "cookie_set",
     "cookie_delete",
     "command_execute",
+    "network_log",
     // Verification of an action without leaving the phase.
     "a11y_snapshot",
     "context_ask",
@@ -370,7 +367,7 @@ mod tests {
 
     /// Explore covers the standard loop — observation, navigation, base
     /// controls, whole-form completion, and verified submit — but never the
-    /// remaining intent family, escape hatches, or niche mutations.
+    /// remaining intent family, escape hatches, or niche/rarer mutations.
     #[test]
     fn the_explore_phase_advertises_the_agent_loop_but_no_escape_hatch() {
         for tool in [
@@ -379,8 +376,6 @@ mod tests {
             "type_text",
             "control_action",
             "upload_files",
-            "dialog",
-            "download_url",
             "intent_complete_form",
             "intent_submit_and_verify",
         ] {
@@ -398,6 +393,17 @@ mod tests {
             "evaluate_javascript",
             "command_execute",
             "emulate",
+            // Moved to the lazy widening phases they were already advertised
+            // in (still callable from explore; only advertisement narrowed).
+            "dialog",
+            "download_url",
+            "cookie_get",
+            "screenshot",
+            "network_log",
+            "context_ask",
+            "context_neighbors",
+            "intent_detect_challenge",
+            "click_and_wait_for_download",
         ] {
             assert!(
                 !Toolset::Explore.advertises(tool),
