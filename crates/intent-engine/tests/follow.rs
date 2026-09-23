@@ -21,6 +21,7 @@ struct FakeBrowser {
     calls: Arc<Mutex<CallLog>>,
     click_evidence: Vec<Evidence>,
     wait_evidence: Vec<Evidence>,
+    wait_error: Option<CommandError>,
 }
 
 #[async_trait]
@@ -81,6 +82,9 @@ impl IntentBrowser for FakeBrowser {
             .expect("call log")
             .waits
             .push(command.clone());
+        if let Some(error) = &self.wait_error {
+            return Err(error.clone());
+        }
         Ok(self.wait_evidence.clone())
     }
 
@@ -166,6 +170,7 @@ async fn follow_clicks_target_then_waits_for_destination_without_boundary() {
             excluded_classes: Vec::new(),
             observed: None,
         }],
+        wait_error: None,
     };
     let page_id = PageId::new();
     let outcome = IntentEngine::execute(
@@ -228,6 +233,7 @@ async fn follow_forwards_boundary_true_verbatim_to_the_click_command() {
             excluded_classes: Vec::new(),
             observed: None,
         }],
+        wait_error: None,
     };
     let page_id = PageId::new();
     let outcome = IntentEngine::execute(
@@ -269,6 +275,7 @@ async fn follow_sets_expected_url_from_exact_wait() {
             excluded_classes: Vec::new(),
             observed: None,
         }],
+        wait_error: None,
     };
     let page_id = PageId::new();
     let outcome = IntentEngine::execute(
@@ -295,6 +302,7 @@ async fn follow_missing_target_is_stuck() {
         calls: Arc::clone(&calls),
         click_evidence: Vec::new(),
         wait_evidence: Vec::new(),
+        wait_error: None,
     };
     let page_id = PageId::new();
     let outcome = IntentEngine::execute(
@@ -321,4 +329,57 @@ async fn follow_missing_target_is_stuck() {
     let record = record.expect("IntentExecution on stuck");
     assert_eq!(record.verification, "targetNotFound");
     assert_eq!(record.intent_kind, "follow");
+}
+
+/// The click landed; the post-click wait to verify the destination found
+/// more than one matching candidate. That is not a retryable ambiguity —
+/// the activation already happened — so the outcome must be `Failed` with
+/// `VerificationFailed`, not the raw `TargetAmbiguous`, and the click
+/// evidence must still be present so a reader can see the click ran.
+#[tokio::test]
+async fn follow_recodes_ambiguous_postclick_wait_as_verification_failed() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let expected_destination = details_wait();
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![link("Details")]),
+        calls: Arc::clone(&calls),
+        click_evidence: vec![Evidence::Element {
+            selector: "#Details".into(),
+            text: None,
+        }],
+        wait_evidence: Vec::new(),
+        wait_error: Some(CommandError {
+            code: ErrorCode::TargetAmbiguous,
+            message: "target is ambiguous: paragraph \"Step 2 of 3\" score=30".into(),
+            layer: types::ErrorLayer::Page,
+            retryable: true,
+        }),
+    };
+    let page_id = PageId::new();
+    let outcome = IntentEngine::execute(
+        &follow("Details", Some("link"), expected_destination, false),
+        &page_id,
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    let IntentOutcome::Failed { error, evidence } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::VerificationFailed);
+    assert!(
+        error.message.contains("landed"),
+        "message should say the click landed: {}",
+        error.message
+    );
+    assert!(!error.retryable);
+    assert!(
+        evidence
+            .iter()
+            .any(|item| matches!(item, Evidence::Element { .. })),
+        "click evidence must be present: {evidence:?}"
+    );
+    let log = calls.lock().expect("call log");
+    assert_eq!(log.clicks.len(), 1, "the click ran exactly once");
 }

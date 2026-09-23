@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- `intent_submit_and_verify`: a pre-satisfied `expectedState` (the matcher
+  already holds before the act runs, so nothing is clicked) now reports
+  plain `failed` with `expectedStatePreSatisfied`, not
+  `needsReconciliation`, so the boundary-once ledger no longer records the
+  attempt and a corrected `expectedState` resubmits without `reSubmit: true`.
+- A `wait_for`/post-click `Text` or `Value` wait whose target matches more
+  than one candidate no longer fails with `targetAmbiguous`: the matcher
+  now runs against every ranked candidate's live text/value, and the wait
+  is satisfied when any of them matches (Chromium and Firefox).
+- `intent_follow`: a post-click wait error caused only by targeting trouble
+  (`targetAmbiguous`, `targetNotFound`, `invalidRequest`) is now reported as
+  `verificationFailed` ("activation landed; expectedState could not be
+  verified: ...") instead of the raw error, so the click's own evidence is
+  visible and the repair does not read as an invitation to re-click.
 - `intent_follow`, `intent_submit_and_verify`, and every other deterministic
   `intent_*` tool now report the stuck kind's own error code
   (`targetNotFound`, `targetAmbiguous`, `obstructionSuspected`) when the

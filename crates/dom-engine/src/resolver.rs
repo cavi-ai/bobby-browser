@@ -52,11 +52,17 @@ pub enum ResolutionError {
     },
 }
 
-pub fn resolve_candidates(
+/// Scores every attached (and, if required, visible) candidate against
+/// `target` and returns them best-first, without collapsing to a single
+/// winner or erroring on more than one match. Used where a caller must
+/// consider every plausible candidate instead of just the top one — e.g. a
+/// text/value wait whose matcher, not identity, decides which candidate
+/// satisfies it.
+pub fn rank_candidates<'a>(
     target: &TargetSpec,
-    candidates: &[Candidate],
+    candidates: &'a [Candidate],
     policy: &ResolutionPolicy,
-) -> Result<ResolutionDecision, ResolutionError> {
+) -> Result<Vec<(&'a Candidate, CandidateEvidence)>, ResolutionError> {
     let regex = match &target.text {
         Some(TextMatch::Regex(pattern)) => {
             if pattern.len() > policy.max_regex_len {
@@ -87,6 +93,22 @@ pub fn resolve_candidates(
             .cmp(&left.2.score)
             .then_with(|| left.0.cmp(&right.0))
     });
+    Ok(ranked
+        .into_iter()
+        .map(|(_, candidate, evidence)| (candidate, evidence))
+        .collect())
+}
+
+pub fn resolve_candidates(
+    target: &TargetSpec,
+    candidates: &[Candidate],
+    policy: &ResolutionPolicy,
+) -> Result<ResolutionDecision, ResolutionError> {
+    let ranked = rank_candidates(target, candidates, policy)?
+        .into_iter()
+        .enumerate()
+        .map(|(index, (candidate, evidence))| (index, candidate, evidence))
+        .collect::<Vec<_>>();
     // An explicit ordinal picks one match deterministically, so a large
     // matching set is not ambiguity for it; the bound guards the ranked
     // choice below.

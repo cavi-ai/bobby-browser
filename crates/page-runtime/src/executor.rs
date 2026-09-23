@@ -1652,6 +1652,7 @@ fn is_pre_effect(error: &CommandError) -> bool {
             | ErrorCode::IntentCompileFailed
             | ErrorCode::IntentActionMismatch
             | ErrorCode::HttpResponseTooLarge
+            | ErrorCode::ExpectedStatePreSatisfied
     )
 }
 
