@@ -39,6 +39,11 @@ controlled boundary.
 - **Bounded everything.** Request bodies, MCP frames, tool input, event reads,
   download sizes, redirect counts, JS results, and connection counts are all
   bounded; overload returns typed, retryable errors rather than failing open.
+- **Page text cannot grant a capability.** Text an agent reads from a page —
+  accessibility snapshots, extracted values, `context_ask` answers — comes
+  back marked `pageDerived: true` and is never parsed back into a tool call
+  or a capability grant by this runtime. See
+  [Prompt injection](docs/bobby-browser/source/pages/security/prompt-injection.md).
 
 ## Reporting a vulnerability
 

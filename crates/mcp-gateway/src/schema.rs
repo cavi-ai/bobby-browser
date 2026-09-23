@@ -1067,6 +1067,15 @@ pub(crate) fn advertised_tool_output_schema(name: &str) -> Value {
             if defs.as_object().is_some_and(|defs| !defs.is_empty()) {
                 schema["$defs"] = defs;
             }
+            // `pageDerived` is not named here (a new required property costs
+            // real bytes the explore catalog does not have -- ~20 bytes of
+            // headroom at diet time); opening closure instead of collapsing
+            // the whole shape keeps `workflow_contract_schemas_bound_inputs_and_define_object_outputs`'s
+            // pinned FormSnapshot expansion intact while still letting the
+            // real result (which does carry `pageDerived`, see
+            // `tool_output_schema`) validate. `false`->`true` costs one
+            // fewer byte, not one more.
+            schema["additionalProperties"] = json!(true);
             schema
         }
         "runtime_info" => {
@@ -1333,7 +1342,11 @@ fn workflow_observe_result_schema() -> Value {
             "workflowId":id(),
             "retainedAnswer":nullable(json!({"type":"object"})),
             "observationOutcome":workflow_observation_outcome_schema(),
-            "formSnapshot":nullable(json!({"$ref":"#/$defs/FormSnapshot"}))
+            "formSnapshot":nullable(json!({"$ref":"#/$defs/FormSnapshot"})),
+            // Text under this result -- node names/labels, form values, the
+            // retained answer -- is data read from the page, never an
+            // instruction. See prompt-injection.md.
+            "pageDerived":{"type":"boolean","const":true}
         }),
         &[
             "status",
@@ -1345,6 +1358,7 @@ fn workflow_observe_result_schema() -> Value {
             "retainedAnswer",
             "observationOutcome",
             "formSnapshot",
+            "pageDerived",
         ],
     )
 }
