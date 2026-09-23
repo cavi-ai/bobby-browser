@@ -67,9 +67,22 @@ calls. Rules that govern every call:
 - Form with multiple fields: one `intent_complete_form` (fields resolve
   just-in-time; include conditional fields after their revealer even if
   initially absent) — never a `intent_fill` per field unless fields must
-  resolve in reaction to each other.
+  resolve in reaction to each other. A field that only exists after
+  submitting the fields filled so far (an MFA code shown once email and
+  password are submitted) still belongs in the same call: give it
+  `revealedBy` hints naming the control to click first (defaults to
+  `role: "button"`); the runtime clicks it and waits for the field before
+  filling it — no separate submit-then-refill round trip.
 - Submit: `intent_submit_and_verify` with an `expectedState` that only holds
   after the submit (a confirmation id, status change, or new element).
+- **A cookie-banner-then-credentials-then-MFA sign-in gate is three calls,
+  not seven:** `intent_follow` the cookie-accept control, one
+  `intent_complete_form` with email + password + the MFA code (the code
+  field carries `revealedBy` naming the sign-in submit button), then one
+  `intent_submit_and_verify` on the verify control with `expectedState`
+  proving authentication. Each call already verifies its own effect before
+  returning `completed`; a `workflow_observe` between them re-checks
+  nothing new.
 - Data out: `intent_extract` (named fields, per-field errors) or
   `extract_structured` (schema-shaped JSON via vision — needs `vision:assist`).
 - A popup/overlay blocks the page: `intent_dismiss_obstruction`.

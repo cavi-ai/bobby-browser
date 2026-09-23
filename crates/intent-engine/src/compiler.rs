@@ -68,6 +68,10 @@ pub struct CompleteFormFieldPlan {
     pub purpose: String,
     pub target: TargetSpec,
     pub value: ControlAction,
+    /// Compiled target of the control that reveals this field once clicked
+    /// (see `CompleteFormField::revealed_by`); `None` when the field is
+    /// already present.
+    pub revealed_by: Option<TargetSpec>,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -133,11 +137,22 @@ pub fn compile_intent(command: &IntentCommand) -> Result<IntentPlan, CompileErro
                 } else {
                     &field.hints
                 };
+                let revealed_by = match &field.revealed_by {
+                    Some(reveal_hints) => {
+                        let mut reveal_hints = reveal_hints.clone();
+                        if reveal_hints.role.is_none() {
+                            reveal_hints.role = Some("button".into());
+                        }
+                        Some(compile_locate_target(purpose, &reveal_hints)?)
+                    }
+                    None => None,
+                };
                 fields.push(CompleteFormFieldPlan {
                     name: field.name.clone(),
                     purpose: purpose.into(),
                     target: compile_target(purpose, hints)?,
                     value: field.value.clone(),
+                    revealed_by,
                 });
             }
             Ok(IntentPlan::CompleteForm { fields })

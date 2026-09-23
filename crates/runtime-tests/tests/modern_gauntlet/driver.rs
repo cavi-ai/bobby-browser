@@ -796,6 +796,7 @@ impl ModernRuntime {
                 value: value.into(),
                 clear_first: true,
             },
+            revealed_by: None,
         }
     }
 

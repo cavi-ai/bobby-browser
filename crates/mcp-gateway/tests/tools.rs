@@ -1620,6 +1620,7 @@ async fn command_execute_schema_accepts_bounded_complete_form_intent() {
                     value: "ada@example.test".into(),
                     clear_first: true,
                 },
+                revealed_by: None,
             }],
         })),
     };

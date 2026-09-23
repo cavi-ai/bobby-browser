@@ -2160,6 +2160,7 @@ fn text_field(name: &str, purpose: &str) -> types::CompleteFormField {
             value: format!("value-{name}"),
             clear_first: true,
         },
+        revealed_by: None,
     }
 }
 
@@ -2177,6 +2178,7 @@ fn checked_field(
             ..IntentHints::default()
         },
         value: types::ControlAction::SetChecked { checked: true },
+        revealed_by: None,
     }
 }
 

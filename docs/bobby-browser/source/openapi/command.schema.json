@@ -2056,6 +2056,17 @@
         },
         "value": {
           "$ref": "#/$defs/ControlAction"
+        },
+        "revealedBy": {
+          "description": "Hints for a control to click before this field is resolved -- set\nwhen the field only exists once the fields filled so far are\nsubmitted (for example an MFA code field revealed after email and\npassword are submitted). Resolved and clicked the same way a\n`SubmitAndVerify` button is, then this field's own target is waited\nfor before it is filled.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IntentHints"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [

@@ -410,6 +410,7 @@ mod tests {
                     value: "ada@example.test".into(),
                     clear_first: true,
                 },
+                revealed_by: None,
             }],
         });
         match command {

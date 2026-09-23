@@ -118,6 +118,7 @@ fn stuck_form() -> IntentCommand {
                     value: "a".into(),
                     clear_first: true,
                 },
+                revealed_by: None,
             },
             CompleteFormField {
                 name: "beta".into(),
@@ -127,6 +128,7 @@ fn stuck_form() -> IntentCommand {
                     value: "b".into(),
                     clear_first: true,
                 },
+                revealed_by: None,
             },
         ],
     })

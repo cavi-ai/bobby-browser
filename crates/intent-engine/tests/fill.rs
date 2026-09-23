@@ -10,9 +10,10 @@ use intent_engine::{
 };
 use types::{
     CaptureScreenshotCommand, ClickCommand, CommandError, CompleteFormField, CompleteFormIntent,
-    ControlAction, ControlActionCommand, ControlActionEvidence, ErrorCode, Evidence, FillIntent,
-    FormControlOperation, FormControlState, FormControlValidity, IntentCommand, IntentHints,
-    IntentResolutionPath, PageId, TargetSpec, TypeTextCommand, UploadFilesCommand, WaitForCommand,
+    ControlAction, ControlActionCommand, ControlActionEvidence, ElementState, ErrorCode, Evidence,
+    FillIntent, FormControlOperation, FormControlState, FormControlValidity, IntentCommand,
+    IntentHints, IntentResolutionPath, PageId, TargetSpec, TypeTextCommand, UploadFilesCommand,
+    WaitCondition, WaitForCommand,
 };
 
 #[tokio::test]
@@ -39,6 +40,7 @@ async fn complete_form_fills_fields_in_order_without_submitting() {
             value: "Ada".into(),
             clear_first: true,
         },
+        revealed_by: None,
     };
     let outcome = IntentEngine::execute(
         &IntentCommand::CompleteForm(CompleteFormIntent {
@@ -80,6 +82,7 @@ async fn complete_form_ignores_incompatible_label_when_control_has_the_same_name
                     value: "Ada Lovelace".into(),
                     clear_first: true,
                 },
+                revealed_by: None,
             }],
         }),
         &PageId::new(),
@@ -106,6 +109,7 @@ async fn complete_form_resolves_conditional_fields_after_their_revealer() {
         value: ControlAction::SelectOne {
             value: value.into(),
         },
+        revealed_by: None,
     };
 
     let outcome = IntentEngine::execute(
@@ -881,6 +885,7 @@ async fn complete_form_on_a_hidden_file_control_fails_before_vision_with_the_upl
                     value: "resume.pdf".into(),
                     clear_first: true,
                 },
+                revealed_by: None,
             }],
         }),
         &PageId::new(),
@@ -1143,4 +1148,164 @@ async fn fill_rejects_activate_and_names_control_action_as_the_right_tool() {
     assert!(log.type_text.is_empty());
     assert!(log.control_action.is_empty());
     assert!(log.upload_files.is_empty());
+}
+
+/// A form whose second field ("Authentication code") is not in the DOM at
+/// all until the "Continue" button is clicked -- the gauntlet sign-in shape
+/// (email + password submitted, then an MFA code field appears).
+struct SubmitRevealingFormBrowser {
+    submitted: AtomicBool,
+    calls: Arc<Mutex<CallLog>>,
+}
+
+#[async_trait]
+impl IntentBrowser for SubmitRevealingFormBrowser {
+    async fn collect_candidates(
+        &self,
+        _page_id: &PageId,
+        _target: &TargetSpec,
+    ) -> Result<Vec<Candidate>, CommandError> {
+        let mut candidates = vec![
+            textbox("Work email"),
+            candidate("continue", Some("button"), "Continue", BTreeMap::new()),
+        ];
+        if self.submitted.load(Ordering::SeqCst) {
+            candidates.push(textbox("Authentication code"));
+        }
+        Ok(candidates)
+    }
+
+    async fn click(
+        &self,
+        _page_id: &PageId,
+        command: &ClickCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let is_continue = command
+            .target
+            .as_ref()
+            .and_then(|target| target.accessible_name.as_deref())
+            == Some("Continue");
+        assert!(is_continue, "expected a click on Continue, got {command:?}");
+        self.submitted.store(true, Ordering::SeqCst);
+        Ok(Vec::new())
+    }
+
+    async fn click_xy(
+        &self,
+        _page_id: &PageId,
+        _x: f64,
+        _y: f64,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported("click_xy"))
+    }
+
+    async fn type_text(
+        &self,
+        _page_id: &PageId,
+        command: &TypeTextCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.calls
+            .lock()
+            .expect("call log")
+            .type_text
+            .push(command.clone());
+        Ok(vec![Evidence::Element {
+            selector: String::new(),
+            text: Some(command.value.clone()),
+        }])
+    }
+
+    async fn upload_files(
+        &self,
+        _page_id: &PageId,
+        _command: &UploadFilesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported("upload_files"))
+    }
+
+    async fn wait_for(
+        &self,
+        _page_id: &PageId,
+        command: &WaitForCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let WaitCondition::Element { target, state } = &command.condition else {
+            return Err(unsupported("wait_for"));
+        };
+        assert_eq!(*state, ElementState::Visible);
+        assert_eq!(
+            target.accessible_name.as_deref(),
+            Some("Authentication code")
+        );
+        if self.submitted.load(Ordering::SeqCst) {
+            Ok(Vec::new())
+        } else {
+            Err(unsupported("wait_for: not submitted yet"))
+        }
+    }
+
+    async fn capture_screenshot(
+        &self,
+        _page_id: &PageId,
+        _command: &CaptureScreenshotCommand,
+    ) -> Result<(Vec<u8>, Vec<Evidence>), CommandError> {
+        Err(unsupported("capture_screenshot"))
+    }
+}
+
+#[tokio::test]
+async fn complete_form_fills_a_field_revealed_by_submitting_the_form_so_far() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let browser = SubmitRevealingFormBrowser {
+        submitted: AtomicBool::new(false),
+        calls: Arc::clone(&calls),
+    };
+    let outcome = IntentEngine::execute(
+        &IntentCommand::CompleteForm(CompleteFormIntent {
+            purpose: "sign in".into(),
+            fields: vec![
+                CompleteFormField {
+                    name: "email".into(),
+                    purpose: "work email".into(),
+                    hints: IntentHints {
+                        role: Some("textbox".into()),
+                        accessible_name: Some("Work email".into()),
+                        ..IntentHints::default()
+                    },
+                    value: ControlAction::SetText {
+                        value: "maya@northstar.example".into(),
+                        clear_first: true,
+                    },
+                    revealed_by: None,
+                },
+                CompleteFormField {
+                    name: "code".into(),
+                    purpose: "authentication code".into(),
+                    hints: IntentHints {
+                        role: Some("textbox".into()),
+                        accessible_name: Some("Authentication code".into()),
+                        ..IntentHints::default()
+                    },
+                    value: ControlAction::SetText {
+                        value: "246813".into(),
+                        clear_first: true,
+                    },
+                    revealed_by: Some(IntentHints {
+                        accessible_name: Some("Continue".into()),
+                        ..IntentHints::default()
+                    }),
+                },
+            ],
+        }),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, IntentOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
+    let log = calls.lock().expect("call log");
+    assert_eq!(log.type_text.len(), 2, "{:?}", log.type_text);
 }
