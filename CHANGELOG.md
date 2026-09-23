@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Fixed
+
+- MCP stdio no longer drops a request whose line arrives in more than one
+  read: when a response or notification write finished while a request was
+  half-read, the gateway discarded the bytes already read, answered
+  `Parse error` (-32700) with a null id, and never ran the request. The
+  partial frame now survives until its newline arrives, and a frame already
+  over the size limit stays rejected as `frameTooLarge`.
+
+## 0.16.0 - 2026-09-23
+
 ### Added
 
 - Python SDK (`packages/python-sdk`, package `bobby-browser`, stdlib only):
@@ -45,12 +56,20 @@
 
 ### Fixed
 
-- MCP stdio no longer drops a request whose line arrives in more than one
-  read: when a response or notification write finished while a request was
-  half-read, the gateway discarded the bytes already read, answered
-  `Parse error` (-32700) with a null id, and never ran the request. The
-  partial frame now survives until its newline arrives, and a frame already
-  over the size limit stays rejected as `frameTooLarge`.
+- A worker's first lease no longer waits indefinitely on a hung browser
+  launch: the launch gets an outer deadline (45 s by default,
+  `WorkerPool::with_timeouts`), after which the call fails with the
+  `browser launch failed: ...` diagnostic. A worker that
+  arrives after the deadline is terminated, and a launch still hung after a
+  second deadline is aborted without disturbing a concurrent lease that
+  took over the session.
+- Firefox companion: the enrolled Firefox is recycled only when every BiDi
+  endpoint the profile offers refuses the probe or connect; a live endpoint
+  that answers with its own failure returns that failure instead. A
+  companion port held by a non-companion listener falls back to a dynamic
+  loopback port; a port published by a live companion still fails the
+  bootstrap, and enrollment keeps its configured port and reports
+  `bindInUse`.
 - `SkillRecoveryCoordinator`'s owned-pool tactics (`ReconcileCheckpoint`,
   `FreshGhostSession`, `SelectCompatibleEngine`, `RestartDurableBoundary`)
   now abort their detached helper task when the caller stops waiting on it
