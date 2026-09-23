@@ -1900,6 +1900,176 @@ async fn wait_for_text_resolves_an_ambiguous_target_by_matcher() {
     worker.close().await.unwrap();
 }
 
+/// A candidate that matched at ranking time can detach before its value is
+/// read on the same poll (the page re-rendered it away between the two). A
+/// `MutationObserver` removes `#gone` the instant the candidate collector
+/// stamps it with its per-scan `data-bobby-target` tracking id — which
+/// happens on every poll, so the removal always races the read — while
+/// `#keep` carries the wanted text throughout. The wait must resolve via
+/// `#keep` instead of failing the whole call with `target detached`.
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn wait_for_text_survives_a_candidate_detaching_between_ranking_and_its_read() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: concat!(
+                    "data:text/html,",
+                    "<p id=\"keep\">Step 2 of 3</p><p id=\"gone\">Step 2 of 3</p>",
+                    // The candidate collector stamps every element with a
+                    // fresh `data-bobby-target` id on every collect pass. The
+                    // first pass (the initial resolve that discovers the
+                    // ambiguity) must still see `#gone` attached; only the
+                    // second pass (resolve_ambiguous_wait_values re-collecting
+                    // candidates for itself) should race its removal against
+                    // the per-candidate read that follows. Counting stamps
+                    // per element reproduces that exact window deterministically.
+                    "<script>new MutationObserver(records=>{for(const r of records){",
+                    "if(r.attributeName==='data-bobby-target'&&r.target.id==='gone'){",
+                    "r.target._bobbyStamps=(r.target._bobbyStamps||0)+1;",
+                    "if(r.target._bobbyStamps===2){r.target.remove()}",
+                    "}}}).observe(document.documentElement,",
+                    "{attributes:true,attributeFilter:['data-bobby-target'],subtree:true})",
+                    "</script>"
+                )
+                .to_string(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let evidence = worker
+        .wait_for(
+            &page_id,
+            &WaitForCommand {
+                condition: WaitCondition::Text {
+                    target: Box::new(TargetSpec {
+                        role: Some("paragraph".into()),
+                        ..TargetSpec::default()
+                    }),
+                    matcher: TextMatch::Contains("Step 2 of 3".into()),
+                },
+                timeout_ms: 2_000,
+            },
+        )
+        .await
+        .unwrap();
+    match &evidence[0] {
+        Evidence::Wait {
+            observations,
+            observed,
+            ..
+        } => {
+            assert!(*observations > 0);
+            assert_eq!(observed.as_deref(), Some("Step 2 of 3"));
+        }
+        other => panic!("expected Evidence::Wait, got {other:?}"),
+    }
+
+    worker.close().await.unwrap();
+}
+
+/// Same race as above, but every ambiguous candidate detaches before its
+/// read on the first poll (`#gone1` and `#gone2` both carry the wanted text
+/// and both get removed the instant they are stamped). Every candidate
+/// failing to read must not fail the wait call itself — it must be
+/// observed as "not yet satisfied" so the wait keeps polling to its own
+/// deadline and times out normally instead of surfacing the per-candidate
+/// `target detached` error.
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn wait_for_text_keeps_polling_instead_of_failing_when_every_candidate_detaches_mid_read() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: concat!(
+                    "data:text/html,",
+                    "<p id=\"gone1\">Step 2 of 3</p><p id=\"gone2\">Step 2 of 3</p>",
+                    // See the sibling test above: only remove on the second
+                    // stamp so both candidates are still attached for the
+                    // ambiguity-discovering collect, then detach before the
+                    // per-candidate read that resolve_ambiguous_wait_values
+                    // performs off its own (second) collect.
+                    "<script>new MutationObserver(records=>{for(const r of records){",
+                    "if(r.attributeName==='data-bobby-target'&&",
+                    "(r.target.id==='gone1'||r.target.id==='gone2')){",
+                    "r.target._bobbyStamps=(r.target._bobbyStamps||0)+1;",
+                    "if(r.target._bobbyStamps===2){r.target.remove()}",
+                    "}}}).observe(document.documentElement,",
+                    "{attributes:true,attributeFilter:['data-bobby-target'],subtree:true})",
+                    "</script>"
+                )
+                .to_string(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let error = worker
+        .wait_for(
+            &page_id,
+            &WaitForCommand {
+                condition: WaitCondition::Text {
+                    target: Box::new(TargetSpec {
+                        role: Some("paragraph".into()),
+                        ..TargetSpec::default()
+                    }),
+                    matcher: TextMatch::Contains("Step 2 of 3".into()),
+                },
+                timeout_ms: 300,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.code,
+        ErrorCode::WaitConditionTimedOut,
+        "every candidate detaching mid-read must time out, not fail with {error:?}"
+    );
+
+    worker.close().await.unwrap();
+}
+
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn page_scoped_text_wait_sees_async_body_updates() {

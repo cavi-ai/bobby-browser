@@ -15,10 +15,13 @@ Two layers:
   command that may have changed the page. Always available, never persisted.
 - **Persisted** — per-profile, per-site structural memory promoted from
   verified intent outcomes. Only runtimes whose engine selection carries a
-  durable profile identity (a Firefox companion enrollment) write or read
-  this layer. Chromium sessions have disposable profiles and no durable
-  identity, so they read nothing and write nothing — by design, not by
-  accident.
+  durable profile identity write or read this layer: a Firefox companion
+  enrollment, or an opt-in named managed-Chromium profile (`{"mode": "exact",
+  "engine": "chromium", "profileId": "<name>"}`), which persists its
+  user-data-dir at `<profiles_dir>/chromium/<name>` instead of a disposable
+  one. A managed Chromium session without a `profileId` still has a
+  disposable profile and no durable identity, so it reads nothing and writes
+  nothing — by design, not by accident.
 
 ## What persists
 
