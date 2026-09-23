@@ -1138,7 +1138,13 @@ fn choose(
                 .map(|candidate| {
                     let role = candidate.role.as_deref().unwrap_or("(no role)");
                     let name = candidate.name.as_deref().unwrap_or("(no name)");
-                    format!("{role} \"{name}\" score={}", candidate.score)
+                    let frame = candidate
+                        .reasons
+                        .iter()
+                        .find(|reason| reason.starts_with("inside iframe"))
+                        .map(|reason| format!(" ({reason})"))
+                        .unwrap_or_default();
+                    format!("{role} \"{name}\" score={}{frame}", candidate.score)
                 })
                 .collect::<Vec<_>>()
                 .join("; ");
@@ -1146,7 +1152,8 @@ fn choose(
                 ErrorCode::TargetAmbiguous,
                 format!(
                     "target is ambiguous: {summary}. Narrow the target with an exact \
-                     accessibleName and ordinal, then retry"
+                     accessibleName and ordinal, or a framePath when a contender sits \
+                     inside an iframe, then retry"
                 ),
             ))
         }
