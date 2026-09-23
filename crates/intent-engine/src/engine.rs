@@ -2047,6 +2047,27 @@ fn disambiguate_submit_by_purpose(
     })
 }
 
+/// A post-click wait error whose code only reflects targeting trouble
+/// (`TargetAmbiguous`, `TargetNotFound`, `InvalidRequest`) means the effect
+/// already happened and only verification could not confirm it — not a fresh,
+/// retryable failure. Re-codes it `VerificationFailed` with `prefix` ahead of
+/// the original message, so a repair reader sees "landed, unverified" instead
+/// of "ambiguous, retry". Any other code (e.g. a real command failure) passes
+/// through unchanged.
+fn recode_postclick_verification_error(error: CommandError, prefix: &str) -> CommandError {
+    match error.code {
+        ErrorCode::TargetAmbiguous | ErrorCode::TargetNotFound | ErrorCode::InvalidRequest => {
+            CommandError {
+                code: ErrorCode::VerificationFailed,
+                message: format!("{prefix}: {}", error.message),
+                layer: error.layer,
+                retryable: false,
+            }
+        }
+        _ => error,
+    }
+}
+
 async fn execute_follow(
     intent: &IntentCommand,
     page_id: &PageId,
@@ -2185,6 +2206,16 @@ async fn execute_follow(
     let mut wait_evidence = match browser.wait_for(page_id, &expected_destination).await {
         Ok(evidence) => evidence,
         Err(error) => {
+            // The click already landed; a wait error that only reflects the
+            // matcher's own targeting trouble (ambiguous/missing/invalid
+            // target) is not a fresh failure to retry — it means the
+            // post-state could not be verified. Reporting it verbatim reads
+            // as a retryable ambiguity and invites re-clicking a control that
+            // already fired.
+            let error = recode_postclick_verification_error(
+                error,
+                "activation landed; expectedState could not be verified",
+            );
             return IntentOutcome::Failed {
                 error,
                 evidence: {
