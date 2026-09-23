@@ -1080,25 +1080,25 @@ pub(crate) fn advertised_tool_output_schema(name: &str) -> Value {
                 .remove("$defs");
             schema
         }
-        // C2: same opaque collapse as every other command-outcome tool below,
-        // but `postState` is named rather than folded into the opaque
-        // object -- an agent reading `tools/list` should see it is there to
-        // read, without the full nested `workflow_observe` shape (that
-        // would re-add the bytes the opaque collapse exists to avoid).
-        "intent_follow" | "intent_submit_and_verify" | "intent_complete_form" | "click" => json!({
-            "type": "object",
-            "properties": {
-                "postState": {
-                    "type": "object",
-                    "description": "Present on success: the same compact observation `workflow_observe` returns for this handle's page. Read it instead of calling `workflow_observe` again."
-                }
-            }
-        }),
         _ => {
             // Command-outcome envelopes are identical across primitives and
             // intents. Advertising the full shape on every tool duplicates
             // ~700 bytes per catalog entry. tools/call still validates with
             // `tool_output_schema`.
+            //
+            // Correction pass (post-C1-merge): `intent_follow`,
+            // `intent_submit_and_verify`, `intent_complete_form`, and `click`
+            // fall through to this same opaque collapse for `postState` too.
+            // C1 left only 67 bytes of explore-catalog headroom; even the
+            // smallest non-empty JSON Schema mention of the property
+            // (`"postState":{}`, no description) costs ~30 bytes per tool,
+            // ~120 across the four, which alone blows the ceiling -- there is
+            // no description short enough to fit a *named* property back in.
+            // `postState` stays fully specified in `tool_output_schema` (the
+            // wire schema `tools/call` validates against, still built from
+            // `workflow_observe_result_schema()`) and is exercised live by
+            // `tests/post_state.rs`; only its `tools/list` advertisement is
+            // dieted away, same as every other field this arm already opacifies.
             json!({"type": "object"})
         }
     }
@@ -3112,19 +3112,28 @@ mod tests {
     }
 
     #[test]
-    fn advertised_click_output_schema_advertises_post_state() {
-        assert_eq!(
-            advertised_tool_output_schema("click"),
-            json!({
-                "type": "object",
-                "properties": {
-                    "postState": {
-                        "type": "object",
-                        "description": "Present on success: the same compact observation `workflow_observe` returns for this handle's page. Read it instead of calling `workflow_observe` again."
-                    }
-                }
-            })
-        );
+    fn advertised_post_state_tools_collapse_to_the_opaque_form_but_wire_schema_keeps_post_state() {
+        // Correction pass: the explore catalog has zero byte headroom, so
+        // `tools/list` cannot name `postState` for any of the four tools --
+        // they fall through to the same opaque collapse as every other
+        // command-outcome tool.
+        for name in [
+            "click",
+            "intent_follow",
+            "intent_submit_and_verify",
+            "intent_complete_form",
+        ] {
+            assert_eq!(
+                advertised_tool_output_schema(name),
+                json!({"type": "object"}),
+                "{name}'s advertised output schema must stay opaque"
+            );
+            assert_eq!(
+                tool_output_schema(name)["properties"]["postState"],
+                workflow_observe_result_schema(),
+                "{name}'s wire output schema must still fully specify postState"
+            );
+        }
     }
 
     #[test]
