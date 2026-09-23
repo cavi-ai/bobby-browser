@@ -11,7 +11,10 @@ pub use corpus::{
     sanitize_corpus_action, sanitize_corpus_label, sanitize_corpus_url, CorpusCandidate,
     CorpusHealth, CorpusRecord, ResolvedElement, VisionCorpus,
 };
-pub use engine::{IntentBrowser, IntentEngine, IntentOutcome, VisionContext};
+pub use engine::{
+    vision_gate_closed, IntentBrowser, IntentEngine, IntentOutcome, VisionContext,
+    VISION_CAPABILITY_GATE_MESSAGE, VISION_SESSION_GATE_MESSAGE,
+};
 pub use http_vision::{HttpVisionAssist, StructuredExtractRequest, StructuredExtractor};
 pub use stuck::{never_escalates, StuckKind};
 pub use verify::{compatible, execution_record, summarize_target, verify_fill};

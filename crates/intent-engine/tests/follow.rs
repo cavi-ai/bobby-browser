@@ -316,7 +316,7 @@ async fn follow_missing_target_is_stuck() {
     let IntentOutcome::Failed { error, evidence } = outcome else {
         panic!("expected Failed, got {outcome:?}");
     };
-    assert_eq!(error.code, ErrorCode::VisionAssistDenied);
+    assert_eq!(error.code, ErrorCode::TargetNotFound);
     {
         let log = calls.lock().expect("call log");
         assert!(log.clicks.is_empty());

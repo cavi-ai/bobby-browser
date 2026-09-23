@@ -1487,11 +1487,12 @@ async fn command_execute_schema_accepts_locate_intent_envelope() {
     assert_eq!(record["candidates"], json!([]), "{response}");
     assert_eq!(record["verification"], "targetNotFound", "{response}");
     // Command-layer failures carry the machine-readable repair hint on the
-    // error itself; the fake DOM denies vision assist, whose message leads
-    // with the stuck reason and whose repair is to fix that reason first.
+    // error itself; the fake DOM denies vision assist, but the stuck kind's
+    // own code (targetNotFound) leads -- not visionAssistDenied -- so an
+    // agent's repair logic keys on the real defect, not the vision policy.
     assert_eq!(
         content["error"]["code"],
-        json!("visionAssistDenied"),
+        json!("targetNotFound"),
         "{response}"
     );
     assert!(
@@ -1505,7 +1506,7 @@ async fn command_execute_schema_accepts_locate_intent_envelope() {
         content["error"]["repair"]["action"]
             .as_str()
             .unwrap()
-            .contains("stuck reason"),
+            .contains("a11y_snapshot"),
         "{response}"
     );
     assert_eq!(

@@ -179,9 +179,9 @@ async fn dismiss_obstruction_removes_banner_on_live_chromium() {
 }
 
 /// Live Chromium proof: when the click does not clear the obstruction, the
-/// intent fails with `ObstructionSuspected` (surfaced here as
-/// `VisionAssistDenied` since the session has not opted into vision), instead
-/// of a false-positive completion.
+/// intent fails with `ObstructionSuspected` (the message also names the closed
+/// vision gate, since the session has not opted into vision), instead of a
+/// false-positive completion.
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn dismiss_obstruction_reports_stuck_when_banner_persists_on_live_chromium() {
@@ -218,9 +218,10 @@ async fn dismiss_obstruction_reports_stuck_when_banner_persists_on_live_chromium
     let CommandOutcome::Failed { error, .. } = outcome else {
         panic!("dismiss obstruction should have failed on a persistent banner: {outcome:?}");
     };
-    assert_eq!(error.code, ErrorCode::VisionAssistDenied);
+    assert_eq!(error.code, ErrorCode::ObstructionSuspected);
     assert!(
-        error.message.contains("obstructionPersisted"),
+        error.message.contains("obstructionPersisted")
+            && error.message.contains("no vision fallback ran"),
         "{}",
         error.message
     );

@@ -23,6 +23,14 @@
   `verificationFailed` ("activation landed; expectedState could not be
   verified: ...") instead of the raw error, so the click's own evidence is
   visible and the repair does not read as an invitation to re-click.
+- `intent_follow`, `intent_submit_and_verify`, and every other deterministic
+  `intent_*` tool now report the stuck kind's own error code
+  (`targetNotFound`, `targetAmbiguous`, `obstructionSuspected`) when the
+  target is stuck and vision assist is off, denied, or unavailable, instead
+  of `visionAssistDenied`; the message still names both the stuck reason and
+  the closed vision gate. `visionAssistDenied` now reports only from
+  `extract_structured`, `intent_solve_challenge`, and
+  `intent_detect_challenge`, where vision is the operation itself.
 
 ## 0.15.0 - 2026-09-19
 

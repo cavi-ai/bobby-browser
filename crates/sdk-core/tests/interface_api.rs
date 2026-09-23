@@ -1565,6 +1565,15 @@ fn assert_failed_with(outcome: &CommandOutcome, expected: types::ErrorCode) {
     }
 }
 
+fn assert_failed_message_contains(outcome: &CommandOutcome, needle: &str) {
+    match outcome {
+        CommandOutcome::Failed { error, .. } => {
+            assert!(error.message.contains(needle), "{}", error.message)
+        }
+        other => panic!("expected Failed containing {needle:?}, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn locate_intent_without_intent_execute_capability_is_denied_before_dispatch() {
     let runtime = RuntimeService::default();
@@ -1867,7 +1876,11 @@ async fn one_shot_vision_consent_applies_to_exactly_one_command() {
         )
         .await
         .expect("held vision capability authorizes one-shot consent");
-    assert_failed_with(&granted, types::ErrorCode::VisionAssistFailed);
+    // Consent opened the gates, but no provider is configured: the
+    // deterministic stuck code leads and the message names the missing
+    // provider rather than a policy wall.
+    assert_failed_with(&granted, types::ErrorCode::TargetNotFound);
+    assert_failed_message_contains(&granted, "no vision provider is configured");
 
     let stored = service.sessions.get(&session.id).await.unwrap();
     assert!(!stored.execution_policy.vision_assist);
@@ -1879,7 +1892,13 @@ async fn one_shot_vision_consent_applies_to_exactly_one_command() {
         )
         .await
         .unwrap();
-    assert_failed_with(&ordinary, types::ErrorCode::VisionAssistDenied);
+    // The consent was spent: the session gate is closed again and the
+    // stuck code still leads.
+    assert_failed_with(&ordinary, types::ErrorCode::TargetNotFound);
+    assert_failed_message_contains(
+        &ordinary,
+        "vision assist is off for this session (executionPolicy.visionAssist)",
+    );
 }
 
 #[tokio::test]

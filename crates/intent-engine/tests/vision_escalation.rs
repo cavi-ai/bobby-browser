@@ -920,7 +920,7 @@ async fn type_into_candidate_rejects_incompatible_control_kind_without_mutation(
 }
 
 #[tokio::test]
-async fn stuck_without_vision_gates_returns_vision_assist_denied() {
+async fn stuck_without_vision_gates_returns_the_stuck_code() {
     let called = Arc::new(AtomicBool::new(false));
     let assist = Arc::new(FakeVision {
         called: called.clone(),
@@ -952,10 +952,13 @@ async fn stuck_without_vision_gates_returns_vision_assist_denied() {
     let IntentOutcome::Failed { error, evidence } = outcome else {
         panic!("expected Failed, got {outcome:?}");
     };
-    assert_eq!(error.code, ErrorCode::VisionAssistDenied);
-    // The message leads with the deterministic stuck reason and names the
-    // closed gate: an agent that never asked for vision can repair the
-    // target instead of reading a policy wall.
+    // The stuck code leads (`targetNotFound` here), not `visionAssistDenied`:
+    // an agent's repair logic keys on `code`, so the code itself must say
+    // what is actually wrong with the target.
+    assert_eq!(error.code, ErrorCode::TargetNotFound);
+    // The message keeps both sentences: the deterministic stuck reason and
+    // the closed gate, so an agent that never asked for vision can repair
+    // the target instead of reading the code as a policy wall.
     assert!(
         error.message.starts_with("no candidate matched") || error.message.starts_with("target"),
         "{}",
@@ -978,6 +981,49 @@ async fn stuck_without_vision_gates_returns_vision_assist_denied() {
     });
     let record = record.expect("stuck IntentExecution evidence");
     assert_eq!(record.verification, "targetNotFound");
+}
+
+#[tokio::test]
+async fn stuck_with_no_vision_provider_returns_the_stuck_code() {
+    let browser = FakeBrowser {
+        screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
+    };
+    let page_id = PageId::new();
+
+    let outcome = IntentEngine::execute(
+        &locate(),
+        &page_id,
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: None,
+            proposals: None,
+            defer_escalation: false,
+            prompt_context: None,
+            corpus: None,
+            context_store: None,
+        },
+    )
+    .await;
+
+    let IntentOutcome::Failed { error, .. } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::TargetNotFound);
+    assert!(
+        error.message.starts_with("no candidate matched") || error.message.starts_with("target"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error
+            .message
+            .contains("no vision fallback ran because no vision provider is configured"),
+        "{}",
+        error.message
+    );
 }
 
 #[tokio::test]
@@ -1353,8 +1399,8 @@ async fn an_open_session_policy_does_not_substitute_for_the_capability() {
     };
     assert_eq!(
         error.code,
-        ErrorCode::VisionAssistDenied,
-        "a missing capability was not reported as a denial"
+        ErrorCode::TargetNotFound,
+        "a missing capability was not reported under the stuck kind's own code"
     );
 }
 
@@ -1397,7 +1443,7 @@ async fn holding_the_capability_does_not_substitute_for_the_session_grant() {
     let IntentOutcome::Failed { error, .. } = outcome else {
         panic!("expected Failed, got {outcome:?}");
     };
-    assert_eq!(error.code, ErrorCode::VisionAssistDenied);
+    assert_eq!(error.code, ErrorCode::TargetNotFound);
 }
 
 #[derive(Default)]

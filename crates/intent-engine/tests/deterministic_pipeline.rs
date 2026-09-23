@@ -281,7 +281,7 @@ async fn locate_keeps_equal_purpose_overlap_ambiguous() {
     let IntentOutcome::Failed { error, evidence } = outcome else {
         panic!("expected Failed, got {outcome:?}");
     };
-    assert_eq!(error.code, ErrorCode::VisionAssistDenied);
+    assert_eq!(error.code, ErrorCode::TargetAmbiguous);
     let record = evidence.iter().find_map(|item| match item {
         Evidence::IntentExecution { record } => Some(record),
         _ => None,
@@ -293,7 +293,7 @@ async fn locate_keeps_equal_purpose_overlap_ambiguous() {
 }
 
 #[tokio::test]
-async fn locate_zero_candidates_is_vision_assist_denied_when_gates_closed() {
+async fn locate_zero_candidates_is_the_stuck_code_when_gates_closed() {
     let browser = FakeBrowser {
         candidates: Arc::new(vec![]),
         wait_ok: true,
@@ -310,8 +310,9 @@ async fn locate_zero_candidates_is_vision_assist_denied_when_gates_closed() {
     let IntentOutcome::Failed { error, evidence } = outcome else {
         panic!("expected Failed, got {outcome:?}");
     };
-    // Stuck taxonomy allows escalation, but deny-by-default gates are closed.
-    assert_eq!(error.code, ErrorCode::VisionAssistDenied);
+    // Stuck taxonomy allows escalation, but deny-by-default gates are closed:
+    // the stuck kind's own code leads, not visionAssistDenied.
+    assert_eq!(error.code, ErrorCode::TargetNotFound);
     let record = evidence.iter().find_map(|item| match item {
         Evidence::IntentExecution { record } => Some(record),
         _ => None,
