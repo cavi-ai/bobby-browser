@@ -36,6 +36,12 @@
   than one candidate no longer fails with `targetAmbiguous`: the matcher
   now runs against every ranked candidate's live text/value, and the wait
   is satisfied when any of them matches (Chromium and Firefox).
+- That same ambiguous-candidates wait no longer fails the whole poll with
+  `browserCommandFailed`/"target detached" when one ranked candidate
+  detaches (or the page re-renders it away) between ranking and its
+  text/value read: the failing candidate is skipped and the remaining
+  candidates decide, and a poll where every candidate fails to read is
+  treated as not-yet-satisfied instead of an error (Chromium and Firefox).
 - `intent_follow`: a post-click wait error caused only by targeting trouble
   (`targetAmbiguous`, `targetNotFound`, `invalidRequest`) is now reported as
   `verificationFailed` ("activation landed; expectedState could not be
