@@ -255,7 +255,8 @@ impl Server {
             }
             _ => unreachable!("dispatch_primitives received a tool it does not own"),
         };
-        self.finish_tool(id, result, defaulted_handle).await
+        self.finish_tool(id, result, defaulted_handle, call.name.as_str())
+            .await
     }
 }
 

@@ -331,6 +331,10 @@ impl Server {
             .map(|binding| binding.page_id)
             .unwrap_or(page_id);
         let observation_outcome = project_observation_outcome(observation_outcome, evidence_detail);
+        // Stamped here, not only in `workflow_observe_success`, so a mutating
+        // action's `postState` (this same outcome, attached verbatim by
+        // `attach_post_state`) carries it too: `postState` is page text,
+        // same as a fresh `workflow_observe` would return for it.
         let mut outcome = json!({
             "status":status,
             "source":"live",
@@ -340,6 +344,7 @@ impl Server {
             "retainedAnswer":Value::Null,
             "observationOutcome":observation_outcome,
             "formSnapshot":Value::Null,
+            "pageDerived":true,
         });
         if let Some(handle) = handle {
             outcome["workflowHandle"] = json!(handle);
@@ -403,12 +408,14 @@ impl Server {
     async fn workflow_observe_success(
         &self,
         id: Value,
-        value: Value,
+        mut value: Value,
         defaulted_handle: Option<&str>,
     ) -> Value {
         let is_error = value.get("status").and_then(Value::as_str) != Some("completed");
+        // Every `workflow_observe` result carries text read from the page
+        // (node names/labels, form values); see `PAGE_DERIVED_TOOLS`.
+        value["pageDerived"] = json!(true);
         let mut response = if let Some(handle) = defaulted_handle {
-            let mut value = value;
             push_evidence(&mut value, workflow_handle_defaulted_evidence(handle));
             self.tool_success(id, value).await
         } else {
