@@ -15,6 +15,13 @@
 
 ### Fixed
 
+- `SkillRecoveryCoordinator`'s owned-pool tactics (`ReconcileCheckpoint`,
+  `FreshGhostSession`, `SelectCompatibleEngine`, `RestartDurableBoundary`)
+  now abort their detached helper task when the caller stops waiting on it
+  (budget exceeded or the caller itself is cancelled), instead of leaving
+  it running in the background holding `stabilization_gate` and a
+  worker-pool lease indefinitely, which could wedge every later call on
+  the same coordinator.
 - Ambiguous target evidence names the iframe a contender was gathered
   inside (`inside iframe "<name>"` in its `reasons`), and the
   `targetAmbiguous` message repeats it and points at `framePath`, so two
