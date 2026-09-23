@@ -598,7 +598,7 @@ impl Server {
         // stalled are not lost: the subscription resumes from its cursor and
         // reports a gap if retention passed it.
         let outstanding = Arc::new(AtomicUsize::new(0));
-        let mut frame = Vec::new();
+        let mut frame = FrameBuffer::default();
         loop {
             tokio::select! {
                 notification = notifications.recv(),
@@ -634,7 +634,7 @@ impl Server {
                             "Invalid Request",
                             Some(json!({"reason":"frameTooLarge","maxBytes":MAX_FRAME_BYTES})),
                         )),
-                        FrameStatus::Complete => match serde_json::from_slice::<Value>(&frame) {
+                        FrameStatus::Complete => match serde_json::from_slice::<Value>(&frame.bytes) {
                             Ok(message) => {
                                 // Handshake frames (and any traffic before Ready) must
                                 // finish before the next frame is dispatched. Concurrent
@@ -2366,18 +2366,35 @@ enum FrameStatus {
     Oversized,
 }
 
-async fn read_bounded_frame<R>(input: &mut R, frame: &mut Vec<u8>) -> io::Result<FrameStatus>
+/// A frame being read, kept across `read_bounded_frame` calls. `serve` polls
+/// the read inside `select!`, which drops it whenever another branch wins; the
+/// bytes it already consumed from the input live here, so the next call
+/// resumes the same frame instead of starting over mid-line.
+#[derive(Default)]
+struct FrameBuffer {
+    bytes: Vec<u8>,
+    oversized: bool,
+    finished: bool,
+}
+
+async fn read_bounded_frame<R>(input: &mut R, frame: &mut FrameBuffer) -> io::Result<FrameStatus>
 where
     R: AsyncBufRead + Unpin,
 {
-    frame.clear();
-    let mut oversized = false;
+    if frame.finished {
+        frame.bytes.clear();
+        frame.oversized = false;
+        frame.finished = false;
+    }
     loop {
+        // The only await: everything after it runs to the next iteration
+        // without yielding, so a dropped read never loses consumed bytes.
         let available = input.fill_buf().await?;
         if available.is_empty() {
-            return if oversized {
+            frame.finished = true;
+            return if frame.oversized {
                 Ok(FrameStatus::Oversized)
-            } else if frame.is_empty() {
+            } else if frame.bytes.is_empty() {
                 Ok(FrameStatus::Eof)
             } else {
                 Ok(FrameStatus::Complete)
@@ -2385,21 +2402,22 @@ where
         }
         let newline = available.iter().position(|byte| *byte == b'\n');
         let payload_len = newline.unwrap_or(available.len());
-        if !oversized {
-            if frame.len().saturating_add(payload_len) > MAX_FRAME_BYTES {
-                oversized = true;
-                frame.clear();
+        if !frame.oversized {
+            if frame.bytes.len().saturating_add(payload_len) > MAX_FRAME_BYTES {
+                frame.oversized = true;
+                frame.bytes.clear();
             } else {
-                frame.extend_from_slice(&available[..payload_len]);
+                frame.bytes.extend_from_slice(&available[..payload_len]);
             }
         }
         let consumed = newline.map_or(available.len(), |index| index + 1);
         input.consume(consumed);
         if newline.is_some() {
-            if !oversized && frame.last() == Some(&b'\r') {
-                frame.pop();
+            frame.finished = true;
+            if !frame.oversized && frame.bytes.last() == Some(&b'\r') {
+                frame.bytes.pop();
             }
-            return Ok(if oversized {
+            return Ok(if frame.oversized {
                 FrameStatus::Oversized
             } else {
                 FrameStatus::Complete
@@ -2799,6 +2817,50 @@ mod tests {
                 "Fix the value at error.data.pointer; error.data.constraint names the keyword it violated."
             ),
             "non-choice constraints keep the generic action"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_frame_read_dropped_mid_line_resumes_with_the_bytes_it_consumed() {
+        let (mut client, server) = tokio::io::duplex(1024);
+        let mut input = BufReader::new(server);
+        let mut frame = FrameBuffer::default();
+        let body = br#"{"jsonrpc":"2.0","id":4,"method":"tools/call"}"#;
+        client.write_all(body).await.unwrap();
+        // `serve` drops this future whenever another `select!` branch wins.
+        assert!(read_bounded_frame(&mut input, &mut frame)
+            .now_or_never()
+            .is_none());
+        client.write_all(b"\n").await.unwrap();
+        assert_eq!(
+            read_bounded_frame(&mut input, &mut frame).await.unwrap(),
+            FrameStatus::Complete
+        );
+        assert_eq!(frame.bytes, body);
+        client.write_all(b"{}\n").await.unwrap();
+        assert_eq!(
+            read_bounded_frame(&mut input, &mut frame).await.unwrap(),
+            FrameStatus::Complete
+        );
+        assert_eq!(frame.bytes, b"{}");
+    }
+
+    #[tokio::test]
+    async fn an_oversized_frame_read_dropped_mid_line_stays_oversized() {
+        let (mut client, server) = tokio::io::duplex(2 * MAX_FRAME_BYTES);
+        let mut input = BufReader::new(server);
+        let mut frame = FrameBuffer::default();
+        client
+            .write_all(&vec![b'a'; MAX_FRAME_BYTES + 1])
+            .await
+            .unwrap();
+        assert!(read_bounded_frame(&mut input, &mut frame)
+            .now_or_never()
+            .is_none());
+        client.write_all(b"tail\n").await.unwrap();
+        assert_eq!(
+            read_bounded_frame(&mut input, &mut frame).await.unwrap(),
+            FrameStatus::Oversized
         );
     }
 }
