@@ -11,6 +11,14 @@
   partial frame now survives until its newline arrives, and a frame already
   over the size limit stays rejected as `frameTooLarge`.
 
+### Changed
+
+- Firefox companion: a fixed (nonzero) companion port that is already taken
+  now fails the launch with `browserLaunchFailed` naming the port, and the
+  descriptor file is left untouched. This replaces the 0.16.0 fallback to a
+  dynamic loopback port, which could publish a second endpoint over the
+  configured owner's descriptor. Port 0 still binds an ephemeral port.
+
 ## 0.16.0 - 2026-09-23
 
 ### Added
