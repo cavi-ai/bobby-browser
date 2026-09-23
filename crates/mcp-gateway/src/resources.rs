@@ -917,35 +917,33 @@ tools most likely to produce it.
   but the target it expected to disappear was still present afterward.
   Repair: take a fresh `a11y_snapshot` -- there may be another dismissal
   control, or the wrong thing was dismissed.
-- `visionAssistDenied` -- the vision double gate is closed, but which
-  conditions count as "the gate" depends on the path, and the two paths
-  disagree about provider configuration. `extract_structured` folds
-  capability, session policy, *and* provider configuration into one combined
-  check and denies if any of the three is false. Every `intent_*` tool's
-  vision-fallback escalation instead computes its gate from only capability
-  and session policy; provider configuration is checked separately, so a
-  missing provider reached through an `intent_*` tool does **not** produce
-  this code -- see `visionAssistFailed`. On every `intent_*` tool the message
-  leads with the deterministic stuck reason (`targetNotFound`,
-  `targetAmbiguous`, `obstructionSuspected`, with the stuck evidence attached)
-  and then names the closed gate, so a session that never asked for vision
-  still sees what to fix. Repair: repair the stuck reason first (fresh
-  `a11y_snapshot`, narrower target); enabling `visionAssist` on the session
-  or granting the capability only adds the vision fallback.
+- `visionAssistDenied` -- vision *is* the operation, and the double gate
+  (capability + session policy) is closed: `extract_structured`,
+  `intent_solve_challenge`, `intent_detect_challenge`. `extract_structured`
+  folds capability, session policy, *and* provider configuration into one
+  combined check and denies if any of the three is false. When a deterministic
+  `intent_*` tool (`intent_follow`, `intent_submit_and_verify`, etc.) gets
+  stuck and vision is off, denied, or unavailable, it does **not** report this
+  code -- the stuck kind's own code leads instead (`targetNotFound`,
+  `targetAmbiguous`, `obstructionSuspected`), because an agent's repair logic
+  keys on `code` and the real defect is the target, not the vision policy.
+  The message still carries both sentences: the deterministic stuck reason,
+  then "no vision fallback ran because ..." naming the closed or missing
+  gate. Repair: repair the stuck reason first (fresh `a11y_snapshot`,
+  narrower target); enabling `visionAssist` on the session or granting the
+  capability only adds the vision fallback.
 - `visionAssistFailed` -- the gate the reached path checks was open, but the
-  vision path still didn't produce a usable result. Critically, on every
-  `intent_*` tool this includes a **provider that isn't configured at all**:
-  the `intent_*` gate only checks capability and session policy, so with
-  both of those satisfied and no provider configured, the escalation returns
-  this code, not `visionAssistDenied` -- the identical "no provider" cause
-  that `extract_structured` reports as `visionAssistDenied`. This code also
-  covers genuinely transient causes on any path: a screenshot capture error,
-  a vision response/transport error, or a proposal that didn't clear the
-  engine's confidence floor. **Repair is conditional, not "retry once":** if
-  a provider simply isn't configured, retrying will fail forever -- treat it
-  like `visionAssistDenied` and fall back to a deterministic tool or fix the
-  configuration. Only for the transient causes (capture error, response
-  error, low-confidence proposal) is a single retry reasonable.
+  vision path still didn't produce a usable result: a screenshot capture
+  error, a vision response/transport error, or a proposal that didn't clear
+  the engine's confidence floor. `extract_structured` also reports this code
+  when its combined gate is open but no provider is configured. A
+  deterministic `intent_*` tool's stuck-and-no-vision path never reports this
+  code either -- see `visionAssistDenied` above for what it reports instead.
+  **Repair is conditional, not "retry once":** if a provider simply isn't
+  configured, retrying will fail forever -- fall back to a deterministic
+  tool or fix the configuration. Only for the transient causes (capture
+  error, response error, low-confidence proposal) is a single retry
+  reasonable.
 
 ## Protocol-layer rejections
 

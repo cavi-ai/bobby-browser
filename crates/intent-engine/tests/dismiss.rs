@@ -284,7 +284,7 @@ async fn dismiss_missing_target_is_stuck_without_vision_configured() {
     let IntentOutcome::Failed { error, evidence } = outcome else {
         panic!("expected Failed, got {outcome:?}");
     };
-    assert_eq!(error.code, ErrorCode::VisionAssistDenied);
+    assert_eq!(error.code, ErrorCode::TargetNotFound);
     {
         let log = calls.lock().expect("call log");
         assert!(log.clicks.is_empty());
@@ -323,7 +323,7 @@ async fn dismiss_still_present_after_click_is_obstruction_suspected_without_visi
     let IntentOutcome::Failed { error, evidence } = outcome else {
         panic!("expected Failed, got {outcome:?}");
     };
-    assert_eq!(error.code, ErrorCode::VisionAssistDenied);
+    assert_eq!(error.code, ErrorCode::ObstructionSuspected);
     {
         let log = calls.lock().expect("call log");
         assert_eq!(

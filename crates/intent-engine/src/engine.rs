@@ -3431,7 +3431,13 @@ async fn stuck_outcome_with_prior_evidence(
 
     let gates_open = vision.session_ok && vision.capability_ok;
     let Some(assist) = vision.assist.as_ref() else {
-        return vision_denied_or_unavailable(vision, prior_evidence, stuck_evidence, verification);
+        return vision_denied_or_unavailable(
+            vision,
+            prior_evidence,
+            stuck_evidence,
+            verification,
+            stuck_code,
+        );
     };
     if !gates_open {
         let mut evidence = prior_evidence;
@@ -3439,7 +3445,7 @@ async fn stuck_outcome_with_prior_evidence(
         tracing::warn!(intent = intent_kind, "policy.vision_denied");
         return IntentOutcome::Failed {
             error: CommandError {
-                code: ErrorCode::VisionAssistDenied,
+                code: stuck_code,
                 message: vision_denied_message(vision, verification),
                 layer: ErrorLayer::Page,
                 retryable: false,
@@ -3561,8 +3567,10 @@ fn cached_candidate_evidence(
 /// reason (the actionable part: which target was missing or ambiguous) and
 /// then names the closed gate, so an agent that never asked for vision can
 /// repair the target instead of reading the code as a policy wall. The code
-/// stays `visionAssistDenied` because the ACP gateway and one-shot consent
-/// flows key their "ask the human for vision" escalation off it.
+/// is the stuck kind's own code (`targetNotFound`, `targetAmbiguous`,
+/// `obstructionSuspected`), not `visionAssistDenied` -- that code is
+/// reserved for the tools where vision *is* the operation itself
+/// (`extract_structured`, `intent_solve_challenge`, `intent_detect_challenge`).
 fn vision_denied_message(vision: &VisionContext, verification: &str) -> String {
     let gate = if !vision.session_ok {
         "vision assist is off for this session (executionPolicy.visionAssist)"
@@ -3577,14 +3585,17 @@ fn vision_denied_or_unavailable(
     prior_evidence: Vec<Evidence>,
     stuck_evidence: Evidence,
     verification: &str,
+    stuck_code: ErrorCode,
 ) -> IntentOutcome {
     let mut evidence = prior_evidence;
     evidence.push(stuck_evidence);
     if vision.session_ok && vision.capability_ok {
         IntentOutcome::Failed {
             error: CommandError {
-                code: ErrorCode::VisionAssistFailed,
-                message: "vision assist provider is not configured".into(),
+                code: stuck_code,
+                message: format!(
+                    "{verification}; no vision fallback ran because no vision provider is configured"
+                ),
                 layer: ErrorLayer::Page,
                 retryable: false,
             },
@@ -3594,7 +3605,7 @@ fn vision_denied_or_unavailable(
         tracing::warn!("policy.vision_denied");
         IntentOutcome::Failed {
             error: CommandError {
-                code: ErrorCode::VisionAssistDenied,
+                code: stuck_code,
                 message: vision_denied_message(vision, verification),
                 layer: ErrorLayer::Page,
                 retryable: false,
