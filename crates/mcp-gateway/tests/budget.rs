@@ -143,6 +143,21 @@ async fn click_schema_advertises_native_modifier_keys() {
 }
 
 #[tokio::test]
+async fn intent_complete_form_schema_advertises_revealed_by() {
+    let tools = list_tools(all_capabilities()).await;
+    let tool = tools
+        .iter()
+        .find(|tool| tool["name"] == "intent_complete_form")
+        .expect("intent_complete_form is advertised");
+    let revealed_by =
+        &tool["inputSchema"]["$defs"]["CompleteFormField"]["properties"]["revealedBy"];
+    assert_eq!(
+        revealed_by["$ref"], "#/$defs/IntentHints",
+        "CompleteFormField.revealedBy must reuse the shared IntentHints $def, not an inline copy: {revealed_by}"
+    );
+}
+
+#[tokio::test]
 async fn tools_list_never_exceeds_the_frame_cap() {
     let tools = list_tools(all_capabilities()).await;
     let bytes = serde_json::to_string(&tools).unwrap().len();
