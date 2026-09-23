@@ -255,13 +255,16 @@ intent_args!(IntentWaitForStateArgs {
     timeout_ms: u64,
 });
 
-// `expectedDestination`/`expectedState` is optional on the wire (the schema's
-// `required` list never named it -- see `schema.rs`'s `"intent_follow"` arm):
-// a caller dismissing a notification or accepting a cookie banner has no
-// destination to name. Missing entirely, it used to fail `bounded_parse` with
-// `malformedArguments` even though `validate_tool_arguments` passed -- a bound
-// enforced only by this struct, not the advertised schema. The dispatch arm
-// fills a cheap default (`document ready=commit`, short timeout) when absent.
+// `expectedDestination`/`expectedState` is `Option` here only so the dispatch
+// arm can tell "absent" apart from "malformed" and reject the former with a
+// message naming the exact fix -- CHANGELOG 0.15.0: "exactly one of the two
+// is required". It used to fail `bounded_parse` outright (schema's
+// `required` list never named it -- see `schema.rs`'s `"intent_follow"`
+// arm -- so `validate_tool_arguments` passed and the rejection came from a
+// bound this struct alone enforced, with a message that did not say why).
+// Do not add a default here or in the dispatch arm: a follow with neither is
+// an unverified click, and defaulting a wait silently would misreport one as
+// verified.
 intent_args!(IntentFollowArgs {
     purpose: String,
     hints: Option<types::IntentHints>,
@@ -698,22 +701,13 @@ mod tests {
         both["expectedDestination"] = wait.clone();
         both["expectedState"] = wait;
         assert!(serde_json::from_value::<IntentFollowArgs>(both).is_err());
-    }
-
-    /// C3 rejection: the agent dismissing a notification/cookie banner sends
-    /// `intent_follow` with `purpose` + `hints` and no `expectedDestination`
-    /// at all -- a reasonable reading of the schema, whose `required` list
-    /// never named it. This used to fail `bounded_parse` with
-    /// `malformedArguments`; the dispatch arm now defaults it instead.
-    #[test]
-    fn intent_follow_accepts_omitted_expected_destination() {
-        let args = serde_json::from_value::<IntentFollowArgs>(serde_json::json!({
-            "sessionId":"00000000-0000-0000-0000-000000000001",
-            "pageId":"00000000-0000-0000-0000-000000000002",
-            "purpose":"Dismiss the Ledger Cloud syncing status notification",
-            "hints":{"role":"button","accessibleName":"Dismiss notification"}
-        }))
-        .expect("expectedDestination-less intent_follow parses");
+        // Neither spelling: this struct alone must not reject it (it stays
+        // `Option` so the dispatch arm -- not `bounded_parse` -- can name the
+        // fix instead of a generic `malformedArguments`). See
+        // `intent_follow_without_expected_state_names_the_fix` in
+        // `tests/workflow_handles.rs` for the end-to-end rejection message.
+        let args = serde_json::from_value::<IntentFollowArgs>(base)
+            .expect("expectedDestination-less intent_follow still parses");
         assert!(args.expected_destination.is_none());
     }
 }
