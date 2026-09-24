@@ -472,19 +472,15 @@ impl ChromiumWorker {
     }
 
     /// Humanized click: curved approach to the target's clickable point, hover
-    /// dwell, then the press, over CDP mouse events.
+    /// dwell, then the press, over CDP mouse events. `target` is resolved by
+    /// the caller, so every read of the resolved element happens before any
+    /// input is dispatched.
     async fn humanized_click(
         &self,
         page: &Page,
-        resolved: &crate::targeting::ResolvedTarget,
+        target: Point,
         modifiers: &[types::ClickModifier],
     ) -> Result<(), CommandError> {
-        let target = resolved.clickable_point(page).await?.ok_or_else(|| {
-            driver_error(
-                ErrorCode::BrowserCommandFailed,
-                "target has no clickable point",
-            )
-        })?;
         let path = {
             let mut random = self.session_random.lock().await;
             self.mouse_simulator.generate_approach_path(&mut random)
@@ -1322,6 +1318,25 @@ fn should_retry_plain_click_target_drift(
         && error.code == ErrorCode::TargetNotFound
 }
 
+/// A resolved element's JS locator throws `target detached` when the page
+/// re-rendered the node away after resolution; the CDP evaluate surfaces
+/// that throw as `BrowserCommandFailed` carrying the message.
+fn is_detached_target_error(error: &CommandError) -> bool {
+    error.code == ErrorCode::BrowserCommandFailed
+        && error
+            .message
+            .to_ascii_lowercase()
+            .contains("target detached")
+}
+
+/// A click whose resolved node detached before any input was dispatched
+/// re-resolves the target once. Nothing has been pressed yet, so the retry
+/// cannot repeat a click that landed; `click` consults this only on its
+/// pre-dispatch steps, never on the dispatch itself.
+fn should_retry_click_target_detach(already_retried: bool, error: &CommandError) -> bool {
+    !already_retried && is_detached_target_error(error)
+}
+
 fn ensure_automatic_download_modifier_support(
     modifiers: &[types::ClickModifier],
 ) -> Result<(), CommandError> {
@@ -1493,6 +1508,13 @@ impl BrowserWorker for ChromiumWorker {
         // never unset, so a second closed-session error anywhere in this
         // click -- predispatch or inside `dispatch_click` -- just fails.
         let mut closed_session_retried = false;
+        // One re-resolve for a target the page re-rendered away between
+        // resolution and dispatch: set the first time a pre-dispatch read
+        // of the resolved element fails `target detached`, and never unset,
+        // so a second detach just fails. Only the steps before
+        // `click_future` below consult it; nothing inside that future is
+        // retried on a detach, so a click that landed is never repeated.
+        let mut detach_retried = false;
         // `attempt` bounds only the stale-target drift retry below (each
         // drift continue increments it); the closed-session continues do
         // not touch it, since that retry is bounded separately by
@@ -1513,6 +1535,10 @@ impl BrowserWorker for ChromiumWorker {
                 {
                     attempt += 1;
                     tokio::time::sleep(PLAIN_CLICK_TARGET_DRIFT_DELAY).await;
+                    continue;
+                }
+                Err(error) if should_retry_click_target_detach(detach_retried, &error) => {
+                    detach_retried = true;
                     continue;
                 }
                 Err(error)
@@ -1555,43 +1581,63 @@ impl BrowserWorker for ChromiumWorker {
                     tokio::time::sleep(PLAIN_CLICK_TARGET_DRIFT_DELAY).await;
                     continue;
                 }
+                Err(error) if should_retry_click_target_detach(detach_retried, &error) => {
+                    detach_retried = true;
+                    continue;
+                }
                 Err(error) => return Err(error),
             }
             let text = resolved.inner_text(&page).await.ok().flatten();
             self.bring_page_to_front(&page).await;
-            let mut click_future: std::pin::Pin<
-                Box<dyn std::future::Future<Output = Result<(), CommandError>> + Send + '_>,
-            > = if self.humanization_enabled() {
-                Box::pin(self.humanized_click(&page, &resolved, &command.modifiers))
-            } else {
+            let humanized = self.humanization_enabled();
+            if !humanized {
                 // A coordinate-based dispatch needs the target on-screen;
                 // best-effort, like `bring_page_to_front` above -- this only
                 // sharpens the point `clickable_point` resolves next.
                 if let Err(error) = resolved.scroll_into_view(&page).await {
                     tracing::debug!(?error, "scroll-into-view before click dispatch failed");
                 }
-                let target = match resolved.clickable_point(&page).await {
-                    Ok(Some(point)) => point,
-                    Ok(None) => {
-                        return Err(driver_error(
-                            ErrorCode::BrowserCommandFailed,
-                            "target has no clickable point",
-                        ))
-                    }
-                    Err(error)
-                        if self
-                            .recover_transient_click_loss(
-                                page_id,
-                                ClickDispatchPhase::BeforePress,
-                                &error,
-                                &mut closed_session_retried,
-                            )
-                            .await =>
-                    {
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                };
+            }
+            // The last read of the resolved element, on both the humanized
+            // and the plain path; no input has been dispatched yet.
+            let target = match resolved.clickable_point(&page).await {
+                Ok(Some(point)) => point,
+                Ok(None) => {
+                    return Err(driver_error(
+                        ErrorCode::BrowserCommandFailed,
+                        "target has no clickable point",
+                    ))
+                }
+                Err(error)
+                    if should_retry_plain_click_target_drift(command.boundary, attempt, &error) =>
+                {
+                    attempt += 1;
+                    tokio::time::sleep(PLAIN_CLICK_TARGET_DRIFT_DELAY).await;
+                    continue;
+                }
+                Err(error) if should_retry_click_target_detach(detach_retried, &error) => {
+                    detach_retried = true;
+                    continue;
+                }
+                Err(error)
+                    if self
+                        .recover_transient_click_loss(
+                            page_id,
+                            ClickDispatchPhase::BeforePress,
+                            &error,
+                            &mut closed_session_retried,
+                        )
+                        .await =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let mut click_future: std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<(), CommandError>> + Send + '_>,
+            > = if humanized {
+                Box::pin(self.humanized_click(&page, target, &command.modifiers))
+            } else {
                 Box::pin(self.dispatch_click_recovering_transient_loss(
                     page_id,
                     &page,
@@ -3544,11 +3590,7 @@ fn element_wait_missing_observation(
         error.code,
         ErrorCode::TargetNotFound | ErrorCode::FrameNotFound | ErrorCode::ShadowRootUnavailable
     ) || is_missing_css_node(error)
-        || (matches!(error.code, ErrorCode::BrowserCommandFailed)
-            && error
-                .message
-                .to_ascii_lowercase()
-                .contains("target detached"));
+        || is_detached_target_error(error);
     target_missing.then_some(matches!(state, types::ElementState::Detached))
 }
 
@@ -4507,10 +4549,11 @@ mod tests {
         driver_error_is_retryable, element_wait_missing_observation,
         ensure_automatic_download_modifier_support, iframe_hop_ordinal, is_closed_page_message,
         is_dead_worker_error, is_document_body_inspect, is_missing_css_node,
-        should_retry_plain_click_target_drift, should_retry_transient_click_loss, snapshot_cookie,
-        text_matches, unscoped_css_wait_selector, validate_clip,
-        wait_should_retry_replaced_context, ChromiumWorker, ClickDispatchPhase, HttpBridgeState,
-        EDITABLE_CONTROL_CHECK_JS, TARGET_GONE_MESSAGE,
+        should_retry_click_target_detach, should_retry_plain_click_target_drift,
+        should_retry_transient_click_loss, snapshot_cookie, text_matches,
+        unscoped_css_wait_selector, validate_clip, wait_should_retry_replaced_context,
+        ChromiumWorker, ClickDispatchPhase, HttpBridgeState, EDITABLE_CONTROL_CHECK_JS,
+        TARGET_GONE_MESSAGE,
     };
     use types::{
         ClickModifier, CommandError, ErrorCode, ErrorLayer, InspectCommand, PageId, SessionId,
@@ -4687,6 +4730,34 @@ mod tests {
         assert!(!should_retry_plain_click_target_drift(false, 3, &stale));
         assert!(!should_retry_plain_click_target_drift(true, 0, &stale));
         assert!(!should_retry_plain_click_target_drift(false, 0, &other));
+    }
+
+    #[test]
+    fn click_re_resolves_a_target_detached_before_dispatch_once_only() {
+        let detached = CommandError {
+            code: ErrorCode::BrowserCommandFailed,
+            message: "ExceptionDetails: Error: target detached".into(),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        };
+        let dispatch_failure = CommandError {
+            code: ErrorCode::BrowserCommandFailed,
+            message: "Input.dispatchMouseEvent failed".into(),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        };
+        let stale = CommandError {
+            code: ErrorCode::TargetNotFound,
+            message: "target detached".into(),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        };
+
+        assert!(should_retry_click_target_detach(false, &detached));
+        assert!(!should_retry_click_target_detach(true, &detached));
+        assert!(!should_retry_click_target_detach(false, &dispatch_failure));
+        // A stale node is the bounded drift retry's case, not this one.
+        assert!(!should_retry_click_target_detach(false, &stale));
     }
 
     fn chromium_worker_without_browser(root: &std::path::Path) -> ChromiumWorker {
