@@ -12,6 +12,7 @@ use config::VisionProviderConfig;
 pub(crate) struct ReadinessOptions {
     pub(crate) timeout: Duration,
     pub(crate) allow_download: bool,
+    pub(crate) allow_start: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,62 +149,210 @@ pub(crate) fn check_provider_readiness(
         None
     };
 
-    if openai_compatible_models_probe(profile, api_key.as_deref(), options.timeout) {
-        return Ok(ReadinessOutcome::Ready {
-            provider,
-            model: profile.model.clone(),
-        });
+    let mut probe =
+        openai_compatible_models_probe(&provider, profile, api_key.as_deref(), options.timeout);
+    if matches!(probe, ProbeResult::Unreachable)
+        && options.allow_start
+        && provider == "ollama"
+        && try_start_ollama(profile, options.timeout)
+    {
+        probe =
+            openai_compatible_models_probe(&provider, profile, api_key.as_deref(), options.timeout);
     }
 
-    let detail = match provider.as_str() {
-        "ollama" => format!(
-            "Ollama is not reachable at {}; run `ollama serve` and ensure model {} is installed",
-            profile.base_url, profile.model
-        ),
-        "lmstudio" => format!(
-            "LM Studio is not reachable at {}; load {} and start the local server in LM Studio",
-            profile.base_url, profile.model
-        ),
-        "mlx" => format!(
-            "MLX model {} is cached but not loaded; Bobby must start its managed worker",
-            profile.model
-        ),
-        _ => format!(
-            "provider {provider} is not reachable at {} for model {}",
-            profile.base_url, profile.model
-        ),
-    };
-    Ok(ReadinessOutcome::NeedsAction {
-        provider,
-        model: profile.model.clone(),
-        detail,
+    match probe {
+        ProbeResult::Reachable { models } => {
+            if provider == "ollama" {
+                if let Some(models) = models {
+                    if !ollama_model_listed(&profile.model, &models) {
+                        if options.allow_download && pull_ollama_model(&profile.model) {
+                            return Ok(ReadinessOutcome::Ready {
+                                provider,
+                                model: profile.model.clone(),
+                            });
+                        }
+                        return Ok(ReadinessOutcome::NeedsAction {
+                            provider,
+                            model: profile.model.clone(),
+                            detail: format!(
+                                "Ollama is running at {} but model {} is not installed; run `ollama pull {}`",
+                                profile.base_url, profile.model, profile.model
+                            ),
+                        });
+                    }
+                }
+            }
+            Ok(ReadinessOutcome::Ready {
+                provider,
+                model: profile.model.clone(),
+            })
+        }
+        ProbeResult::Unreachable => Ok(ReadinessOutcome::NeedsAction {
+            provider: provider.clone(),
+            model: profile.model.clone(),
+            detail: match provider.as_str() {
+                "ollama" => format!(
+                    "Ollama is not reachable at {}; run `ollama serve` and ensure model {} is installed",
+                    profile.base_url, profile.model
+                ),
+                "lmstudio" => format!(
+                    "LM Studio is not reachable at {}; load {} and start the local server in LM Studio",
+                    profile.base_url, profile.model
+                ),
+                "mlx" => format!(
+                    "MLX model {} is cached but not loaded; Bobby must start its managed worker",
+                    profile.model
+                ),
+                _ => format!(
+                    "provider {provider} is not reachable at {} for model {}",
+                    profile.base_url, profile.model
+                ),
+            },
+        }),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProbeResult {
+    Unreachable,
+    Reachable { models: Option<Vec<String>> },
+}
+
+pub(crate) fn models_probe_urls(provider: &str, base_url: &str) -> Vec<String> {
+    let base = base_url.trim_end_matches('/');
+    if provider.eq_ignore_ascii_case("ollama") && !base.ends_with("/v1") {
+        vec![format!("{base}/v1/models"), format!("{base}/api/tags")]
+    } else {
+        vec![format!("{base}/models")]
+    }
+}
+
+pub(crate) fn ollama_model_listed(configured: &str, listed: &[String]) -> bool {
+    let configured = configured.trim();
+    if configured.is_empty() {
+        return false;
+    }
+    listed.iter().any(|id| {
+        id == configured
+            || id.starts_with(&format!("{configured}:"))
+            || configured.starts_with(&format!("{id}:"))
     })
 }
 
+fn listed_models(body: &str) -> Option<Vec<String>> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    if let Some(data) = value.get("data").and_then(|value| value.as_array()) {
+        return Some(
+            data.iter()
+                .filter_map(|model| {
+                    model
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .collect(),
+        );
+    }
+    if let Some(models) = value.get("models").and_then(|value| value.as_array()) {
+        return Some(
+            models
+                .iter()
+                .filter_map(|model| {
+                    model
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .collect(),
+        );
+    }
+    None
+}
+
 fn openai_compatible_models_probe(
+    provider: &str,
     profile: &VisionProviderConfig,
     api_key: Option<&str>,
     timeout: Duration,
-) -> bool {
-    let base_url = profile.base_url.clone();
+) -> ProbeResult {
+    let urls = models_probe_urls(provider, &profile.base_url);
     let api_key = api_key.map(str::to_owned);
     std::thread::spawn(move || {
         let Ok(client) = reqwest::blocking::Client::builder()
             .timeout(timeout)
+            .no_proxy()
             .build()
         else {
-            return false;
+            return ProbeResult::Unreachable;
         };
-        let mut request = client.get(format!("{}/models", base_url.trim_end_matches('/')));
-        if let Some(api_key) = api_key {
-            request = request.bearer_auth(api_key);
+        for url in urls {
+            let mut request = client.get(&url);
+            if let Some(api_key) = api_key.as_deref() {
+                request = request.bearer_auth(api_key);
+            }
+            let Ok(response) = request.send() else {
+                continue;
+            };
+            if !response.status().is_success() {
+                continue;
+            }
+            let body = response.text().unwrap_or_default();
+            return ProbeResult::Reachable {
+                models: listed_models(&body),
+            };
         }
-        request
-            .send()
-            .is_ok_and(|response| response.status().is_success())
+        ProbeResult::Unreachable
     })
     .join()
-    .unwrap_or(false)
+    .unwrap_or(ProbeResult::Unreachable)
+}
+
+fn try_start_ollama(profile: &VisionProviderConfig, timeout: Duration) -> bool {
+    let Some(address) = endpoint_socket(&profile.base_url) else {
+        return false;
+    };
+    if !address.ip().is_loopback() {
+        return false;
+    }
+    if TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok() {
+        return true;
+    }
+    let Some(binary) = crate::onboarding::find_sidecar_binary("ollama") else {
+        return false;
+    };
+    let Ok(mut child) = Command::new(binary)
+        .arg("serve")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let _ = child.try_wait();
+        if TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+fn pull_ollama_model(model: &str) -> bool {
+    let Some(binary) = crate::onboarding::find_sidecar_binary("ollama") else {
+        return false;
+    };
+    Command::new(binary)
+        .arg("pull")
+        .arg(model)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .status()
+        .ok()
+        .is_some_and(|status| status.success())
 }
 
 fn configure_mlx_readiness_command(
@@ -342,6 +491,7 @@ mod tests {
         let options = ReadinessOptions {
             timeout: Duration::from_millis(10),
             allow_download: false,
+            allow_start: false,
         };
 
         let ollama = check_provider_readiness("ollama", &ollama, &options).unwrap();
@@ -373,6 +523,7 @@ mod tests {
             &ReadinessOptions {
                 timeout: Duration::from_millis(10),
                 allow_download: false,
+                allow_start: false,
             },
         )
         .unwrap();
@@ -402,5 +553,88 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--vision-base-url", "http://127.0.0.1:19101"]));
+    }
+
+    #[test]
+    fn ollama_host_only_base_probes_openai_v1_models() {
+        assert_eq!(
+            models_probe_urls("ollama", "http://127.0.0.1:11434"),
+            vec![
+                "http://127.0.0.1:11434/v1/models".to_string(),
+                "http://127.0.0.1:11434/api/tags".to_string(),
+            ]
+        );
+        assert_eq!(
+            models_probe_urls("ollama", "http://127.0.0.1:11434/v1"),
+            vec!["http://127.0.0.1:11434/v1/models".to_string()]
+        );
+        assert_eq!(
+            models_probe_urls("openai", "https://api.openai.com/v1"),
+            vec!["https://api.openai.com/v1/models".to_string()]
+        );
+    }
+
+    #[test]
+    fn ollama_model_listed_accepts_tagged_variants() {
+        let listed = ["llava:7b".to_string(), "qwen3.8:27b-mlx".to_string()];
+        assert!(ollama_model_listed("llava", &listed));
+        assert!(ollama_model_listed("llava:7b", &listed));
+        assert!(!ollama_model_listed("llava:13b", &listed));
+        assert!(!ollama_model_listed("llama3.1", &listed));
+    }
+
+    #[test]
+    fn ollama_host_only_readiness_succeeds_against_v1_models() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let mut chunk = [0_u8; 256];
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let request = String::from_utf8_lossy(&request);
+            assert!(
+                request.contains("GET /v1/models"),
+                "host-only ollama base must probe /v1/models, got {request}"
+            );
+            let body = r#"{"object":"list","data":[{"id":"llava:7b"}]}"#;
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        });
+
+        let profile = VisionProviderConfig {
+            base_url: format!("http://{address}"),
+            model: "llava".into(),
+            api_key_env: None,
+        };
+        let outcome = check_provider_readiness(
+            "ollama",
+            &profile,
+            &ReadinessOptions {
+                timeout: Duration::from_secs(2),
+                allow_download: false,
+                allow_start: false,
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                outcome,
+                ReadinessOutcome::Ready { ref model, .. } if model == "llava"
+            ),
+            "{outcome:?}"
+        );
+        server.join().unwrap();
     }
 }

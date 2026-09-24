@@ -46,7 +46,29 @@ Supported host contracts:
 | NVIDIA OpenShell | MCP streamable HTTP | project `openshell/mcp.json` |
 
 Host entries launch Bobby without embedding credentials. Run `bobby doctor`
-to detect stale entries and `bobby doctor --fix` to update them.
+to detect stale entries and `bobby doctor --fix` to update them. Unhealthy
+`bobby doctor` output leads with `next: bobby doctor --fix` and each
+auto-repairable fail names that flag.
+
+## Where files go
+
+`make install` / `bobby install` writes two trees. `bobby doctor` prints the
+resolved paths.
+
+| What | Where |
+|---|---|
+| Runtime config (vision, ports, storage) | `./config.toml` in the directory you ran install from (`--config` / `BOBBY_BROWSER_CONFIG` override) |
+| Bootstrap + vision credentials | OS config dir `bobby-browser/` (`~/Library/Application Support/bobby-browser/` on macOS) |
+| CLI + gateways | `~/.cargo/bin` when that dir is on PATH, else `~/.local/bin` |
+| Claude MCP | project `.mcp.json` |
+| VS Code MCP | project `.vscode/mcp.json` |
+| ACP | project `.acp.json` |
+| Agent skills | `~/.agents/skills/bobby-browser/` (and `~/.claude/skills/` when selected) |
+| Firefox companion | OS config dir + Mozilla native-host path; profile under the same config dir |
+
+A Homebrew `bobby` earlier on PATH than the install dir does not change where
+hosts launch. Hosts use the installed CLI. `bobby doctor` warns when PATH
+resolves a different binary.
 
 Selecting an agent host generates a missing agent bootstrap credential.
 Vision setup generates a separate owner-only local vision credential. Bobby

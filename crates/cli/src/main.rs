@@ -2578,7 +2578,7 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(output).unwrap(),
-            "[ok] config: loaded\n[warn] model: not loaded\n[fail] health: unreachable\nnext: bobby doctor --fix\ndoctor: 1 failure(s), 1 warning(s)\n"
+            "next: bobby doctor --fix\n\n[ok] config: loaded\n[warn] model: not loaded\n[fail] health: unreachable · fix: bobby doctor --fix\ndoctor: 1 failure(s), 1 warning(s)\n"
         );
     }
 
@@ -2597,7 +2597,8 @@ mod tests {
 
         assert!(output.contains("[\u{1b}[32mok\u{1b}[0m] config: loaded"));
         assert!(output.contains("[\u{1b}[33mwarn\u{1b}[0m] model: not loaded"));
-        assert!(output.contains("[\u{1b}[31mfail\u{1b}[0m] health: unreachable"));
+        assert!(output
+            .contains("[\u{1b}[31mfail\u{1b}[0m] health: unreachable · fix: bobby doctor --fix"));
     }
 
     #[test]
