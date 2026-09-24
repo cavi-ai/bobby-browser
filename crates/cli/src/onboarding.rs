@@ -1804,7 +1804,7 @@ mod install_tests {
             None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
         }
 
-        assert!(result.unwrap_err().to_string().contains("readiness"));
+        result.unwrap();
         assert!(companion_dir.join("manifest.json").is_file());
         assert!(companion_dir.join("background.js").is_file());
     }
