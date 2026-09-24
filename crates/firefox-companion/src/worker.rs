@@ -2066,7 +2066,20 @@ impl FirefoxCompanionWorker {
         modifiers: &[types::ClickModifier],
     ) -> Result<(), CommandError> {
         let shared_id = self.preflight_pointer_target(context, shared_id).await?;
-        let bounds = self.pointer_origin_bounds(context, &shared_id).await?;
+        self.dispatch_pointer_click(context, &shared_id, mouse_path, modifiers)
+            .await
+    }
+
+    /// The pointer input half of [`Self::perform_pointer_click`], for a
+    /// `shared_id` that [`Self::preflight_pointer_target`] already returned.
+    async fn dispatch_pointer_click(
+        &self,
+        context: &str,
+        shared_id: &str,
+        mouse_path: Option<&MousePath>,
+        modifiers: &[types::ClickModifier],
+    ) -> Result<(), CommandError> {
+        let bounds = self.pointer_origin_bounds(context, shared_id).await?;
         let (min_x, max_x, min_y, max_y) = bounds.element_origin_limits();
         let clamped_path;
         let mouse_path = match mouse_path {
@@ -2078,7 +2091,7 @@ impl FirefoxCompanionWorker {
         };
         let pointer_actions = match mouse_path {
             Some(path) if !path.points.is_empty() => {
-                let pointer_moves = self.pointer_moves_for_path(&path.points, &shared_id);
+                let pointer_moves = self.pointer_moves_for_path(&path.points, shared_id);
                 let mut actions_array = Vec::new();
                 actions_array.extend(pointer_moves);
                 let mut dwell_ms = path.hover_dwell_ms;
@@ -2100,7 +2113,7 @@ impl FirefoxCompanionWorker {
                 actions_array.push(serde_json::json!({"type": "pointerUp", "button": 0}));
                 actions_array
             }
-            _ => pointer_action_sequence(&shared_id),
+            _ => pointer_action_sequence(shared_id),
         };
         let actions = if modifiers.is_empty() {
             serde_json::json!({
@@ -3385,33 +3398,47 @@ impl BrowserWorker for FirefoxCompanionWorker {
         page_id: &PageId,
         command: &ClickCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let context = self.context(page_id).await?;
-        let (context, selector) = self
-            .resolve_input_target(
-                page_id,
-                &context,
-                &command.selector,
-                command.target.as_ref(),
-            )
-            .await?;
-        let shared_id = match command
-            .target
-            .as_ref()
-            .filter(|target| !target.shadow_path.is_empty())
-        {
-            Some(target) => self.resolve_shadow_element(&context, target).await?,
-            None => {
-                self.resolve_element(&context, &selector, command.target.is_some())
-                    .await?
+        let top_context = self.context(page_id).await?;
+        // One re-resolve for a target the page re-rendered away between
+        // resolution and the viewport preflight; a second detach just
+        // fails. Only the preflight is retried: it runs before any pointer
+        // input, so a click that landed is never repeated.
+        let mut detach_retried = false;
+        let (context, shared_id) = loop {
+            let (context, selector) = self
+                .resolve_input_target(
+                    page_id,
+                    &top_context,
+                    &command.selector,
+                    command.target.as_ref(),
+                )
+                .await?;
+            let shared_id = match command
+                .target
+                .as_ref()
+                .filter(|target| !target.shadow_path.is_empty())
+            {
+                Some(target) => self.resolve_shadow_element(&context, target).await?,
+                None => {
+                    self.resolve_element(&context, &selector, command.target.is_some())
+                        .await?
+                }
+            };
+
+            self.behavioral_scroll_into_view_if_needed(&context, &shared_id)
+                .await?;
+            match self.preflight_pointer_target(&context, &shared_id).await {
+                Ok(shared_id) => break (context, shared_id),
+                Err(error) if !detach_retried && error.code == ErrorCode::TargetDetached => {
+                    detach_retried = true;
+                }
+                Err(error) => return Err(error),
             }
         };
-
-        self.behavioral_scroll_into_view_if_needed(&context, &shared_id)
-            .await?;
         let path =
             self.with_session_random(|random| self.mouse_simulator.generate_approach_path(random));
 
-        self.perform_pointer_click(&context, &shared_id, Some(&path), &command.modifiers)
+        self.dispatch_pointer_click(&context, &shared_id, Some(&path), &command.modifiers)
             .await?;
         Ok(vec![
             Evidence::Element {

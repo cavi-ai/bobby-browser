@@ -1760,17 +1760,141 @@ async fn native_click_scrolls_and_revalidates_a_below_fold_element_before_pointe
     );
 }
 
+fn pointer_preflights(calls: &[BidiCall]) -> Vec<&BidiCall> {
+    calls
+        .iter()
+        .filter(|call| {
+            call.method == "script.callFunction"
+                && call.params["functionDeclaration"]
+                    .as_str()
+                    .is_some_and(|declaration| declaration.contains("scrollIntoView"))
+        })
+        .collect()
+}
+
+fn native_element_lookups(calls: &[BidiCall]) -> usize {
+    calls
+        .iter()
+        .filter(|call| {
+            call.method == "script.evaluate"
+                && call.params["expression"]
+                    .as_str()
+                    .is_some_and(|expression| expression.starts_with("document.querySelector("))
+        })
+        .count()
+}
+
+/// A target the page re-rendered away between resolution and the viewport
+/// preflight is re-resolved once, and the click lands exactly once on the
+/// fresh node instead of failing `TargetDetached`.
 #[tokio::test]
-async fn native_click_fails_typed_without_pointer_input_when_target_detaches_after_scroll() {
+async fn native_click_re_resolves_a_target_detached_before_pointer_input() {
     let bidi = FakeBidi::new(vec![
         Ok(json!({"context": "context-1"})),
-        Ok(json!({"result": {"type": "node", "sharedId": "detaching"}})),
+        Ok(json!({"result": {"type": "node", "sharedId": "stale-option"}})),
+        Ok(json!({"result": {"type": "node", "sharedId": "fresh-option"}})),
     ]);
     bidi.set_preflight(vec![Ok(json!({"result": {
         "type": "string",
         "value": "detached"
     }}))])
     .await;
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    worker
+        .click(
+            &page,
+            &ClickCommand {
+                selector: "li[role=option]".into(),
+                target: None,
+                boundary: false,
+                expected_url: None,
+                modifiers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let calls = bidi.calls().await;
+    assert_eq!(native_element_lookups(&calls), 2);
+    let preflights = pointer_preflights(&calls);
+    assert_eq!(preflights.len(), 2);
+    assert_eq!(
+        preflights[0].params["arguments"][0]["sharedId"],
+        "stale-option"
+    );
+    assert_eq!(
+        preflights[1].params["arguments"][0]["sharedId"],
+        "fresh-option"
+    );
+    let pointer: Vec<_> = calls
+        .iter()
+        .filter(|call| call.method == "input.performActions")
+        .collect();
+    assert_eq!(pointer.len(), 1, "a re-resolved click dispatches once");
+    assert_eq!(
+        pointer[0].params["actions"][0]["actions"][0]["origin"]["element"]["sharedId"],
+        "fresh-option"
+    );
+}
+
+/// Pointer input that fails after dispatch is never retried, even when the
+/// failure reads like a detach: the click may already have landed.
+#[tokio::test]
+async fn native_click_never_repeats_pointer_input_that_failed_after_dispatch() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "node", "sharedId": "option"}})),
+        Err(detached_error()),
+    ]);
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    let error = worker
+        .click(
+            &page,
+            &ClickCommand {
+                selector: "li[role=option]".into(),
+                target: None,
+                boundary: false,
+                expected_url: None,
+                modifiers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error, detached_error());
+    let calls = bidi.calls().await;
+    assert_eq!(native_element_lookups(&calls), 1);
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.method == "input.performActions")
+            .count(),
+        1
+    );
+}
+
+/// The re-resolve is spent once: a target that detaches again during the
+/// second preflight fails typed, with no pointer input to either node.
+#[tokio::test]
+async fn native_click_fails_typed_without_pointer_input_when_target_detaches_after_scroll() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "node", "sharedId": "detaching"}})),
+        Ok(json!({"result": {"type": "node", "sharedId": "detaching-again"}})),
+    ]);
+    let detached = || {
+        Ok(json!({"result": {
+            "type": "string",
+            "value": "detached"
+        }}))
+    };
+    bidi.set_preflight(vec![detached(), detached()]).await;
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
     worker.open_page(page.clone()).await.unwrap();
@@ -1790,9 +1914,9 @@ async fn native_click_fails_typed_without_pointer_input_when_target_detaches_aft
         .unwrap_err();
 
     assert_eq!(error.code, ErrorCode::TargetDetached);
-    assert!(!bidi
-        .calls()
-        .await
+    let calls = bidi.calls().await;
+    assert_eq!(pointer_preflights(&calls).len(), 2);
+    assert!(!calls
         .iter()
         .any(|call| call.method == "input.performActions"));
 }
