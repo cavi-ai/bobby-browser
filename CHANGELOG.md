@@ -16,6 +16,25 @@
   `ollama` preset now writes the host-only `http://127.0.0.1:11434`. Requests
   ask for `response_format: {"type": "json_object"}`, and a reply that wraps
   its JSON object in commentary is still parsed.
+- `bobby install` no longer fails the whole run when Ollama (or another
+  selected vision backend) is not reachable; it writes config, prints
+  `locations:`, and tells `bobby doctor` to re-check.
+- Host MCP/ACP entries follow the `bobby install --cli` binary, not whichever
+  `bobby` happens to be first on PATH. `bobby doctor --fix` no longer rewrites
+  those entries to an older Homebrew copy.
+- Ollama vision readiness probed `{base}/models`, which 404s on a host-only
+  `http://127.0.0.1:11434` base. It now hits `/v1/models` (and `/api/tags`),
+  treats `llava` as present when `llava:7b` is installed, and `bobby doctor --fix`
+  starts `ollama serve` when the loopback port is down.
+- `bobby doctor` now reports `vision-readiness` on the regular run, not only
+  under `--fix`.
+
+### Changed
+
+- `bobby doctor` prints `next: bobby doctor --fix` first when anything is
+  wrong, and auto-repairable fail lines include ` · fix: …`.
+- `bobby install` prints a `locations:` block (config, credentials, CLI, host
+  files). `bobby doctor` warns when PATH `bobby` is not that CLI.
 
 ### Changed
 

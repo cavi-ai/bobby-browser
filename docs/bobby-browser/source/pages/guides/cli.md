@@ -68,8 +68,10 @@ does not rewrite bootstrap capabilities or create directories.
 | `--fix` | Repair safe Bobby-owned state, create missing storage dirs, readiness-test the selected provider, then run doctor again |
 | `--download-model` | With `--fix`, explicitly allow downloading the already-selected MLX model |
 
-Exit code `1` if any **fail** checks; warnings alone exit `0`. A `next:` line
-(JSON: `nextAction`) names the first repair command when something is wrong.
+Exit code `1` if any **fail** checks; warnings alone exit `0`. When something
+is wrong, the report **starts** with `next: bobby doctor --fix` (or another
+repair command). Fail lines that doctor can repair include ` · fix: …`. JSON
+`nextAction` names the same command.
 
 In an interactive terminal, `ok`, `warn`, and `fail` are green, yellow, and
 red. Repair results use cyan, green, yellow, or red according to outcome.
@@ -78,11 +80,12 @@ labels, so color is never required to understand a result.
 
 `--fix` is conservative and idempotent. It can heal an existing unrestricted
 bootstrap capability set, create missing storage parent directories, normalize
-the selected provider into Bobby's canonical vision node, and readiness-test
-that selected provider. It does not choose a provider/model, overwrite a custom
-endpoint, persist secrets, install system packages, or leave a daemon running.
-A missing MLX cache remains an action item unless `--download-model` gives
-explicit consent for the download.
+the selected provider into Bobby's canonical vision node, start a loopback
+Ollama if the selected provider is down, and readiness-test that selected
+provider. It does not choose a provider/model, overwrite a custom
+endpoint, persist secrets, install system packages, or leave a Bobby daemon
+running. A missing MLX cache remains an action item unless `--download-model`
+gives explicit consent for the download.
 
 If `/healthz` is unreachable, the `healthz` check is **ok** with detail
 `not running` (start `bobby serve` when you want a live runtime). `--json`

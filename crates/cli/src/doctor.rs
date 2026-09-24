@@ -86,7 +86,7 @@ fn record_host_config_checks(report: &mut DoctorReport, project_root: &Path) {
                         report.ok(&name, path.display().to_string())
                     }
                     onboarding::HostConfigStatus::Drifted => {
-                        report.fail(&name, format!("{} has a stale Bobby entry", path.display()))
+                        report.fail(&name, onboarding::host_config_drift_detail(kind, &path))
                     }
                     onboarding::HostConfigStatus::Invalid => {
                         report.fail(&name, format!("{} is not valid host JSON", path.display()))
@@ -95,6 +95,32 @@ fn record_host_config_checks(report: &mut DoctorReport, project_root: &Path) {
             }
         }
         Err(error) => report.fail("host-config", format!("{error:#}")),
+    }
+}
+
+fn record_cli_path_check(report: &mut DoctorReport) {
+    let Ok(canonical) = onboarding::canonical_cli_path() else {
+        return;
+    };
+    match onboarding::path_cli() {
+        None => report.warn(
+            "cli-path",
+            format!(
+                "bobby is not on PATH; hosts launch {}",
+                canonical.display()
+            ),
+        ),
+        Some(path_hit) if onboarding::same_cli(&path_hit, &canonical) => {
+            report.ok("cli-path", canonical.display().to_string())
+        }
+        Some(path_hit) => report.warn(
+            "cli-path",
+            format!(
+                "PATH `bobby` is {}; hosts launch {}. Put the install dir first on PATH or run that binary",
+                path_hit.display(),
+                canonical.display()
+            ),
+        ),
     }
 }
 
@@ -286,7 +312,9 @@ pub(crate) fn run_doctor_fix(options: DoctorFixOptions) -> Result<DoctorFixRepor
                     profile,
                     &crate::vision_readiness::ReadinessOptions {
                         timeout: Duration::from_secs(45),
-                        allow_download: options.download_model,
+                        allow_download: options.download_model
+                            || provider_name.eq_ignore_ascii_case("ollama"),
+                        allow_start: true,
                     },
                 );
                 match readiness {
@@ -466,6 +494,8 @@ fn repair_command(name: &str) -> &'static str {
         "bootstrap-expiry" => "bobby init --force",
         "mcp-gateway" | "acp-gateway" | "sidecar-version" => "bobby install --cli",
         "firefox-enrollment" => "bobby install --companion",
+        "cli-path" => "put the install dir first on PATH",
+        "vision-readiness" => "bobby doctor --fix",
         "bootstrap-capabilities" => "bobby doctor --fix",
         "config" => "fix config.toml",
         "context-store" => "bobby context verify",
@@ -480,6 +510,16 @@ fn repair_command(name: &str) -> &'static str {
         }
         _ => "bobby doctor --fix",
     }
+}
+
+fn check_detail_with_fix(check: &DoctorCheck) -> String {
+    if check.status != DoctorStatus::Fail || ignored_for_next_action(&check.name) {
+        return check.detail.clone();
+    }
+    if check.detail.contains("fix:") || check.name.starts_with("host-") {
+        return check.detail.clone();
+    }
+    format!("{} · fix: {}", check.detail, repair_command(&check.name))
 }
 
 pub(crate) fn sidecar_version_status(
@@ -628,8 +668,18 @@ impl DoctorReport {
         color_mode: DoctorColorMode,
     ) -> std::io::Result<()> {
         let color = color_mode.enabled();
+        let next_line = match self.next_action() {
+            Some(action) => format!("next: {}", action.command),
+            None => "next: ok".to_string(),
+        };
+        let lead_with_next = self.failures() > 0 || self.warnings() > 0;
+        if lead_with_next {
+            writeln!(writer, "{next_line}")?;
+            writeln!(writer)?;
+        }
         let mut last_group: Option<&str> = None;
         for check in &self.checks {
+            let detail = check_detail_with_fix(check);
             if color {
                 let group = check_group(&check.name);
                 if last_group != Some(group) {
@@ -645,7 +695,7 @@ impl DoctorReport {
                     check.status.ansi(),
                     check.status.label(),
                     check.name,
-                    check.detail
+                    detail
                 )?;
             } else {
                 writeln!(
@@ -653,16 +703,14 @@ impl DoctorReport {
                     "[{}] {}: {}",
                     check.status.label(),
                     check.name,
-                    check.detail
+                    detail
                 )?;
             }
         }
-        let next_line = match self.next_action() {
-            Some(action) => format!("next: {}", action.command),
-            None => "next: ok".to_string(),
-        };
-        if color {
+        if !lead_with_next {
             writeln!(writer, "{next_line}")?;
+        }
+        if color {
             let failure_ansi = if self.failures() == 0 {
                 "\x1b[32m"
             } else {
@@ -680,7 +728,6 @@ impl DoctorReport {
                 self.warnings()
             )
         } else {
-            writeln!(writer, "{next_line}")?;
             writeln!(
                 writer,
                 "doctor: {} failure(s), {} warning(s)",
@@ -1038,6 +1085,39 @@ fn check_vision_model(vision: &VisionConfig) -> Option<DoctorCheck> {
     })
 }
 
+fn check_vision_readiness(vision: &VisionConfig) -> Option<DoctorCheck> {
+    let (provider, profile) = vision.selected_provider()?;
+    match crate::vision_readiness::check_provider_readiness(
+        provider,
+        profile,
+        &crate::vision_readiness::ReadinessOptions {
+            timeout: Duration::from_secs(3),
+            allow_download: false,
+            allow_start: false,
+        },
+    ) {
+        Ok(crate::vision_readiness::ReadinessOutcome::Ready { provider, model }) => {
+            Some(DoctorCheck {
+                status: DoctorStatus::Ok,
+                name: "vision-readiness".to_string(),
+                detail: format!("{provider} / {model} is reachable"),
+            })
+        }
+        Ok(crate::vision_readiness::ReadinessOutcome::NeedsAction { detail, .. }) => {
+            Some(DoctorCheck {
+                status: DoctorStatus::Fail,
+                name: "vision-readiness".to_string(),
+                detail: format!("{detail} · fix: bobby doctor --fix"),
+            })
+        }
+        Err(error) => Some(DoctorCheck {
+            status: DoctorStatus::Warn,
+            name: "vision-readiness".to_string(),
+            detail: error.to_string(),
+        }),
+    }
+}
+
 pub(crate) fn check_vision_upstream_key(vision: &VisionConfig) -> Option<DoctorCheck> {
     let (provider_name, profile) = vision.selected_provider()?;
     let api_key_env = profile.api_key_env.as_deref()?.trim();
@@ -1220,6 +1300,7 @@ pub(crate) fn run_doctor_with_profile(
 ) -> Result<DoctorReport> {
     let mut report = DoctorReport::default();
     record_host_config_checks(&mut report, &std::env::current_dir()?);
+    record_cli_path_check(&mut report);
 
     let config_path = resolve_config_path(config_cli);
     let bootstrap_path = resolve_bootstrap_path(bootstrap_cli.clone()).ok();
@@ -1271,6 +1352,9 @@ pub(crate) fn run_doctor_with_profile(
             push_doctor_check(&mut report, check);
         }
         if let Some(check) = check_vision_model(&config.vision) {
+            push_doctor_check(&mut report, check);
+        }
+        if let Some(check) = check_vision_readiness(&config.vision) {
             push_doctor_check(&mut report, check);
         }
         if let Some(check) = check_vision_upstream_key(&config.vision) {
@@ -2684,6 +2768,15 @@ mod host_config_tests {
         assert_eq!(
             report.check("host-claude").unwrap().status,
             DoctorStatus::Fail
+        );
+        assert!(
+            report
+                .check("host-claude")
+                .unwrap()
+                .detail
+                .contains("fix: bobby doctor --fix"),
+            "{}",
+            report.check("host-claude").unwrap().detail
         );
 
         let actions = repair_host_configs(root.path());

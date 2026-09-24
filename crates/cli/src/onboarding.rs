@@ -415,15 +415,57 @@ thread_local! {
     static INSTALLED_CLI: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
-/// The MCP / ACP host entry an agent launches: this same binary, absolute,
-/// running `mcp-stdio` or `acp-stdio`, which loads the bootstrap credential
-/// itself. No env wiring in the host config, no secrets in any file the host
-/// reads.
+fn cli_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "bobby.exe"
+    } else {
+        "bobby"
+    }
+}
+
+pub(crate) fn same_cli(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// `bobby install --cli` destination if that file exists, else this process.
+/// Host configs and doctor must agree on one path so a Homebrew `bobby` on
+/// PATH cannot rewrite hosts away from the binary just installed.
+pub(crate) fn canonical_cli_path() -> Result<PathBuf> {
+    if let Some(path) = INSTALLED_CLI.with(|slot| slot.borrow().clone()) {
+        return Ok(path);
+    }
+    if let Some(path) = installed_cli_if_present() {
+        return Ok(path);
+    }
+    std::env::current_exe().context("current executable unknown")
+}
+
+fn installed_cli_if_present() -> Option<PathBuf> {
+    let dir = resolve_cli_bin_dir().ok()?;
+    let candidate = dir.join(cli_binary_name());
+    candidate.is_file().then_some(candidate)
+}
+
+/// First `bobby` on PATH, if any.
+pub(crate) fn path_cli() -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    std::env::split_paths(&path_var).find_map(|dir| {
+        let candidate = dir.join(cli_binary_name());
+        candidate.is_file().then_some(candidate)
+    })
+}
+
+/// The MCP / ACP host entry an agent launches: the installed CLI when present,
+/// otherwise this process. Absolute `mcp-stdio` / `acp-stdio`. No env wiring
+/// in the host config, no secrets in any file the host reads.
 fn static_cli_entry(subcommand: &str) -> Result<(String, Vec<String>)> {
-    let exe = match INSTALLED_CLI.with(|slot| slot.borrow().clone()) {
-        Some(path) => path,
-        None => std::env::current_exe().context("current executable unknown")?,
-    };
+    let exe = canonical_cli_path()?;
     Ok((
         exe.to_str()
             .ok_or_else(|| anyhow!("executable path is not valid UTF-8"))?
@@ -511,6 +553,43 @@ fn host_config_status_at(kind: HostKind, path: &Path) -> Result<HostConfigStatus
     match config.pointer(&format!("/{section}/bobby-browser")) {
         Some(actual) if json_contains(actual, &expected) => Ok(HostConfigStatus::Current),
         Some(_) | None => Ok(HostConfigStatus::Drifted),
+    }
+}
+
+pub(crate) fn host_config_drift_detail(kind: HostKind, path: &Path) -> String {
+    const FIX: &str = "bobby doctor --fix";
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return format!("{} has a stale Bobby entry · fix: {FIX}", path.display());
+    };
+    let Ok(config) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return format!("{} has a stale Bobby entry · fix: {FIX}", path.display());
+    };
+    let Ok((section, expected)) = expected_host_entry(kind) else {
+        return format!("{} has a stale Bobby entry · fix: {FIX}", path.display());
+    };
+    match config.pointer(&format!("/{section}/bobby-browser")) {
+        None => format!(
+            "{} is missing the bobby-browser entry · fix: {FIX}",
+            path.display()
+        ),
+        Some(actual) => {
+            let expected_cmd = expected
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let actual_cmd = actual
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if !actual_cmd.is_empty() && actual_cmd != expected_cmd {
+                format!(
+                    "{} launches {actual_cmd}; hosts should launch {expected_cmd} · fix: {FIX}",
+                    path.display()
+                )
+            } else {
+                format!("{} has a stale Bobby entry · fix: {FIX}", path.display())
+            }
+        }
     }
 }
 
@@ -1228,6 +1307,16 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
             let dest = resolve_cli_bin_dir()?;
             let (bobby, on_path) = install_cli_into(&dest)?;
             remember_installed_cli(&bobby);
+            if let Some(path_bobby) = path_cli() {
+                if !same_cli(&path_bobby, &bobby) {
+                    return Ok(format!(
+                        "installed {} — PATH `bobby` is {}. Hosts launch the installed binary; put {} first on PATH",
+                        bobby.display(),
+                        path_bobby.display(),
+                        dest.display()
+                    ));
+                }
+            }
             if on_path {
                 Ok(format!("installed {}", bobby.display()))
             } else {
@@ -1440,22 +1529,58 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
             &crate::vision_readiness::ReadinessOptions {
                 timeout: std::time::Duration::from_secs(45),
                 allow_download: false,
+                allow_start: true,
             },
         )? {
             crate::vision_readiness::ReadinessOutcome::Ready { provider, model } => {
                 println!("ok: configured and readiness-tested {provider} / {model}");
             }
             outcome @ crate::vision_readiness::ReadinessOutcome::NeedsAction { .. } => {
-                anyhow::bail!("vision readiness: {}", outcome.detail());
+                eprintln!(
+                    "next: vision not ready — {}. Config is written; re-check with `bobby doctor`.",
+                    outcome.detail()
+                );
             }
         }
     }
     if ran == 0 {
         println!("nothing selected; nothing changed");
     } else {
+        print_install_locations(&config_path, bootstrap_path, &project_root);
         println!("installation applied. Next: run `bobby doctor`.");
     }
     Ok(())
+}
+
+fn print_install_locations(config_path: &Path, bootstrap_path: &Path, project_root: &Path) {
+    println!("locations:");
+    println!("  config: {}", config_path.display());
+    if let Some(dir) = bootstrap_path.parent() {
+        println!(
+            "  credentials: {} (bootstrap.env, vision.env)",
+            dir.display()
+        );
+    } else {
+        println!("  credentials: {}", bootstrap_path.display());
+    }
+    if let Ok(cli) = canonical_cli_path() {
+        println!("  cli: {}", cli.display());
+        if let Some(path_bobby) = path_cli() {
+            if !same_cli(&path_bobby, &cli) {
+                println!(
+                    "  PATH bobby: {} (not the installed CLI — hosts launch the cli path above)",
+                    path_bobby.display()
+                );
+            }
+        }
+    }
+    for kind in HostKind::DRIFT_CHECKED {
+        if let Ok(path) = host_config_path(kind, project_root) {
+            if path.is_file() {
+                println!("  host {}: {}", kind.name(), path.display());
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1614,10 +1739,10 @@ mod install_tests {
     }
 
     #[test]
-    fn vision_readiness_named_install_persists_selection_and_surfaces_failure() {
+    fn vision_readiness_named_install_persists_selection_when_provider_is_not_ready() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
-        let error = run_install(
+        run_install(
             &dir.path().join("bootstrap.env"),
             InstallOptions {
                 vision: true,
@@ -1628,9 +1753,8 @@ mod install_tests {
                 ..InstallOptions::default()
             },
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(error.to_string().contains("readiness"));
         let loaded = config::AppConfig::load(&config_path).unwrap();
         assert_eq!(loaded.vision.provider.as_deref(), Some("openai"));
         assert_eq!(
@@ -1680,7 +1804,7 @@ mod install_tests {
             None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
         }
 
-        assert!(result.unwrap_err().to_string().contains("readiness"));
+        result.unwrap();
         assert!(companion_dir.join("manifest.json").is_file());
         assert!(companion_dir.join("background.js").is_file());
     }
@@ -1787,6 +1911,43 @@ mod install_tests {
             host_config_status_at(HostKind::Claude, &path).unwrap(),
             HostConfigStatus::Current
         );
+    }
+
+    #[test]
+    fn canonical_cli_path_prefers_the_remembered_install() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let bobby = dest.path().join("bobby");
+        std::fs::write(&bobby, b"").unwrap();
+        remember_installed_cli(&bobby);
+        let _clear = scopeguard_clear_installed_cli();
+        assert_eq!(canonical_cli_path().unwrap(), bobby);
+    }
+
+    fn scopeguard_clear_installed_cli() -> impl Drop {
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                INSTALLED_CLI.with(|slot| {
+                    *slot.borrow_mut() = None;
+                });
+            }
+        }
+        Clear
+    }
+
+    #[test]
+    fn host_drift_detail_names_both_binaries_and_the_fix_flag() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let path = merge_host_config(HostKind::Claude, root.path()).unwrap();
+        let mut config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        config["mcpServers"]["bobby-browser"]["command"] = serde_json::json!("/tmp/other-bobby");
+        std::fs::write(&path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+        let detail = host_config_drift_detail(HostKind::Claude, &path);
+        assert!(detail.contains("/tmp/other-bobby"), "{detail}");
+        assert!(detail.contains("fix: bobby doctor --fix"), "{detail}");
     }
 
     #[test]

@@ -135,6 +135,7 @@ pub fn connect(opts: ConnectOpts) -> Result<()> {
             &crate::vision_readiness::ReadinessOptions {
                 timeout: Duration::from_secs(45),
                 allow_download: opts.download_model,
+                allow_start: true,
             },
         )? {
             crate::vision_readiness::ReadinessOutcome::Ready { provider, model } => {
