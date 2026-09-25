@@ -496,7 +496,7 @@ impl Server {
                     "Invalid Request",
                     Some(json!({
                         "diagnostic": format!("request id {key} is already in flight"),
-                        "repair": "use a unique id per request; wait for the earlier response or send notifications/cancelled for it first"
+                        "repair": crate::repair::duplicate_request_id_repair(),
                     })),
                 ));
             }
@@ -632,7 +632,11 @@ impl Server {
                             Value::Null,
                             INVALID_REQUEST,
                             "Invalid Request",
-                            Some(json!({"reason":"frameTooLarge","maxBytes":MAX_FRAME_BYTES})),
+                            Some(json!({
+                                "reason":"frameTooLarge",
+                                "maxBytes":MAX_FRAME_BYTES,
+                                "repair":crate::repair::frame_too_large_repair()
+                            })),
                         )),
                         FrameStatus::Complete => match serde_json::from_slice::<Value>(&frame.bytes) {
                             Ok(message) => {
@@ -936,26 +940,18 @@ impl Server {
                 return error(
                     id,
                     INTERFACE_ERROR,
-                    "Runtime interface error",
+                    "Runtime interface error: notFound",
                     Some(json!({
                         "interfaceError":not_found_error(&context),
-                        "resource":{"uri":input.uri}
+                        "resource":{"uri":input.uri},
+                        "repair":crate::repair::artifact_not_found_repair()
                     })),
                 )
             }
             Err(interface_error) => return interface_error_response(id, interface_error),
         };
         if content.bytes.len() > MAX_RESOURCE_ENCODED_BYTES {
-            return error(
-                id,
-                INTERFACE_ERROR,
-                "Runtime interface error",
-                Some(json!({
-                    "resource":{"uri":input.uri},
-                    "reason":"resourceTooLarge",
-                    "maxEncodedBytes":MAX_RESOURCE_ENCODED_BYTES
-                })),
-            );
+            return resource_too_large(id, input.uri);
         }
         let body = if textual_media_type(&content.media_type) {
             match String::from_utf8(content.bytes) {
@@ -1930,8 +1926,9 @@ fn push_evidence(value: &mut Value, evidence: Value) {
 
 /// The agent-facing `-32602` message: hosts (Claude Code among them) render
 /// only `error.message`, so a `reason` parked in `data` alone reaches no one.
-/// The reason is always named, and the repair action follows it when
-/// `repair_for_protocol_reason` has one. Built only from the canned reason
+/// The reason is always named, and the repair action follows it: the
+/// reason's own from `repair_for_protocol_reason`, else the `-32602` general
+/// one. Built only from the canned reason
 /// string and repair action -- never from caller-supplied argument values,
 /// ids, or paths (`crates/mcp-gateway/tests/redaction.rs` is the gate).
 fn invalid_params_message(reason: &str, repair: Option<&Value>) -> String {
@@ -2061,12 +2058,10 @@ fn missing_scope_hint(
 /// the schema but failed to deserialize, an expired deadline, a malformed
 /// idempotency key.
 fn invalid_params_reason(id: Value, reason: &'static str) -> Value {
-    let mut data = json!({"reason":reason});
-    let repair = crate::repair::repair_for_protocol_reason(reason);
-    let message = invalid_params_message(reason, repair.as_ref());
-    if let Some(repair) = repair {
-        data["repair"] = repair;
-    }
+    let repair = crate::repair::repair_for_protocol_reason(reason)
+        .unwrap_or_else(|| crate::repair::repair_for_rpc_code(INVALID_PARAMS));
+    let message = invalid_params_message(reason, Some(&repair));
+    let data = json!({"reason":reason,"repair":repair});
     let mut response = error(id, INVALID_PARAMS, "Invalid params", Some(data));
     response["error"]["message"] = json!(message);
     response
@@ -2080,29 +2075,32 @@ fn job_port_error_response(id: Value, port_error: crate::jobs::JobPortError) -> 
         crate::jobs::JobPortError::NotFound => error(
             id,
             INTERFACE_ERROR,
-            "Runtime interface error",
+            "Runtime interface error: notFound",
             Some(json!({
                 "code":"notFound",
                 "message": port_error.message(),
+                "repair": crate::repair::job_not_found_repair(),
             })),
         ),
         crate::jobs::JobPortError::MissingCapability(capability) => error(
             id,
             INTERFACE_ERROR,
-            "Runtime interface error",
+            "Runtime interface error: missingCapability",
             Some(json!({
                 "code":"missingCapability",
                 "message": port_error.message(),
                 "requiredCapability": capability.as_str(),
+                "repair": crate::repair::repair_for_code("missingCapability"),
             })),
         ),
         crate::jobs::JobPortError::Unavailable(detail) => error(
             id,
             INTERFACE_ERROR,
-            "Runtime interface error",
+            "Runtime interface error: internal",
             Some(json!({
                 "code":"internal",
                 "message": detail,
+                "repair": crate::repair::repair_for_code("internal"),
             })),
         ),
     }
@@ -2132,21 +2130,17 @@ fn interface_error_response(id: Value, mut interface_error: types::InterfaceErro
     }
     interface_error.message = "runtime interface request failed".to_owned();
     let repair = if safe_diagnostic.is_some() {
-        Some(crate::repair::browser_launch_repair())
+        crate::repair::browser_launch_repair()
     } else {
         crate::repair::repair_for_code(&code)
+            .unwrap_or_else(|| crate::repair::repair_for_rpc_code(INTERFACE_ERROR))
     };
-    let repair_action = repair
-        .as_ref()
-        .and_then(|repair| repair["action"].as_str())
-        .map(ToOwned::to_owned);
+    let repair_action = repair["action"].as_str().map(ToOwned::to_owned);
     let mut data = json!({"interfaceError":interface_error});
     if let Some(diagnostic) = &safe_diagnostic {
         data["diagnostic"] = json!(diagnostic);
     }
-    if let Some(repair) = repair {
-        data["repair"] = repair;
-    }
+    data["repair"] = repair;
     let message = interface_error_message(
         &diagnostic,
         safe_diagnostic.as_deref(),
@@ -2336,11 +2330,12 @@ fn resource_too_large(id: Value, uri: String) -> Value {
     error(
         id,
         INTERFACE_ERROR,
-        "Runtime interface error",
+        "Runtime interface error: resourceTooLarge",
         Some(json!({
             "resource":{"uri":uri},
             "reason":"resourceTooLarge",
-            "maxEncodedBytes":MAX_RESOURCE_ENCODED_BYTES
+            "maxEncodedBytes":MAX_RESOURCE_ENCODED_BYTES,
+            "repair":crate::repair::resource_too_large_repair()
         })),
     )
 }
@@ -2448,7 +2443,11 @@ where
             fallback_id,
             INTERNAL_ERROR,
             "Internal error",
-            Some(json!({"reason":"resultTooLarge","maxBytes":MAX_FRAME_BYTES})),
+            Some(json!({
+                "reason":"resultTooLarge",
+                "maxBytes":MAX_FRAME_BYTES,
+                "repair":crate::repair::result_too_large_repair()
+            })),
         ))
         .map_err(io::Error::other)?;
         if fallback.len() <= MAX_FRAME_BYTES {
@@ -2652,6 +2651,14 @@ mod tests {
                 "unknownWorkflowHandle",
                 "The handle is malformed, unknown, or evicted; use explicit IDs to inspect or close the workflow's resources, then call workflow_start for a new handle.",
             ),
+            (
+                "controlIdNotFound",
+                "Take a fresh form_snapshot (or workflow_observe with includeForms:true) and pass a controlId from it; a controlId does not survive a page change.",
+            ),
+            (
+                "exactlyOneOfWorkflowIdOrSessionId",
+                "Pass exactly one of workflowId or sessionId, not both and not neither.",
+            ),
         ] {
             let response = invalid_params_reason(json!(1), reason);
             assert_eq!(
@@ -2669,19 +2676,22 @@ mod tests {
         }
     }
 
+    /// A reason with no repair of its own still names itself and falls back
+    /// to the `-32602` general repair, so no rejection reaches a host bare.
     #[test]
-    fn invalid_params_reason_with_no_known_repair_still_names_the_reason() {
-        assert!(crate::repair::repair_for_protocol_reason("controlIdNotFound").is_none());
-        let response = invalid_params_reason(json!(2), "controlIdNotFound");
+    fn invalid_params_reason_with_no_own_repair_falls_back_to_the_general_one() {
+        assert!(crate::repair::repair_for_protocol_reason("madeUpReason").is_none());
+        let general = crate::repair::repair_for_rpc_code(INVALID_PARAMS);
+        let response = invalid_params_reason(json!(2), "madeUpReason");
         assert_eq!(
             response["error"]["message"],
-            json!("Invalid params (controlIdNotFound)")
+            json!(format!(
+                "Invalid params (madeUpReason): {}",
+                general["action"].as_str().unwrap()
+            ))
         );
-        assert_eq!(
-            response["error"]["data"]["reason"],
-            json!("controlIdNotFound")
-        );
-        assert!(response["error"]["data"]["repair"].is_null());
+        assert_eq!(response["error"]["data"]["reason"], json!("madeUpReason"));
+        assert_eq!(response["error"]["data"]["repair"], general);
     }
 
     #[test]
@@ -2763,14 +2773,21 @@ mod tests {
         );
     }
 
-    /// No `SchemaViolation` means no reason is known, so the message must
-    /// stay the untouched bare string rather than naming a reason that was
-    /// never diagnosed.
+    /// No `SchemaViolation` means no reason is known, so the message names
+    /// no reason that was never diagnosed -- only the `-32602` general repair.
     #[test]
-    fn invalid_params_with_no_violation_stays_bare() {
+    fn invalid_params_with_no_violation_names_no_reason_only_the_general_repair() {
+        let general = crate::repair::repair_for_rpc_code(INVALID_PARAMS);
         let response = invalid_params(json!(4), "click", &json!({}), None, 0);
-        assert_eq!(response["error"]["message"], json!("Invalid params"));
-        assert!(response["error"]["data"].is_null());
+        assert_eq!(
+            response["error"]["message"],
+            json!(format!(
+                "Invalid params; repair: {}",
+                general["action"].as_str().unwrap()
+            ))
+        );
+        assert!(response["error"]["data"]["reason"].is_null());
+        assert_eq!(response["error"]["data"]["repair"], general);
     }
 
     /// A choice-keyword rejection names the variant-list fix in the

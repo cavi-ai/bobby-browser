@@ -1384,8 +1384,10 @@ async fn cancelling_while_open_page_is_blocked_keeps_setup_supervised_and_delete
         .await
         .expect("cancelled request completed")
         .unwrap();
-    assert_eq!(
-        response["error"]["message"], "Request cancelled",
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("Request cancelled; repair: ")),
         "{response}"
     );
     wait_for_no_sessions(&live.runtime).await;
@@ -1438,8 +1440,10 @@ async fn cancelling_blocked_navigation_reaches_terminal_journal_phase_before_ses
         .await
         .expect("cancelled request completed")
         .unwrap();
-    assert_eq!(
-        response["error"]["message"], "Request cancelled",
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("Request cancelled; repair: ")),
         "{response}"
     );
     wait_for_no_sessions(&live.runtime).await;
@@ -1553,8 +1557,10 @@ async fn cancellation_racing_page_open_failure_still_performs_one_session_delete
         .await
         .expect("cancelled request completed")
         .unwrap();
-    assert_eq!(
-        response["error"]["message"], "Request cancelled",
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("Request cancelled; repair: ")),
         "{response}"
     );
     wait_for_no_sessions(&live.runtime).await;
@@ -1598,8 +1604,10 @@ async fn cancellation_while_delete_session_is_blocked_does_not_drop_cleanup_futu
         .await
         .expect("cancelled request completed")
         .unwrap();
-    assert_eq!(
-        response["error"]["message"], "Request cancelled",
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("Request cancelled; repair: ")),
         "{response}"
     );
     wait_for_no_sessions(&live.runtime).await;
@@ -1925,8 +1933,10 @@ async fn cancelled_failed_compensation_is_bounded_to_one_attempt_and_does_not_pa
         .await
         .expect("cancelled response completed")
         .unwrap();
-    assert_eq!(
-        response["error"]["message"], "Request cancelled",
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("Request cancelled; repair: ")),
         "{response}"
     );
 
@@ -2031,7 +2041,8 @@ async fn reusing_a_request_id_while_the_first_is_in_flight_returns_invalid_reque
         .expect("duplicate id response");
     assert_eq!(duplicate["error"]["code"], -32600, "{duplicate}");
     assert_eq!(
-        duplicate["error"]["message"], "Invalid Request",
+        duplicate["error"]["message"],
+        "Invalid Request; repair: Use a unique id per request; wait for the earlier response or send notifications/cancelled for it first.",
         "{duplicate}"
     );
     assert_eq!(
@@ -2039,8 +2050,8 @@ async fn reusing_a_request_id_while_the_first_is_in_flight_returns_invalid_reque
         "{duplicate}"
     );
     assert_eq!(
-        duplicate["error"]["data"]["repair"],
-        "use a unique id per request; wait for the earlier response or send notifications/cancelled for it first",
+        duplicate["error"]["data"]["repair"]["action"],
+        "Use a unique id per request; wait for the earlier response or send notifications/cancelled for it first.",
         "{duplicate}"
     );
 

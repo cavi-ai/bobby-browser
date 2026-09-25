@@ -43,10 +43,91 @@ pub fn success(id: Value, result: Value) -> Value {
     json!({"jsonrpc":"2.0","id":id,"result":result})
 }
 
+/// A JSON-RPC error whose `message` ends with the repair action. Hosts
+/// (Claude Code among them) render only `error.message`, so a repair parked
+/// in `data` alone reaches no one. The site's own `data.repair` wins; a site
+/// with none gets the code's general repair on `data.repair` as well.
 pub fn error(id: Value, code: i64, message: &'static str, data: Option<Value>) -> Value {
-    let mut error = json!({"code":code,"message":message});
-    if let Some(data) = data {
-        error["data"] = data;
+    let mut data = data.unwrap_or_else(|| json!({}));
+    if let Some(fields) = data.as_object_mut() {
+        if !fields
+            .get("repair")
+            .is_some_and(|repair| repair["action"].is_string())
+        {
+            fields.insert(
+                "repair".to_owned(),
+                crate::repair::repair_for_rpc_code(code),
+            );
+        }
     }
-    json!({"jsonrpc":"2.0","id":id,"error":error})
+    let message = match data["repair"]["action"].as_str() {
+        Some(action) => format!("{message}; repair: {action}"),
+        None => message.to_owned(),
+    };
+    json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message,"data":data}})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RPC_CODES: [(i64, &str); 8] = [
+        (PARSE_ERROR, "Parse error"),
+        (INVALID_REQUEST, "Invalid Request"),
+        (METHOD_NOT_FOUND, "Method not found"),
+        (INVALID_PARAMS, "Invalid params"),
+        (INTERNAL_ERROR, "Internal error"),
+        (NOT_INITIALIZED, "Server not initialized"),
+        (INTERFACE_ERROR, "Runtime interface error"),
+        (REQUEST_CANCELLED, "Request cancelled"),
+    ];
+
+    /// Every error this gateway can emit names its repair in `error.message`,
+    /// the one field hosts render, and carries it on `error.data.repair`.
+    #[test]
+    fn every_rpc_error_message_ends_with_its_repair_action() {
+        for (code, base) in RPC_CODES {
+            let response = error(json!(1), code, base, None);
+            let repair = crate::repair::repair_for_rpc_code(code);
+            let action = repair["action"].as_str().expect("repair action");
+            assert_eq!(
+                response["error"]["message"],
+                json!(format!("{base}; repair: {action}")),
+                "{response}"
+            );
+            assert_eq!(response["error"]["data"]["repair"], repair, "{response}");
+        }
+    }
+
+    #[test]
+    fn a_site_repair_wins_and_its_other_data_is_kept() {
+        let site = json!({"action":"Do the specific thing.","doc":"bobby://failure-taxonomy"});
+        let response = error(
+            json!(2),
+            INVALID_REQUEST,
+            "Invalid Request",
+            Some(json!({"reason":"frameTooLarge","repair":site.clone()})),
+        );
+        assert_eq!(
+            response["error"]["message"],
+            "Invalid Request; repair: Do the specific thing."
+        );
+        assert_eq!(response["error"]["data"]["repair"], site);
+        assert_eq!(response["error"]["data"]["reason"], "frameTooLarge");
+    }
+
+    #[test]
+    fn site_data_without_a_repair_gets_the_code_repair_beside_it() {
+        let response = error(
+            json!(3),
+            INTERNAL_ERROR,
+            "Internal error",
+            Some(json!({"reason":"resultTooLarge"})),
+        );
+        assert_eq!(response["error"]["data"]["reason"], "resultTooLarge");
+        assert_eq!(
+            response["error"]["data"]["repair"],
+            crate::repair::repair_for_rpc_code(INTERNAL_ERROR)
+        );
+    }
 }
