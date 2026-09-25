@@ -15,6 +15,9 @@ Not yet published to PyPI. Install from this monorepo:
 pip install -e packages/python-sdk
 ```
 
+`bobby install --skill-hermes` installs the Hermes skill that drives this
+client into `$HERMES_HOME/skills/` (else `~/.hermes/skills/`).
+
 ## Construct the client
 
 ```python

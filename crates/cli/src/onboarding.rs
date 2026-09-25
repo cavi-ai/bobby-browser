@@ -407,7 +407,10 @@ pub(crate) enum HostConfigStatus {
 }
 
 const SKILL_SOURCE: &str = include_str!("../../../skill/SKILL.md");
+const HERMES_SKILL_SOURCE: &str = include_str!("../../../skill/hermes/SKILL.md");
 const SKILL_NAME: &str = "bobby-browser";
+const OPENCLAW_STATE_DIR_ENV: &str = "OPENCLAW_STATE_DIR";
+const HERMES_HOME_ENV: &str = "HERMES_HOME";
 
 thread_local! {
     /// Set when this process installs `bobby` onto PATH, so host MCP merges
@@ -662,44 +665,77 @@ pub enum SkillKind {
     Agents,
     /// Claude Code only: `.claude/skills/` or `~/.claude/skills/`.
     Claude,
-    /// OpenClaw: always `~/.openclaw/skills/` (no project tree).
+    /// OpenClaw: `$OPENCLAW_STATE_DIR/skills/` when set, else `~/.openclaw/skills/`
+    /// (no project tree).
     OpenClaw,
+    /// Hermes: `$HERMES_HOME/skills/` when set, else `~/.hermes/skills/`
+    /// (no project tree). Python SDK skill, not the MCP skill.
+    Hermes,
+}
+
+fn env_dir(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn home_subdir(name: &str) -> Result<PathBuf> {
+    Ok(dirs::home_dir()
+        .context("home directory unavailable")?
+        .join(name))
+}
+
+/// OpenClaw skills directory: `$OPENCLAW_STATE_DIR/skills`, else `~/.openclaw/skills`.
+pub fn openclaw_skills_dir() -> Result<PathBuf> {
+    let root = match env_dir(OPENCLAW_STATE_DIR_ENV) {
+        Some(dir) => dir,
+        None => home_subdir(".openclaw")?,
+    };
+    Ok(root.join("skills"))
+}
+
+/// Hermes skills directory: `$HERMES_HOME/skills`, else `~/.hermes/skills`.
+pub fn hermes_skills_dir() -> Result<PathBuf> {
+    let root = match env_dir(HERMES_HOME_ENV) {
+        Some(dir) => dir,
+        None => home_subdir(".hermes")?,
+    };
+    Ok(root.join("skills"))
+}
+
+fn skill_source(kind: SkillKind) -> &'static str {
+    match kind {
+        SkillKind::Hermes => HERMES_SKILL_SOURCE,
+        SkillKind::Agents | SkillKind::Claude | SkillKind::OpenClaw => SKILL_SOURCE,
+    }
 }
 
 /// Install the agent skill for one host family. `project` selects the project
-/// tree for [`SkillKind::Agents`] and [`SkillKind::Claude`]; OpenClaw is
-/// always user-level. Returns the file written.
+/// tree for [`SkillKind::Agents`] and [`SkillKind::Claude`]; OpenClaw and
+/// Hermes are always user-level. Returns the file written.
 pub fn install_skill(kind: SkillKind, project: bool, project_root: &Path) -> Result<PathBuf> {
     let base = match kind {
         SkillKind::Agents => {
             if project {
                 project_root.join(".agents").join("skills")
             } else {
-                dirs::home_dir()
-                    .context("home directory unavailable")?
-                    .join(".agents")
-                    .join("skills")
+                home_subdir(".agents")?.join("skills")
             }
         }
         SkillKind::Claude => {
             if project {
                 project_root.join(".claude").join("skills")
             } else {
-                dirs::home_dir()
-                    .context("home directory unavailable")?
-                    .join(".claude")
-                    .join("skills")
+                home_subdir(".claude")?.join("skills")
             }
         }
-        SkillKind::OpenClaw => dirs::home_dir()
-            .context("home directory unavailable")?
-            .join(".openclaw")
-            .join("skills"),
+        SkillKind::OpenClaw => openclaw_skills_dir()?,
+        SkillKind::Hermes => hermes_skills_dir()?,
     };
     let dir = base.join(SKILL_NAME);
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("SKILL.md");
-    std::fs::write(&path, SKILL_SOURCE)?;
+    std::fs::write(&path, skill_source(kind))?;
     Ok(path)
 }
 
@@ -838,8 +874,10 @@ pub struct InstallOptions {
     pub project_skill: bool,
     /// Also install into Claude Code's skill tree.
     pub skill_claude: bool,
-    /// Also install into OpenClaw's skill tree (`~/.openclaw/skills/`).
+    /// Also install into OpenClaw's skill tree (`$OPENCLAW_STATE_DIR/skills/`).
     pub skill_openclaw: bool,
+    /// Also install the Python SDK skill into Hermes (`$HERMES_HOME/skills/`).
+    pub skill_hermes: bool,
     pub companion: bool,
     pub extension: Option<PathBuf>,
     /// Copy `bobby` (+ sibling `mcp-gateway` / `acp-gateway`) onto a writable bin dir on PATH.
@@ -866,6 +904,7 @@ fn use_install_defaults(options: &InstallOptions) -> bool {
         && !options.project_skill
         && !options.skill_claude
         && !options.skill_openclaw
+        && !options.skill_hermes
         && !options.companion
         && !options.cli
         && !options.vision
@@ -1172,6 +1211,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         project_skill,
         skill_claude,
         skill_openclaw,
+        skill_hermes,
         companion,
         extension,
         cli,
@@ -1193,6 +1233,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
     let project_skill = *project_skill;
     let skill_claude = *skill_claude;
     let skill_openclaw = *skill_openclaw;
+    let skill_hermes = *skill_hermes;
     let companion = *companion;
     let cli = *cli;
     let vision = *vision;
@@ -1409,10 +1450,25 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
     });
 
     items.push(InstallItem {
-        label: "Agent skill (openclaw): install into ~/.openclaw/skills/".to_owned(),
+        label: format!(
+            "Agent skill (openclaw): install into {}/",
+            openclaw_skills_dir()?.display()
+        ),
         enabled: skill_openclaw,
         run: Box::new(|| {
             let path = install_skill(SkillKind::OpenClaw, false, Path::new("."))?;
+            Ok(format!("installed to {}", path.display()))
+        }),
+    });
+
+    items.push(InstallItem {
+        label: format!(
+            "Agent skill (hermes): install Python SDK skill into {}/",
+            hermes_skills_dir()?.display()
+        ),
+        enabled: skill_hermes,
+        run: Box::new(|| {
+            let path = install_skill(SkillKind::Hermes, false, Path::new("."))?;
             Ok(format!("installed to {}", path.display()))
         }),
     });
@@ -1423,6 +1479,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         && !project_skill
         && !skill_claude
         && !skill_openclaw
+        && !skill_hermes
         && !companion
         && !cli
         && !vision_named
@@ -1432,7 +1489,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
             || !std::io::IsTerminal::is_terminal(&std::io::stdout())
         {
             anyhow::bail!(
-                "bobby install needs a terminal for its checklist, or explicit flags: --host <claude|zed|vscode|acp|openshell> --skill [--skill-claude] [--skill-openclaw] --cli --yes"
+                "bobby install needs a terminal for its checklist, or explicit flags: --host <claude|zed|vscode|acp|openshell> --skill [--skill-claude] [--skill-openclaw] [--skill-hermes] --cli --yes"
             );
         }
         loop {
@@ -1581,6 +1638,12 @@ fn print_install_locations(config_path: &Path, bootstrap_path: &Path, project_ro
             }
         }
     }
+    if let Ok(dir) = openclaw_skills_dir() {
+        println!("  skills openclaw: {}", dir.display());
+    }
+    if let Ok(dir) = hermes_skills_dir() {
+        println!("  skills hermes: {}", dir.display());
+    }
 }
 
 #[cfg(test)]
@@ -1638,6 +1701,10 @@ mod install_tests {
         }));
         assert!(!use_install_defaults(&InstallOptions {
             skill_openclaw: true,
+            ..InstallOptions::default()
+        }));
+        assert!(!use_install_defaults(&InstallOptions {
+            skill_hermes: true,
             ..InstallOptions::default()
         }));
         assert!(!use_install_defaults(&InstallOptions {
@@ -2007,17 +2074,104 @@ mod install_tests {
     }
 
     #[test]
-    fn the_openclaw_skill_installs_into_the_user_openclaw_tree() {
+    fn the_openclaw_skill_installs_into_openclaw_state_dir_when_set() {
         let _lock = INSTALL_ENV_LOCK.lock().unwrap();
         let home = tempfile::tempdir().unwrap();
-        let previous = std::env::var_os("HOME");
-        unsafe { std::env::set_var("HOME", home.path()) };
+        let state = tempfile::tempdir().unwrap();
+        let _env = EnvRestore::capture(&[OPENCLAW_STATE_DIR_ENV, "HOME"]);
+        // SAFETY: tests hold INSTALL_ENV_LOCK; EnvRestore puts the process env back.
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::set_var(OPENCLAW_STATE_DIR_ENV, state.path());
+        }
+        let path = install_skill(SkillKind::OpenClaw, true, Path::new("/unused")).unwrap();
+        assert!(path.ends_with("skills/bobby-browser/SKILL.md"));
+        assert!(path.starts_with(state.path()));
+        assert!(!path.starts_with(home.path()));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("---\nname: bobby-browser"));
+        assert!(text.contains("Drive the bobby-browser automation runtime over its MCP surface"));
+    }
+
+    #[test]
+    fn the_openclaw_skill_falls_back_to_home_openclaw_when_state_dir_unset() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let _env = EnvRestore::capture(&[OPENCLAW_STATE_DIR_ENV, "HOME"]);
+        // SAFETY: tests hold INSTALL_ENV_LOCK; EnvRestore puts the process env back.
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::remove_var(OPENCLAW_STATE_DIR_ENV);
+        }
         let path = install_skill(SkillKind::OpenClaw, true, Path::new("/unused")).unwrap();
         assert!(path.ends_with(".openclaw/skills/bobby-browser/SKILL.md"));
         assert!(path.starts_with(home.path()));
-        match previous {
-            Some(value) => unsafe { std::env::set_var("HOME", value) },
-            None => unsafe { std::env::remove_var("HOME") },
+    }
+
+    #[test]
+    fn the_hermes_skill_installs_into_hermes_home_when_set() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let hermes = tempfile::tempdir().unwrap();
+        let _env = EnvRestore::capture(&[HERMES_HOME_ENV, "HOME"]);
+        // SAFETY: tests hold INSTALL_ENV_LOCK; EnvRestore puts the process env back.
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::set_var(HERMES_HOME_ENV, hermes.path());
+        }
+        let path = install_skill(SkillKind::Hermes, true, Path::new("/unused")).unwrap();
+        assert!(path.ends_with("skills/bobby-browser/SKILL.md"));
+        assert!(path.starts_with(hermes.path()));
+        assert!(!path.starts_with(home.path()));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("BrowserRuntimeClient"));
+        assert!(text.contains("AUTOMATION_RUNTIME_TOKEN"));
+        assert!(text.contains("submit_command"));
+        assert!(
+            !text.contains("Drive the bobby-browser automation runtime over its MCP surface"),
+            "Hermes skill must be the Python SDK skill, not the MCP skill"
+        );
+    }
+
+    #[test]
+    fn the_hermes_skill_falls_back_to_home_hermes_when_hermes_home_unset() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let _env = EnvRestore::capture(&[HERMES_HOME_ENV, "HOME"]);
+        // SAFETY: tests hold INSTALL_ENV_LOCK; EnvRestore puts the process env back.
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::remove_var(HERMES_HOME_ENV);
+        }
+        let path = install_skill(SkillKind::Hermes, false, Path::new("/unused")).unwrap();
+        assert!(path.ends_with(".hermes/skills/bobby-browser/SKILL.md"));
+        assert!(path.starts_with(home.path()));
+    }
+
+    struct EnvRestore {
+        pairs: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl EnvRestore {
+        fn capture(keys: &[&'static str]) -> Self {
+            Self {
+                pairs: keys
+                    .iter()
+                    .map(|key| (*key, std::env::var_os(key)))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (key, previous) in &self.pairs {
+                match previous {
+                    // SAFETY: tests hold INSTALL_ENV_LOCK; restored after each case.
+                    Some(value) => unsafe { std::env::set_var(key, value) },
+                    None => unsafe { std::env::remove_var(key) },
+                }
+            }
         }
     }
 

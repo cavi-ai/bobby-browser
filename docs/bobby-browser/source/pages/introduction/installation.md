@@ -64,6 +64,8 @@ resolved paths.
 | VS Code MCP | project `.vscode/mcp.json` |
 | ACP | project `.acp.json` |
 | Agent skills | `~/.agents/skills/bobby-browser/` (and `~/.claude/skills/` when selected) |
+| OpenClaw skill | `$OPENCLAW_STATE_DIR/skills/bobby-browser/` when set, else `~/.openclaw/skills/` |
+| Hermes skill (Python SDK) | `$HERMES_HOME/skills/bobby-browser/` when set, else `~/.hermes/skills/` |
 | Firefox companion | OS config dir + Mozilla native-host path; profile under the same config dir |
 
 A Homebrew `bobby` earlier on PATH than the install dir does not change where

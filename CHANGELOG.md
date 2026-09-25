@@ -34,7 +34,13 @@
 - `bobby doctor` prints `next: bobby doctor --fix` first when anything is
   wrong, and auto-repairable fail lines include ` · fix: …`.
 - `bobby install` prints a `locations:` block (config, credentials, CLI, host
-  files). `bobby doctor` warns when PATH `bobby` is not that CLI.
+  files, OpenClaw/Hermes skill dirs). `bobby doctor` warns when PATH `bobby`
+  is not that CLI.
+- `bobby install --skill-openclaw` writes `$OPENCLAW_STATE_DIR/skills/` when
+  that env is set, else `~/.openclaw/skills/`.
+- `bobby install --skill-hermes` installs the Python SDK skill
+  (`skill/hermes/SKILL.md`) into `$HERMES_HOME/skills/` when set, else
+  `~/.hermes/skills/`.
 
 ### Changed
 
