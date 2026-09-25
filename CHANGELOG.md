@@ -41,6 +41,10 @@
 - `bobby install --skill-hermes` installs the Python SDK skill
   (`skill/hermes/SKILL.md`) into `$HERMES_HOME/skills/` when set, else
   `~/.hermes/skills/`.
+- Python SDK publishes to PyPI as `bobby-browser` from each release tag
+  (`.github/workflows/publish-python.yml`, trusted publishing, no stored
+  token); `workflow_dispatch` publishes an existing tag. Install docs, the
+  package README, and the Hermes skill now say `pip install bobby-browser`.
 
 ### Changed
 

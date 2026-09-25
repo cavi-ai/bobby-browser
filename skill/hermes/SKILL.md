@@ -15,11 +15,11 @@ bobby-browser is a browser automation runtime, not an agent. Drive it with
 
 ## Install the client
 
-Not on PyPI yet. From a bobby-browser checkout:
-
 ```bash
-pip install -e packages/python-sdk
+pip install bobby-browser
 ```
+
+From a bobby-browser checkout: `pip install -e packages/python-sdk`.
 
 The runtime must already be up (`bobby serve`). The bearer is the plaintext
 from `bobby token` / `bobby init`, exported as `AUTOMATION_RUNTIME_TOKEN`.

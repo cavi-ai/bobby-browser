@@ -11,11 +11,11 @@ passthrough, and `CommandOutcome` status discriminator.
 
 ## Install
 
-Not yet published to PyPI. Install from this monorepo:
-
 ```bash
-pip install -e packages/python-sdk
+pip install bobby-browser
 ```
+
+From a bobby-browser checkout: `pip install -e packages/python-sdk`.
 
 `bobby install --skill-hermes` copies `skill/hermes/SKILL.md` into
 `$HERMES_HOME/skills/bobby-browser/` (else `~/.hermes/skills/`).
