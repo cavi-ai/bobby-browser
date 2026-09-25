@@ -473,3 +473,74 @@ async fn initialize_offers_the_newest_revision_when_there_is_no_overlap() {
     assert!(initialized.get("error").is_none());
     assert_eq!(initialized["result"]["protocolVersion"], "2025-11-25");
 }
+
+/// Hosts render only `error.message`. Every protocol-layer rejection, not only
+/// `-32602` with a reason, must end that message with the repair action it
+/// also carries on `error.data.repair`.
+#[tokio::test]
+async fn every_protocol_rejection_ends_its_message_with_the_repair_action() {
+    fn assert_repair_in_message(response: &Value, code: i64) {
+        assert_eq!(response["error"]["code"], code, "{response}");
+        let message = response["error"]["message"].as_str().expect("message");
+        let action = response["error"]["data"]["repair"]["action"]
+            .as_str()
+            .expect("data.repair.action");
+        assert!(!action.is_empty(), "{response}");
+        assert!(message.ends_with(action), "{response}");
+    }
+
+    let server = fixture_server(vec![Capability::SessionRead]).await;
+    let not_an_object = server.handle_message(json!([1, 2])).await.unwrap();
+    assert_repair_in_message(&not_an_object, -32600);
+    let before_initialize = server
+        .handle_message(request(json!(1), "tools/list", json!({})))
+        .await
+        .unwrap();
+    assert_repair_in_message(&before_initialize, -32002);
+
+    initialize_ready(&server).await;
+    let unknown_method = server
+        .handle_message(request(json!(2), "no/such/method", json!({})))
+        .await
+        .unwrap();
+    assert_repair_in_message(&unknown_method, -32601);
+    let unknown_tool = server
+        .handle_message(request(
+            json!(3),
+            "tools/call",
+            json!({"name":"no_such_tool","arguments":{}}),
+        ))
+        .await
+        .unwrap();
+    assert_repair_in_message(&unknown_tool, -32601);
+    assert!(
+        unknown_tool["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("tools/list"),
+        "{unknown_tool}"
+    );
+    let ping_with_params = server
+        .handle_message(request(json!(4), "ping", json!({"unexpected":true})))
+        .await
+        .unwrap();
+    assert_repair_in_message(&ping_with_params, -32602);
+    let unknown_prompt = server
+        .handle_message(request(
+            json!(5),
+            "prompts/get",
+            json!({"name":"no-such-prompt"}),
+        ))
+        .await
+        .unwrap();
+    assert_repair_in_message(&unknown_prompt, -32602);
+    let unknown_resource = server
+        .handle_message(request(
+            json!(6),
+            "resources/read",
+            json!({"uri":"nowhere://x"}),
+        ))
+        .await
+        .unwrap();
+    assert_repair_in_message(&unknown_resource, -32602);
+}

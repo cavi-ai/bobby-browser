@@ -356,6 +356,8 @@ A `-32602` response carries `data` describing what failed:
 | `workflowBindingConflict` | — | A handle-capable call mixed `workflowHandle` with explicit scope IDs; use one form only (`page_activate` alone accepts handle + `pageId` as activate-and-rebind) |
 | `unknownWorkflowHandle` | — | Handle is malformed, unknown, evicted, or from an earlier server generation; repair with explicit IDs |
 | `hintsPerField` | — | `intent_complete_form` only: a top-level `hints` was sent with `fields` not exactly one entry, or the one field already had its own `hints` |
+| `controlIdNotFound` | — | `upload_files` only: the `controlId` is not on the current form snapshot; take a fresh `form_snapshot` |
+| `exactlyOneOfWorkflowIdOrSessionId` | — | `recovery_status` only: pass exactly one of `workflowId` or `sessionId` |
 
 `pageOpenFailed`, `navigationFailed`, `workflowGenerationChanged`, and
 `workflowSupervisorLost` are not protocol-layer rejections. They are the four
@@ -395,7 +397,10 @@ reverse-engineering evidence shapes. A command whose outcome status is not
 flow. Failures carry a machine-readable repair hint: command-layer failures
 set `error.repair`, RPC-layer rejections set `error.data.repair`, each
 `{action, doc}` with `doc` pointing into `bobby://failure-taxonomy`. A
-`needsReconciliation` outcome always carries the never-retry repair.
+`needsReconciliation` outcome always carries the never-retry repair. Hosts
+that render only `error.message` still see the repair: every JSON-RPC error
+message ends with it (`Invalid params (<reason>): <action>` for `-32602`,
+`<message>; repair: <action>` for every other code).
 
 ## Resources
 

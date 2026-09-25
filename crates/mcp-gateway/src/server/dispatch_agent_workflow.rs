@@ -1755,8 +1755,10 @@ mod tests {
             .expect("cancelled terminal response completed")
             .unwrap();
         gate.release();
-        assert_eq!(
-            response["error"]["message"], "Request cancelled",
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.starts_with("Request cancelled; repair: ")),
             "{response}"
         );
 
@@ -2077,8 +2079,10 @@ mod tests {
             .expect("cancelled publication-generation response completed")
             .unwrap();
         gate.release();
-        assert_eq!(
-            response["error"]["message"], "Request cancelled",
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.starts_with("Request cancelled; repair: ")),
             "{response}"
         );
         assert!(
