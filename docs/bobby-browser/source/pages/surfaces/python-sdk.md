@@ -9,11 +9,11 @@ client dependency).
 
 ## Install
 
-Not yet published to PyPI. Install from this monorepo:
-
 ```bash
-pip install -e packages/python-sdk
+pip install bobby-browser
 ```
+
+From a bobby-browser checkout: `pip install -e packages/python-sdk`.
 
 `bobby install --skill-hermes` installs the Hermes skill that drives this
 client into `$HERMES_HOME/skills/` (else `~/.hermes/skills/`).
