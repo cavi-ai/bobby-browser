@@ -136,9 +136,12 @@ enum CliCommand {
         /// Also install the skill for Claude Code (~/.claude/skills/, or project with --project-skill)
         #[arg(long)]
         skill_claude: bool,
-        /// Also install the skill for OpenClaw (~/.openclaw/skills/)
+        /// Also install the skill for OpenClaw ($OPENCLAW_STATE_DIR/skills/, else ~/.openclaw/skills/)
         #[arg(long)]
         skill_openclaw: bool,
+        /// Also install the Python SDK skill for Hermes ($HERMES_HOME/skills/, else ~/.hermes/skills/)
+        #[arg(long)]
+        skill_hermes: bool,
         /// Install the Firefox companion (extension, native host, descriptor)
         #[arg(long)]
         companion: bool,
@@ -722,6 +725,7 @@ pub async fn run() -> Result<()> {
             project_skill,
             skill_claude,
             skill_openclaw,
+            skill_hermes,
             companion,
             extension,
             cli,
@@ -750,6 +754,7 @@ pub async fn run() -> Result<()> {
                     project_skill,
                     skill_claude,
                     skill_openclaw,
+                    skill_hermes,
                     companion,
                     extension,
                     cli,
@@ -3858,6 +3863,31 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
                 }
                 _ => panic!("unexpected install/setup parse"),
             }
+        }
+    }
+
+    #[test]
+    fn install_parses_openclaw_and_hermes_skill_flags() {
+        let cli = Cli::try_parse_from([
+            "bobby",
+            "install",
+            "--skill-openclaw",
+            "--skill-hermes",
+            "--yes",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(CliCommand::Install {
+                skill_openclaw,
+                skill_hermes,
+                yes,
+                ..
+            }) => {
+                assert!(skill_openclaw);
+                assert!(skill_hermes);
+                assert!(yes);
+            }
+            _ => panic!("unexpected install parse"),
         }
     }
 

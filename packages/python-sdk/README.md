@@ -17,6 +17,9 @@ Not yet published to PyPI. Install from this monorepo:
 pip install -e packages/python-sdk
 ```
 
+`bobby install --skill-hermes` copies `skill/hermes/SKILL.md` into
+`$HERMES_HOME/skills/bobby-browser/` (else `~/.hermes/skills/`).
+
 ## Use
 
 ```python
