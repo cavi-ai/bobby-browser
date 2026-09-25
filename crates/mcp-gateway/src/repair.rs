@@ -7,6 +7,11 @@
 
 use serde_json::{json, Value};
 
+use crate::protocol::{
+    INTERFACE_ERROR, INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND, NOT_INITIALIZED,
+    PARSE_ERROR, REQUEST_CANCELLED,
+};
+
 const TAXONOMY_DOC: &str = "bobby://failure-taxonomy";
 
 /// The `needsReconciliation` override: the outcome is not a plain failure and
@@ -60,6 +65,68 @@ pub(crate) fn browser_launch_repair() -> Value {
     repair("Environment problem, not a bad argument: run `bobby doctor`; another runtime (bobby serve/cdp/mcp-stdio or a stray mcp-gateway) may own the Firefox companion port (default 127.0.0.1:9876) or the BiDi endpoint. Stop it, start and Pair the companion if needed, or point this runtime at a free companionBind, then retry session_create.")
 }
 
+pub(crate) fn duplicate_request_id_repair() -> Value {
+    repair("Use a unique id per request; wait for the earlier response or send notifications/cancelled for it first.")
+}
+
+pub(crate) fn frame_too_large_repair() -> Value {
+    repair("Keep each request frame under maxBytes; pass large inputs by reference (a file path or URL), not inline.")
+}
+
+/// The call ran; only its result was dropped for size, so resubmitting a
+/// mutating call would apply its effect a second time.
+pub(crate) fn result_too_large_repair() -> Value {
+    repair("The call ran but its result exceeded maxBytes and was dropped. Do not resubmit a mutating call; read its outcome with recovery_status. For a read, ask for less (a smaller limit, evidenceDetail compact, or a clipped screenshot).")
+}
+
+pub(crate) fn event_gap_repair() -> Value {
+    repair("Resume events_read from eventGap.earliestAvailable; the events before it are gone, so re-read current state (recovery_status or workflow_observe) instead of replaying them.")
+}
+
+pub(crate) fn artifact_not_found_repair() -> Value {
+    repair("Call resources/list for the artifact:// URIs this principal can read; the artifact may have been evicted or captured by another principal.")
+}
+
+pub(crate) fn resource_too_large_repair() -> Value {
+    repair("Not retryable as-is: the artifact exceeds maxEncodedBytes for resources/read. Capture a smaller one (a clipped screenshot) or fetch it with GET /v1/artifacts/{id} from bobby serve.")
+}
+
+pub(crate) fn job_not_found_repair() -> Value {
+    repair("Use a jobId returned by job_submit; a job is visible only to the principal that submitted it.")
+}
+
+/// Repair for a JSON-RPC error `code` whose site attached no more specific
+/// one. `protocol::error` puts it on `error.data.repair` and, because hosts
+/// render only `error.message`, on the message too.
+pub(crate) fn repair_for_rpc_code(code: i64) -> Value {
+    let action = match code {
+        PARSE_ERROR => "Send each message as one complete JSON value, one per line on stdio; nothing ran.",
+        INVALID_REQUEST => {
+            "Send one JSON-RPC 2.0 object carrying only jsonrpc \"2.0\", a string or number id, method, and params; nothing ran."
+        }
+        METHOD_NOT_FOUND => {
+            "Check the name against tools/list or the MCP methods this server implements; a tool the credential's capabilities do not cover, or a job tool on a runtime without jobs, is not callable."
+        }
+        INVALID_PARAMS => {
+            "Re-read what the method takes (for tools/call, the tool's inputSchema in tools/list; for prompts/get and resources/read, a name or uri from prompts/list or resources/list) and resubmit; nothing ran."
+        }
+        NOT_INITIALIZED => {
+            "Send initialize, then the notifications/initialized notification, before any other request."
+        }
+        REQUEST_CANCELLED => {
+            "The request was cancelled before a result returned; if it could have acted on the page, check recovery_status before resubmitting."
+        }
+        INTERFACE_ERROR => {
+            "Read the interface error code in error.data and follow its entry in bobby://failure-taxonomy."
+        }
+        _ => INTERNAL_ACTION,
+    };
+    repair(action)
+}
+
+const INTERNAL_ACTION: &str =
+    "Nothing caller-side to fix; treat as non-retryable and escalate if it recurs.";
+
 /// General repair for one `ErrorCode` or `InterfaceErrorCode` wire name
 /// (both serialize camelCase from the same vocabulary). Unknown codes get no
 /// hint rather than a guessed one.
@@ -86,7 +153,7 @@ pub(crate) fn repair_for_code(code: &str) -> Option<Value> {
             "Free capacity first (session_list, then session_close or close an idle page), then retry."
         }
         "policyDenied" => "Not retryable as-is; use an allowed path or policy, or a different tool.",
-        "internal" => "Nothing caller-side to fix; treat as non-retryable and escalate if it recurs.",
+        "internal" => INTERNAL_ACTION,
         "targetNotFound" => {
             "Take a fresh a11y_snapshot (form_snapshot for typed controls) and pass the new target."
         }
@@ -235,6 +302,12 @@ pub(crate) fn repair_for_protocol_reason(reason: &str) -> Option<Value> {
         "hintsPerField" => {
             "intent_complete_form takes hints per field (fields[].hints); a top-level hints applies only when fields has exactly one entry."
         }
+        "controlIdNotFound" => {
+            "Take a fresh form_snapshot (or workflow_observe with includeForms:true) and pass a controlId from it; a controlId does not survive a page change."
+        }
+        "exactlyOneOfWorkflowIdOrSessionId" => {
+            "Pass exactly one of workflowId or sessionId, not both and not neither."
+        }
         _ => return None,
     };
     Some(repair(action))
@@ -273,6 +346,53 @@ mod tests {
         ] {
             assert!(repair_for_code(code).is_some(), "no repair for {code}");
         }
+    }
+
+    /// Each JSON-RPC code the gateway emits has its own repair; only
+    /// `-32603` and codes it never emits share the internal fallback.
+    #[test]
+    fn every_emitted_rpc_code_has_its_own_repair() {
+        let fallback = repair_for_rpc_code(i64::MIN);
+        let mut actions = std::collections::BTreeSet::new();
+        for code in [
+            PARSE_ERROR,
+            INVALID_REQUEST,
+            METHOD_NOT_FOUND,
+            INVALID_PARAMS,
+            NOT_INITIALIZED,
+            REQUEST_CANCELLED,
+            INTERFACE_ERROR,
+        ] {
+            let hint = repair_for_rpc_code(code);
+            assert_ne!(
+                hint, fallback,
+                "code {code} fell through to the internal repair"
+            );
+            assert_eq!(hint["doc"], json!(TAXONOMY_DOC));
+            assert!(actions.insert(hint["action"].as_str().unwrap().to_owned()));
+        }
+        assert_eq!(
+            repair_for_rpc_code(crate::protocol::INTERNAL_ERROR),
+            repair_for_code("internal").unwrap()
+        );
+    }
+
+    /// A cancelled call may already have acted; its repair must send the
+    /// agent to recovery_status, not straight back to a resubmit.
+    #[test]
+    fn cancelled_and_oversized_result_repairs_never_invite_a_blind_resubmit() {
+        let cancelled = repair_for_rpc_code(REQUEST_CANCELLED);
+        assert!(cancelled["action"]
+            .as_str()
+            .unwrap()
+            .contains("recovery_status"));
+        let dropped = result_too_large_repair();
+        let action = dropped["action"].as_str().unwrap();
+        assert!(
+            action.contains("Do not resubmit a mutating call"),
+            "{action}"
+        );
+        assert!(action.contains("recovery_status"), "{action}");
     }
 
     #[test]

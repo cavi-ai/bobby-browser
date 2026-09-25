@@ -664,9 +664,10 @@ whatever its error code.
 
 A call that fails before a command runs (auth, capability, routing) returns a
 JSON-RPC error whose `data.interfaceError` carries one of these codes
-(`crates/types/src/interface.rs`). The `message` is deliberately generic;
-the code, `retryable`, `retryAfterMs`, and `requiredCapability` fields are
-the signal:
+(`crates/types/src/interface.rs`). The `message` carries no raw runtime
+detail: it names the code and ends with `; repair: <action>`, the same action
+as `data.repair`. The code, `retryable`, `retryAfterMs`, and
+`requiredCapability` fields are the signal:
 
 - `authenticationFailed` -- the bearer did not verify. Re-source the
   credential (`bootstrap.env` or `AUTOMATION_RUNTIME_BOOTSTRAP_*`); do not
@@ -950,8 +951,8 @@ tools most likely to produce it.
 Not every failed call produces an `ErrorCode`. A call the MCP layer refuses
 before it builds a command answers with JSON-RPC `-32602`. Hosts commonly
 render only `error.message`, so it is never the bare string "Invalid
-params": it is `Invalid params (<reason>): <repair action>`, or
-`Invalid params (<reason>)` when the reason has no repair action. The same
+params": it is `Invalid params (<reason>): <repair action>`; a reason with
+no repair of its own gets the general `-32602` one. The same
 reason and repair also stay under `error.data.reason` / `error.data.repair`
 for a client that already reads `data`
 (`crates/mcp-gateway/src/server/mod.rs`). These are protocol-layer rejections,
@@ -986,6 +987,19 @@ resubmit" -- never reconciliation.
   sent with `fields` not exactly one entry, or the one field already carried
   its own `hints`. Repair: send hints per field (`fields[].hints`); a
   top-level `hints` is a convenience for the single-field case only.
+- `controlIdNotFound` -- `upload_files` only: the `controlId` is not on the
+  page's current form snapshot. Repair: take a fresh `form_snapshot` (or
+  `workflow_observe` with `includeForms: true`) and pass a `controlId` from
+  it; a `controlId` does not survive a page change.
+- `exactlyOneOfWorkflowIdOrSessionId` -- `recovery_status` only: the call
+  named both `workflowId` and `sessionId`, or neither. Repair: pass exactly
+  one.
+
+Every other JSON-RPC error -- `-32700`, `-32600`, `-32601`, `-32603`,
+`-32002`, `-32800`, and the `-32000` rejections without an
+`interfaceError` (`eventGap`, an artifact over the size limit, a missing
+artifact, a job error) -- also ends `message` with `; repair: <action>` and
+carries the same `{action, doc}` on `error.data.repair`.
 
 `workflowGenerationChanged` is different: it is a structured
 `workflow_start` failure reason, not an `-32602` protocol rejection. It means

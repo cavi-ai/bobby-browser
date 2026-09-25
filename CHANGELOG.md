@@ -45,6 +45,16 @@
   (`.github/workflows/publish-python.yml`, trusted publishing, no stored
   token); `workflow_dispatch` publishes an existing tag. Install docs, the
   package README, and the Hermes skill now say `pip install bobby-browser`.
+- MCP: every JSON-RPC error `message` now ends with its repair action
+  (`<message>; repair: <action>`), and `error.data.repair` carries the same
+  `{action, doc}`. Previously `-32700`, `-32600`, `-32601`, `-32002`,
+  `-32800`, `-32603`, bare `-32602`, and the `-32000` rejections for
+  `eventGap`, missing or oversized artifacts, and job errors reached hosts
+  that render only `message` with no repair. `controlIdNotFound` and
+  `exactlyOneOfWorkflowIdOrSessionId` gained their own repairs; a `-32602`
+  reason with none falls back to the general one. The duplicate-request-id
+  rejection's `data.repair` is now the `{action, doc}` object instead of a
+  bare string.
 
 ### Changed
 
