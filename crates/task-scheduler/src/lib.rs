@@ -9,7 +9,7 @@
 //! - Default: in-memory ([`MemoryJobStore`]) — process restart loses the queue.
 //! - Optional: [`JournalJobStore`] via [`JobScheduler::open_journal`] or
 //!   [`SchedulerConfig::journal_path`] — append-only JSONL with fsync; on reopen,
-//!   `Running` jobs are recovered as `Pending`.
+//!   interrupted `Running` jobs require reconciliation before any replay.
 
 mod handlers;
 mod job;

@@ -202,8 +202,9 @@ async fn cli_cancel_running_sleep_job() {
     let created = stdout_json(&submit);
     let job_id = created["jobId"].as_str().expect("jobId").to_string();
 
-    // Give the runner a beat to claim the job (cancel still works while pending).
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // The running handler may already have acted; cancellation must stop
+    // future work without claiming that no effect occurred.
+    wait_cli_status(&base_url, &token, &job_id, &["running"]).await;
 
     let cancel = run_jobs(
         base_url.clone(),
@@ -217,8 +218,8 @@ async fn cli_cancel_running_sleep_job() {
         String::from_utf8_lossy(&cancel.stderr)
     );
 
-    let job = wait_cli_status(&base_url, &token, &job_id, &["cancelled"]).await;
-    assert_eq!(job["status"], "cancelled");
+    let job = wait_cli_status(&base_url, &token, &job_id, &["reconciliationRequired"]).await;
+    assert_eq!(job["status"], "reconciliationRequired");
 
     broker.stop().await;
 }

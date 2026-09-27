@@ -20,10 +20,11 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, Mutex, Notify};
 use types::{
     AttachmentId, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand, ClickCommand,
-    ClickModifier, ClosePageCommand, CommandError, CompanionId, ErrorCode, ErrorLayer, Evidence,
-    InspectCommand, NavigateCommand, OpenPageCommand, PageId, ProfileId, SessionId, TargetSpec,
-    TextMatch, TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil,
-    WorkerId,
+    ClickModifier, ClosePageCommand, CommandError, CompanionId, ControlAction,
+    ControlActionCommand, ErrorCode, ErrorLayer, Evidence, FormControlTarget, InspectCommand,
+    ListPagesCommand, NavigateCommand, OpenPageCommand, PageId, ProfileId, SemanticTargetSegment,
+    SessionId, TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand, WaitCondition,
+    WaitForCommand, WaitUntil, WorkerId,
 };
 use worker_pool::BrowserWorker;
 
@@ -286,6 +287,17 @@ impl BidiTransport for FakeBidi {
             }));
         }
         if method == "script.callFunction" {
+            if params["functionDeclaration"]
+                .as_str()
+                .is_some_and(|declaration| declaration.starts_with("function(el){return Boolean("))
+            {
+                return self
+                    .scripted
+                    .lock()
+                    .await
+                    .pop_front()
+                    .unwrap_or_else(|| Ok(json!({})));
+            }
             if params["functionDeclaration"]
                 .as_str()
                 .is_some_and(|declaration| declaration.contains("automationScrollMetrics"))
@@ -2154,6 +2166,376 @@ async fn semantic_frame_path_rejects_missing_ambiguous_and_non_frame_segments() 
 }
 
 #[tokio::test]
+async fn semantic_frame_path_rejects_ambiguous_live_frame_candidates() {
+    let controls = json!({
+        "truncated": false,
+        "controls": [
+            {"css":"html:nth-of-type(1) > body:nth-of-type(1) > iframe:nth-of-type(1)","role":"iframe","name":"Checkout","label":"","disabled":false},
+            {"css":"html:nth-of-type(1) > body:nth-of-type(1) > iframe:nth-of-type(2)","role":"iframe","name":"Checkout","label":"","disabled":false}
+        ]
+    });
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "string", "value": controls.to_string()}})),
+    ]);
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    let error = worker
+        .click(
+            &page,
+            &ClickCommand {
+                selector: String::new(),
+                target: Some(TargetSpec {
+                    role: Some("button".into()),
+                    accessible_name: Some("Continue".into()),
+                    frame_path: vec![Box::new(TargetSpec {
+                        role: Some("iframe".into()),
+                        accessible_name: Some("Checkout".into()),
+                        ..Default::default()
+                    })],
+                    ..Default::default()
+                }),
+                boundary: false,
+                expected_url: None,
+                modifiers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::TargetAmbiguous);
+    assert!(!bidi
+        .calls()
+        .await
+        .iter()
+        .any(|call| call.method == "input.performActions"));
+}
+
+#[tokio::test]
+async fn frame_candidate_boundary_rejects_unsanitized_credential_metadata() {
+    for name in [
+        "Password hunter2",
+        "Authentication code 391726",
+        "Card number 4242424242424242",
+    ] {
+        let controls = json!({
+            "truncated": false,
+            "controls": [{
+                "css": "html:nth-of-type(1) > body:nth-of-type(1) > iframe:nth-of-type(1)",
+                "role": "iframe",
+                "name": name,
+                "label": "",
+                "disabled": false
+            }]
+        });
+        let bidi = FakeBidi::new(vec![
+            Ok(json!({"context": "context-1"})),
+            Ok(json!({"result": {"type": "string", "value": controls.to_string()}})),
+        ]);
+        let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+        let page = PageId::new();
+        worker.open_page(page.clone()).await.unwrap();
+
+        let error = worker
+            .click(
+                &page,
+                &ClickCommand {
+                    selector: String::new(),
+                    target: Some(TargetSpec {
+                        role: Some("button".into()),
+                        accessible_name: Some("Continue".into()),
+                        frame_path: vec![Box::new(TargetSpec {
+                            role: Some("iframe".into()),
+                            accessible_name: Some("Checkout".into()),
+                            ..Default::default()
+                        })],
+                        ..Default::default()
+                    }),
+                    boundary: false,
+                    expected_url: None,
+                    modifiers: Vec::new(),
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::BrowserCommandFailed, "{name}");
+        assert!(!bidi
+            .calls()
+            .await
+            .iter()
+            .any(|call| call.method == "input.performActions"));
+    }
+}
+
+#[tokio::test]
+async fn framed_typed_value_is_verified_without_returning_payment_value() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "string", "value": "index:0"}})),
+        Ok(json!({"result": {"type": "boolean", "value": true}})),
+    ]);
+    bidi.set_tree(json!({"contexts": [{
+        "context": "context-1",
+        "children": [{"context": "frame-context", "children": []}]
+    }]}))
+    .await;
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    let evidence = worker
+        .verify_framed_typed_value(
+            &page,
+            &TypeTextCommand {
+                selector: String::new(),
+                target: Some(TargetSpec {
+                    css: Some("input[name=card]".into()),
+                    frame_path: vec![Box::new(TargetSpec {
+                        css: Some("iframe[name=payment]".into()),
+                        ..Default::default()
+                    })],
+                    ..Default::default()
+                }),
+                value: "4242424242424242".into(),
+                clear_first: true,
+                expected_url: None,
+            },
+            None,
+            "text",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::Inspection { text, .. } if text == "[redacted]"
+    )));
+    assert!(!serde_json::to_string(&evidence)
+        .unwrap()
+        .contains("4242424242424242"));
+    let verification = bidi
+        .calls()
+        .await
+        .into_iter()
+        .find(|call| {
+            call.method == "script.evaluate"
+                && call.params["expression"]
+                    .as_str()
+                    .is_some_and(|expression| expression.contains("actual===expected"))
+        })
+        .unwrap();
+    assert_eq!(verification.params["target"]["context"], "frame-context");
+}
+
+#[tokio::test]
+async fn framed_select_label_is_verified_privately_when_option_value_differs() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "string", "value": "index:0"}})),
+        Ok(json!({"result": {"type": "boolean", "value": true}})),
+    ]);
+    bidi.set_tree(json!({"contexts": [{
+        "context": "context-1",
+        "children": [{"context": "frame-context", "children": []}]
+    }]}))
+    .await;
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+    let command = TypeTextCommand {
+        selector: String::new(),
+        target: Some(TargetSpec {
+            css: Some("select[name=country]".into()),
+            frame_path: vec![Box::new(TargetSpec {
+                css: Some("iframe".into()),
+                ..Default::default()
+            })],
+            ..Default::default()
+        }),
+        value: "United States".into(),
+        clear_first: true,
+        expected_url: None,
+    };
+    let evidence = worker
+        .verify_framed_typed_value(&page, &command, Some("[redacted]"), "select")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::Inspection { text, .. } if text == "[redacted]"
+    )));
+    let calls = bidi.calls().await;
+    let expression = calls
+        .iter()
+        .find(|call| {
+            call.method == "script.evaluate"
+                && call.params["expression"]
+                    .as_str()
+                    .is_some_and(|expression| expression.contains("selectedOptions[0]"))
+        })
+        .unwrap()
+        .params["expression"]
+        .as_str()
+        .unwrap();
+    assert!(expression.contains("norm(selected.label)===norm(expected)"));
+    assert!(!expression.contains("observed===actual"));
+}
+
+#[tokio::test]
+async fn framed_select_control_action_is_denied_before_dispatch() {
+    let bidi = FakeBidi::new(vec![Ok(json!({"context": "context-1"}))]);
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+    let before = bidi.calls().await.len();
+    let error = worker
+        .control_action(
+            &page,
+            &ControlActionCommand {
+                target: FormControlTarget {
+                    role: "combobox".into(),
+                    accessible_name: "Country".into(),
+                    ordinal: None,
+                    frame_path: vec![SemanticTargetSegment {
+                        role: "iframe".into(),
+                        accessible_name: "Checkout".into(),
+                        ordinal: None,
+                    }],
+                    shadow_path: Vec::new(),
+                },
+                action: ControlAction::SelectOne {
+                    value: "United States".into(),
+                },
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::PolicyDenied);
+    assert_eq!(bidi.calls().await.len(), before);
+}
+
+#[tokio::test]
+async fn framed_inspection_redacts_all_form_values_including_short_unlabelled_secrets() {
+    for (name, value) in [
+        ("Password", "hunter2"),
+        ("Challenge code", "391726"),
+        ("Card number", "4242424242424242"),
+        ("Notes", "391726"),
+    ] {
+        let bidi = FakeBidi::new(vec![
+            Ok(json!({"context": "context-1"})),
+            Ok(json!({"result": {"type": "boolean", "value": true}})),
+            Ok(json!({"result": {"type": "string", "value": "index:0"}})),
+            Ok(json!({"result": {"type": "string", "value": value}})),
+        ]);
+        bidi.set_tree(json!({"contexts": [{
+            "context": "context-1",
+            "children": [{"context": "frame-context", "children": []}]
+        }]}))
+        .await;
+        let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+        let page = PageId::new();
+        worker.open_page(page.clone()).await.unwrap();
+
+        let evidence = worker
+            .inspect(
+                &page,
+                &InspectCommand {
+                    selector: None,
+                    target: Some(TargetSpec {
+                        css: Some("input".into()),
+                        accessible_name: Some(name.into()),
+                        frame_path: vec![Box::new(TargetSpec {
+                            css: Some("iframe".into()),
+                            ..Default::default()
+                        })],
+                        ..Default::default()
+                    }),
+                    include_html: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            evidence.iter().any(|item| matches!(
+                item,
+                Evidence::Inspection { text, .. } if text == "[redacted]"
+            )),
+            "{name}"
+        );
+        assert!(!serde_json::to_string(&evidence).unwrap().contains(value));
+        let calls = bidi.calls().await;
+        let probe = calls
+            .iter()
+            .find(|call| {
+                call.method == "script.evaluate"
+                    && call.params["expression"]
+                        .as_str()
+                        .is_some_and(|expression| expression.contains("el.innerText"))
+            })
+            .expect("frame inspection must use the bounded browser-side probe");
+        let expression = probe.params["expression"].as_str().unwrap();
+        assert!(expression.contains("HTMLSelectElement)return '[redacted]';const value="));
+    }
+}
+
+#[tokio::test]
+async fn framed_typing_never_reads_the_control_value_over_bidi() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "string", "value": "index:0"}})),
+        Ok(json!({"result": {"type": "string", "value": "not-select"}})),
+        Ok(json!({"result": {"type": "node", "sharedId": "field"}})),
+        Ok(json!({})),
+        Ok(json!({})),
+    ]);
+    bidi.set_tree(json!({"contexts": [{
+        "context": "context-1",
+        "children": [{"context": "frame-context", "children": []}]
+    }]}))
+    .await;
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    let evidence = worker
+        .type_text(
+            &page,
+            &TypeTextCommand {
+                selector: String::new(),
+                target: Some(TargetSpec {
+                    css: Some("input[type=text]".into()),
+                    frame_path: vec![Box::new(TargetSpec {
+                        css: Some("iframe".into()),
+                        ..Default::default()
+                    })],
+                    ..Default::default()
+                }),
+                value: "391726".into(),
+                clear_first: true,
+                expected_url: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::Element { text: Some(text), .. } if text == "[redacted]"
+    )));
+    assert!(!bidi.calls().await.iter().any(|call| {
+        call.method == "script.evaluate"
+            && call.params["expression"]
+                .as_str()
+                .is_some_and(|expression| expression.contains("automationTypedControlValue"))
+    }));
+}
+
+#[tokio::test]
 async fn semantic_click_descends_exact_open_shadow_root_before_native_input() {
     let bidi = FakeBidi::new(vec![
         Ok(json!({"context": "context-1"})),
@@ -2256,6 +2638,81 @@ async fn semantic_shadow_path_rejects_missing_closed_and_ambiguous_roots() {
             .iter()
             .any(|call| call.method == "input.performActions"));
     }
+}
+
+#[tokio::test]
+async fn semantic_shadow_path_resolves_exact_role_and_name_for_wait_and_click() {
+    let target = TargetSpec {
+        role: Some("button".into()),
+        accessible_name: Some("Confirm document preview".into()),
+        shadow_path: vec![Box::new(TargetSpec {
+            role: Some("group".into()),
+            accessible_name: Some("Document preview widget".into()),
+            ..Default::default()
+        })],
+        ..Default::default()
+    };
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "node", "sharedId": "shadow-button"}})),
+        Ok(json!({"result": {"type": "boolean", "value": true}})),
+        Ok(json!({"result": {"type": "node", "sharedId": "shadow-button"}})),
+        Ok(json!({})),
+    ]);
+    bidi.set_preflight(vec![Ok(json!({"result": {
+        "type": "node", "sharedId": "shadow-button-after-scroll"
+    }}))])
+    .await;
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+
+    worker
+        .wait_for(
+            &page,
+            &WaitForCommand {
+                condition: WaitCondition::Element {
+                    target: Box::new(target.clone()),
+                    state: types::ElementState::Visible,
+                },
+                timeout_ms: 100,
+            },
+        )
+        .await
+        .unwrap();
+    worker
+        .click(
+            &page,
+            &ClickCommand {
+                selector: String::new(),
+                target: Some(target),
+                boundary: false,
+                expected_url: None,
+                modifiers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let calls = bidi.calls().await;
+    let probes: Vec<_> = calls
+        .iter()
+        .filter(|call| {
+            call.method == "script.evaluate"
+                && call.params["expression"]
+                    .as_str()
+                    .is_some_and(|expression| expression.contains("shadowRoot"))
+        })
+        .collect();
+    assert_eq!(probes.len(), 2);
+    for probe in probes {
+        let expression = probe.params["expression"].as_str().unwrap();
+        assert!(expression.contains("Document preview widget"));
+        assert!(expression.contains("Confirm document preview"));
+    }
+    assert!(calls
+        .iter()
+        .any(|call| call.method == "input.performActions"));
 }
 
 #[tokio::test]
@@ -2366,6 +2823,30 @@ async fn popup_timeout_never_replays_the_boundary_click() {
             .count(),
         1
     );
+}
+
+#[tokio::test]
+async fn list_pages_excludes_a_closed_context_and_releases_its_binding() {
+    let bidi = FakeBidi::new(vec![Ok(json!({"context": "context-1"}))]);
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+    bidi.set_tree(json!({"contexts": [{
+        "context": "context-1", "url": "https://example.test/live", "children": []
+    }]}))
+    .await;
+    let live = worker.list_pages(&ListPagesCommand).await.unwrap();
+    assert!(
+        matches!(&live[0], Evidence::Pages { pages } if pages.len() == 1 && pages[0].page_id == page)
+    );
+
+    bidi.set_tree(json!({"contexts": []})).await;
+    let closed = worker.list_pages(&ListPagesCommand).await.unwrap();
+    assert!(matches!(&closed[0], Evidence::Pages { pages } if pages.is_empty()));
+    assert!(worker
+        .inspect(&page, &InspectCommand::default())
+        .await
+        .is_err());
 }
 
 #[tokio::test]

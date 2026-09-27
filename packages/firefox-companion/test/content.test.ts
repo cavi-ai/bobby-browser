@@ -73,6 +73,15 @@ test("observeDocument returns page identity, visible text, labels, roles, and st
   assert.equal(observed.controls[1]?.name, "Continue");
 });
 
+test("named iframes are observable targets", () => {
+  const document = documentFor('<iframe title="Card details"></iframe>');
+  const observed = observeDocument(document);
+  assert.equal(observed.controls[0]?.role, "iframe");
+  assert.equal(observed.controls[0]?.name, "Card details");
+  const snapshot = executeContentAction(document, "a11yTree", { maxNodes: 32 });
+  assert.match(JSON.stringify(snapshot), /Card details/);
+});
+
 test("observe action scopes selector and target output and only includes sanitized bounded HTML on request", () => {
   const document = documentFor(`
     <main id="wanted" onclick="steal()">
@@ -128,7 +137,37 @@ test("password values never enter observations", () => {
   );
   const observed = observeDocument(document);
   assert.equal(JSON.stringify(observed).includes("secret"), false);
+  assert.equal(observed.controls[0]?.name, "Password");
   assert.equal(observed.controls[0]?.value, "[redacted]");
+});
+
+test("public authentication field labels remain targetable while their values stay redacted", () => {
+  const document = documentFor(
+    '<label for="authentication-code">Authentication code</label><input id="authentication-code" value="opaque-code" autocomplete="one-time-code">',
+  );
+  const observed = observeDocument(document);
+  assert.equal(observed.controls[0]?.name, "Authentication code");
+  assert.equal(observed.controls[0]?.value, "[redacted]");
+  assert.equal(JSON.stringify(observed).includes("opaque-code"), false);
+  const tree = executeContentAction(document, "a11yTree", { maxNodes: 64 });
+  assert.match(JSON.stringify(tree), /"name":"Authentication code"/);
+});
+
+test("file picker observations never expose the browser's local path", () => {
+  const document = documentFor('<label for="upload">Customer document</label><input id="upload" type="file">');
+  const input = document.querySelector("input")!;
+  Object.defineProperty(input, "value", { value: "C:\\fakepath\\approved-upload.txt" });
+
+  const observed = observeDocument(document);
+  assert.equal(observed.controls[0]?.name, "Customer document");
+  assert.equal(observed.controls[0]?.value, "[redacted]");
+  assert.equal(JSON.stringify(observed).includes("fakepath"), false);
+});
+
+test("invalid required fields retain the accessibility invalid state for resolution", () => {
+  const observed = observeDocument(documentFor('<input aria-label="Full name" required>'));
+  assert.equal(observed.controls[0]?.name, "Full name");
+  assert.equal(observed.controls[0]?.attributes["aria-invalid"], "true");
 });
 
 test("unlabelled password values cannot become accessible names", () => {
@@ -489,6 +528,7 @@ test("a11yTree exposes bounded form state without leaking sensitive values", () 
   assert.match(encoded, /"checked":true/);
   assert.match(encoded, /"disabled":true/);
   assert.match(encoded, /"value":"\[redacted\]"/);
+  assert.match(encoded, /"name":"Password"/);
   assert.equal(encoded.includes(secret), false);
 });
 

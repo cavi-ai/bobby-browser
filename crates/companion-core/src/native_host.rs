@@ -482,6 +482,12 @@ fn reject_secret_string(text: &str) -> Result<(), NativeHostError> {
     let Ok(url) = Url::parse(text) else {
         return Ok(());
     };
+    // The extension's bounded CSS paths can begin `main:nth-of-type(1)`.
+    // URL parsers treat `main:` as a scheme. Accept only the exact selector
+    // shape the extension generates, never arbitrary scheme-like strings.
+    if generated_css_path(text) {
+        return Ok(());
+    }
     if !matches!(url.scheme(), "http" | "https")
         || !url.username().is_empty()
         || url.password().is_some()
@@ -494,6 +500,41 @@ fn reject_secret_string(text: &str) -> Result<(), NativeHostError> {
         }
     }
     Ok(())
+}
+
+fn generated_css_path(text: &str) -> bool {
+    if text.len() > 2_048 || text.contains("://") {
+        return false;
+    }
+    let mut segments = text.split(" > ");
+    let Some(first) = segments.next() else {
+        return false;
+    };
+    if !generated_css_nth_segment(first) {
+        return false;
+    }
+    segments.all(|segment| generated_css_nth_segment(segment) || generated_css_tag(segment))
+}
+
+fn generated_css_nth_segment(segment: &str) -> bool {
+    let Some((tag, position)) = segment.split_once(":nth-of-type(") else {
+        return false;
+    };
+    let Some(position) = position.strip_suffix(')') else {
+        return false;
+    };
+    generated_css_tag(tag)
+        && position.parse::<u32>().is_ok_and(|position| position > 0)
+        && !position.starts_with('0')
+}
+
+fn generated_css_tag(tag: &str) -> bool {
+    tag.chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_lowercase())
+        && tag.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        })
 }
 
 fn is_sensitive_url_query_key(name: &str) -> bool {

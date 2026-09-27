@@ -496,6 +496,7 @@ fn parse_capability(value: &str) -> Result<Capability, StartupCredentialError> {
 pub(crate) struct ProtocolError {
     error: InterfaceError,
     status_override: Option<StatusCode>,
+    job_id: Option<String>,
 }
 
 impl ProtocolError {
@@ -525,7 +526,13 @@ impl ProtocolError {
                 None,
             ),
             status_override: Some(StatusCode::PAYLOAD_TOO_LARGE),
+            job_id: None,
         }
+    }
+
+    pub(crate) fn with_job_id(mut self, job_id: String) -> Self {
+        self.job_id = Some(job_id);
+        self
     }
 }
 
@@ -534,6 +541,7 @@ impl From<InterfaceError> for ProtocolError {
         Self {
             error,
             status_override: None,
+            job_id: None,
         }
     }
 }
@@ -548,8 +556,11 @@ impl IntoResponse for ProtocolError {
             .status_override
             .unwrap_or_else(|| error_status(&self.error));
         let retry_after_ms = self.error.retry_after_ms;
-        let mut response =
-            (status, Json(serde_json::json!({ "error": self.error }))).into_response();
+        let mut body = serde_json::json!({ "error": self.error });
+        if let Some(job_id) = self.job_id {
+            body["jobId"] = serde_json::json!(job_id);
+        }
+        let mut response = (status, Json(body)).into_response();
         if authenticate {
             response
                 .headers_mut()

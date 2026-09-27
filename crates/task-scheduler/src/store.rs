@@ -57,6 +57,7 @@ impl JobEvent {
             JobStatus::Completed => JobEvent::Completed,
             JobStatus::Failed => JobEvent::Failed,
             JobStatus::Cancelled => JobEvent::Cancelled,
+            JobStatus::ReconciliationRequired => JobEvent::Recovered,
         }
     }
 }
@@ -254,10 +255,10 @@ impl JournalJobStore {
         {
             let mut map = index.jobs.lock().await;
             for mut job in jobs {
-                // Crash recovery: Running at restart becomes Pending.
+                // A handler may have acted before the process stopped. Never
+                // replay an interrupted execution without reconciliation.
                 if job.status == JobStatus::Running {
-                    job.status = JobStatus::Pending;
-                    job.started_at = None;
+                    job.require_reconciliation("execution interrupted; outcome must be reconciled");
                     recovered.push(job.clone());
                 }
                 map.insert(job.id.clone(), job);

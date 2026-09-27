@@ -24,6 +24,7 @@ interface FormSnapshot {
   forms: FormDescriptor[];
   unownedControls: FormControl[];
   truncated: boolean;
+  pageDerived?: true;
 }
 ```
 

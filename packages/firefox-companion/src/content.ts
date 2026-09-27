@@ -137,6 +137,7 @@ const CONTROL_SELECTOR = [
   "input",
   "select",
   "textarea",
+  "iframe",
   "[role]",
   '[contenteditable="true"]',
 ].join(",");
@@ -365,6 +366,7 @@ function implicitRole(element: Element, allowExplicit = true): string | undefine
   if (tag === "a" && element.hasAttribute("href")) return "link";
   if (tag === "select") return element.hasAttribute("multiple") ? "listbox" : "combobox";
   if (tag === "textarea") return "textbox";
+  if (tag === "iframe") return "iframe";
   if (tag === "input") {
     const type = (element.getAttribute("type") ?? "text").toLowerCase();
     if (["button", "submit", "reset", "image"].includes(type)) return "button";
@@ -463,6 +465,17 @@ function accessibleName(
   );
 }
 
+function publicControlLabel(element: Element): string | undefined {
+  if (!["INPUT", "TEXTAREA", "SELECT"].includes(element.tagName)) return undefined;
+  const input = element as HTMLInputElement;
+  const names = [element.getAttribute("aria-label"), ...Array.from(input.labels ?? []).map((label) => label.textContent)];
+  // Emit only these exact fixed labels; never forward arbitrary text from a
+  // sensitive control's metadata, which can include credentials.
+  return ["Password", "Authentication code"].find((safeName) =>
+    names.some((name) => name?.trim() === safeName)
+  );
+}
+
 function isSensitiveControl(element: Element, budget?: WorkBudget): boolean {
   if (
     element.tagName === "INPUT" &&
@@ -487,7 +500,11 @@ function isSensitiveControl(element: Element, budget?: WorkBudget): boolean {
 
 function controlValue(element: Element, sensitive = isSensitiveControl(element)): string | undefined {
   if (!["INPUT", "SELECT", "TEXTAREA"].includes(element.tagName)) return undefined;
-  if (sensitive) return REDACTED;
+  // File inputs expose a browser-supplied local path through `value`. The
+  // selected filename is not needed for target discovery or observation.
+  if (sensitive || (element.tagName === "INPUT" && (element as HTMLInputElement).type === "file")) {
+    return REDACTED;
+  }
   const value = (element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement).value;
   return observationString(value);
 }
@@ -631,7 +648,8 @@ function observeRoot(document: Document, root: Element, includeHtml: boolean): P
     if (!observedPath) continue;
     const observedLabel = labelText(element, labelsByControlId, helperBudget);
     const observedName = accessibleName(element, observedLabel, helperBudget, sensitive);
-    const label = sensitive && observedLabel ? REDACTED : observedLabel;
+    const publicLabel = publicControlLabel(element);
+    const label = publicLabel ?? (sensitive && observedLabel ? REDACTED : observedLabel);
     const testId = sensitive
       ? undefined
       : observationString(element.getAttribute("data-testid"));
@@ -644,12 +662,18 @@ function observeRoot(document: Document, root: Element, includeHtml: boolean): P
       for (const name of ["required", "readonly", "checked", "multiple"] as const) {
         if ((element as unknown as Record<string, unknown>)[name] === true) attributes[name] = "true";
       }
+      if (
+        ["INPUT", "SELECT", "TEXTAREA"].includes(element.tagName) &&
+        !(element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement).validity.valid
+      ) {
+        attributes["aria-invalid"] = "true";
+      }
     }
     const control = {
       cssPath: observedPath,
       ...(testId ? { testId } : {}),
       role: implicitRole(element, !sensitive),
-      name: sensitive && observedName ? REDACTED : observedName,
+      name: publicLabel ?? (sensitive && observedName ? REDACTED : observedName),
       label,
       value: controlValue(element, sensitive),
       attributes,
@@ -806,6 +830,7 @@ const A11Y_ACTIONABLE_ROLES = new Set([
   "spinbutton",
   "switch",
   "textbox",
+  "iframe",
 ]);
 
 function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode[]; truncated: boolean } {
@@ -856,7 +881,7 @@ function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode
     const sensitive = isSensitiveControl(element, budget);
     const role = implicitRole(element, !sensitive) ?? structuralRole(element);
     const name = sensitive
-      ? REDACTED
+      ? publicControlLabel(element) ?? REDACTED
       : accessibleName(element, labelText(element, labelsByControlId, budget), budget, sensitive);
     return { role, name, sensitive };
   };

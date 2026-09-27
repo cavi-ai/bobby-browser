@@ -24,7 +24,7 @@ export interface CreateSessionRequest { profile: string; proxy: string | null; e
 export interface OpenPageRequest { session_id: Id; }
 
 export type JobPriority = "low" | "normal" | "high" | "critical";
-export type JobStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+export type JobStatus = "pending" | "running" | "completed" | "failed" | "cancelled" | "reconciliationRequired";
 export interface SubmitJobRequest {
   name: string;
   payload?: JsonValue;
@@ -139,7 +139,7 @@ export interface ExecutionRecord {
 export type Evidence =
   | { kind: "executionPath"; path: ExecutionPath; reason: ExecutionReason; stateVersion: number; elapsedMs: number; bytes: number | null; sha256: string | null; finalUrl?: string; contentType?: string; status?: number; redirectChain?: string[] }
   | { kind: "navigation"; url: string; title: string }
-  | { kind: "inspection"; selector: string | null; url: string; title: string; text: string; html: string | null }
+  | { kind: "inspection"; selector: string | null; url: string; title: string; text: string; html: string | null; pageDerived?: true }
   | { kind: "submitSettlement"; outcome: "settled" | "validationRejected" }
   | { kind: "element"; selector: string; text: string | null }
   | { kind: "upload"; selector: string; paths: string[] }
@@ -155,11 +155,11 @@ export type Evidence =
   | { kind: "screenshot"; artifactId: Id; mediaType: string; width: number; height: number; bytes: number; sha256: string }
   | { kind: "browserExecution"; engine: string; browserVersion: string; profileId: string; interactionPath: string }
   | { kind: "javaScriptResult"; value: JsonValue; truncated: boolean }
-  | { kind: "accessibilitySnapshot"; pageId: Id; nodes: AccessibilityNode[]; truncated: boolean }
+  | { kind: "accessibilitySnapshot"; pageId: Id; nodes: AccessibilityNode[]; truncated: boolean; pageDerived?: true }
   | { kind: "formSnapshot"; snapshot: FormSnapshot }
   | { kind: "formValidation"; issues: FormValidationIssue[] }
   | { kind: "controlAction"; action: ControlActionEvidence }
-  | { kind: "structuredExtraction"; pageId: Id; value: JsonValue; truncated: boolean }
+  | { kind: "structuredExtraction"; pageId: Id; value: JsonValue; truncated: boolean; pageDerived?: true }
   | { kind: "challengeDetection"; confidence: number; detection: ChallengeDetection | null; priorKind?: string }
   | { kind: "cookieState"; pageId: Id | null; cookies: CookieRecord[] }
   | { kind: "pdfArtifact"; artifactId: string; mediaType: string; bytes: number; sha256: string }
@@ -238,7 +238,7 @@ export interface FormControl { id: string; formId?: string | null; groupId?: str
 export interface FormGroup { id: string; label: string | null; description: string | null; controlIds: string[]; }
 export interface FormValidity { valid: boolean; invalidControlIds: string[]; }
 export interface FormDescriptor { id: string; target: FormControlTarget | null; accessibleName: string | null; description: string | null; groups: FormGroup[]; controls: FormControl[]; submitControlIds: string[]; resetControlIds: string[]; validity: FormValidity; }
-export interface FormSnapshot { schemaVersion: typeof FORM_SNAPSHOT_SCHEMA_VERSION; pageId: Id; forms: FormDescriptor[]; unownedControls: FormControl[]; truncated: boolean; }
+export interface FormSnapshot { schemaVersion: typeof FORM_SNAPSHOT_SCHEMA_VERSION; pageId: Id; forms: FormDescriptor[]; unownedControls: FormControl[]; truncated: boolean; pageDerived?: true; }
 /**
  * The unified mutation vocabulary for form controls. Used both as the
  * `controlAction` primitive's payload and as {@link FillIntent} /
@@ -414,14 +414,14 @@ export type CommandClass = "replayable" | "reconciliable" | "boundary";
 export type CheckpointInvariant = { kind: "url"; value: string } | { kind: "title"; value: string } | { kind: "text"; selector: string; value: string };
 export type ContextObservedAt = { kind: "generation"; generation: number } | { kind: "persisted" };
 export type ContextAnswerSource = "observed" | "vision-promoted";
-export interface ContextAnswer { target: AccessibilityTarget; confidence: number; observedAt: ContextObservedAt; source?: ContextAnswerSource; }
+export interface ContextAnswer { target: AccessibilityTarget; confidence: number; observedAt: ContextObservedAt; source?: ContextAnswerSource; pageDerived?: true; }
 export interface ContextNeighborStats { successCount: number; failureCount: number; lastVerifiedDay?: number; source?: ContextAnswerSource; }
 export interface ContextNeighborControl { role: string; accessibleName: string; ordinal?: number; intents: Record<string, ContextNeighborStats>; }
 export interface ContextNeighbors { answer: ContextAnswer; form: string; pagePattern: string; controls: ContextNeighborControl[]; }
 export interface ContextSiteView { siteKey: string; pages: Record<string, Record<string, ContextNeighborControl[]>>; }
-export type ContextAskResponse = { answer: ContextAnswer; hit: true } | { answer: null; hit: false; reason: "notRemembered"; nextStep: "a11y_snapshot" };
-export type ContextNeighborsResponse = { neighbors: ContextNeighbors; hit: true } | { neighbors: null; hit: false; reason: "notRemembered"; nextStep: "a11y_snapshot" };
-export interface ContextSiteResponse { site: ContextSiteView | null; }
+export type ContextAskResponse = { answer: ContextAnswer; hit: true; pageDerived?: true } | { answer: null; hit: false; reason: "notRemembered"; nextStep: "a11y_snapshot"; pageDerived?: true };
+export type ContextNeighborsResponse = { neighbors: ContextNeighbors; hit: true; pageDerived?: true } | { neighbors: null; hit: false; reason: "notRemembered"; nextStep: "a11y_snapshot"; pageDerived?: true };
+export interface ContextSiteResponse { site: ContextSiteView | null; pageDerived?: true; }
 export interface WorkflowCheckpoint { schemaVersion: number; checkpointId: Id; workflowId: Id; attemptId: Id; sessionId: Id; pageId: Id; restartUrl: string; currentUrl: string; cursor: Id | null; boundaryCommandId: Id | null; recoveryClass: CommandClass; invariants: CheckpointInvariant[]; replayableInputs: string[]; evidence: Evidence[]; recoveryHistory: RecoveryRecord[]; recoveryReceipts: unknown[]; createdAt: string; }
 export interface RecoveryRecord { recordedAt: string; decision: RecoveryDecision; }
 export interface RecoveryStatus { workflowId: Id; checkpoint: WorkflowCheckpoint; receipts: unknown[]; }

@@ -4,12 +4,12 @@
 //!
 //! - [`JobScheduler::new`] uses an in-memory [`crate::MemoryJobStore`] (restart loses the queue).
 //! - [`JobScheduler::open_journal`] / [`JobScheduler::from_config`] can attach a
-//!   [`crate::JournalJobStore`]. On reopen, `Running` jobs are recovered as `Pending`.
+//!   [`crate::JournalJobStore`]. Interrupted `Running` jobs require reconciliation.
 //!
 //! # Cancellation
 //!
 //! Pending jobs are removed from the ready queue. Running jobs are hard-aborted via
-//! `AbortHandle`; the handler future is dropped and status stays `Cancelled`.
+//! `AbortHandle`; the handler future is dropped and the outcome requires reconciliation.
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -36,6 +36,12 @@ pub trait JobHandler: Send + Sync {
     /// Additional capabilities required by this handler beyond `job:submit`.
     fn required_capabilities(&self) -> &'static [Capability] {
         &[]
+    }
+
+    /// Opt in only when repeating execution after an error cannot duplicate
+    /// an externally visible effect.
+    fn safe_to_retry(&self) -> bool {
+        false
     }
 
     /// Execute a job and return the result.
@@ -131,7 +137,10 @@ impl JobScheduler {
                 JobStatus::Failed => {
                     self.total_failed.fetch_add(1, Ordering::Relaxed);
                 }
-                JobStatus::Pending | JobStatus::Running | JobStatus::Cancelled => {}
+                JobStatus::Pending
+                | JobStatus::Running
+                | JobStatus::Cancelled
+                | JobStatus::ReconciliationRequired => {}
             }
             if is_pending {
                 queue.requeue(job)?;
@@ -150,9 +159,16 @@ impl JobScheduler {
     /// Submit a job to the scheduler.
     pub async fn submit(&self, config: JobConfig) -> Result<JobId, crate::JobError> {
         let mut queue = self.queue.lock().await;
-        let job = queue.submit(config)?;
+        let job = queue.prepare(config)?;
         let id = job.id.clone();
-        self.store.put(&job).await.map_err(store_err)?;
+        self.store
+            .put(&job)
+            .await
+            .map_err(|error| crate::JobError::AdmissionUncertain {
+                job_id: id.clone(),
+                message: error.to_string(),
+            })?;
+        queue.requeue(job.clone())?;
         {
             let mut registry = self.job_registry.lock().await;
             registry.insert(id.clone(), job.clone());
@@ -272,12 +288,11 @@ impl JobScheduler {
                 }
             };
 
-            let job = {
-                let mut queue = self.queue.lock().await;
-                queue.next_job()
-            };
+            let mut queue = self.queue.lock().await;
+            let job = queue.next_job();
 
             let Some(mut job) = job else {
+                drop(queue);
                 drop(permit);
                 tokio::select! {
                     _ = self.wake.notified() => {}
@@ -292,6 +307,7 @@ impl JobScheduler {
                 let mut registry = self.job_registry.lock().await;
                 if let Some(registered) = registry.get_mut(&job_id) {
                     if registered.status == JobStatus::Cancelled {
+                        drop(queue);
                         drop(permit);
                         continue;
                     }
@@ -303,8 +319,19 @@ impl JobScheduler {
             }
 
             if let Err(e) = self.store.update(&job, JobEvent::Started).await {
-                warn!(job_id = %job_id, error = %e, "failed to persist job.started");
+                job.status = JobStatus::Pending;
+                job.started_at = None;
+                if let Some(registered) = self.job_registry.lock().await.get_mut(&job_id) {
+                    *registered = job.clone();
+                }
+                queue.requeue(job)?;
+                drop(queue);
+                // Returning drops the JoinSet and stops all other handlers. Record
+                // their uncertain effects before that happens.
+                self.abort_all_running().await;
+                return Err(store_err_for_job(&job_id, e));
             }
+            drop(queue);
 
             self.active_jobs.fetch_add(1, Ordering::Relaxed);
             info!(
@@ -327,26 +354,31 @@ impl JobScheduler {
                     job_id: job_id.clone(),
                 };
 
-                let result = match timeout(
+                let (result, timed_out) = match timeout(
                     Duration::from_millis(timeout_ms),
                     scheduler.execute_job(&job_clone),
                 )
                 .await
                 {
-                    Ok(result) => result,
+                    Ok(result) => (result, false),
                     Err(_) => {
                         error!(job_id = %job_id, "job timeout");
-                        JobResult {
-                            job_id: job_id.clone(),
-                            success: false,
-                            output: None,
-                            error: Some("job timeout".to_string()),
-                            completed_at: Utc::now(),
-                        }
+                        (
+                            JobResult {
+                                job_id: job_id.clone(),
+                                success: false,
+                                output: None,
+                                error: Some("job timeout".to_string()),
+                                completed_at: Utc::now(),
+                            },
+                            true,
+                        )
                     }
                 };
 
-                let retry = scheduler.finish_job(job_id.clone(), result).await;
+                let retry = scheduler
+                    .finish_job(job_id.clone(), result, timed_out)
+                    .await;
                 // Release concurrency slot before any retry backoff.
                 drop(permit_guard);
 
@@ -375,7 +407,10 @@ impl JobScheduler {
                 .is_some_and(|job| {
                     matches!(
                         job.status,
-                        JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+                        JobStatus::Completed
+                            | JobStatus::Failed
+                            | JobStatus::Cancelled
+                            | JobStatus::ReconciliationRequired
                     )
                 });
             if finished {
@@ -408,14 +443,18 @@ impl JobScheduler {
         let mut registry = self.job_registry.lock().await;
         for job in registry.values_mut() {
             if job.status == JobStatus::Running {
-                job.cancel();
-                let _ = self.store.update(job, JobEvent::Cancelled).await;
+                job.require_reconciliation(
+                    "shutdown interrupted handler; effect may have occurred",
+                );
+                if let Err(error) = self.store.update(job, JobEvent::Recovered).await {
+                    error!(job_id = %job.id, error = %error, "failed to persist shutdown reconciliation state");
+                }
                 info!(
                     job_id = %job.id,
                     job_name = %job.name,
                     priority = ?job.priority,
                     retry_count = job.retry_count,
-                    "job.cancelled"
+                    "job.reconciliation_required"
                 );
             }
         }
@@ -452,14 +491,40 @@ impl JobScheduler {
     /// store: pruning before the update lets the freshest terminal entry
     /// escape every bound (and get_job falls through to this index).
     async fn prune_store_terminal(&self) {
-        let _ = self
+        if let Err(error) = self
             .store
             .prune_terminal(self.config.retained_terminal_jobs)
-            .await;
+            .await
+        {
+            warn!(error = %error, "failed to prune terminal jobs");
+        }
+    }
+
+    async fn persist_or_reconcile(&self, snapshot: &Job, event: JobEvent) -> bool {
+        if let Err(error) = self.store.update(snapshot, event).await {
+            warn!(job_id = %snapshot.id, event = ?event, error = %error, "job transition persistence uncertain");
+            let mut registry = self.job_registry.lock().await;
+            let Some(job) = registry.get_mut(&snapshot.id) else {
+                return false;
+            };
+            job.require_reconciliation(format!("{event:?} persistence uncertain: {error}"));
+            let unresolved = job.clone();
+            drop(registry);
+            if let Err(recovery_error) = self.store.update(&unresolved, JobEvent::Recovered).await {
+                error!(job_id = %snapshot.id, error = %recovery_error, "failed to persist reconciliation state");
+            }
+            return false;
+        }
+        true
     }
 
     /// Returns `Some((backoff, job))` when a retry should be scheduled after releasing the permit.
-    async fn finish_job(&self, job_id: JobId, result: JobResult) -> Option<(Duration, Job)> {
+    async fn finish_job(
+        &self,
+        job_id: JobId,
+        result: JobResult,
+        timed_out: bool,
+    ) -> Option<(Duration, Job)> {
         self.abort_handles
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -475,12 +540,29 @@ impl JobScheduler {
             return None;
         }
 
+        if timed_out {
+            job.require_reconciliation("handler timed out; effect may have occurred");
+            job.result = Some(result);
+            let snapshot = job.clone();
+            drop(registry);
+            self.persist_or_reconcile(&snapshot, JobEvent::Recovered)
+                .await;
+            return None;
+        }
+
         if result.success {
             job.complete(result);
             let snapshot = job.clone();
+            drop(registry);
+            if !self
+                .persist_or_reconcile(&snapshot, JobEvent::Completed)
+                .await
+            {
+                return None;
+            }
+            let mut registry = self.job_registry.lock().await;
             self.prune_terminal(&mut registry).await;
             drop(registry);
-            let _ = self.store.update(&snapshot, JobEvent::Completed).await;
             self.prune_store_terminal().await;
             self.total_completed.fetch_add(1, Ordering::Relaxed);
             info!(
@@ -500,11 +582,19 @@ impl JobScheduler {
         job.fail(err);
         job.result = Some(result);
 
-        if !job.can_retry() {
+        let replay_safe = self
+            .handlers
+            .get(&job.name)
+            .is_some_and(|handler| handler.safe_to_retry());
+        if !job.can_retry() || !replay_safe {
             let snapshot = job.clone();
+            drop(registry);
+            if !self.persist_or_reconcile(&snapshot, JobEvent::Failed).await {
+                return None;
+            }
+            let mut registry = self.job_registry.lock().await;
             self.prune_terminal(&mut registry).await;
             drop(registry);
-            let _ = self.store.update(&snapshot, JobEvent::Failed).await;
             self.prune_store_terminal().await;
             self.total_failed.fetch_add(1, Ordering::Relaxed);
             info!(
@@ -520,11 +610,16 @@ impl JobScheduler {
         let retry_count_after = job.retry_count + 1;
         let max_retries = job.max_retries;
         job.prepare_retry();
-        self.total_retried.fetch_add(1, Ordering::Relaxed);
         let requeue_job = job.clone();
         drop(registry);
 
-        let _ = self.store.update(&requeue_job, JobEvent::Retried).await;
+        if !self
+            .persist_or_reconcile(&requeue_job, JobEvent::Retried)
+            .await
+        {
+            return None;
+        }
+        self.total_retried.fetch_add(1, Ordering::Relaxed);
         let backoff = {
             let queue = self.queue.lock().await;
             queue.retry_config().calculate_backoff(retry_count_after)
@@ -560,7 +655,9 @@ impl JobScheduler {
             let snapshot = job.clone();
             drop(registry);
             drop(queue);
-            let _ = self.store.update(&snapshot, JobEvent::Failed).await;
+            if !self.persist_or_reconcile(&snapshot, JobEvent::Failed).await {
+                return;
+            }
             self.prune_store_terminal().await;
             self.total_failed.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -656,16 +753,17 @@ impl JobScheduler {
                 )))
             }
             JobStatus::Pending => {
-                let _ = queue.cancel_job(job_id);
-                job.cancel();
-                let snapshot = job.clone();
-                self.prune_terminal(&mut registry).await;
-                drop(registry);
-                drop(queue);
+                let mut snapshot = job.clone();
+                snapshot.cancel();
                 self.store
                     .update(&snapshot, JobEvent::Cancelled)
                     .await
-                    .map_err(store_err)?;
+                    .map_err(|error| store_err_for_job(job_id, error))?;
+                let _ = queue.cancel_job(job_id);
+                *job = snapshot.clone();
+                self.prune_terminal(&mut registry).await;
+                drop(registry);
+                drop(queue);
                 self.prune_store_terminal().await;
                 info!(
                     job_id = %snapshot.id,
@@ -677,11 +775,10 @@ impl JobScheduler {
                 Ok(())
             }
             JobStatus::Running => {
-                job.cancel();
+                job.require_reconciliation(
+                    "running job cancelled; handler effect may have occurred",
+                );
                 let snapshot = job.clone();
-                self.prune_terminal(&mut registry).await;
-                drop(registry);
-                drop(queue);
                 if let Some(handle) = self
                     .abort_handles
                     .lock()
@@ -690,20 +787,23 @@ impl JobScheduler {
                 {
                     handle.abort();
                 }
-                self.store
-                    .update(&snapshot, JobEvent::Cancelled)
-                    .await
-                    .map_err(store_err)?;
-                self.prune_store_terminal().await;
+                let persisted = self.store.update(&snapshot, JobEvent::Recovered).await;
+                drop(registry);
+                drop(queue);
+                persisted.map_err(|error| store_err_for_job(job_id, error))?;
                 info!(
                     job_id = %snapshot.id,
                     job_name = %snapshot.name,
                     priority = ?snapshot.priority,
                     retry_count = snapshot.retry_count,
-                    "job.cancelled"
+                    "job.reconciliation_required"
                 );
                 Ok(())
             }
+            JobStatus::ReconciliationRequired => Err(crate::JobError::Execution(format!(
+                "job {} requires reconciliation before cancellation",
+                job_id
+            ))),
         }
     }
 }
@@ -752,6 +852,10 @@ impl Drop for PermitGuard {
 
 fn store_err(e: StoreError) -> crate::JobError {
     crate::JobError::Store(e.to_string())
+}
+
+fn store_err_for_job(id: &JobId, error: StoreError) -> crate::JobError {
+    crate::JobError::Store(format!("job {id}: {error}"))
 }
 
 impl Clone for JobScheduler {

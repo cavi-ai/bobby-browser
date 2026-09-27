@@ -1646,13 +1646,14 @@ fn print_install_locations(config_path: &Path, bootstrap_path: &Path, project_ro
     }
 }
 
+/// Host configuration tests in both onboarding and doctor share process-global
+/// HOME/XDG state, so they must hold the same lock under parallel `cargo test`.
+#[cfg(test)]
+pub(crate) static INSTALL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod install_tests {
     use super::*;
-
-    /// Companion install tests mutate process-global `HOME` (and sometimes
-    /// `XDG_CONFIG_HOME`); serialize so parallel `cargo test` stays deterministic.
-    static INSTALL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn named_hosts_require_a_missing_bootstrap_and_defaults_include_the_agent_skill() {
@@ -1953,6 +1954,7 @@ mod install_tests {
 
     #[test]
     fn host_config_status_detects_current_and_drifted_bobby_entries() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
         let root = tempfile::tempdir().unwrap();
         let path = merge_host_config(HostKind::Claude, root.path()).unwrap();
         assert_eq!(

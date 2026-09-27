@@ -289,6 +289,7 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           pnpm --filter @cavi-ai/bobby-firefox-companion build
+          pnpm --filter @cavi-ai/bobby-gauntlet build
 
       - name: Install Firefox
         uses: browser-actions/setup-firefox@latest
@@ -322,6 +323,11 @@ jobs:
             --test behavioral_firefox \
             --test fingerprint_firefox \
             -- --ignored --test-threads=1
+
+      - name: Firefox Northstar end-to-end release gate
+        env:
+          BOBBY_GAUNTLET_ENGINE: firefox
+        run: xvfb-run -a cargo test -p runtime-tests --locked --test modern_gauntlet_e2e -- --test-threads=1
 
   node:
     name: node · typescript · docs

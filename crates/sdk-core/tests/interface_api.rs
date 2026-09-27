@@ -15,7 +15,7 @@ use interface_core::{
     SessionOwnershipRecorder, SessionOwnershipRegistry,
 };
 use page_runtime::{PageRuntime, RecoveryCoordinator};
-use sdk_core::{AuthenticatedRuntime, RuntimeService};
+use sdk_core::{workflow::WorkflowService, AuthenticatedRuntime, RuntimeService};
 use session_manager::SessionManager;
 use types::{
     AttemptId, Capability, CheckpointId, ClickCommand, CommandClass, CommandEnvelope, CommandError,
@@ -29,6 +29,108 @@ use uuid::uuid;
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
 
 fn assert_runtime_interface<T: RuntimeInterface>() {}
+
+#[tokio::test]
+async fn rust_workflow_service_prepares_typed_resources_without_mcp() {
+    let root = tempfile::tempdir().unwrap();
+    let journal = Arc::new(
+        workflow_journal::JsonlJournal::open(root.path().join("commands.jsonl"))
+            .await
+            .unwrap(),
+    );
+    let workers = Arc::new(WorkerPool::new(
+        1,
+        Arc::new(LifecycleFactory {
+            attempts: AtomicUsize::new(0),
+            fail_first: false,
+            closes: Arc::new(AtomicUsize::new(0)),
+        }),
+    ));
+    let runtime = RuntimeService::new(
+        SessionManager::new(workers.clone()),
+        PageRuntime::new(journal, workers),
+    );
+    let (authenticated, handle) = authenticated(runtime).await;
+    let context = handle.context(expiry(), None);
+    let service = WorkflowService::new(Arc::new(authenticated));
+    let setup = service
+        .prepare(
+            context.clone(),
+            CreateSessionRequest {
+                profile: "direct-workflow".into(),
+                proxy: None,
+                execution_policy: ExecutionPolicy::default(),
+                zigzagzig: false,
+            },
+            || true,
+        )
+        .await
+        .unwrap();
+    assert!(setup.session.page_ids.contains(&setup.page.id));
+    let session_id = setup.session.id.clone();
+    let page_id = setup.page.id.clone();
+    let workflow_id = WorkflowId::new();
+    let envelope = WorkflowService::observation_envelope(
+        &context,
+        session_id.clone(),
+        page_id.clone(),
+        workflow_id.clone(),
+        32,
+        None,
+    );
+    assert!(matches!(
+        envelope.command,
+        RuntimeCommand::Primitive(types::PrimitiveCommand::AccessibilitySnapshot(_))
+    ));
+    assert!(service
+        .navigate_optional(
+            context.clone(),
+            session_id.clone(),
+            page_id.clone(),
+            workflow_id.clone(),
+            None,
+            1000,
+        )
+        .await
+        .is_none());
+    let (command_id, navigation) = service
+        .navigate_optional(
+            context.clone(),
+            session_id.clone(),
+            page_id.clone(),
+            workflow_id.clone(),
+            Some("https://example.test/".into()),
+            1000,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(navigation.unwrap()).unwrap()["commandId"],
+        serde_json::json!(command_id)
+    );
+    let observation = service
+        .observe_live(
+            context.clone(),
+            session_id.clone(),
+            page_id.clone(),
+            workflow_id.clone(),
+            32,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(observation.page_derived);
+    let (action, post_state) = service
+        .post_action_with(Ok::<_, ()>(5), |value| *value == 5, || async { Ok(9) })
+        .await
+        .unwrap();
+    assert_eq!((action, post_state), (5, Some(9)));
+    let cleanup = service
+        .cleanup(|| context.clone(), session_id, Some(page_id), workflow_id)
+        .await;
+    assert!(cleanup.page_close.is_some());
+    assert!(cleanup.session_delete.is_ok());
+}
 
 fn expiry() -> chrono::DateTime<Utc> {
     Utc::now() + Duration::minutes(5)
@@ -2017,6 +2119,30 @@ async fn create_session_replays_retained_session_and_conflicts_before_dispatch()
         .unwrap_err();
     assert_eq!(conflict.code, InterfaceErrorCode::IdempotencyConflict);
     assert_eq!(api.create_session_dispatch_count(), 1);
+}
+
+#[tokio::test]
+async fn lifecycle_key_survives_authenticated_wrapper_replacement() {
+    let (runtime, _, _) = runtime_with_workers(false);
+    let (first, handle) = authenticated(runtime.clone()).await;
+    let second = AuthenticatedRuntime::new(runtime, handle.clone());
+    let key = IdempotencyKey::try_from("wrapper-replacement-create").unwrap();
+    let first_session = first
+        .create_session(
+            handle.context(expiry(), Some(key.clone())),
+            request_profile("retained"),
+        )
+        .await
+        .unwrap();
+    let replayed = second
+        .create_session(
+            handle.context(expiry(), Some(key)),
+            request_profile("retained"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replayed.id, first_session.id);
+    assert_eq!(second.create_session_dispatch_count(), 0);
 }
 
 fn request_profile(profile: &str) -> CreateSessionRequest {

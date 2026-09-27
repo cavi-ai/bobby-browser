@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -114,6 +115,32 @@ pub struct JsonlJournal {
     path: Arc<PathBuf>,
     writer: Arc<Mutex<WriterState>>,
     recovered_torn_tail: bool,
+    history_cache: Arc<Mutex<HistoryCache>>,
+}
+
+const HOT_HISTORY_LIMIT: usize = 128;
+
+#[derive(Default)]
+struct HistoryCache {
+    entries: HashMap<CommandId, (JournalScan, u64, u64)>,
+    sequence: u64,
+}
+
+impl HistoryCache {
+    fn remember(&mut self, id: CommandId, scan: JournalScan, file_len: u64) {
+        self.sequence = self.sequence.wrapping_add(1);
+        if self.entries.len() >= HOT_HISTORY_LIMIT && !self.entries.contains_key(&id) {
+            if let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (_, _, used))| *used)
+                .map(|(id, _)| id.clone())
+            {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.entries.insert(id, (scan, file_len, self.sequence));
+    }
 }
 
 struct WriterState {
@@ -155,6 +182,7 @@ impl JsonlJournal {
                 next_sequence,
             })),
             recovered_torn_tail: scan.torn_tail,
+            history_cache: Arc::new(Mutex::new(HistoryCache::default())),
         })
     }
 
@@ -205,12 +233,41 @@ impl CommandJournal for JsonlJournal {
         writer.file.flush().await?;
         writer.file.sync_data().await?;
         writer.next_sequence += 1;
+        let Ok(metadata) = writer.file.metadata().await else {
+            self.history_cache.lock().await.entries.clear();
+            return Ok(());
+        };
+        let file_len = metadata.len();
+        let mut cache = self.history_cache.lock().await;
+        let previous_len = file_len.saturating_sub(bytes.len() as u64);
+        if cache
+            .entries
+            .values()
+            .any(|(_, len, _)| *len != previous_len)
+        {
+            cache.entries.clear();
+        } else {
+            for (id, (scan, len, _)) in &mut cache.entries {
+                if *id == record.command_id {
+                    scan.records.push(record.clone());
+                }
+                *len = file_len;
+            }
+        }
         Ok(())
     }
 
     async fn history(&self, id: CommandId) -> Result<JournalScan, JournalError> {
+        let file_len = tokio::fs::metadata(&*self.path).await?.len();
+        let mut cache = self.history_cache.lock().await;
+        if let Some((scan, cached_len, _)) = cache.entries.get(&id) {
+            if *cached_len == file_len {
+                return Ok(scan.clone());
+            }
+        }
         let mut scan = scan_path(&self.path, Some(&id)).await?.scan;
         scan.torn_tail |= self.recovered_torn_tail;
+        cache.remember(id, scan.clone(), file_len);
         Ok(scan)
     }
 }

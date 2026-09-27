@@ -84,15 +84,24 @@ validators / Rust types.
   terminal `event.gap` frame.
 - **GET `/v1/sessions/{session}/pages/{page}/forms`** — optional query
   `maxControls` (integer 1–512). Returns a `FormSnapshot` (same contract as MCP
-  `form_snapshot`).
+  `form_snapshot`) with `pageDerived: true` on page-derived controls.
 - **POST `/v1/jobs`** — `{ name, payload?, priority?, maxRetries?, timeoutMs? }`
   → `{ jobId, status }`. `priority` is `low` | `normal` | `high` | `critical`
   (default `normal`); `maxRetries` defaults to `3`. Mutating: send
-  `idempotency-key` for safe retries.
+  `idempotency-key` for safe retries. If admission persistence is uncertain,
+  the error response carries `jobId` and `error.reconciliationRequired: true`;
+  query that job before attempting a new submission.
 - **GET `/v1/jobs/{job}`** — job status record (`id`, `name`, `priority`,
   `status`, `payload`, timestamps, `retryCount`, `maxRetries`, `result`,
-  `error`, …).
+  `error`, …). `reconciliationRequired` means execution or persistence has
+  an uncertain outcome; inspect the external effect before submitting new work.
 - **DELETE `/v1/jobs/{job}`** — cancel; returns the updated job status.
+
+Idempotency keys are scoped to the authenticated principal and operation. A
+completed key remains replayable for 15 minutes; unresolved keys remain in the
+durable ledger until an authoritative command or job outcome resolves them.
+Replays still require current authorization. Keys created before the durable
+ledger upgrade were memory-only and cannot be recovered after a process restart.
 
 Nested command kinds include primitives (`navigate`, `click`, …) and
 `{ kind: "intent", input: … }`. Intents additionally need `intent:execute`.

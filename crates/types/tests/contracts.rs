@@ -1494,7 +1494,37 @@ fn accessibility_snapshot_action_target_round_trips_without_dom_identifiers() {
     });
 
     let evidence: Evidence = serde_json::from_value(value.clone()).unwrap();
+    assert!(evidence.page_derived());
     assert_eq!(serde_json::to_value(evidence).unwrap(), value);
+}
+
+#[test]
+fn page_provenance_projection_marks_only_derived_evidence() {
+    let mut outcome = json!({"evidence": [
+        {"kind": "inspection", "text": "untrusted page text"},
+        {"kind": "structuredExtraction", "value": {"x": 1}},
+        {"kind": "browserExecution", "engine": "firefox"}
+    ]});
+    types::annotate_page_derived_evidence(&mut outcome);
+    assert_eq!(outcome["evidence"][0]["pageDerived"], true);
+    assert_eq!(outcome["evidence"][1]["pageDerived"], true);
+    assert!(outcome["evidence"][2].get("pageDerived").is_none());
+}
+
+#[test]
+fn rust_context_wire_accepts_legacy_and_true_provenance_but_rejects_false() {
+    for marker in [None, Some(true)] {
+        let mut value = json!({"answer": null, "hit": false});
+        if let Some(marker) = marker {
+            value["pageDerived"] = json!(marker);
+        }
+        let response: types::ContextAskResponse = serde_json::from_value(value).unwrap();
+        assert!(response.page_derived());
+    }
+    assert!(serde_json::from_value::<types::ContextAskResponse>(
+        json!({"answer": null, "hit": false, "pageDerived": false})
+    )
+    .is_err());
 }
 
 #[test]

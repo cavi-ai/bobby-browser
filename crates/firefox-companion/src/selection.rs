@@ -391,6 +391,18 @@ impl ConfiguredFirefoxFactory {
     }
 
     async fn ensure_bidi_slot(&self) -> Result<(), CommandError> {
+        // A live shared client occupies Firefox's one WebDriver session slot
+        // by design. Probing that slot as though it belonged to another
+        // process would recycle our own browser during a runtime restart.
+        if self
+            .bidi
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(crate::BidiClient::is_alive)
+        {
+            return Ok(());
+        }
         match crate::bidi::session_slot_occupied(self.config.bidi_url.clone(), self.config.timeout)
             .await
         {

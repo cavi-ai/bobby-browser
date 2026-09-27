@@ -3,8 +3,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use task_scheduler::{
-    Job, JobConfig, JobError, JobHandler, JobId, JobPriority, JobQueue, JobResult, JobScheduler,
-    JobStatus, JobStore, JournalJobStore, RetryConfig, SchedulerConfig,
+    Job, JobConfig, JobError, JobEvent, JobHandler, JobId, JobPriority, JobQueue, JobResult,
+    JobScheduler, JobStatus, JobStore, JournalJobStore, MemoryJobStore, RetryConfig,
+    SchedulerConfig, StoreError,
 };
 use tokio::sync::Mutex;
 use types::{Capability, CapabilitySet};
@@ -311,6 +312,192 @@ fn retry_config_backoff_capped() {
 
 struct OkHandler;
 
+struct RejectPutStore;
+
+struct AppendThenErrorStore(MemoryJobStore);
+
+#[async_trait]
+impl JobStore for AppendThenErrorStore {
+    async fn put(&self, job: &Job) -> Result<(), StoreError> {
+        self.0.put(job).await?;
+        Err(std::io::Error::other("ack lost after append").into())
+    }
+    async fn get(&self, id: &JobId) -> Result<Option<Job>, StoreError> {
+        self.0.get(id).await
+    }
+    async fn update(&self, job: &Job, event: JobEvent) -> Result<(), StoreError> {
+        self.0.update(job, event).await
+    }
+    async fn pending(&self) -> Result<Vec<Job>, StoreError> {
+        self.0.pending().await
+    }
+    async fn load_all(&self) -> Result<Vec<Job>, StoreError> {
+        self.0.load_all().await
+    }
+}
+
+struct RejectEventStore {
+    inner: MemoryJobStore,
+    denied: JobEvent,
+}
+
+#[async_trait]
+impl JobStore for RejectEventStore {
+    async fn put(&self, job: &Job) -> Result<(), StoreError> {
+        self.inner.put(job).await
+    }
+    async fn get(&self, id: &JobId) -> Result<Option<Job>, StoreError> {
+        self.inner.get(id).await
+    }
+    async fn update(&self, job: &Job, event: JobEvent) -> Result<(), StoreError> {
+        if event == self.denied {
+            return Err(std::io::Error::other("injected transition failure").into());
+        }
+        self.inner.update(job, event).await
+    }
+    async fn pending(&self) -> Result<Vec<Job>, StoreError> {
+        self.inner.pending().await
+    }
+    async fn load_all(&self) -> Result<Vec<Job>, StoreError> {
+        self.inner.load_all().await
+    }
+}
+
+#[test]
+fn failed_start_never_invokes_handler_and_preserves_pending_job() {
+    runtime().block_on(async {
+        let mut scheduler = JobScheduler::with_store(
+            SchedulerConfig::default(),
+            Arc::new(RejectEventStore {
+                inner: MemoryJobStore::new(),
+                denied: JobEvent::Started,
+            }),
+        );
+        let calls = Arc::new(AtomicU32::new(0));
+        struct CountingHandler(Arc<AtomicU32>);
+        #[async_trait]
+        impl JobHandler for CountingHandler {
+            async fn execute(&self, _job: &Job) -> Result<serde_json::Value, String> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(serde_json::json!({}))
+            }
+        }
+        scheduler.register_handler("test".into(), Arc::new(CountingHandler(calls.clone())));
+        let id = scheduler
+            .submit(JobConfig::new("test".into(), serde_json::json!({})))
+            .await
+            .unwrap();
+        assert!(scheduler.run().await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            scheduler.get_job(&id).await.unwrap().status,
+            JobStatus::Pending
+        );
+    });
+}
+
+#[test]
+fn failed_completion_persistence_is_visible_as_uncertain_and_never_replayed() {
+    runtime().block_on(async {
+        let store = Arc::new(RejectEventStore {
+            inner: MemoryJobStore::new(),
+            denied: JobEvent::Completed,
+        });
+        let mut scheduler = JobScheduler::with_store(SchedulerConfig::default(), store.clone());
+        scheduler.register_handler("test".into(), Arc::new(OkHandler));
+        let id = scheduler
+            .submit(JobConfig::new("test".into(), serde_json::json!({})))
+            .await
+            .unwrap();
+        let scheduler = Arc::new(scheduler);
+        let runner = tokio::spawn({
+            let scheduler = scheduler.clone();
+            async move { scheduler.run().await }
+        });
+        let job = wait_status(&scheduler, &id, JobStatus::ReconciliationRequired, 100).await;
+        assert_eq!(job.status, JobStatus::ReconciliationRequired);
+        assert_eq!(scheduler.stats().await.total_completed, 0);
+        scheduler.request_shutdown();
+        runner.await.unwrap().unwrap();
+    });
+}
+
+#[async_trait]
+impl JobStore for RejectPutStore {
+    async fn put(&self, _job: &Job) -> Result<(), StoreError> {
+        Err(std::io::Error::other("injected admission failure").into())
+    }
+
+    async fn get(&self, _id: &JobId) -> Result<Option<Job>, StoreError> {
+        Ok(None)
+    }
+
+    async fn update(&self, _job: &Job, _event: JobEvent) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    async fn pending(&self) -> Result<Vec<Job>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    async fn load_all(&self) -> Result<Vec<Job>, StoreError> {
+        Ok(Vec::new())
+    }
+}
+
+#[test]
+fn failed_submission_leaves_no_runnable_job() {
+    runtime().block_on(async {
+        let mut scheduler =
+            JobScheduler::with_store(SchedulerConfig::default(), Arc::new(RejectPutStore));
+        let calls = Arc::new(AtomicU32::new(0));
+        struct CountingHandler(Arc<AtomicU32>);
+        #[async_trait]
+        impl JobHandler for CountingHandler {
+            async fn execute(&self, _job: &Job) -> Result<serde_json::Value, String> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(serde_json::json!({}))
+            }
+        }
+        scheduler.register_handler("test".into(), Arc::new(CountingHandler(calls.clone())));
+        let error = scheduler
+            .submit(JobConfig::new("test".into(), serde_json::json!({})))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("job_"), "{error}");
+        assert_eq!(scheduler.stats().await.queued_jobs, 0);
+        let scheduler = Arc::new(scheduler);
+        let runner = tokio::spawn({
+            let scheduler = scheduler.clone();
+            async move { scheduler.run().await }
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        scheduler.request_shutdown();
+        runner.await.unwrap().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    });
+}
+
+#[test]
+fn admission_error_after_append_exposes_reconciliation_id_without_running() {
+    runtime().block_on(async {
+        let store = Arc::new(AppendThenErrorStore(MemoryJobStore::new()));
+        let scheduler = JobScheduler::with_store(SchedulerConfig::default(), store.clone());
+        let error = scheduler
+            .submit(JobConfig::new("test".into(), serde_json::json!({})))
+            .await
+            .unwrap_err();
+        let JobError::AdmissionUncertain { job_id, .. } = error else {
+            panic!("expected typed uncertain admission error");
+        };
+        assert_eq!(
+            store.get(&job_id).await.unwrap().unwrap().status,
+            JobStatus::Pending
+        );
+        assert_eq!(scheduler.stats().await.queued_jobs, 0);
+    });
+}
+
 #[async_trait]
 impl JobHandler for OkHandler {
     async fn execute(&self, _job: &Job) -> Result<serde_json::Value, String> {
@@ -324,6 +511,10 @@ struct FailNTimes {
 
 #[async_trait]
 impl JobHandler for FailNTimes {
+    fn safe_to_retry(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, _job: &Job) -> Result<serde_json::Value, String> {
         let left = self.failures_remaining.load(Ordering::SeqCst);
         if left > 0 {
@@ -333,6 +524,38 @@ impl JobHandler for FailNTimes {
             Ok(serde_json::json!({"recovered": true}))
         }
     }
+}
+
+#[test]
+fn handler_without_replay_guarantee_is_never_retried() {
+    runtime().block_on(async {
+        struct UnsafeFail(Arc<AtomicU32>);
+        #[async_trait]
+        impl JobHandler for UnsafeFail {
+            async fn execute(&self, _job: &Job) -> Result<serde_json::Value, String> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err("effect may have occurred".into())
+            }
+        }
+        let calls = Arc::new(AtomicU32::new(0));
+        let mut scheduler = JobScheduler::new(SchedulerConfig::default().with_backoff_range(1, 1));
+        scheduler.register_handler("unsafe".into(), Arc::new(UnsafeFail(calls.clone())));
+        let id = scheduler
+            .submit(JobConfig::new("unsafe".into(), serde_json::json!({})))
+            .await
+            .unwrap();
+        let scheduler = Arc::new(scheduler);
+        let runner = tokio::spawn({
+            let scheduler = scheduler.clone();
+            async move { scheduler.run().await }
+        });
+        let job = wait_status(&scheduler, &id, JobStatus::Failed, 100).await;
+        assert_eq!(job.retry_count, 0);
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        scheduler.request_shutdown();
+        runner.await.unwrap().unwrap();
+    });
 }
 
 struct SlowHandler {
@@ -357,6 +580,21 @@ struct HangHandler;
 #[async_trait]
 impl JobHandler for HangHandler {
     async fn execute(&self, _job: &Job) -> Result<serde_json::Value, String> {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        Ok(serde_json::json!({}))
+    }
+}
+
+struct RetrySafeHangHandler(Arc<AtomicU32>);
+
+#[async_trait]
+impl JobHandler for RetrySafeHangHandler {
+    fn safe_to_retry(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, _job: &Job) -> Result<serde_json::Value, String> {
+        self.0.fetch_add(1, Ordering::SeqCst);
         tokio::time::sleep(Duration::from_secs(60)).await;
         Ok(serde_json::json!({}))
     }
@@ -595,15 +833,19 @@ fn scheduler_times_out_hanging_job() {
         SchedulerConfig::default()
             .with_job_timeout(50)
             .with_backoff_range(1, 5)
-            .with_max_retries(0),
+            .with_max_retries(2),
     );
-    scheduler.register_handler("hang".to_string(), Arc::new(HangHandler));
+    let calls = Arc::new(AtomicU32::new(0));
+    scheduler.register_handler(
+        "hang".to_string(),
+        Arc::new(RetrySafeHangHandler(calls.clone())),
+    );
     let scheduler = Arc::new(scheduler);
     let rt = runtime();
 
     rt.block_on(async {
         let id = scheduler
-            .submit(JobConfig::new("hang".to_string(), serde_json::json!({})).with_max_retries(0))
+            .submit(JobConfig::new("hang".to_string(), serde_json::json!({})).with_max_retries(2))
             .await
             .unwrap();
 
@@ -614,7 +856,7 @@ fn scheduler_times_out_hanging_job() {
 
         for _ in 0..50 {
             if let Some(job) = scheduler.get_job(&id).await {
-                if job.status == JobStatus::Failed {
+                if job.status == JobStatus::ReconciliationRequired {
                     break;
                 }
             }
@@ -622,11 +864,13 @@ fn scheduler_times_out_hanging_job() {
         }
 
         let job = scheduler.get_job(&id).await.unwrap();
-        assert_eq!(job.status, JobStatus::Failed);
+        assert_eq!(job.status, JobStatus::ReconciliationRequired);
+        assert_eq!(job.retry_count, 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(job
             .error
             .as_deref()
-            .is_some_and(|e| e.contains("timeout") || e.contains("job timeout")));
+            .is_some_and(|e| e.contains("timed out")));
 
         scheduler.request_shutdown();
         runner.await.unwrap().unwrap();
@@ -873,6 +1117,47 @@ fn journal_survives_restart() {
 }
 
 #[test]
+fn interrupted_running_job_requires_reconciliation_without_replaying_handler() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("jobs.jsonl");
+    runtime().block_on(async {
+        let store = JournalJobStore::open(&path).await.unwrap();
+        let mut job = Job::new("test".into(), serde_json::json!({}), JobPriority::Normal);
+        store.put(&job).await.unwrap();
+        job.start();
+        store.update(&job, JobEvent::Started).await.unwrap();
+        drop(store);
+
+        let mut scheduler = JobScheduler::open_journal(SchedulerConfig::default(), &path)
+            .await
+            .unwrap();
+        let calls = Arc::new(AtomicU32::new(0));
+        struct CountingHandler(Arc<AtomicU32>);
+        #[async_trait]
+        impl JobHandler for CountingHandler {
+            async fn execute(&self, _job: &Job) -> Result<serde_json::Value, String> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(serde_json::json!({}))
+            }
+        }
+        scheduler.register_handler("test".into(), Arc::new(CountingHandler(calls.clone())));
+        assert_eq!(
+            serde_json::to_value(&scheduler.get_job(&job.id).await.unwrap().status).unwrap(),
+            serde_json::json!("ReconciliationRequired")
+        );
+        let scheduler = Arc::new(scheduler);
+        let runner = tokio::spawn({
+            let scheduler = scheduler.clone();
+            async move { scheduler.run().await }
+        });
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        scheduler.request_shutdown();
+        runner.await.unwrap().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    });
+}
+
+#[test]
 fn journal_torn_tail() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("jobs.jsonl");
@@ -981,8 +1266,8 @@ fn cancel_aborts_running() {
         wait_status(&scheduler, &id, JobStatus::Running, 50).await;
         scheduler.cancel_job(&id).await.unwrap();
 
-        let job = wait_status(&scheduler, &id, JobStatus::Cancelled, 50).await;
-        assert_eq!(job.status, JobStatus::Cancelled);
+        let job = wait_status(&scheduler, &id, JobStatus::ReconciliationRequired, 50).await;
+        assert_eq!(job.status, JobStatus::ReconciliationRequired);
 
         for _ in 0..50 {
             if scheduler.stats().await.active_jobs == 0 {
@@ -994,6 +1279,27 @@ fn cancel_aborts_running() {
 
         scheduler.request_shutdown();
         let _ = runner.await.unwrap();
+    });
+}
+
+#[test]
+fn failed_pending_cancel_remains_pending_and_runnable() {
+    runtime().block_on(async {
+        let store = Arc::new(RejectEventStore {
+            inner: MemoryJobStore::new(),
+            denied: JobEvent::Cancelled,
+        });
+        let scheduler = JobScheduler::with_store(SchedulerConfig::default(), store);
+        let id = scheduler
+            .submit(JobConfig::new("test".into(), serde_json::json!({})))
+            .await
+            .unwrap();
+        assert!(scheduler.cancel_job(&id).await.is_err());
+        assert_eq!(
+            scheduler.get_job(&id).await.unwrap().status,
+            JobStatus::Pending
+        );
+        assert_eq!(scheduler.stats().await.queued_jobs, 1);
     });
 }
 
@@ -1056,7 +1362,7 @@ fn drain_deadline_aborts() {
     let rt = runtime();
 
     rt.block_on(async {
-        scheduler
+        let id = scheduler
             .submit(JobConfig::new("hang".to_string(), serde_json::json!({})))
             .await
             .unwrap();
@@ -1075,6 +1381,10 @@ fn drain_deadline_aborts() {
             .expect("run returns within drain window")
             .unwrap();
         assert_eq!(result, Err(JobError::DrainTimeout));
+        assert_eq!(
+            scheduler.get_job(&id).await.unwrap().status,
+            JobStatus::ReconciliationRequired,
+        );
     });
 }
 

@@ -1377,7 +1377,7 @@ fn merge_values(mut left: Value, right: Value) -> Value {
 
 /// Advertise-only FormSnapshot: keep top-level keys, collapse nested controls.
 fn advertised_form_snapshot() -> Value {
-    object(
+    let mut schema = object(
         json!({
             "schemaVersion":{"type":"integer","const":1},
             "pageId":id(),
@@ -1403,7 +1403,11 @@ fn advertised_form_snapshot() -> Value {
             "unownedControls",
             "truncated",
         ],
-    )
+    );
+    // The full call schema constrains pageDerived. The catalog's compact
+    // projection permits this additive field without inflating every tool.
+    schema["additionalProperties"] = json!(true);
+    schema
 }
 
 /// A top-level schema whose entire value equals one named definition. JSON Schema
@@ -2882,6 +2886,7 @@ fn form_snapshot_schema() -> Value {
             "forms":array(json!({"$ref":"#/$defs/FormDescriptor"}), 64),
             "unownedControls":array(json!({"$ref":"#/$defs/FormControl"}), 512),
             "truncated":{"type":"boolean"},
+            "pageDerived":{"type":"boolean","const":true},
             // Optional: only present when the closed-page rule replayed this
             // call on the opener after the handle's popup closed. Generic
             // rather than an `Evidence` `$ref`, like `checkpoint_record`'s

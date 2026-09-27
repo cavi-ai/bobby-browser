@@ -311,12 +311,21 @@ struct FormSnapshotWire {
     #[cfg_attr(feature = "schema", schemars(length(max = 512)))]
     unowned_controls: Vec<FormControl>,
     truncated: bool,
+    #[serde(default = "page_derived_true")]
+    page_derived: bool,
+}
+
+fn page_derived_true() -> bool {
+    true
 }
 
 impl TryFrom<FormSnapshotWire> for FormSnapshot {
     type Error = String;
 
     fn try_from(wire: FormSnapshotWire) -> Result<Self, Self::Error> {
+        if !wire.page_derived {
+            return Err("form snapshot pageDerived must be true".into());
+        }
         let snapshot = Self {
             schema_version: wire.schema_version,
             page_id: wire.page_id,
@@ -341,12 +350,17 @@ impl Serialize for FormSnapshot {
             forms: self.forms.clone(),
             unowned_controls: self.unowned_controls.clone(),
             truncated: self.truncated,
+            page_derived: true,
         }
         .serialize(serializer)
     }
 }
 
 impl FormSnapshot {
+    pub fn page_derived(&self) -> bool {
+        true
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.schema_version != FORM_SNAPSHOT_SCHEMA_VERSION {
             return Err("unsupported form snapshot schema version".into());
