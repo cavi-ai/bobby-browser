@@ -190,7 +190,8 @@ class BrowserRuntimeClient:
     ) -> Dict[str, Any]:
         """``GET /v1/sessions/{session}/pages/{page}/forms`` -- read-only
         ``FormSnapshot`` (the PageRead HTTP surface; same contract as MCP
-        ``form_snapshot``). ``max_controls`` is optional, 1 through 512.
+        ``form_snapshot``). Page-derived controls carry ``pageDerived: true``.
+        ``max_controls`` is optional, 1 through 512.
         """
         if max_controls is not None and not (1 <= max_controls <= 512):
             raise self._protocol("max_controls must be between 1 and 512")
@@ -214,6 +215,8 @@ class BrowserRuntimeClient:
         ``policyDenied``, ``resourceExhausted``, ``restarted``, or
         ``failed``) after checking the HTTP status matches the documented
         mapping for that status.
+        Page-derived inspection, accessibility, form, and extraction evidence
+        retains its ``pageDerived: true`` marker in the returned dictionary.
         """
         status, payload = self._request("POST", "/v1/commands", envelope, options)
         if not isinstance(payload, dict) or "status" not in payload:
@@ -270,7 +273,10 @@ class BrowserRuntimeClient:
         description: str,
         options: Optional[RequestOptions] = None,
     ) -> Dict[str, Any]:
-        """``GET /v1/context/ask`` -- remembered target for a description."""
+        """``GET /v1/context/ask`` -- remembered target for a description.
+
+        The result carries ``pageDerived: true`` on either a hit or miss.
+        """
         encoded = len(description.encode("utf-8"))
         if not (1 <= encoded <= 256):
             raise self._protocol("description must contain between 1 and 256 bytes")

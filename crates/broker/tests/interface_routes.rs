@@ -668,7 +668,7 @@ async fn context_routes_require_context_read_and_validate_ids() {
     let body = to_bytes(unknown_site.into_body(), 16 * 1024).await.unwrap();
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
-        serde_json::json!({ "site": null })
+        serde_json::json!({ "site": null, "pageDerived": true })
     );
 }
 
@@ -732,7 +732,8 @@ async fn context_neighbors_miss_names_the_not_remembered_reason_and_next_step() 
             "neighbors": null,
             "hit": false,
             "reason": "notRemembered",
-            "nextStep": "a11y_snapshot"
+            "nextStep": "a11y_snapshot",
+            "pageDerived": true
         })
     );
 }

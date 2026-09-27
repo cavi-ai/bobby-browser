@@ -126,7 +126,7 @@ async fn submit_http_fetch_to_loopback_fails_closed() {
 }
 
 #[tokio::test]
-async fn cancel_pending_job() {
+async fn cancelling_running_job_exposes_reconciliation_required() {
     let (app, _, admin) = app_with_admin(8).await;
     let body = json!({ "name": "sleep", "payload": {"ms": 5000}, "maxRetries": 0 });
     let req = context_headers(Request::post("/v1/jobs"), &admin)
@@ -153,7 +153,7 @@ async fn cancel_pending_job() {
     let response = app.clone().oneshot(get).await.unwrap();
     let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
     let job: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(job["status"], "cancelled");
+    assert_eq!(job["status"], "reconciliationRequired");
 }
 
 #[tokio::test]
@@ -224,6 +224,35 @@ async fn network_jobs_require_network_egress_capability() {
     let error: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(error["error"]["code"], "missingCapability");
     assert_eq!(error["error"]["requiredCapability"], "network:egress");
+}
+
+#[tokio::test]
+async fn denied_job_submission_releases_durable_idempotency_reservation() {
+    let (app, _, admin) = app_with_admin(8).await;
+    let bearer = issue_bearer(
+        &app,
+        &admin,
+        Uuid::from_u128(0x20000000000000000000000000000003),
+        &["job:submit"],
+    )
+    .await;
+    for method in ["HEAD", "GET"] {
+        let body = json!({
+            "name": "http_probe",
+            "payload": {"url": "https://example.com/", "method": method},
+        });
+        let request = context_headers(Request::post("/v1/jobs"), &bearer)
+            .header("content-type", "application/json")
+            .header("idempotency-key", "denied-job-key")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(body["error"]["code"], "missingCapability");
+    }
 }
 
 #[tokio::test]

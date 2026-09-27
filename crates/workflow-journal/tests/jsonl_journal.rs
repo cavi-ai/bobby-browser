@@ -223,3 +223,68 @@ async fn serializes_concurrent_appends_with_unique_sequences() {
     let sequences: Vec<_> = scan.records.iter().map(|record| record.sequence).collect();
     assert_eq!(sequences, (0..32).collect::<Vec<_>>());
 }
+
+#[tokio::test]
+async fn hot_history_tracks_durable_appends_and_cold_records_remain_recoverable() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("commands.jsonl");
+    let journal = JsonlJournal::open(&path).await.unwrap();
+    let old = CommandId::new();
+    journal
+        .append(record(&old, CommandPhase::Accepted))
+        .await
+        .unwrap();
+    assert_eq!(journal.history(old.clone()).await.unwrap().records.len(), 1);
+    for _ in 0..130 {
+        let id = CommandId::new();
+        journal
+            .append(record(&id, CommandPhase::Accepted))
+            .await
+            .unwrap();
+        assert_eq!(journal.history(id).await.unwrap().records.len(), 1);
+    }
+    journal
+        .append(record(&old, CommandPhase::Prepared))
+        .await
+        .unwrap();
+    let history = journal.history(old.clone()).await.unwrap();
+    assert_eq!(history.records.len(), 2);
+    assert_eq!(history.records[0].sequence, 0);
+    assert_eq!(history.records[1].sequence, 131);
+    drop(journal);
+    assert_eq!(
+        JsonlJournal::open(path)
+            .await
+            .unwrap()
+            .history(old)
+            .await
+            .unwrap()
+            .records
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn a_corrupt_external_append_invalidates_cached_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("commands.jsonl");
+    let journal = JsonlJournal::open(&path).await.unwrap();
+    let id = CommandId::new();
+    journal
+        .append(record(&id, CommandPhase::Accepted))
+        .await
+        .unwrap();
+    journal.history(id.clone()).await.unwrap();
+    let mut file = tokio::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .await
+        .unwrap();
+    file.write_all(b"bad-json\n").await.unwrap();
+    file.sync_all().await.unwrap();
+    assert!(matches!(
+        journal.history(id).await,
+        Err(JournalError::Corrupt { line: 2 })
+    ));
+}

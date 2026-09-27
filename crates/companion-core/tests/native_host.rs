@@ -236,6 +236,39 @@ fn shared_url_security_fixtures_match_the_rust_extension_boundary() {
 }
 
 #[test]
+fn generated_css_paths_are_not_mistaken_for_url_schemes() {
+    for selector in [
+        "main:nth-of-type(1) > input:nth-of-type(2)",
+        "custom-field:nth-of-type(3)",
+    ] {
+        let event = json!({
+            "kind": "actionCompleted",
+            "output": {
+                "commandId": CommandId::new(),
+                "interactionPath": "extensionApi",
+                "output": {"selector": selector}
+            }
+        });
+        assert!(validate_extension_message(event).is_ok(), "{selector}");
+    }
+    for unsafe_value in [
+        "javascript:alert(1)",
+        "main:nth-of-type(1) > javascript:alert(1)",
+        "https://example.test/?token=private-value",
+    ] {
+        let event = json!({
+            "kind": "actionCompleted",
+            "output": {
+                "commandId": CommandId::new(),
+                "interactionPath": "extensionApi",
+                "output": {"selector": unsafe_value}
+            }
+        });
+        assert!(validate_extension_message(event).is_err(), "{unsafe_value}");
+    }
+}
+
+#[test]
 fn native_reconnect_backoff_is_exponential_bounded_and_resettable() {
     let mut backoff = NativeReconnectBackoff::default();
     let delays: Vec<_> = (0..8).map(|_| backoff.next_delay()).collect();

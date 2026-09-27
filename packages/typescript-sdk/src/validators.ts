@@ -170,7 +170,7 @@ function isFormDescriptor(value: unknown, globalIds: Set<string>): value is Form
   return hasExactKeys(value.validity, ["valid", "invalidControlIds"]) && typeof value.validity.valid === "boolean" && Array.isArray(value.validity.invalidControlIds) && value.validity.invalidControlIds.length <= 512 && unique(value.validity.invalidControlIds) && value.validity.invalidControlIds.every((id) => controls.has(id));
 }
 export function isFormSnapshot(value: unknown): value is FormSnapshot {
-  if (!hasExactKeys(value, ["schemaVersion", "pageId", "forms", "unownedControls", "truncated"]) || value.schemaVersion !== 1 || !isUuid(value.pageId) || !Array.isArray(value.forms) || value.forms.length > 64 || !Array.isArray(value.unownedControls) || typeof value.truncated !== "boolean") return false;
+  if (!hasExactKeys(value, ["schemaVersion", "pageId", "forms", "unownedControls", "truncated"], ["pageDerived"]) || (value.pageDerived !== undefined && value.pageDerived !== true) || value.schemaVersion !== 1 || !isUuid(value.pageId) || !Array.isArray(value.forms) || value.forms.length > 64 || !Array.isArray(value.unownedControls) || typeof value.truncated !== "boolean") return false;
   const ids = new Set<string>(); const formIds = new Set<string>();
   for (const form of value.forms) { if (!isRecord(form) || typeof form.id !== "string" || formIds.has(form.id) || !isFormDescriptor(form, ids)) return false; formIds.add(form.id); }
   if (value.unownedControls.length + [...value.forms].reduce((n, form) => n + (isRecord(form) && Array.isArray(form.controls) ? form.controls.length : 0), 0) > 512) return false;
@@ -190,7 +190,7 @@ function isJsonValue(value: unknown, depth = 0): value is JsonValue {
 }
 
 const JOB_PRIORITIES = ["low", "normal", "high", "critical"] as const;
-const JOB_STATUSES = ["pending", "running", "completed", "failed", "cancelled"] as const;
+const JOB_STATUSES = ["pending", "running", "completed", "failed", "cancelled", "reconciliationRequired"] as const;
 
 export function isJobId(value: unknown): value is string {
   return typeof value === "string" && value.startsWith("job_") && isUuid(value.slice(4));
@@ -244,6 +244,7 @@ export function isJobStatusResponse(value: unknown): value is JobStatusResponse 
   if (value.status === "running") return value.startedAt !== null && value.completedAt === null && value.result === null && value.error === null;
   if (value.status === "completed") return value.startedAt !== null && value.completedAt !== null && value.result !== null && value.result.success && value.result.error === null && value.error === null;
   if (value.status === "failed") return value.startedAt !== null && value.completedAt !== null && value.result === null && value.error !== null;
+  if (value.status === "reconciliationRequired") return value.completedAt === null && value.result === null && value.error !== null;
   return value.completedAt !== null && value.result === null && value.error === null;
 }
 
@@ -307,7 +308,7 @@ export function isPageState(value: unknown): value is PageState {
 }
 
 export function isContextAnswer(value: unknown): value is ContextAnswer {
-  if (!hasExactKeys(value, ["target", "confidence", "observedAt"], ["source"]) || !isAccessibilityTarget(value.target) || typeof value.confidence !== "number" || !Number.isFinite(value.confidence) || value.confidence < 0 || value.confidence > 1 || !isRecord(value.observedAt)) return false;
+  if (!hasExactKeys(value, ["target", "confidence", "observedAt"], ["source", "pageDerived"]) || (value.pageDerived !== undefined && value.pageDerived !== true) || !isAccessibilityTarget(value.target) || typeof value.confidence !== "number" || !Number.isFinite(value.confidence) || value.confidence < 0 || value.confidence > 1 || !isRecord(value.observedAt)) return false;
   const observedAt = value.observedAt;
   const validObservedAt = observedAt.kind === "generation"
     ? hasExactKeys(observedAt, ["kind", "generation"]) && isSafeUnsigned(observedAt.generation)
@@ -321,19 +322,19 @@ function isContextNeighborControl(value: unknown): value is ContextNeighborContr
 }
 
 export function isContextAskResponse(value: unknown): value is ContextAskResponse {
-  return hasExactKeys(value, ["answer", "hit"], ["reason", "nextStep"])
+  return hasExactKeys(value, ["answer", "hit"], ["reason", "nextStep", "pageDerived"]) && (value.pageDerived === undefined || value.pageDerived === true)
     && ((value.hit === true && isContextAnswer(value.answer) && value.reason === undefined && value.nextStep === undefined)
       || (value.hit === false && value.answer === null && value.reason === "notRemembered" && value.nextStep === "a11y_snapshot"));
 }
 
 export function isContextNeighborsResponse(value: unknown): value is ContextNeighborsResponse {
-  if (!hasExactKeys(value, ["neighbors", "hit"], ["reason", "nextStep"])) return false;
+  if (!hasExactKeys(value, ["neighbors", "hit"], ["reason", "nextStep", "pageDerived"]) || (value.pageDerived !== undefined && value.pageDerived !== true)) return false;
   if (value.hit === false) return value.neighbors === null && value.reason === "notRemembered" && value.nextStep === "a11y_snapshot";
   return value.hit === true && value.reason === undefined && value.nextStep === undefined && hasExactKeys(value.neighbors, ["answer", "form", "pagePattern", "controls"]) && isContextAnswer(value.neighbors.answer) && boundedText(value.neighbors.form, 2048) && boundedText(value.neighbors.pagePattern, 2048) && Array.isArray(value.neighbors.controls) && value.neighbors.controls.every(isContextNeighborControl);
 }
 
 export function isContextSiteResponse(value: unknown): value is ContextSiteResponse {
-  if (!hasExactKeys(value, ["site"])) return false;
+  if (!hasExactKeys(value, ["site"], ["pageDerived"]) || (value.pageDerived !== undefined && value.pageDerived !== true)) return false;
   if (value.site === null) return true;
   if (!hasExactKeys(value.site, ["siteKey", "pages"]) || !isString(value.site.siteKey) || value.site.siteKey.length === 0 || !isRecord(value.site.pages)) return false;
   return Object.entries(value.site.pages).every(([page, forms]) => isString(page) && isRecord(forms) && Object.entries(forms).every(([form, controls]) => form.length > 0 && Array.isArray(controls) && controls.every(isContextNeighborControl)));
@@ -431,7 +432,7 @@ export function isEvidence(value: unknown): value is Evidence {
         && ((value.bytes === null) === (value.sha256 === null))
         && validExecutionPathOptionalFields(value);
     case "navigation": return hasExactKeys(value, ["kind", "url", "title"]) && isString(value.url) && isString(value.title);
-    case "inspection": return hasExactKeys(value, ["kind", "selector", "url", "title", "text", "html"]) && isNullableString(value.selector) && isString(value.url) && isString(value.title) && isString(value.text) && isNullableString(value.html);
+    case "inspection": return hasExactKeys(value, ["kind", "selector", "url", "title", "text", "html"], ["pageDerived"]) && (value.pageDerived === undefined || value.pageDerived === true) && isNullableString(value.selector) && isString(value.url) && isString(value.title) && isString(value.text) && isNullableString(value.html);
     case "submitSettlement": return hasExactKeys(value, ["kind", "outcome"]) && (value.outcome === "settled" || value.outcome === "validationRejected");
     case "element": return hasExactKeys(value, ["kind", "selector", "text"]) && isString(value.selector) && isNullableString(value.text);
     case "upload": return hasExactKeys(value, ["kind", "selector", "paths"]) && isString(value.selector) && isStringArray(value.paths);
@@ -452,11 +453,11 @@ export function isEvidence(value: unknown): value is Evidence {
       && isString(value.engine)
       && isSafeUnsigned(value.actions, 65_535)
       && isSafeUnsigned(value.synthesizedMs, 600_000);
-    case "accessibilitySnapshot": return hasExactKeys(value, ["kind", "pageId", "nodes", "truncated"], []) && isUuid(value.pageId) && Array.isArray(value.nodes) && value.nodes.every(isAccessibilityNode) && typeof value.truncated === "boolean";
+    case "accessibilitySnapshot": return hasExactKeys(value, ["kind", "pageId", "nodes", "truncated"], ["pageDerived"]) && (value.pageDerived === undefined || value.pageDerived === true) && isUuid(value.pageId) && Array.isArray(value.nodes) && value.nodes.every(isAccessibilityNode) && typeof value.truncated === "boolean";
     case "formSnapshot": return hasExactKeys(value, ["kind", "snapshot"]) && isFormSnapshot(value.snapshot);
     case "formValidation": return hasExactKeys(value, ["kind", "issues"]) && Array.isArray(value.issues) && value.issues.length <= 512 && value.issues.every(isFormValidationIssue);
     case "controlAction": return hasExactKeys(value, ["kind", "action"]) && isControlActionEvidence(value.action);
-    case "structuredExtraction": return hasExactKeys(value, ["kind", "pageId", "value", "truncated"]) && isUuid(value.pageId) && isJsonValue(value.value) && typeof value.truncated === "boolean";
+    case "structuredExtraction": return hasExactKeys(value, ["kind", "pageId", "value", "truncated"], ["pageDerived"]) && (value.pageDerived === undefined || value.pageDerived === true) && isUuid(value.pageId) && isJsonValue(value.value) && typeof value.truncated === "boolean";
     case "challengeDetection": {
       if (!hasExactKeys(value, ["kind", "confidence", "detection"], ["priorKind"]) || typeof value.confidence !== "number" || !Number.isFinite(value.confidence) || !optional(value, "priorKind", isString)) return false;
       if (value.detection === null) return true;

@@ -792,14 +792,12 @@ export class CompanionBackground {
     if (grant.expiresAtUnixMs <= now) {
       throw new Error("attachment grant is expired");
     }
-    // Merge, not replace: every runtime session holds its own attachment, and
-    // dropping earlier attachments' leases would wedge their in-flight work.
-    for (const [key, lease] of this.#leases) {
-      if (lease.attachmentId === grant.attachmentId) this.#leases.delete(key);
-    }
+    const replacement: PageLease[] = [];
     for (const page of grant.pages) {
       const target = this.#targets.get(page.targetId);
-      if (!target) throw new Error("attachment grant names an undiscovered browser target");
+      // Recovery can race target removal. Never lease an undiscovered target,
+      // while preserving the discovered pages in the same grant.
+      if (!target) continue;
       const lease: PageLease = {
         companionId: this.#options.companionId,
         profileId: this.#options.profileId,
@@ -809,6 +807,17 @@ export class CompanionBackground {
         frameId: target.frameId,
         expiresAtUnixMs: grant.expiresAtUnixMs,
       };
+      replacement.push(lease);
+    }
+    if (grant.pages.length > 0 && replacement.length === 0) {
+      throw new Error("attachment grant names an undiscovered browser target");
+    }
+    // Validate before replacing this attachment's leases. Other runtime
+    // sessions keep their own attachments and in-flight work.
+    for (const [key, lease] of this.#leases) {
+      if (lease.attachmentId === grant.attachmentId) this.#leases.delete(key);
+    }
+    for (const lease of replacement) {
       this.#leases.set(routeKey(lease.attachmentId, lease.pageId), lease);
     }
   }

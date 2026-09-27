@@ -1855,6 +1855,7 @@ fn derive_native_browser_proof(
                 title,
                 text,
                 html,
+                ..
             } => {
                 if selector
                     .iter()

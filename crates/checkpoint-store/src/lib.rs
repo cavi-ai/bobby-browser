@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -78,7 +79,13 @@ impl LockedCheckpointSnapshot {
 pub struct CheckpointStore {
     root: Arc<PathBuf>,
     workflow_locks: Arc<Mutex<HashMap<WorkflowId, Arc<Mutex<()>>>>>,
+    session_cache: Arc<Mutex<HashMap<types::SessionId, CachedSession>>>,
 }
+
+type CachedSession = (Vec<WorkflowCheckpoint>, SystemTime);
+
+const HOT_SESSION_LIMIT: usize = 64;
+const HOT_CHECKPOINT_LIMIT: usize = 256;
 
 impl CheckpointStore {
     pub async fn open(root: impl AsRef<Path>) -> Result<Self, CheckpointStoreError> {
@@ -87,6 +94,7 @@ impl CheckpointStore {
         Ok(Self {
             root: Arc::new(root),
             workflow_locks: Arc::default(),
+            session_cache: Arc::default(),
         })
     }
 
@@ -156,6 +164,7 @@ impl CheckpointStore {
             let _ = tokio::fs::remove_file(&temporary).await;
         }
         if result.is_ok() {
+            self.session_cache.lock().await.clear();
             tracing::info!(workflow_id = %checkpoint.workflow_id.0, "checkpoint.established");
         }
         result
@@ -189,6 +198,12 @@ impl CheckpointStore {
         session_id: &types::SessionId,
         limit: usize,
     ) -> Result<Vec<WorkflowCheckpoint>, CheckpointStoreError> {
+        let before = tokio::fs::metadata(self.root.as_path()).await?.modified()?;
+        if let Some((cached, modified)) = self.session_cache.lock().await.get(session_id) {
+            if *modified == before {
+                return Ok(cached.iter().take(limit).cloned().collect());
+            }
+        }
         let mut entries = tokio::fs::read_dir(self.root.as_path()).await?;
         let mut found: Vec<WorkflowCheckpoint> = Vec::new();
         while let Some(entry) = entries.next_entry().await? {
@@ -210,6 +225,14 @@ impl CheckpointStore {
             found.push(checkpoint);
         }
         found.sort_by_key(|entry| std::cmp::Reverse(entry.created_at));
+        let after = tokio::fs::metadata(self.root.as_path()).await?.modified()?;
+        if before == after && found.len() <= HOT_CHECKPOINT_LIMIT {
+            let mut cache = self.session_cache.lock().await;
+            if cache.len() >= HOT_SESSION_LIMIT && !cache.contains_key(session_id) {
+                cache.clear();
+            }
+            cache.insert(session_id.clone(), (found.clone(), after));
+        }
         found.truncate(limit);
         Ok(found)
     }
@@ -229,6 +252,7 @@ impl CheckpointStore {
         match tokio::fs::remove_file(self.path(workflow_id)).await {
             Ok(()) => {
                 File::open(self.root.as_ref()).await?.sync_all().await?;
+                self.session_cache.lock().await.clear();
                 Ok(())
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),

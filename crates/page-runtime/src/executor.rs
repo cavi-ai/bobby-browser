@@ -857,6 +857,7 @@ impl PageRuntime {
                     page_id: observed,
                     nodes,
                     truncated,
+                    ..
                 } = item
                 {
                     // A truncated snapshot is not the page: recording it would
@@ -1048,6 +1049,33 @@ impl PageRuntime {
                 }
             }
             PrimitiveCommand::TypeText(command) => {
+                let observed = evidence.iter().find_map(|item| match item {
+                    Evidence::Element { text, .. } => text.as_deref(),
+                    _ => None,
+                });
+                let kind = evidence
+                    .iter()
+                    .find_map(|item| match item {
+                        Evidence::Configuration { name, value } if name == "typedControlKind" => {
+                            Some(value.as_str())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or("text");
+                if let Some(verification) = lease
+                    .worker()
+                    .verify_framed_typed_value(
+                        page_id.expect("validated page id"),
+                        command,
+                        observed,
+                        kind,
+                    )
+                    .await?
+                {
+                    let mut combined = evidence;
+                    combined.extend(verification);
+                    return Ok(combined);
+                }
                 let verification = lease
                     .worker()
                     .inspect(
@@ -1064,19 +1092,6 @@ impl PageRuntime {
                     Evidence::Inspection { text, .. } => Some(text.as_str()),
                     _ => None,
                 });
-                let observed = evidence.iter().find_map(|item| match item {
-                    Evidence::Element { text, .. } => text.as_deref(),
-                    _ => None,
-                });
-                let kind = evidence
-                    .iter()
-                    .find_map(|item| match item {
-                        Evidence::Configuration { name, value } if name == "typedControlKind" => {
-                            Some(value.as_str())
-                        }
-                        _ => None,
-                    })
-                    .unwrap_or("text");
                 let matches = inspected.is_some_and(|inspected| {
                     typed_value_verified(
                         &command.value,

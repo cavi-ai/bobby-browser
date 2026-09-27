@@ -9,10 +9,10 @@ use std::fmt::{Display, Formatter};
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Scorecard {
     pub station: String,
@@ -25,6 +25,10 @@ pub struct Scorecard {
     pub tool_calls: u64,
     pub action_count: u64,
     pub wall_ms: u64,
+    /// From journey launch through scorecard capture, including browser setup.
+    pub journey_wall_ms: u64,
+    /// Sum of complete command outcomes returned to the direct Rust journey caller.
+    pub serialized_response_bytes: u64,
     pub snapshots_taken: u64,
     pub vision_escalations_attempted: u64,
     pub vision_escalations_accepted: u64,
@@ -39,7 +43,7 @@ pub struct JourneyBudget {
     pub max_snapshots: u64,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ProviderMode {
     Http,
@@ -48,7 +52,7 @@ pub enum ProviderMode {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ModelTier {
     Deterministic,
@@ -57,7 +61,7 @@ pub enum ModelTier {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ContextSource {
     None,
@@ -66,7 +70,7 @@ pub enum ContextSource {
     Mixed,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum VisionSource {
     None,
@@ -75,7 +79,7 @@ pub enum VisionSource {
     Mixed,
 }
 
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct FailureTaxonomy {
     pub timeout: u64,
@@ -239,6 +243,8 @@ impl Scorecard {
             tool_calls,
             action_count,
             wall_ms,
+            journey_wall_ms: 0,
+            serialized_response_bytes: 0,
             snapshots_taken,
             vision_escalations_attempted,
             vision_escalations_accepted,
@@ -302,7 +308,7 @@ impl Scorecard {
 }
 
 pub fn release_budget_for(station: &str, engine: &str) -> Option<JourneyBudget> {
-    if engine != "chromium" {
+    if !matches!(engine, "chromium" | "firefox") {
         return None;
     }
     let budget = match station {
@@ -358,6 +364,64 @@ pub fn enforce_remembered_site_reduction(
             "remembered-site call budget exceeded for station={station}: rememberedCalls={remembered_calls}, coldCalls={cold_calls}"
         )))
     }
+}
+
+/// Compare matching 20-run measured cohorts after two discarded warmups per
+/// cohort. The wall limit is twice baseline p95; the response-byte limit is
+/// 110% of the largest baseline run. No missing sample is treated as zero.
+pub fn enforce_measured_regression(
+    baseline: &[Scorecard],
+    candidate: &[Scorecard],
+) -> Result<(), ScorecardError> {
+    if baseline.len() != 20 || candidate.len() != 20 {
+        return Err(ScorecardError(
+            "baseline and candidate each require 20 measured runs after warmup".into(),
+        ));
+    }
+    let reference = &baseline[0];
+    if baseline.iter().chain(candidate).any(|sample| {
+        !sample.passed
+            || sample.station != reference.station
+            || sample.engine != reference.engine
+            || sample.provider_mode != reference.provider_mode
+            || sample.journey_wall_ms == 0
+            || sample.serialized_response_bytes == 0
+    }) {
+        return Err(ScorecardError(
+            "measured runs must pass and share station, engine, and provider mode".into(),
+        ));
+    }
+    let p95 = |samples: &[Scorecard]| {
+        let mut walls = samples
+            .iter()
+            .map(|sample| sample.journey_wall_ms)
+            .collect::<Vec<_>>();
+        walls.sort_unstable();
+        walls[18]
+    };
+    let baseline_p95 = p95(baseline);
+    let candidate_p95 = p95(candidate);
+    if candidate_p95 > baseline_p95.saturating_mul(2) {
+        return Err(ScorecardError(format!(
+            "journeyWallMs p95={candidate_p95} exceeds 2x baseline p95={baseline_p95}"
+        )));
+    }
+    let baseline_bytes = baseline
+        .iter()
+        .map(|sample| sample.serialized_response_bytes)
+        .max()
+        .unwrap();
+    let candidate_bytes = candidate
+        .iter()
+        .map(|sample| sample.serialized_response_bytes)
+        .max()
+        .unwrap();
+    if u128::from(candidate_bytes) * 10 > u128::from(baseline_bytes) * 11 {
+        return Err(ScorecardError(format!(
+            "serializedResponseBytes max={candidate_bytes} exceeds 110% of baseline max={baseline_bytes}"
+        )));
+    }
+    Ok(())
 }
 
 impl ProviderMode {

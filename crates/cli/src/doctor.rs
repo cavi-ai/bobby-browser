@@ -2755,6 +2755,7 @@ mod host_config_tests {
 
     #[test]
     fn doctor_reports_and_repairs_drifted_host_entries() {
+        let _lock = onboarding::INSTALL_ENV_LOCK.lock().unwrap();
         let root = tempfile::tempdir().unwrap();
         let path =
             onboarding::merge_host_config(onboarding::HostKind::Claude, root.path()).unwrap();

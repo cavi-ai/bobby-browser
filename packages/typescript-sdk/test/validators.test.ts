@@ -79,7 +79,7 @@ function evidenceFixtures(): Evidence[] {
     { kind: "executionPath", path: "directHttp", reason: "eligibleStaticDocument", stateVersion: 0, elapsedMs: 1, bytes: null, sha256: null },
     { kind: "executionPath", path: "browserFallback", reason: "javascriptRequired", stateVersion: 2, elapsedMs: 3, bytes: 4, sha256: SHA, finalUrl: "https://example.test/", contentType: "text/html", status: 200, redirectChain: ["https://example.test/"] },
     { kind: "navigation", url: "https://example.test/", title: "Example" },
-    { kind: "inspection", selector: null, url: "https://example.test/", title: "Example", text: "body", html: null },
+    { kind: "inspection", selector: null, url: "https://example.test/", title: "Example", text: "body", html: null, pageDerived: true },
     { kind: "submitSettlement", outcome: "settled" },
     { kind: "element", selector: "#save", text: null },
     { kind: "upload", selector: "input", paths: ["/tmp/a"] },
@@ -101,11 +101,11 @@ function evidenceFixtures(): Evidence[] {
     { kind: "configuration", name: "focusEmulation", value: "true" },
     { kind: "browserExecution", engine: "firefox", browserVersion: "128.0", profileId: ID, interactionPath: "engineNative" },
     { kind: "javaScriptResult", value: { answer: 42 }, truncated: false },
-    { kind: "accessibilitySnapshot", pageId: ID, nodes: [{ role: "link", target: { role: "link", accessibleName: "Docs", framePath: [{ role: "iframe", accessibleName: "Content", ordinal: null }] }, url: "https://example.test/docs" }], truncated: false },
+    { kind: "accessibilitySnapshot", pageId: ID, nodes: [{ role: "link", target: { role: "link", accessibleName: "Docs", framePath: [{ role: "iframe", accessibleName: "Content", ordinal: null }] }, url: "https://example.test/docs" }], truncated: false, pageDerived: true },
     { kind: "formSnapshot", snapshot: { schemaVersion: 1, pageId: ID, forms: [], unownedControls: [], truncated: false } },
     { kind: "formValidation", issues: [{ controlId: "email", controlKind: "email", accessibleName: "Email", target: null, validity: { willValidate: true, valid: false, flags: ["valueMissing"], message: "Required", describedBy: [] } }] },
     { kind: "controlAction", action: { operation: "setChecked", target: { role: "checkbox", accessibleName: "Business" }, state: { kind: "checked", checked: true }, validity: { willValidate: true, valid: true }, nodeReplaced: false, revealedControls: [{ controlKind: "text", accessibleName: "Company", target: { role: "textbox", accessibleName: "Company" } }] } },
-    { kind: "structuredExtraction", pageId: ID, value: { title: "Example" }, truncated: false },
+    { kind: "structuredExtraction", pageId: ID, value: { title: "Example" }, truncated: false, pageDerived: true },
     { kind: "challengeDetection", confidence: 0.9, detection: { challenge_type: "recaptchaV2Checkbox", confidence: 0.8, region: { x: 1, y: 2, width: 3, height: 4 }, blocking: true, hints: { target_field_purpose: "Verify", instruction_text: "Check the box" } }, priorKind: "recaptchaV2Checkbox" },
     { kind: "cookieState", pageId: ID, cookies: [{ name: "session", value: "value", domain: "example.test", path: "/", secure: true, httpOnly: true, sameSite: "Lax", expiresUnix: 1 }] },
     { kind: "pdfArtifact", artifactId: "artifact-pdf", mediaType: "application/pdf", bytes: 4, sha256: SHA },
@@ -148,7 +148,13 @@ test("evidence fixtures cover every Rust wire variant and field", () => {
   for (const variant of variants) {
     const kind = `${variant[1]![0]!.toLowerCase()}${variant[1]!.slice(1)}`;
     const expected = ["kind", ...[...variant[2]!.matchAll(/^        ([a-z][a-z0-9_]*):/gm)].map((field) => field[1]!.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase()))].sort();
-    const actual = [...new Set(evidenceFixtures().filter((evidence) => evidence.kind === kind).flatMap((evidence) => Object.keys(evidence)))].sort();
+    const fixtures = evidenceFixtures().filter((evidence) => evidence.kind === kind);
+    if (fixtures.some((evidence) => "pageDerived" in evidence)) {
+      assert.ok(["inspection", "accessibilitySnapshot", "formSnapshot", "structuredExtraction"].includes(kind));
+      assert.ok(fixtures.every((evidence) => !("pageDerived" in evidence) || evidence.pageDerived === true));
+    }
+    // pageDerived is additive transport provenance, not a Rust enum field.
+    const actual = [...new Set(fixtures.flatMap((evidence) => Object.keys(evidence).filter((key) => key !== "pageDerived")))].sort();
     assert.deepEqual(actual, expected, kind);
   }
 });
@@ -281,6 +287,7 @@ test("job response validators enforce exact lifecycle and nested result contract
   assert.equal(isJobStatusResponse(JOB_STATUS), true);
   assert.equal(isJobStatusResponse({ ...JOB_STATUS, status: "failed", result: null, error: "handler failed" }), true);
   assert.equal(isJobStatusResponse({ ...JOB_STATUS, status: "cancelled", result: null, error: null }), true);
+  assert.equal(isJobStatusResponse({ ...JOB_STATUS, status: "reconciliationRequired", completedAt: null, result: null, error: "outcome unknown" }), true);
 
   assert.equal(isJobSubmitResponse({ jobId: "bad", status: "pending" }), false);
   assert.equal(isJobSubmitResponse({ jobId: JOB_ID, status: "unknown" }), false);

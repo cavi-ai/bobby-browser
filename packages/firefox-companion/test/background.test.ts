@@ -480,6 +480,42 @@ test("paired discovery accepts profile-bound grants and rejects unrelated routes
   });
 });
 
+test("mixed recovery grant leases discovered pages without routing stale targets", async () => {
+  const transport = new FakeTransport();
+  const routed: number[] = [];
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [{ tabId: 9, frameId: 0 }],
+    createTargetId: (target) => targetId(target.tabId, target.frameId),
+    async sendTabMessage(tabId) {
+      routed.push(tabId);
+      return { controls: [] };
+    },
+    async navigateTab() {},
+    now: () => 1_000,
+  });
+  background.connect(CONNECT_OPTIONS);
+  await pair(background);
+  await grant(background, [{ tabId: 9, frameId: 0 }, { tabId: 99, frameId: 0 }]);
+
+  await background.receive(action(9, 0));
+  await background.receive(action(99, 0));
+  assert.deepEqual(routed, [9]);
+  assert.deepEqual(transport.sent.at(-1), {
+    kind: "actionFailed",
+    output: {
+      commandId: "command-1",
+      code: "leaseExpired",
+      message: "the page lease is missing or expired",
+      effectUncertain: false,
+    },
+  });
+
+  await assert.rejects(grant(background, [{ tabId: 99, frameId: 0 }]), /undiscovered browser target/);
+  await background.receive(action(9, 0));
+  assert.deepEqual(routed, [9, 9]);
+});
+
 test("spoofed pairing and sender IDs cannot mint routes", async () => {
   const transport = new FakeTransport();
   let routed = false;

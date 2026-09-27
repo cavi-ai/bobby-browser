@@ -18,6 +18,8 @@ fn release_scorecard(station: &str) -> Scorecard {
         tool_calls: budget.max_tool_calls,
         action_count: budget.max_action_count,
         wall_ms: 1,
+        journey_wall_ms: 1,
+        serialized_response_bytes: 1,
         snapshots_taken: budget.max_snapshots,
         vision_escalations_attempted: 0,
         vision_escalations_accepted: 0,
@@ -49,6 +51,9 @@ fn scorecard_counts_commands_snapshots_and_vision_outcomes() {
     assert_eq!(scorecard.tool_calls, 3);
     assert_eq!(scorecard.action_count, 2);
     assert_eq!(scorecard.wall_ms, 130);
+    // The journal only has sanitized outcomes; response bytes come from the
+    // live caller boundary in ModernRuntime.
+    assert_eq!(scorecard.serialized_response_bytes, 0);
     assert_eq!(scorecard.snapshots_taken, 1);
     assert_eq!(scorecard.vision_escalations_attempted, 1);
     assert_eq!(scorecard.vision_escalations_accepted, 1);
@@ -85,7 +90,10 @@ fn release_budgets_cover_every_canonical_journey() {
         );
     }
     assert!(scorecard::release_budget_for("unknown", "chromium").is_none());
-    assert!(scorecard::release_budget_for("session", "firefox").is_none());
+    assert_eq!(
+        scorecard::release_budget_for("session", "firefox"),
+        scorecard::release_budget_for("session", "chromium")
+    );
 }
 
 #[test]
@@ -151,4 +159,40 @@ fn remembered_site_gate_requires_strictly_fewer_calls() {
         assert!(error.contains("rememberedCalls"), "{error}");
         assert!(error.contains("coldCalls=12"), "{error}");
     }
+}
+
+#[test]
+fn measured_regression_requires_complete_matching_cohorts_and_enforces_locked_limits() {
+    let sample = release_scorecard("session");
+    let mut baseline = vec![sample.clone(); 20];
+    for entry in &mut baseline {
+        entry.journey_wall_ms = 100;
+        entry.serialized_response_bytes = 100;
+    }
+    let mut candidate = baseline.clone();
+    candidate[18].journey_wall_ms = 200;
+    candidate[19].journey_wall_ms = 200;
+    candidate[19].serialized_response_bytes = 110;
+    scorecard::enforce_measured_regression(&baseline, &candidate).unwrap();
+
+    candidate[18].journey_wall_ms = 201;
+    candidate[19].journey_wall_ms = 201;
+    assert!(
+        scorecard::enforce_measured_regression(&baseline, &candidate)
+            .unwrap_err()
+            .to_string()
+            .contains("journeyWallMs")
+    );
+    candidate[18].journey_wall_ms = 200;
+    candidate[19].journey_wall_ms = 200;
+    candidate[19].serialized_response_bytes = 111;
+    assert!(
+        scorecard::enforce_measured_regression(&baseline, &candidate)
+            .unwrap_err()
+            .to_string()
+            .contains("serializedResponseBytes")
+    );
+    assert!(scorecard::enforce_measured_regression(&baseline[..19], &candidate).is_err());
+    candidate[19].engine = "firefox".into();
+    assert!(scorecard::enforce_measured_regression(&baseline, &candidate).is_err());
 }

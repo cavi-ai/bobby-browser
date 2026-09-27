@@ -1433,6 +1433,7 @@ impl Server {
                     .await;
                 match to_json(outcome) {
                     Ok(mut value) => {
+                        types::annotate_page_derived_evidence(&mut value);
                         admission.apply_to_mcp_value(&mut value, &envelope.command_id);
                         // `CommandOutcome` carries only `commandId`, so the
                         // workflow and attempt ids are echoed here. Callers

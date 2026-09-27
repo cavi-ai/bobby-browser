@@ -214,6 +214,17 @@ pub trait BrowserWorker: Send + Sync {
         page_id: &PageId,
         command: &InspectCommand,
     ) -> Result<Vec<Evidence>, CommandError>;
+    /// Verify a typed value inside a private frame without returning its
+    /// contents to the runtime. Workers without this capability use Inspect.
+    async fn verify_framed_typed_value(
+        &self,
+        _page_id: &PageId,
+        _command: &TypeTextCommand,
+        _observed: Option<&str>,
+        _kind: &str,
+    ) -> Result<Option<Vec<Evidence>>, CommandError> {
+        Ok(None)
+    }
     async fn click(
         &self,
         page_id: &PageId,

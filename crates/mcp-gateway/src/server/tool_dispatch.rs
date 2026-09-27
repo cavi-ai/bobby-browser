@@ -17,6 +17,9 @@ pub(super) const PAGE_DERIVED_TOOLS: &[&str] = &[
     "intent_extract",
     "extract_structured",
     "context_ask",
+    "context_neighbors",
+    "context_site",
+    "form_snapshot",
 ];
 
 impl Server {

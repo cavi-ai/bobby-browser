@@ -47,7 +47,8 @@ impl AuthenticatedRuntime {
 
     /// Wrap `inner` with the principal's live capability handle.
     pub fn new(inner: RuntimeService, authority: CapabilityHandle) -> Self {
-        Self::with_idempotency(inner, authority, IdempotencyStore::default())
+        let idempotency = inner.idempotency.clone();
+        Self::with_idempotency(inner, authority, idempotency)
     }
 
     /// Wrap `inner` with capability checks and a shared idempotency store.
@@ -57,10 +58,10 @@ impl AuthenticatedRuntime {
         idempotency: IdempotencyStore,
     ) -> Self {
         Self {
-            inner,
             authorization: AuthorizationGuard::new(authority),
             idempotency,
-            lifecycle_idempotency: IdempotencyStore::default(),
+            lifecycle_idempotency: inner.lifecycle_idempotency.clone(),
+            inner,
             submit_dispatches: Arc::new(AtomicUsize::new(0)),
             create_session_dispatches: Arc::new(AtomicUsize::new(0)),
             checkpoint_dispatches: Arc::new(AtomicUsize::new(0)),
@@ -75,10 +76,10 @@ impl AuthenticatedRuntime {
         session_ownership: SessionOwnershipRecorder,
     ) -> Self {
         Self {
-            inner,
             authorization: AuthorizationGuard::new(authority),
-            idempotency: IdempotencyStore::default(),
-            lifecycle_idempotency: IdempotencyStore::default(),
+            idempotency: inner.idempotency.clone(),
+            lifecycle_idempotency: inner.lifecycle_idempotency.clone(),
+            inner,
             submit_dispatches: Arc::new(AtomicUsize::new(0)),
             create_session_dispatches: Arc::new(AtomicUsize::new(0)),
             checkpoint_dispatches: Arc::new(AtomicUsize::new(0)),
@@ -393,7 +394,11 @@ impl RuntimeInterface for AuthenticatedRuntime {
                         Ok(session)
                     }
                     Err(error) => {
-                        self.lifecycle_idempotency.abandon(permit).await;
+                        if error.code == InterfaceErrorCode::MissingCapability {
+                            self.lifecycle_idempotency.abandon(permit).await;
+                        } else {
+                            drop(permit);
+                        }
                         Err(error)
                     }
                 }
@@ -592,7 +597,7 @@ impl RuntimeInterface for AuthenticatedRuntime {
                         Ok(checkpoint)
                     }
                     Err(error) => {
-                        self.lifecycle_idempotency.abandon(permit).await;
+                        drop(permit);
                         Err(error)
                     }
                 }

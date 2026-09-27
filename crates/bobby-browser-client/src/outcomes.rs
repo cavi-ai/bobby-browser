@@ -60,6 +60,13 @@ pub struct ContextAnswer {
     pub source: Option<ContextAnswerSource>,
 }
 
+impl ContextAnswer {
+    /// Retained and live context answers both originate from page observations.
+    pub fn page_derived(&self) -> bool {
+        true
+    }
+}
+
 impl Default for ContextObservedAt {
     fn default() -> Self {
         Self::Generation { generation: 0 }
@@ -154,7 +161,7 @@ pub enum ContextNextStep {
 }
 
 /// Response from `GET /v1/context/ask`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContextAskResponse {
@@ -166,8 +173,42 @@ pub struct ContextAskResponse {
     pub next_step: Option<ContextNextStep>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ContextAskResponseWire {
+    answer: Option<ContextAnswer>,
+    hit: bool,
+    #[serde(default)]
+    reason: Option<ContextMissReason>,
+    #[serde(default)]
+    next_step: Option<ContextNextStep>,
+    #[serde(default)]
+    page_derived: Option<bool>,
+}
+
+impl<'de> Deserialize<'de> for ContextAskResponse {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = ContextAskResponseWire::deserialize(deserializer)?;
+        if wire.page_derived == Some(false) {
+            return Err(serde::de::Error::custom("pageDerived must be true"));
+        }
+        Ok(Self {
+            answer: wire.answer,
+            hit: wire.hit,
+            reason: wire.reason,
+            next_step: wire.next_step,
+        })
+    }
+}
+
+impl ContextAskResponse {
+    pub fn page_derived(&self) -> bool {
+        true
+    }
+}
+
 /// Response from `GET /v1/context/neighbors`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContextNeighborsResponse {
@@ -179,12 +220,70 @@ pub struct ContextNeighborsResponse {
     pub next_step: Option<ContextNextStep>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ContextNeighborsResponseWire {
+    neighbors: Option<ContextNeighbors>,
+    hit: bool,
+    #[serde(default)]
+    reason: Option<ContextMissReason>,
+    #[serde(default)]
+    next_step: Option<ContextNextStep>,
+    #[serde(default)]
+    page_derived: Option<bool>,
+}
+
+impl<'de> Deserialize<'de> for ContextNeighborsResponse {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = ContextNeighborsResponseWire::deserialize(deserializer)?;
+        if wire.page_derived == Some(false) {
+            return Err(serde::de::Error::custom("pageDerived must be true"));
+        }
+        Ok(Self {
+            neighbors: wire.neighbors,
+            hit: wire.hit,
+            reason: wire.reason,
+            next_step: wire.next_step,
+        })
+    }
+}
+
+impl ContextNeighborsResponse {
+    pub fn page_derived(&self) -> bool {
+        true
+    }
+}
+
 /// Response from `GET /v1/context/site/{key}`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContextSiteResponse {
     pub site: Option<ContextSiteView>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ContextSiteResponseWire {
+    site: Option<ContextSiteView>,
+    #[serde(default)]
+    page_derived: Option<bool>,
+}
+
+impl<'de> Deserialize<'de> for ContextSiteResponse {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = ContextSiteResponseWire::deserialize(deserializer)?;
+        if wire.page_derived == Some(false) {
+            return Err(serde::de::Error::custom("pageDerived must be true"));
+        }
+        Ok(Self { site: wire.site })
+    }
+}
+
+impl ContextSiteResponse {
+    pub fn page_derived(&self) -> bool {
+        true
+    }
 }
 
 /// One node in an `accessibilitySnapshot` result tree.
@@ -531,6 +630,16 @@ pub struct ExecutionRecord {
 }
 
 impl Evidence {
+    pub fn page_derived(&self) -> bool {
+        matches!(
+            self,
+            Self::Inspection { .. }
+                | Self::AccessibilitySnapshot { .. }
+                | Self::FormSnapshot { .. }
+                | Self::StructuredExtraction { .. }
+        )
+    }
+
     pub fn journal_safe(&self) -> Self {
         fn safe_url(value: &str) -> String {
             let Ok(mut url) = url::Url::parse(value) else {
@@ -586,6 +695,26 @@ impl Evidence {
             _ => {}
         }
         safe
+    }
+}
+
+/// Add provenance only to page-derived evidence in a serialized outcome.
+/// This keeps public Rust enum variants source-compatible while extending the
+/// HTTP and MCP JSON representations.
+pub fn annotate_page_derived_evidence(outcome: &mut serde_json::Value) {
+    let Some(evidence) = outcome
+        .get_mut("evidence")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    for item in evidence {
+        if matches!(
+            item.get("kind").and_then(serde_json::Value::as_str),
+            Some("inspection" | "accessibilitySnapshot" | "formSnapshot" | "structuredExtraction")
+        ) {
+            item["pageDerived"] = serde_json::Value::Bool(true);
+        }
     }
 }
 

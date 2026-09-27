@@ -1,5 +1,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, ServerConfig, StorageConfig};
@@ -97,6 +99,7 @@ async fn acquire_live_browser_lock() -> TestResult<std::fs::File> {
 
 pub struct ModernRuntime {
     _browser_lock: std::fs::File,
+    _firefox: Option<runtime_tests::InstalledFirefoxRuntime>,
     runtime: RuntimeService,
     session_id: SessionId,
     page_id: PageId,
@@ -107,6 +110,8 @@ pub struct ModernRuntime {
     profile: String,
     journey: String,
     execution_policy: types::ExecutionPolicy,
+    journey_started: Instant,
+    serialized_response_bytes: AtomicU64,
 }
 
 impl fmt::Debug for ModernRuntime {
@@ -173,6 +178,7 @@ impl ModernRuntime {
         journey: &str,
         javascript_evaluation: bool,
     ) -> TestResult<Self> {
+        let journey_started = Instant::now();
         if !dist.join("index.html").is_file()
             || !dist.join("app.js").is_file()
             || !dist.join("app.css").is_file()
@@ -181,8 +187,9 @@ impl ModernRuntime {
                 path: dist.to_path_buf(),
             }));
         }
+        let firefox_engine = std::env::var("BOBBY_GAUNTLET_ENGINE").as_deref() == Ok("firefox");
         let chrome = chrome_executable();
-        if !chrome.is_file() {
+        if !firefox_engine && !chrome.is_file() {
             return Err(Box::new(HarnessError::MissingBrowser { path: chrome }));
         }
         let browser_lock = acquire_live_browser_lock().await?;
@@ -212,7 +219,7 @@ impl ModernRuntime {
                 shutdown_timeout_ms: 10_000,
             },
             browser: BrowserConfig {
-                executable: Some(chrome),
+                executable: (!firefox_engine).then_some(chrome),
                 profiles_dir: root.join("profiles"),
                 headless: true,
                 max_active: 1,
@@ -240,7 +247,28 @@ impl ModernRuntime {
             nodes: Default::default(),
         };
         let profile = format!("northstar-{journey}");
-        let runtime = RuntimeService::build(&config).await?;
+        let firefox = if firefox_engine {
+            let mut installed = runtime_tests::InstalledFirefoxConfig::from_env()
+                .map_err(|name| format!("Firefox Northstar requires {name}"))?;
+            // A test that just dropped Firefox can leave its process exiting for
+            // a moment. Each journey gets an independent profile and companion
+            // enrollment, so no later test can attach to that stale process.
+            installed.profile = root.join("firefox-profile");
+            std::fs::create_dir_all(&installed.profile)?;
+            Some(
+                runtime_tests::launch_installed_firefox_runtime(installed, &config, "about:blank")
+                    .await
+                    .map_err(|error| format!("Firefox Northstar launch failed: {error:?}"))?,
+            )
+        } else {
+            None
+        };
+        let runtime = match &firefox {
+            Some(firefox) => {
+                RuntimeService::build_with_worker_factory(&config, firefox.factory()).await?
+            }
+            None => RuntimeService::build(&config).await?,
+        };
         let execution_policy = gauntlet_execution_policy(javascript_evaluation);
         let session = runtime
             .create_session(CreateSessionRequest {
@@ -257,6 +285,7 @@ impl ModernRuntime {
             .await?;
         Ok(Self {
             _browser_lock: browser_lock,
+            _firefox: firefox,
             runtime,
             session_id: session.id,
             page_id: page.id,
@@ -267,6 +296,8 @@ impl ModernRuntime {
             profile,
             journey: journey.to_owned(),
             execution_policy,
+            journey_started,
+            serialized_response_bytes: AtomicU64::new(0),
         })
     }
 
@@ -1009,8 +1040,7 @@ impl ModernRuntime {
         let vision_capable = std::env::var("BOBBY_GAUNTLET_VISION_ENDPOINT")
             .is_ok_and(|endpoint| !endpoint.trim().is_empty());
         let outcome = self
-            .runtime
-            .submit_with_vision_capability(
+            .submit_vision_recorded(
                 CommandEnvelope {
                     schema_version: CommandEnvelope::SCHEMA_VERSION,
                     command_id: CommandId::new(),
@@ -1040,8 +1070,7 @@ impl ModernRuntime {
         let attempt_id = AttemptId::new();
         let inspect_id = CommandId::new();
         let preflight = self
-            .runtime
-            .submit(CommandEnvelope {
+            .submit_recorded(CommandEnvelope {
                 schema_version: CommandEnvelope::SCHEMA_VERSION,
                 command_id: inspect_id.clone(),
                 workflow_id: workflow_id.clone(),
@@ -1103,8 +1132,7 @@ impl ModernRuntime {
             .await?;
         let debug = serde_json::to_string(&command).unwrap_or_default();
         match self
-            .runtime
-            .submit(CommandEnvelope {
+            .submit_recorded(CommandEnvelope {
                 schema_version: CommandEnvelope::SCHEMA_VERSION,
                 command_id,
                 workflow_id,
@@ -1143,6 +1171,20 @@ impl ModernRuntime {
         self.submit_on(&self.page_id, command).await
     }
 
+    async fn submit_recorded(&self, envelope: CommandEnvelope) -> CommandOutcome {
+        self.runtime.submit(envelope).await
+    }
+
+    async fn submit_vision_recorded(
+        &self,
+        envelope: CommandEnvelope,
+        vision_capable: bool,
+    ) -> CommandOutcome {
+        self.runtime
+            .submit_with_vision_capability(envelope, vision_capable)
+            .await
+    }
+
     pub async fn capture_viewport_screenshot(&self) -> TestResult<Vec<Evidence>> {
         const MAX_ATTEMPTS: usize = 2;
 
@@ -1151,8 +1193,7 @@ impl ModernRuntime {
                 mode: ScreenshotMode::Viewport,
             });
             let outcome = self
-                .runtime
-                .submit(CommandEnvelope {
+                .submit_recorded(CommandEnvelope {
                     schema_version: CommandEnvelope::SCHEMA_VERSION,
                     command_id: CommandId::new(),
                     workflow_id: WorkflowId::new(),
@@ -1193,8 +1234,7 @@ impl ModernRuntime {
     ) -> TestResult<Vec<Evidence>> {
         let debug = format!("{command:?}");
         let outcome = self
-            .runtime
-            .submit(CommandEnvelope {
+            .submit_recorded(CommandEnvelope {
                 schema_version: CommandEnvelope::SCHEMA_VERSION,
                 command_id: CommandId::new(),
                 workflow_id: WorkflowId::new(),
@@ -1242,8 +1282,7 @@ impl ModernRuntime {
         let attempt_id = AttemptId::new();
         let inspect_id = CommandId::new();
         let preflight = self
-            .runtime
-            .submit(CommandEnvelope {
+            .submit_recorded(CommandEnvelope {
                 schema_version: CommandEnvelope::SCHEMA_VERSION,
                 command_id: inspect_id.clone(),
                 workflow_id: workflow_id.clone(),
@@ -1301,8 +1340,7 @@ impl ModernRuntime {
             .await?;
         let debug = format!("{command:?}");
         match self
-            .runtime
-            .submit(CommandEnvelope {
+            .submit_recorded(CommandEnvelope {
                 schema_version: CommandEnvelope::SCHEMA_VERSION,
                 command_id,
                 workflow_id: workflow_id.clone(),
@@ -1346,7 +1384,9 @@ impl ModernRuntime {
     ) -> TestResult<(Self, RecoveryDecision)> {
         let Self {
             _browser_lock,
+            _firefox,
             runtime,
+            page_id: _,
             root,
             journal_path,
             downloads_dir,
@@ -1354,8 +1394,11 @@ impl ModernRuntime {
             profile,
             journey,
             execution_policy,
+            journey_started,
+            serialized_response_bytes,
             ..
         } = self;
+        serialized_response_bytes.fetch_add(runtime.serialized_response_bytes(), Ordering::Relaxed);
         drop(runtime);
         let config = runtime_config(
             &root,
@@ -1364,7 +1407,12 @@ impl ModernRuntime {
             downloads_dir.clone(),
             artifacts_dir.clone(),
         );
-        let runtime = RuntimeService::build(&config).await?;
+        let runtime = match &_firefox {
+            Some(firefox) => {
+                RuntimeService::build_with_worker_factory(&config, firefox.factory()).await?
+            }
+            None => RuntimeService::build(&config).await?,
+        };
         let decision = runtime.recover(workflow_id).await?;
         let _checkpoint = runtime.recovery_status(workflow_id).await?.checkpoint;
         let session = runtime
@@ -1382,6 +1430,7 @@ impl ModernRuntime {
             .await?;
         let replacement = Self {
             _browser_lock,
+            _firefox,
             runtime,
             session_id: session.id,
             page_id: page.id,
@@ -1392,6 +1441,8 @@ impl ModernRuntime {
             profile,
             journey,
             execution_policy,
+            journey_started,
+            serialized_response_bytes,
         };
         replacement.navigate(application_url).await?;
         replacement.establish_session().await?;
@@ -1406,6 +1457,19 @@ impl ModernRuntime {
         &self.artifacts_dir
     }
 
+    pub async fn download_bytes(&self, path: &str) -> TestResult<Vec<u8>> {
+        if let Some(artifact_id) = path.strip_prefix("artifact://") {
+            return Ok(artifact_store::ArtifactStore::new(
+                &self.artifacts_dir,
+                usize::MAX,
+                u32::MAX,
+            )
+            .get(&self.session_id, artifact_id)
+            .await?);
+        }
+        Ok(tokio::fs::read(path).await?)
+    }
+
     pub fn scorecard(&self, passed: bool) -> TestResult<Scorecard> {
         let engine = std::env::var("BOBBY_GAUNTLET_ENGINE").unwrap_or_else(|_| "chromium".into());
         let provider_mode = ProviderMode::from_label(
@@ -1413,14 +1477,19 @@ impl ModernRuntime {
         );
         let model_tier =
             ModelTier::from_label(&std::env::var("BOBBY_GAUNTLET_MODEL_TIER").unwrap_or_default());
-        Ok(Scorecard::from_journal_with_environment(
+        let mut scorecard = Scorecard::from_journal_with_environment(
             &self.journey,
             engine,
             provider_mode,
             model_tier,
             &self.journal_path,
             passed,
-        )?)
+        )?;
+        scorecard.journey_wall_ms = self.journey_started.elapsed().as_millis() as u64;
+        scorecard.serialized_response_bytes =
+            self.serialized_response_bytes.load(Ordering::Relaxed)
+                + self.runtime.serialized_response_bytes();
+        Ok(scorecard)
     }
 
     pub fn emit_scorecard(&self, passed: bool) -> TestResult<Scorecard> {
@@ -1489,8 +1558,7 @@ impl ModernRuntime {
             if let CommandOutcome::Completed {
                 evidence: captured, ..
             } = self
-                .runtime
-                .submit(CommandEnvelope {
+                .submit_recorded(CommandEnvelope {
                     schema_version: CommandEnvelope::SCHEMA_VERSION,
                     command_id: CommandId::new(),
                     workflow_id: WorkflowId::new(),

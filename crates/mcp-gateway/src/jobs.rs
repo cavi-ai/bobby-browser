@@ -188,6 +188,7 @@ fn status_wire(status: &JobStatus) -> String {
         JobStatus::Completed => "completed",
         JobStatus::Failed => "failed",
         JobStatus::Cancelled => "cancelled",
+        JobStatus::ReconciliationRequired => "reconciliationRequired",
     }
     .to_owned()
 }
