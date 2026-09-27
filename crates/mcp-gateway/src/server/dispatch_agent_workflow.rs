@@ -776,7 +776,7 @@ async fn supervise_start(
             .await;
             let failure = WorkflowStartFailure {
                 reason: "pageOpenFailed",
-                session: session.clone(),
+                session: *session,
                 page: None,
                 workflow_id,
                 navigation_outcome: None,

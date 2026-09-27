@@ -943,6 +943,10 @@ async fn installed_chromium_daemon_abort_rebuilds_from_the_same_durable_journal(
     let _ = task.await;
     observer.release.notify_waiters();
     drop(runtime);
+    // The fixture also built a service for the same storage root. Its two
+    // owners must release the exclusive ledger lock before daemon rebuild.
+    drop(harness.runtime);
+    drop(harness.service);
 
     let rebuilt = RuntimeService::build(&harness.config).await.unwrap();
     assert!(matches!(

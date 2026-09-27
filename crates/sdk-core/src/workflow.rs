@@ -17,11 +17,11 @@ use types::{
 pub enum WorkflowSetupFailure {
     Session(InterfaceError),
     Cancelled {
-        session: SessionState,
+        session: Box<SessionState>,
         page: Option<PageState>,
     },
     Page {
-        session: SessionState,
+        session: Box<SessionState>,
         error: InterfaceError,
     },
 }
@@ -71,7 +71,7 @@ impl WorkflowService {
             .map_err(WorkflowSetupFailure::Session)?;
         if !still_current() {
             return Err(WorkflowSetupFailure::Cancelled {
-                session,
+                session: Box::new(session),
                 page: None,
             });
         }
@@ -85,12 +85,12 @@ impl WorkflowService {
             )
             .await
             .map_err(|error| WorkflowSetupFailure::Page {
-                session: session.clone(),
+                session: Box::new(session.clone()),
                 error,
             })?;
         if !still_current() {
             return Err(WorkflowSetupFailure::Cancelled {
-                session,
+                session: Box::new(session),
                 page: Some(page),
             });
         }

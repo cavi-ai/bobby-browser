@@ -1573,6 +1573,12 @@ async fn launch_firefox(
             if let Some(url) = read_bidi_endpoint_file(&endpoint_file)? {
                 return Ok(url);
             }
+            if let Some(status) = child.try_wait().map_err(io_error)? {
+                return Err(workflow_error(
+                    ErrorCode::BrowserLaunchFailed,
+                    format!("Firefox exited before publishing its BiDi endpoint: {status}"),
+                ));
+            }
         }
     })
     .await
@@ -2007,6 +2013,13 @@ async fn terminate_firefox(child: &mut Child) {
 
 fn terminate_firefox_on_drop(child: &mut Child) {
     let _ = child.start_kill();
+    // The next journey may start immediately with another profile. Reap this
+    // process before releasing its owner so browser resources cannot pile up
+    // across a serial Northstar run.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while matches!(child.try_wait(), Ok(None)) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn io_error(error: std::io::Error) -> CommandError {
@@ -2032,11 +2045,31 @@ mod tests {
         let mut child = Command::new("sleep").arg("30").spawn().unwrap();
 
         terminate_firefox_on_drop(&mut child);
+        assert!(child.try_wait().unwrap().is_some());
+    }
 
-        tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .expect("child termination timed out")
-            .expect("wait for terminated child");
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn early_firefox_exit_is_reported_without_waiting_for_endpoint_timeout() {
+        let root = tempfile::tempdir().unwrap();
+        let config = InstalledFirefoxConfig {
+            firefox_bin: "/usr/bin/false".into(),
+            profile: root.path().to_path_buf(),
+            companion_extension: root.path().join("unused-extension"),
+        };
+        let observations = ProcessObservationCollector::new(Vec::new());
+        let start = std::time::Instant::now();
+        let error = match launch_firefox(&config, "about:blank", &observations).await {
+            Ok(_) => panic!("exited Firefox must fail launch"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .message
+                .contains("exited before publishing its BiDi endpoint"),
+            "{error:?}"
+        );
+        assert!(start.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
