@@ -11,6 +11,7 @@
   replacement so an uncertain operation cannot be submitted twice.
 - A dropped durable idempotency store explicitly releases its writer lock even
   if a forked child briefly holds a copy of the file descriptor.
+- Homebrew formula license metadata now matches the repository's MIT license.
 - Firefox workflow targeting and recovery handle detached controls, frame
   targeting, and companion reconnects more consistently. Workflow setup and
   observation share a typed core across adapters.
