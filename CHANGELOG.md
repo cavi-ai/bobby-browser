@@ -2,8 +2,21 @@
 
 ## Unreleased
 
+## 0.17.0 - 2026-09-28
+
 ### Fixed
 
+- Interrupted scheduler jobs now require reconciliation instead of being
+  replayed after restart, and durable idempotency reservations survive runtime
+  replacement so an uncertain operation cannot be submitted twice.
+- A dropped durable idempotency store explicitly releases its writer lock even
+  if a forked child briefly holds a copy of the file descriptor.
+- Homebrew formula license metadata now matches the repository's MIT license.
+- Firefox workflow targeting and recovery handle detached controls, frame
+  targeting, and companion reconnects more consistently. Workflow setup and
+  observation share a typed core across adapters.
+- Vision readiness honors the configured proxy for remote providers and
+  recognizes Ollama's full `/v1/chat/completions` base URL.
 - MCP stdio no longer drops a request whose line arrives in more than one
   read: when a response or notification write finished while a request was
   half-read, the gateway discarded the bytes already read, answered
@@ -65,8 +78,6 @@
   at 512 characters; a 401 now carries this body too. An upstream rejection
   reports only its status class and code, never the upstream response body,
   and an unparseable model reply is reported with a fixed message.
-
-### Changed
 
 - Firefox companion: a fixed (nonzero) companion port that is already taken
   now fails the launch with `browserLaunchFailed` naming the port, and the

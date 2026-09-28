@@ -219,7 +219,14 @@ enum ProbeResult {
 }
 
 pub(crate) fn models_probe_urls(provider: &str, base_url: &str) -> Vec<String> {
-    let base = base_url.trim_end_matches('/');
+    let base = base_url.trim().trim_end_matches('/');
+    let base = if provider.eq_ignore_ascii_case("ollama") {
+        base.strip_suffix("/v1/chat/completions")
+            .or_else(|| base.strip_suffix("/chat/completions"))
+            .unwrap_or(base)
+    } else {
+        base
+    };
     if provider.eq_ignore_ascii_case("ollama") && !base.ends_with("/v1") {
         vec![format!("{base}/v1/models"), format!("{base}/api/tags")]
     } else {
@@ -276,13 +283,15 @@ fn openai_compatible_models_probe(
     timeout: Duration,
 ) -> ProbeResult {
     let urls = models_probe_urls(provider, &profile.base_url);
+    let local_endpoint =
+        endpoint_socket(&profile.base_url).is_some_and(|address| address.ip().is_loopback());
     let api_key = api_key.map(str::to_owned);
     std::thread::spawn(move || {
-        let Ok(client) = reqwest::blocking::Client::builder()
-            .timeout(timeout)
-            .no_proxy()
-            .build()
-        else {
+        let mut builder = reqwest::blocking::Client::builder().timeout(timeout);
+        if local_endpoint {
+            builder = builder.no_proxy();
+        }
+        let Ok(client) = builder.build() else {
             return ProbeResult::Unreachable;
         };
         for url in urls {
@@ -567,6 +576,13 @@ mod tests {
         assert_eq!(
             models_probe_urls("ollama", "http://127.0.0.1:11434/v1"),
             vec!["http://127.0.0.1:11434/v1/models".to_string()]
+        );
+        assert_eq!(
+            models_probe_urls("ollama", "http://127.0.0.1:11434/v1/chat/completions"),
+            vec![
+                "http://127.0.0.1:11434/v1/models".to_string(),
+                "http://127.0.0.1:11434/api/tags".to_string(),
+            ]
         );
         assert_eq!(
             models_probe_urls("openai", "https://api.openai.com/v1"),

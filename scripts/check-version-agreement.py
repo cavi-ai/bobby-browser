@@ -107,16 +107,34 @@ def firefox_companion_extension_version(expected: str) -> list[str]:
 
 
 def homebrew_formula_version(expected: str) -> list[str]:
-    """`brew install` resolves the tarball URL from the formula's own version.
-    A stale one points every tap user at the previous release's assets."""
+    """The formula may trail one minor release until its binary hashes exist.
+
+    Binaries are built from the tag. Hashes guessed before that build would
+    make the formula uninstallable, so the previous release remains available
+    until the new assets are published and the formula is updated.
+    """
     path = REPO / "Formula" / "bobby-browser.rb"
     if not path.is_file():
         return [f"{path.relative_to(REPO)}: missing"]
-    found = re.search(r'^\s*version "([^"]+)"', path.read_text(), re.M)
+    formula = path.read_text()
+    found = re.search(r'^\s*version "([^"]+)"', formula, re.M)
     if not found:
         return ["Formula/bobby-browser.rb: no version declared"]
-    if found.group(1) != expected:
-        return [f"Formula/bobby-browser.rb: {found.group(1)} != {expected}"]
+    formula_version = found.group(1)
+    try:
+        major, minor, patch = (int(part) for part in expected.split("."))
+    except ValueError:
+        return [f"workspace version {expected} is not a stable version"]
+    previous_minor = f"{major}.{minor - 1}.0" if minor > 0 and patch == 0 else None
+    if formula_version not in (expected, previous_minor):
+        return [f"Formula/bobby-browser.rb: {formula_version} must be {expected} or the prior minor release ({previous_minor})"]
+    digests = re.findall(r'^\s*sha256 "([^"]+)"', formula, re.M)
+    if len(digests) != 4 or any(not re.fullmatch(r"[a-f0-9]{64}", digest) for digest in digests):
+        return ["Formula/bobby-browser.rb: expected four SHA-256 digests"]
+    workspace_license = re.search(r'^license = "([^"]+)"', (REPO / "Cargo.toml").read_text(), re.M)
+    formula_license = re.search(r'^\s*license "([^"]+)"', formula, re.M)
+    if not workspace_license or not formula_license or formula_license.group(1) != workspace_license.group(1):
+        return ["Formula/bobby-browser.rb: license must match the Cargo workspace license"]
     return []
 
 
@@ -163,7 +181,7 @@ def main() -> int:
         for problem in problems:
             print(f"  {problem}", file=sys.stderr)
         return 1
-    print(f"all artifacts agree: {expected}, @cavi-ai scope, 2 publishable crates")
+    print(f"release artifacts agree: {expected}; Homebrew may trail one minor until published binaries have verified hashes")
     return 0
 
 
