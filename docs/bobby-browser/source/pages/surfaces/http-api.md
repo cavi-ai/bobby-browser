@@ -11,7 +11,8 @@ Unauthenticated: `GET /healthz` → `{ "ok": true }`.
 
 There is no `/runtime` route. Use `GET /v1/runtime`.
 
-Shared headers for every `/v1/*` call: [Authentication](../guides/auth.md).
+Broker `/v1/*` routes require the shared headers in
+[Authentication](../guides/auth.md). `/v1/mcp` is bearer-only.
 
 ## Routes
 
@@ -22,6 +23,9 @@ Shared headers for every `/v1/*` call: [Authentication](../guides/auth.md).
 | POST | `/v1/sessions` | Create session | `session:write` |
 | DELETE | `/v1/sessions/{session}` | Delete session (204) | `session:write` |
 | POST | `/v1/pages` | Open page | `page:write` |
+| GET | `/v1/context/ask` | Locate a described control (`sessionId`, `pageId`, `description`) | `context:read` |
+| GET | `/v1/context/neighbors` | Read remembered controls around a described target (same query) | `context:read` |
+| GET | `/v1/context/site/{key}` | Read remembered structure for a site key | `context:read` |
 | POST | `/v1/commands` | Submit command envelope | `browser:mutate` (+ nested caps for upload / download / JS / intents) |
 | POST | `/v1/checkpoints` | Persist workflow checkpoint | `recovery:write` |
 | POST | `/v1/recovery/{workflow}` | Recover workflow | `recovery:write` |
@@ -60,6 +64,14 @@ validators / Rust types.
   (see [Internal skill runtime](../guides/skills.md)).
 - **DELETE `/v1/sessions/{session}`** — empty body; `204` on success
 - **POST `/v1/pages`** — `{ session_id }` (snake_case on this request; session/page state also uses `id` / `session_id` / `page_ids`)
+- **GET `/v1/context/ask` and `/v1/context/neighbors`** — require exactly
+  `sessionId`, `pageId`, and a nonempty `description` of at most 256 bytes as
+  query parameters. A hit returns `answer` or `neighbors` with `hit: true`;
+  a miss returns `null`, `hit: false`, `reason: "notRemembered"`, and
+  `nextStep: "a11y_snapshot"`. Both responses mark `pageDerived: true`.
+- **GET `/v1/context/site/{key}`** — returns `site` (or `null` for an unknown
+  site) and `pageDerived: true`. Percent-encode the site key as one path
+  segment.
 - **POST `/v1/commands`** — `CommandEnvelope` (`schemaVersion: 2`, ids, `deadline`,
   `command` where `command` is `{ kind: "primitive"|"intent", input: … }`).
   Primitive `activatePage` uses `{ kind: "activatePage", input: { pageId } }`.

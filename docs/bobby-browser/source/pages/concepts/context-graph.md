@@ -87,8 +87,9 @@ escalations by transport (`providerEscalations`, `providerHttp`,
 - MCP `context_ask` (requires `page:read`) — live first, persisted fallback.
 - MCP `context_neighbors` (requires `context:read`) — the remembered form
   structure around a located control.
-- HTTP `GET /v1/context/ask` and `GET /v1/context/site/{key}` (both require
-  `context:read`).
+- HTTP `GET /v1/context/ask`, `GET /v1/context/neighbors`, and
+  `GET /v1/context/site/{key}` (all require `context:read`). See the
+  [HTTP API reference](../surfaces/http-api.md) for query and response shapes.
 
 On a known site, ask before you snapshot: `context_ask` answers before the
 first accessibility observation of a session.
