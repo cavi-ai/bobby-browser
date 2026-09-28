@@ -193,6 +193,42 @@ async fn durable_ledger_is_single_writer_and_ignores_uncommitted_temporary_files
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn dropped_durable_ledger_unlocks_while_a_forked_child_holds_the_descriptor() {
+    use std::io::{Read, Write};
+    use std::os::unix::process::CommandExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.json");
+    let lookup = |_value| async { Ok::<Option<CommandOutcome>, std::io::Error>(None) };
+    let store = IdempotencyStore::open_durable(&path, lookup).await.unwrap();
+    let clone = store.clone();
+    drop(store);
+    assert!(IdempotencyStore::open_durable(&path, lookup).await.is_err());
+
+    let (mut forked_reader, mut forked_writer) = std::io::pipe().unwrap();
+    let (mut release_reader, mut release_writer) = std::io::pipe().unwrap();
+    let mut command = std::process::Command::new("true");
+    // SAFETY: pre_exec uses only read and write syscalls on owned pipes.
+    unsafe {
+        command.pre_exec(move || {
+            forked_writer.write_all(&[1])?;
+            release_reader.read_exact(&mut [0])?;
+            Ok(())
+        });
+    }
+    let spawner = std::thread::spawn(move || command.status());
+    forked_reader.read_exact(&mut [0]).unwrap();
+
+    drop(clone);
+    let reopened = IdempotencyStore::open_durable(&path, lookup).await;
+
+    release_writer.write_all(&[1]).unwrap();
+    assert!(spawner.join().unwrap().unwrap().success());
+    assert!(reopened.is_ok(), "a dropped ledger must release its lock");
+}
+
 #[tokio::test]
 async fn completed_durable_key_expires_but_unresolved_key_does_not() {
     let dir = tempfile::tempdir().unwrap();

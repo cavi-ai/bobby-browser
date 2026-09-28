@@ -137,6 +137,18 @@ struct StoreState<O> {
     sequence: u64,
 }
 
+struct DurableLock {
+    file: std::fs::File,
+}
+
+impl Drop for DurableLock {
+    fn drop(&mut self) {
+        // A forked child can still hold a copy of this open file description
+        // before exec. Closing our descriptor would leave its flock held.
+        let _ = self.file.unlock();
+    }
+}
+
 impl<O> Default for StoreState<O> {
     fn default() -> Self {
         Self {
@@ -153,7 +165,7 @@ pub struct IdempotencyStore<O = CommandOutcome> {
     ttl: Duration,
     state: Arc<Mutex<StoreState<O>>>,
     durable_path: Option<Arc<PathBuf>>,
-    _durable_lock: Option<Arc<std::fs::File>>,
+    _durable_lock: Option<Arc<DurableLock>>,
 }
 
 impl<O> std::fmt::Debug for IdempotencyStore<O> {
@@ -193,7 +205,7 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
         lock_file.try_lock()?;
         let store = Self {
             durable_path: Some(Arc::new(path.clone())),
-            _durable_lock: Some(Arc::new(lock_file)),
+            _durable_lock: Some(Arc::new(DurableLock { file: lock_file })),
             ..Self::default()
         };
         let bytes = match tokio::fs::read(&path).await {
