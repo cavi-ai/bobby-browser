@@ -1,4 +1,5 @@
 mod audit_bundle;
+mod audit_replay;
 mod bootstrap_local;
 mod deployment_profiles;
 mod doctor;
@@ -551,6 +552,17 @@ enum AuditCommands {
     /// Check a bundle's digests and signature
     Verify {
         bundle: PathBuf,
+        /// Require this signer (hex public key from `bobby audit key`)
+        #[arg(long)]
+        public_key: Option<String>,
+    },
+    /// Render a verified bundle as a self-contained HTML replay: every
+    /// command with its phases, outcome, evidence, and screenshots
+    Replay {
+        bundle: PathBuf,
+        /// Output path (default: the bundle path with an .html extension)
+        #[arg(long)]
+        out: Option<PathBuf>,
         /// Require this signer (hex public key from `bobby audit key`)
         #[arg(long)]
         public_key: Option<String>,
@@ -1598,6 +1610,17 @@ fn run_audit(command: AuditCommands) -> Result<()> {
                     summary.missing_artifacts.join(", ")
                 );
             }
+        }
+        AuditCommands::Replay {
+            bundle,
+            out,
+            public_key,
+        } => {
+            let verified = audit_bundle::open_verified(&bundle, public_key.as_deref())?;
+            let html = audit_replay::render(&verified)?;
+            let out = out.unwrap_or_else(|| bundle.with_extension("html"));
+            std::fs::write(&out, html).with_context(|| format!("write {}", out.display()))?;
+            println!("{}", out.display());
         }
         AuditCommands::Key { key } => {
             let key_path = match key {

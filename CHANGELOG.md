@@ -9,6 +9,9 @@
   SHA-256 digests signed by a local Ed25519 key. `bobby audit verify` checks
   every digest and the signature, optionally pinned with `--public-key`;
   `bobby audit key` prints the public key.
+- `bobby audit replay <bundle>` verifies a bundle and writes a self-contained
+  HTML replay: each command with its phases, outcome, evidence, and embedded
+  screenshots. The docs ship a sample from a real Chromium run.
 
 - Release builds sign the Firefox companion through addons.mozilla.org
   (unlisted) on each release tag and ship it as

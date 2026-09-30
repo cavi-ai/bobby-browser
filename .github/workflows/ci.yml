@@ -231,6 +231,9 @@ jobs:
           -- --ignored --test-threads=1
           --skip stuck_locate_records_a_real_local_vision_proposal
 
+      - name: CLI live tests
+        run: cargo test -p bobby-browser --locked --test audit_replay_live -- --ignored --test-threads=1
+
       - name: Conformance live tests
         run: >-
           cargo test -p interface-conformance --locked

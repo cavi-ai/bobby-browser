@@ -63,5 +63,7 @@ vision-proxy.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
 
 [dev-dependencies]
+sdk-core.workspace = true
+test-site.workspace = true
 tempfile.workspace = true
 gateway-transport.workspace = true

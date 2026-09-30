@@ -141,6 +141,10 @@
           "path": "guides/openshell.md"
         },
         {
+          "title": "Workflow replay",
+          "path": "guides/replay.md"
+        },
+        {
           "title": "Troubleshooting",
           "path": "guides/troubleshooting.md"
         },
