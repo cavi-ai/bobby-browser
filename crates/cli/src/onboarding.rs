@@ -1383,9 +1383,14 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         enabled: companion || (use_defaults && firefox_present()),
         run: Box::new(move || {
             let install = install_firefox_companion(extension_path.as_deref())?;
+            let build = if install.signed {
+                "signed extension (any Firefox 128+)"
+            } else {
+                "unpacked extension (Firefox Developer Edition, Nightly, or ESR)"
+            };
             Ok(format!(
-                "sideloaded into {}; config copy at {}; native host at {}. Next: `bobby firefox-start` with the same team/project flags (profile at {}), then Pair from the toolbar popup. Local agents use `bobby mcp-stdio` — no `bobby serve` required",
-                install.sideload_dir.display(),
+                "{build} installed at {}; config copy at {}; native host at {}. Next: `bobby firefox-start` with the same team/project flags (profile at {}), then Pair from the toolbar popup. Local agents use `bobby mcp-stdio` — no `bobby serve` required",
+                install.sideload_path.display(),
                 install.extension_dir.display(),
                 install.manifest_path.display(),
                 install.profile_dir.display()
@@ -2182,10 +2187,10 @@ mod install_tests {
             install.descriptor_path.parent().unwrap(),
             install.extension_dir.parent().unwrap()
         );
-        assert!(install.sideload_dir.join("manifest.json").is_file());
-        assert!(install.sideload_dir.join("background.js").is_file());
+        assert!(install.sideload_path.join("manifest.json").is_file());
+        assert!(install.sideload_path.join("background.js").is_file());
         assert_eq!(
-            install.sideload_dir,
+            install.sideload_path,
             install
                 .profile_dir
                 .join("extensions")
@@ -2228,7 +2233,7 @@ mod install_tests {
             .join("extensions")
             .join(format!("{COMPANION_GECKO_ID}.xpi"));
         std::fs::write(&stale_xpi, b"stale").unwrap();
-        std::fs::write(first.sideload_dir.join("stale-asset.js"), "// gone").unwrap();
+        std::fs::write(first.sideload_path.join("stale-asset.js"), "// gone").unwrap();
 
         std::fs::write(dist.path().join("manifest.json"), r#"{"v":2}"#).unwrap();
         std::fs::write(dist.path().join("background.js"), "// v2").unwrap();
@@ -2245,15 +2250,15 @@ mod install_tests {
         }
 
         assert_eq!(
-            std::fs::read_to_string(second.sideload_dir.join("manifest.json")).unwrap(),
+            std::fs::read_to_string(second.sideload_path.join("manifest.json")).unwrap(),
             r#"{"v":2}"#
         );
         assert_eq!(
-            std::fs::read_to_string(second.sideload_dir.join("background.js")).unwrap(),
+            std::fs::read_to_string(second.sideload_path.join("background.js")).unwrap(),
             "// v2"
         );
-        assert!(second.sideload_dir.join("popup.js").is_file());
-        assert!(!second.sideload_dir.join("stale-asset.js").exists());
+        assert!(second.sideload_path.join("popup.js").is_file());
+        assert!(!second.sideload_path.join("stale-asset.js").exists());
         assert!(!stale_xpi.exists());
         let preserved = std::fs::read_to_string(second.profile_dir.join("user.js")).unwrap();
         assert!(preserved.contains("user_pref(\"bobby.test.custom\", true);"));
@@ -2307,6 +2312,96 @@ mod install_tests {
         assert_eq!(defaults.descriptor_path, install.descriptor_path);
     }
 
+    fn signed_bundle() -> tempfile::TempDir {
+        let dist = tempfile::tempdir().unwrap();
+        std::fs::write(dist.path().join("manifest.json"), "{}").unwrap();
+        std::fs::write(dist.path().join("background.js"), "//").unwrap();
+        std::fs::write(dist.path().join(SIGNED_COMPANION_XPI), b"signed build").unwrap();
+        dist
+    }
+
+    fn isolated_home(home: &Path) {
+        // SAFETY: tests hold INSTALL_ENV_LOCK; EnvRestore puts the process env back.
+        unsafe {
+            std::env::set_var("HOME", home);
+            std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+        }
+        #[cfg(target_os = "macos")]
+        std::fs::create_dir_all(home.join("Library/Application Support")).unwrap();
+    }
+
+    #[test]
+    fn companion_install_uses_the_signed_build_for_the_default_scope() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
+        let _env = EnvRestore::capture(&["HOME", "XDG_CONFIG_HOME", "BOBBY_BROWSER_SCOPE_DIR"]);
+        let home = tempfile::tempdir().unwrap();
+        isolated_home(home.path());
+        // SAFETY: as above.
+        unsafe { std::env::remove_var("BOBBY_BROWSER_SCOPE_DIR") };
+        let dist = signed_bundle();
+        // An earlier unpacked install must not leave a second copy behind.
+        std::fs::rename(
+            dist.path().join(SIGNED_COMPANION_XPI),
+            home.path().join("held.xpi"),
+        )
+        .unwrap();
+        let unpacked = install_firefox_companion(Some(dist.path())).expect("unpacked install");
+        assert!(!unpacked.signed);
+        std::fs::rename(
+            home.path().join("held.xpi"),
+            dist.path().join(SIGNED_COMPANION_XPI),
+        )
+        .unwrap();
+
+        let install = install_firefox_companion(Some(dist.path())).expect("signed install");
+
+        assert!(install.signed);
+        let extensions = install.profile_dir.join("extensions");
+        assert_eq!(
+            install.sideload_path,
+            extensions.join(format!("{COMPANION_GECKO_ID}.xpi"))
+        );
+        assert_eq!(
+            std::fs::read(&install.sideload_path).unwrap(),
+            b"signed build"
+        );
+        assert!(!extensions.join(COMPANION_GECKO_ID).exists());
+    }
+
+    #[test]
+    fn companion_install_keeps_the_unpacked_build_for_a_scoped_install() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
+        let _env = EnvRestore::capture(&["HOME", "XDG_CONFIG_HOME", "BOBBY_BROWSER_SCOPE_DIR"]);
+        let home = tempfile::tempdir().unwrap();
+        isolated_home(home.path());
+        let scope = home.path().join("scopes/team-a");
+        // SAFETY: as above.
+        unsafe { std::env::set_var("BOBBY_BROWSER_SCOPE_DIR", &scope) };
+        let dist = signed_bundle();
+
+        let install = install_firefox_companion(Some(dist.path())).expect("scoped install");
+
+        assert!(!install.signed);
+        let extensions = install.profile_dir.join("extensions");
+        assert_eq!(install.sideload_path, extensions.join(COMPANION_GECKO_ID));
+        assert!(!extensions
+            .join(format!("{COMPANION_GECKO_ID}.xpi"))
+            .exists());
+        assert!(!install.sideload_path.join(SIGNED_COMPANION_XPI).exists());
+        let scope_file: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(install.sideload_path.join("bobby-scope.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            scope_file["nativeHostName"],
+            crate::runtime_scopes::native_host_name(&scope).unwrap()
+        );
+        assert_ne!(
+            scope_file["nativeHostName"],
+            crate::runtime_scopes::DEFAULT_NATIVE_HOST_NAME
+        );
+    }
+
     #[test]
     fn companion_install_reports_a_missing_extension_build() {
         let missing = tempfile::tempdir().unwrap();
@@ -2330,7 +2425,9 @@ mod install_tests {
 /// Where the Firefox companion pieces live after installation: extension
 /// copy, native-host wrapper, and pairing descriptor under the bobby config
 /// dir; the manifest goes to Mozilla's per-platform native-messaging dir;
-/// the profile receives an unpacked sideload plus `user.js` prefs.
+/// the profile receives the Mozilla-signed `.xpi` when the bundle carries one
+/// and the scope is the default, otherwise an unpacked sideload, plus
+/// `user.js` prefs.
 #[derive(Debug)]
 pub struct CompanionInstall {
     pub extension_dir: PathBuf,
@@ -2338,11 +2435,19 @@ pub struct CompanionInstall {
     pub manifest_path: PathBuf,
     pub descriptor_path: PathBuf,
     pub profile_dir: PathBuf,
-    pub sideload_dir: PathBuf,
+    /// `<profile>/extensions/<id>.xpi` when signed, `<profile>/extensions/<id>/` when unpacked.
+    pub sideload_path: PathBuf,
+    /// Release Firefox accepts only the signed build.
+    pub signed: bool,
 }
 
 /// Gecko add-on id from `packages/firefox-companion/manifest.json`.
 const COMPANION_GECKO_ID: &str = "firefox-companion@bobby-browser.local";
+
+/// The Mozilla-signed build the release workflow places inside the bundle.
+/// Signing fixes its `bobby-scope.json` to the default native host, so a
+/// team or project scope still gets the unpacked sideload.
+const SIGNED_COMPANION_XPI: &str = "bobby-firefox-companion.xpi";
 
 /// Prefs required for unsigned permanent sideload on Dev Edition / Nightly / ESR.
 const FIREFOX_PROFILE_PREFS: &[(&str, &str)] = &[
@@ -2419,8 +2524,9 @@ fn find_companion_dist(explicit: Option<&Path>) -> Result<PathBuf> {
 
 /// Install the Firefox companion: copy the built extension into the bobby
 /// config dir, install the native-host wrapper and manifest, ensure the Bobby
-/// Firefox profile prefs, and permanently sideload an unpacked extension into
-/// that profile. Pairing is a later step (toolbar Pair).
+/// Firefox profile prefs, and permanently install the extension into that
+/// profile: the signed `.xpi` for the default scope when the bundle has one,
+/// otherwise an unpacked sideload. Pairing is a later step (toolbar Pair).
 pub fn install_firefox_companion(extension: Option<&Path>) -> Result<CompanionInstall> {
     let dist = find_companion_dist(extension)?;
     let config = bobby_config_dir()?;
@@ -2429,8 +2535,18 @@ pub fn install_firefox_companion(extension: Option<&Path>) -> Result<CompanionIn
     let profile_dir = config.join("firefox-profile");
     std::fs::create_dir_all(&profile_dir)?;
     ensure_firefox_profile_user_js(&profile_dir)?;
-    let sideload_dir = profile_dir.join("extensions").join(COMPANION_GECKO_ID);
-    sideload_unpacked_extension(&dist, &sideload_dir)?;
+    let host_name = crate::runtime_scopes::native_host_name(&config)?;
+    let extensions_dir = profile_dir.join("extensions");
+    let signed_xpi = dist.join(SIGNED_COMPANION_XPI);
+    let signed =
+        signed_xpi.is_file() && host_name == crate::runtime_scopes::DEFAULT_NATIVE_HOST_NAME;
+    let sideload_path = if signed {
+        install_signed_extension(&signed_xpi, &extensions_dir)?
+    } else {
+        let sideload_dir = extensions_dir.join(COMPANION_GECKO_ID);
+        sideload_unpacked_extension(&dist, &sideload_dir)?;
+        sideload_dir
+    };
     let install = CompanionInstall {
         extension_dir,
         wrapper_path: config.join("firefox-native-host"),
@@ -2440,7 +2556,8 @@ pub fn install_firefox_companion(extension: Option<&Path>) -> Result<CompanionIn
         )),
         descriptor_path: config.join("firefox-native-host-descriptor.json"),
         profile_dir: profile_dir.clone(),
-        sideload_dir,
+        sideload_path,
+        signed,
     };
     let exe = std::env::current_exe().context("current executable unknown")?;
     crate::install_native_host(crate::NativeHostInstallConfig {
@@ -2449,12 +2566,12 @@ pub fn install_firefox_companion(extension: Option<&Path>) -> Result<CompanionIn
         cli_path: exe,
         descriptor_path: install.descriptor_path.clone(),
     })?;
-    std::fs::write(
-        install.sideload_dir.join("bobby-scope.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "nativeHostName": crate::runtime_scopes::native_host_name(&config)?
-        }))?,
-    )?;
+    if !signed {
+        std::fs::write(
+            install.sideload_path.join("bobby-scope.json"),
+            serde_json::to_vec(&serde_json::json!({ "nativeHostName": host_name }))?,
+        )?;
+    }
     let defaults = firefox_companion::selection::FirefoxEnrollDefaults {
         profile_dir,
         companion_bind: firefox_companion::selection::DEFAULT_COMPANION_BIND
@@ -2511,7 +2628,25 @@ fn sideload_unpacked_extension(dist: &Path, sideload_dir: &Path) -> Result<()> {
         std::fs::remove_dir_all(sideload_dir)?;
     }
     copy_dir(dist, sideload_dir)?;
+    let bundled_xpi = sideload_dir.join(SIGNED_COMPANION_XPI);
+    if bundled_xpi.is_file() {
+        std::fs::remove_file(bundled_xpi)?;
+    }
     Ok(())
+}
+
+/// Install the signed build as `{id}.xpi`, the file name Firefox requires for
+/// a profile-scope extension, and drop an unpacked copy so Firefox does not
+/// see two.
+fn install_signed_extension(xpi: &Path, extensions_dir: &Path) -> Result<PathBuf> {
+    std::fs::create_dir_all(extensions_dir)?;
+    let unpacked = extensions_dir.join(COMPANION_GECKO_ID);
+    if unpacked.exists() {
+        std::fs::remove_dir_all(&unpacked)?;
+    }
+    let target = extensions_dir.join(format!("{COMPANION_GECKO_ID}.xpi"));
+    std::fs::copy(xpi, &target)?;
+    Ok(target)
 }
 
 fn copy_dir(source: &Path, dest: &Path) -> Result<()> {

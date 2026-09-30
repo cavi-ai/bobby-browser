@@ -2,7 +2,25 @@
 
 ## Unreleased
 
+### Added
+
+- Release builds sign the Firefox companion through addons.mozilla.org
+  (unlisted) on each release tag and ship it as
+  `firefox-companion/bobby-firefox-companion.xpi` in every platform archive and
+  as a release asset. Signing runs when the `AMO_JWT_ISSUER` and
+  `AMO_JWT_SECRET` repository secrets are set; without them the release ships
+  unsigned as before.
+- `bobby install --companion` installs the signed build as
+  `firefox-companion@bobby-browser.local.xpi` for the default scope, so release
+  Firefox accepts the companion. Team and project scopes, and builds from a
+  checkout, keep the unpacked sideload, which needs Firefox Developer Edition,
+  Nightly, or ESR.
+
 ### Changed
+
+- The companion manifest declares `data_collection_permissions` (required:
+  `websiteContent`, `browsingActivity`) for the page content and tab URLs it
+  passes to the local runtime.
 
 - Managed Chromium remembers site structure across sessions and runtime
   restarts without a named profile. A `managedChromium` selection, or an exact
