@@ -29,6 +29,14 @@ pub(crate) fn reconciliation_repair() -> Value {
     repair(NEEDS_RECONCILIATION_ACTION)
 }
 
+/// Repair for an interface error flagged `reconciliationRequired`: an earlier
+/// call may already have taken effect, so it wins over the carried code's
+/// advice (for `idempotencyConflict`, "mint a fresh key", which repeats the
+/// effect).
+pub(crate) fn unresolved_outcome_repair() -> Value {
+    repair("Do not retry and do not mint a new idempotency key: an earlier call may already have taken effect. Check for the effect first (a11y_snapshot of the page, session_list, or recovery_status) and act only on what you find.")
+}
+
 /// Repair for a navigation Chrome aborted (a download response or a cancelled
 /// navigation): the generic `browserCommandFailed` advice says retry, and a
 /// retry repeats the abort.

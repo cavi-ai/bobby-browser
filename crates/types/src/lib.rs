@@ -20,6 +20,7 @@ mod ids;
 mod interface;
 #[path = "../../bobby-browser-client/src/outcomes.rs"]
 mod outcomes;
+mod presets;
 #[path = "../../bobby-browser-client/src/recovery.rs"]
 mod recovery;
 #[path = "../../bobby-browser-client/src/skills.rs"]
@@ -35,6 +36,7 @@ pub use forms::*;
 pub use ids::*;
 pub use interface::*;
 pub use outcomes::*;
+pub use presets::{capability_effect, CapabilityPreset};
 pub use recovery::*;
 pub use skills::*;
 pub use state::*;

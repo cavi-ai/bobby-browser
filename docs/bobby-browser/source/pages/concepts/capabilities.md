@@ -85,3 +85,60 @@ Submitting a command still requires `browser:mutate`. Nested commands add:
 | Humanized input timing | `browser:humanize` at session creation (+ session `executionPolicy.humanize`) |
 
 Missing capability → `missingCapability` (HTTP 403) with `requiredCapability` set when known.
+
+<!-- BEGIN GENERATED PRESET MATRIX -->
+## Generated preset matrix
+
+`bobby init --preset <name>` mints the loopback credential with one of these sets. A call that needs a capability the credential lacks fails with `missingCapability`.
+
+| Capability | Lets a principal | `unrestricted` | `agent` | `claude` | `codex` | `openshell` |
+|---|---|---|---|---|---|---|
+| `session:read` | list sessions, read runtime info, subscribe to events | yes | yes | yes | yes | yes |
+| `session:write` | create and delete sessions | yes | yes | yes | yes | yes |
+| `page:read` | read page state | yes | yes | yes | yes | yes |
+| `page:write` | open and close pages | yes | yes | yes | yes | yes |
+| `browser:mutate` | submit commands: navigate, click, type | yes | yes | yes | yes | yes |
+| `network:egress` | run the HTTP job handlers (http_probe, http_wait, http_fetch) | yes | yes | yes | yes | — |
+| `file:upload` | upload local files into the page | yes | yes | yes | yes | yes |
+| `file:download` | download files to disk | yes | yes | yes | yes | yes |
+| `javascript:evaluate` | run JavaScript in the page | yes | yes | — | — | — |
+| `intent:execute` | run intent commands (locate, fill, submit, follow) | yes | yes | yes | yes | yes |
+| `vision:assist` | escalate stuck intents and extraction to a vision model | yes | yes | yes | yes | — |
+| `artifact:read` | read stored artifacts | yes | yes | yes | yes | yes |
+| `context:read` | read remembered site structure | yes | yes | yes | yes | yes |
+| `artifact:capture` | capture screenshots and other artifacts | yes | yes | yes | yes | yes |
+| `recovery:read` | read checkpoints and recovery state | yes | yes | yes | yes | yes |
+| `recovery:write` | save checkpoints and recover workflows | yes | yes | yes | yes | yes |
+| `job:submit` | submit background jobs | yes | yes | yes | yes | — |
+| `job:read` | read background jobs | yes | yes | yes | yes | — |
+| `job:cancel` | cancel background jobs | yes | yes | yes | yes | — |
+| `authority:admin` | mint and revoke principals | yes | — | — | — | — |
+| `browser:fingerprint` | spoof the browser fingerprint | yes | yes | — | — | — |
+| `browser:humanize` | humanize input timing | yes | yes | — | — | — |
+
+## What each preset cannot do
+
+- `unrestricted`: local operator: every capability, including authority:admin. Nothing is withheld.
+- `agent`: no authority:admin; every other capability. Cannot:
+  - mint and revoke principals (`authority:admin`: `issuePrincipal`, `revokePrincipal`)
+- `claude`: the shipped agent skill's workflow: no JavaScript evaluation, fingerprint, humanize, or authority:admin. Cannot:
+  - run JavaScript in the page (`javascript:evaluate`: `executionPolicy.javascriptEvaluation`)
+  - mint and revoke principals (`authority:admin`: `issuePrincipal`, `revokePrincipal`)
+  - spoof the browser fingerprint (`browser:fingerprint`: `executionPolicy.fingerprint`)
+  - humanize input timing (`browser:humanize`: `executionPolicy.humanize`)
+- `codex`: the shipped agent skill's workflow: no JavaScript evaluation, fingerprint, humanize, or authority:admin. Cannot:
+  - run JavaScript in the page (`javascript:evaluate`: `executionPolicy.javascriptEvaluation`)
+  - mint and revoke principals (`authority:admin`: `issuePrincipal`, `revokePrincipal`)
+  - spoof the browser fingerprint (`browser:fingerprint`: `executionPolicy.fingerprint`)
+  - humanize input timing (`browser:humanize`: `executionPolicy.humanize`)
+- `openshell`: sandboxed tenant: browse, intents, files, evidence, and recovery only. Cannot:
+  - run the HTTP job handlers (http_probe, http_wait, http_fetch) (`network:egress`: checked by the job or command that uses it)
+  - run JavaScript in the page (`javascript:evaluate`: `executionPolicy.javascriptEvaluation`)
+  - escalate stuck intents and extraction to a vision model (`vision:assist`: `executionPolicy.visionAssist`)
+  - submit background jobs (`job:submit`: `submitJob`)
+  - read background jobs (`job:read`: `readJob`)
+  - cancel background jobs (`job:cancel`: `cancelJob`)
+  - mint and revoke principals (`authority:admin`: `issuePrincipal`, `revokePrincipal`)
+  - spoof the browser fingerprint (`browser:fingerprint`: `executionPolicy.fingerprint`)
+  - humanize input timing (`browser:humanize`: `executionPolicy.humanize`)
+<!-- END GENERATED PRESET MATRIX -->

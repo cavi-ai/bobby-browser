@@ -27,6 +27,7 @@ supported).
 | `--force` | Overwrite an existing bootstrap file |
 | `--ttl-days <n>` | Expiry in days (default from CLI) |
 | `--path <file>` | Bootstrap file path (else `BOBBY_BROWSER_BOOTSTRAP_ENV` / OS config dir) |
+| `--preset <name>` | Capability floor: `agent` (default), `unrestricted`, `claude`, `codex`, or `openshell`; see the [preset matrix](../concepts/capabilities.md#generated-preset-matrix) |
 
 Prints the plaintext bearer **once**. Map it to `AUTOMATION_RUNTIME_TOKEN` for
 SDK clients. Never commit the bearer or put it in `config.toml`.

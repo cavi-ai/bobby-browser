@@ -889,26 +889,49 @@ fn check_builtin_job_handlers() -> DoctorCheck {
 
 fn check_bootstrap_preset(path: Option<&Path>, caps_csv: Option<&str>) -> DoctorCheck {
     let preset = bootstrap_local::read_bootstrap_preset(path);
-    let holds_admin = caps_csv.is_some_and(|caps| bootstrap_csv_holds(caps, "authority:admin"));
-    match preset {
-        bootstrap_local::BootstrapPreset::Agent if holds_admin => DoctorCheck {
+    let floor = preset.capability_preset();
+    let held: Vec<&str> = caps_csv
+        .map(|caps| {
+            caps.split(',')
+                .map(str::trim)
+                .filter(|capability| !capability.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let beyond: Vec<&str> = held
+        .iter()
+        .copied()
+        .filter(|capability| {
+            !floor
+                .capabilities()
+                .iter()
+                .any(|allowed| allowed.as_str() == *capability)
+        })
+        .collect();
+    if !beyond.is_empty() {
+        return DoctorCheck {
             status: DoctorStatus::Warn,
             name: "bootstrap-preset".to_string(),
-            detail: "preset is agent but capability list still includes authority:admin; re-run `bobby init --preset agent --force`".to_string(),
-        },
-        bootstrap_local::BootstrapPreset::Agent => DoctorCheck {
-            status: DoctorStatus::Ok,
-            name: "bootstrap-preset".to_string(),
-            detail: "agent (no authority:admin)".to_string(),
-        },
-        bootstrap_local::BootstrapPreset::Unrestricted => DoctorCheck {
-            status: DoctorStatus::Ok,
-            name: "bootstrap-preset".to_string(),
-            detail: if holds_admin {
+            detail: format!(
+                "preset is {} but the capability list also holds {}; re-run `bobby init --preset {} --force`",
+                preset.as_str(),
+                beyond.join(", "),
+                preset.as_str()
+            ),
+        };
+    }
+    let holds_admin = held.contains(&"authority:admin");
+    DoctorCheck {
+        status: DoctorStatus::Ok,
+        name: "bootstrap-preset".to_string(),
+        detail: match preset {
+            bootstrap_local::BootstrapPreset::Unrestricted if holds_admin => {
                 "unrestricted (includes authority:admin)".to_string()
-            } else {
+            }
+            bootstrap_local::BootstrapPreset::Unrestricted => {
                 "unrestricted (authority:admin not present; heal will add it)".to_string()
-            },
+            }
+            _ => format!("{} ({})", preset.as_str(), floor.summary()),
         },
     }
 }
@@ -1632,7 +1655,11 @@ pub(crate) fn run_doctor_with_profile(
                             );
                         }
                     }
-                    if !caps.split(',').any(|c| c.trim() == "browser:fingerprint") {
+                    if preset
+                        .capability_preset()
+                        .contains(types::Capability::BrowserFingerprint)
+                        && !caps.split(',').any(|c| c.trim() == "browser:fingerprint")
+                    {
                         report.warn(
                             "bootstrap-capabilities",
                             "bootstrap lacks browser:fingerprint; run `bobby doctor --fix`"

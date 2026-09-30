@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
 use interface_conformance::{
-    execution_policy_requirements, operation_support, render_support_matrix_markdown,
-    AdapterSupport, EngineSupport, ExecutionPolicyRequirement, SUPPORT_MATRIX_BEGIN,
-    SUPPORT_MATRIX_END,
+    execution_policy_requirements, operation_support, render_preset_matrix_markdown,
+    render_support_matrix_markdown, AdapterSupport, EngineSupport, ExecutionPolicyRequirement,
+    PRESET_MATRIX_BEGIN, PRESET_MATRIX_END, SUPPORT_MATRIX_BEGIN, SUPPORT_MATRIX_END,
 };
 use types::{Capability, InterfaceOperation};
 
@@ -120,4 +120,37 @@ fn generated_documentation_matches_the_support_source() {
     let start = documentation.find(SUPPORT_MATRIX_BEGIN).unwrap();
     let end = documentation.find(SUPPORT_MATRIX_END).unwrap() + SUPPORT_MATRIX_END.len();
     assert_eq!(&documentation[start..end], render_support_matrix_markdown());
+}
+
+#[test]
+fn generated_preset_matrix_matches_the_preset_table() {
+    let documentation = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/bobby-browser/source/pages/concepts/capabilities.md"),
+    )
+    .unwrap();
+    let start = documentation.find(PRESET_MATRIX_BEGIN).unwrap();
+    let end = documentation.find(PRESET_MATRIX_END).unwrap() + PRESET_MATRIX_END.len();
+    assert_eq!(&documentation[start..end], render_preset_matrix_markdown());
+}
+
+#[test]
+fn preset_matrix_names_every_withheld_admin_operation() {
+    let matrix = render_preset_matrix_markdown();
+    let agent = matrix
+        .split("\n- `")
+        .find(|section| section.starts_with("agent`"))
+        .expect("agent section");
+    assert!(agent.contains("`issuePrincipal`"), "{agent}");
+    assert!(agent.contains("`revokePrincipal`"), "{agent}");
+    let claude = matrix
+        .split("\n- `")
+        .find(|section| section.starts_with("claude`"))
+        .expect("claude section");
+    assert!(
+        claude.contains("`executionPolicy.javascriptEvaluation`"),
+        "{claude}"
+    );
+    assert!(claude.contains("`executionPolicy.fingerprint`"), "{claude}");
+    assert!(!claude.contains("`browser:mutate`"), "{claude}");
 }

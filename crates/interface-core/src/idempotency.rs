@@ -26,6 +26,11 @@ pub trait RetainedOutcome: Clone + Serialize + Send + Sync + 'static {
     /// Whether this outcome must never expire or be evicted (uncertain outcomes
     /// tombstone the key until explicitly resolved).
     fn safety_relevant(&self) -> bool;
+    /// Whether the effect behind this outcome is unknown, so a different
+    /// request under the same key must reconcile first.
+    fn uncertain(&self) -> bool {
+        false
+    }
 
     /// Durable representation. Command outcomes store only their journal
     /// identity; the command journal remains the source of page evidence.
@@ -41,6 +46,10 @@ impl RetainedOutcome for CommandOutcome {
 
     fn safety_relevant(&self) -> bool {
         !matches!(self, CommandOutcome::Completed { .. })
+    }
+
+    fn uncertain(&self) -> bool {
+        matches!(self, CommandOutcome::NeedsReconciliation { .. })
     }
 
     fn durable_value(&self) -> io::Result<serde_json::Value> {
@@ -369,8 +378,22 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
                         if entry.operation != operation
                             || entry.canonical_sha256 != canonical_sha256
                         {
+                            // A key whose outcome is unknown may already have
+                            // taken effect. A retry after a restart runs in a
+                            // new session, so its digest differs; a plain
+                            // conflict there reads as "use a fresh key", which
+                            // repeats the effect.
+                            let uncertain = match &entry.state {
+                                EntryState::Unresolved => true,
+                                EntryState::Retained { outcome, .. } => outcome.uncertain(),
+                                EntryState::Reserved { .. } => false,
+                            };
                             entries.push(entry);
-                            return Err(conflict_error(correlation_id));
+                            return Err(if uncertain {
+                                unresolved_error(correlation_id)
+                            } else {
+                                conflict_error(correlation_id)
+                            });
                         }
                         entry.last_used = last_used;
                         match &entry.state {

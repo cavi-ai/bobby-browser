@@ -68,7 +68,7 @@ impl RuntimeInterface for PageCreatingRuntime {
         &self,
         _: RequestContext,
         _: types::CommandEnvelope,
-    ) -> InterfaceResult<(types::CommandOutcome, types::CheckpointId)> {
+    ) -> InterfaceResult<(types::CommandOutcome, Option<types::CheckpointId>)> {
         unreachable!()
     }
     async fn delete_session(&self, _: RequestContext, _: types::SessionId) -> InterfaceResult<()> {
@@ -156,7 +156,7 @@ impl RuntimeInterface for AutoSessionRuntime {
         &self,
         _: RequestContext,
         _: types::CommandEnvelope,
-    ) -> InterfaceResult<(types::CommandOutcome, types::CheckpointId)> {
+    ) -> InterfaceResult<(types::CommandOutcome, Option<types::CheckpointId>)> {
         unreachable!()
     }
     async fn delete_session(&self, _: RequestContext, _: types::SessionId) -> InterfaceResult<()> {
@@ -300,7 +300,7 @@ impl RuntimeInterface for StaticRuntime {
         &self,
         _: RequestContext,
         _: types::CommandEnvelope,
-    ) -> InterfaceResult<(types::CommandOutcome, types::CheckpointId)> {
+    ) -> InterfaceResult<(types::CommandOutcome, Option<types::CheckpointId>)> {
         unreachable!()
     }
     async fn delete_session(&self, _: RequestContext, _: types::SessionId) -> InterfaceResult<()> {
@@ -371,7 +371,7 @@ impl RuntimeInterface for NavigatingRuntime {
         &self,
         _: RequestContext,
         _: types::CommandEnvelope,
-    ) -> InterfaceResult<(types::CommandOutcome, types::CheckpointId)> {
+    ) -> InterfaceResult<(types::CommandOutcome, Option<types::CheckpointId>)> {
         unreachable!()
     }
     async fn delete_session(&self, _: RequestContext, _: types::SessionId) -> InterfaceResult<()> {
@@ -452,7 +452,7 @@ impl RuntimeInterface for BlockingRuntime {
         &self,
         _: RequestContext,
         _: types::CommandEnvelope,
-    ) -> InterfaceResult<(types::CommandOutcome, types::CheckpointId)> {
+    ) -> InterfaceResult<(types::CommandOutcome, Option<types::CheckpointId>)> {
         unreachable!()
     }
     async fn delete_session(&self, _: RequestContext, _: types::SessionId) -> InterfaceResult<()> {

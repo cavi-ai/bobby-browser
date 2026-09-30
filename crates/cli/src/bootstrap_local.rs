@@ -6,7 +6,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use broker::StartupCredential;
 use chrono::{DateTime, Duration, Utc};
 use clap::ValueEnum;
-use types::{Capability, PrincipalId};
+use types::{Capability, CapabilityPreset, PrincipalId};
 use uuid::Uuid;
 
 pub const DEFAULT_TTL_DAYS: i64 = 30;
@@ -19,92 +19,59 @@ const ENV_EXPIRES_AT: &str = "AUTOMATION_RUNTIME_BOOTSTRAP_EXPIRES_AT";
 const ENV_PRESET: &str = "AUTOMATION_RUNTIME_BOOTSTRAP_PRESET";
 const PRESET_MARKER: &str = "bobby-bootstrap-preset:";
 
-/// Which capability floor heal / init use.
+/// Which capability floor heal / init use. The sets live in
+/// [`types::CapabilityPreset`]; heal never widens past the selected one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum BootstrapPreset {
-    /// Agent host set: no `authority:admin`. Heal never widens past this set.
+    /// Every capability except `authority:admin`.
     /// Default for fresh `bobby init` / install / loopback auto-init.
     #[default]
     Agent,
     /// Full local operator set, including `authority:admin`.
     Unrestricted,
+    /// Claude Code: the shipped skill's workflow, no JavaScript evaluation,
+    /// fingerprint, or humanize.
+    Claude,
+    /// Codex CLI: the same floor as `claude`.
+    Codex,
+    /// Sandboxed OpenShell tenant: browse, intents, files, evidence, recovery.
+    Openshell,
 }
 
 impl BootstrapPreset {
-    pub fn as_str(self) -> &'static str {
+    pub fn capability_preset(self) -> CapabilityPreset {
         match self {
-            Self::Unrestricted => "unrestricted",
-            Self::Agent => "agent",
+            Self::Unrestricted => CapabilityPreset::Unrestricted,
+            Self::Agent => CapabilityPreset::Agent,
+            Self::Claude => CapabilityPreset::Claude,
+            Self::Codex => CapabilityPreset::Codex,
+            Self::Openshell => CapabilityPreset::Openshell,
         }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        self.capability_preset().as_str()
     }
 
     pub fn parse(raw: &str) -> Option<Self> {
-        match raw.trim() {
-            "unrestricted" => Some(Self::Unrestricted),
-            "agent" => Some(Self::Agent),
-            _ => None,
-        }
+        Self::value_variants()
+            .iter()
+            .copied()
+            .find(|preset| preset.as_str() == raw.trim())
     }
 }
 
-/// Unrestricted local defaults. Heal appends any missing entry for the
-/// unrestricted preset.
-pub(crate) const DEFAULT_CAPABILITIES: &[Capability] = &[
-    Capability::SessionRead,
-    Capability::SessionWrite,
-    Capability::PageRead,
-    Capability::PageWrite,
-    Capability::BrowserMutate,
-    Capability::NetworkEgress,
-    Capability::FileUpload,
-    Capability::FileDownload,
-    Capability::JavascriptEvaluate,
-    Capability::IntentExecute,
-    Capability::VisionAssist,
-    Capability::ContextRead,
-    Capability::ArtifactRead,
-    Capability::ArtifactCapture,
-    Capability::RecoveryRead,
-    Capability::RecoveryWrite,
-    Capability::JobSubmit,
-    Capability::JobRead,
-    Capability::JobCancel,
-    Capability::AuthorityAdmin,
-    Capability::BrowserFingerprint,
-    Capability::BrowserHumanize,
-];
+/// Unrestricted local defaults, for tests; heal reads the preset table.
+#[cfg(test)]
+pub(crate) const DEFAULT_CAPABILITIES: &[Capability] =
+    CapabilityPreset::Unrestricted.capabilities();
 
 /// Agent host defaults: everything in [`DEFAULT_CAPABILITIES`] except
 /// `authority:admin`. Heal for the agent preset only appends from this set.
-pub(crate) const AGENT_CAPABILITIES: &[Capability] = &[
-    Capability::SessionRead,
-    Capability::SessionWrite,
-    Capability::PageRead,
-    Capability::PageWrite,
-    Capability::BrowserMutate,
-    Capability::NetworkEgress,
-    Capability::FileUpload,
-    Capability::FileDownload,
-    Capability::JavascriptEvaluate,
-    Capability::IntentExecute,
-    Capability::VisionAssist,
-    Capability::ContextRead,
-    Capability::ArtifactRead,
-    Capability::ArtifactCapture,
-    Capability::RecoveryRead,
-    Capability::RecoveryWrite,
-    Capability::JobSubmit,
-    Capability::JobRead,
-    Capability::JobCancel,
-    Capability::BrowserFingerprint,
-    Capability::BrowserHumanize,
-];
+pub(crate) const AGENT_CAPABILITIES: &[Capability] = CapabilityPreset::Agent.capabilities();
 
 pub fn capabilities_for_preset(preset: BootstrapPreset) -> &'static [Capability] {
-    match preset {
-        BootstrapPreset::Unrestricted => DEFAULT_CAPABILITIES,
-        BootstrapPreset::Agent => AGENT_CAPABILITIES,
-    }
+    preset.capability_preset().capabilities()
 }
 
 pub struct BootstrapMaterial {
@@ -738,6 +705,54 @@ mod tests {
             read_preset_marker_from_file(&path).unwrap(),
             Some(BootstrapPreset::Agent)
         );
+    }
+
+    #[test]
+    fn host_presets_mint_their_floor_and_heal_never_widens_past_it() {
+        for preset in [
+            BootstrapPreset::Claude,
+            BootstrapPreset::Codex,
+            BootstrapPreset::Openshell,
+        ] {
+            let material =
+                generate_bootstrap_for_preset(chrono::Duration::days(1), preset).unwrap();
+            let expected = preset
+                .capability_preset()
+                .capabilities()
+                .iter()
+                .map(|capability| capability.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            assert_eq!(material.capabilities_csv(), expected, "{}", preset.as_str());
+            assert!(!material.capabilities_csv().contains("javascript:evaluate"));
+            assert!(!material.capabilities_csv().contains("browser:fingerprint"));
+            assert!(!material.capabilities_csv().contains("authority:admin"));
+
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("bootstrap.env");
+            write_bootstrap_env(&path, &material, false).unwrap();
+            assert_eq!(read_preset_marker_from_file(&path).unwrap(), Some(preset));
+            // Heal restores the floor after a capability is dropped, and adds
+            // nothing the preset does not hold.
+            let text = std::fs::read_to_string(&path)
+                .unwrap()
+                .replace(",intent:execute", "");
+            write_private_file(&path, text.as_bytes()).unwrap();
+            let report = heal_bootstrap_env_file(&path).unwrap();
+            assert_eq!(report.added, vec!["intent:execute"], "{}", preset.as_str());
+            let healed = load_bootstrap_capabilities_csv(&path).unwrap();
+            for capability in healed.split(',') {
+                assert!(
+                    preset
+                        .capability_preset()
+                        .capabilities()
+                        .iter()
+                        .any(|allowed| allowed.as_str() == capability),
+                    "{} healed in {capability}",
+                    preset.as_str()
+                );
+            }
+        }
     }
 
     #[test]

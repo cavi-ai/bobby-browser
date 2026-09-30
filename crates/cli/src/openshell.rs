@@ -61,21 +61,8 @@ impl OpenshellAgent {
 }
 
 /// Narrow OpenShell tenant set — least privilege for sandboxed agents.
-pub(crate) const OPENSHELL_CAPABILITIES: &[Capability] = &[
-    Capability::SessionRead,
-    Capability::SessionWrite,
-    Capability::PageRead,
-    Capability::PageWrite,
-    Capability::BrowserMutate,
-    Capability::FileUpload,
-    Capability::FileDownload,
-    Capability::IntentExecute,
-    Capability::ContextRead,
-    Capability::ArtifactRead,
-    Capability::ArtifactCapture,
-    Capability::RecoveryRead,
-    Capability::RecoveryWrite,
-];
+pub(crate) const OPENSHELL_CAPABILITIES: &[Capability] =
+    types::CapabilityPreset::Openshell.capabilities();
 
 pub fn capabilities_for_openshell_preset(
     preset: OpenshellCapabilityPreset,
@@ -786,10 +773,12 @@ pub fn doctor_openshell_extras(
                     true,
                     "bootstrap preset unrestricted (can mint sandbox principals)".to_owned(),
                 ),
-                bootstrap_local::BootstrapPreset::Agent => (
+                preset => (
                     false,
-                    "bootstrap preset is agent (no authority:admin); use `bobby init --preset unrestricted` to mint principals"
-                        .to_owned(),
+                    format!(
+                        "bootstrap preset is {} (no authority:admin); use `bobby init --preset unrestricted` to mint principals",
+                        preset.as_str()
+                    ),
                 ),
             }
             }
