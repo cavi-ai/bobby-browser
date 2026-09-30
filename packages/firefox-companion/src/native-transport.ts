@@ -77,6 +77,7 @@ export type NativePort = {
 };
 
 export type NativeTransportDependencies = {
+  nativeHostName?: string;
   connectNative(hostName: string): NativePort;
   scheduleReconnect?: (callback: () => void, delayMs: number) => unknown;
   cancelReconnect?: (handle: unknown) => void;
@@ -409,7 +410,7 @@ export class NativeCompanionTransport {
   #connect(): void {
     if (!this.#running) return;
     try {
-      const port = this.#dependencies.connectNative(NATIVE_HOST_NAME);
+      const port = this.#dependencies.connectNative(this.#dependencies.nativeHostName ?? NATIVE_HOST_NAME);
       this.#port = port;
       this.#portValidated = false;
       port.onMessage.addListener((message) => {

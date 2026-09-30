@@ -48,6 +48,7 @@ struct ConfiguredFirefoxFactory {
     downloads_dir: PathBuf,
     bidi: Mutex<Option<crate::BidiClient>>,
     lifecycle: Mutex<()>,
+    profile_owner: std::sync::Mutex<Option<std::fs::File>>,
     closed: std::sync::atomic::AtomicBool,
 }
 
@@ -274,6 +275,10 @@ impl WorkerFactory for ConfiguredFirefoxFactory {
             }
         }
         self.server.lock().await.take();
+        self.profile_owner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
     }
 }
 
@@ -344,7 +349,8 @@ impl ConfiguredFirefoxFactory {
     /// truth, so a refused connection retries against it once. Its parser
     /// enforces the same loopback rule the enrolled URL is held to.
     async fn connect_bidi(&self) -> Result<crate::BidiClient, CommandError> {
-        let configured = self.config.bidi_url.clone();
+        let configured = live_endpoint_override(&self.config.profile_dir, &self.config.bidi_url)
+            .unwrap_or_else(|| self.config.bidi_url.clone());
         let error =
             match crate::BidiClient::connect_session(configured.clone(), self.config.timeout).await
             {
@@ -357,7 +363,9 @@ impl ConfiguredFirefoxFactory {
                 "firefox BiDi session.new still blocked; recycling enrolled profile"
             );
             recycle_enrolled_firefox(&self.config).await?;
-            return crate::BidiClient::connect_session(configured, self.config.timeout).await;
+            let endpoint =
+                live_endpoint_override(&self.config.profile_dir, &configured).unwrap_or(configured);
+            return crate::BidiClient::connect_session(endpoint, self.config.timeout).await;
         }
         let mut live_error = None;
         if let Some(live) = live_endpoint_override(&self.config.profile_dir, &configured) {
@@ -422,9 +430,9 @@ impl ConfiguredFirefoxFactory {
         {
             return Ok(());
         }
-        match crate::bidi::session_slot_occupied(self.config.bidi_url.clone(), self.config.timeout)
-            .await
-        {
+        let endpoint = live_endpoint_override(&self.config.profile_dir, &self.config.bidi_url)
+            .unwrap_or_else(|| self.config.bidi_url.clone());
+        match crate::bidi::session_slot_occupied(endpoint, self.config.timeout).await {
             Ok(false) => Ok(()),
             Ok(true) => {
                 tracing::warn!(
@@ -745,27 +753,43 @@ fn kill_pid(_pid: u32) {
     }
 }
 
-fn terminate_firefox_listeners(port: u16) -> Result<(), CommandError> {
+fn command_owns_profile(command: &str, profile: &Path) -> bool {
+    if !is_firefox_command(command) {
+        return false;
+    }
+    ["--profile ", "-profile ", "--profile="]
+        .iter()
+        .any(|flag| {
+            command
+                .split_once(&format!("{flag}{}", profile.display()))
+                .is_some_and(|(_, tail)| tail.is_empty() || tail.trim_start().starts_with('-'))
+        })
+}
+
+fn terminate_firefox_listeners(port: u16, profile: &Path) -> Result<(), CommandError> {
     for pid in tcp_listen_pids(port) {
         let Some(command) = process_command(pid) else {
             continue;
         };
-        if !is_firefox_command(&command) {
-            return Err(companion_error(format!(
-                "Firefox BiDi port {port} is held by a non-Firefox process"
-            )));
+        if command_owns_profile(&command, profile) {
+            terminate_pid(pid);
         }
-        terminate_pid(pid);
     }
     Ok(())
 }
 
-async fn wait_until_port_free(port: u16, timeout: Duration) -> Result<(), CommandError> {
+async fn wait_until_port_free(
+    port: u16,
+    profile: &Path,
+    timeout: Duration,
+) -> Result<(), CommandError> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let remaining: Vec<u32> = tcp_listen_pids(port)
             .into_iter()
-            .filter(|pid| process_command(*pid).is_some_and(|command| is_firefox_command(&command)))
+            .filter(|pid| {
+                process_command(*pid).is_some_and(|command| command_owns_profile(&command, profile))
+            })
             .collect();
         if remaining.is_empty() {
             return Ok(());
@@ -775,7 +799,9 @@ async fn wait_until_port_free(port: u16, timeout: Duration) -> Result<(), Comman
                 kill_pid(pid);
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
-            if tcp_listen_pids(port).is_empty() {
+            if tcp_listen_pids(port).into_iter().all(|pid| {
+                !process_command(pid).is_some_and(|command| command_owns_profile(&command, profile))
+            }) {
                 return Ok(());
             }
             return Err(companion_error(
@@ -818,6 +844,27 @@ fn validate_enrolled_profile(profile: &Path) -> Result<(), CommandError> {
     Ok(())
 }
 
+fn claim_profile_owner(profile: &Path) -> Result<Option<std::fs::File>> {
+    if !profile.exists() {
+        return Ok(None);
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let file = options.open(profile.join(".bobby-runtime.lock"))?;
+    if !file.metadata()?.is_file() {
+        anyhow::bail!("Firefox owner lock must be a regular file");
+    }
+    file.try_lock().map_err(|_| anyhow::anyhow!("Firefox profile {} already has a runtime owner; use the same team/project scope or a separately enrolled profile", profile.display()))?;
+    Ok(Some(file))
+}
+
 fn spawn_enrolled_firefox(bin: &Path, profile: &Path, port: u16) -> Result<(), CommandError> {
     validate_enrolled_profile(profile)?;
     let mut command = Command::new(bin);
@@ -849,6 +896,40 @@ fn spawn_enrolled_firefox(bin: &Path, profile: &Path, port: u16) -> Result<(), C
     Ok(())
 }
 
+/// Open an installed scope's profile on an OS-assigned BiDi port, preserving
+/// its existing login state. Used by the CLI's first-run pairing flow.
+pub async fn start_installed_firefox(
+    profile: &Path,
+    timeout: Duration,
+) -> Result<Url, CommandError> {
+    validate_enrolled_profile(profile)?;
+    if let Ok(endpoint) = crate::read_bidi_url_from_profile_dir(profile) {
+        if crate::bidi::session_slot_occupied(endpoint.clone(), Duration::from_secs(2))
+            .await
+            .is_ok()
+        {
+            return Ok(endpoint);
+        }
+    }
+    let bin = enrolled_firefox_bin().ok_or_else(|| companion_error("Firefox binary not found"))?;
+    spawn_enrolled_firefox(&bin, profile, 0)?;
+    tokio::time::timeout(timeout, async {
+        loop {
+            if let Ok(endpoint) = crate::read_bidi_url_from_profile_dir(profile) {
+                if crate::bidi::session_slot_occupied(endpoint.clone(), Duration::from_secs(1))
+                    .await
+                    .is_ok()
+                {
+                    return endpoint;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .map_err(|_| companion_error("Firefox did not publish a live BiDi endpoint"))
+}
+
 async fn wait_until_bidi_slot_free(url: &Url, timeout: Duration) -> Result<(), CommandError> {
     let deadline = tokio::time::Instant::now() + timeout;
     let probe = timeout.min(Duration::from_secs(2));
@@ -873,15 +954,44 @@ async fn wait_until_bidi_slot_free(url: &Url, timeout: Duration) -> Result<(), C
 /// (same profile, same remote-debugging port, no re-pair) is the recovery.
 async fn recycle_enrolled_firefox(config: &FirefoxRuntimeConfig) -> Result<(), CommandError> {
     validate_enrolled_profile(&config.profile_dir)?;
-    let port = bidi_listen_port(&config.bidi_url)
+    let endpoint = live_endpoint_override(&config.profile_dir, &config.bidi_url)
+        .unwrap_or_else(|| config.bidi_url.clone());
+    let port = bidi_listen_port(&endpoint)
         .ok_or_else(|| companion_error("Firefox BiDi URL is missing a port"))?;
     let bin = enrolled_firefox_bin().ok_or_else(|| {
         companion_error("Firefox binary not found to recycle the leaked BiDi session")
     })?;
-    terminate_firefox_listeners(port)?;
-    wait_until_port_free(port, config.timeout).await?;
-    spawn_enrolled_firefox(&bin, &config.profile_dir, port)?;
-    wait_until_bidi_slot_free(&config.bidi_url, config.timeout).await
+    terminate_firefox_listeners(port, &config.profile_dir)?;
+    wait_until_port_free(port, &config.profile_dir, config.timeout).await?;
+    let endpoint_file = config.profile_dir.join("WebDriverBiDiServer.json");
+    match std::fs::symlink_metadata(&endpoint_file) {
+        Ok(metadata) if metadata.is_file() => {
+            std::fs::remove_file(endpoint_file).map_err(companion_error)?
+        }
+        Ok(_) => {
+            return Err(companion_error(
+                "Firefox endpoint file must be a regular file",
+            ))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(companion_error(error)),
+    }
+    spawn_enrolled_firefox(&bin, &config.profile_dir, 0)?;
+    tokio::time::timeout(config.timeout, async {
+        loop {
+            if let Ok(endpoint) = crate::read_bidi_url_from_profile_dir(&config.profile_dir) {
+                if wait_until_bidi_slot_free(&endpoint, config.timeout)
+                    .await
+                    .is_ok()
+                {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .map_err(|_| companion_error("recycled Firefox did not publish a live BiDi endpoint"))
 }
 
 fn companion_error(error: impl std::fmt::Display) -> CommandError {
@@ -1307,31 +1417,37 @@ fn compose_worker_factory_inner(
         .into_iter()
         .map(FirefoxRuntimeConfig::try_from)
         .map(|config| {
-            config.map(|config| {
-                let server = match enrolled.take() {
-                    Some((profile_id, server)) if profile_id == config.profile_id => Some(server),
-                    Some(value) => {
-                        enrolled = Some(value);
-                        None
-                    }
-                    None => None,
-                };
-                FirefoxRegistration {
-                    profile_id: config.profile_id.clone(),
-                    factory: Arc::new(ConfiguredFirefoxFactory {
-                        config,
-                        required: firefox_required,
-                        pairing_code_observer: Arc::clone(&pairing_code_observer),
-                        server: Mutex::new(server),
-                        artifacts: firefox_artifacts.clone(),
-                        upload_roots: firefox_upload_roots.clone(),
-                        downloads_dir: firefox_downloads_dir.clone(),
-                        bidi: Mutex::new(None),
-                        lifecycle: Mutex::new(()),
-                        closed: std::sync::atomic::AtomicBool::new(false),
-                    }),
-                }
-            })
+            config
+                .map(|config| {
+                    let server = match enrolled.take() {
+                        Some((profile_id, server)) if profile_id == config.profile_id => {
+                            Some(server)
+                        }
+                        Some(value) => {
+                            enrolled = Some(value);
+                            None
+                        }
+                        None => None,
+                    };
+                    let profile_owner = claim_profile_owner(&config.profile_dir)?;
+                    Ok(FirefoxRegistration {
+                        profile_id: config.profile_id.clone(),
+                        factory: Arc::new(ConfiguredFirefoxFactory {
+                            config,
+                            required: firefox_required,
+                            pairing_code_observer: Arc::clone(&pairing_code_observer),
+                            server: Mutex::new(server),
+                            artifacts: firefox_artifacts.clone(),
+                            upload_roots: firefox_upload_roots.clone(),
+                            downloads_dir: firefox_downloads_dir.clone(),
+                            bidi: Mutex::new(None),
+                            lifecycle: Mutex::new(()),
+                            profile_owner: std::sync::Mutex::new(profile_owner),
+                            closed: std::sync::atomic::AtomicBool::new(false),
+                        }),
+                    })
+                })
+                .and_then(|result| result)
         })
         .collect::<Result<Vec<_>>>()?;
     if enrolled.is_some() {
@@ -1526,9 +1642,8 @@ pub enum SelectionSource {
 /// resolves through the same precedence, so configuration cannot diverge
 /// between the process an operator validates and the process a host launches.
 pub fn default_selection_path() -> Result<PathBuf> {
-    Ok(dirs::config_dir()
+    Ok(config::bobby_config_dir()
         .ok_or_else(|| anyhow::anyhow!("config directory unavailable"))?
-        .join("bobby-browser")
         .join("browser-selection.json"))
 }
 
@@ -1642,6 +1757,27 @@ pub fn persist_browser_selection(path: &Path, selection: &BrowserSelectionConfig
 mod tests {
     use super::*;
     use types::SessionId;
+
+    #[test]
+    fn profile_owner_lock_prevents_takeover_and_releases_on_drop() {
+        let root = tempfile::tempdir().unwrap();
+        let first = claim_profile_owner(root.path()).unwrap();
+        assert!(claim_profile_owner(root.path()).is_err());
+        drop(first);
+        assert!(claim_profile_owner(root.path()).unwrap().is_some());
+    }
+
+    #[test]
+    fn firefox_recycle_matches_only_the_enrolled_profile() {
+        let profile = Path::new("/profiles/team alpha");
+        assert!(command_owns_profile("/Applications/Firefox/firefox --profile /profiles/team alpha --remote-debugging-port=1234", profile));
+        assert!(!command_owns_profile("/Applications/Firefox/firefox --profile /profiles/team beta --remote-debugging-port=1234", profile));
+        assert!(!command_owns_profile("/Applications/Firefox/firefox --profile /profiles/team alpha extra --remote-debugging-port=1234", profile));
+        assert!(!command_owns_profile(
+            "other-server --profile /profiles/team alpha --remote-debugging-port=1234",
+            profile
+        ));
+    }
 
     fn write_endpoint(profile_dir: &Path, port: u16) {
         std::fs::write(

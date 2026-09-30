@@ -23,7 +23,7 @@ use agent_client_protocol::schema::v1::{
     SessionCloseCapabilities, SessionNotification, SessionUpdate, StopReason, TextContent,
     ToolCallUpdate, ToolCallUpdateFields,
 };
-use agent_client_protocol::{Agent, Client, ConnectionTo, Result as AcpResult, Stdio};
+use agent_client_protocol::{Agent, Client, ConnectionTo, Lines, Result as AcpResult};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use intent_engine::vision_gate_closed;
@@ -501,6 +501,30 @@ impl AcpServer {
 
     /// Serve stdin/stdout until the client disconnects.
     pub async fn serve(self) -> AcpResult<()> {
+        self.serve_io(tokio::io::stdin(), tokio::io::stdout()).await
+    }
+
+    /// Serve an authenticated connection to an existing runtime owner.
+    pub async fn serve_io<R, W>(self, reader: R, writer: W) -> AcpResult<()>
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let incoming =
+            futures_util::stream::unfold(tokio::io::BufReader::new(reader), async |mut reader| {
+                match gateway_transport::read_frame(&mut reader).await {
+                    Ok(Some(frame)) => Some((Ok::<_, std::io::Error>(frame), reader)),
+                    Ok(None) => None,
+                    Err(error) => Some((Err(std::io::Error::other(error)), reader)),
+                }
+            });
+        let outgoing = futures_util::sink::unfold(writer, async |mut writer, frame: String| {
+            use tokio::io::AsyncWriteExt;
+            writer.write_all(frame.as_bytes()).await?;
+            writer.write_all(b"\n").await?;
+            writer.flush().await?;
+            Ok::<_, std::io::Error>(writer)
+        });
         let server = self.clone();
         let prompt_server = self.clone();
         let close_server = self.clone();
@@ -576,7 +600,7 @@ impl AcpServer {
                 },
                 agent_client_protocol::on_receive_notification!(),
             )
-            .connect_to(Stdio::new())
+            .connect_to(Lines::new(Box::pin(outgoing), Box::pin(incoming)))
             .await;
         let cleanup_result = disconnect_server.cleanup_sessions().await;
         transport_result?;

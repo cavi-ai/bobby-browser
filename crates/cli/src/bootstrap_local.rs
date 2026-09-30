@@ -151,9 +151,8 @@ impl BootstrapMaterial {
 }
 
 pub fn default_bootstrap_path() -> Result<PathBuf> {
-    Ok(dirs::config_dir()
+    Ok(config::bobby_config_dir()
         .context("config directory unavailable")?
-        .join("bobby-browser")
         .join("bootstrap.env"))
 }
 
@@ -584,7 +583,10 @@ pub fn heal_process_env_capabilities() -> Result<HealBootstrapReport> {
 /// path while `dirs::config_dir()` resolves to Application Support.
 pub fn ensure_unrestricted_bootstrap(path: &Path) -> Result<HealBootstrapReport> {
     let mut report = heal_bootstrap_env_file(path)?;
-    if let Some(legacy) = xdg_config_bootstrap_path() {
+    // A named scope must not rewrite the personal legacy credential.
+    if let Some(legacy) = xdg_config_bootstrap_path()
+        .filter(|_| std::env::var_os("BOBBY_BROWSER_SCOPE_DIR").is_none())
+    {
         if legacy != *path {
             report.merge(heal_bootstrap_env_file(&legacy)?);
         }

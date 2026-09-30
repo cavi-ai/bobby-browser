@@ -343,6 +343,16 @@ impl Server {
         self
     }
 
+    /// Apply the connecting client's phase after its environment/config
+    /// precedence has been resolved by the shared transport.
+    pub fn with_connection_toolset(self, toolset: crate::toolset::Toolset) -> Self {
+        *self
+            .toolset
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = toolset;
+        self
+    }
+
     /// This principal's outbound notification fan-out. A transport subscribes
     /// here to learn what to push to the client without being asked.
     pub fn notifications(&self) -> &NotificationSink {
@@ -576,8 +586,8 @@ impl Server {
     /// `output` until the client disconnects or the server shuts down.
     pub async fn serve<R, W>(&self, input: R, output: W) -> io::Result<()>
     where
-        R: AsyncRead + Unpin,
-        W: AsyncWrite + Unpin,
+        R: AsyncRead + Unpin + Send,
+        W: AsyncWrite + Unpin + Send,
     {
         let mut input = BufReader::new(input);
         // Every frame, response or notification, goes through `write_response`,
@@ -585,8 +595,9 @@ impl Server {
         // is what stops a notification interleaving into a response and killing
         // the session with an unparseable line.
         let output = Arc::new(Mutex::new(output));
-        let mut pending: FuturesUnordered<Pin<Box<dyn Future<Output = io::Result<()>> + '_>>> =
-            FuturesUnordered::new();
+        let mut pending: FuturesUnordered<
+            Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>,
+        > = FuturesUnordered::new();
         let mut notifications = self.notifications.subscribe().await;
         let mut notifications_open = true;
         // Notification writes are queued, not awaited inline, so a client that

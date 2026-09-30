@@ -5,6 +5,18 @@ import test from "node:test";
 import * as backgroundModule from "../src/background.js";
 import { CompanionBackground, type DiscoveredTarget } from "../src/background.js";
 
+test("scope resource selects the native host and rejects invalid names", async (t) => {
+  const api = { runtime: { getURL: (path: string) => `moz-extension://scope/${path}` } } as backgroundModule.ProductionBrowserApi;
+  const host = "com.bobby_browser.companion.scope_0123456789abcdef";
+  const fetch = t.mock.method(globalThis, "fetch", async () =>
+    new Response(JSON.stringify({ nativeHostName: host })));
+  assert.equal(await backgroundModule.loadNativeHostName(api), host);
+  fetch.mock.mockImplementation(async () => new Response(JSON.stringify({ nativeHostName: "foreign.host" })));
+  await assert.rejects(backgroundModule.loadNativeHostName(api), /invalid native host/);
+  fetch.mock.mockImplementation(async () => new Response("", { status: 404 }));
+  assert.equal(await backgroundModule.loadNativeHostName(api), "com.bobby_browser.companion");
+});
+
 const CONNECT_OPTIONS = {
   companionId: "dbb47eb5-e32f-41f7-812d-24b051fbac52",
   profileId: "8ec6d155-8d88-4107-87a5-744660228b65",

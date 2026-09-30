@@ -1,6 +1,7 @@
 mod auth;
 mod authority_persist;
 mod cdp;
+mod gateway;
 mod jobs;
 mod mcp_http;
 mod routes;
@@ -39,6 +40,8 @@ use jobs::JobSubmitOutcome;
 pub use jobs::BUILTIN_JOB_HANDLERS;
 
 type RuntimeBinder = dyn Fn(CapabilityHandle) -> Arc<dyn RuntimeInterface> + Send + Sync + 'static;
+type AuthenticatedBinder =
+    dyn Fn(CapabilityHandle) -> Arc<AuthenticatedRuntime> + Send + Sync + 'static;
 
 /// Caches one [`AuthenticatedRuntime`] per principal.
 ///
@@ -234,6 +237,7 @@ impl std::error::Error for ArtifactCatalogFull {}
 pub struct AppState {
     authority: Arc<dyn Authority>,
     bind_runtime: Arc<RuntimeBinder>,
+    bind_authenticated: Option<Arc<AuthenticatedBinder>>,
     events: EventStore,
     artifacts: ArtifactCatalog,
     interface: InterfaceConfig,
@@ -243,7 +247,9 @@ pub struct AppState {
     principal_permits: Arc<RwLock<HashMap<PrincipalId, Arc<Semaphore>>>>,
     mcp_servers: mcp_http::McpServers,
     mcp_resources: mcp_gateway::ArtifactResources,
+    mcp_startup_toolset: Option<mcp_gateway::toolset::Toolset>,
     scheduler: Arc<JobScheduler>,
+    gateway_lifecycle: gateway::Lifecycle,
     job_idempotency: Arc<IdempotencyStore<JobSubmitOutcome>>,
 }
 
@@ -262,13 +268,16 @@ impl AppState {
         Self {
             authority,
             bind_runtime: Arc::new(bind_runtime),
+            bind_authenticated: None,
             events: EventStore::new(interface.max_event_retention),
             artifacts: ArtifactCatalog::default(),
             in_flight_requests: Arc::new(Semaphore::new(interface.max_connections)),
             principal_permits: Arc::new(RwLock::new(HashMap::new())),
             mcp_servers: mcp_http::McpServers::default(),
             mcp_resources: mcp_gateway::ArtifactResources::default(),
+            mcp_startup_toolset: None,
             scheduler: Arc::new(jobs::memory_scheduler()),
+            gateway_lifecycle: gateway::Lifecycle::default(),
             job_idempotency: Arc::new(jobs::job_idempotency_store()),
             interface,
         }
@@ -312,6 +321,7 @@ pub fn router(state: AppState) -> Router {
     // send a static `Authorization` header, not the fresh
     // `x-deadline`/`x-correlation-id`/`x-interface-version` the other routes require.
     let mcp = Router::new()
+        .route("/v1/gateway/{protocol}", get(gateway::connect))
         .route(
             "/v1/mcp",
             axum::routing::post(mcp_http::post_mcp).get(mcp_http::get_mcp),
@@ -642,7 +652,13 @@ async fn bootstrap_listener_with<T, Clock, Build, BuildFuture, Bind, BindFuture>
     now: Clock,
     build_runtime: Build,
     bind_listener: Bind,
-) -> anyhow::Result<(Router, T, Arc<JobScheduler>, Option<CdpBootstrap>)>
+) -> anyhow::Result<(
+    Router,
+    T,
+    Arc<JobScheduler>,
+    Option<CdpBootstrap>,
+    gateway::Lifecycle,
+)>
 where
     Clock: Fn() -> chrono::DateTime<chrono::Utc>,
     Build: FnOnce(AppConfig) -> BuildFuture,
@@ -683,7 +699,7 @@ where
         .unwrap_or_else(|| Path::new("."))
         .join("upload-staging");
     let bindings = Arc::new(RuntimeBindingCache::new(config.interface.max_principals));
-    let bind_runtime: Arc<RuntimeBinder> = {
+    let bind_authenticated: Arc<AuthenticatedBinder> = {
         let bindings = Arc::clone(&bindings);
         let runtime = runtime.clone();
         let recorder = recorder.clone();
@@ -694,8 +710,12 @@ where
                     handle,
                     recorder.clone(),
                 )
-            }) as Arc<dyn RuntimeInterface>
+            })
         })
+    };
+    let bind_runtime: Arc<RuntimeBinder> = {
+        let bind_authenticated = Arc::clone(&bind_authenticated);
+        Arc::new(move |handle| bind_authenticated(handle) as Arc<dyn RuntimeInterface>)
     };
     let cdp_bootstrap = config.cdp.enabled.then(|| CdpBootstrap {
         authority: persistent_authority.clone(),
@@ -736,34 +756,40 @@ where
     )
     .await
     .map_err(|error| anyhow::anyhow!("job idempotency ledger: {error}"))?;
-    let app = router(
-        AppState::new(
-            persistent_authority,
-            move |handle| bind_runtime(handle),
-            config.interface.clone(),
-        )
-        .with_scheduler(Arc::clone(&scheduler))
-        .with_job_idempotency(job_idempotency)
-        .with_boundaries(
-            events,
-            ArtifactCatalog::new(
-                artifact_reader.clone(),
-                config.interface.max_event_retention,
-            ),
-        )
-        // The same `ArtifactReader` instance backs both surfaces, so one ownership
-        // ledger accounts for artifacts however they were produced.
-        .with_mcp_resources(mcp_gateway::ArtifactResources::production(
-            artifact_reader,
-            artifact_store,
-            config.browser.downloads_dir.clone(),
-            config.http.max_download_bytes,
+    let mut state = AppState::new(
+        persistent_authority,
+        move |handle| bind_runtime(handle),
+        config.interface.clone(),
+    )
+    .with_scheduler(Arc::clone(&scheduler))
+    .with_job_idempotency(job_idempotency)
+    .with_boundaries(
+        events,
+        ArtifactCatalog::new(
+            artifact_reader.clone(),
             config.interface.max_event_retention,
-        )),
-    );
+        ),
+    )
+    // The same `ArtifactReader` instance backs both surfaces, so one ownership
+    // ledger accounts for artifacts however they were produced.
+    .with_mcp_resources(mcp_gateway::ArtifactResources::production(
+        artifact_reader,
+        artifact_store,
+        config.browser.downloads_dir.clone(),
+        config.http.max_download_bytes,
+        config.interface.max_event_retention,
+    ));
+    state.bind_authenticated = Some(bind_authenticated);
+    state.mcp_startup_toolset = config
+        .mcp
+        .startup_toolset
+        .as_deref()
+        .and_then(mcp_gateway::toolset::Toolset::parse);
+    let gateway_lifecycle = state.gateway_lifecycle.clone();
+    let app = router(state);
     let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port).parse()?;
     let listener = gate.bind_if_valid_at(now(), || bind_listener(addr)).await?;
-    Ok((app, listener, scheduler, cdp_bootstrap))
+    Ok((app, listener, scheduler, cdp_bootstrap, gateway_lifecycle))
 }
 
 pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Result<()> {
@@ -771,7 +797,7 @@ pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Res
     let max_rejection_workers = config.interface.max_rejection_workers;
     let shutdown_timeout = std::time::Duration::from_millis(config.server.shutdown_timeout_ms);
     let cdp_config = config.cdp.clone();
-    let (app, listener, scheduler, cdp_bootstrap) = bootstrap_listener_with(
+    let (app, listener, scheduler, cdp_bootstrap, gateway_lifecycle) = bootstrap_listener_with(
         config,
         startup,
         chrono::Utc::now,
@@ -802,6 +828,7 @@ pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Res
         drain_after_signal(shutdown_timeout),
     )
     .await;
+    gateway_lifecycle.drain(shutdown_timeout).await;
     jobs::shutdown_scheduler(&scheduler, run_handle, shutdown_timeout).await;
     if let Some(cdp) = cdp_listen {
         log_cdp_shutdown(cdp, shutdown_timeout).await;
@@ -1204,10 +1231,86 @@ pub async fn serve_with_worker_factory(
     startup: StartupCredential,
     factory: Arc<dyn worker_pool::WorkerFactory>,
 ) -> anyhow::Result<()> {
-    serve_with_runtime(config, startup, move |config| async move {
+    serve_with_runtime(config, startup, None, move |config| async move {
         RuntimeService::build_with_worker_factory(&config, factory)
             .await
             .map_err(anyhow::Error::new)
+    })
+    .await
+}
+
+/// Local owner discovery and graceful control; the stop secret stays in the
+/// owner-only registry, never in gateway responses or URLs.
+#[derive(Clone)]
+pub struct SharedRuntimeControl {
+    id: uuid::Uuid,
+    stop_secret: String,
+    stop: tokio::sync::watch::Sender<bool>,
+    ready: Arc<dyn Fn(SocketAddr) -> anyhow::Result<()> + Send + Sync>,
+}
+
+impl SharedRuntimeControl {
+    pub fn new(
+        id: uuid::Uuid,
+        stop_secret: String,
+        ready: impl Fn(SocketAddr) -> anyhow::Result<()> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            id,
+            stop_secret,
+            stop: tokio::sync::watch::channel(false).0,
+            ready: Arc::new(ready),
+        }
+    }
+    fn router(&self) -> Router {
+        Router::new()
+            .route(
+                "/_bobby/runtime",
+                get(shared_runtime_identity).post(shared_runtime_stop),
+            )
+            .with_state(self.clone())
+    }
+}
+
+async fn shared_runtime_identity(
+    axum::extract::State(control): axum::extract::State<SharedRuntimeControl>,
+) -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({"ownerId": control.id}))
+}
+
+async fn shared_runtime_stop(
+    axum::extract::State(control): axum::extract::State<SharedRuntimeControl>,
+    headers: axum::http::HeaderMap,
+) -> axum::http::StatusCode {
+    let supplied = headers
+        .get("x-bobby-owner-stop")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    use sha2::Digest;
+    if sha2::Sha256::digest(supplied.as_bytes())
+        != sha2::Sha256::digest(control.stop_secret.as_bytes())
+    {
+        return axum::http::StatusCode::UNAUTHORIZED;
+    }
+    control.stop.send_replace(true);
+    axum::http::StatusCode::ACCEPTED
+}
+
+pub async fn serve_shared_runtime(
+    config: AppConfig,
+    startup: StartupCredential,
+    factory: Arc<dyn worker_pool::WorkerFactory>,
+    profile_id: Option<String>,
+    control: SharedRuntimeControl,
+) -> anyhow::Result<()> {
+    serve_with_runtime(config, startup, Some(control), move |config| async move {
+        match profile_id {
+            Some(profile) => {
+                RuntimeService::build_with_context_promotion(&config, factory, &profile).await
+            }
+            None => RuntimeService::build_with_worker_factory(&config, factory).await,
+        }
+        .map_err(anyhow::Error::new)
     })
     .await
 }
@@ -1221,7 +1324,7 @@ pub async fn serve_with_context_promotion(
     factory: Arc<dyn worker_pool::WorkerFactory>,
     durable_profile_id: String,
 ) -> anyhow::Result<()> {
-    serve_with_runtime(config, startup, move |config| async move {
+    serve_with_runtime(config, startup, None, move |config| async move {
         RuntimeService::build_with_context_promotion(&config, factory, &durable_profile_id)
             .await
             .map_err(anyhow::Error::new)
@@ -1232,6 +1335,7 @@ pub async fn serve_with_context_promotion(
 async fn serve_with_runtime<B, F>(
     config: AppConfig,
     startup: StartupCredential,
+    shared: Option<SharedRuntimeControl>,
     build: B,
 ) -> anyhow::Result<()>
 where
@@ -1242,7 +1346,7 @@ where
     let max_rejection_workers = config.interface.max_rejection_workers;
     let shutdown_timeout = std::time::Duration::from_millis(config.server.shutdown_timeout_ms);
     let cdp_config = config.cdp.clone();
-    let (app, listener, scheduler, cdp_bootstrap) = bootstrap_listener_with(
+    let (mut app, listener, scheduler, cdp_bootstrap, gateway_lifecycle) = bootstrap_listener_with(
         config,
         startup,
         chrono::Utc::now,
@@ -1254,21 +1358,45 @@ where
         },
     )
     .await?;
+    if let Some(control) = &shared {
+        app = app.merge(control.router());
+        (control.ready)(listener.local_addr()?)?;
+    }
     let cdp_listen = spawn_configured_cdp(&cdp_config, cdp_bootstrap).await?;
     let run_handle = {
         let scheduler = Arc::clone(&scheduler);
         tokio::spawn(async move { scheduler.run().await })
     };
+    let (draining, mut drain_waiter) = tokio::sync::watch::channel(false);
+    let stopping_gateways = gateway_lifecycle.clone();
     let serve_result = serve_listener_graceful(
         listener,
         app,
         max_connections,
         max_rejection_workers,
         RejectionWorkerStats::default(),
-        shutdown_signal(),
-        drain_after_signal(shutdown_timeout),
+        async move {
+            if let Some(control) = shared {
+                let mut stopped = control.stop.subscribe();
+                tokio::select! {
+                    _ = shutdown_signal() => {},
+                    _ = async { if !*stopped.borrow() { let _ = stopped.changed().await; } } => {},
+                }
+            } else {
+                shutdown_signal().await;
+            }
+            stopping_gateways.stop();
+            draining.send_replace(true);
+        },
+        async move {
+            if !*drain_waiter.borrow() {
+                let _ = drain_waiter.changed().await;
+            }
+            tokio::time::sleep(shutdown_timeout).await;
+        },
     )
     .await;
+    gateway_lifecycle.drain(shutdown_timeout).await;
     jobs::shutdown_scheduler(&scheduler, run_handle, shutdown_timeout).await;
     if let Some(cdp) = cdp_listen {
         log_cdp_shutdown(cdp, shutdown_timeout).await;

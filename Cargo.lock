@@ -31,6 +31,8 @@ dependencies = [
  "async-trait",
  "chrono",
  "config",
+ "futures-util",
+ "gateway-transport",
  "intent-engine",
  "interface-core",
  "sdk-core",
@@ -38,6 +40,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "tokio-tungstenite 0.30.0",
  "tracing",
  "types",
  "uuid",
@@ -561,6 +564,7 @@ dependencies = [
  "dialoguer",
  "dirs",
  "firefox-companion",
+ "gateway-transport",
  "getrandom 0.4.3",
  "hex",
  "intent-engine",
@@ -576,6 +580,7 @@ dependencies = [
  "task-scheduler",
  "tempfile",
  "tokio",
+ "toml",
  "tracing",
  "types",
  "url",
@@ -645,6 +650,7 @@ checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
 name = "broker"
 version = "0.17.0"
 dependencies = [
+ "acp-gateway",
  "anyhow",
  "artifact-store",
  "async-trait",
@@ -654,6 +660,7 @@ dependencies = [
  "chrono",
  "config",
  "futures-util",
+ "gateway-transport",
  "getrandom 0.4.3",
  "hex",
  "interface-core",
@@ -1759,6 +1766,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gateway-transport"
+version = "0.17.0"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "url",
+]
+
+[[package]]
 name = "gauntlet-server"
 version = "0.17.0"
 dependencies = [
@@ -2594,6 +2613,7 @@ dependencies = [
  "dom-engine",
  "firefox-companion",
  "futures-util",
+ "gateway-transport",
  "gauntlet-server",
  "hex",
  "interface-core",
@@ -2611,6 +2631,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-tungstenite 0.30.0",
  "tracing",
  "types",
  "uuid",

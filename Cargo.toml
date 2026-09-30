@@ -21,6 +21,7 @@ members = [
   "crates/session-manager",
   "crates/page-runtime",
   "crates/network-engine",
+  "crates/gateway-transport",
   "crates/dom-engine",
   "crates/intent-engine",
   "crates/js-engine",
@@ -128,6 +129,7 @@ interface-core = { path = "crates/interface-core" }
 js-engine = { path = "crates/js-engine" }
 mcp-gateway = { path = "crates/mcp-gateway" }
 network-engine = { path = "crates/network-engine" }
+gateway-transport = { path = "crates/gateway-transport" }
 node-registry = { path = "crates/node-registry" }
 observability = { path = "crates/observability" }
 page-runtime = { path = "crates/page-runtime" }
