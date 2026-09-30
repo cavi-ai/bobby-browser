@@ -47,6 +47,8 @@ struct ConfiguredFirefoxFactory {
     upload_roots: Vec<PathBuf>,
     downloads_dir: PathBuf,
     bidi: Mutex<Option<crate::BidiClient>>,
+    lifecycle: Mutex<()>,
+    closed: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone)]
@@ -116,10 +118,10 @@ impl FirefoxProfileEnrollment {
         })
         .await
         .map_err(|_| companion_error("Firefox profile enrollment timed out"))??;
-        let server = self
-            .attempt
-            .complete()
-            .map_err(|error| companion_error(error.to_string()))?;
+        let server = tokio::task::spawn_blocking(move || self.attempt.complete())
+            .await
+            .map_err(companion_error)?
+            .map_err(companion_error)?;
         Ok(EnrolledFirefoxProfile { profile_id, server })
     }
 }
@@ -201,6 +203,11 @@ impl TryFrom<FirefoxCompanionConfig> for FirefoxRuntimeConfig {
 #[async_trait]
 impl WorkerFactory for ConfiguredFirefoxFactory {
     async fn launch(&self, session_id: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
+        let _lifecycle = self.lifecycle.lock().await;
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(companion_error("Firefox factory is shut down"));
+        }
+        validate_enrolled_profile(&self.config.profile_dir)?;
         let warmed = self.server.lock().await.clone();
         if let Some(server) = warmed {
             // Recycling Firefox also restarts its native relay. Wait for
@@ -240,12 +247,22 @@ impl WorkerFactory for ConfiguredFirefoxFactory {
             .inspect_err(|error| {
                 tracing::warn!(error = %error.message, "firefox companion worker launch failed");
             })?;
-        let server = attempt.complete().map_err(companion_error)?;
-        *self.server.lock().await = Some(server);
+        let server = tokio::task::spawn_blocking(move || attempt.complete())
+            .await
+            .map_err(companion_error)?
+            .map_err(companion_error)?;
+        let mut slot = self.server.lock().await;
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(companion_error("Firefox factory is shut down"));
+        }
+        *slot = Some(server);
         Ok(worker)
     }
 
     async fn shutdown(&self) {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.closed
+            .store(true, std::sync::atomic::Ordering::Release);
         let client = self.bidi.lock().await.take();
         if let Some(client) = client {
             // End the WebDriver session explicitly: Firefox's RemoteAgent
@@ -256,6 +273,7 @@ impl WorkerFactory for ConfiguredFirefoxFactory {
                 tracing::warn!(error = %error.message, "firefox BiDi session end on shutdown failed");
             }
         }
+        self.server.lock().await.take();
     }
 }
 
@@ -533,11 +551,15 @@ async fn start_bootstrap_attempt(
         pairing_code,
         ownership_id: uuid::Uuid::new_v4().to_string(),
     };
-    let _publication_lock = DescriptorLock::claim(&descriptor_path).map_err(companion_error)?;
-    remove_stale_descriptor(&descriptor_path)
-        .map_err(|error| companion_error(error.to_string()))?;
-    let publication = write_descriptor(&descriptor_path, &descriptor)
-        .map_err(|error| companion_error(error.to_string()))?;
+    let publication_path = descriptor_path.clone();
+    let publication = tokio::task::spawn_blocking(move || {
+        let _publication_lock = DescriptorLock::claim(&publication_path)?;
+        remove_stale_descriptor(&publication_path)?;
+        write_descriptor(&publication_path, &descriptor)
+    })
+    .await
+    .map_err(companion_error)?
+    .map_err(companion_error)?;
     Ok(FirefoxBootstrapAttempt {
         server: Some(server),
         publication: Some(publication),
@@ -567,12 +589,8 @@ impl FirefoxBootstrapAttempt {
     /// reads it whenever the extension (or a manual Pair) connects, so the
     /// warm path must not unpublish on completion. The publication lives as
     /// long as the returned server handle.
-    fn complete_keeping_publication(mut self) -> std::io::Result<Arc<CompanionServerHandle>> {
-        let server = self.server.take().expect("bootstrap server must exist");
-        // Leak the publication into the server's lifetime: dropping the
-        // attempt would unpublish, so forget it deliberately.
-        std::mem::forget(self);
-        Ok(server)
+    fn complete_keeping_publication(self) -> std::io::Result<Arc<CompanionServerHandle>> {
+        self.complete_warm()
     }
 
     /// Complete and keep the descriptor fresh: the pairing code in the
@@ -583,59 +601,49 @@ impl FirefoxBootstrapAttempt {
         let server = self.server.take().expect("bootstrap server must exist");
         let publication = self.publication.take().expect("publication must exist");
         let registry = server.registry().clone();
-        let descriptor_path = publication.path().to_path_buf();
         let ownership_id = publication.ownership_id().to_string();
         let pairing_code_ttl = self.pairing_code_ttl;
-        let server_for_refresh = server.clone();
-        std::mem::forget(self);
-        tokio::spawn(async move {
+        let server_for_refresh = Arc::downgrade(&server);
+        let refresh_task = tokio::spawn(async move {
             // Hold the initial publication for the task's lifetime: dropping
             // it would remove the descriptor while the warm server is live.
-            let _initial = publication;
+            let mut publication = publication;
             loop {
                 tokio::time::sleep(pairing_code_ttl / 2).await;
+                let Some(server) = server_for_refresh.upgrade() else {
+                    break;
+                };
                 let code = registry.issue_pairing_code().await;
                 let descriptor = NativeHostDescriptor {
-                    endpoint: format!("ws://{}/v1/companion", server_for_refresh.local_addr()),
+                    endpoint: format!("ws://{}/v1/companion", server.local_addr()),
                     pairing_code: code,
                     ownership_id: ownership_id.clone(),
                 };
-                let _publication_lock = match DescriptorLock::claim(&descriptor_path) {
-                    Ok(lock) => lock,
-                    Err(error) => {
-                        tracing::warn!(%error, "firefox companion descriptor refresh lock failed");
-                        continue;
-                    }
-                };
-                // A replacement runtime owns discovery now. Never let an old
-                // warm process redirect the extension back to its endpoint.
-                let still_owned = std::fs::read(&descriptor_path)
-                    .ok()
-                    .and_then(|bytes| serde_json::from_slice::<NativeHostDescriptor>(&bytes).ok())
-                    .is_some_and(|current| current.ownership_id == ownership_id);
-                if !still_owned {
-                    break;
-                }
-                // The write path uses create_new, so the prior descriptor
-                // must be removed first — otherwise every refresh fails
-                // and the pairing code goes stale.
-                if let Err(error) = remove_stale_descriptor(&descriptor_path) {
-                    tracing::warn!(%error, "firefox companion descriptor refresh: remove failed");
-                    continue;
-                }
-                match write_descriptor(&descriptor_path, &descriptor) {
-                    Ok(refreshed) => {
-                        // Forget rather than drop: dropping would remove the
-                        // file just written (the non-unix fallback matches on
-                        // the shared ownership_id).
-                        std::mem::forget(refreshed);
+                drop(server);
+                let result = tokio::task::spawn_blocking(move || {
+                    let result = refresh_publication(&mut publication, &descriptor);
+                    (publication, result)
+                })
+                .await;
+                match result {
+                    Ok((current, result)) => {
+                        publication = current;
+                        match result {
+                            Ok(true) => {}
+                            Ok(false) => break,
+                            Err(error) => {
+                                tracing::warn!(%error, "firefox companion descriptor refresh failed")
+                            }
+                        }
                     }
                     Err(error) => {
-                        tracing::warn!(%error, "firefox companion descriptor refresh failed");
+                        tracing::warn!(%error, "firefox companion descriptor refresh task failed");
+                        break;
                     }
                 }
             }
         });
+        server.retain_background_task(refresh_task);
         Ok(server)
     }
 }
@@ -778,7 +786,40 @@ async fn wait_until_port_free(port: u16, timeout: Duration) -> Result<(), Comman
     }
 }
 
+fn validate_enrolled_profile(profile: &Path) -> Result<(), CommandError> {
+    let failure = |reason: String| {
+        let mut error = companion_error(format!(
+            "Firefox profile {} cannot be loaded: {reason}. Check the enrolled profile path and permissions before retrying",
+            profile.display()
+        ));
+        error.retryable = false;
+        error
+    };
+    let metadata = std::fs::metadata(profile).map_err(|error| failure(error.to_string()))?;
+    if !metadata.is_dir() {
+        return Err(failure("path is not a directory".into()));
+    }
+    std::fs::read_dir(profile).map_err(|error| failure(error.to_string()))?;
+    // Firefox needs to write its lock and profile state. Check that ability
+    // before terminating an existing browser or launching a dialog-only process.
+    let probe = profile.join(format!(".bobby-write-check-{}", uuid::Uuid::new_v4()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(&probe)
+        .map_err(|error| failure(error.to_string()))?;
+    drop(file);
+    std::fs::remove_file(probe).map_err(|error| failure(error.to_string()))?;
+    Ok(())
+}
+
 fn spawn_enrolled_firefox(bin: &Path, profile: &Path, port: u16) -> Result<(), CommandError> {
+    validate_enrolled_profile(profile)?;
     let mut command = Command::new(bin);
     command
         .arg("--no-remote")
@@ -831,6 +872,7 @@ async fn wait_until_bidi_slot_free(url: &Url, timeout: Duration) -> Result<(), C
 /// The enrolled Bobby profile is dedicated automation Firefox, so recycling it
 /// (same profile, same remote-debugging port, no re-pair) is the recovery.
 async fn recycle_enrolled_firefox(config: &FirefoxRuntimeConfig) -> Result<(), CommandError> {
+    validate_enrolled_profile(&config.profile_dir)?;
     let port = bidi_listen_port(&config.bidi_url)
         .ok_or_else(|| companion_error("Firefox BiDi URL is missing a port"))?;
     let bin = enrolled_firefox_bin().ok_or_else(|| {
@@ -954,29 +996,84 @@ struct PublishedDescriptor {
 }
 
 impl PublishedDescriptor {
-    fn path(&self) -> &Path {
-        &self.path
-    }
-
     fn ownership_id(&self) -> &str {
         &self.ownership_id
     }
 
     fn cleanup(&mut self) -> std::io::Result<()> {
-        let _publication_lock = DescriptorLock::claim(&self.path)?;
-        if let Some(final_file) = self.final_file.take() {
-            final_file.remove_if_owned()?;
+        if self.final_file.is_none() && self.pending_file.is_none() {
+            return Ok(());
         }
-        if let Some(pending_file) = self.pending_file.take() {
+        let _publication_lock = DescriptorLock::claim(&self.path)?;
+        self.remove_owned_files()
+    }
+
+    fn remove_owned_files(&mut self) -> std::io::Result<()> {
+        if let Some(final_file) = &self.final_file {
+            final_file.remove_if_owned()?;
+            self.final_file = None;
+        }
+        if let Some(pending_file) = &self.pending_file {
             pending_file.remove_if_owned()?;
+            self.pending_file = None;
         }
         Ok(())
     }
 }
 
+fn refresh_publication(
+    publication: &mut PublishedDescriptor,
+    descriptor: &NativeHostDescriptor,
+) -> std::io::Result<bool> {
+    let lock = DescriptorLock::claim(&publication.path)?;
+    let still_owned = std::fs::read(&publication.path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<NativeHostDescriptor>(&bytes).ok())
+        .is_some_and(|current| current.ownership_id == publication.ownership_id);
+    if !still_owned {
+        return Ok(false);
+    }
+    remove_stale_descriptor(&publication.path)?;
+    let refreshed = write_descriptor(&publication.path, descriptor)?;
+    // The old final path now belongs to the replacement publication. Retain
+    // any old pending-file ownership until it can be cleaned up under its lock.
+    publication.final_file = None;
+    let previous = std::mem::replace(publication, refreshed);
+    drop(lock);
+    drop(previous);
+    Ok(true)
+}
+
 impl Drop for PublishedDescriptor {
     fn drop(&mut self) {
-        let _ = self.cleanup();
+        if self.final_file.is_none() && self.pending_file.is_none() {
+            return;
+        }
+        // Destructors can run on an async worker. Never wait for a lock there.
+        if let Ok(_lock) = DescriptorLock::try_claim(&self.path) {
+            if self.remove_owned_files().is_ok() {
+                return;
+            }
+        }
+        let path = self.path.clone();
+        let files = [self.final_file.take(), self.pending_file.take()];
+        let cleanup = move || {
+            let result = (|| {
+                let _lock = DescriptorLock::claim(&path)?;
+                for file in files.into_iter().flatten() {
+                    file.remove_if_owned()?;
+                }
+                Ok::<_, std::io::Error>(())
+            })();
+            if let Err(error) = result {
+                tracing::warn!(%error, "firefox companion descriptor cleanup failed");
+            }
+        };
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn_blocking(cleanup);
+        } else {
+            cleanup();
+        }
     }
 }
 
@@ -986,6 +1083,26 @@ struct DescriptorLock(std::fs::File);
 
 impl DescriptorLock {
     fn claim(descriptor: &Path) -> std::io::Result<Self> {
+        let file = Self::open(descriptor)?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Self(file)),
+                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    fn try_claim(descriptor: &Path) -> std::io::Result<Self> {
+        let file = Self::open(descriptor)?;
+        file.try_lock().map_err(std::io::Error::from)?;
+        Ok(Self(file))
+    }
+
+    fn open(descriptor: &Path) -> std::io::Result<std::fs::File> {
         if let Some(parent) = descriptor.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -1005,8 +1122,7 @@ impl DescriptorLock {
                 "descriptor lock must be a regular file",
             ));
         }
-        file.lock()?;
-        Ok(Self(file))
+        Ok(file)
     }
 }
 
@@ -1211,6 +1327,8 @@ fn compose_worker_factory_inner(
                         upload_roots: firefox_upload_roots.clone(),
                         downloads_dir: firefox_downloads_dir.clone(),
                         bidi: Mutex::new(None),
+                        lifecycle: Mutex::new(()),
+                        closed: std::sync::atomic::AtomicBool::new(false),
                     }),
                 }
             })
@@ -1236,6 +1354,10 @@ fn compose_worker_factory_inner(
             }
             let factory = Arc::clone(&registration.factory);
             tokio::spawn(async move {
+                let _lifecycle = factory.lifecycle.lock().await;
+                if factory.closed.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
                 let attempt = start_bootstrap_attempt(
                     factory.config.companion_bind,
                     factory.config.descriptor_path.clone(),
@@ -1247,7 +1369,11 @@ fn compose_worker_factory_inner(
                 match attempt {
                     Ok(attempt) => match attempt.complete_warm() {
                         Ok(server) => {
-                            *factory.server.lock().await = Some(server);
+                            let mut slot = factory.server.lock().await;
+                            if factory.closed.load(std::sync::atomic::Ordering::Acquire) {
+                                return;
+                            }
+                            *slot = Some(server);
                             tracing::info!(
                                 bind = %factory.config.companion_bind,
                                 "firefox companion warm: endpoint and descriptor live"
@@ -1815,6 +1941,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn descriptor_lock_contention_has_a_bounded_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("descriptor.json");
+        let held_path = path.clone();
+        let (ready, started) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _lock = DescriptorLock::claim(&held_path).unwrap();
+            ready.send(()).unwrap();
+            std::thread::sleep(Duration::from_secs(2));
+        });
+        started.recv().unwrap();
+        let result = tokio::task::spawn_blocking(move || DescriptorLock::claim(&path))
+            .await
+            .unwrap();
+        holder.join().unwrap();
+        assert!(
+            result.is_err(),
+            "a held descriptor lock must time out rather than wait indefinitely"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_warm_server_releases_listener_and_descriptor() {
+        let root = tempfile::tempdir().unwrap();
+        let descriptor = root.path().join("descriptor.json");
+        let server = start_bootstrap_attempt(
+            "127.0.0.1:0".parse().unwrap(),
+            descriptor.clone(),
+            Duration::from_millis(80),
+            Duration::from_secs(30),
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap()
+        .complete_warm()
+        .unwrap();
+        let addr = server.local_addr();
+        drop(server);
+        tokio::time::timeout(Duration::from_millis(300), async {
+            while descriptor.exists() || tokio::net::TcpStream::connect(addr).await.is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("warm refresh must not retain the listener or descriptor after its owner drops");
+    }
+
+    #[tokio::test]
     async fn replaced_warm_runtime_cannot_republish_its_old_endpoint() {
         let root = tempfile::tempdir().unwrap();
         let descriptor = root.path().join("descriptor.json");
@@ -1983,7 +2157,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configured_firefox_is_a_real_launch_candidate() {
+    async fn configured_firefox_rejects_missing_profile_without_publishing() {
         let profile_id = ProfileId::new();
         let test_dir = tempfile::tempdir().unwrap();
         let descriptor = test_dir
@@ -1999,7 +2173,7 @@ mod tests {
                 firefox: vec![FirefoxCompanionConfig {
                     profile_id: profile_id.0.to_string(),
                     bidi_url: "ws://127.0.0.1:9222/session".into(),
-                    profile_dir: PathBuf::from("/profiles/default-release"),
+                    profile_dir: test_dir.path().join("missing-profile"),
                     companion_bind: "127.0.0.1:0".into(),
                     descriptor_path: descriptor.clone(),
                     timeout_ms: 1,
@@ -2015,8 +2189,103 @@ mod tests {
             Ok(_) => panic!("unpaired Firefox unexpectedly launched"),
         };
         assert_eq!(error.code, ErrorCode::BrowserLaunchFailed);
+        assert!(error.message.contains("Firefox profile"), "{error:?}");
         assert!(!descriptor.exists());
         let _ = std::fs::remove_file(descriptor);
+    }
+
+    #[tokio::test]
+    async fn shutdown_releases_warm_factory_and_cancels_pending_warm_start() {
+        for wait_for_publication in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let descriptor = root.path().join("descriptor.json");
+            let factory = compose_worker_factory_warm(
+                &AppConfig::default(),
+                BrowserSelectionConfig {
+                    preference: EnginePreferenceConfig::Exact {
+                        engine: BrowserEngineConfig::Firefox,
+                        profile_id: None,
+                    },
+                    firefox: vec![FirefoxCompanionConfig {
+                        profile_id: ProfileId::new().0.to_string(),
+                        bidi_url: "ws://127.0.0.1:9222/session".into(),
+                        profile_dir: root.path().to_path_buf(),
+                        companion_bind: "127.0.0.1:0".into(),
+                        descriptor_path: descriptor.clone(),
+                        timeout_ms: 1000,
+                        pairing_code_ttl_ms: 80,
+                        attachment_ttl_ms: 1000,
+                    }],
+                },
+            )
+            .unwrap();
+            let address = if wait_for_publication {
+                Some(
+                    tokio::time::timeout(Duration::from_secs(2), async {
+                        loop {
+                            if let Ok(bytes) = std::fs::read(&descriptor) {
+                                if let Ok(value) =
+                                    serde_json::from_slice::<NativeHostDescriptor>(&bytes)
+                                {
+                                    break Url::parse(&value.endpoint)
+                                        .unwrap()
+                                        .socket_addrs(|| None)
+                                        .unwrap()[0];
+                                }
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .unwrap(),
+                )
+            } else {
+                None
+            };
+            factory.shutdown().await;
+            // Keep the factory alive: shutdown itself must release ownership.
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let listening = match address {
+                        Some(address) => tokio::net::TcpStream::connect(address).await.is_ok(),
+                        None => false,
+                    };
+                    if !descriptor.exists() && !listening {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("shutdown leaked the warm listener or descriptor");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(
+                !descriptor.exists(),
+                "pending warm start republished after shutdown"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn firefox_recovery_rejects_invalid_profiles_before_spawning() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("firefox");
+        let marker = root.path().join("spawned");
+        std::fs::write(&bin, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let missing = root.path().join("missing-profile");
+        let file = root.path().join("not-a-directory");
+        std::fs::write(&file, b"keep").unwrap();
+        for profile in [&missing, &file] {
+            let error = spawn_enrolled_firefox(&bin, profile, 9224)
+                .expect_err("invalid profile must not launch Firefox");
+            assert!(error.message.contains("Firefox profile"), "{error:?}");
+        }
+        assert!(!marker.exists());
+        assert!(!missing.exists());
+        assert_eq!(std::fs::read(file).unwrap(), b"keep");
     }
 
     #[tokio::test]
@@ -2067,35 +2336,25 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_firefox_bootstrap_removes_descriptor_and_listener() {
-        let profile_id = ProfileId::new();
         let descriptor_dir = tempfile::tempdir().unwrap();
         let descriptor = descriptor_dir.path().join(format!(
             "cancelled-firefox-companion-{}.json",
             uuid::Uuid::new_v4()
         ));
-        let factory = compose_worker_factory(
-            &AppConfig::default(),
-            BrowserSelectionConfig {
-                preference: EnginePreferenceConfig::Exact {
-                    engine: BrowserEngineConfig::Firefox,
-                    profile_id: Some(profile_id.0.to_string()),
-                },
-                firefox: vec![FirefoxCompanionConfig {
-                    profile_id: profile_id.0.to_string(),
-                    bidi_url: "ws://127.0.0.1:9222/session".into(),
-                    profile_dir: PathBuf::from("/profiles/default-release"),
-                    companion_bind: "127.0.0.1:0".into(),
-                    descriptor_path: descriptor.clone(),
-                    timeout_ms: 30_000,
-                    pairing_code_ttl_ms: 30_000,
-                    attachment_ttl_ms: 30_000,
-                }],
-            },
-        )
-        .unwrap();
         let task = tokio::spawn({
-            let factory = factory.clone();
-            async move { factory.launch(&SessionId::new()).await }
+            let descriptor = descriptor.clone();
+            async move {
+                let _attempt = start_bootstrap_attempt(
+                    "127.0.0.1:0".parse().unwrap(),
+                    descriptor,
+                    Duration::from_secs(30),
+                    Duration::from_secs(30),
+                    Arc::new(|_| {}),
+                )
+                .await
+                .unwrap();
+                std::future::pending::<()>().await;
+            }
         });
         let descriptor_ready = tokio::time::timeout(Duration::from_secs(1), async {
             while !descriptor.exists() && !task.is_finished() {
@@ -2103,11 +2362,8 @@ mod tests {
             }
         })
         .await;
-        if descriptor_ready.is_err() || task.is_finished() {
-            let _ = task.await;
-            assert!(!descriptor.exists());
-            return;
-        }
+        descriptor_ready.expect("bootstrap did not publish its descriptor");
+        assert!(!task.is_finished(), "bootstrap exited before cancellation");
         let published: NativeHostDescriptor =
             serde_json::from_slice(&std::fs::read(&descriptor).unwrap()).unwrap();
         let address: SocketAddr = Url::parse(&published.endpoint)

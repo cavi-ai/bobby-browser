@@ -101,6 +101,7 @@ impl fmt::Debug for ReconnectCredential {
 pub struct NativeHostConfig {
     endpoint: String,
     pairing_code: String,
+    ownership_id: Option<String>,
     reconnect_credential: Arc<Mutex<Option<ReconnectCredential>>>,
     config_refresh: Option<Arc<dyn Fn() -> Option<NativeHostConfig> + Send + Sync>>,
     config_changes: Option<watch::Receiver<u64>>,
@@ -111,13 +112,20 @@ impl NativeHostConfig {
         Self {
             endpoint,
             pairing_code: pairing_code.into(),
+            ownership_id: None,
             reconnect_credential: Arc::new(Mutex::new(None)),
             config_refresh: None,
             config_changes: None,
         }
     }
 
-    /// Reload local endpoint discovery when a runtime moves its listener.
+    /// Identify the listener's publication generation independently of its port.
+    pub fn with_ownership_id(mut self, ownership_id: String) -> Self {
+        self.ownership_id = (!ownership_id.is_empty()).then_some(ownership_id);
+        self
+    }
+
+    /// Reload local endpoint discovery when a runtime replaces its listener.
     pub fn with_config_refresh(
         mut self,
         changes: watch::Receiver<u64>,
@@ -132,7 +140,8 @@ impl NativeHostConfig {
         let Some(mut next) = self.config_refresh.as_ref().and_then(|refresh| refresh()) else {
             return false;
         };
-        if next.endpoint == self.endpoint
+        let same_owner = next.ownership_id.is_none() || next.ownership_id == self.ownership_id;
+        if (next.endpoint == self.endpoint && same_owner)
             || next
                 .authentication_token()
                 .and_then(|token| next.authenticated_request(&token))
@@ -1018,6 +1027,54 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pairing_code_refresh_keeps_the_current_owner_credential() {
+        let (_changed, changes) = watch::channel(0_u64);
+        let mut config =
+            NativeHostConfig::new("ws://127.0.0.1:9877/v1/companion".into(), "original")
+                .with_ownership_id("same-owner".into())
+                .with_config_refresh(changes, || {
+                    Some(
+                        NativeHostConfig::new(
+                            "ws://127.0.0.1:9877/v1/companion".into(),
+                            "rotated-code",
+                        )
+                        .with_ownership_id("same-owner".into()),
+                    )
+                });
+        config
+            .store_reconnect_credential("existing-credential".into())
+            .unwrap();
+        assert!(!config.refresh_endpoint());
+        assert_eq!(
+            config.authentication_token().unwrap(),
+            "existing-credential"
+        );
+    }
+
+    #[test]
+    fn ownership_change_at_the_same_endpoint_replaces_the_old_credential() {
+        let (_changed, changes) = watch::channel(0_u64);
+        let mut config =
+            NativeHostConfig::new("ws://127.0.0.1:9877/v1/companion".into(), "original")
+                .with_ownership_id("old-owner".into())
+                .with_config_refresh(changes, || {
+                    Some(
+                        NativeHostConfig::new(
+                            "ws://127.0.0.1:9877/v1/companion".into(),
+                            "new-code",
+                        )
+                        .with_ownership_id("new-owner".into()),
+                    )
+                });
+        config
+            .store_reconnect_credential("old-credential".into())
+            .unwrap();
+        assert!(config.refresh_endpoint());
+        assert_eq!(config.authentication_token().unwrap(), "new-code");
+        assert!(!config.has_reconnect_credential().unwrap());
+    }
 
     #[test]
     fn endpoint_refresh_rejects_remote_and_invalid_pairing_material() {

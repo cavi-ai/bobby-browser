@@ -2303,7 +2303,8 @@ async fn run_configured_native_host(descriptor_path: PathBuf) -> Result<()> {
         Ok(bytes) => {
             let descriptor: NativeHostDescriptor = serde_json::from_slice(&bytes)?;
             Some(follow_native_host_descriptor(
-                NativeHostConfig::new(descriptor.endpoint, descriptor.pairing_code),
+                NativeHostConfig::new(descriptor.endpoint, descriptor.pairing_code)
+                    .with_ownership_id(descriptor.ownership_id),
                 descriptor_path.clone(),
             )?)
         }
@@ -2351,10 +2352,10 @@ fn follow_native_host_descriptor(
         let _keep_watcher_alive = &watcher;
         let bytes = std::fs::read(&path).ok()?;
         let descriptor: NativeHostDescriptor = serde_json::from_slice(&bytes).ok()?;
-        Some(NativeHostConfig::new(
-            descriptor.endpoint,
-            descriptor.pairing_code,
-        ))
+        Some(
+            NativeHostConfig::new(descriptor.endpoint, descriptor.pairing_code)
+                .with_ownership_id(descriptor.ownership_id),
+        )
     }))
 }
 
@@ -2426,7 +2427,8 @@ fn load_usable_live_descriptor(path: &Path) -> Option<NativeHostConfig> {
         return None;
     }
     follow_native_host_descriptor(
-        NativeHostConfig::new(descriptor.endpoint, descriptor.pairing_code),
+        NativeHostConfig::new(descriptor.endpoint, descriptor.pairing_code)
+            .with_ownership_id(descriptor.ownership_id),
         path.to_path_buf(),
     )
     .ok()
@@ -2497,7 +2499,8 @@ impl NativeHostEnroll for NativeHostFirefoxEnroll {
             )
             .map_err(|_| EnrollHostError::ListenerUnavailable)?;
             let config = follow_native_host_descriptor(
-                NativeHostConfig::new(descriptor.endpoint, descriptor.pairing_code),
+                NativeHostConfig::new(descriptor.endpoint, descriptor.pairing_code)
+                    .with_ownership_id(descriptor.ownership_id),
                 defaults.descriptor_path.clone(),
             )
             .map_err(|_| EnrollHostError::ListenerUnavailable)?;
@@ -2879,6 +2882,91 @@ model = "mlx-community/example-selected"
                 Path::new("other.json")
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn native_host_recovers_restarted_owner_on_the_same_port() {
+        use companion_core::{CompanionServer, CompanionServerConfig};
+        let root = tempfile::tempdir().unwrap();
+        let descriptor = root.path().join("descriptor.json");
+        let server_config = |bind_addr| CompanionServerConfig {
+            bind_addr,
+            pairing_code_ttl: Duration::from_secs(60),
+            attachment_ttl: Duration::from_secs(60),
+        };
+        let first = CompanionServer::bind_loopback(server_config("127.0.0.1:0".parse().unwrap()))
+            .await
+            .unwrap();
+        let addr = first.local_addr();
+        let code = first.registry().issue_pairing_code().await;
+        std::fs::write(
+            &descriptor,
+            serde_json::to_vec(&NativeHostDescriptor {
+                endpoint: format!("ws://{addr}/v1/companion"),
+                pairing_code: code.clone(),
+                ownership_id: uuid::Uuid::new_v4().to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let config = follow_native_host_descriptor(
+            NativeHostConfig::new(format!("ws://{addr}/v1/companion"), code),
+            descriptor.clone(),
+        )
+        .unwrap();
+        let (stream, mut extension) =
+            tokio::io::duplex(2 * companion_core::MAX_NATIVE_MESSAGE_BYTES);
+        let (reader, writer) = tokio::io::split(stream);
+        let host = tokio::spawn(companion_core::run_native_host(reader, writer, config));
+        companion_core::write_native_message(
+            &mut extension,
+            &serde_json::json!({"kind":"pair","input":sample_native_connect_request()}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            companion_core::read_native_message(&mut extension)
+                .await
+                .unwrap()
+                .unwrap()["kind"],
+            "paired"
+        );
+        first.disconnect_clients();
+        drop(first);
+        let second = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(server) = CompanionServer::bind_loopback(server_config(addr)).await {
+                    break server;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        std::fs::write(
+            &descriptor,
+            serde_json::to_vec(&NativeHostDescriptor {
+                endpoint: format!("ws://{addr}/v1/companion"),
+                pairing_code: second.registry().issue_pairing_code().await,
+                ownership_id: uuid::Uuid::new_v4().to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let message = tokio::time::timeout(
+            Duration::from_secs(2),
+            companion_core::read_native_message(&mut extension),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            message["kind"], "paired",
+            "a new owner must recover even when its endpoint is unchanged"
+        );
+        drop(extension);
+        host.await.unwrap().unwrap();
     }
 
     #[tokio::test]
