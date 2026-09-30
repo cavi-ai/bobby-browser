@@ -7,6 +7,9 @@ documentedVersion: {{PRODUCT_VERSION}}
 > **Not the agent skill.** Agents install and follow the public skill via
 > `bobby install --skill` (`bobby-browser` under `~/.agents/skills/`, sourced
 > from `skill/SKILL.md` in the repo). That skill drives MCP tools.
+> `--skill-openclaw` writes the same MCP skill into `$OPENCLAW_STATE_DIR/skills/`
+> (else `~/.openclaw/skills/`). `--skill-hermes` writes the Python SDK skill
+> (`skill/hermes/SKILL.md`) into `$HERMES_HOME/skills/` (else `~/.hermes/skills/`).
 > **Ghost** and **ZigZagZig** (Rust: `SkillGhost` / `SkillZigZagZig`) below are
 > an in-process recovery router used by runtime tests — they are **not** MCP
 > tools and are not part of the public HTTP/SDK surface.

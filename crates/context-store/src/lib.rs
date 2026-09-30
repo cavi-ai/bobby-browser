@@ -165,7 +165,7 @@ impl ContextStore {
     ) -> Result<(Self, OpenReport), ContextStoreError> {
         let root = root.as_ref().join(encode_component(profile_id));
         tokio::fs::create_dir_all(&root).await?;
-        let lock = Lockfile::claim(&root).await?;
+        let lock = Lockfile::claim(&root)?;
         let mut index = BTreeMap::new();
         let mut report = OpenReport::default();
         let mut entries = tokio::fs::read_dir(&root).await?;
@@ -421,17 +421,12 @@ fn encode_component(value: &str) -> String {
     hex::encode(value.as_bytes())
 }
 
-/// Attempts to claim the lockfile before reporting contention.
-const LOCK_CLAIM_ATTEMPTS: u32 = 5;
-/// Pause between claim attempts.
-const LOCK_CLAIM_BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
-
 struct Lockfile {
-    _file: std::fs::File,
+    file: std::fs::File,
 }
 
 impl Lockfile {
-    async fn claim(root: &Path) -> Result<Self, ContextStoreError> {
+    fn claim(root: &Path) -> Result<Self, ContextStoreError> {
         let path = root.join(".context-store.lock");
         if let Ok(metadata) = std::fs::symlink_metadata(&path) {
             if !metadata.file_type().is_file() {
@@ -469,27 +464,25 @@ impl Lockfile {
             }
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         }
-        // A lock released moments ago is not always claimable on the very next
-        // attempt: `bobby context forget` opens, drops, and reopens the store
-        // in one process, and on Linux that hand-off loses the race often
-        // enough to fail a test run every time. Retry briefly.
-        //
-        // This does not soften real contention. A running bobby holds the lock
-        // for its whole lifetime, so it still fails after the last attempt --
-        // the window only covers a close that has just happened.
-        let mut attempt = 0;
-        loop {
-            match file.try_lock() {
-                Ok(()) => return Ok(Self { _file: file }),
-                Err(std::fs::TryLockError::WouldBlock) if attempt < LOCK_CLAIM_ATTEMPTS - 1 => {
-                    attempt += 1;
-                    tokio::time::sleep(LOCK_CLAIM_BACKOFF).await;
-                }
-                Err(std::fs::TryLockError::WouldBlock) => {
-                    return Err(ContextStoreError::AlreadyLocked)
-                }
-                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
-            }
+        match file.try_lock() {
+            Ok(()) => Ok(Self { file }),
+            Err(std::fs::TryLockError::WouldBlock) => Err(ContextStoreError::AlreadyLocked),
+            Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
         }
+    }
+}
+
+impl Drop for Lockfile {
+    /// Releases the lock explicitly instead of leaving it to the close.
+    ///
+    /// A flock belongs to the open file description, not to this descriptor,
+    /// and a close only releases it once every copy of the descriptor is
+    /// gone. A child that any thread is spawning holds a copy from its fork
+    /// until its exec, `O_CLOEXEC` notwithstanding, so a close alone let the
+    /// lock outlive the store: the next open in this process, such as the
+    /// one in `bobby context forget`, then reported a running bobby that did
+    /// not exist. Unlocking drops the lock for every copy at once.
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
     }
 }

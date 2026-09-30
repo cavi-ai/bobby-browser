@@ -48,6 +48,7 @@ pub enum JobStatus {
     Completed,
     Failed,
     Cancelled,
+    ReconciliationRequired,
 }
 
 impl fmt::Display for JobStatus {
@@ -58,6 +59,7 @@ impl fmt::Display for JobStatus {
             JobStatus::Completed => write!(f, "completed"),
             JobStatus::Failed => write!(f, "failed"),
             JobStatus::Cancelled => write!(f, "cancelled"),
+            JobStatus::ReconciliationRequired => write!(f, "reconciliationRequired"),
         }
     }
 }
@@ -157,6 +159,11 @@ impl Job {
     pub fn cancel(&mut self) {
         self.status = JobStatus::Cancelled;
         self.completed_at = Some(Utc::now());
+    }
+
+    pub fn require_reconciliation(&mut self, reason: impl Into<String>) {
+        self.status = JobStatus::ReconciliationRequired;
+        self.error = Some(reason.into());
     }
 
     pub fn can_retry(&self) -> bool {
@@ -262,6 +269,11 @@ pub enum JobError {
 
     #[error("job store error: {0}")]
     Store(String),
+
+    /// A store error after admission was attempted cannot prove whether the
+    /// job was appended. The ID lets callers reconcile without resubmitting.
+    #[error("job {job_id} admission uncertain: {message}")]
+    AdmissionUncertain { job_id: JobId, message: String },
 
     #[error("missing capability: {0:?}")]
     MissingCapability(types::Capability),

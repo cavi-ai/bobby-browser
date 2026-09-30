@@ -183,16 +183,20 @@ impl Server {
                         return error(
                             id,
                             INTERFACE_ERROR,
-                            "Runtime interface error",
-                            Some(json!({"eventGap": gap})),
+                            "Runtime interface error: eventGap",
+                            Some(json!({
+                                "eventGap": gap,
+                                "repair": crate::repair::event_gap_repair(),
+                            })),
                         )
                     }
                     Err(_) => {
                         return error(
                             id,
                             INTERFACE_ERROR,
-                            "Runtime interface error",
+                            "Runtime interface error: deadlineExceeded",
                             Some(json!({
+                                "repair": crate::repair::repair_for_code("deadlineExceeded"),
                                 "interfaceError": {
                                     "code":"deadlineExceeded",
                                     "layer":"interface",

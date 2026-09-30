@@ -262,7 +262,7 @@ bobby serve --vision
 | Provider | `base_url` (default) | `model` (default) | `api_key_env` |
 |---|---|---|---|
 | `openai` | `https://api.openai.com/v1` | `gpt-4o-mini` | `OPENAI_API_KEY` |
-| `ollama` | `http://127.0.0.1:11434/v1` | `llava` | — |
+| `ollama` | `http://127.0.0.1:11434` | `llava` | — |
 | `lmstudio` | `http://127.0.0.1:1234/v1` | `local-model` | — |
 
 For LM Studio (or MLX-hosted OpenAI-compatible servers), copy the **Server

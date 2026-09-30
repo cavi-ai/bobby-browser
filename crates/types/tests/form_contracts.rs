@@ -86,7 +86,8 @@ fn valid_snapshot() -> Value {
             }
         }],
         "unownedControls": [],
-        "truncated": false
+        "truncated": false,
+        "pageDerived": true
     })
 }
 

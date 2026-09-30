@@ -27,6 +27,7 @@ use worker_pool::{ChromiumWorkerFactory, WorkerFactory, WorkerPool};
 use workflow_journal::JsonlJournal;
 
 mod interface;
+pub mod workflow;
 
 pub use interface::AuthenticatedRuntime;
 
@@ -59,12 +60,16 @@ fn zigzagzig_unavailable(reason: &str) -> CommandError {
 pub struct RuntimeService {
     pub sessions: SessionManager,
     pub pages: PageRuntime,
+    idempotency: interface_core::IdempotencyStore,
+    lifecycle_idempotency:
+        interface_core::IdempotencyStore<interface_core::SessionCheckpointOutcome>,
     recovery: Option<RecoveryCoordinator>,
     /// Worker pool for the ZigZagZig recovery ladder. Present in every
     /// production build; `None` only for hand-built test services.
     workers: Option<Arc<worker_pool::WorkerPool>>,
     started_at: std::time::Instant,
     in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    serialized_response_bytes: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Nodes this runtime can reach. Empty by default, so a `RuntimeService`
     /// built without configuration resolves no node for any session.
     nodes: Arc<NodeRegistry>,
@@ -111,6 +116,8 @@ impl RuntimeService {
         Self {
             sessions,
             pages,
+            idempotency: interface_core::IdempotencyStore::default(),
+            lifecycle_idempotency: interface_core::IdempotencyStore::default(),
             recovery: None,
             workers: None,
             nodes: Arc::new(NodeRegistry::default()),
@@ -121,6 +128,7 @@ impl RuntimeService {
             operational_metrics: OperationalMetrics::default(),
             started_at: std::time::Instant::now(),
             in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            serialized_response_bytes: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -132,6 +140,8 @@ impl RuntimeService {
         Self {
             sessions,
             pages,
+            idempotency: interface_core::IdempotencyStore::default(),
+            lifecycle_idempotency: interface_core::IdempotencyStore::default(),
             recovery: Some(recovery),
             workers: None,
             nodes: Arc::new(NodeRegistry::default()),
@@ -142,6 +152,7 @@ impl RuntimeService {
             operational_metrics: OperationalMetrics::default(),
             started_at: std::time::Instant::now(),
             in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            serialized_response_bytes: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -171,6 +182,16 @@ impl RuntimeService {
 
     fn with_operational_metrics(mut self, metrics: OperationalMetrics) -> Self {
         self.operational_metrics = metrics;
+        self
+    }
+
+    fn with_idempotency_stores(
+        mut self,
+        command: interface_core::IdempotencyStore,
+        lifecycle: interface_core::IdempotencyStore<interface_core::SessionCheckpointOutcome>,
+    ) -> Self {
+        self.idempotency = command;
+        self.lifecycle_idempotency = lifecycle;
         self
     }
 
@@ -305,6 +326,46 @@ impl RuntimeService {
                 .await
                 .map_err(|error| RuntimeError::Internal(error.to_string()))?,
         );
+        let command_journal = journal.clone();
+        let command_idempotency = interface_core::IdempotencyStore::open_durable(
+            config
+                .storage
+                .journal_path
+                .with_extension("idempotency.json"),
+            move |value| {
+                let command_journal = command_journal.clone();
+                async move {
+                    let command_id: types::CommandId =
+                        serde_json::from_value(value).map_err(std::io::Error::other)?;
+                    let history =
+                        workflow_journal::CommandJournal::history(&*command_journal, command_id)
+                            .await
+                            .map_err(std::io::Error::other)?;
+                    Ok(history
+                        .records
+                        .into_iter()
+                        .filter_map(|record| record.outcome)
+                        .next_back())
+                }
+            },
+        )
+        .await
+        .map_err(|error| RuntimeError::Internal(format!("command idempotency ledger: {error}")))?;
+        let lifecycle_idempotency = interface_core::IdempotencyStore::open_durable(
+            config
+                .storage
+                .journal_path
+                .with_extension("lifecycle-idempotency.json"),
+            |value| async move {
+                serde_json::from_value::<interface_core::SessionCheckpointOutcome>(value)
+                    .map(Some)
+                    .map_err(std::io::Error::other)
+            },
+        )
+        .await
+        .map_err(|error| {
+            RuntimeError::Internal(format!("lifecycle idempotency ledger: {error}"))
+        })?;
         let workers = Arc::new(WorkerPool::new(config.browser.max_active, factory));
         let checkpoints = checkpoint_store::CheckpointStore::open(&config.storage.checkpoints_dir)
             .await
@@ -370,6 +431,7 @@ impl RuntimeService {
         }
         let sessions = SessionManager::new(workers.clone());
         Ok(Self::with_recovery(sessions, pages, recovery)
+            .with_idempotency_stores(command_idempotency, lifecycle_idempotency)
             .with_workers(workers)
             .with_nodes(nodes)
             .with_vision_state(vision_assist_present, provider_present)
@@ -529,7 +591,32 @@ impl RuntimeService {
         Ok((outcome, saved.checkpoint_id))
     }
 
+    /// Full serialized command outcomes returned by this service, including
+    /// setup calls that bypass a particular test driver. This is a direct
+    /// Rust response boundary, not an HTTP or MCP projection measurement.
+    pub fn serialized_response_bytes(&self) -> u64 {
+        self.serialized_response_bytes
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     async fn submit_with_vision_grant(
+        &self,
+        envelope: CommandEnvelope,
+        vision_capability_ok: bool,
+        one_shot_session_ok: bool,
+    ) -> CommandOutcome {
+        let outcome = self
+            .submit_with_vision_grant_inner(envelope, vision_capability_ok, one_shot_session_ok)
+            .await;
+        let bytes = serde_json::to_vec(&outcome)
+            .expect("command outcomes must serialize at the runtime boundary")
+            .len() as u64;
+        self.serialized_response_bytes
+            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+        outcome
+    }
+
+    async fn submit_with_vision_grant_inner(
         &self,
         envelope: CommandEnvelope,
         vision_capability_ok: bool,

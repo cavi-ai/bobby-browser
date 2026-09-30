@@ -2,14 +2,88 @@
 
 ## Unreleased
 
+## 0.17.0 - 2026-09-28
+
 ### Fixed
 
+- Interrupted scheduler jobs now require reconciliation instead of being
+  replayed after restart, and durable idempotency reservations survive runtime
+  replacement so an uncertain operation cannot be submitted twice.
+- A dropped durable idempotency store explicitly releases its writer lock even
+  if a forked child briefly holds a copy of the file descriptor.
+- Homebrew formula license metadata now matches the repository's MIT license.
+- Firefox workflow targeting and recovery handle detached controls, frame
+  targeting, and companion reconnects more consistently. Workflow setup and
+  observation share a typed core across adapters.
+- Vision readiness honors the configured proxy for remote providers and
+  recognizes Ollama's full `/v1/chat/completions` base URL.
 - MCP stdio no longer drops a request whose line arrives in more than one
   read: when a response or notification write finished while a request was
   half-read, the gateway discarded the bytes already read, answered
   `Parse error` (-32700) with a null id, and never ran the request. The
   partial frame now survives until its newline arrives, and a frame already
   over the size limit stays rejected as `frameTooLarge`.
+- Vision proxy, Ollama upstream: a `base_url` ending in `/v1` or
+  `/v1/chat/completions` no longer doubles the path (`/v1/v1/...`); host-only,
+  `/v1`, and full-endpoint forms all reach `<host>/v1/chat/completions`. The
+  `ollama` preset now writes the host-only `http://127.0.0.1:11434`. Requests
+  ask for `response_format: {"type": "json_object"}`, and a reply that wraps
+  its JSON object in commentary is still parsed.
+- `bobby install` no longer fails the whole run when Ollama (or another
+  selected vision backend) is not reachable; it writes config, prints
+  `locations:`, and tells `bobby doctor` to re-check.
+- Host MCP/ACP entries follow the `bobby install --cli` binary, not whichever
+  `bobby` happens to be first on PATH. `bobby doctor --fix` no longer rewrites
+  those entries to an older Homebrew copy.
+- Ollama vision readiness probed `{base}/models`, which 404s on a host-only
+  `http://127.0.0.1:11434` base. It now hits `/v1/models` (and `/api/tags`),
+  treats `llava` as present when `llava:7b` is installed, and `bobby doctor --fix`
+  starts `ollama serve` when the loopback port is down.
+- `bobby doctor` now reports `vision-readiness` on the regular run, not only
+  under `--fix`.
+
+### Changed
+
+- `bobby doctor` prints `next: bobby doctor --fix` first when anything is
+  wrong, and auto-repairable fail lines include ` · fix: …`.
+- `bobby install` prints a `locations:` block (config, credentials, CLI, host
+  files, OpenClaw/Hermes skill dirs). `bobby doctor` warns when PATH `bobby`
+  is not that CLI.
+- `bobby install --skill-openclaw` writes `$OPENCLAW_STATE_DIR/skills/` when
+  that env is set, else `~/.openclaw/skills/`.
+- `bobby install --skill-hermes` installs the Python SDK skill
+  (`skill/hermes/SKILL.md`) into `$HERMES_HOME/skills/` when set, else
+  `~/.hermes/skills/`.
+- Python SDK publishes to PyPI as `bobby-browser` from each release tag
+  (`.github/workflows/publish-python.yml`, trusted publishing, no stored
+  token); `workflow_dispatch` publishes an existing tag. Install docs, the
+  package README, and the Hermes skill now say `pip install bobby-browser`.
+- MCP: every JSON-RPC error `message` now ends with its repair action
+  (`<message>; repair: <action>`), and `error.data.repair` carries the same
+  `{action, doc}`. Previously `-32700`, `-32600`, `-32601`, `-32002`,
+  `-32800`, `-32603`, bare `-32602`, and the `-32000` rejections for
+  `eventGap`, missing or oversized artifacts, and job errors reached hosts
+  that render only `message` with no repair. `controlIdNotFound` and
+  `exactlyOneOfWorkflowIdOrSessionId` gained their own repairs; a `-32602`
+  reason with none falls back to the general one. The duplicate-request-id
+  rejection's `data.repair` is now the `{action, doc}` object instead of a
+  bare string.
+
+### Changed
+
+- Vision proxy error responses are a structured object,
+  `{"error": {"code", "kind", "message", "retryable"}}` (codes
+  `visionAuthRejected`, `visionInvalidRequest`, `visionUpstreamTransport`,
+  `visionUpstreamRejected`, `visionInvalidModelReply`), with `message` capped
+  at 512 characters; a 401 now carries this body too. An upstream rejection
+  reports only its status class and code, never the upstream response body,
+  and an unparseable model reply is reported with a fixed message.
+
+- Firefox companion: a fixed (nonzero) companion port that is already taken
+  now fails the launch with `browserLaunchFailed` naming the port, and the
+  descriptor file is left untouched. This replaces the 0.16.0 fallback to a
+  dynamic loopback port, which could publish a second endpoint over the
+  configured owner's descriptor. Port 0 still binds an ephemeral port.
 
 ### Changed
 

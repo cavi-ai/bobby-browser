@@ -135,6 +135,7 @@ pub fn connect(opts: ConnectOpts) -> Result<()> {
             &crate::vision_readiness::ReadinessOptions {
                 timeout: Duration::from_secs(45),
                 allow_download: opts.download_model,
+                allow_start: true,
             },
         )? {
             crate::vision_readiness::ReadinessOutcome::Ready { provider, model } => {
@@ -346,7 +347,7 @@ pub(crate) fn preset(name: &str) -> Option<(String, VisionProviderConfig)> {
             api_key_env: Some("OPENAI_API_KEY".into()),
         },
         "ollama" => VisionProviderConfig {
-            base_url: "http://127.0.0.1:11434/v1".into(),
+            base_url: "http://127.0.0.1:11434".into(),
             model: "llava".into(),
             api_key_env: None,
         },
@@ -541,7 +542,7 @@ mod tests {
         assert_eq!(openai.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
 
         let (_, ollama) = preset("ollama").unwrap();
-        assert_eq!(ollama.base_url, "http://127.0.0.1:11434/v1");
+        assert_eq!(ollama.base_url, "http://127.0.0.1:11434");
         assert_eq!(ollama.model, "llava");
         assert!(ollama.api_key_env.is_none());
 

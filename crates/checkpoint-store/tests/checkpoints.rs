@@ -293,6 +293,47 @@ async fn a_session_lists_its_own_workflows_newest_first_within_the_cap() {
     assert!(none.is_empty(), "an unknown session lists nothing");
 }
 
+#[tokio::test]
+async fn cached_session_listing_invalidates_after_save_remove_and_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let session = SessionId::new();
+    let mut first = checkpoint(WorkflowId::new(), "https://example.test/first");
+    first.session_id = session.clone();
+    store.save(&first).await.unwrap();
+    assert_eq!(store.list_for_session(&session, 10).await.unwrap().len(), 1);
+
+    let mut second = checkpoint(WorkflowId::new(), "https://example.test/second");
+    second.session_id = session.clone();
+    store.save(&second).await.unwrap();
+    assert_eq!(store.list_for_session(&session, 10).await.unwrap().len(), 2);
+
+    store.remove(&first.workflow_id).await.unwrap();
+    let listed = store.list_for_session(&session, 10).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].workflow_id, second.workflow_id);
+    drop(store);
+
+    let reopened = CheckpointStore::open(root.path()).await.unwrap();
+    assert_eq!(
+        reopened.list_for_session(&session, 10).await.unwrap(),
+        listed
+    );
+}
+
+#[tokio::test]
+async fn corrupt_checkpoint_does_not_hide_recoverable_session_entries() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let entry = checkpoint(WorkflowId::new(), "https://example.test/recoverable");
+    store.save(&entry).await.unwrap();
+    std::fs::write(root.path().join("corrupt.json"), b"not-json").unwrap();
+    assert_eq!(
+        store.list_for_session(&entry.session_id, 10).await.unwrap(),
+        vec![entry]
+    );
+}
+
 /// One unreadable file must not hide every other recoverable workflow.
 #[tokio::test]
 async fn a_corrupt_entry_is_skipped_rather_than_failing_the_listing() {

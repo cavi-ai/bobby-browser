@@ -282,6 +282,54 @@ async fn a_dropped_store_releases_its_lock_for_the_next_open() {
     drop(third);
 }
 
+/// A dropped store releases its lock even while a forked child still holds a
+/// copy of the lock descriptor.
+///
+/// On Linux, `std::process::Command` creates the child first and execs it
+/// second. Until the exec, the child holds a copy of every descriptor in the
+/// process, `O_CLOEXEC` ones included, and a flock belongs to the open file
+/// description those copies share. Closing ours released nothing while some
+/// other thread's child sat in that window, so `bobby context forget`
+/// reported a running bobby that did not exist. `pre_exec` parks the child in
+/// the window for as long as the test needs it there.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_dropped_store_releases_its_lock_while_a_forked_child_holds_a_copy() {
+    use std::io::{Read, Write};
+    use std::os::unix::process::CommandExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let (store, _) = ContextStore::open(root.path(), "profile-a").await.unwrap();
+
+    let (mut forked_reader, mut forked_writer) = std::io::pipe().unwrap();
+    let (mut release_reader, mut release_writer) = std::io::pipe().unwrap();
+    let mut command = std::process::Command::new("true");
+    // SAFETY: the closure only issues read and write syscalls on pipes it
+    // owns; it neither allocates nor takes a lock.
+    unsafe {
+        command.pre_exec(move || {
+            forked_writer.write_all(&[1])?;
+            release_reader.read_exact(&mut [0])?;
+            Ok(())
+        });
+    }
+    // Spawning blocks until the child execs, so it runs on its own thread,
+    // the way a concurrent test or task spawns in a real process.
+    let spawner = std::thread::spawn(move || command.status());
+    forked_reader.read_exact(&mut [0]).unwrap();
+
+    drop(store);
+    let reopened = ContextStore::open(root.path(), "profile-a").await;
+
+    // The child also holds a copy of the release pipe's write end, so only a
+    // written byte, never a close, lets it through to the exec.
+    release_writer.write_all(&[1]).unwrap();
+    assert!(spawner.join().unwrap().unwrap().success());
+    if let Err(error) = reopened {
+        panic!("a dropped store must release its lock despite a forked child: {error}");
+    }
+}
+
 /// A live store still refuses a second writer.
 #[tokio::test]
 async fn a_live_store_still_refuses_a_second_writer() {

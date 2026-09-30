@@ -88,6 +88,34 @@ impl BrowserWorker for Worker {
 }
 
 #[tokio::test]
+async fn durable_ledger_reopens_only_after_all_fixture_owners_are_released() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = config::AppConfig::default();
+    config.storage.journal_path = root.path().join("commands.jsonl");
+    config.storage.checkpoints_dir = root.path().join("checkpoints");
+    config.browser.artifacts_dir = root.path().join("artifacts");
+    let factory = Arc::new(CountingFactory(Arc::new(AtomicUsize::new(0))));
+
+    let service = RuntimeService::build_with_worker_factory(&config, factory.clone())
+        .await
+        .unwrap();
+    let fixture_owner = service.clone();
+    drop(service);
+    match RuntimeService::build_with_worker_factory(&config, factory.clone()).await {
+        Err(error) => assert!(
+            error.to_string().contains("command idempotency ledger:"),
+            "{error}"
+        ),
+        Ok(_) => panic!("fixture owner must keep the ledger locked"),
+    }
+
+    drop(fixture_owner);
+    RuntimeService::build_with_worker_factory(&config, factory)
+        .await
+        .expect("same journal must reopen after the final owner drops");
+}
+
+#[tokio::test]
 async fn build_with_worker_factory_consumes_the_injected_factory() {
     let root = tempfile::tempdir().unwrap();
     let mut config = config::AppConfig::default();

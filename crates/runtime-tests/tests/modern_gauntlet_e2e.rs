@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 use modern_gauntlet::driver::{Journey, ModernRuntime};
 use modern_gauntlet::evidence::{
-    assert_effect_count, assert_file_digest, assert_journal_terminal_once, EvidenceBundle,
+    assert_effect_count, assert_journal_terminal_once, EvidenceBundle,
 };
 use modern_gauntlet::scenario::{
     ScenarioConfig, ScenarioServer, MFA_CODE, OPERATOR_EMAIL, OPERATOR_PASSWORD, THREE_DS_CODE,
@@ -544,9 +544,10 @@ async fn interrupted_report_recovers_once_and_downloads() -> TestResult<()> {
         })
         .ok_or("download command completed without download evidence")?;
     persist_evidence("report-recovery", &server, &runtime).await?;
-    assert_file_digest(std::path::Path::new(path), digest)?;
+    let bytes = runtime.download_bytes(path).await?;
+    assert_eq!(hex::encode(Sha256::digest(&bytes)), *digest);
     assert_eq!(
-        std::fs::read_to_string(path)?,
+        String::from_utf8(bytes)?,
         "customer,priority\nAtlas Labs,high\n"
     );
     let snapshot = server.snapshot().await;

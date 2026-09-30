@@ -2070,6 +2070,161 @@ async fn wait_for_text_keeps_polling_instead_of_failing_when_every_candidate_det
     worker.close().await.unwrap();
 }
 
+/// A listbox option the page replaces with an identical, unstamped node the
+/// instant the candidate collector stamps it with its per-scan
+/// `data-bobby-target` id -- the re-render the gauntlet combobox does when a
+/// late suggestion render lands between a click's resolution and its
+/// dispatch (`intent_frames.rs`). The `MutationObserver` runs as soon as the
+/// collect pass returns, so the click's first read of the resolved element
+/// always finds it detached. Only the first `swap_limit` stamps trigger a
+/// replacement. Every option, fresh or original, counts clicks into
+/// `#clicks`.
+fn re_rendering_option_page(swap_limit: u32) -> String {
+    format!(
+        concat!(
+            "data:text/html,",
+            "<ul role=listbox aria-label=Customers>",
+            "<li role=option tabindex=0>Atlas Labs</li></ul>",
+            "<output id=clicks>0</output>",
+            "<script>",
+            "const wire=li=>li.addEventListener('click',",
+            "()=>{{clicks.textContent=String(Number(clicks.textContent)+1)}});",
+            "wire(document.querySelector('li'));let swaps=0;",
+            "new MutationObserver(records=>{{for(const r of records){{",
+            "if(r.attributeName==='data-bobby-target'&&r.target.isConnected&&",
+            "r.target.getAttribute('role')==='option'&&swaps<{swap_limit}){{swaps++;",
+            "const fresh=r.target.cloneNode(true);fresh.removeAttribute('data-bobby-target');",
+            "wire(fresh);r.target.replaceWith(fresh)}}",
+            "}}}}).observe(document.documentElement,",
+            "{{attributes:true,attributeFilter:['data-bobby-target'],subtree:true}})",
+            "</script>"
+        ),
+        swap_limit = swap_limit
+    )
+}
+
+async fn option_click_count(worker: &dyn worker_pool::BrowserWorker, page_id: &PageId) -> String {
+    let evidence = worker
+        .inspect(
+            page_id,
+            &InspectCommand {
+                selector: Some("#clicks".into()),
+                target: None,
+                include_html: false,
+            },
+        )
+        .await
+        .unwrap();
+    match &evidence[0] {
+        Evidence::Inspection { text, .. } => text.clone(),
+        other => panic!("expected Evidence::Inspection, got {other:?}"),
+    }
+}
+
+fn atlas_option_click() -> ClickCommand {
+    ClickCommand {
+        selector: String::new(),
+        target: Some(TargetSpec {
+            role: Some("option".into()),
+            accessible_name: Some("Atlas Labs".into()),
+            ..TargetSpec::default()
+        }),
+        boundary: false,
+        expected_url: None,
+        modifiers: Vec::new(),
+    }
+}
+
+/// The resolved option detaches before the click dispatches any input. The
+/// click must re-resolve it and land exactly once on the fresh node instead
+/// of failing with `BrowserCommandFailed`/`target detached`.
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn click_re_resolves_a_target_detached_between_resolution_and_dispatch() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: re_rendering_option_page(1),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    worker
+        .click(&page_id, &atlas_option_click())
+        .await
+        .expect("a target detached before dispatch must be re-resolved");
+    assert_eq!(option_click_count(worker.as_ref(), &page_id).await, "1");
+
+    worker.close().await.unwrap();
+}
+
+/// The re-resolve is spent once: an option that is re-rendered away again
+/// after it fails the click with the detach, and no input is ever
+/// dispatched to either node.
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn click_fails_without_dispatch_when_the_re_resolved_target_detaches_again() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+    worker
+        .navigate(
+            &page_id,
+            &NavigateCommand {
+                url: re_rendering_option_page(2),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+
+    let error = worker
+        .click(&page_id, &atlas_option_click())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::BrowserCommandFailed, "{error:?}");
+    assert!(error.message.contains("target detached"), "{error:?}");
+    assert_eq!(option_click_count(worker.as_ref(), &page_id).await, "0");
+
+    worker.close().await.unwrap();
+}
+
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn page_scoped_text_wait_sees_async_body_updates() {

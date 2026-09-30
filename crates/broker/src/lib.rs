@@ -279,6 +279,11 @@ impl AppState {
         self
     }
 
+    pub fn with_job_idempotency(mut self, store: IdempotencyStore<JobSubmitOutcome>) -> Self {
+        self.job_idempotency = Arc::new(store);
+        self
+    }
+
     pub fn with_boundaries(mut self, events: EventStore, artifacts: ArtifactCatalog) -> Self {
         self.events = events;
         self.artifacts = artifacts;
@@ -714,6 +719,23 @@ where
             .await
             .map_err(|e| anyhow::anyhow!("scheduler bootstrap failed: {e}"))?,
     );
+    let job_lookup = Arc::clone(&scheduler);
+    let job_idempotency = IdempotencyStore::open_durable(
+        config
+            .storage
+            .scheduler_journal_path
+            .with_extension("idempotency.json"),
+        move |value| {
+            let scheduler = Arc::clone(&job_lookup);
+            async move {
+                let outcome: JobSubmitOutcome =
+                    serde_json::from_value(value).map_err(io::Error::other)?;
+                Ok(scheduler.get_job(&outcome.job_id).await.map(|_| outcome))
+            }
+        },
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("job idempotency ledger: {error}"))?;
     let app = router(
         AppState::new(
             persistent_authority,
@@ -721,6 +743,7 @@ where
             config.interface.clone(),
         )
         .with_scheduler(Arc::clone(&scheduler))
+        .with_job_idempotency(job_idempotency)
         .with_boundaries(
             events,
             ArtifactCatalog::new(

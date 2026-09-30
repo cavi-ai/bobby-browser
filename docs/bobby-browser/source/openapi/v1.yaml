@@ -289,16 +289,51 @@ paths:
         - $ref: "#/components/parameters/Deadline"
       responses:
         "200":
-          description: ContextAnswer or null
+          description: Context answer or a machine-readable miss
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  answer:
-                    anyOf:
-                      - $ref: "#/components/schemas/ContextAnswer"
-                      - type: "null"
+                $ref: "#/components/schemas/ContextAskResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/context/neighbors:
+    get:
+      operationId: contextNeighbors
+      tags: [context]
+      summary: Remembered controls near a described target
+      description: >-
+        Requires `context:read`. Returns the remembered form structure around
+        the target, or a machine-readable snapshot repair when it is unknown.
+      parameters:
+        - name: sessionId
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+        - name: pageId
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+        - name: description
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 256 }
+        - $ref: "#/components/parameters/Authorization"
+        - $ref: "#/components/parameters/InterfaceVersion"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/Deadline"
+      responses:
+        "200":
+          description: Context neighbors or a machine-readable miss
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContextNeighborsResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -332,12 +367,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  site:
-                    anyOf:
-                      - $ref: "#/components/schemas/ContextSiteView"
-                      - type: "null"
+                $ref: "#/components/schemas/ContextSiteResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -1011,27 +1041,65 @@ components:
         - browser:humanize
     ContextAnswer:
       type: object
-      required: [target, confidence]
+      required: [target, confidence, observedAt]
       properties:
         target:
           type: object
+          required: [role, accessibleName]
           properties:
             role: { type: string }
             accessibleName: { type: string }
-            ordinal: { type: integer }
-        confidence: { type: number }
+            ordinal: { type: integer, minimum: 0 }
+            framePath:
+              type: array
+              items:
+                type: object
+                required: [role, accessibleName, ordinal]
+                properties:
+                  role: { type: string }
+                  accessibleName: { type: string }
+                  ordinal:
+                    anyOf:
+                      - { type: integer, minimum: 0 }
+                      - { type: "null" }
+        confidence: { type: number, minimum: 0, maximum: 1 }
         observedAt:
-          type: object
-          description: generation (live) or persisted (remembered)
+          oneOf:
+            - type: object
+              required: [kind, generation]
+              properties:
+                kind: { type: string, const: generation }
+                generation: { type: integer, minimum: 0 }
+            - type: object
+              required: [kind]
+              properties:
+                kind: { type: string, const: persisted }
         source:
           type: string
           enum: [observed, vision-promoted]
+    ContextAskResponse:
+      oneOf:
+        - type: object
+          required: [answer, hit, pageDerived]
+          properties:
+            answer: { $ref: "#/components/schemas/ContextAnswer" }
+            hit: { type: boolean, const: true }
+            pageDerived: { type: boolean, const: true }
+        - type: object
+          required: [answer, hit, reason, nextStep, pageDerived]
+          properties:
+            answer: { type: "null" }
+            hit: { type: boolean, const: false }
+            reason: { type: string, const: notRemembered }
+            nextStep: { type: string, const: a11y_snapshot }
+            pageDerived: { type: boolean, const: true }
     ContextNeighborStats:
       type: object
+      required: [successCount, failureCount]
       properties:
-        successCount: { type: integer }
-        failureCount: { type: integer }
-        lastVerifiedDay: { type: integer }
+        successCount: { type: integer, minimum: 0 }
+        failureCount: { type: integer, minimum: 0 }
+        lastVerifiedDay: { type: integer, minimum: 0 }
         source:
           type: string
           enum: [observed, vision-promoted]
@@ -1046,6 +1114,33 @@ components:
           type: object
           additionalProperties:
             $ref: "#/components/schemas/ContextNeighborStats"
+    ContextNeighbors:
+      type: object
+      required: [answer, form, pagePattern, controls]
+      properties:
+        answer: { $ref: "#/components/schemas/ContextAnswer" }
+        form: { type: string }
+        pagePattern: { type: string }
+        controls:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContextNeighborControl"
+    ContextNeighborsResponse:
+      oneOf:
+        - type: object
+          required: [neighbors, hit, pageDerived]
+          properties:
+            neighbors: { $ref: "#/components/schemas/ContextNeighbors" }
+            hit: { type: boolean, const: true }
+            pageDerived: { type: boolean, const: true }
+        - type: object
+          required: [neighbors, hit, reason, nextStep, pageDerived]
+          properties:
+            neighbors: { type: "null" }
+            hit: { type: boolean, const: false }
+            reason: { type: string, const: notRemembered }
+            nextStep: { type: string, const: a11y_snapshot }
+            pageDerived: { type: boolean, const: true }
     ContextSiteView:
       type: object
       required: [siteKey, pages]
@@ -1059,6 +1154,15 @@ components:
               type: array
               items:
                 $ref: "#/components/schemas/ContextNeighborControl"
+    ContextSiteResponse:
+      type: object
+      required: [site, pageDerived]
+      properties:
+        site:
+          anyOf:
+            - $ref: "#/components/schemas/ContextSiteView"
+            - type: "null"
+        pageDerived: { type: boolean, const: true }
     ArtifactId:
       type: string
       minLength: 1

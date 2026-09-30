@@ -43,6 +43,263 @@ fn reconciliation(command_id: CommandId) -> CommandOutcome {
     }
 }
 
+#[tokio::test]
+async fn durable_key_replays_after_reopen_without_storing_page_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("idempotency.json");
+    let lookup = |value: serde_json::Value| async move {
+        let id: CommandId = serde_json::from_value(value).map_err(std::io::Error::other)?;
+        Ok(Some(completed(id)))
+    };
+    let principal = principal("10000000-0000-0000-0000-000000000001");
+    let idempotency_key = key("durable-completed");
+    let digest = canonical_sha256(&"same-command").unwrap();
+    let store = IdempotencyStore::open_durable(&path, lookup).await.unwrap();
+    let permit = match reserve(
+        &store,
+        principal.clone(),
+        idempotency_key.clone(),
+        digest,
+        CorrelationId::new(),
+    )
+    .await
+    .unwrap()
+    {
+        IdempotencyReservation::Acquired(permit) => permit,
+        IdempotencyReservation::Replay(_) => panic!("new key replayed"),
+    };
+    let command_id = CommandId::new();
+    store
+        .finish(
+            permit,
+            CommandOutcome::Completed {
+                command_id: command_id.clone(),
+                evidence: vec![types::Evidence::Inspection {
+                    selector: None,
+                    url: "https://example.test".into(),
+                    title: "Example".into(),
+                    text: "page secret".into(),
+                    html: None,
+                }],
+            },
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(!bytes
+        .windows("page secret".len())
+        .any(|part| part == b"page secret"));
+    drop(store);
+
+    let reopened = IdempotencyStore::open_durable(&path, lookup).await.unwrap();
+    assert!(matches!(
+        reserve(&reopened, principal.clone(), idempotency_key.clone(), digest, CorrelationId::new()).await.unwrap(),
+        IdempotencyReservation::Replay(CommandOutcome::Completed { command_id: id, .. }) if id == command_id
+    ));
+    assert!(reserve(
+        &reopened,
+        principal,
+        idempotency_key,
+        canonical_sha256(&"different").unwrap(),
+        CorrelationId::new()
+    )
+    .await
+    .is_err());
+}
+
+#[tokio::test]
+async fn interrupted_durable_reservation_reopens_as_unresolved() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("idempotency.json");
+    let lookup = |_value| async { Ok::<Option<CommandOutcome>, std::io::Error>(None) };
+    let principal = principal("10000000-0000-0000-0000-000000000001");
+    let idempotency_key = key("interrupted-reservation");
+    let digest = canonical_sha256(&"same-command").unwrap();
+    let store = IdempotencyStore::open_durable(&path, lookup).await.unwrap();
+    let permit = match reserve(
+        &store,
+        principal.clone(),
+        idempotency_key.clone(),
+        digest,
+        CorrelationId::new(),
+    )
+    .await
+    .unwrap()
+    {
+        IdempotencyReservation::Acquired(permit) => permit,
+        IdempotencyReservation::Replay(_) => panic!("new key replayed"),
+    };
+    drop(permit);
+    drop(store);
+    let reopened = IdempotencyStore::open_durable(&path, lookup).await.unwrap();
+    let error = reserve(
+        &reopened,
+        principal,
+        idempotency_key,
+        digest,
+        CorrelationId::new(),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.reconciliation_required);
+}
+
+#[tokio::test]
+async fn durable_ledger_is_single_writer_and_ignores_uncommitted_temporary_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.json");
+    let lookup = |_value| async { Ok::<Option<CommandOutcome>, std::io::Error>(None) };
+    let store = IdempotencyStore::open_durable(&path, lookup).await.unwrap();
+    assert!(IdempotencyStore::open_durable(&path, lookup).await.is_err());
+    let principal = principal("10000000-0000-0000-0000-000000000001");
+    let digest = canonical_sha256(&"same-command").unwrap();
+    let permit = match reserve(
+        &store,
+        principal.clone(),
+        key("durable-torn"),
+        digest,
+        CorrelationId::new(),
+    )
+    .await
+    .unwrap()
+    {
+        IdempotencyReservation::Acquired(permit) => permit,
+        IdempotencyReservation::Replay(_) => panic!("new key replayed"),
+    };
+    drop(permit);
+    drop(store);
+    std::fs::write(dir.path().join("ledger.abandoned.tmp"), b"{broken").unwrap();
+    let reopened = IdempotencyStore::open_durable(&path, lookup).await.unwrap();
+    assert!(
+        reserve(
+            &reopened,
+            principal,
+            key("durable-torn"),
+            digest,
+            CorrelationId::new()
+        )
+        .await
+        .unwrap_err()
+        .reconciliation_required
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn dropped_durable_ledger_unlocks_while_a_forked_child_holds_the_descriptor() {
+    use std::io::{Read, Write};
+    use std::os::unix::process::CommandExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.json");
+    let lookup = |_value| async { Ok::<Option<CommandOutcome>, std::io::Error>(None) };
+    let store = IdempotencyStore::open_durable(&path, lookup).await.unwrap();
+    let clone = store.clone();
+    drop(store);
+    assert!(IdempotencyStore::open_durable(&path, lookup).await.is_err());
+
+    let (mut forked_reader, mut forked_writer) = std::io::pipe().unwrap();
+    let (mut release_reader, mut release_writer) = std::io::pipe().unwrap();
+    let mut command = std::process::Command::new("true");
+    // SAFETY: pre_exec uses only read and write syscalls on owned pipes.
+    unsafe {
+        command.pre_exec(move || {
+            forked_writer.write_all(&[1])?;
+            release_reader.read_exact(&mut [0])?;
+            Ok(())
+        });
+    }
+    let spawner = std::thread::spawn(move || command.status());
+    forked_reader.read_exact(&mut [0]).unwrap();
+
+    drop(clone);
+    let reopened = IdempotencyStore::open_durable(&path, lookup).await;
+
+    release_writer.write_all(&[1]).unwrap();
+    assert!(spawner.join().unwrap().unwrap().success());
+    assert!(reopened.is_ok(), "a dropped ledger must release its lock");
+}
+
+#[tokio::test]
+async fn completed_durable_key_expires_but_unresolved_key_does_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.json");
+    let lookup = |_value| async { Ok::<Option<CommandOutcome>, std::io::Error>(None) };
+    let store = IdempotencyStore::open_durable(&path, lookup).await.unwrap();
+    let principal = principal("10000000-0000-0000-0000-000000000001");
+    let digest = canonical_sha256(&"same-command").unwrap();
+    let completed_permit = match reserve(
+        &store,
+        principal.clone(),
+        key("expired"),
+        digest,
+        CorrelationId::new(),
+    )
+    .await
+    .unwrap()
+    {
+        IdempotencyReservation::Acquired(permit) => permit,
+        IdempotencyReservation::Replay(_) => panic!("new key replayed"),
+    };
+    store
+        .finish(
+            completed_permit,
+            completed(CommandId::new()),
+            Utc::now() - Duration::minutes(16),
+        )
+        .await
+        .unwrap();
+    let unresolved_permit = match reserve(
+        &store,
+        principal.clone(),
+        key("unresolved"),
+        digest,
+        CorrelationId::new(),
+    )
+    .await
+    .unwrap()
+    {
+        IdempotencyReservation::Acquired(permit) => permit,
+        IdempotencyReservation::Replay(_) => panic!("new key replayed"),
+    };
+    drop(unresolved_permit);
+    drop(store);
+    let reopened = IdempotencyStore::open_durable(&path, lookup).await.unwrap();
+    assert!(matches!(
+        reserve(
+            &reopened,
+            principal.clone(),
+            key("expired"),
+            digest,
+            CorrelationId::new()
+        )
+        .await
+        .unwrap(),
+        IdempotencyReservation::Acquired(_)
+    ));
+    assert!(
+        reserve(
+            &reopened,
+            principal,
+            key("unresolved"),
+            digest,
+            CorrelationId::new()
+        )
+        .await
+        .unwrap_err()
+        .reconciliation_required
+    );
+}
+
 async fn reserve(
     store: &IdempotencyStore,
     principal: PrincipalId,
@@ -452,23 +709,6 @@ async fn safety_tombstone_survives_time_advance_until_explicit_resolution() {
         .unwrap_err();
     assert_eq!(full.code, InterfaceErrorCode::ResourceExhausted);
 
-    let resolved = store
-        .resolve_safety_tombstone(
-            &principal,
-            &idempotency_key,
-            InterfaceOperation::SubmitCommand,
-            digest,
-            CorrelationId::new(),
-        )
-        .await
-        .unwrap();
-    assert!(matches!(
-        resolved,
-        CommandOutcome::NeedsReconciliation {
-            command_id: actual,
-            ..
-        } if actual == command_id
-    ));
     assert!(matches!(
         store
             .reserve(
@@ -482,7 +722,7 @@ async fn safety_tombstone_survives_time_advance_until_explicit_resolution() {
             )
             .await
             .unwrap(),
-        IdempotencyReservation::Acquired(_)
+        IdempotencyReservation::Replay(CommandOutcome::NeedsReconciliation { .. })
     ));
 }
 

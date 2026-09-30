@@ -1,8 +1,17 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    future::Future,
+    io,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use chrono::{DateTime, Duration, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{watch, Mutex};
 use types::{
     CommandOutcome, CorrelationId, ErrorLayer, IdempotencyKey, InterfaceError, InterfaceErrorCode,
@@ -10,13 +19,19 @@ use types::{
 };
 
 /// Outcome types that an [`IdempotencyStore`] can retain and replay.
-pub trait RetainedOutcome: Clone + Send + Sync + 'static {
+pub trait RetainedOutcome: Clone + Serialize + Send + Sync + 'static {
     /// Whether finishing with this outcome releases the reservation instead of
     /// retaining it (retryable outcomes must allow a real retry).
     fn releases_reservation(&self) -> bool;
     /// Whether this outcome must never expire or be evicted (uncertain outcomes
     /// tombstone the key until explicitly resolved).
     fn safety_relevant(&self) -> bool;
+
+    /// Durable representation. Command outcomes store only their journal
+    /// identity; the command journal remains the source of page evidence.
+    fn durable_value(&self) -> io::Result<serde_json::Value> {
+        serde_json::to_value(self).map_err(io::Error::other)
+    }
 }
 
 impl RetainedOutcome for CommandOutcome {
@@ -27,12 +42,25 @@ impl RetainedOutcome for CommandOutcome {
     fn safety_relevant(&self) -> bool {
         !matches!(self, CommandOutcome::Completed { .. })
     }
+
+    fn durable_value(&self) -> io::Result<serde_json::Value> {
+        let command_id = match self {
+            CommandOutcome::Completed { command_id, .. }
+            | CommandOutcome::RetryableFailure { command_id, .. }
+            | CommandOutcome::NeedsReconciliation { command_id, .. }
+            | CommandOutcome::PolicyDenied { command_id, .. }
+            | CommandOutcome::ResourceExhausted { command_id, .. }
+            | CommandOutcome::Restarted { command_id, .. }
+            | CommandOutcome::Failed { command_id, .. } => command_id,
+        };
+        serde_json::to_value(command_id).map_err(io::Error::other)
+    }
 }
 
 /// Retained outcomes for session/checkpoint lifecycle operations. Successes replay
 /// with ordinary TTL semantics; failures are never retained (callers abandon the
 /// permit on error so a retry re-executes).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionCheckpointOutcome {
     Session(SessionState),
     Checkpoint(WorkflowCheckpoint),
@@ -66,6 +94,7 @@ enum EntryState<O> {
         outcome: O,
         safety_relevant: bool,
     },
+    Unresolved,
 }
 
 #[derive(Clone)]
@@ -73,11 +102,51 @@ enum ReservationUpdate<O> {
     Pending,
     Replay(O),
     Released,
+    Unresolved,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DurableEntry {
+    principal_id: PrincipalId,
+    key: IdempotencyKey,
+    operation: InterfaceOperation,
+    canonical_sha256: [u8; 32],
+    expires_at: Option<DateTime<Utc>>,
+    last_used: u64,
+    state: DurableState,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "camelCase")]
+enum DurableState {
+    Reserved,
+    Unresolved,
+    Retained(serde_json::Value),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DurableSnapshot {
+    schema_version: u16,
+    entries: Vec<DurableEntry>,
 }
 
 struct StoreState<O> {
     entries: HashMap<PrincipalId, Vec<Entry<O>>>,
     sequence: u64,
+}
+
+struct DurableLock {
+    file: std::fs::File,
+}
+
+impl Drop for DurableLock {
+    fn drop(&mut self) {
+        // A forked child can still hold a copy of this open file description
+        // before exec. Closing our descriptor would leave its flock held.
+        let _ = self.file.unlock();
+    }
 }
 
 impl<O> Default for StoreState<O> {
@@ -95,6 +164,8 @@ pub struct IdempotencyStore<O = CommandOutcome> {
     global_capacity: usize,
     ttl: Duration,
     state: Arc<Mutex<StoreState<O>>>,
+    durable_path: Option<Arc<PathBuf>>,
+    _durable_lock: Option<Arc<DurableLock>>,
 }
 
 impl<O> std::fmt::Debug for IdempotencyStore<O> {
@@ -115,6 +186,142 @@ impl<O: RetainedOutcome> Default for IdempotencyStore<O> {
 }
 
 impl<O: RetainedOutcome> IdempotencyStore<O> {
+    /// Open an owner-only, atomically replaced ledger. A retained reference
+    /// that cannot be resolved from its authoritative store fails closed.
+    pub async fn open_durable<F, Fut>(path: impl AsRef<Path>, resolve: F) -> io::Result<Self>
+    where
+        F: Fn(serde_json::Value) -> Fut,
+        Fut: Future<Output = io::Result<Option<O>>>,
+    {
+        let path = path.as_ref().to_path_buf();
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let mut lock_options = std::fs::OpenOptions::new();
+        lock_options.create(true).read(true).write(true);
+        #[cfg(unix)]
+        lock_options.mode(0o600);
+        let lock_file = lock_options.open(path.with_extension("lock"))?;
+        lock_file.try_lock()?;
+        let store = Self {
+            durable_path: Some(Arc::new(path.clone())),
+            _durable_lock: Some(Arc::new(DurableLock { file: lock_file })),
+            ..Self::default()
+        };
+        let bytes = match tokio::fs::read(&path).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(store),
+            Err(error) => return Err(error),
+        };
+        let snapshot: DurableSnapshot = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+        if snapshot.schema_version != 1 {
+            return Err(io::Error::other("unsupported idempotency ledger schema"));
+        }
+        let now = Utc::now();
+        let mut state = store.state.lock().await;
+        for entry in snapshot.entries {
+            if entry.expires_at.is_some_and(|expires| expires <= now) {
+                continue;
+            }
+            let restored = match entry.state {
+                DurableState::Reserved | DurableState::Unresolved => EntryState::Unresolved,
+                DurableState::Retained(value) => match resolve(value).await? {
+                    Some(outcome) => EntryState::Retained {
+                        safety_relevant: outcome.safety_relevant(),
+                        outcome,
+                    },
+                    None => EntryState::Unresolved,
+                },
+            };
+            let bucket = state.entries.entry(entry.principal_id).or_default();
+            if bucket.iter().any(|prior| prior.key == entry.key) {
+                return Err(io::Error::other("duplicate idempotency ledger key"));
+            }
+            if bucket.len() >= store.per_principal_capacity {
+                return Err(io::Error::other(
+                    "idempotency ledger exceeds per-principal capacity",
+                ));
+            }
+            bucket.push(Entry {
+                key: entry.key,
+                operation: entry.operation,
+                canonical_sha256: entry.canonical_sha256,
+                state: restored,
+                expires_at: entry.expires_at,
+                last_used: entry.last_used,
+            });
+            state.sequence = state.sequence.max(entry.last_used);
+            if entry_count(&state) > store.global_capacity {
+                return Err(io::Error::other(
+                    "idempotency ledger exceeds global capacity",
+                ));
+            }
+        }
+        drop(state);
+        Ok(store)
+    }
+
+    async fn persist_locked(&self, state: &StoreState<O>) -> io::Result<()> {
+        let Some(path) = &self.durable_path else {
+            return Ok(());
+        };
+        let mut entries = Vec::new();
+        for (principal_id, bucket) in &state.entries {
+            for entry in bucket {
+                let durable_state = match &entry.state {
+                    EntryState::Reserved { .. } => DurableState::Reserved,
+                    EntryState::Unresolved => DurableState::Unresolved,
+                    EntryState::Retained { outcome, .. } => {
+                        let value = outcome.durable_value()?;
+                        if serde_json::to_vec(&value).map_err(io::Error::other)?.len() > 64 * 1024 {
+                            return Err(io::Error::other(
+                                "idempotency outcome exceeds durable bound",
+                            ));
+                        }
+                        DurableState::Retained(value)
+                    }
+                };
+                entries.push(DurableEntry {
+                    principal_id: principal_id.clone(),
+                    key: entry.key.clone(),
+                    operation: entry.operation,
+                    canonical_sha256: entry.canonical_sha256,
+                    expires_at: entry.expires_at,
+                    last_used: entry.last_used,
+                    state: durable_state,
+                });
+            }
+        }
+        let bytes = serde_json::to_vec(&DurableSnapshot {
+            schema_version: 1,
+            entries,
+        })
+        .map_err(io::Error::other)?;
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+        let mut options = tokio::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&temporary).await?;
+        let result = async {
+            file.write_all(&bytes).await?;
+            file.sync_all().await?;
+            drop(file);
+            tokio::fs::rename(&temporary, path.as_ref()).await?;
+            if let Some(parent) = path.parent() {
+                tokio::fs::File::open(parent).await?.sync_all().await?;
+            }
+            Ok::<(), io::Error>(())
+        }
+        .await;
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(&temporary).await;
+        }
+        result
+    }
     pub fn new(per_principal_capacity: usize, ttl: Duration) -> Self {
         Self::with_global_capacity(
             per_principal_capacity,
@@ -133,6 +340,8 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
             global_capacity,
             ttl,
             state: Arc::new(Mutex::new(StoreState::default())),
+            durable_path: None,
+            _durable_lock: None,
         }
     }
 
@@ -175,6 +384,10 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
                                 entries.push(entry);
                                 return Ok(IdempotencyReservation::Replay(outcome));
                             }
+                            EntryState::Unresolved => {
+                                entries.push(entry);
+                                return Err(unresolved_error(correlation_id));
+                            }
                         }
                     } else {
                         None
@@ -199,6 +412,7 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
                     ReservationUpdate::Replay(outcome) => {
                         return Ok(IdempotencyReservation::Replay(outcome));
                     }
+                    ReservationUpdate::Unresolved => return Err(unresolved_error(correlation_id)),
                     ReservationUpdate::Released | ReservationUpdate::Pending => {}
                 }
                 now = Utc::now();
@@ -242,6 +456,16 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
                     expires_at: None,
                     last_used: generation,
                 });
+            if let Err(error) = self.persist_locked(&state).await {
+                if let Some(entry) = state
+                    .entries
+                    .get_mut(&principal_id)
+                    .and_then(|bucket| bucket.iter_mut().find(|entry| entry.key == key))
+                {
+                    entry.state = EntryState::Unresolved;
+                }
+                return Err(persistence_error(correlation_id, error));
+            }
             return Ok(IdempotencyReservation::Acquired(IdempotencyPermit {
                 principal_id,
                 key,
@@ -249,6 +473,7 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
                 canonical_sha256,
                 generation,
                 store: Arc::clone(&self.state),
+                durable: self.durable_path.is_some(),
                 armed: true,
                 correlation_id,
             }));
@@ -283,7 +508,7 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
         }
         let changed = match &entry.state {
             EntryState::Reserved { changed, .. } => changed.clone(),
-            EntryState::Retained { .. } => unreachable!(),
+            EntryState::Retained { .. } | EntryState::Unresolved => unreachable!(),
         };
 
         let releases = outcome.releases_reservation();
@@ -308,6 +533,27 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
                 .push(entry);
         }
         remove_empty_buckets(&mut state);
+        if let Err(error) = self.persist_locked(&state).await {
+            let bucket = state
+                .entries
+                .entry(permit.principal_id.clone())
+                .or_default();
+            if let Some(item) = bucket.iter_mut().find(|item| item.key == permit.key) {
+                item.state = EntryState::Unresolved;
+                item.expires_at = None;
+            } else {
+                bucket.push(Entry {
+                    key: permit.key.clone(),
+                    operation: permit.operation,
+                    canonical_sha256: permit.canonical_sha256,
+                    state: EntryState::Unresolved,
+                    expires_at: None,
+                    last_used: permit.generation,
+                });
+            }
+            changed.send_replace(ReservationUpdate::Unresolved);
+            return Err(persistence_error(permit.correlation_id.clone(), error));
+        }
         changed.send_replace(update);
         Ok(())
     }
@@ -324,47 +570,21 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
             &permit.canonical_sha256,
             permit.generation,
         );
-    }
-}
-
-impl IdempotencyStore<CommandOutcome> {
-    pub async fn resolve_safety_tombstone(
-        &self,
-        principal_id: &PrincipalId,
-        key: &IdempotencyKey,
-        operation: InterfaceOperation,
-        canonical_sha256: [u8; 32],
-        correlation_id: CorrelationId,
-    ) -> Result<CommandOutcome, InterfaceError> {
-        let mut state = self.state.lock().await;
-        let outcome = {
-            let Some(entries) = state.entries.get_mut(principal_id) else {
-                return Err(conflict_error(correlation_id));
-            };
-            let Some(index) = entries.iter().position(|entry| entry.key == *key) else {
-                return Err(conflict_error(correlation_id));
-            };
-            let entry = &entries[index];
-            if entry.operation != operation || entry.canonical_sha256 != canonical_sha256 {
-                return Err(conflict_error(correlation_id));
-            }
-            match &entry.state {
-                EntryState::Retained {
-                    outcome,
-                    safety_relevant: true,
-                } => outcome.clone(),
-                EntryState::Reserved { .. }
-                | EntryState::Retained {
-                    safety_relevant: false,
-                    ..
-                } => return Err(conflict_error(correlation_id)),
-            }
-        };
-        if let Some(entries) = state.entries.get_mut(principal_id) {
-            entries.retain(|entry| entry.key != *key);
+        if let Err(error) = self.persist_locked(&state).await {
+            tracing::error!(%error, "idempotency release persistence failed");
+            state
+                .entries
+                .entry(permit.principal_id.clone())
+                .or_default()
+                .push(Entry {
+                    key: permit.key.clone(),
+                    operation: permit.operation,
+                    canonical_sha256: permit.canonical_sha256,
+                    state: EntryState::Unresolved,
+                    expires_at: None,
+                    last_used: permit.generation,
+                });
         }
-        remove_empty_buckets(&mut state);
-        Ok(outcome)
     }
 }
 
@@ -392,6 +612,7 @@ pub struct IdempotencyPermit<O: Send + Sync + 'static = CommandOutcome> {
     /// Back-reference so a dropped permit (cancelled or panicked request
     /// task) abandons its reservation instead of wedging the key forever.
     store: Arc<Mutex<StoreState<O>>>,
+    durable: bool,
     armed: bool,
 }
 
@@ -425,12 +646,39 @@ fn abandon_entry<O>(
         let entry = entries.remove(index);
         match entry.state {
             EntryState::Reserved { changed, .. } => Some(changed),
-            EntryState::Retained { .. } => None,
+            EntryState::Retained { .. } | EntryState::Unresolved => None,
         }
     });
     remove_empty_buckets(state);
     if let Some(changed) = changed {
         changed.send_replace(ReservationUpdate::Released);
+    }
+}
+
+fn unresolve_entry<O>(
+    state: &mut StoreState<O>,
+    principal_id: &PrincipalId,
+    key: &IdempotencyKey,
+    operation: InterfaceOperation,
+    canonical_sha256: &[u8; 32],
+    generation: u64,
+) {
+    let changed = state.entries.get_mut(principal_id).and_then(|entries| {
+        let entry = entries.iter_mut().find(|entry| {
+            entry.key == *key
+                && entry.operation == operation
+                && entry.canonical_sha256 == *canonical_sha256
+                && matches!(&entry.state, EntryState::Reserved { generation: g, .. } if *g == generation)
+        })?;
+        let changed = match &entry.state {
+            EntryState::Reserved { changed, .. } => changed.clone(),
+            _ => unreachable!(),
+        };
+        entry.state = EntryState::Unresolved;
+        Some(changed)
+    });
+    if let Some(changed) = changed {
+        changed.send_replace(ReservationUpdate::Unresolved);
     }
 }
 
@@ -442,14 +690,25 @@ impl<O: Send + Sync + 'static> Drop for IdempotencyPermit<O> {
         // Abandon inline when uncontended; spawn otherwise (dropping on the
         // executor while the store lock is held must not block the reactor).
         if let Ok(mut state) = self.store.try_lock() {
-            abandon_entry(
-                &mut state,
-                &self.principal_id,
-                &self.key,
-                self.operation,
-                &self.canonical_sha256,
-                self.generation,
-            );
+            if self.durable {
+                unresolve_entry(
+                    &mut state,
+                    &self.principal_id,
+                    &self.key,
+                    self.operation,
+                    &self.canonical_sha256,
+                    self.generation,
+                );
+            } else {
+                abandon_entry(
+                    &mut state,
+                    &self.principal_id,
+                    &self.key,
+                    self.operation,
+                    &self.canonical_sha256,
+                    self.generation,
+                );
+            }
             return;
         }
         let store = self.store.clone();
@@ -458,17 +717,29 @@ impl<O: Send + Sync + 'static> Drop for IdempotencyPermit<O> {
         let operation = self.operation;
         let canonical_sha256 = self.canonical_sha256;
         let generation = self.generation;
+        let durable = self.durable;
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
                 let mut state = store.lock().await;
-                abandon_entry(
-                    &mut state,
-                    &principal_id,
-                    &key,
-                    operation,
-                    &canonical_sha256,
-                    generation,
-                );
+                if durable {
+                    unresolve_entry(
+                        &mut state,
+                        &principal_id,
+                        &key,
+                        operation,
+                        &canonical_sha256,
+                        generation,
+                    );
+                } else {
+                    abandon_entry(
+                        &mut state,
+                        &principal_id,
+                        &key,
+                        operation,
+                        &canonical_sha256,
+                        generation,
+                    );
+                }
             });
         }
     }
@@ -664,6 +935,37 @@ fn conflict_error(correlation_id: CorrelationId) -> InterfaceError {
         retryable: false,
         retry_after_ms: None,
         reconciliation_required: false,
+        required_capability: None,
+    }
+}
+
+fn unresolved_error(correlation_id: CorrelationId) -> InterfaceError {
+    InterfaceError {
+        code: InterfaceErrorCode::IdempotencyConflict,
+        layer: ErrorLayer::Interface,
+        message:
+            "idempotency outcome is unresolved; inspect the authoritative operation before retrying"
+                .to_owned(),
+        correlation_id,
+        command_id: None,
+        retryable: false,
+        retry_after_ms: None,
+        reconciliation_required: true,
+        required_capability: None,
+    }
+}
+
+fn persistence_error(correlation_id: CorrelationId, error: io::Error) -> InterfaceError {
+    tracing::error!(%error, "idempotency persistence failed");
+    InterfaceError {
+        code: InterfaceErrorCode::Internal,
+        layer: ErrorLayer::Interface,
+        message: "idempotency state could not be durably recorded".to_owned(),
+        correlation_id,
+        command_id: None,
+        retryable: false,
+        retry_after_ms: None,
+        reconciliation_required: true,
         required_capability: None,
     }
 }

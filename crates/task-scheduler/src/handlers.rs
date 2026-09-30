@@ -25,6 +25,10 @@ struct EchoHandler;
 
 #[async_trait]
 impl JobHandler for EchoHandler {
+    fn safe_to_retry(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, job: &Job) -> Result<serde_json::Value, String> {
         Ok(job.payload.clone())
     }
@@ -34,6 +38,10 @@ struct SleepHandler;
 
 #[async_trait]
 impl JobHandler for SleepHandler {
+    fn safe_to_retry(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, job: &Job) -> Result<serde_json::Value, String> {
         let ms = job
             .payload
@@ -50,6 +58,10 @@ struct HttpProbeHandler;
 
 #[async_trait]
 impl JobHandler for HttpProbeHandler {
+    fn safe_to_retry(&self) -> bool {
+        true
+    }
+
     fn required_capabilities(&self) -> &'static [Capability] {
         NETWORK_EGRESS
     }
@@ -88,6 +100,10 @@ struct HttpWaitHandler;
 
 #[async_trait]
 impl JobHandler for HttpWaitHandler {
+    fn safe_to_retry(&self) -> bool {
+        true
+    }
+
     fn required_capabilities(&self) -> &'static [Capability] {
         NETWORK_EGRESS
     }
@@ -142,6 +158,10 @@ struct HttpFetchHandler;
 
 #[async_trait]
 impl JobHandler for HttpFetchHandler {
+    fn safe_to_retry(&self) -> bool {
+        true
+    }
+
     fn required_capabilities(&self) -> &'static [Capability] {
         NETWORK_EGRESS
     }

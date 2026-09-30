@@ -67,6 +67,14 @@ impl JobQueue {
 
     /// Submit a job to the queue.
     pub fn submit(&mut self, config: JobConfig) -> Result<Job, crate::JobError> {
+        let job = self.prepare(config)?;
+        self.requeue(job.clone())?;
+        Ok(job)
+    }
+
+    /// Build a job only when the queue can accept it. The scheduler persists
+    /// this job before making it runnable while holding the queue lock.
+    pub fn prepare(&self, config: JobConfig) -> Result<Job, crate::JobError> {
         if self.jobs.len() >= self.max_size {
             return Err(crate::JobError::QueueFull);
         }
@@ -82,7 +90,6 @@ impl JobQueue {
         }
         job.owner = config.owner;
 
-        self.jobs.push_back(job.clone());
         Ok(job)
     }
 
@@ -150,7 +157,10 @@ impl JobQueue {
             let mut job = self.jobs.remove(idx).unwrap();
             if matches!(
                 job.status,
-                JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+                JobStatus::Completed
+                    | JobStatus::Failed
+                    | JobStatus::Cancelled
+                    | JobStatus::ReconciliationRequired
             ) {
                 return Err(crate::JobError::Execution(format!(
                     "job {} already finished with status {}",
@@ -197,6 +207,7 @@ impl JobQueue {
                 JobStatus::Completed => completed += 1,
                 JobStatus::Failed => failed += 1,
                 JobStatus::Cancelled => cancelled += 1,
+                JobStatus::ReconciliationRequired => {}
             }
         }
 

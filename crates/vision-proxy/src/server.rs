@@ -53,20 +53,51 @@ fn classify(v: &Value) -> Option<Kind> {
     }
 }
 
-fn bad_request(message: &str) -> Response {
+fn error_response(
+    status: StatusCode,
+    code: &str,
+    kind: &str,
+    message: impl Into<String>,
+) -> Response {
     (
-        StatusCode::BAD_REQUEST,
-        Json(serde_json::json!({ "error": message })),
+        status,
+        Json(serde_json::json!({
+            "error": {
+                "code": code,
+                "kind": kind,
+                "message": bound_diagnostic(message.into()),
+                "retryable": status.is_server_error(),
+            }
+        })),
     )
         .into_response()
 }
 
-fn bad_gateway(message: impl Into<String>) -> Response {
-    (
-        StatusCode::BAD_GATEWAY,
-        Json(serde_json::json!({ "error": message.into() })),
+fn bad_request(message: &str) -> Response {
+    error_response(
+        StatusCode::BAD_REQUEST,
+        "visionInvalidRequest",
+        "request",
+        message,
     )
-        .into_response()
+}
+
+fn bad_gateway(error: UpstreamError) -> Response {
+    let (code, kind, message) = upstream_error_diagnostic(error);
+    error_response(StatusCode::BAD_GATEWAY, code, kind, message)
+}
+
+fn validation_failed(error: ValidateError) -> Response {
+    error_response(
+        StatusCode::BAD_GATEWAY,
+        "visionInvalidModelReply",
+        "invalid-model-reply",
+        error.to_string(),
+    )
+}
+
+fn bound_diagnostic(message: String) -> String {
+    message.chars().take(512).collect()
 }
 
 async fn handle_vision(
@@ -75,7 +106,12 @@ async fn handle_vision(
     Json(body): Json<Value>,
 ) -> Response {
     if !auth::authorize(&headers, &state.bearer_token) {
-        return StatusCode::UNAUTHORIZED.into_response();
+        return error_response(
+            StatusCode::UNAUTHORIZED,
+            "visionAuthRejected",
+            "auth",
+            "missing or invalid bearer token",
+        );
     }
 
     let kind = match classify(&body) {
@@ -111,11 +147,11 @@ async fn handle_propose(state: &AppState, body: Value) -> Response {
 
     let proposal = match state.upstream.propose(input).await {
         Ok(proposal) => proposal,
-        Err(error) => return bad_gateway(upstream_error_message(error)),
+        Err(error) => return bad_gateway(error),
     };
 
     if let Err(error) = validate_proposal_for_request(&proposal, &intent_kind, candidate_count) {
-        return bad_gateway(validate_error_message(error));
+        return validation_failed(error);
     }
 
     Json(proposal).into_response()
@@ -135,22 +171,28 @@ async fn handle_extract(state: &AppState, body: Value) -> Response {
 
     let response = match state.upstream.extract(input).await {
         Ok(response) => response,
-        Err(error) => return bad_gateway(upstream_error_message(error)),
+        Err(error) => return bad_gateway(error),
     };
 
     if let Err(error) = validate_extract(&response) {
-        return bad_gateway(validate_error_message(error));
+        return validation_failed(error);
     }
 
     Json(response).into_response()
 }
 
-fn upstream_error_message(error: UpstreamError) -> String {
-    error.to_string()
-}
-
-fn validate_error_message(error: ValidateError) -> String {
-    error.to_string()
+fn upstream_error_diagnostic(error: UpstreamError) -> (&'static str, &'static str, String) {
+    match error {
+        UpstreamError::Transport(message) => ("visionUpstreamTransport", "transport", message),
+        UpstreamError::Rejected(message) => {
+            ("visionUpstreamRejected", "upstream-rejected", message)
+        }
+        UpstreamError::Invalid(_) => (
+            "visionInvalidModelReply",
+            "invalid-model-reply",
+            "upstream returned an invalid model reply".to_string(),
+        ),
+    }
 }
 
 async fn handle_status() -> impl IntoResponse {

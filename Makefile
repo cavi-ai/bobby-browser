@@ -55,6 +55,8 @@ help:
 	@echo
 	@echo "Notes"
 	@echo "  Local agents: host spawns bobby mcp-stdio (wired by install). No daemon."
+	@echo "  Config: ./config.toml   Credentials: OS config dir/bobby-browser/"
+	@echo "  After install: bobby doctor   (bobby doctor --fix repairs host entries)"
 	@echo "  Set BOBBY_BROWSER_TOKEN to include the MCP handshake in reload/verify."
 	@echo "  Non-interactive full setup:"
 	@echo "    ./target/release/bobby install --host claude --skill --cli --yes"

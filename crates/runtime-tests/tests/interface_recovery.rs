@@ -893,6 +893,11 @@ async fn reconnect_resumes_exactly_or_reports_a_deterministic_gap() {
 #[ignore = "requires installed Chromium; exercises daemon/worker replacement fixture"]
 async fn installed_chromium_daemon_abort_rebuilds_from_the_same_durable_journal() {
     let harness = interface_conformance::live::ChromeRuntimeHarness::start().await;
+    let site_url = harness.site_url();
+    // The fixture builds two owners of its service. Release both before the
+    // first instrumented build opens the same exclusive durable ledger.
+    drop(harness.runtime);
+    drop(harness.service);
     let observer = Arc::new(PauseAt {
         target: CommandPhase::Verifying,
         reached: Notify::new(),
@@ -926,7 +931,7 @@ async fn installed_chromium_daemon_abort_rebuilds_from_the_same_durable_journal(
         page_id: Some(page.id),
         deadline: Utc::now() + Duration::seconds(20),
         command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(NavigateCommand {
-            url: harness.site_url(),
+            url: site_url,
             wait_until: types::WaitUntil::DomContentLoaded,
             timeout_ms: 15_000,
         })),

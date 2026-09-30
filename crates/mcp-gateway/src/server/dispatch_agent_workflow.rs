@@ -7,6 +7,7 @@
 
 use super::*;
 use crate::workflow_handles::{WorkflowBinding, WorkflowHandleReservation};
+use sdk_core::workflow::{WorkflowService, WorkflowSetupFailure};
 use std::future::Future;
 use tokio::sync::oneshot;
 
@@ -306,19 +307,21 @@ impl Server {
         target: Option<types::TargetSpec>,
         evidence_detail: EvidenceDetail,
     ) -> interface_core::InterfaceResult<LiveObservation> {
-        let (submit_context, envelope) = primitive_envelope(
-            context.clone(),
-            session_id.clone(),
-            Some(page_id.clone()),
-            workflow_id.clone(),
-            types::PrimitiveCommand::AccessibilitySnapshot(types::AccessibilitySnapshotCommand {
-                max_nodes: Some(max_nodes),
+        let dispatch_context = context.clone();
+        let observation_outcome = WorkflowService::new(Arc::clone(&self.runtime))
+            .observe_with(
+                context.clone(),
+                session_id.clone(),
+                page_id.clone(),
+                workflow_id.clone().unwrap_or_default(),
+                max_nodes,
                 target,
-            }),
-        );
-        let observation_outcome = self
-            .submit_envelope(submit_context, envelope, handle, "workflow_observe")
-            .await?;
+                |envelope| {
+                    self.submit_envelope(dispatch_context, envelope, handle, "workflow_observe")
+                },
+            )
+            .await?
+            .outcome;
         let Some(status) = observation_outcome
             .get("status")
             .and_then(Value::as_str)
@@ -380,27 +383,32 @@ impl Server {
         page_id: types::PageId,
         handle: Option<&str>,
     ) -> interface_core::InterfaceResult<Value> {
-        let mut outcome = result?;
-        if outcome.get("status").and_then(Value::as_str) == Some("completed") {
-            let workflow_id = outcome
-                .get("workflowId")
-                .cloned()
-                .and_then(|value| serde_json::from_value::<types::WorkflowId>(value).ok());
-            if let Ok(live) = self
-                .live_workflow_observation(
-                    context,
-                    session_id,
-                    page_id,
-                    workflow_id,
-                    handle,
-                    DEFAULT_WORKFLOW_OBSERVE_MAX_NODES,
-                    None,
-                    EvidenceDetail::Compact,
-                )
-                .await
-            {
-                outcome["postState"] = live.outcome;
-            }
+        let workflow_id = result
+            .as_ref()
+            .ok()
+            .and_then(|outcome| outcome.get("workflowId"))
+            .cloned()
+            .and_then(|value| serde_json::from_value::<types::WorkflowId>(value).ok());
+        let (mut outcome, post_state) = WorkflowService::new(Arc::clone(&self.runtime))
+            .post_action_with(
+                result,
+                |outcome| outcome.get("status").and_then(Value::as_str) == Some("completed"),
+                || {
+                    self.live_workflow_observation(
+                        context,
+                        session_id,
+                        page_id,
+                        workflow_id,
+                        handle,
+                        DEFAULT_WORKFLOW_OBSERVE_MAX_NODES,
+                        None,
+                        EvidenceDetail::Compact,
+                    )
+                },
+            )
+            .await?;
+        if let Some(live) = post_state {
+            outcome["postState"] = live.outcome;
         }
         Ok(outcome)
     }
@@ -721,35 +729,35 @@ async fn supervise_start(
     correlation_id: types::CorrelationId,
     setup_sender: oneshot::Sender<SetupMessage>,
 ) {
-    let session = match runtime
-        .create_session(context.clone(), create_request)
-        .await
-    {
-        Ok(session) => session,
-        Err(error) => {
+    let setup = WorkflowService::new(Arc::clone(&runtime))
+        .prepare(context.clone(), create_request, || {
+            !setup_sender.is_closed()
+        })
+        .await;
+    let (session, page) = match setup {
+        Ok(setup) => (setup.session, setup.page),
+        Err(WorkflowSetupFailure::Session(error)) => {
             let _ = setup_sender.send(SetupMessage::Failed(error));
             return;
         }
-    };
-
-    if setup_sender.is_closed() {
-        let cleanup =
-            cleanup_workflow(&runtime, &handle, session.id.clone(), None, workflow_id).await;
-        warn_cancel_cleanup(&cleanup, &correlation_id, &session.id, None);
-        return;
-    }
-
-    let page = match runtime
-        .open_page(
-            context.clone(),
-            types::OpenPageRequest {
-                session_id: session.id.clone(),
-            },
-        )
-        .await
-    {
-        Ok(page) => page,
-        Err(error) => {
+        Err(WorkflowSetupFailure::Cancelled { session, page }) => {
+            let cleanup = cleanup_workflow(
+                &runtime,
+                &handle,
+                session.id.clone(),
+                page.as_ref().map(|page| page.id.clone()),
+                workflow_id,
+            )
+            .await;
+            warn_cancel_cleanup(
+                &cleanup,
+                &correlation_id,
+                &session.id,
+                page.as_ref().map(|page| &page.id),
+            );
+            return;
+        }
+        Err(WorkflowSetupFailure::Page { session, error }) => {
             let detail = format!(
                 "{}: {}",
                 serde_json::to_value(error.code)
@@ -768,7 +776,7 @@ async fn supervise_start(
             .await;
             let failure = WorkflowStartFailure {
                 reason: "pageOpenFailed",
-                session: session.clone(),
+                session: *session,
                 page: None,
                 workflow_id,
                 navigation_outcome: None,
@@ -796,22 +804,18 @@ async fn supervise_start(
         return;
     }
 
-    let navigation_outcome = if let Some(url) = url {
-        let (navigation_context, envelope) = primitive_envelope(
+    let navigation = WorkflowService::new(Arc::clone(&runtime))
+        .navigate_optional(
             context,
             session.id.clone(),
-            Some(page.id.clone()),
-            Some(workflow_id.clone()),
-            types::PrimitiveCommand::Navigate(types::NavigateCommand {
-                url,
-                wait_until: types::WaitUntil::Interactive,
-                timeout_ms: DEFAULT_COMMAND_TIMEOUT_MS,
-            }),
-        );
-        let outcome = runtime
-            .submit(navigation_context, envelope.clone())
-            .await
-            .unwrap_or_else(|error| interface_failure_outcome(envelope.command_id, error));
+            page.id.clone(),
+            workflow_id.clone(),
+            url,
+            DEFAULT_COMMAND_TIMEOUT_MS,
+        )
+        .await;
+    let navigation_outcome = if let Some((command_id, result)) = navigation {
+        let outcome = result.unwrap_or_else(|error| interface_failure_outcome(command_id, error));
         if !reservation.generation_is_current() {
             finish_generation_change(
                 runtime,
@@ -1094,36 +1098,33 @@ async fn cleanup_workflow(
     page_id: Option<types::PageId>,
     workflow_id: types::WorkflowId,
 ) -> CleanupResult {
+    let cleanup = WorkflowService::new(Arc::clone(runtime))
+        .cleanup(
+            || {
+                handle.context(
+                    Utc::now() + Duration::seconds(CLEANUP_DEADLINE_SECONDS),
+                    None,
+                )
+            },
+            session_id,
+            page_id,
+            workflow_id,
+        )
+        .await;
     let mut result = CleanupResult {
         page_closed: false,
         session_deleted: false,
         error_code: None,
     };
 
-    if let Some(page_id) = page_id {
-        let context = handle.context(
-            Utc::now() + Duration::seconds(CLEANUP_DEADLINE_SECONDS),
-            None,
-        );
-        let (context, envelope) = primitive_envelope(
-            context,
-            session_id.clone(),
-            Some(page_id.clone()),
-            Some(workflow_id),
-            types::PrimitiveCommand::ClosePage(types::ClosePageCommand { page_id }),
-        );
-        match runtime.submit(context, envelope).await {
+    if let Some(close) = cleanup.page_close {
+        match close {
             Ok(types::CommandOutcome::Completed { .. }) => result.page_closed = true,
             Ok(outcome) => result.error_code = outcome_error_code(&outcome),
             Err(error) => result.error_code = Some(interface_error_code(&error)),
         }
     }
-
-    let context = handle.context(
-        Utc::now() + Duration::seconds(CLEANUP_DEADLINE_SECONDS),
-        None,
-    );
-    match runtime.delete_session(context, session_id).await {
+    match cleanup.session_delete {
         Ok(()) => result.session_deleted = true,
         Err(error) => {
             if result.error_code.is_none() {
@@ -1755,8 +1756,10 @@ mod tests {
             .expect("cancelled terminal response completed")
             .unwrap();
         gate.release();
-        assert_eq!(
-            response["error"]["message"], "Request cancelled",
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.starts_with("Request cancelled; repair: ")),
             "{response}"
         );
 
@@ -2077,8 +2080,10 @@ mod tests {
             .expect("cancelled publication-generation response completed")
             .unwrap();
         gate.release();
-        assert_eq!(
-            response["error"]["message"], "Request cancelled",
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.starts_with("Request cancelled; repair: ")),
             "{response}"
         );
         assert!(

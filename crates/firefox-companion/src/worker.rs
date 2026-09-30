@@ -40,9 +40,9 @@ use types::{
     CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
     ClickCommand, ClosePageCommand, CommandError, CommandId, ControlAction, ControlActionCommand,
     ErrorCode, ErrorLayer, EvaluateJavaScriptCommand, Evidence, FormControl, FormControlTarget,
-    InspectCommand, NavigateCommand, OpenPageCommand, PageId, ScreenshotMode, SessionId,
-    TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand,
-    WaitUntil, WorkerId,
+    InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand, PageEvidence, PageId,
+    ScreenshotMode, SessionId, TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand,
+    WaitCondition, WaitForCommand, WaitUntil, WorkerId,
 };
 use url::Url;
 use worker_pool::{resolve_upload_paths, BrowserWorker, WorkerFactory};
@@ -52,6 +52,50 @@ use crate::generate_session_seed;
 use crate::network_quiet::FirefoxNetworkQuiet;
 
 const COMPANION_SANDBOX: &str = "automation-runtime-companion";
+const FRAME_CANDIDATES_SCRIPT: &str = r#"(()=>{
+  const controls=[];
+  const nodes=document.querySelectorAll('input,textarea,select,button,a[href],iframe,[role]');
+  const bounded=value=>typeof value==='string'?value.trim().replace(/\s+/g,' ').slice(0,256):'';
+  const secret=/(?:authorization|authentication|bearer|token|secret|password|passwd|api[-_]?key|credential)/i;
+  const paymentValue=/(?:card(?: number)?|cvc|cvv|otp|expiry|challenge code)\s*[:=]?\s*\d{3,}/i;
+  const credentialShape=/(?:\d[ -]?){12,19}|[a-zA-Z0-9_-]{32,}/;
+  const publicLabels=new Set(['Password','Authentication code','Card details','Card number','Expiry','CVC','3-D Secure challenge','Challenge code']);
+  const safeLabel=value=>publicLabels.has(value)?value:(secret.test(value)||paymentValue.test(value)||credentialShape.test(value)?'[redacted]':value);
+  const sensitive=element=>['input','textarea','select'].includes(element.localName)&&((element.localName==='input'&&element.type==='password')||Array.from(element.attributes).some(attribute=>secret.test(attribute.name)||secret.test(attribute.value)||paymentValue.test(attribute.value)||/(?:card|cvc|cvv|otp|one[-_]?time|expiry|challenge|code)/i.test(attribute.name)||credentialShape.test(attribute.value)));
+  const path=element=>{
+    const parts=[];
+    for(let current=element;current;current=current.parentElement){
+      if(parts.length>=12)return null;
+      const tag=current.localName;
+      if(!/^[a-z][a-z0-9-]*$/.test(tag))return null;
+      let position=1;
+      for(let peer=current.previousElementSibling;peer;peer=peer.previousElementSibling){
+        if(peer.localName===tag)position++;
+      }
+      parts.unshift(`${tag}:nth-of-type(${position})`);
+    }
+    const selector=parts.join(' > ');
+    return selector.length<=2048?selector:null;
+  };
+  for(let index=0;index<nodes.length&&index<4096;index++){
+    const element=nodes[index];
+    if(element.getClientRects().length===0||getComputedStyle(element).visibility==='hidden')continue;
+    const tag=element.localName;
+    const role=bounded(element.getAttribute('role'))||({input:'textbox',textarea:'textbox',select:'combobox',button:'button',a:'link',iframe:'iframe'})[tag]||'';
+    const isSensitive=sensitive(element);
+    const rawLabel=bounded(element.labels?.[0]?.textContent||element.closest('label')?.textContent);
+    const rawName=bounded(element.getAttribute('aria-label')||element.getAttribute('title')||element.getAttribute('alt')||rawLabel||((tag==='button'||tag==='a')?element.textContent:''));
+    const label=isSensitive?(publicLabels.has(rawLabel)?rawLabel:'[redacted]'):safeLabel(rawLabel);
+    const name=isSensitive?(publicLabels.has(rawName)?rawName:'[redacted]'):safeLabel(rawName);
+    const css=path(element);
+    if(!css)continue;
+    controls.push({css,role,name,label,disabled:Boolean(element.disabled)});
+    if(controls.length>128)return JSON.stringify({truncated:true,controls:[]});
+  }
+  if(nodes.length>4096)return JSON.stringify({truncated:true,controls:[]});
+  const output=JSON.stringify({truncated:false,controls});
+  return output.length<=65536?output:JSON.stringify({truncated:true,controls:[]});
+})()"#;
 const DEFAULT_NAVIGATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn session_subscribe_params() -> Value {
@@ -596,6 +640,23 @@ struct ScrollMetrics {
     current_y: f64,
     target_y: f64,
     viewport_height: f64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FrameCandidateObservation {
+    truncated: bool,
+    controls: Vec<FrameCandidateControl>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FrameCandidateControl {
+    css: String,
+    role: String,
+    name: String,
+    label: String,
+    disabled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1723,13 +1784,43 @@ impl FirefoxCompanionWorker {
         }
         let mut context = top_context.to_owned();
         for frame in &target.frame_path {
-            let frame_selector = direct_target_selector(frame).ok_or_else(|| {
-                driver_error(
-                    ErrorCode::FrameNotFound,
-                    "Firefox frame path requires an exact CSS or test-id segment",
-                    false,
-                )
-            })?;
+            let frame_selector = if let Some(selector) = direct_target_selector(frame) {
+                selector
+            } else {
+                let candidates = self.gather_bidi_context_candidates(&context).await?;
+                match resolve_candidates(frame, &candidates, &ResolutionPolicy::default()) {
+                    Ok(ResolutionDecision::Resolved { candidate, .. }) => {
+                        candidate.css.ok_or_else(|| {
+                            driver_error(
+                                ErrorCode::FrameNotFound,
+                                "Firefox frame has no CSS identity",
+                                false,
+                            )
+                        })?
+                    }
+                    Ok(ResolutionDecision::Ambiguous { .. }) => {
+                        return Err(driver_error(
+                            ErrorCode::TargetAmbiguous,
+                            "Firefox semantic frame is ambiguous",
+                            false,
+                        ))
+                    }
+                    Ok(ResolutionDecision::NotFound) => {
+                        return Err(driver_error(
+                            ErrorCode::FrameNotFound,
+                            "Firefox semantic frame was not found",
+                            false,
+                        ))
+                    }
+                    Err(error) => {
+                        return Err(driver_error(
+                            ErrorCode::InvalidRequest,
+                            error.to_string(),
+                            false,
+                        ))
+                    }
+                }
+            };
             context = self
                 .descend_frame_context(&context, &frame_selector)
                 .await?;
@@ -1790,6 +1881,100 @@ impl FirefoxCompanionWorker {
             .collect::<Vec<_>>())
     }
 
+    async fn gather_candidates_for_context(
+        &self,
+        page_id: &PageId,
+        top_context: &str,
+        context: &str,
+    ) -> Result<Vec<Candidate>, CommandError> {
+        if context == top_context {
+            return self.gather_input_candidates(page_id).await;
+        }
+        self.gather_bidi_context_candidates(context).await
+    }
+
+    async fn gather_bidi_context_candidates(
+        &self,
+        context: &str,
+    ) -> Result<Vec<Candidate>, CommandError> {
+        let response = self
+            .transport
+            .send(
+                "script.evaluate",
+                json!({
+                    "expression": FRAME_CANDIDATES_SCRIPT,
+                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                    "awaitPromise": false,
+                    "resultOwnership": "none",
+                }),
+            )
+            .await?;
+        let value = response
+            .pointer("/result/value")
+            .and_then(Value::as_str)
+            .filter(|value| value.len() <= 65_536)
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox frame observation was unavailable or oversized",
+                    false,
+                )
+            })?;
+        let observation: FrameCandidateObservation = serde_json::from_str(value).map_err(|_| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox frame observation was invalid",
+                false,
+            )
+        })?;
+        if observation.truncated || observation.controls.len() > 128 {
+            return Err(driver_error(
+                ErrorCode::ResourceExhausted,
+                "Firefox frame observation exceeded a safety bound",
+                false,
+            ));
+        }
+        observation
+            .controls
+            .into_iter()
+            .enumerate()
+            .map(|(index, control)| {
+                if control.css.is_empty()
+                    || control.css.len() > MAX_SELECTOR_BYTES
+                    || [&control.role, &control.name, &control.label]
+                        .iter()
+                        .any(|field| {
+                            field.len() > MAX_CONTROL_FIELD_BYTES
+                                || !safe_frame_candidate_metadata(field)
+                        })
+                {
+                    return Err(driver_error(
+                        ErrorCode::BrowserCommandFailed,
+                        "Firefox frame control exceeded a safety bound",
+                        false,
+                    ));
+                }
+                Ok(Candidate {
+                    id: format!("frame-control-{index}"),
+                    css: Some(control.css),
+                    tag: None,
+                    test_id: None,
+                    role: (!control.role.is_empty()).then_some(control.role),
+                    name: (!control.name.is_empty()).then_some(control.name.clone()),
+                    label: (!control.label.is_empty()).then_some(control.label),
+                    text: control.name,
+                    attributes: Default::default(),
+                    state: CandidateState {
+                        attached: true,
+                        visible: true,
+                        enabled: !control.disabled,
+                    },
+                    frame_path: Vec::new(),
+                })
+            })
+            .collect()
+    }
+
     async fn resolve_input_target(
         &self,
         page_id: &PageId,
@@ -1804,7 +1989,9 @@ impl FirefoxCompanionWorker {
         if let Some(selector) = direct_target_selector(target) {
             return Ok((context, selector));
         }
-        let candidates = self.gather_input_candidates(page_id).await?;
+        let candidates = self
+            .gather_candidates_for_context(page_id, top_context, &context)
+            .await?;
         match resolve_candidates(target, &candidates, &ResolutionPolicy::default()) {
             Ok(ResolutionDecision::Resolved { candidate, .. }) => candidate
                 .css
@@ -1845,7 +2032,9 @@ impl FirefoxCompanionWorker {
         target: &types::TargetSpec,
     ) -> Result<Vec<(String, String)>, CommandError> {
         let context = self.resolve_input_context(top_context, target).await?;
-        let candidates = self.gather_input_candidates(page_id).await?;
+        let candidates = self
+            .gather_candidates_for_context(page_id, top_context, &context)
+            .await?;
         let ranked = rank_candidates(target, &candidates, &ResolutionPolicy::default())
             .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
         Ok(ranked
@@ -2005,28 +2194,15 @@ impl FirefoxCompanionWorker {
         let hosts = target
             .shadow_path
             .iter()
-            .map(|host| direct_target_selector(host))
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| {
-                driver_error(
-                    ErrorCode::ShadowRootUnavailable,
-                    "Firefox shadow path requires exact CSS or test-id hosts",
-                    false,
-                )
-            })?;
-        let target_selector = direct_target_selector(target).ok_or_else(|| {
-            driver_error(
-                ErrorCode::TargetNotFound,
-                "Firefox shadow target requires exact CSS or test-id identity",
-                false,
-            )
-        })?;
+            .map(|host| shadow_target_descriptor(host))
+            .collect::<Result<Vec<_>, _>>()?;
+        let target_selector = shadow_target_descriptor(target)?;
         let hosts_json = serde_json::to_string(&hosts)
             .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
         let target_json = serde_json::to_string(&target_selector)
             .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
         let response = self.transport.send("script.evaluate", json!({
-            "expression": format!("(()=>{{let root=document;for(const selector of {hosts_json}){{const matches=[...root.querySelectorAll(selector)];if(matches.length===0)return 'host-missing';if(matches.length!==1)return 'host-ambiguous';if(!matches[0].shadowRoot)return 'shadow-unavailable';root=matches[0].shadowRoot;}}const matches=[...root.querySelectorAll({target_json})];if(matches.length===0)return 'target-missing';if(matches.length!==1)return 'target-ambiguous';return matches[0];}})()"),
+            "expression": format!("(()=>{{const norm=s=>String(s??'').replace(/\\s+/g,' ').trim();const resolve=(root,spec)=>{{if(spec.selector)return [...root.querySelectorAll(spec.selector)].slice(0,2);const selector=spec.role==='button'?'button,[role=button]':spec.role==='group'?'[role=group]':'*';const nodes=root.querySelectorAll(selector);if(nodes.length>10000)return 'too-many';const matches=[];for(const el of nodes){{const role=el.getAttribute('role')||(el.tagName==='BUTTON'?'button':null);if(role!==spec.role)continue;const labelledBy=el.getAttribute('aria-labelledby');const labelled=labelledBy?labelledBy.split(/\\s+/).map(id=>el.ownerDocument.getElementById(id)?.textContent??'').join(' '):null;const name=el.getAttribute('aria-label')??labelled??el.textContent;if(norm(name)===norm(spec.name))matches.push(el);if(matches.length>1)break;}}return matches;}};let root=document;for(const spec of {hosts_json}){{const matches=resolve(root,spec);if(matches==='too-many')return 'too-many';if(matches.length===0)return 'host-missing';if(matches.length!==1)return 'host-ambiguous';if(!matches[0].shadowRoot)return 'shadow-unavailable';root=matches[0].shadowRoot;}}const matches=resolve(root,{target_json});if(matches==='too-many')return 'too-many';if(matches.length===0)return 'target-missing';if(matches.length!==1)return 'target-ambiguous';return matches[0];}})()"),
             "target": {"context": context, "sandbox": COMPANION_SANDBOX},
             "awaitPromise": false,
             "resultOwnership": "none",
@@ -2050,6 +2226,11 @@ impl FirefoxCompanionWorker {
                 "Firefox shadow host or open root is unavailable",
                 false,
             )),
+            Some("too-many") => Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox shadow search exceeded its node bound",
+                false,
+            )),
             _ => Err(driver_error(
                 ErrorCode::BrowserCommandFailed,
                 "Firefox shadow probe returned an invalid result",
@@ -2066,7 +2247,20 @@ impl FirefoxCompanionWorker {
         modifiers: &[types::ClickModifier],
     ) -> Result<(), CommandError> {
         let shared_id = self.preflight_pointer_target(context, shared_id).await?;
-        let bounds = self.pointer_origin_bounds(context, &shared_id).await?;
+        self.dispatch_pointer_click(context, &shared_id, mouse_path, modifiers)
+            .await
+    }
+
+    /// The pointer input half of [`Self::perform_pointer_click`], for a
+    /// `shared_id` that [`Self::preflight_pointer_target`] already returned.
+    async fn dispatch_pointer_click(
+        &self,
+        context: &str,
+        shared_id: &str,
+        mouse_path: Option<&MousePath>,
+        modifiers: &[types::ClickModifier],
+    ) -> Result<(), CommandError> {
+        let bounds = self.pointer_origin_bounds(context, shared_id).await?;
         let (min_x, max_x, min_y, max_y) = bounds.element_origin_limits();
         let clamped_path;
         let mouse_path = match mouse_path {
@@ -2078,7 +2272,7 @@ impl FirefoxCompanionWorker {
         };
         let pointer_actions = match mouse_path {
             Some(path) if !path.points.is_empty() => {
-                let pointer_moves = self.pointer_moves_for_path(&path.points, &shared_id);
+                let pointer_moves = self.pointer_moves_for_path(&path.points, shared_id);
                 let mut actions_array = Vec::new();
                 actions_array.extend(pointer_moves);
                 let mut dwell_ms = path.hover_dwell_ms;
@@ -2100,7 +2294,7 @@ impl FirefoxCompanionWorker {
                 actions_array.push(serde_json::json!({"type": "pointerUp", "button": 0}));
                 actions_array
             }
-            _ => pointer_action_sequence(&shared_id),
+            _ => pointer_action_sequence(shared_id),
         };
         let actions = if modifiers.is_empty() {
             serde_json::json!({
@@ -2393,12 +2587,12 @@ impl FirefoxCompanionWorker {
         })
     }
 
-    async fn bind_existing_popup(&self, context: &str) -> Result<(PageId, String), CommandError> {
-        let page_id = PageId::new();
-        let binding = self
-            .observer
-            .begin_page_binding(&self.current_lease(), &page_id)
-            .await?;
+    async fn bind_existing_popup(
+        &self,
+        context: &str,
+        page_id: PageId,
+        binding: Box<dyn ExtensionPageBinding>,
+    ) -> Result<(PageId, String), CommandError> {
         let original_title = capture_context_title(&self.transport, context).await?;
         set_context_binding_title(&self.transport, context, binding.nonce()).await?;
         binding.complete().await?;
@@ -3056,6 +3250,15 @@ impl BrowserWorker for FirefoxCompanionWorker {
             .validate()
             .map_err(|message| driver_error(ErrorCode::InvalidRequest, message, false))?;
         let target = form_control_target_spec(&command.target);
+        if !target.frame_path.is_empty()
+            && matches!(command.action, ControlAction::SelectOne { .. })
+        {
+            return Err(driver_error(
+                ErrorCode::PolicyDenied,
+                "Firefox framed select control actions require private verification",
+                false,
+            ));
+        }
         let snapshot = self
             .form_snapshot(page_id, None)
             .await?
@@ -3221,6 +3424,67 @@ impl BrowserWorker for FirefoxCompanionWorker {
         ])
     }
 
+    async fn verify_framed_typed_value(
+        &self,
+        page_id: &PageId,
+        command: &TypeTextCommand,
+        _observed: Option<&str>,
+        kind: &str,
+    ) -> Result<Option<Vec<Evidence>>, CommandError> {
+        let Some(target) = command
+            .target
+            .as_ref()
+            .filter(|target| !target.frame_path.is_empty())
+        else {
+            return Ok(None);
+        };
+        let top_context = self.context(page_id).await?;
+        let (context, selector) = self
+            .resolve_input_target(page_id, &top_context, &command.selector, Some(target))
+            .await?;
+        let selector = serde_json::to_string(&selector)
+            .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
+        let expected = serde_json::to_string(&command.value)
+            .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
+        let kind = serde_json::to_string(kind)
+            .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
+        let clear_first = command.clear_first;
+        let response = self
+            .transport
+            .send(
+                "script.evaluate",
+                json!({
+                    "expression": format!("(()=>{{const el=document.querySelector({selector});if(!el)return null;const expected={expected};const kind={kind};const actual=el instanceof HTMLInputElement&&(el.type==='checkbox'||el.type==='radio')?String(el.checked):String(el.value??'');const selected=kind==='select'&&el instanceof HTMLSelectElement?el.selectedOptions[0]:null;const norm=value=>String(value??'').trim().toLowerCase();const selectedLabelMatches=selected&&(norm(selected.label)===norm(expected)||norm(selected.textContent)===norm(expected));return actual===expected||(!{clear_first}&&kind!=='select'&&actual.endsWith(expected))||Boolean(selectedLabelMatches);}})()"),
+                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                    "awaitPromise": false,
+                    "resultOwnership": "none",
+                }),
+            )
+            .await?;
+        match response.pointer("/result/value").and_then(Value::as_bool) {
+            Some(true) => Ok(Some(vec![
+                Evidence::Inspection {
+                    selector: None,
+                    url: String::new(),
+                    title: String::new(),
+                    text: "[redacted]".into(),
+                    html: None,
+                },
+                self.evidence(InteractionPath::EngineNative),
+            ])),
+            Some(false) => Err(driver_error(
+                ErrorCode::VerificationFailed,
+                "typed value did not match private frame state",
+                true,
+            )),
+            None => Err(driver_error(
+                ErrorCode::TargetNotFound,
+                "Firefox framed input was unavailable for verification",
+                false,
+            )),
+        }
+    }
+
     async fn inspect(
         &self,
         page_id: &PageId,
@@ -3276,6 +3540,63 @@ impl BrowserWorker for FirefoxCompanionWorker {
                     self.evidence(InteractionPath::EngineNative),
                 ]);
             }
+        }
+        if let Some(target) = command
+            .target
+            .as_ref()
+            .filter(|target| !target.frame_path.is_empty())
+        {
+            if command.include_html {
+                return Err(driver_error(
+                    ErrorCode::PolicyDenied,
+                    "Firefox frame inspection cannot return unsanitized HTML",
+                    false,
+                ));
+            }
+            let (frame_context, selector) = self
+                .resolve_input_target(page_id, &context, "", Some(target))
+                .await?;
+            let selector_json = serde_json::to_string(&selector).map_err(|error| {
+                driver_error(ErrorCode::InvalidRequest, error.to_string(), false)
+            })?;
+            let response = self.transport.send("script.evaluate", json!({
+                "expression": format!("(()=>{{const el=document.querySelector({selector_json});if(!el)return null;if(el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement||el instanceof HTMLSelectElement)return '[redacted]';const value=String(el.innerText||el.textContent||'');const secret=/(?:authorization|authentication|bearer|token|secret|password|passwd|api[-_]?key|credential|card|cvc|cvv|otp|one[-_]?time|expiry|challenge|code)/i;const credentialShape=/(?:\\d[ -]?){{12,19}}|[a-zA-Z0-9_-]{{32,}}/;const sensitive=Array.from(el.attributes).some(attribute=>secret.test(attribute.name)||secret.test(attribute.value)||credentialShape.test(attribute.value))||secret.test(value)||credentialShape.test(value);return sensitive?'[redacted]':value.slice(0,8192);}})()"),
+                "target": {"context": frame_context, "sandbox": COMPANION_SANDBOX},
+                "awaitPromise": false,
+                "resultOwnership": "none",
+            })).await?;
+            let text = response
+                .pointer("/result/value")
+                .and_then(Value::as_str)
+                .filter(|text| text.len() <= MAX_VISIBLE_TEXT_BYTES)
+                .ok_or_else(|| {
+                    driver_error(
+                        ErrorCode::TargetNotFound,
+                        "Firefox frame inspection target was unavailable",
+                        false,
+                    )
+                })?;
+            // The browser-side probe redacts before serialization. Also
+            // redact at this boundary when the requested field itself is
+            // sensitive, so a malformed or older probe cannot echo it.
+            let text = if is_framed_form_control_selector(&selector)
+                || sensitive_frame_inspection_target(target, &selector)
+                || !safe_frame_candidate_metadata(text)
+            {
+                "[redacted]"
+            } else {
+                text
+            };
+            return Ok(vec![
+                Evidence::Inspection {
+                    selector: Some(selector),
+                    url: String::new(),
+                    title: String::new(),
+                    text: text.to_owned(),
+                    html: None,
+                },
+                self.evidence(InteractionPath::EngineNative),
+            ]);
         }
         if let Some(target) = command
             .target
@@ -3385,33 +3706,50 @@ impl BrowserWorker for FirefoxCompanionWorker {
         page_id: &PageId,
         command: &ClickCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let context = self.context(page_id).await?;
-        let (context, selector) = self
-            .resolve_input_target(
-                page_id,
-                &context,
-                &command.selector,
-                command.target.as_ref(),
-            )
-            .await?;
-        let shared_id = match command
-            .target
-            .as_ref()
-            .filter(|target| !target.shadow_path.is_empty())
-        {
-            Some(target) => self.resolve_shadow_element(&context, target).await?,
-            None => {
-                self.resolve_element(&context, &selector, command.target.is_some())
-                    .await?
+        let top_context = self.context(page_id).await?;
+        // One re-resolve for a target the page re-rendered away between
+        // resolution and the viewport preflight; a second detach just
+        // fails. Only the preflight is retried: it runs before any pointer
+        // input, so a click that landed is never repeated.
+        let mut detach_retried = false;
+        let (context, shared_id) = loop {
+            let shadow_target = command
+                .target
+                .as_ref()
+                .filter(|target| !target.shadow_path.is_empty());
+            let (context, shared_id) = if let Some(target) = shadow_target {
+                let context = self.resolve_input_context(&top_context, target).await?;
+                let shared_id = self.resolve_shadow_element(&context, target).await?;
+                (context, shared_id)
+            } else {
+                let (context, selector) = self
+                    .resolve_input_target(
+                        page_id,
+                        &top_context,
+                        &command.selector,
+                        command.target.as_ref(),
+                    )
+                    .await?;
+                let shared_id = self
+                    .resolve_element(&context, &selector, command.target.is_some())
+                    .await?;
+                (context, shared_id)
+            };
+
+            self.behavioral_scroll_into_view_if_needed(&context, &shared_id)
+                .await?;
+            match self.preflight_pointer_target(&context, &shared_id).await {
+                Ok(shared_id) => break (context, shared_id),
+                Err(error) if !detach_retried && error.code == ErrorCode::TargetDetached => {
+                    detach_retried = true;
+                }
+                Err(error) => return Err(error),
             }
         };
-
-        self.behavioral_scroll_into_view_if_needed(&context, &shared_id)
-            .await?;
         let path =
             self.with_session_random(|random| self.mouse_simulator.generate_approach_path(random));
 
-        self.perform_pointer_click(&context, &shared_id, Some(&path), &command.modifiers)
+        self.dispatch_pointer_click(&context, &shared_id, Some(&path), &command.modifiers)
             .await?;
         Ok(vec![
             Evidence::Element {
@@ -3482,56 +3820,67 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 false,
             )
         })?;
-        let click_evidence = self
-            .click(
-                page_id,
-                &ClickCommand {
-                    selector: command.selector.clone(),
-                    target: command.target.clone(),
-                    boundary: true,
-                    expected_url: None,
-                    modifiers: Vec::new(),
-                },
-            )
+        // Capture the discovery generation before the click creates the popup.
+        // A ticket opened afterward treats that already-known target as stale.
+        let popup_page_id = PageId::new();
+        let binding = self
+            .observer
+            .begin_page_binding(&self.current_lease(), &popup_page_id)
             .await?;
-        let timeout = Duration::from_millis(command.timeout_ms.max(1));
-        let (popup_context, popup_url) = tokio::time::timeout(timeout, async {
-            loop {
-                let event = events.recv().await.map_err(|_| {
-                    driver_error(
-                        ErrorCode::BrowserCommandFailed,
-                        "Firefox popup event stream closed",
+        let click_command = ClickCommand {
+            selector: command.selector.clone(),
+            target: command.target.clone(),
+            boundary: true,
+            expected_url: None,
+            modifiers: Vec::new(),
+        };
+        let click = self.click(page_id, &click_command);
+        // Consume contextCreated while the popup is still blank. Waiting for
+        // native click completion lets its navigation outrun the title proof.
+        let bind_popup = async {
+            let timeout = Duration::from_millis(command.timeout_ms.max(1));
+            let (popup_context, popup_url) = tokio::time::timeout(timeout, async {
+                loop {
+                    let event = events.recv().await.map_err(|_| {
+                        driver_error(
+                            ErrorCode::BrowserCommandFailed,
+                            "Firefox popup event stream closed",
+                            false,
+                        )
+                    })?;
+                    if let Some(popup) = popup_context_from_event(&event, &opener) {
+                        return Ok::<_, CommandError>(popup);
+                    }
+                }
+            })
+            .await
+            .map_err(|_| {
+                driver_error(
+                    ErrorCode::WaitConditionTimedOut,
+                    format!(
+                        "Firefox popup did not open within {} ms",
+                        command.timeout_ms
+                    ),
+                    false,
+                )
+            })??;
+            tokio::task::yield_now().await;
+            while let Ok(event) = events.try_recv() {
+                if popup_context_from_event(&event, &opener).is_some() {
+                    return Err(driver_error(
+                        ErrorCode::TargetAmbiguous,
+                        "Firefox click opened multiple popup contexts",
                         false,
-                    )
-                })?;
-                if let Some(popup) = popup_context_from_event(&event, &opener) {
-                    return Ok::<_, CommandError>(popup);
+                    ));
                 }
             }
-        })
-        .await
-        .map_err(|_| {
-            driver_error(
-                ErrorCode::WaitConditionTimedOut,
-                format!(
-                    "Firefox popup did not open within {} ms",
-                    command.timeout_ms
-                ),
-                false,
-            )
-        })??;
-
-        tokio::task::yield_now().await;
-        while let Ok(event) = events.try_recv() {
-            if popup_context_from_event(&event, &opener).is_some() {
-                return Err(driver_error(
-                    ErrorCode::TargetAmbiguous,
-                    "Firefox click opened multiple popup contexts",
-                    false,
-                ));
-            }
-        }
-        let (popup_page_id, title) = self.bind_existing_popup(&popup_context).await?;
+            let (popup_page_id, title) = self
+                .bind_existing_popup(&popup_context, popup_page_id, binding)
+                .await?;
+            Ok::<_, CommandError>((popup_page_id, title, popup_url))
+        };
+        let (click_evidence, (popup_page_id, title, popup_url)) =
+            tokio::try_join!(click, bind_popup)?;
         let mut evidence = vec![Evidence::Popup {
             opener_page_id: page_id.clone(),
             page_id: popup_page_id,
@@ -4011,8 +4360,12 @@ impl BrowserWorker for FirefoxCompanionWorker {
             .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
         let value_json = serde_json::to_string(&command.value)
             .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
+        let private_frame = command
+            .target
+            .as_ref()
+            .is_some_and(|target| !target.frame_path.is_empty());
         let selection = self.transport.send("script.evaluate", json!({
-            "expression": format!("(()=>{{const element=document.querySelector({selector_json});if(element instanceof HTMLInputElement&&(element.type==='checkbox'||element.type==='radio')){{if({value_json}!=='true'&&{value_json}!=='false')return 'invalid-checked';const checked={value_json}==='true';if(element.type==='radio'&&!checked)return 'radio-uncheck';if(element.checked!==checked)element.click();return `checked:${{element.checked}}`;}}if(!(element instanceof HTMLSelectElement))return 'not-select';const wanted={value_json};const norm=s=>s.trim().toLowerCase();const byValue=[...element.options].filter(option=>option.value===wanted);const options=byValue.length?byValue:[...element.options].filter(option=>norm(option.label)===norm(wanted)||norm(option.textContent)===norm(wanted));if(options.length===0)return 'missing';if(options.length!==1)return 'ambiguous';if(options[0].disabled)return 'disabled';element.value=options[0].value;element.dispatchEvent(new Event('input',{{bubbles:true}}));element.dispatchEvent(new Event('change',{{bubbles:true}}));return element.value===options[0].value?`selected:${{element.value}}`:'missing';}})()"),
+            "expression": format!("(()=>{{const element=document.querySelector({selector_json});if(element instanceof HTMLInputElement&&(element.type==='checkbox'||element.type==='radio')){{if({value_json}!=='true'&&{value_json}!=='false')return 'invalid-checked';const checked={value_json}==='true';if(element.type==='radio'&&!checked)return 'radio-uncheck';if(element.checked!==checked)element.click();return `checked:${{element.checked}}`;}}if(!(element instanceof HTMLSelectElement))return 'not-select';const wanted={value_json};const norm=s=>s.trim().toLowerCase();const byValue=[...element.options].filter(option=>option.value===wanted);const options=byValue.length?byValue:[...element.options].filter(option=>norm(option.label)===norm(wanted)||norm(option.textContent)===norm(wanted));if(options.length===0)return 'missing';if(options.length!==1)return 'ambiguous';if(options[0].disabled)return 'disabled';element.value=options[0].value;element.dispatchEvent(new Event('input',{{bubbles:true}}));element.dispatchEvent(new Event('change',{{bubbles:true}}));return element.value===options[0].value?({private_frame}?'selected:[redacted]':`selected:${{element.value}}`):'missing';}})()"),
             "target": {"context": context, "sandbox": COMPANION_SANDBOX},
             "awaitPromise": false,
             "resultOwnership": "none",
@@ -4020,6 +4373,15 @@ impl BrowserWorker for FirefoxCompanionWorker {
         match selection.pointer("/result/value").and_then(Value::as_str) {
             Some(value) if value.starts_with("selected:") => {
                 let selected_value = value.trim_start_matches("selected:");
+                let selected_value = if command
+                    .target
+                    .as_ref()
+                    .is_some_and(|target| !target.frame_path.is_empty())
+                {
+                    "[redacted]"
+                } else {
+                    selected_value
+                };
                 let mut evidence = vec![
                     Evidence::Element {
                         selector: command.selector.clone(),
@@ -4123,7 +4485,15 @@ impl BrowserWorker for FirefoxCompanionWorker {
         self.transport
             .send("input.performActions", bidi_actions)
             .await?;
-        let typed = read_typed_control_value(&self.transport, &context, &selector_json).await?;
+        let typed = if command
+            .target
+            .as_ref()
+            .is_some_and(|target| !target.frame_path.is_empty())
+        {
+            "[redacted]".to_owned()
+        } else {
+            read_typed_control_value(&self.transport, &context, &selector_json).await?
+        };
         let mut evidence = vec![
             Evidence::Element {
                 selector: command.selector.clone(),
@@ -4209,16 +4579,90 @@ impl BrowserWorker for FirefoxCompanionWorker {
                     )
                 }
                 WaitCondition::Element { target, state } => {
-                    let context = self.context(page_id).await?;
-                    let resolved = self
-                        .resolve_input_target(page_id, &context, "", Some(target))
-                        .await;
-                    match resolved {
-                        Ok((context, selector)) => {
-                            let selector = serde_json::to_string(&selector).map_err(|error| {
-                                driver_error(ErrorCode::InvalidRequest, error.to_string(), false)
-                            })?;
-                            let expression = match state {
+                    if !target.shadow_path.is_empty() {
+                        let top_context = self.context(page_id).await?;
+                        let context = self.resolve_input_context(&top_context, target).await?;
+                        match self.resolve_shadow_element(&context, target).await {
+                            Ok(shared_id) => {
+                                let condition = match state {
+                                    types::ElementState::Attached => "el.isConnected",
+                                    types::ElementState::Visible => "el.isConnected&&el.checkVisibility()",
+                                    types::ElementState::Detached => "!el.isConnected",
+                                    types::ElementState::Enabled => "el.isConnected&&!el.matches(':disabled,[aria-disabled=\"true\"]')",
+                                    types::ElementState::Disabled => "el.isConnected&&el.matches(':disabled,[aria-disabled=\"true\"]')",
+                                    types::ElementState::Hidden => "el.isConnected&&!el.checkVisibility()",
+                                };
+                                let response = self.transport.send("script.callFunction", json!({
+                                    "functionDeclaration": format!("function(el){{return Boolean({condition});}}"),
+                                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                                    "arguments": [{"sharedId": shared_id}],
+                                    "awaitPromise": false,
+                                    "resultOwnership": "none",
+                                })).await?;
+                                (
+                                    response
+                                        .pointer("/result/value")
+                                        .and_then(Value::as_bool)
+                                        .unwrap_or(false),
+                                    None,
+                                )
+                            }
+                            Err(error)
+                                if matches!(
+                                    error.code,
+                                    ErrorCode::TargetNotFound | ErrorCode::ShadowRootUnavailable
+                                ) =>
+                            {
+                                (matches!(state, types::ElementState::Detached), None)
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    } else if *state == types::ElementState::Visible
+                        && target.css.is_none()
+                        && target.test_id.is_none()
+                        && target.frame_path.is_empty()
+                        && target.shadow_path.is_empty()
+                        && target.attributes.is_empty()
+                        && target.ordinal.is_none()
+                        && target.accessible_name.is_some()
+                        && matches!(
+                            target.role.as_deref(),
+                            Some(
+                                "navigation"
+                                    | "main"
+                                    | "region"
+                                    | "heading"
+                                    | "banner"
+                                    | "complementary"
+                                    | "contentinfo"
+                                    | "form"
+                                    | "dialog"
+                                    | "alert"
+                                    | "status"
+                            )
+                        )
+                    {
+                        let (nodes, _) = self
+                            .observer
+                            .a11y_snapshot(&self.current_lease(), page_id, 256)
+                            .await?;
+                        (accessibility_tree_contains(&nodes, target), None)
+                    } else {
+                        let context = self.context(page_id).await?;
+                        let resolved = self
+                            .resolve_input_target(page_id, &context, "", Some(target))
+                            .await;
+                        match resolved {
+                            Ok((context, selector)) => {
+                                let selector =
+                                    serde_json::to_string(&selector).map_err(|error| {
+                                        driver_error(
+                                            ErrorCode::InvalidRequest,
+                                            error.to_string(),
+                                            false,
+                                        )
+                                    })?;
+                                let expression = match state {
                                 types::ElementState::Attached | types::ElementState::Visible => {
                                     format!("Boolean(document.querySelector({selector}))")
                                 }
@@ -4229,22 +4673,23 @@ impl BrowserWorker for FirefoxCompanionWorker {
                                 types::ElementState::Disabled => format!("Boolean(document.querySelector({selector})?.matches(':disabled,[aria-disabled=\"true\"]'))"),
                                 types::ElementState::Hidden => format!("Boolean(document.querySelector({selector})) && !document.querySelector({selector}).checkVisibility()"),
                             };
-                            let response = self.transport.send("script.evaluate", json!({
+                                let response = self.transport.send("script.evaluate", json!({
                                 "expression": expression,
                                 "target": {"context": context, "sandbox": COMPANION_SANDBOX},
                                 "awaitPromise": false,
                                 "resultOwnership": "none",
                             })).await?;
-                            let satisfied = response
-                                .pointer("/result/value")
-                                .and_then(Value::as_bool)
-                                .unwrap_or(false);
-                            (satisfied, None)
+                                let satisfied = response
+                                    .pointer("/result/value")
+                                    .and_then(Value::as_bool)
+                                    .unwrap_or(false);
+                                (satisfied, None)
+                            }
+                            Err(error) if error.code == ErrorCode::TargetNotFound => {
+                                (matches!(state, types::ElementState::Detached), None)
+                            }
+                            Err(error) => return Err(error),
                         }
-                        Err(error) if error.code == ErrorCode::TargetNotFound => {
-                            (matches!(state, types::ElementState::Detached), None)
-                        }
-                        Err(error) => return Err(error),
                     }
                 }
                 WaitCondition::Text { target, matcher }
@@ -4579,6 +5024,92 @@ impl BrowserWorker for FirefoxCompanionWorker {
         ];
         guard.disarm().await?;
         Ok(evidence)
+    }
+
+    async fn list_pages(&self, _command: &ListPagesCommand) -> Result<Vec<Evidence>, CommandError> {
+        self.ensure_active()?;
+        let tree = self
+            .transport
+            .send("browsingContext.getTree", json!({}))
+            .await?;
+        let live = live_contexts(&tree).ok_or_else(|| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox page listing returned an invalid context tree",
+                false,
+            )
+        })?;
+        let stale = self
+            .pages
+            .read()
+            .await
+            .values()
+            .filter_map(|page| match page {
+                PageContext::Ready { context, .. } if !live.contains(context) => {
+                    Some(context.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for context in stale {
+            let removals = mark_destroyed_context(&self.pages, &self.page_cleanups, &context).await;
+            release_removed_pages(&self.cleanup_failure, removals).await;
+        }
+        self.ensure_active()?;
+        let contexts = tree["contexts"].as_array().ok_or_else(|| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox page listing omitted root contexts",
+                false,
+            )
+        })?;
+        let urls = contexts
+            .iter()
+            .filter_map(|context| {
+                Some((
+                    context.get("context")?.as_str()?.to_owned(),
+                    context.get("url")?.as_str()?.to_owned(),
+                ))
+            })
+            .collect::<HashMap<_, _>>();
+        let tracked = self
+            .pages
+            .read()
+            .await
+            .iter()
+            .filter_map(|(page_id, page)| match page {
+                PageContext::Ready { context, .. } if live.contains(context) => {
+                    Some((page_id.clone(), context.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut listed = Vec::with_capacity(tracked.len());
+        for (page_id, context) in tracked {
+            let url = urls.get(&context).cloned().unwrap_or_default();
+            if url.len() > MAX_URL_BYTES * 4 {
+                return Err(driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox page URL exceeded its bound",
+                    false,
+                ));
+            }
+            let title = capture_context_title(&self.transport, &context).await?;
+            if title.len() > MAX_TITLE_BYTES * 4 {
+                return Err(driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox page title exceeded its bound",
+                    false,
+                ));
+            }
+            listed.push(PageEvidence {
+                page_id,
+                url,
+                title,
+            });
+        }
+        listed.sort_by_key(|page| page.page_id.0);
+        Ok(vec![Evidence::Pages { pages: listed }])
     }
 
     async fn close_page_command(
@@ -5177,6 +5708,14 @@ impl BrowserWorker for FirefoxCompanionWorker {
     }
 }
 
+fn accessibility_tree_contains(nodes: &[types::AccessibilityNode], target: &TargetSpec) -> bool {
+    nodes.iter().any(|node| {
+        node.role.as_deref() == target.role.as_deref()
+            && node.name.as_deref() == target.accessible_name.as_deref()
+            || accessibility_tree_contains(&node.children, target)
+    })
+}
+
 fn accessibility_candidates(nodes: &[types::AccessibilityNode]) -> Vec<Candidate> {
     fn collect(nodes: &[types::AccessibilityNode], candidates: &mut Vec<Candidate>) {
         for node in nodes {
@@ -5226,7 +5765,31 @@ fn accessibility_candidates(nodes: &[types::AccessibilityNode]) -> Vec<Candidate
 
 #[cfg(test)]
 mod accessibility_candidate_tests {
-    use super::accessibility_candidates;
+    use super::{accessibility_candidates, accessibility_tree_contains};
+
+    #[test]
+    fn structural_wait_finds_named_navigation_inside_the_tree() {
+        let nodes = [types::AccessibilityNode {
+            role: Some("complementary".into()),
+            children: vec![types::AccessibilityNode {
+                role: Some("navigation".into()),
+                name: Some("Primary navigation".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+        let target = types::TargetSpec {
+            role: Some("navigation".into()),
+            accessible_name: Some("Primary navigation".into()),
+            ..Default::default()
+        };
+        assert!(accessibility_tree_contains(&nodes, &target));
+        let other = types::TargetSpec {
+            accessible_name: Some("Secondary navigation".into()),
+            ..target
+        };
+        assert!(!accessibility_tree_contains(&nodes, &other));
+    }
 
     #[test]
     fn invalid_accessibility_nodes_preserve_validation_metadata() {
@@ -5568,7 +6131,7 @@ fn validate_observation(observation: &ExtensionObservation) -> Result<(), Comman
             false,
         ));
     }
-    let safe = [
+    let safe_page = [
         Some(observation.url.as_str()),
         Some(observation.title.as_str()),
         Some(observation.visible_text.as_str()),
@@ -5576,19 +6139,25 @@ fn validate_observation(observation: &ExtensionObservation) -> Result<(), Comman
     ]
     .into_iter()
     .flatten()
-    .chain(observation.controls.iter().flat_map(|control| {
+    .all(|value| !contains_sensitive_material(value));
+    let safe_controls = observation.controls.iter().all(|control| {
         [
             Some(control.css_path.as_str()),
             control.role.as_deref(),
-            control.name.as_deref(),
-            control.label.as_deref(),
             control.value.as_deref(),
         ]
         .into_iter()
         .flatten()
-    }))
-    .all(|value| !contains_sensitive_material(value));
-    if !safe {
+        .all(|value| !contains_sensitive_material(value))
+            && [control.name.as_deref(), control.label.as_deref()]
+                .into_iter()
+                .flatten()
+                .all(|value| {
+                    matches!(value, "Password" | "Authentication code")
+                        || !contains_sensitive_material(value)
+                })
+    });
+    if !safe_page || !safe_controls {
         return Err(driver_error(
             ErrorCode::BrowserCommandFailed,
             "extension observation contained unsanitized sensitive material",
@@ -5616,6 +6185,79 @@ fn contains_sensitive_material(value: &str) -> bool {
     ]
     .iter()
     .any(|marker| lower.contains(marker))
+}
+
+fn safe_frame_candidate_metadata(value: &str) -> bool {
+    if matches!(
+        value,
+        "Password"
+            | "Authentication code"
+            | "Card details"
+            | "Card number"
+            | "Expiry"
+            | "CVC"
+            | "3-D Secure challenge"
+            | "Challenge code"
+    ) {
+        return true;
+    }
+    let lower = value.to_ascii_lowercase();
+    !contains_sensitive_material(value)
+        && !lower.contains("authentication")
+        && !((lower.contains("card")
+            || lower.contains("cvc")
+            || lower.contains("cvv")
+            || lower.contains("otp")
+            || lower.contains("expiry")
+            || lower.contains("code"))
+            && value.chars().filter(char::is_ascii_digit).count() >= 3)
+        && value
+            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .all(|token| token.len() < 32)
+        && value.chars().filter(char::is_ascii_digit).count() < 12
+}
+
+fn sensitive_frame_inspection_target(target: &TargetSpec, selector: &str) -> bool {
+    let sensitive = |value: &str| {
+        let lower = value.to_ascii_lowercase();
+        contains_sensitive_material(value)
+            || [
+                "authentication",
+                "card",
+                "cvc",
+                "cvv",
+                "otp",
+                "expiry",
+                "challenge code",
+                "verification code",
+                "security code",
+            ]
+            .iter()
+            .any(|marker| lower.contains(marker))
+    };
+    [
+        Some(selector),
+        target.css.as_deref(),
+        target.test_id.as_deref(),
+        target.accessible_name.as_deref(),
+        target.label.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(sensitive)
+        || target
+            .attributes
+            .iter()
+            .any(|(name, value)| sensitive(name) || sensitive(value))
+}
+
+fn is_framed_form_control_selector(selector: &str) -> bool {
+    let last = selector.rsplit('>').next().unwrap_or(selector).trim_start();
+    ["input", "textarea", "select"].into_iter().any(|tag| {
+        last.strip_prefix(tag).is_some_and(|rest| {
+            rest.is_empty() || matches!(rest.as_bytes()[0], b':' | b'[' | b'.' | b'#' | b' ')
+        })
+    })
 }
 
 fn nonempty_field(value: &Option<String>) -> Option<&str> {
@@ -5894,6 +6536,37 @@ fn direct_target_selector(target: &types::TargetSpec) -> Option<String> {
             });
             format!("[data-testid=\"{escaped}\"]")
         })
+}
+
+fn shadow_target_descriptor(target: &types::TargetSpec) -> Result<Value, CommandError> {
+    if let Some(selector) = direct_target_selector(target) {
+        return Ok(json!({"selector": selector}));
+    }
+    if let (Some(role), Some(name)) = (
+        target
+            .role
+            .as_deref()
+            .filter(|value| !value.trim().is_empty()),
+        target
+            .accessible_name
+            .as_deref()
+            .filter(|value| !value.trim().is_empty()),
+    ) {
+        if target.attributes.is_empty()
+            && target.label.is_none()
+            && target.text.is_none()
+            && target.ordinal.is_none()
+            && !target.allow_best_match
+            && target.frame_path.is_empty()
+        {
+            return Ok(json!({"role": role, "name": name}));
+        }
+    }
+    Err(driver_error(
+        ErrorCode::InvalidRequest,
+        "Firefox shadow segment requires exact CSS, test ID, or role and accessible name",
+        false,
+    ))
 }
 
 fn popup_context_from_event(event: &BidiEvent, opener: &str) -> Option<(String, String)> {

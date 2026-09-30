@@ -200,7 +200,8 @@ impl RequestContext {
 }
 
 /// Transport-neutral interface operations and their required capabilities.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum InterfaceOperation {
     RuntimeInfo,
     CreateSession,

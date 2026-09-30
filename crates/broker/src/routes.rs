@@ -140,12 +140,13 @@ async fn context_ask(
     // the miss carries `hit:false` and the snapshot repair so HTTP consumers
     // get the same machine-readable next step.
     Ok(Json(match answer {
-        Some(answer) => serde_json::json!({ "answer": answer, "hit": true }),
+        Some(answer) => serde_json::json!({ "answer": answer, "hit": true, "pageDerived": true }),
         None => serde_json::json!({
             "answer": null,
             "hit": false,
             "reason": "notRemembered",
-            "nextStep": "a11y_snapshot"
+            "nextStep": "a11y_snapshot",
+            "pageDerived": true
         }),
     }))
 }
@@ -165,12 +166,15 @@ async fn context_neighbors(
         .await
         .map_err(ProtocolError::from)?;
     Ok(Json(match neighbors {
-        Some(neighbors) => serde_json::json!({ "neighbors": neighbors, "hit": true }),
+        Some(neighbors) => {
+            serde_json::json!({ "neighbors": neighbors, "hit": true, "pageDerived": true })
+        }
         None => serde_json::json!({
             "neighbors": null,
             "hit": false,
             "reason": "notRemembered",
-            "nextStep": "a11y_snapshot"
+            "nextStep": "a11y_snapshot",
+            "pageDerived": true
         }),
     }))
 }
@@ -184,7 +188,9 @@ async fn context_site(
         .context_site(request.context, key)
         .await
         .map_err(ProtocolError::from)?;
-    Ok(Json(serde_json::json!({ "site": site })))
+    Ok(Json(
+        serde_json::json!({ "site": site, "pageDerived": true }),
+    ))
 }
 
 async fn form_snapshot(
@@ -649,6 +655,7 @@ fn status_wire(status: &JobStatus) -> String {
         JobStatus::Completed => "completed",
         JobStatus::Failed => "failed",
         JobStatus::Cancelled => "cancelled",
+        JobStatus::ReconciliationRequired => "reconciliationRequired",
     }
     .to_string()
 }
@@ -714,6 +721,16 @@ fn job_error(err: JobError, correlation_id: CorrelationId) -> ProtocolError {
             correlation_id,
             None,
         )),
+        JobError::AdmissionUncertain { job_id, message } => {
+            let mut error = interface_error(
+                InterfaceErrorCode::Internal,
+                &format!("job admission requires reconciliation: {message}"),
+                correlation_id,
+                None,
+            );
+            error.reconciliation_required = true;
+            ProtocolError::from(error).with_job_id(job_id.0)
+        }
         JobError::Execution(message) if message.contains("already finished") => {
             ProtocolError::from(interface_error(
                 InterfaceErrorCode::InvalidRequest,
@@ -735,7 +752,7 @@ async fn dispatch_submit_job(
     state: &AppState,
     request: &AuthenticatedRequest,
     input: SubmitJobRequest,
-) -> Result<JobSubmitOutcome, ProtocolError> {
+) -> Result<JobSubmitOutcome, JobError> {
     let mut config = JobConfig::new(input.name, input.payload)
         .with_priority(input.priority.into())
         .with_max_retries(input.max_retries);
@@ -747,8 +764,7 @@ async fn dispatch_submit_job(
     let id = state
         .scheduler
         .submit_authorized(config, &request.context.capabilities)
-        .await
-        .map_err(|e| job_error(e, request.context.correlation_id.clone()))?;
+        .await?;
     let status = state
         .scheduler
         .get_job(&id)
@@ -819,14 +835,20 @@ async fn submit_job(
                         outcome
                     }
                     Err(error) => {
-                        state.job_idempotency.abandon(permit).await;
-                        return Err(error);
+                        if matches!(error, JobError::MissingCapability(_) | JobError::QueueFull) {
+                            state.job_idempotency.abandon(permit).await;
+                        } else {
+                            drop(permit);
+                        }
+                        return Err(job_error(error, request.context.correlation_id.clone()));
                     }
                 }
             }
         }
     } else {
-        dispatch_submit_job(&state, &request, input).await?
+        dispatch_submit_job(&state, &request, input)
+            .await
+            .map_err(|error| job_error(error, request.context.correlation_id.clone()))?
     };
 
     Ok((
@@ -1255,7 +1277,11 @@ fn outcome_response(outcome: CommandOutcome) -> Response {
         }
         CommandOutcome::Failed { .. } => (StatusCode::INTERNAL_SERVER_ERROR, None),
     };
-    let mut response = (status, Json(outcome)).into_response();
+    let Ok(mut value) = serde_json::to_value(outcome) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    types::annotate_page_derived_evidence(&mut value);
+    let mut response = (status, Json(value)).into_response();
     if let Some(milliseconds) = retry_after_ms {
         let seconds = milliseconds.saturating_add(999) / 1_000;
         if let Ok(value) = HeaderValue::from_str(&seconds.max(1).to_string()) {
@@ -1263,4 +1289,28 @@ fn outcome_response(outcome: CommandOutcome) -> Response {
         }
     }
     response
+}
+
+#[cfg(test)]
+mod job_error_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn uncertain_admission_has_structured_reconciliation_and_job_id() {
+        let response = job_error(
+            JobError::AdmissionUncertain {
+                job_id: JobId("job_opaque".into()),
+                message: "ack lost after append".into(),
+            },
+            CorrelationId::new(),
+        )
+        .into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(body["jobId"], "job_opaque");
+        assert_eq!(body["error"]["reconciliationRequired"], true);
+        assert_eq!(body["error"]["code"], "internal");
+    }
 }
