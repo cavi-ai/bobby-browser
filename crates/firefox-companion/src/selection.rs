@@ -147,7 +147,6 @@ pub async fn start_firefox_profile_enrollment(
         config.pairing_code_ttl,
         config.attachment_ttl,
         pairing_code_observer,
-        BindPolicy::Configured,
     )
     .await?;
     Ok(FirefoxProfileEnrollment {
@@ -204,6 +203,9 @@ impl WorkerFactory for ConfiguredFirefoxFactory {
     async fn launch(&self, session_id: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
         let warmed = self.server.lock().await.clone();
         if let Some(server) = warmed {
+            // Recycling Firefox also restarts its native relay. Wait for
+            // discovery after recovery so the grant uses the new connection.
+            self.ensure_bidi_slot().await?;
             server
                 .wait_for_discovery(&self.config.profile_id, self.config.timeout)
                 .await
@@ -214,7 +216,6 @@ impl WorkerFactory for ConfiguredFirefoxFactory {
                         "firefox companion discovery wait failed"
                     );
                 })?;
-            self.ensure_bidi_slot().await?;
             return self.launch_with_server(&server, session_id).await;
         }
 
@@ -222,6 +223,7 @@ impl WorkerFactory for ConfiguredFirefoxFactory {
             tracing::warn!(error = %error.message, "firefox companion bootstrap failed");
         })?;
         let server = attempt.server().clone();
+        self.ensure_bidi_slot().await?;
         server
             .wait_for_discovery(&self.config.profile_id, self.config.timeout)
             .await
@@ -232,7 +234,6 @@ impl WorkerFactory for ConfiguredFirefoxFactory {
                     "firefox companion pairing timed out waiting for extension discovery"
                 );
             })?;
-        self.ensure_bidi_slot().await?;
         let worker = self
             .launch_with_server(&server, session_id)
             .await
@@ -441,7 +442,6 @@ impl ConfiguredFirefoxFactory {
             self.config.pairing_code_ttl,
             self.config.attachment_ttl,
             Arc::clone(&self.pairing_code_observer),
-            BindPolicy::FallBackWhenTaken,
         )
         .await
     }
@@ -468,7 +468,6 @@ pub async fn warm_companion_servers(
             config.pairing_code_ttl,
             config.attachment_ttl,
             Arc::new(|_| {}),
-            BindPolicy::FallBackWhenTaken,
         )
         .await;
         match attempt {
@@ -493,22 +492,12 @@ pub async fn warm_companion_servers(
     handles
 }
 
-/// Whether a taken companion bind may move to a dynamic one. Fixed nonzero
-/// ports are single-owner: a second runtime must fail closed instead of
-/// publishing a fallback descriptor over the configured owner's file.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum BindPolicy {
-    Configured,
-    FallBackWhenTaken,
-}
-
 async fn start_bootstrap_attempt(
     companion_bind: SocketAddr,
     descriptor_path: PathBuf,
     pairing_code_ttl: Duration,
     attachment_ttl: Duration,
     pairing_code_observer: Arc<dyn Fn(&str) + Send + Sync>,
-    bind: BindPolicy,
 ) -> Result<FirefoxBootstrapAttempt, CommandError> {
     let server = match CompanionServer::bind_loopback(CompanionServerConfig {
         bind_addr: companion_bind,
@@ -518,18 +507,16 @@ async fn start_bootstrap_attempt(
     .await
     {
         Ok(server) => Arc::new(server),
-        Err(error)
-            if bind == BindPolicy::FallBackWhenTaken
-                && bind_fallback_allowed(&error, companion_bind, &descriptor_path) =>
+        Err(CompanionServerError::Bind { source, .. })
+            if source.kind() == std::io::ErrorKind::AddrInUse =>
         {
             tracing::warn!(
                 bind = %companion_bind,
-                error = %error,
-                "configured companion port is taken by a non-companion listener; falling back to a dynamic loopback port"
+                "configured companion port is taken; selecting a dynamic loopback port"
             );
             Arc::new(
                 CompanionServer::bind_loopback(CompanionServerConfig {
-                    bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+                    bind_addr: SocketAddr::new(companion_bind.ip(), 0),
                     pairing_code_ttl,
                     attachment_ttl,
                 })
@@ -546,6 +533,7 @@ async fn start_bootstrap_attempt(
         pairing_code,
         ownership_id: uuid::Uuid::new_v4().to_string(),
     };
+    let _publication_lock = DescriptorLock::claim(&descriptor_path).map_err(companion_error)?;
     remove_stale_descriptor(&descriptor_path)
         .map_err(|error| companion_error(error.to_string()))?;
     let publication = write_descriptor(&descriptor_path, &descriptor)
@@ -612,6 +600,22 @@ impl FirefoxBootstrapAttempt {
                     pairing_code: code,
                     ownership_id: ownership_id.clone(),
                 };
+                let _publication_lock = match DescriptorLock::claim(&descriptor_path) {
+                    Ok(lock) => lock,
+                    Err(error) => {
+                        tracing::warn!(%error, "firefox companion descriptor refresh lock failed");
+                        continue;
+                    }
+                };
+                // A replacement runtime owns discovery now. Never let an old
+                // warm process redirect the extension back to its endpoint.
+                let still_owned = std::fs::read(&descriptor_path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<NativeHostDescriptor>(&bytes).ok())
+                    .is_some_and(|current| current.ownership_id == ownership_id);
+                if !still_owned {
+                    break;
+                }
                 // The write path uses create_new, so the prior descriptor
                 // must be removed first — otherwise every refresh fails
                 // and the pairing code goes stale.
@@ -847,22 +851,6 @@ fn companion_error(error: impl std::fmt::Display) -> CommandError {
     }
 }
 
-/// A taken fixed companion port never falls back to a dynamic one. The
-/// descriptor path is the shared discovery contract, so a fixed-bind runtime
-/// that cannot own its configured port must not publish a different endpoint
-/// or evict a fixed owner. Port 0 keeps its normal ephemeral behavior because
-/// the initial bind succeeds with an OS-assigned port.
-fn bind_fallback_allowed(
-    error: &CompanionServerError,
-    companion_bind: SocketAddr,
-    _descriptor_path: &Path,
-) -> bool {
-    let CompanionServerError::Bind { source, .. } = error else {
-        return false;
-    };
-    source.kind() == std::io::ErrorKind::AddrInUse && companion_bind.port() == 0
-}
-
 /// Recycle after a failed connect only when every endpoint the profile
 /// offers refused the transport. A live endpoint that answered (for example
 /// with a taken session slot) is a running Firefox, and recycling the
@@ -940,15 +928,17 @@ impl OwnedDescriptorFile {
             }
         };
         #[cfg(unix)]
-        let owned = current == self.identity;
+        if current != self.identity {
+            return Ok(());
+        }
         #[cfg(not(unix))]
-        let owned = {
-            let _ = metadata;
-            std::fs::read(&self.path)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<NativeHostDescriptor>(&bytes).ok())
-                .is_some_and(|descriptor| descriptor.ownership_id == self.ownership_id)
-        };
+        let _ = metadata;
+        // An unlinked file's inode may be reused by a replacement publication.
+        // File identity alone cannot establish ownership after that handoff.
+        let owned = std::fs::read(&self.path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<NativeHostDescriptor>(&bytes).ok())
+            .is_some_and(|descriptor| descriptor.ownership_id == self.ownership_id);
         if owned {
             std::fs::remove_file(&self.path)?;
         }
@@ -973,6 +963,7 @@ impl PublishedDescriptor {
     }
 
     fn cleanup(&mut self) -> std::io::Result<()> {
+        let _publication_lock = DescriptorLock::claim(&self.path)?;
         if let Some(final_file) = self.final_file.take() {
             final_file.remove_if_owned()?;
         }
@@ -986,6 +977,42 @@ impl PublishedDescriptor {
 impl Drop for PublishedDescriptor {
     fn drop(&mut self) {
         let _ = self.cleanup();
+    }
+}
+
+/// Serialize publication, refresh, and cleanup across runtimes. The lock file
+/// remains on disk; the OS releases the lock even after an unclean exit.
+struct DescriptorLock(std::fs::File);
+
+impl DescriptorLock {
+    fn claim(descriptor: &Path) -> std::io::Result<Self> {
+        if let Some(parent) = descriptor.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let path = descriptor.with_extension("lock");
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        let file = options.open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::other(
+                "descriptor lock must be a regular file",
+            ));
+        }
+        file.lock()?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for DescriptorLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
     }
 }
 
@@ -1215,7 +1242,6 @@ fn compose_worker_factory_inner(
                     factory.config.pairing_code_ttl,
                     factory.config.attachment_ttl,
                     Arc::clone(&factory.pairing_code_observer),
-                    BindPolicy::FallBackWhenTaken,
                 )
                 .await;
                 match attempt {
@@ -1587,45 +1613,48 @@ mod tests {
         ));
     }
 
+    /// Regression: every configured companion port is a preference, not a
+    /// startup dependency. Keep the conflicting listener alive throughout.
     #[tokio::test]
-    async fn a_taken_fixed_companion_bind_fails_without_dynamic_descriptor() {
+    async fn occupied_companion_port_automatically_publishes_reachable_fallback() {
         let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let taken = held.local_addr().unwrap();
-        let descriptor =
-            PathBuf::from("target").join(format!("fixed-bind-fail-{}.json", uuid::Uuid::new_v4()));
-        let result = start_bootstrap_attempt(
+        let root = tempfile::tempdir().unwrap();
+        let descriptor = root.path().join("descriptor.json");
+        let attempt = start_bootstrap_attempt(
             taken,
             descriptor.clone(),
             Duration::from_secs(30),
             Duration::from_secs(30),
             Arc::new(|_| {}),
-            BindPolicy::FallBackWhenTaken,
         )
-        .await;
-        let error = match result {
-            Err(error) => error,
-            Ok(_) => panic!("a taken fixed port did not fail closed"),
-        };
-        assert_eq!(error.code, ErrorCode::BrowserLaunchFailed);
-        assert!(
-            error.message.contains(&taken.to_string()),
-            "{}",
-            error.message
-        );
+        .await
+        .expect("an occupied port must not block browser startup");
+        let bound = attempt.server().local_addr();
+        assert_eq!(bound.ip(), taken.ip());
+        assert_ne!(bound.port(), taken.port());
+        assert_ne!(bound.port(), 0);
+        let published: NativeHostDescriptor =
+            serde_json::from_slice(&std::fs::read(&descriptor).unwrap()).unwrap();
+        assert_eq!(published.endpoint, format!("ws://{bound}/v1/companion"));
+        assert!(tokio::net::TcpStream::connect(bound).await.is_ok());
+        assert_eq!(held.local_addr().unwrap(), taken);
+        drop(attempt);
         assert!(!descriptor.exists());
     }
 
     #[tokio::test]
     async fn port_zero_companion_bind_still_publishes_an_ephemeral_endpoint() {
-        let descriptor =
-            PathBuf::from("target").join(format!("port-zero-{}.json", uuid::Uuid::new_v4()));
+        let descriptor_dir = tempfile::tempdir().unwrap();
+        let descriptor = descriptor_dir
+            .path()
+            .join(format!("port-zero-{}.json", uuid::Uuid::new_v4()));
         let attempt = start_bootstrap_attempt(
             "127.0.0.1:0".parse().unwrap(),
             descriptor.clone(),
             Duration::from_secs(30),
             Duration::from_secs(30),
             Arc::new(|_| {}),
-            BindPolicy::FallBackWhenTaken,
         )
         .await
         .expect("port 0 should keep ephemeral binding support");
@@ -1640,109 +1669,110 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enrollment_keeps_its_configured_port_when_taken() {
+    async fn enrollment_also_reassigns_an_occupied_companion_port() {
         let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let taken = held.local_addr().unwrap();
-        let descriptor =
-            PathBuf::from("target").join(format!("enroll-bind-{}.json", uuid::Uuid::new_v4()));
-        let result = start_bootstrap_attempt(
-            taken,
-            descriptor.clone(),
-            Duration::from_secs(30),
-            Duration::from_secs(30),
+        let root = tempfile::tempdir().unwrap();
+        let descriptor = root.path().join("descriptor.json");
+        let enrollment = start_firefox_profile_enrollment(
+            FirefoxProfileEnrollmentConfig {
+                companion_bind: taken,
+                descriptor_path: descriptor.clone(),
+                timeout: Duration::from_secs(1),
+                pairing_code_ttl: Duration::from_secs(30),
+                attachment_ttl: Duration::from_secs(30),
+            },
             Arc::new(|_| {}),
-            BindPolicy::Configured,
         )
-        .await;
-        assert!(result.is_err(), "enrollment must not move off its port");
+        .await
+        .expect("enrollment must not require manual port repair");
+        assert_ne!(enrollment.attempt.server().local_addr(), taken);
+        assert!(descriptor.exists());
+        drop(enrollment);
         assert!(!descriptor.exists());
     }
 
     #[tokio::test]
-    async fn a_port_published_by_a_live_companion_is_never_taken_over() {
-        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let taken = held.local_addr().unwrap();
-        let descriptor =
-            PathBuf::from("target").join(format!("live-companion-{}.json", uuid::Uuid::new_v4()));
-        let live = serde_json::to_vec(&NativeHostDescriptor {
-            endpoint: format!("ws://{taken}/v1/companion"),
-            pairing_code: "live-runtime".into(),
-            ownership_id: uuid::Uuid::new_v4().to_string(),
-        })
+    async fn leftover_listener_and_descriptor_do_not_block_new_runtime() {
+        let root = tempfile::tempdir().unwrap();
+        let descriptor = root.path().join("descriptor.json");
+        let first = start_bootstrap_attempt(
+            "127.0.0.1:0".parse().unwrap(),
+            descriptor.clone(),
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+            Arc::new(|_| {}),
+        )
+        .await
         .unwrap();
-        std::fs::create_dir_all(descriptor.parent().unwrap()).unwrap();
-        std::fs::write(&descriptor, &live).unwrap();
-        let result = start_bootstrap_attempt(
+        let taken = first.server().local_addr();
+        let second = start_bootstrap_attempt(
             taken,
             descriptor.clone(),
             Duration::from_secs(30),
             Duration::from_secs(30),
             Arc::new(|_| {}),
-            BindPolicy::FallBackWhenTaken,
         )
-        .await;
-        let error = match result {
-            Err(error) => error,
-            Ok(_) => panic!("bootstrap evicted a live companion's descriptor"),
-        };
-        assert_eq!(error.code, ErrorCode::BrowserLaunchFailed);
+        .await
+        .expect("a leftover listener must trigger automatic reassignment");
+        let bound = second.server().local_addr();
+        assert_ne!(bound, taken);
+        let published: NativeHostDescriptor =
+            serde_json::from_slice(&std::fs::read(&descriptor).unwrap()).unwrap();
+        assert_eq!(published.endpoint, format!("ws://{bound}/v1/companion"));
+        assert!(tokio::net::TcpStream::connect(taken).await.is_ok());
+        drop(first);
         assert!(
-            error.message.contains(&taken.to_string()),
-            "{}",
-            error.message
+            descriptor.exists(),
+            "old cleanup must not remove the new endpoint"
         );
-        assert_eq!(std::fs::read(&descriptor).unwrap(), live);
-        let _ = std::fs::remove_file(descriptor);
+        drop(second);
+        assert!(!descriptor.exists());
     }
 
     #[tokio::test]
-    async fn occupied_fixed_bind_preserves_stale_dynamic_descriptor() {
+    async fn occupied_port_replaces_stale_dynamic_descriptor() {
         let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let taken = held.local_addr().unwrap();
-        let stale_dynamic = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let stale_addr = stale_dynamic.local_addr().unwrap();
-        drop(stale_dynamic);
-        let descriptor = PathBuf::from("target").join(format!(
-            "stale-dynamic-fixed-bind-{}.json",
-            uuid::Uuid::new_v4()
-        ));
-        let stale = serde_json::to_vec(&NativeHostDescriptor {
-            endpoint: format!("ws://{stale_addr}/v1/companion"),
-            pairing_code: "stale-dynamic".into(),
-            ownership_id: uuid::Uuid::new_v4().to_string(),
-        })
+        let root = tempfile::tempdir().unwrap();
+        let descriptor = root.path().join("descriptor.json");
+        std::fs::write(
+            &descriptor,
+            serde_json::to_vec(&NativeHostDescriptor {
+                endpoint: "ws://127.0.0.1:1/v1/companion".into(),
+                pairing_code: "stale".into(),
+                ownership_id: uuid::Uuid::new_v4().to_string(),
+            })
+            .unwrap(),
+        )
         .unwrap();
-        std::fs::create_dir_all(descriptor.parent().unwrap()).unwrap();
-        std::fs::write(&descriptor, &stale).unwrap();
-
-        let result = start_bootstrap_attempt(
+        let attempt = start_bootstrap_attempt(
             taken,
             descriptor.clone(),
             Duration::from_secs(30),
             Duration::from_secs(30),
             Arc::new(|_| {}),
-            BindPolicy::FallBackWhenTaken,
         )
-        .await;
-        let error = match result {
-            Err(error) => error,
-            Ok(_) => panic!("fixed bind replaced stale dynamic descriptor"),
-        };
-        assert_eq!(error.code, ErrorCode::BrowserLaunchFailed);
-        assert_eq!(std::fs::read(&descriptor).unwrap(), stale);
-        let _ = std::fs::remove_file(descriptor);
+        .await
+        .expect("stale descriptor must not disable port fallback");
+        let published: NativeHostDescriptor =
+            serde_json::from_slice(&std::fs::read(&descriptor).unwrap()).unwrap();
+        assert_eq!(
+            published.endpoint,
+            format!("ws://{}/v1/companion", attempt.server().local_addr())
+        );
+        drop(attempt);
+        assert!(!descriptor.exists());
     }
 
     #[tokio::test]
-    async fn concurrent_fixed_bind_launch_preserves_single_owner_descriptor() {
-        let descriptor =
-            PathBuf::from("target").join(format!("fixed-owner-race-{}.json", uuid::Uuid::new_v4()));
-        let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let fixed = reserved.local_addr().unwrap();
-        drop(reserved);
-
+    async fn concurrent_launches_reassign_ports_without_descriptor_cleanup_races() {
+        let root = tempfile::tempdir().unwrap();
+        let descriptor = root.path().join("descriptor.json");
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let fixed = held.local_addr().unwrap();
         let barrier = Arc::new(tokio::sync::Barrier::new(3));
-        let attempts = (0..2)
+        let tasks = (0..2)
             .map(|_| {
                 let barrier = Arc::clone(&barrier);
                 let descriptor = descriptor.clone();
@@ -1754,43 +1784,69 @@ mod tests {
                         Duration::from_secs(30),
                         Duration::from_secs(30),
                         Arc::new(|_| {}),
-                        BindPolicy::FallBackWhenTaken,
                     )
                     .await
+                    .unwrap()
                 })
             })
             .collect::<Vec<_>>();
-
         barrier.wait().await;
-        let mut owners = Vec::new();
-        let mut errors = Vec::new();
-        for attempt in attempts {
-            match attempt.await.unwrap() {
-                Ok(owner) => owners.push(owner),
-                Err(error) => errors.push(error),
-            }
+        let mut attempts = Vec::new();
+        for task in tasks {
+            attempts.push(task.await.unwrap());
         }
-
-        assert_eq!(
-            owners.len(),
-            1,
-            "exactly one contender may own the fixed bind"
+        assert_ne!(
+            attempts[0].server().local_addr(),
+            attempts[1].server().local_addr()
         );
-        assert_eq!(errors.len(), 1, "exactly one contender must fail closed");
-        let owner = owners.pop().unwrap();
-        assert_eq!(owner.server().local_addr(), fixed);
-        let error = errors.pop().unwrap();
-        assert_eq!(error.code, ErrorCode::BrowserLaunchFailed);
-        assert!(
-            error.message.contains(&fixed.to_string()),
-            "{}",
-            error.message
-        );
-
         let published: NativeHostDescriptor =
             serde_json::from_slice(&std::fs::read(&descriptor).unwrap()).unwrap();
-        assert_eq!(published.endpoint, format!("ws://{fixed}/v1/companion"));
-        drop(owner);
+        let owner = attempts
+            .iter()
+            .position(|attempt| {
+                published.endpoint == format!("ws://{}/v1/companion", attempt.server().local_addr())
+            })
+            .unwrap();
+        let current = attempts.swap_remove(owner);
+        drop(attempts);
+        assert!(descriptor.exists());
+        drop(current);
+        assert!(!descriptor.exists());
+    }
+
+    #[tokio::test]
+    async fn replaced_warm_runtime_cannot_republish_its_old_endpoint() {
+        let root = tempfile::tempdir().unwrap();
+        let descriptor = root.path().join("descriptor.json");
+        let first = start_bootstrap_attempt(
+            "127.0.0.1:0".parse().unwrap(),
+            descriptor.clone(),
+            Duration::from_millis(80),
+            Duration::from_secs(30),
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap()
+        .complete_warm()
+        .unwrap();
+        let second = start_bootstrap_attempt(
+            first.local_addr(),
+            descriptor.clone(),
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        let expected = std::fs::read(&descriptor).unwrap();
+        tokio::time::sleep(Duration::from_millis(160)).await;
+        assert_eq!(
+            std::fs::read(&descriptor).unwrap(),
+            expected,
+            "old pairing-code refresh must not steal the new descriptor"
+        );
+        drop(first);
+        drop(second);
         assert!(!descriptor.exists());
     }
 
@@ -1929,7 +1985,9 @@ mod tests {
     #[tokio::test]
     async fn configured_firefox_is_a_real_launch_candidate() {
         let profile_id = ProfileId::new();
-        let descriptor = PathBuf::from("target")
+        let test_dir = tempfile::tempdir().unwrap();
+        let descriptor = test_dir
+            .path()
             .join(format!("firefox-companion-{}.json", uuid::Uuid::new_v4()));
         let factory = compose_worker_factory(
             &AppConfig::default(),
@@ -1963,15 +2021,16 @@ mod tests {
 
     #[tokio::test]
     async fn bootstrap_recovers_a_descriptor_leaked_by_a_killed_process() {
-        let descriptor =
-            PathBuf::from("target").join(format!("stale-descriptor-{}.json", uuid::Uuid::new_v4()));
+        let descriptor_dir = tempfile::tempdir().unwrap();
+        let descriptor = descriptor_dir
+            .path()
+            .join(format!("stale-descriptor-{}.json", uuid::Uuid::new_v4()));
         let attempt = start_bootstrap_attempt(
             "127.0.0.1:0".parse().unwrap(),
             descriptor.clone(),
             Duration::from_secs(30),
             Duration::from_secs(30),
             Arc::new(|_| {}),
-            BindPolicy::Configured,
         )
         .await
         .unwrap();
@@ -1984,7 +2043,6 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(30),
             Arc::new(|_| {}),
-            BindPolicy::Configured,
         )
         .await;
         let attempt = recovered.unwrap_or_else(|error| {
@@ -2000,7 +2058,6 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(30),
             Arc::new(|_| {}),
-            BindPolicy::Configured,
         )
         .await;
         assert!(foreign.is_err());
@@ -2011,7 +2068,8 @@ mod tests {
     #[tokio::test]
     async fn cancelled_firefox_bootstrap_removes_descriptor_and_listener() {
         let profile_id = ProfileId::new();
-        let descriptor = PathBuf::from("target").join(format!(
+        let descriptor_dir = tempfile::tempdir().unwrap();
+        let descriptor = descriptor_dir.path().join(format!(
             "cancelled-firefox-companion-{}.json",
             uuid::Uuid::new_v4()
         ));
@@ -2098,7 +2156,8 @@ mod tests {
 
     #[test]
     fn descriptor_publication_never_clobbers_an_existing_destination() {
-        let path = PathBuf::from("target").join(format!(
+        let test_dir = tempfile::tempdir().unwrap();
+        let path = test_dir.path().join(format!(
             "existing-firefox-descriptor-{}.json",
             uuid::Uuid::new_v4()
         ));
@@ -2124,7 +2183,8 @@ mod tests {
 
     #[test]
     fn concurrent_descriptor_publication_has_one_owner_and_never_clobbers() {
-        let path = PathBuf::from("target").join(format!(
+        let test_dir = tempfile::tempdir().unwrap();
+        let path = test_dir.path().join(format!(
             "concurrent-firefox-descriptor-{}.json",
             uuid::Uuid::new_v4()
         ));
@@ -2166,7 +2226,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn descriptor_publication_never_follows_an_existing_symlink() {
-        let root = PathBuf::from("target").join(format!(
+        let test_dir = tempfile::tempdir().unwrap();
+        let root = test_dir.path().join(format!(
             "symlink-firefox-descriptor-{}",
             uuid::Uuid::new_v4()
         ));
@@ -2198,7 +2259,8 @@ mod tests {
     #[test]
     fn published_descriptor_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
-        let path = PathBuf::from("target").join(format!(
+        let test_dir = tempfile::tempdir().unwrap();
+        let path = test_dir.path().join(format!(
             "private-firefox-descriptor-{}.json",
             uuid::Uuid::new_v4()
         ));
@@ -2220,8 +2282,35 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_cleanup_preserves_a_new_owner_on_the_same_inode() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("descriptor.json");
+        let publication = write_descriptor(
+            &path,
+            &NativeHostDescriptor {
+                endpoint: "ws://127.0.0.1:1234/v1/companion".into(),
+                pairing_code: "original-material".into(),
+                ownership_id: uuid::Uuid::new_v4().to_string(),
+            },
+        )
+        .unwrap();
+        let replacement = serde_json::to_vec(&NativeHostDescriptor {
+            endpoint: "ws://127.0.0.1:5678/v1/companion".into(),
+            pairing_code: "replacement-material".into(),
+            ownership_id: uuid::Uuid::new_v4().to_string(),
+        })
+        .unwrap();
+        // Overwrite in place to deterministically exercise matching file identity
+        // with a different owner, as can happen after Linux reuses an inode.
+        std::fs::write(&path, &replacement).unwrap();
+        drop(publication);
+        assert_eq!(std::fs::read(&path).unwrap(), replacement);
+    }
+
+    #[test]
     fn descriptor_cleanup_preserves_a_replacement_file() {
-        let path = PathBuf::from("target").join(format!(
+        let test_dir = tempfile::tempdir().unwrap();
+        let path = test_dir.path().join(format!(
             "replaced-firefox-descriptor-{}.json",
             uuid::Uuid::new_v4()
         ));
@@ -2246,7 +2335,8 @@ mod tests {
 
     #[test]
     fn pending_unlink_failure_keeps_every_secret_file_owned() {
-        let path = PathBuf::from("target").join(format!(
+        let test_dir = tempfile::tempdir().unwrap();
+        let path = test_dir.path().join(format!(
             "unlink-failure-firefox-descriptor-{}.json",
             uuid::Uuid::new_v4()
         ));

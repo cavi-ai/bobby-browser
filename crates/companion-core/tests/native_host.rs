@@ -894,3 +894,124 @@ async fn enroll_keep_relay_leaves_host_running_after_enroll_ok() {
         .expect("host exits after native close")
         .unwrap();
 }
+
+/// Regression: port reassignment must move an already-paired native relay,
+/// without requiring Firefox to restart or the operator to pair again.
+#[tokio::test]
+async fn native_relay_follows_reassigned_endpoint_while_old_server_stays_live() {
+    let first = CompanionServer::bind_loopback(CompanionServerConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        pairing_code_ttl: Duration::from_secs(60),
+        attachment_ttl: Duration::from_secs(60),
+    })
+    .await
+    .unwrap();
+    let second = CompanionServer::bind_loopback(CompanionServerConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        pairing_code_ttl: Duration::from_secs(60),
+        attachment_ttl: Duration::from_secs(60),
+    })
+    .await
+    .unwrap();
+    let replacement = Arc::new(std::sync::Mutex::new(None::<NativeHostConfig>));
+    let refresh = Arc::clone(&replacement);
+    let (changed, changes) = tokio::sync::watch::channel(0_u64);
+    let config = NativeHostConfig::new(
+        format!("ws://{}/v1/companion", first.local_addr()),
+        first.registry().issue_pairing_code().await,
+    )
+    .with_config_refresh(changes, move || refresh.lock().unwrap().clone());
+    let (host_stream, mut extension) = duplex(2 * MAX_NATIVE_MESSAGE_BYTES);
+    let (reader, writer) = split(host_stream);
+    let host = tokio::spawn(run_native_host(reader, writer, config));
+    let connect = connect_request();
+    let profile_id = connect.profile_id.clone();
+    write_native_message(&mut extension, &json!({"kind":"pair","input":connect}))
+        .await
+        .unwrap();
+    assert_eq!(
+        read_native_message(&mut extension).await.unwrap().unwrap()["kind"],
+        "paired"
+    );
+    *replacement.lock().unwrap() = Some(NativeHostConfig::new(
+        format!("ws://{}/v1/companion", second.local_addr()),
+        second.registry().issue_pairing_code().await,
+    ));
+    changed.send_modify(|version| *version += 1);
+    let paired = tokio::time::timeout(Duration::from_secs(3), read_native_message(&mut extension))
+        .await
+        .expect("relay must discover port reassignment")
+        .unwrap()
+        .unwrap();
+    assert_eq!(paired["kind"], "paired");
+    let target = BrowserTarget {
+        target_id: "reassigned-target".into(),
+        kind: TargetKind::Frame,
+    };
+    write_native_message(
+        &mut extension,
+        &serde_json::to_value(CompanionEvent::TargetsDiscovered(TargetDiscovery {
+            protocol_version: PROTOCOL_VERSION,
+            profile_id: profile_id.clone(),
+            targets: vec![target.clone()],
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        second
+            .wait_for_discovery(&profile_id, Duration::from_secs(1))
+            .await
+            .unwrap(),
+        vec![target]
+    );
+    assert!(tokio::net::TcpStream::connect(first.local_addr())
+        .await
+        .is_ok());
+    drop(extension);
+    host.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn endpoint_reassignment_interrupts_a_stalled_websocket_handshake() {
+    let held = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let second = CompanionServer::bind_loopback(CompanionServerConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        pairing_code_ttl: Duration::from_secs(60),
+        attachment_ttl: Duration::from_secs(60),
+    })
+    .await
+    .unwrap();
+    let replacement = Arc::new(std::sync::Mutex::new(None::<NativeHostConfig>));
+    let refresh = Arc::clone(&replacement);
+    let (changed, changes) = tokio::sync::watch::channel(0_u64);
+    let config = NativeHostConfig::new(
+        format!("ws://{}/v1/companion", held.local_addr().unwrap()),
+        "initial",
+    )
+    .with_config_refresh(changes, move || refresh.lock().unwrap().clone());
+    let (stream, mut extension) = duplex(2 * MAX_NATIVE_MESSAGE_BYTES);
+    let (reader, writer) = split(stream);
+    let host = tokio::spawn(run_native_host(reader, writer, config));
+    write_native_message(
+        &mut extension,
+        &json!({"kind":"pair","input":connect_request()}),
+    )
+    .await
+    .unwrap();
+    let (_stalled, _) = held.accept().await.unwrap();
+    *replacement.lock().unwrap() = Some(NativeHostConfig::new(
+        format!("ws://{}/v1/companion", second.local_addr()),
+        second.registry().issue_pairing_code().await,
+    ));
+    changed.send_modify(|version| *version += 1);
+    let paired = tokio::time::timeout(Duration::from_secs(2), read_native_message(&mut extension))
+        .await
+        .expect("an occupied non-WebSocket port must not trap native discovery")
+        .unwrap()
+        .unwrap();
+    assert_eq!(paired["kind"], "paired");
+    drop(extension);
+    host.await.unwrap().unwrap();
+}

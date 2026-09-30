@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Fixed
+
+- Firefox companion startup and enrollment automatically select a free loopback
+  port when the configured port is occupied. Discovery publishes the actual
+  endpoint; replaced runtimes cannot overwrite it during pairing-code refresh
+  or remove it during cleanup. The native relay follows descriptor file changes
+  automatically, without restarting Firefox or pairing again. Regressions cover
+  port collisions and the complete relay handoff.
+
 ## 0.17.0 - 2026-09-28
 
 ### Fixed

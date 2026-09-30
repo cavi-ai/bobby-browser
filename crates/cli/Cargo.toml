@@ -21,6 +21,7 @@ name = "bobby"
 path = "src/bin/cli.rs"
 
 [dependencies]
+notify.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 chrono.workspace = true

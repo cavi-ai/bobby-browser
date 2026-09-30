@@ -2132,14 +2132,7 @@ fn probe_companion_route(url: &str) -> Result<u16> {
     }
 }
 
-/// Whether the profile's `companionBind` can still be bound.
-///
-/// Every runtime binds its own companion server on this address, so the second
-/// `bobby serve` / `bobby cdp` / `bobby mcp-stdio` on one profile fails every
-/// Firefox session with `engineUnreachable`. Doctor validated only that the
-/// address parsed, so that collision showed up as an all-green report and a
-/// browser that would not start -- and the failure's own repair hint says to
-/// run doctor to find it.
+/// Report the preferred companion port; collisions are recovered automatically.
 fn check_companion_port(bind: SocketAddr) -> DoctorCheck {
     let check = |status, detail| DoctorCheck {
         status,
@@ -2156,35 +2149,32 @@ fn check_companion_port(bind: SocketAddr) -> DoctorCheck {
 
     // The companion route is a WebSocket upgrade: a plain GET is rejected 400
     // and an unauthenticated upgrade 401. Either answer identifies our own
-    // server rather than a stranger on the port, but it still blocks a
-    // second runtime from binding it, so this is a warning, not all-clear.
+    // server. The next runtime automatically selects another loopback port.
     match probe_companion_route(&format!("http://{bind}/v1/companion")) {
         Ok(400) | Ok(401) => {
             let owner = companion_port_owner(bind.port())
                 .map(|(pid, command)| format!(" (pid {pid}, {command})"))
                 .unwrap_or_default();
             check(
-                DoctorStatus::Warn,
+                DoctorStatus::Ok,
                 format!(
-                    "{bind} is held by a running bobby runtime{owner}; a second bobby \
-                     serve/cdp/mcp-stdio on this profile cannot bind it and its Firefox \
-                     sessions fail with engineUnreachable -- if that pid is an orphan, stop it"
+                    "{bind} is held by a running bobby runtime{owner}; the next runtime \
+                     automatically selects another loopback port"
                 ),
             )
         }
         Ok(status) => check(
-            DoctorStatus::Warn,
+            DoctorStatus::Ok,
             format!(
-                "{bind} answered {status}; the Firefox companion answers 400 to a plain GET, so \
-                 another service holds the port -- Firefox sessions fail with engineUnreachable \
-                 until it is freed"
+                "{bind} answered {status}; another service holds the preferred port -- \
+                 the next runtime automatically selects another loopback port"
             ),
         ),
         Err(error) => check(
-            DoctorStatus::Warn,
+            DoctorStatus::Ok,
             format!(
                 "{bind} is held by a service that does not answer the companion route ({error}) \
-                 -- Firefox sessions fail with engineUnreachable until it is freed"
+                 -- the next runtime automatically selects another loopback port"
             ),
         ),
     }
@@ -2948,11 +2938,9 @@ mod cdp_port_tests {
         assert!(check.detail.contains("is free"), "{}", check.detail);
     }
 
-    /// The state that left Firefox unusable behind an all-green report: a
-    /// runtime already owns the companion port, so the next one cannot bind it
-    /// and every Firefox session it opens fails.
+    /// A running companion on the preferred port is recoverable at startup.
     #[test]
-    fn a_companion_port_owned_by_a_runtime_names_the_second_runtime_failure() {
+    fn an_occupied_companion_port_reports_automatic_reassignment() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let bind = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
@@ -2986,19 +2974,20 @@ mod cdp_port_tests {
         });
 
         let check = check_companion_port(bind);
-        assert_eq!(check.status, DoctorStatus::Warn, "{}", check.detail);
+        assert_eq!(check.status, DoctorStatus::Ok, "{}", check.detail);
         assert!(
-            check.detail.contains("engineUnreachable"),
+            check
+                .detail
+                .contains("automatically selects another loopback port"),
             "{}",
             check.detail
         );
         server.join().unwrap();
     }
 
-    /// A stranger on the companion port blocks the bind just as surely, but
-    /// needs the opposite repair, so it must not read as our own server.
+    /// An unrelated listener also triggers automatic port reassignment.
     #[test]
-    fn a_stranger_on_the_companion_port_warns() {
+    fn a_stranger_on_the_companion_port_reports_automatic_reassignment() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let bind = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
@@ -3009,9 +2998,11 @@ mod cdp_port_tests {
         });
 
         let check = check_companion_port(bind);
-        assert_eq!(check.status, DoctorStatus::Warn, "{}", check.detail);
+        assert_eq!(check.status, DoctorStatus::Ok, "{}", check.detail);
         assert!(
-            check.detail.contains("engineUnreachable"),
+            check
+                .detail
+                .contains("automatically selects another loopback port"),
             "{}",
             check.detail
         );
