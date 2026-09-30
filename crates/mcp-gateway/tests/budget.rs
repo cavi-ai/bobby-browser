@@ -149,8 +149,10 @@ async fn intent_complete_form_schema_advertises_revealed_by() {
         .iter()
         .find(|tool| tool["name"] == "intent_complete_form")
         .expect("intent_complete_form is advertised");
+    // CompleteFormField has one use, so the advertisement inlines it into
+    // `fields.items`; IntentHints has several and stays a shared definition.
     let revealed_by =
-        &tool["inputSchema"]["$defs"]["CompleteFormField"]["properties"]["revealedBy"];
+        &tool["inputSchema"]["properties"]["fields"]["items"]["properties"]["revealedBy"];
     assert_eq!(
         revealed_by["$ref"], "#/$defs/IntentHints",
         "CompleteFormField.revealedBy must reuse the shared IntentHints $def, not an inline copy: {revealed_by}"
@@ -183,7 +185,7 @@ async fn screenshot_advertises_each_mode_shape() {
         .iter()
         .find(|tool| tool["name"] == "screenshot")
         .expect("screenshot is advertised");
-    let modes = screenshot["inputSchema"]["$defs"]["ScreenshotMode"]["oneOf"]
+    let modes = screenshot["inputSchema"]["properties"]["mode"]["oneOf"]
         .as_array()
         .expect("ScreenshotMode is an explicit union");
 
@@ -250,7 +252,7 @@ async fn command_execute_points_agents_at_the_named_tools() {
         .iter()
         .find(|tool| tool["name"] == "command_execute")
         .expect("command_execute is advertised");
-    let command = &tool["inputSchema"]["$defs"]["CommandEnvelope"]["properties"]["command"];
+    let command = &tool["inputSchema"]["properties"]["envelope"]["properties"]["command"];
     assert_eq!(command["type"], "object");
     let description = command["description"]
         .as_str()
@@ -303,8 +305,10 @@ async fn checkpoint_save_does_not_advertise_the_evidence_union() {
         .iter()
         .find(|tool| tool["name"] == "checkpoint_save")
         .expect("checkpoint_save is advertised");
+    let advertised = tool["inputSchema"].to_string();
     assert!(
-        tool["inputSchema"]["$defs"].get("Evidence").is_none(),
+        tool["inputSchema"]["$defs"].get("Evidence").is_none()
+            && !advertised.contains("javaScriptResult"),
         "checkpoint_save still carries the Evidence union"
     );
     assert!(

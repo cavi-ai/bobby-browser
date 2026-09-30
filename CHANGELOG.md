@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Fixed
+
+- `intent_submit_and_verify` and a boundary `intent_follow` honor their
+  `idempotencyKey` under `autoCheckpoint`, the default for Boundary commands.
+  The auto-checkpoint path skipped the idempotency ledger, so a retry under
+  the same key ran the command again; it now replays the first outcome. A replayed call saves no checkpoint and
+  omits `checkpointId`, `workflowId`, and `attemptId`.
+- A request under an idempotency key whose earlier outcome is unknown (the
+  runtime stopped mid-command, or the retained outcome is
+  `needsReconciliation`) is refused as unresolved with
+  `reconciliationRequired: true`, even when it arrives from a new session.
+  Previously a different session made it a plain conflict.
+- MCP errors with `reconciliationRequired: true` carry a repair that says not
+  to retry or mint a new key and to check for the effect first. The
+  `idempotencyConflict` repair ("mint a fresh idempotency key") no longer
+  applies to them.
+
 ### Added
 
 - `bobby init --preset claude`, `codex`, and `openshell` mint host
@@ -13,6 +30,9 @@
 - The capabilities page carries a generated preset matrix: every preset
   against every capability, and what each preset cannot do, with the
   operations and `executionPolicy` opt-ins each withheld capability closes.
+- `recovery_demo` live test: an MCP gateway killed mid-submit on real
+  Chromium, restarted on the same data directory, places one order, not two.
+  The transcript is on the first-session page.
 
 - Release builds sign the Firefox companion through addons.mozilla.org
   (unlisted) on each release tag and ship it as
@@ -28,6 +48,15 @@
 
 ### Changed
 
+- `tools/list` is smaller: `explore` from 32,740 to 26,776 bytes and `full`
+  from 77,053 to 66,380. Advertised schemas inline single-use definitions,
+  fold `{"oneOf":[X,{"type":"null"}]}` into `"type":[T,"null"]`, and drop the
+  draft URL; these rewrites accept exactly the same instances. `workflow_start`
+  advertises `session` and `navigationOutcome`, and `workflow_observe`
+  advertises `observationOutcome`, as opaque objects, like every command
+  outcome. Annotations omit hints equal to the MCP default `false`.
+  `tools/call` still validates against the full schemas. The catalog ceilings
+  are 28 KiB (`explore`) and 68 KiB (`full`).
 - The companion manifest declares `data_collection_permissions` (required:
   `websiteContent`, `browsingActivity`) for the page content and tab URLs it
   passes to the local runtime.
