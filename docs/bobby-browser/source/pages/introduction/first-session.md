@@ -182,6 +182,35 @@ Full catalog: [MCP tools](../surfaces/mcp-tools.md). Intents:
 - Auth and path mistakes: [Authentication](../guides/auth.md),
   [HTTP API](../surfaces/http-api.md).
 
+### A gateway killed mid-submit places one order
+
+Pass an `idempotencyKey` on every call with a side effect. The key is written
+to a durable ledger before the browser acts, so it survives the gateway
+process. This is the output of the `recovery_demo` release test on real
+Chromium: the shop counts the order and holds its response, the gateway is
+killed, a new gateway starts on the same data directory, and the agent sends
+the same order again under the same key.
+
+```text
+agent -> workflow_start {"profile":"shop","url":"http://127.0.0.1:63727/shop"}
+agent -> intent_submit_and_verify {"workflowHandle":"wf_c4cd…","idempotencyKey":"order-2026-0042","purpose":"Place the order","hints":{"role":"button","accessibleName":"Place order"},"expectedState":{"condition":{"kind":"url","matcher":{"kind":"contains","value":"/confirmed"}},"timeoutMs":30000}}
+shop    <- POST /order (orders placed: 1); the response is still pending
+gateway killed mid-submit
+gateway restarted on the same data directory
+agent -> workflow_start {"profile":"shop","url":"http://127.0.0.1:63727/shop"}
+agent -> intent_submit_and_verify {"workflowHandle":"wf_07be…","idempotencyKey":"order-2026-0042", …same arguments…}
+agent <- Runtime interface error: idempotencyConflict; repair: Do not retry and do not mint a new idempotency key: an earlier call may already have taken effect. Check for the effect first (a11y_snapshot of the page, session_list, or recovery_status) and act only on what you find.
+agent -> workflow_observe {"workflowHandle":"wf_07be…","goal":"Orders placed"}
+agent <- page reads "Orders placed: 1"; nothing to resubmit
+```
+
+The retry is refused because the first call's outcome is unknown, even though
+it now runs in a new session. The error carries
+`reconciliationRequired: true`; the agent checks the page instead of minting a
+new key. Run it with
+`cargo test -p runtime-tests --test recovery_demo -- --ignored --nocapture`
+(`BOBBY_CHROME_EXECUTABLE` names the browser).
+
 Next: [TypeScript SDK](../surfaces/typescript-sdk.md) ·
 [Rust HTTP client](../rust/bobby-browser-client.md) ·
 [HTTP API](../surfaces/http-api.md) · [Quickstart](quickstart.md)
