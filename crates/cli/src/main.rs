@@ -1,3 +1,4 @@
+mod audit_bundle;
 mod bootstrap_local;
 mod deployment_profiles;
 mod doctor;
@@ -331,6 +332,11 @@ enum CliCommand {
         #[command(subcommand)]
         command: ContextCommands,
     },
+    /// Export or verify a signed audit bundle for one workflow
+    Audit {
+        #[command(subcommand)]
+        command: AuditCommands,
+    },
     /// Vision provider setup and loopback proxy
     Vision {
         #[command(subcommand)]
@@ -521,6 +527,38 @@ enum VisionCommands {
         timeout_ms: u64,
         #[command(flatten)]
         common: JobsCommonArgs,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum AuditCommands {
+    /// Bundle a workflow's journal lines, checkpoint, and artifacts into a
+    /// tar with a signed manifest of SHA-256 digests
+    Export {
+        /// Workflow id, as returned by workflow_start or any command result
+        #[arg(long)]
+        workflow: String,
+        /// Output path (default: bobby-audit-<workflow>.tar); must not exist
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Path to config.toml (overrides BOBBY_BROWSER_CONFIG)
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Signing key (default: <config dir>/audit-signing-key.pk8, created on first use)
+        #[arg(long)]
+        key: Option<PathBuf>,
+    },
+    /// Check a bundle's digests and signature
+    Verify {
+        bundle: PathBuf,
+        /// Require this signer (hex public key from `bobby audit key`)
+        #[arg(long)]
+        public_key: Option<String>,
+    },
+    /// Print the audit signing public key, creating the key on first use
+    Key {
+        #[arg(long)]
+        key: Option<PathBuf>,
     },
 }
 
@@ -923,6 +961,7 @@ pub async fn run() -> Result<()> {
         CliCommand::Jobs { command } => run_jobs(command)?,
         CliCommand::Openshell { command } => run_openshell(command)?,
         CliCommand::Context { command } => run_context(command).await?,
+        CliCommand::Audit { command } => run_audit(command)?,
         CliCommand::Vision { command } => match command {
             VisionCommands::Connect(args) => vision_connect::connect(args.into())?,
             VisionCommands::Login(args) => vision_login::login(args.config, &args.name).await?,
@@ -1498,6 +1537,78 @@ impl Drop for ManagedPythonServer {
 
 pub(crate) fn default_context_dir() -> Result<PathBuf> {
     config::default_context_dir().ok_or_else(|| anyhow::anyhow!("config directory unavailable"))
+}
+
+fn run_audit(command: AuditCommands) -> Result<()> {
+    match command {
+        AuditCommands::Export {
+            workflow,
+            out,
+            config,
+            key,
+        } => {
+            let workflow = types::WorkflowId(
+                uuid::Uuid::parse_str(workflow.trim())
+                    .map_err(|_| anyhow::anyhow!("--workflow must be a workflow id (UUID)"))?,
+            );
+            let config_path = resolve_config_path(config);
+            let config = config::AppConfig::load(&config_path)
+                .with_context(|| format!("failed to load config from {}", config_path.display()))?;
+            let key_path = match key {
+                Some(path) => path,
+                None => audit_bundle::default_key_path()?,
+            };
+            let key = audit_bundle::load_or_create_key(&key_path)?;
+            let out =
+                out.unwrap_or_else(|| PathBuf::from(format!("bobby-audit-{}.tar", workflow.0)));
+            let summary = audit_bundle::export(
+                &audit_bundle::BundleSources::from_config(&config),
+                &workflow,
+                &key,
+                &out,
+            )?;
+            println!("{}", summary.path.display());
+            eprintln!(
+                "{} files ({} journal lines), signed by {}",
+                summary.files, summary.journal_lines, summary.public_key
+            );
+            if !summary.missing_artifacts.is_empty() {
+                eprintln!(
+                    "artifacts no longer on disk: {}",
+                    summary.missing_artifacts.join(", ")
+                );
+            }
+        }
+        AuditCommands::Verify { bundle, public_key } => {
+            let summary = audit_bundle::verify(&bundle, public_key.as_deref())?;
+            println!(
+                "verified: workflow {}, {} files, signed by {} ({})",
+                summary.workflow_id,
+                summary.files,
+                summary.public_key,
+                if summary.pinned {
+                    "pinned"
+                } else {
+                    "not pinned; pass --public-key to require a signer"
+                }
+            );
+            if !summary.missing_artifacts.is_empty() {
+                println!(
+                    "artifacts missing at export: {}",
+                    summary.missing_artifacts.join(", ")
+                );
+            }
+        }
+        AuditCommands::Key { key } => {
+            let key_path = match key {
+                Some(path) => path,
+                None => audit_bundle::default_key_path()?,
+            };
+            let key = audit_bundle::load_or_create_key(&key_path)?;
+            println!("{}", audit_bundle::public_key_hex(&key));
+        }
+    }
+    Ok(())
 }
 
 async fn run_context(command: ContextCommands) -> Result<()> {
