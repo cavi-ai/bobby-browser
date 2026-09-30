@@ -145,6 +145,10 @@
           "path": "guides/replay.md"
         },
         {
+          "title": "Zed over ACP",
+          "path": "guides/acp-zed.md"
+        },
+        {
           "title": "Troubleshooting",
           "path": "guides/troubleshooting.md"
         },

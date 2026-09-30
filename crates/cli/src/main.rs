@@ -108,7 +108,8 @@ enum CliCommand {
         /// Days until the bootstrap credential expires
         #[arg(long, default_value_t = bootstrap_local::DEFAULT_TTL_DAYS as u32)]
         ttl_days: u32,
-        /// Capability floor: agent (default, no authority:admin) or unrestricted
+        /// Capability floor: agent (default, no authority:admin), unrestricted,
+        /// or a host floor: claude, codex, openshell
         #[arg(long, value_enum, default_value_t = bootstrap_local::BootstrapPreset::Agent)]
         preset: bootstrap_local::BootstrapPreset,
         /// Bootstrap env file path
@@ -2007,10 +2008,7 @@ fn run_init(
     eprintln!(
         "Preset: {} ({})",
         preset.as_str(),
-        match preset {
-            bootstrap_local::BootstrapPreset::Agent => "no authority:admin",
-            bootstrap_local::BootstrapPreset::Unrestricted => "includes authority:admin",
-        }
+        preset.capability_preset().summary()
     );
     eprintln!("Map this bearer to AUTOMATION_RUNTIME_TOKEN / Authorization bearer for the SDK.");
     eprintln!(
@@ -4625,6 +4623,43 @@ endpoint_url = "http://127.0.0.1:8080/propose"
         assert_eq!(check.status, DoctorStatus::Ok);
         assert!(check.detail.contains("agent"));
         assert!(check.detail.contains("no authority:admin"));
+    }
+
+    #[test]
+    fn doctor_warns_when_a_host_preset_holds_more_than_its_floor() {
+        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
+        let _env = DoctorEnvGuard::clear();
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config.toml");
+        std::fs::write(&config, "").unwrap();
+        let bootstrap = root.path().join("bootstrap.env");
+        let material = bootstrap_local::generate_bootstrap_for_preset(
+            chrono::Duration::days(30),
+            bootstrap_local::BootstrapPreset::Claude,
+        )
+        .unwrap();
+        bootstrap_local::write_bootstrap_env(&bootstrap, &material, true).unwrap();
+
+        let report = run_doctor(Some(config.clone()), Some(bootstrap.clone()), false).unwrap();
+        let check = report.check("bootstrap-preset").expect("bootstrap-preset");
+        assert_eq!(check.status, DoctorStatus::Ok, "{check:?}");
+        assert!(check.detail.starts_with("claude ("), "{check:?}");
+        assert!(
+            report
+                .check("bootstrap-capabilities")
+                .is_none_or(|check| !check.detail.contains("browser:fingerprint")),
+            "a claude credential is not expected to hold browser:fingerprint"
+        );
+
+        let widened = std::fs::read_to_string(&bootstrap)
+            .unwrap()
+            .replace("session:read,", "session:read,javascript:evaluate,");
+        std::fs::write(&bootstrap, widened).unwrap();
+        let report = run_doctor(Some(config), Some(bootstrap), false).unwrap();
+        let check = report.check("bootstrap-preset").expect("bootstrap-preset");
+        assert_eq!(check.status, DoctorStatus::Warn, "{check:?}");
+        assert!(check.detail.contains("javascript:evaluate"), "{check:?}");
+        assert!(check.detail.contains("--preset claude"), "{check:?}");
     }
 
     #[test]

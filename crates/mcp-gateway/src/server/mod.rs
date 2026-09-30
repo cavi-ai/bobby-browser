@@ -1360,7 +1360,10 @@ impl Server {
             .await;
         let mut value = to_json(outcome)?;
         admission.apply_to_mcp_value(&mut value, &envelope.command_id);
-        if let Some(object) = value.as_object_mut() {
+        // An idempotent replay ran nothing and saved no checkpoint: it returns
+        // the original attempt's outcome, so, as in `submit_envelope_once`,
+        // this envelope's workflow and attempt ids are not echoed onto it.
+        if let (Some(object), Some(checkpoint_id)) = (value.as_object_mut(), checkpoint_id) {
             object.insert("workflowId".to_owned(), json!(envelope.workflow_id.clone()));
             object.insert("attemptId".to_owned(), json!(envelope.attempt_id.clone()));
             // So the caller can still name this checkpoint to `workflow_recover`.
@@ -2143,6 +2146,8 @@ fn interface_error_response(id: Value, mut interface_error: types::InterfaceErro
     interface_error.message = "runtime interface request failed".to_owned();
     let repair = if safe_diagnostic.is_some() {
         crate::repair::browser_launch_repair()
+    } else if interface_error.reconciliation_required {
+        crate::repair::unresolved_outcome_repair()
     } else {
         crate::repair::repair_for_code(&code)
             .unwrap_or_else(|| crate::repair::repair_for_rpc_code(INTERFACE_ERROR))
@@ -2503,6 +2508,34 @@ mod tests {
         assert_eq!(error["retryAfterMs"], 1_234);
         assert_eq!(error["reconciliationRequired"], true);
         assert_eq!(error["requiredCapability"], "session:read");
+    }
+
+    #[test]
+    fn an_unresolved_outcome_never_tells_the_agent_to_mint_a_fresh_key() {
+        let error = |reconciliation_required| types::InterfaceError {
+            code: types::InterfaceErrorCode::IdempotencyConflict,
+            layer: types::ErrorLayer::Interface,
+            message: "idempotency outcome is unresolved".to_owned(),
+            correlation_id: types::CorrelationId::new(),
+            command_id: None,
+            retryable: false,
+            retry_after_ms: None,
+            reconciliation_required,
+            required_capability: None,
+        };
+        let unresolved = interface_error_response(json!(9), error(true));
+        let message = unresolved["error"]["message"].as_str().unwrap();
+        assert!(message.contains("idempotencyConflict"), "{message}");
+        assert!(message.contains("Do not retry"), "{message}");
+        assert!(!message.contains("Mint a fresh"), "{message}");
+        assert_eq!(
+            unresolved["error"]["data"]["repair"],
+            crate::repair::unresolved_outcome_repair()
+        );
+
+        let conflict = interface_error_response(json!(10), error(false));
+        let message = conflict["error"]["message"].as_str().unwrap();
+        assert!(message.contains("Mint a fresh"), "{message}");
     }
 
     #[test]

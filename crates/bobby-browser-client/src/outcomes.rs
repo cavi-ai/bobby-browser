@@ -202,6 +202,18 @@ impl<'de> Deserialize<'de> for ContextAskResponse {
 }
 
 impl ContextAskResponse {
+    /// The one shape every surface answers with: a miss is an answer that
+    /// names why and the repair, not a bare `null`.
+    pub fn from_answer(answer: Option<ContextAnswer>) -> Self {
+        let hit = answer.is_some();
+        Self {
+            answer,
+            hit,
+            reason: (!hit).then_some(ContextMissReason::NotRemembered),
+            next_step: (!hit).then_some(ContextNextStep::A11ySnapshot),
+        }
+    }
+
     pub fn page_derived(&self) -> bool {
         true
     }
@@ -249,6 +261,17 @@ impl<'de> Deserialize<'de> for ContextNeighborsResponse {
 }
 
 impl ContextNeighborsResponse {
+    /// Same contract as [`ContextAskResponse::from_answer`].
+    pub fn from_neighbors(neighbors: Option<ContextNeighbors>) -> Self {
+        let hit = neighbors.is_some();
+        Self {
+            neighbors,
+            hit,
+            reason: (!hit).then_some(ContextMissReason::NotRemembered),
+            next_step: (!hit).then_some(ContextNextStep::A11ySnapshot),
+        }
+    }
+
     pub fn page_derived(&self) -> bool {
         true
     }

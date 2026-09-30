@@ -1191,6 +1191,82 @@ async fn boundary_click_through_a_handle_returns_checkpoint_and_binding_workflow
     );
 }
 
+/// A Boundary submit runs through the auto-checkpoint path by default; its
+/// idempotency key must hold there too, or a retried order clicks twice.
+#[tokio::test]
+async fn boundary_submit_retry_under_one_key_replays_without_a_second_click() {
+    let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+    live.probe
+        .candidates
+        .lock()
+        .expect("candidates lock")
+        .push(dom_engine::Candidate {
+            id: "place-order".into(),
+            css: Some("#place-order".into()),
+            tag: Some("button".into()),
+            test_id: None,
+            role: Some("button".into()),
+            name: Some("Place order".into()),
+            label: None,
+            text: "Place order".into(),
+            attributes: Default::default(),
+            state: dom_engine::CandidateState {
+                attached: true,
+                visible: true,
+                enabled: true,
+            },
+            frame_path: Vec::new(),
+        });
+    live.probe
+        .satisfy_wait
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let started = start(&live.server, 95, json!({"profile":"harness"})).await;
+    let submit = json!({
+        "workflowHandle":started["result"]["structuredContent"]["workflowHandle"],
+        "purpose":"Place the order",
+        "hints":{"role":"button","accessibleName":"Place order"},
+        "expectedState":{
+            "condition":{"kind":"url","matcher":{"kind":"contains","value":""}},
+            "timeoutMs":2000
+        },
+        "idempotencyKey":"order-7"
+    });
+    let first_response =
+        call_tool(&live.server, 96, "intent_submit_and_verify", submit.clone()).await;
+    let first = &first_response["result"]["structuredContent"];
+    assert!(first["checkpointId"].is_string(), "{first_response}");
+    let clicks = live
+        .probe
+        .click_calls
+        .load(std::sync::atomic::Ordering::SeqCst);
+    assert!(clicks >= 1, "{first_response}");
+
+    // `reSubmit` passes the per-workflow boundary guard, so the key alone has
+    // to stop the second click, as it must after a restart or in a new
+    // workflow.
+    let mut retry_args = submit;
+    retry_args["reSubmit"] = json!(true);
+    let retry_response = call_tool(&live.server, 97, "intent_submit_and_verify", retry_args).await;
+    let retry = &retry_response["result"]["structuredContent"];
+    assert_eq!(retry["commandId"], first["commandId"], "{retry_response}");
+    assert_eq!(retry["status"], first["status"], "{retry_response}");
+    assert!(
+        retry["checkpointId"].is_null(),
+        "a replay saved no checkpoint: {retry_response}"
+    );
+    assert!(
+        retry["attemptId"].is_null(),
+        "a replay ran no attempt: {retry_response}"
+    );
+    assert_eq!(
+        live.probe
+            .click_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        clicks,
+        "the retry clicked a second time"
+    );
+}
+
 #[tokio::test]
 async fn successful_page_and_session_close_invalidate_only_affected_handles() {
     let live = live_with_capabilities(Capability::ALL.to_vec()).await;

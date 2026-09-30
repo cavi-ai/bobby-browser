@@ -130,16 +130,7 @@ impl Server {
                     // be indistinguishable from a broken call. The miss is
                     // spelled out so an agent reading `structuredContent` can
                     // tell "unknown" from "located" without parsing `null`.
-                    .map(|answer| match answer {
-                        Some(answer) => to_json(json!({"answer": answer})),
-                        None => to_json(json!({
-                            "answer": null,
-                            "hit": false,
-                            "reason": "notRemembered",
-                            "nextStep": "a11y_snapshot"
-                        })),
-                    })
-                    .and_then(|result| result)
+                    .and_then(|answer| to_json(types::ContextAskResponse::from_answer(answer)))
             }
             "context_neighbors" => {
                 let input: ContextNeighborsArgs = match bounded_parse(call.arguments) {
@@ -150,16 +141,9 @@ impl Server {
                     .context_neighbors(context, input.session_id, input.page_id, input.description)
                     .await
                     // Like context_ask: `None` is an answer, not a failure.
-                    .map(|neighbors| match neighbors {
-                        Some(neighbors) => to_json(json!({"neighbors": neighbors})),
-                        None => to_json(json!({
-                            "neighbors": null,
-                            "hit": false,
-                            "reason": "notRemembered",
-                            "nextStep": "a11y_snapshot"
-                        })),
+                    .and_then(|neighbors| {
+                        to_json(types::ContextNeighborsResponse::from_neighbors(neighbors))
                     })
-                    .and_then(|result| result)
             }
             "form_snapshot" => {
                 let input: FormSnapshotArgs = match bounded_parse(call.arguments) {

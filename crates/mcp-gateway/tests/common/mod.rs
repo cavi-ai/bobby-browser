@@ -72,6 +72,7 @@ pub struct LiveProbe {
     pub opened_page: std::sync::Mutex<Option<PageId>>,
     pub current_url: std::sync::Mutex<Option<String>>,
     pub type_text_calls: AtomicUsize,
+    pub click_calls: AtomicUsize,
     /// The value the last successful `type_text` wrote, so `inspect`'s
     /// verification echo reflects it instead of a fixed string -- needed
     /// once a handle-resolved `type_text` can legitimately land on a second
@@ -228,6 +229,7 @@ impl BrowserWorker for LiveWorker {
         _: &PageId,
         command: &ClickCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
+        self.probe.click_calls.fetch_add(1, Ordering::SeqCst);
         Ok(vec![Evidence::Element {
             selector: command.selector.clone(),
             text: None,
@@ -702,7 +704,7 @@ impl RuntimeInterface for FaultInjectingRuntime {
         &self,
         ctx: types::RequestContext,
         envelope: types::CommandEnvelope,
-    ) -> InterfaceResult<(types::CommandOutcome, types::CheckpointId)> {
+    ) -> InterfaceResult<(types::CommandOutcome, Option<types::CheckpointId>)> {
         self.inner.submit_with_auto_checkpoint(ctx, envelope).await
     }
 

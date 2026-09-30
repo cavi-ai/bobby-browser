@@ -46,7 +46,7 @@ impl RuntimeInterface for RecordingRuntime {
         &self,
         _: RequestContext,
         _: types::CommandEnvelope,
-    ) -> InterfaceResult<(types::CommandOutcome, types::CheckpointId)> {
+    ) -> InterfaceResult<(types::CommandOutcome, Option<types::CheckpointId>)> {
         unreachable!()
     }
     async fn delete_session(&self, _: RequestContext, _: types::SessionId) -> InterfaceResult<()> {

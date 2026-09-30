@@ -228,6 +228,7 @@ jobs:
           --test interface_capacity
           --test interface_recovery
           --test interface_security
+          --test recovery_demo
           -- --ignored --test-threads=1
           --skip stuck_locate_records_a_real_local_vision_proposal
 
@@ -237,6 +238,7 @@ jobs:
       - name: Conformance live tests
         run: >-
           cargo test -p interface-conformance --locked
+          --test acp_walkthrough
           --test javascript_evaluation
           --test mcp_live
           -- --ignored --test-threads=1

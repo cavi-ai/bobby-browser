@@ -382,7 +382,10 @@ list, each variant's `kind` discriminator included — for a rejected
 
 Every tool carries a human-readable `title` and MCP `annotations`
 (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) so a
-host can gate or confirm calls without knowing the tool vocabulary. Read-only
+host can gate or confirm calls without knowing the tool vocabulary. A hint
+equal to its MCP default of `false` is omitted, as is `destructiveHint` on a
+read-only tool; `destructiveHint` and `openWorldHint` are always written when
+`false`. Read-only
 tools (`inspect`, `a11y_snapshot`, `cookie_get`, …) are marked
 `readOnlyHint: true`; boundary tools `intent_submit_and_verify` and
 `intent_follow` are marked `destructiveHint: true` (hosts may confirm before
@@ -489,15 +492,15 @@ compare hand-bounded `kind` variant sets to schemars output from the
 
 ## Toolset phases
 
-`tools/list` for a principal holding every capability is ~77,000 bytes. An
+`tools/list` for a principal holding every capability is ~66,000 bytes. An
 agent that only needs part of the surface can narrow it with `toolset_select`:
 
 | Phase | Contains | Payload |
 |---|---|---|
-| `explore` | read the page (`a11y_snapshot`), navigate, base controls (`click`, `click_and_wait_for_popup`, `type_text`, `control_action`, `upload_files`), plus `intent_complete_form`, `intent_submit_and_verify`, and `intent_follow` — the standard loop with no `toolset_select` first (default) | ~33 KB |
-| `act` | escape hatches (`command_execute`, `evaluate_javascript`, `emulate`), `wait_for`, downloads, dialogs, cookies, `network_log`, and job tools | ~43 KB |
-| `intent` | the `intent_*` family (including `intent_detect_challenge`) and `extract_structured` | ~48 KB |
-| `verify` | evidence, checkpoints, recovery, job tools | ~32 KB |
+| `explore` | read the page (`a11y_snapshot`), navigate, base controls (`click`, `click_and_wait_for_popup`, `type_text`, `control_action`, `upload_files`), plus `intent_complete_form`, `intent_submit_and_verify`, and `intent_follow` — the standard loop with no `toolset_select` first (default) | ~27 KB |
+| `act` | escape hatches (`command_execute`, `evaluate_javascript`, `emulate`), `wait_for`, downloads, dialogs, cookies, `network_log`, and job tools | ~36 KB |
+| `intent` | the `intent_*` family (including `intent_detect_challenge`) and `extract_structured` | ~40 KB |
+| `verify` | evidence, checkpoints, recovery, job tools | ~27 KB |
 | `full` | everything the principal's capabilities allow (including jobs when a job port is attached) | ~77 KB |
 
 Session/page lifecycle, `runtime_info`, `toolset_select`, `workflow_start`, and
