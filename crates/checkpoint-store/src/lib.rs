@@ -324,7 +324,7 @@ impl CheckpointStore {
     }
 
     fn path(&self, workflow_id: &WorkflowId) -> PathBuf {
-        self.root.join(format!("{}.json", workflow_id.0))
+        checkpoint_path(&self.root, workflow_id)
     }
 
     fn issuance_path(&self, workflow_id: &WorkflowId) -> PathBuf {
@@ -380,4 +380,10 @@ fn checkpoint_authority_digest(
     authority.recovery_history.clear();
     authority.recovery_receipts.clear();
     Ok(checkpoint_digest(&serde_json::to_vec(&authority)?))
+}
+
+/// Where a store rooted at `root` keeps `workflow_id`'s checkpoint, for
+/// read-only exporters that must not open the store.
+pub fn checkpoint_path(root: &Path, workflow_id: &WorkflowId) -> PathBuf {
+    root.join(format!("{}.json", workflow_id.0))
 }

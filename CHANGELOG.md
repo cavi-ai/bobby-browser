@@ -21,6 +21,11 @@
 
 ### Added
 
+- `bobby audit export --workflow <id>` writes a tar of one workflow's journal
+  lines (byte for byte), checkpoint, and stored artifacts with a manifest of
+  SHA-256 digests signed by a local Ed25519 key. `bobby audit verify` checks
+  every digest and the signature, optionally pinned with `--public-key`;
+  `bobby audit key` prints the public key.
 - `bobby init --preset claude`, `codex`, and `openshell` mint host
   credentials. `claude` and `codex` hold what the shipped agent skill uses:
   the agent floor without `javascript:evaluate`, `browser:fingerprint`, and
