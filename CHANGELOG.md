@@ -18,6 +18,15 @@
 
 ### Changed
 
+- `tools/list` is smaller: `explore` from 32,740 to 26,776 bytes and `full`
+  from 77,053 to 66,380. Advertised schemas inline single-use definitions,
+  fold `{"oneOf":[X,{"type":"null"}]}` into `"type":[T,"null"]`, and drop the
+  draft URL; these rewrites accept exactly the same instances. `workflow_start`
+  advertises `session` and `navigationOutcome`, and `workflow_observe`
+  advertises `observationOutcome`, as opaque objects, like every command
+  outcome. Annotations omit hints equal to the MCP default `false`.
+  `tools/call` still validates against the full schemas. The catalog ceilings
+  are 28 KiB (`explore`) and 68 KiB (`full`).
 - The companion manifest declares `data_collection_permissions` (required:
   `websiteContent`, `browsingActivity`) for the page content and tab URLs it
   passes to the local runtime.

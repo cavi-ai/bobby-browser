@@ -176,10 +176,10 @@ async fn click_and_wait_for_download_requires_file_download_and_accepts_a_workfl
     let branches = tool["inputSchema"]["oneOf"]
         .as_array()
         .expect("workflow-scoped tools advertise explicit-id and handle branches");
-    assert!(branches.iter().any(|branch| {
-        branch["required"] == json!(["workflowHandle"])
-            && branch["properties"]["workflowHandle"].is_object()
-    }));
+    assert!(tool["inputSchema"]["properties"]["workflowHandle"].is_object());
+    assert!(branches
+        .iter()
+        .any(|branch| branch["required"] == json!(["workflowHandle"])));
 }
 
 #[tokio::test]
@@ -695,26 +695,34 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
         .iter()
         .find(|tool| tool["name"] == "command_execute")
         .unwrap();
-    assert!(
-        command_schema["inputSchema"]["$defs"]["PrimitiveCommand"].is_null(),
-        "{}",
-        command_schema["inputSchema"]["$defs"]
-    );
-    assert!(
-        command_schema["inputSchema"]["$defs"]["IntentCommand"].is_null(),
-        "{}",
-        command_schema["inputSchema"]["$defs"]
-    );
+    // Single-use definitions are inlined in `tools/list`, so absence is checked
+    // on the serialized schema, not on `$defs` alone.
+    let advertised_command = command_schema["inputSchema"].to_string();
+    for union in ["PrimitiveCommand", "IntentCommand"] {
+        for variant in validation_schema["$defs"][union]["oneOf"]
+            .as_array()
+            .unwrap()
+        {
+            let kind = &variant["properties"]["kind"]["const"];
+            assert!(
+                kind.is_string(),
+                "{union} variant without a kind: {variant}"
+            );
+            assert!(
+                !advertised_command.contains(&format!("\"const\":{kind}")),
+                "command_execute advertises {union} variant {kind}: {advertised_command}"
+            );
+        }
+    }
     assert_eq!(
-        command_schema["inputSchema"]["$defs"]["CommandEnvelope"]["properties"]["command"]["type"],
+        command_schema["inputSchema"]["properties"]["envelope"]["properties"]["command"]["type"],
         "object"
     );
     // `CommandEnvelope` does not carry evidence, so the closure keeps `Evidence`
     // out of this tool entirely.
     assert!(
-        command_schema["inputSchema"]["$defs"]["Evidence"].is_null(),
-        "{}",
-        command_schema["inputSchema"]["$defs"]
+        !advertised_command.contains("javaScriptResult"),
+        "{advertised_command}"
     );
 
     let checkpoint_schema = tools
@@ -722,7 +730,7 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
         .find(|tool| tool["name"] == "checkpoint_save")
         .unwrap();
     assert_eq!(
-        checkpoint_schema["inputSchema"]["$defs"]["WorkflowCheckpoint"]["properties"]
+        checkpoint_schema["inputSchema"]["properties"]["checkpoint"]["properties"]
             ["recoveryReceipts"]["maxItems"],
         0
     );
@@ -768,20 +776,22 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
     );
 
     assert_eq!(
-        checkpoint_schema["inputSchema"]["$defs"]["WorkflowCheckpoint"]["properties"]["evidence"]
+        checkpoint_schema["inputSchema"]["properties"]["checkpoint"]["properties"]["evidence"]
             ["maxItems"],
         0
     );
     assert_eq!(
-        checkpoint_schema["inputSchema"]["$defs"]["WorkflowCheckpoint"]["properties"]
+        checkpoint_schema["inputSchema"]["properties"]["checkpoint"]["properties"]
             ["recoveryHistory"]["maxItems"],
         0
     );
-    assert!(
-        checkpoint_schema["inputSchema"]["$defs"]["Evidence"].is_null(),
-        "{}",
-        checkpoint_schema["inputSchema"]["$defs"]
-    );
+    let advertised_checkpoint = checkpoint_schema["inputSchema"].to_string();
+    for kind in &evidence_kinds {
+        assert!(
+            !advertised_checkpoint.contains(&format!("\"const\":\"{kind}\"")),
+            "checkpoint_save advertises Evidence variant {kind}: {advertised_checkpoint}"
+        );
+    }
 
     let envelope = CommandEnvelope {
         schema_version: CommandEnvelope::SCHEMA_VERSION,
@@ -2109,8 +2119,8 @@ async fn flat_browser_tools_are_listed_and_follow_capability_grants() {
         .unwrap();
     assert_eq!(upload_files["inputSchema"]["required"], json!(["paths"]));
     assert_eq!(
-        upload_files["inputSchema"]["properties"]["expectedState"]["$ref"],
-        "#/$defs/WaitForCommand"
+        upload_files["inputSchema"]["properties"]["expectedState"]["description"],
+        "Post-action wait condition; full shape enforced at tools/call."
     );
     assert_eq!(
         upload_files["inputSchema"]["properties"]["autoCheckpoint"]["type"],
@@ -4267,7 +4277,7 @@ async fn download_url_requires_and_threads_a_page_id() {
     // either (see `apply_workflow_scope_advertisement`).
     assert_eq!(
         tool["inputSchema"]["properties"]["saveAs"],
-        json!({"oneOf":[{"type":"string","minLength":1,"maxLength":4096},{"type":"null"}]}),
+        json!({"type":["string","null"],"minLength":1,"maxLength":4096}),
         "download_url must advertise optional saveAs: {tool}"
     );
 

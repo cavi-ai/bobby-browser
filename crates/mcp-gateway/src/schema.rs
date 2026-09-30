@@ -579,7 +579,155 @@ pub(crate) fn advertised_tool_schema(name: &str) -> Value {
     if let Some(example) = tool_argument_example(name) {
         schema["examples"] = json!([example]);
     }
+    compact_advertised_schema(&mut schema);
     schema
+}
+
+/// Advertise-only rewrites that accept exactly the same instances and drop
+/// bytes every `tools/list` re-downloads: a local definition used by exactly
+/// one bare `$ref` is inlined there, the draft URL is dropped, and
+/// `{"oneOf":[X,{"type":"null"}]}` is folded into `X`
+/// with `"type":[T,"null"]` when `X` names a single non-null type and carries
+/// no keyword that could also match `null`. Instance data under `examples`,
+/// `const`, `enum`, and `default` is left alone.
+pub(crate) fn compact_advertised_schema(schema: &mut Value) {
+    inline_single_use_definitions(schema);
+    compact_advertised_node(schema);
+}
+
+const INSTANCE_KEYWORDS: [&str; 4] = ["examples", "const", "enum", "default"];
+
+fn inline_single_use_definitions(schema: &mut Value) {
+    while let Some(name) = single_use_definition(schema) {
+        let body = schema["$defs"]
+            .as_object_mut()
+            .and_then(|defs| defs.remove(&name))
+            .expect("single_use_definition names an existing definition");
+        if schema["$defs"].as_object().is_some_and(Map::is_empty) {
+            schema
+                .as_object_mut()
+                .expect("advertised schemas are objects")
+                .remove("$defs");
+        }
+        replace_bare_ref(schema, &format!("#/$defs/{name}"), &body);
+    }
+}
+
+/// A definition referenced exactly once, by a `$ref` with no sibling
+/// keywords, and never from inside itself.
+fn single_use_definition(schema: &Value) -> Option<String> {
+    let defs = schema.get("$defs")?.as_object()?;
+    let mut uses = std::collections::BTreeMap::<&str, (usize, bool)>::new();
+    count_definition_refs(schema, &mut uses);
+    uses.into_iter()
+        .find(|(name, (count, bare))| {
+            *count == 1 && *bare && defs.get(*name).is_some_and(|body| !refers_to(body, name))
+        })
+        .map(|(name, _)| name.to_owned())
+}
+
+fn count_definition_refs<'a>(
+    value: &'a Value,
+    uses: &mut std::collections::BTreeMap<&'a str, (usize, bool)>,
+) {
+    match value {
+        Value::Object(fields) => {
+            if let Some(target) = fields
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(|target| target.strip_prefix("#/$defs/"))
+            {
+                let (name, pointer) = target.split_once('/').unwrap_or((target, ""));
+                let entry = uses.entry(name).or_insert((0, true));
+                entry.0 += 1;
+                entry.1 &= pointer.is_empty() && fields.len() == 1;
+            }
+            for (key, value) in fields {
+                if !INSTANCE_KEYWORDS.contains(&key.as_str()) {
+                    count_definition_refs(value, uses);
+                }
+            }
+        }
+        Value::Array(values) => values
+            .iter()
+            .for_each(|value| count_definition_refs(value, uses)),
+        _ => {}
+    }
+}
+
+fn refers_to(value: &Value, name: &str) -> bool {
+    let mut uses = std::collections::BTreeMap::new();
+    count_definition_refs(value, &mut uses);
+    uses.contains_key(name)
+}
+
+fn replace_bare_ref(value: &mut Value, target: &str, body: &Value) {
+    match value {
+        Value::Object(fields) => {
+            if fields.len() == 1 && fields.get("$ref").and_then(Value::as_str) == Some(target) {
+                *value = body.clone();
+                return;
+            }
+            for (key, value) in fields.iter_mut() {
+                if !INSTANCE_KEYWORDS.contains(&key.as_str()) {
+                    replace_bare_ref(value, target, body);
+                }
+            }
+        }
+        Value::Array(values) => values
+            .iter_mut()
+            .for_each(|value| replace_bare_ref(value, target, body)),
+        _ => {}
+    }
+}
+
+fn compact_advertised_node(schema: &mut Value) {
+    match schema {
+        Value::Object(fields) => {
+            fields.remove("$schema");
+            for (key, value) in fields.iter_mut() {
+                if !INSTANCE_KEYWORDS.contains(&key.as_str()) {
+                    compact_advertised_node(value);
+                }
+            }
+            if let Some(folded) = folded_nullable(fields) {
+                *schema = folded;
+            }
+        }
+        Value::Array(values) => values.iter_mut().for_each(compact_advertised_node),
+        _ => {}
+    }
+}
+
+fn folded_nullable(fields: &Map<String, Value>) -> Option<Value> {
+    if fields.len() != 1 {
+        return None;
+    }
+    let [first, second] = fields.get("oneOf")?.as_array()?.as_slice() else {
+        return None;
+    };
+    let null = json!({"type":"null"});
+    let other = if *second == null {
+        first
+    } else if *first == null {
+        second
+    } else {
+        return None;
+    };
+    let other = other.as_object()?;
+    let kind = other.get("type")?.as_str().filter(|kind| *kind != "null")?;
+    let matches_null = [
+        "const", "enum", "$ref", "oneOf", "anyOf", "allOf", "not", "if", "then", "else",
+    ];
+    if matches_null
+        .iter()
+        .any(|keyword| other.contains_key(*keyword))
+    {
+        return None;
+    }
+    let mut folded = other.clone();
+    folded.insert("type".to_owned(), json!([kind, "null"]));
+    Some(Value::Object(folded))
 }
 
 /// Capability-sensitive advertising for the two session-creation contracts.
@@ -655,11 +803,12 @@ fn apply_workflow_scope_advertisement(name: &str, schema: &mut Value) {
         WorkflowScope::SessionPage => json!(["sessionId", "pageId"]),
         WorkflowScope::SessionPageWorkflow => json!(["sessionId", "pageId", "workflowId"]),
     };
+    // `workflowHandle`'s shape is the top-level property above; the branch
+    // only has to require it and exclude the explicit ids.
     schema["oneOf"] = json!([
         {
             "required":["workflowHandle"],
             "properties":{
-                "workflowHandle":{"$ref":"#/$defs/H"},
                 "sessionId":false,
                 "pageId":false,
                 "workflowId":false
@@ -968,6 +1117,12 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
 /// unchanged. Every entry also drops the constant `$schema` URL (see
 /// [`advertised_tool_schema`]).
 pub(crate) fn advertised_tool_output_schema(name: &str) -> Value {
+    let mut schema = advertised_output_shape(name);
+    compact_advertised_schema(&mut schema);
+    schema
+}
+
+fn advertised_output_shape(name: &str) -> Value {
     match name {
         "workflow_recover" => {
             let mut schema = output_ref("RecoveryDecision");
@@ -1076,6 +1231,9 @@ pub(crate) fn advertised_tool_output_schema(name: &str) -> Value {
             // `tool_output_schema`) validate. `false`->`true` costs one
             // fewer byte, not one more.
             schema["additionalProperties"] = json!(true);
+            // The command-outcome envelope is opaque here for the same reason
+            // it is on every command tool (see the fallback arm below).
+            schema["properties"]["observationOutcome"] = json!({"type":["object","null"]});
             schema
         }
         "runtime_info" => {
@@ -1113,19 +1271,15 @@ pub(crate) fn advertised_tool_output_schema(name: &str) -> Value {
     }
 }
 
-/// Exact advertise-only workflow-start result. The three closed wire branches
-/// are unchanged from [`workflow_start_output_schema`], but repeated nested
-/// session/page/navigation schemas and failure fields are shared through local
-/// definitions so the public catalog does not duplicate them per branch.
+/// Advertise-only workflow-start result. The three branches stay closed at
+/// the top level with the same required fields and failure reasons as
+/// [`workflow_start_output_schema`]; `session` and `navigationOutcome` are
+/// opaque here, as `session_create`'s result and every command outcome are,
+/// and the page and failure fields are shared through local definitions so
+/// the public catalog does not duplicate them per branch.
 fn advertised_workflow_start_output_schema() -> Value {
-    let all_defs = definitions();
-    let id_def = all_defs["Id"].clone();
-    let mut session_def = all_defs["SessionState"].clone();
-    let mut navigation_def = object(command_outcome_properties(), &["status", "commandId"]);
-    navigation_def["type"] = json!(["object", "null"]);
+    let id_def = definitions()["Id"].clone();
     let mut page_def = page_state();
-    rewrite_local_id_refs(&mut session_def);
-    rewrite_local_id_refs(&mut navigation_def);
     rewrite_local_id_refs(&mut page_def);
     let mut handle = workflow_handle();
     handle
@@ -1140,9 +1294,9 @@ fn advertised_workflow_start_output_schema() -> Value {
             "sessionId":{"$ref":"#/$defs/I"},
             "pageId":{"$ref":"#/$defs/I"},
             "workflowId":{"$ref":"#/$defs/I"},
-            "session":{"$ref":"#/$defs/S"},
+            "session":{"type":"object"},
             "page":{"$ref":"#/$defs/P"},
-            "navigationOutcome":{"$ref":"#/$defs/N"}
+            "navigationOutcome":{"type":["object","null"]}
         }),
         &[
             "status",
@@ -1165,8 +1319,8 @@ fn advertised_workflow_start_output_schema() -> Value {
             "workflowHandle":{"type":"null"},
             "sessionId":{"$ref":"#/$defs/I"},
             "workflowId":{"$ref":"#/$defs/I"},
-            "session":{"oneOf":[{"$ref":"#/$defs/S"},{"type":"null"}]},
-            "navigationOutcome":{"$ref":"#/$defs/N"},
+            "session":{"type":["object","null"]},
+            "navigationOutcome":{"type":["object","null"]},
             "reason":{"type":"string"},
             "detail":{"type":["string","null"],"minLength":1,"maxLength":512},
             "pageClosed":{"type":"boolean"},
@@ -1205,8 +1359,6 @@ fn advertised_workflow_start_output_schema() -> Value {
         ],
         "$defs":{
             "I":id_def,
-            "S":session_def,
-            "N":navigation_def,
             "P":page_def,
             "F":failure_base,
             "C":success,
@@ -3131,6 +3283,116 @@ mod tests {
         }
     }
 
+    fn accepts(schema: &Value, instance: &Value) -> bool {
+        jsonschema::validator_for(schema)
+            .expect("schema compiles")
+            .is_valid(instance)
+    }
+
+    #[test]
+    fn compaction_folds_only_nullables_that_cannot_match_null_themselves() {
+        let mut schema = json!({
+            "type":"object",
+            "properties":{
+                "text":{"oneOf":[{"type":"string","maxLength":3},{"type":"null"}]},
+                "nullFirst":{"oneOf":[{"type":"null"},{"type":"integer","minimum":1}]},
+                "choice":{"oneOf":[{"type":"string","enum":["a"]},{"type":"null"}]},
+                "pinned":{"oneOf":[{"type":"string","const":"a"},{"type":"null"}]},
+                "described":{"oneOf":[{"type":"string"},{"type":"null"}],"description":"kept"}
+            },
+            "examples":[{"text":{"oneOf":[{"type":"string"},{"type":"null"}]}}]
+        });
+        let original = schema.clone();
+        compact_advertised_schema(&mut schema);
+        let properties = &schema["properties"];
+        assert_eq!(
+            properties["text"],
+            json!({"type":["string","null"],"maxLength":3})
+        );
+        assert_eq!(
+            properties["nullFirst"],
+            json!({"type":["integer","null"],"minimum":1})
+        );
+        assert_eq!(properties["choice"], original["properties"]["choice"]);
+        assert_eq!(properties["pinned"], original["properties"]["pinned"]);
+        assert_eq!(properties["described"], original["properties"]["described"]);
+        assert_eq!(schema["examples"], original["examples"]);
+        for instance in [
+            json!({"text":null,"nullFirst":null}),
+            json!({"text":"abc","nullFirst":1}),
+            json!({"text":"abcd"}),
+            json!({"text":1}),
+            json!({"nullFirst":0}),
+            json!({"choice":null}),
+            json!({"choice":"b"}),
+            json!({"pinned":"b"}),
+        ] {
+            assert_eq!(
+                accepts(&schema, &instance),
+                accepts(&original, &instance),
+                "{instance}"
+            );
+        }
+    }
+
+    #[test]
+    fn compaction_inlines_only_bare_single_use_non_recursive_definitions() {
+        let mut schema = json!({
+            "$schema":"https://json-schema.org/draft/2020-12/schema",
+            "type":"object",
+            "properties":{
+                "once":{"$ref":"#/$defs/Once"},
+                "twiceA":{"$ref":"#/$defs/Twice"},
+                "twiceB":{"$ref":"#/$defs/Twice"},
+                "described":{"$ref":"#/$defs/Described","description":"sibling"},
+                "tree":{"$ref":"#/$defs/Tree"},
+                "maybe":{"oneOf":[{"$ref":"#/$defs/Maybe"},{"type":"null"}]}
+            },
+            "$defs":{
+                "Once":{"type":"string","maxLength":2},
+                "Twice":{"type":"integer"},
+                "Described":{"type":"boolean"},
+                "Tree":{"type":"object","properties":{"child":{"$ref":"#/$defs/Tree"}}},
+                "Maybe":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}
+            }
+        });
+        let original = schema.clone();
+        compact_advertised_schema(&mut schema);
+        assert!(schema.get("$schema").is_none());
+        assert_eq!(
+            schema["properties"]["once"],
+            json!({"type":"string","maxLength":2})
+        );
+        assert_eq!(
+            schema["properties"]["maybe"],
+            json!({"type":["object","null"],"properties":{"id":{"type":"string"}},"required":["id"]})
+        );
+        let defs = schema["$defs"]
+            .as_object()
+            .expect("shared definitions stay");
+        assert_eq!(
+            defs.keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from(["Described", "Tree", "Twice"])
+        );
+        for instance in [
+            json!({"once":"ab","twiceA":1,"maybe":null}),
+            json!({"once":"abc"}),
+            json!({"maybe":{}}),
+            json!({"maybe":{"id":"x"}}),
+            json!({"tree":{"child":{"child":{}}}}),
+            json!({"tree":{"child":1}}),
+            json!({"described":"no"}),
+        ] {
+            assert_eq!(
+                accepts(&schema, &instance),
+                accepts(&original, &instance),
+                "{instance}"
+            );
+        }
+    }
+
     #[test]
     fn advertised_post_state_tools_collapse_to_the_opaque_form_but_wire_schema_keeps_post_state() {
         // Correction pass: the explore catalog has zero byte headroom, so
@@ -3197,9 +3459,7 @@ mod tests {
         assert_eq!(
             tool_annotations("workflow_start"),
             json!({
-                "readOnlyHint":false,
                 "destructiveHint":false,
-                "idempotentHint":false,
                 "openWorldHint":true,
             })
         );
@@ -3207,14 +3467,16 @@ mod tests {
             tool_annotations("workflow_observe"),
             json!({
                 "readOnlyHint":true,
-                "destructiveHint":false,
-                "idempotentHint":false,
                 "openWorldHint":false,
             })
         );
+        // FormSnapshot has one use, so the advertisement inlines it into the
+        // nullable `formSnapshot` property.
         let advertised_observe = advertised_tool_output_schema("workflow_observe");
+        let form_snapshot = &advertised_observe["properties"]["formSnapshot"];
+        assert_eq!(form_snapshot["type"], json!(["object", "null"]));
         assert_eq!(
-            advertised_observe["$defs"]["FormSnapshot"]["properties"]["forms"]["items"],
+            form_snapshot["properties"]["forms"]["items"],
             json!({"type":"object"}),
         );
         assert_eq!(

@@ -68,12 +68,22 @@ pub(crate) fn tool_annotations(name: &str) -> Value {
             | "intent_follow"
             | "intent_submit_and_verify"
     );
-    json!({
-        "readOnlyHint": read_only,
-        "destructiveHint": destructive,
-        "idempotentHint": idempotent,
-        "openWorldHint": open_world
-    })
+    // Every catalog entry carries these, so hints equal to the MCP default of
+    // `false` (`readOnlyHint`, `idempotentHint`) are left out, and so is
+    // `destructiveHint` on a read-only tool, where MCP says it has no meaning.
+    // `destructiveHint` and `openWorldHint` default to `true`, so a `false`
+    // for either is always written out.
+    let mut hints = serde_json::Map::new();
+    if read_only {
+        hints.insert("readOnlyHint".to_owned(), json!(true));
+    } else {
+        hints.insert("destructiveHint".to_owned(), json!(destructive));
+    }
+    if idempotent {
+        hints.insert("idempotentHint".to_owned(), json!(true));
+    }
+    hints.insert("openWorldHint".to_owned(), json!(open_world));
+    Value::Object(hints)
 }
 
 pub(crate) fn tool_title(name: &str) -> &'static str {
