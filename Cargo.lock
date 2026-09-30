@@ -2282,6 +2282,7 @@ dependencies = [
  "tower",
  "types",
  "uuid",
+ "worker-pool",
 ]
 
 [[package]]

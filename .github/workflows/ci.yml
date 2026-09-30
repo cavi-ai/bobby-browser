@@ -235,6 +235,7 @@ jobs:
       - name: Conformance live tests
         run: >-
           cargo test -p interface-conformance --locked
+          --test acp_walkthrough
           --test javascript_evaluation
           --test mcp_live
           -- --ignored --test-threads=1

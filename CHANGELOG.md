@@ -21,6 +21,10 @@
 
 ### Added
 
+- Zed over ACP guide: `agent_servers` setup for `bobby acp-stdio` and a
+  transcript of the `acp_walkthrough` live test (fill, `contextAsk`,
+  `checkpointSave`, `recoveryStatus`, `workflowRecover`, close), which asserts
+  MCP `context_ask` and `recovery_status` answer the same on the same runtime.
 - `bobby audit export --workflow <id>` writes a tar of one workflow's journal
   lines (byte for byte), checkpoint, and stored artifacts with a manifest of
   SHA-256 digests signed by a local Ed25519 key. `bobby audit verify` checks
@@ -75,6 +79,13 @@
   list --profile managed-chromium` shows the sites.
 - Docker image: the context store lives at `/var/lib/bobby/data/context` on
   the data volume.
+
+### Fixed
+
+- ACP `contextAsk` and `contextNeighbors` answered a bare `null` on a miss and
+  the raw record on a hit; they now return the MCP and HTTP shape with `hit`,
+  `reason`, `nextStep`, and `pageDerived`. MCP `context_ask` and
+  `context_neighbors` hits now carry `hit: true`, as HTTP's always did.
 
 ## 0.18.0 - 2026-09-30
 

@@ -65,7 +65,11 @@ The same channel accepts these explicit operations:
 | `workflowRecover` | `workflowId` | Recover an owned workflow |
 
 Successful operations emit one JSON `session/update` text chunk with
-`operation` and `result`. Automation replies contain `operation: "execute"`,
+`operation` and `result`. `contextAsk` and `contextNeighbors` results use the
+MCP and HTTP shape: `{"answer":…,"hit":true,"pageDerived":true}`, or on a miss
+`{"answer":null,"hit":false,"reason":"notRemembered","nextStep":"a11y_snapshot","pageDerived":true}`
+(`neighbors` in place of `answer`). The [Zed walkthrough](../guides/acp-zed.md)
+runs every operation on a real page. Automation replies contain `operation: "execute"`,
 `sessionId`, `pageId`, the stable `workflowId`, `attemptId`, and the complete
 `CommandOutcome`, including evidence.
 
