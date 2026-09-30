@@ -108,7 +108,7 @@ impl RuntimeInterface for CountingRuntime {
         &self,
         _: RequestContext,
         _: types::CommandEnvelope,
-    ) -> InterfaceResult<(types::CommandOutcome, types::CheckpointId)> {
+    ) -> InterfaceResult<(types::CommandOutcome, Option<types::CheckpointId>)> {
         unreachable!()
     }
     async fn delete_session(

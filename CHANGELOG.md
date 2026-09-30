@@ -2,7 +2,28 @@
 
 ## Unreleased
 
+### Fixed
+
+- `intent_submit_and_verify` and a boundary `intent_follow` honor their
+  `idempotencyKey` under `autoCheckpoint`, the default for Boundary commands.
+  The auto-checkpoint path skipped the idempotency ledger, so a retry under
+  the same key ran the command again; it now replays the first outcome. A replayed call saves no checkpoint and
+  omits `checkpointId`, `workflowId`, and `attemptId`.
+- A request under an idempotency key whose earlier outcome is unknown (the
+  runtime stopped mid-command, or the retained outcome is
+  `needsReconciliation`) is refused as unresolved with
+  `reconciliationRequired: true`, even when it arrives from a new session.
+  Previously a different session made it a plain conflict.
+- MCP errors with `reconciliationRequired: true` carry a repair that says not
+  to retry or mint a new key and to check for the effect first. The
+  `idempotencyConflict` repair ("mint a fresh idempotency key") no longer
+  applies to them.
+
 ### Added
+
+- `recovery_demo` live test: an MCP gateway killed mid-submit on real
+  Chromium, restarted on the same data directory, places one order, not two.
+  The transcript is on the first-session page.
 
 - Release builds sign the Firefox companion through addons.mozilla.org
   (unlisted) on each release tag and ship it as

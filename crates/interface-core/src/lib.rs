@@ -198,12 +198,14 @@ pub trait RuntimeInterface: Send + Sync {
     /// Collapses pin-ids -> `checkpoint_save` -> submit into one call. The
     /// gateway cannot author a checkpoint itself: it has no access to live
     /// page state. Returns the outcome and the id of the checkpoint that was
-    /// saved, so the caller can still name it to `workflow_recover`.
+    /// saved, so the caller can still name it to `workflow_recover`. A call
+    /// answered from the idempotency ledger runs nothing and saves no
+    /// checkpoint, so its id is `None`.
     async fn submit_with_auto_checkpoint(
         &self,
         ctx: RequestContext,
         envelope: types::CommandEnvelope,
-    ) -> InterfaceResult<(types::CommandOutcome, types::CheckpointId)>;
+    ) -> InterfaceResult<(types::CommandOutcome, Option<types::CheckpointId>)>;
     /// Recoverable workflows for a session the caller owns, newest first.
     ///
     /// `recovery_status` and `recover` are keyed by `workflowId` alone, so an
