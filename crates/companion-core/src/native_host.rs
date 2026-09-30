@@ -102,6 +102,8 @@ pub struct NativeHostConfig {
     endpoint: String,
     pairing_code: String,
     reconnect_credential: Arc<Mutex<Option<ReconnectCredential>>>,
+    config_refresh: Option<Arc<dyn Fn() -> Option<NativeHostConfig> + Send + Sync>>,
+    config_changes: Option<watch::Receiver<u64>>,
 }
 
 impl NativeHostConfig {
@@ -110,7 +112,38 @@ impl NativeHostConfig {
             endpoint,
             pairing_code: pairing_code.into(),
             reconnect_credential: Arc::new(Mutex::new(None)),
+            config_refresh: None,
+            config_changes: None,
         }
+    }
+
+    /// Reload local endpoint discovery when a runtime moves its listener.
+    pub fn with_config_refresh(
+        mut self,
+        changes: watch::Receiver<u64>,
+        refresh: impl Fn() -> Option<NativeHostConfig> + Send + Sync + 'static,
+    ) -> Self {
+        self.config_changes = Some(changes);
+        self.config_refresh = Some(Arc::new(refresh));
+        self
+    }
+
+    fn refresh_endpoint(&mut self) -> bool {
+        let Some(mut next) = self.config_refresh.as_ref().and_then(|refresh| refresh()) else {
+            return false;
+        };
+        if next.endpoint == self.endpoint
+            || next
+                .authentication_token()
+                .and_then(|token| next.authenticated_request(&token))
+                .is_err()
+        {
+            return false;
+        }
+        next.config_refresh = self.config_refresh.clone();
+        next.config_changes = self.config_changes.clone();
+        *self = next;
+        true
     }
 
     pub fn pair_request(
@@ -628,6 +661,16 @@ fn public_paired(output: &InitialPairedOutput) -> Result<Value, NativeHostError>
 enum ConnectionResult {
     NativeClosed,
     Reconnect,
+    EndpointChanged,
+}
+
+async fn wait_for_config_change(changes: &mut Option<watch::Receiver<u64>>) {
+    if let Some(receiver) = changes {
+        if receiver.changed().await.is_ok() {
+            return;
+        }
+    }
+    std::future::pending::<()>().await;
 }
 
 async fn sleep_or_native_closed(delay: Duration, closed: &mut watch::Receiver<bool>) -> bool {
@@ -751,7 +794,7 @@ where
         .ok_or(NativeHostError::MissingConnectRequest)?;
     let first = decode_native_request(first)?;
 
-    let (connect, config, finalize_enroll) = match first {
+    let (connect, mut config, finalize_enroll) = match first {
         NativeRequest::Pair(input) => {
             let config = config.ok_or(NativeHostError::InvalidPairingMaterial)?;
             (input, config, false)
@@ -781,8 +824,8 @@ where
 
     let expected_companion_id = connect.companion_id.clone();
     let expected_profile_id = connect.profile_id.clone();
-    let pair = config.pair_request(connect.clone())?;
-    let pair = serde_json::to_string(&pair).map_err(|_| NativeHostError::InvalidProtocol)?;
+    config.pair_request(connect.clone())?;
+    let mut config_changes = config.config_changes.clone();
 
     let (native_messages, mut receiver) = mpsc::channel(32);
     let (native_closed, mut native_closed_receiver) = watch::channel(false);
@@ -799,10 +842,17 @@ where
         if *native_closed_receiver.borrow() {
             break Ok(());
         }
+        config.refresh_endpoint();
+        let pair = config.pair_request(connect.clone())?;
+        let pair = serde_json::to_string(&pair).map_err(|_| NativeHostError::InvalidProtocol)?;
         let has_credential = config.has_reconnect_credential()?;
         let token = config.authentication_token()?;
         let request = config.authenticated_request(&token)?;
         let connection = tokio::select! {
+            _ = wait_for_config_change(&mut config_changes) => {
+                if config.refresh_endpoint() { backoff.reset(); }
+                continue;
+            }
             _ = wait_for_native_close(&mut native_closed_receiver) => break Ok(()),
             result = connect_async(request) => result,
         };
@@ -811,6 +861,12 @@ where
             Err(WebSocketError::Http(response))
                 if response.status() == StatusCode::UNAUTHORIZED =>
             {
+                // A replacement endpoint has its own credential; an old
+                // listener rejecting the prior one must not block handoff.
+                if config.refresh_endpoint() {
+                    backoff.reset();
+                    continue;
+                }
                 write_terminal_auth_status(&mut native_writer).await;
                 break Err(NativeHostError::InvalidPairingMaterial)
             }
@@ -834,8 +890,16 @@ where
             break Err(NativeHostError::WebSocket);
         }
 
+        let liveness = tokio::time::sleep(SERVER_LIVENESS_TIMEOUT);
+        tokio::pin!(liveness);
         let connection = loop {
             tokio::select! {
+                _ = wait_for_config_change(&mut config_changes) => {
+                    if config.refresh_endpoint() {
+                        break Ok(ConnectionResult::EndpointChanged);
+                    }
+                }
+                _ = &mut liveness => break Ok(ConnectionResult::Reconnect),
                 native = receiver.recv() => {
                     match native {
                         Some(Ok(Some(value))) => {
@@ -850,11 +914,8 @@ where
                         Some(Err(error)) => break Err(error),
                     }
                 }
-                message = tokio::time::timeout(SERVER_LIVENESS_TIMEOUT, socket_reader.next()) => {
-                    let message = match message {
-                        Ok(message) => message,
-                        Err(_) => break Ok(ConnectionResult::Reconnect),
-                    };
+                message = socket_reader.next() => {
+                    liveness.as_mut().reset(tokio::time::Instant::now() + SERVER_LIVENESS_TIMEOUT);
                     match message {
                         Some(Ok(Message::Text(body))) => {
                             if body.len() > MAX_NATIVE_MESSAGE_BYTES {
@@ -938,6 +999,7 @@ where
 
         match connection? {
             ConnectionResult::NativeClosed => break Ok(()),
+            ConnectionResult::EndpointChanged => backoff.reset(),
             ConnectionResult::Reconnect if config.has_reconnect_credential()? => {
                 let delay = backoff.next_delay();
                 if sleep_or_native_closed(delay, &mut native_closed_receiver).await {
@@ -956,6 +1018,30 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn endpoint_refresh_rejects_remote_and_invalid_pairing_material() {
+        for (endpoint, secret) in [
+            ("ws://example.com/v1/companion", "replacement"),
+            ("ws://127.0.0.1:9878/v1/companion", ""),
+        ] {
+            let (_changed, changes) = watch::channel(0_u64);
+            let mut config =
+                NativeHostConfig::new("ws://127.0.0.1:9877/v1/companion".into(), "original")
+                    .with_config_refresh(changes, move || {
+                        Some(NativeHostConfig::new(endpoint.into(), secret))
+                    });
+            config
+                .store_reconnect_credential("existing-credential".into())
+                .unwrap();
+            assert!(!config.refresh_endpoint());
+            assert_eq!(config.endpoint, "ws://127.0.0.1:9877/v1/companion");
+            assert_eq!(
+                config.authentication_token().unwrap(),
+                "existing-credential"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn eof_publishes_cancellation_before_a_saturated_queue_send() {

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Fixed
+
+- Firefox companion startup and enrollment automatically select a free loopback
+  port when the configured port is occupied. Discovery publishes the actual
+  endpoint; replaced runtimes cannot overwrite it during pairing-code refresh
+  or remove it during cleanup. The native relay follows descriptor file changes
+  automatically, without restarting Firefox or pairing again. Regressions cover
+  port collisions and the complete relay handoff.
+
 ## 0.17.0 - 2026-09-28
 
 ### Fixed
@@ -78,14 +87,6 @@
   at 512 characters; a 401 now carries this body too. An upstream rejection
   reports only its status class and code, never the upstream response body,
   and an unparseable model reply is reported with a fixed message.
-
-- Firefox companion: a fixed (nonzero) companion port that is already taken
-  now fails the launch with `browserLaunchFailed` naming the port, and the
-  descriptor file is left untouched. This replaces the 0.16.0 fallback to a
-  dynamic loopback port, which could publish a second endpoint over the
-  configured owner's descriptor. Port 0 still binds an ephemeral port.
-
-### Changed
 
 - Firefox companion: a fixed (nonzero) companion port that is already taken
   now fails the launch with `browserLaunchFailed` naming the port, and the
