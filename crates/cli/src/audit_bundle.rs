@@ -344,10 +344,25 @@ pub fn export(
     })
 }
 
+/// A bundle whose digests and signature checked out, with its files.
+pub struct VerifiedBundle {
+    pub summary: VerifySummary,
+    pub session_ids: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub bobby_version: String,
+    /// Every file the manifest lists, by bundle path.
+    pub files: BTreeMap<String, Vec<u8>>,
+}
+
 /// Checks every digest and the signature. With `pinned`, the bundle must be
 /// signed by that public key (hex); without it, any valid signer passes and
 /// the summary says so.
 pub fn verify(bundle: &Path, pinned: Option<&str>) -> Result<VerifySummary> {
+    open_verified(bundle, pinned).map(|verified| verified.summary)
+}
+
+/// [`verify`], keeping the verified files for a reader such as the replay.
+pub fn open_verified(bundle: &Path, pinned: Option<&str>) -> Result<VerifiedBundle> {
     let file = std::fs::File::open(bundle).with_context(|| format!("open {}", bundle.display()))?;
     let mut archive = tar::Archive::new(file);
     let mut entries: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -408,6 +423,7 @@ pub fn verify(bundle: &Path, pinned: Option<&str>) -> Result<VerifySummary> {
             manifest.schema_version
         );
     }
+    let mut files = BTreeMap::new();
     for file in &manifest.files {
         let bytes = entries
             .remove(&file.path)
@@ -415,16 +431,23 @@ pub fn verify(bundle: &Path, pinned: Option<&str>) -> Result<VerifySummary> {
         if bytes.len() as u64 != file.bytes || sha256_hex(&bytes) != file.sha256 {
             bail!("{}: contents do not match the manifest digest", file.path);
         }
+        files.insert(file.path.clone(), bytes);
     }
     if let Some(extra) = entries.keys().next() {
         bail!("{extra}: not listed in the manifest");
     }
-    Ok(VerifySummary {
-        workflow_id: manifest.workflow_id,
-        files: manifest.files.len(),
-        public_key: signature.public_key,
-        pinned: pinned.is_some(),
-        missing_artifacts: manifest.missing_artifacts,
+    Ok(VerifiedBundle {
+        summary: VerifySummary {
+            workflow_id: manifest.workflow_id,
+            files: manifest.files.len(),
+            public_key: signature.public_key,
+            pinned: pinned.is_some(),
+            missing_artifacts: manifest.missing_artifacts,
+        },
+        session_ids: manifest.session_ids,
+        created_at: manifest.created_at,
+        bobby_version: manifest.bobby_version,
+        files,
     })
 }
 

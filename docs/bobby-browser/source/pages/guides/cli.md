@@ -139,12 +139,14 @@ Signed audit bundles for one workflow; see
 bobby audit key
 bobby audit export --workflow <workflowId> --out bundle.tar
 bobby audit verify bundle.tar --public-key <hex>
+bobby audit replay bundle.tar --out bundle.html
 ```
 
 `export` takes `--config <path>` (same as `serve`) and `--key <path>` (default
 `<config dir>/audit-signing-key.pk8`, created on first use). `verify` exits
 non-zero and names the file when a digest, an entry, or the signature does not
-match.
+match. `replay` verifies the bundle, then writes a self-contained HTML page;
+see [Workflow replay](replay.md).
 
 ### `bobby vision`
 

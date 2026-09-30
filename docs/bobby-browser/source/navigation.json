@@ -141,6 +141,10 @@
           "path": "guides/openshell.md"
         },
         {
+          "title": "Workflow replay",
+          "path": "guides/replay.md"
+        },
+        {
           "title": "Zed over ACP",
           "path": "guides/acp-zed.md"
         },

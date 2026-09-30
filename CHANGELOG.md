@@ -30,6 +30,9 @@
   SHA-256 digests signed by a local Ed25519 key. `bobby audit verify` checks
   every digest and the signature, optionally pinned with `--public-key`;
   `bobby audit key` prints the public key.
+- `bobby audit replay <bundle>` verifies a bundle and writes a self-contained
+  HTML replay: each command with its phases, outcome, evidence, and embedded
+  screenshots. The docs ship a sample from a real Chromium run.
 - `bobby init --preset claude`, `codex`, and `openshell` mint host
   credentials. `claude` and `codex` hold what the shipped agent skill uses:
   the agent floor without `javascript:evaluate`, `browser:fingerprint`, and
