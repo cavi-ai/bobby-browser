@@ -572,6 +572,9 @@ async fn owner_inner(
     let configuration_digest = digest(&config, &bootstrap)?;
     let (selection, _) = crate::resolve_browser_selection()?;
     let profile_id = selection.preference.durable_profile_id().map(str::to_owned);
+    if profile_id.is_some() && loaded.context.dir.is_none() {
+        loaded.context.dir = Some(crate::default_context_dir()?);
+    }
     let factory = firefox_companion::selection::compose_worker_factory_warm(&loaded, selection)?;
     let registry = state_dir.join("owner.json");
     let ready_path = registry.clone();

@@ -2,8 +2,30 @@
 
 ## Unreleased
 
+## 0.18.0 - 2026-09-30
+
+### Added
+
+- Local team and project scopes with one shared runtime owner for MCP and ACP
+  clients. Scoped installation, Firefox pairing, profiles, credentials, context,
+  storage, jobs, and existing broker interfaces use the same scope.
+- `bobby --team <name> --project <name> runtime start`, `status`, and `stop`,
+  plus `bobby runtime list` to organize local runtimes. Either scope flag can be
+  used independently. `bobby firefox-start` opens the selected installed profile
+  on an automatically assigned BiDi port for first-run pairing.
+
 ### Fixed
 
+- Concurrent agent startup reuses the scope owner instead of replacing a live
+  Firefox companion. Each gateway connection keeps independent protocol state;
+  disconnecting one client leaves the runtime available to others.
+- Owner shutdown closes active gateway connections, drains their sessions, and
+  releases ownership leases before the CLI reports stopped. Gateway processes
+  also exit cleanly when an agent host keeps stdin open during owner shutdown.
+- Firefox recovery rejects missing or inaccessible profiles before launching,
+  follows the profile's current BiDi endpoint, and only terminates processes
+  that own the enrolled profile. Profile leases prevent competing runtimes
+  from taking it over.
 - Firefox companion startup and enrollment automatically select a free loopback
   port when the configured port is occupied. Discovery publishes the actual
   endpoint; replaced runtimes cannot overwrite it during pairing-code refresh

@@ -87,6 +87,42 @@ async fn response(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn existing_config_without_context_dir_retains_durable_profile_memory() {
+    let scope = Cleanup(tempfile::tempdir().unwrap());
+    let path = scope.0.path();
+    let mut config = config::AppConfig::default();
+    config.browser.profiles_dir = path.join("profiles");
+    config.storage.journal_path = path.join("storage/commands.jsonl");
+    config.storage.checkpoints_dir = path.join("storage/checkpoints");
+    config.storage.authority_path = path.join("storage/authority.json");
+    config.storage.scheduler_journal_path = path.join("storage/scheduler-jobs.jsonl");
+    assert!(config.context.dir.is_none());
+    std::fs::write(path.join("config.toml"), toml::to_string(&config).unwrap()).unwrap();
+    checked(
+        command(path)
+            .env(
+                "AUTOMATION_RUNTIME_BROWSER_SELECTION",
+                r#"{"preference":{"mode":"exact","engine":"chromium","profileId":"memory-regression"},"firefox":[]}"#,
+            )
+            .args(["runtime", "start"])
+            .output()
+            .unwrap(),
+    );
+    // The production owner must hold the real context store's writer lease.
+    let opened = context_store::ContextStore::open(path.join("context"), "memory-regression").await;
+    assert!(matches!(
+        opened,
+        Err(context_store::ContextStoreError::AlreadyLocked)
+    ));
+    checked(command(path).args(["runtime", "stop"]).output().unwrap());
+    assert!(
+        context_store::ContextStore::open(path.join("context"), "memory-regression")
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn concurrent_cli_starts_share_one_owner_and_keep_connection_lifecycles_independent() {
     let scope = Cleanup(tempfile::tempdir().unwrap());
     let path = scope.0.path().to_owned();
