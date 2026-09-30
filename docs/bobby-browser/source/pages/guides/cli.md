@@ -27,6 +27,7 @@ supported).
 | `--force` | Overwrite an existing bootstrap file |
 | `--ttl-days <n>` | Expiry in days (default from CLI) |
 | `--path <file>` | Bootstrap file path (else `BOBBY_BROWSER_BOOTSTRAP_ENV` / OS config dir) |
+| `--preset <name>` | Capability floor: `agent` (default), `unrestricted`, `claude`, `codex`, or `openshell`; see the [preset matrix](../concepts/capabilities.md#generated-preset-matrix) |
 
 Prints the plaintext bearer **once**. Map it to `AUTOMATION_RUNTIME_TOKEN` for
 SDK clients. Never commit the bearer or put it in `config.toml`.
@@ -128,6 +129,22 @@ Shared flags on all `jobs` subcommands:
 `submit` flags: `--name` (required), `--payload` (JSON string, default `{}`),
 `--payload-file`, `--priority` (`low|normal|high|critical`, default `normal`),
 `--max-retries`, `--timeout-ms`, `--idempotency-key`.
+
+### `bobby audit`
+
+Signed audit bundles for one workflow; see
+[Audit bundles](../concepts/evidence-checkpoints.md#audit-bundles).
+
+```bash
+bobby audit key
+bobby audit export --workflow <workflowId> --out bundle.tar
+bobby audit verify bundle.tar --public-key <hex>
+```
+
+`export` takes `--config <path>` (same as `serve`) and `--key <path>` (default
+`<config dir>/audit-signing-key.pk8`, created on first use). `verify` exits
+non-zero and names the file when a digest, an entry, or the signature does not
+match.
 
 ### `bobby vision`
 

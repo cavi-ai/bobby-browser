@@ -3170,7 +3170,7 @@ mod playwright_semantic_click {
             &self,
             _: RequestContext,
             _: types::CommandEnvelope,
-        ) -> InterfaceResult<(types::CommandOutcome, types::CheckpointId)> {
+        ) -> InterfaceResult<(types::CommandOutcome, Option<types::CheckpointId>)> {
             unreachable!()
         }
         async fn delete_session(
@@ -3581,7 +3581,7 @@ mod dispatch_gates {
             &self,
             _: RequestContext,
             _: CommandEnvelope,
-        ) -> InterfaceResult<(CommandOutcome, types::CheckpointId)> {
+        ) -> InterfaceResult<(CommandOutcome, Option<types::CheckpointId>)> {
             Err(unsupported())
         }
         async fn workflows_for_session(

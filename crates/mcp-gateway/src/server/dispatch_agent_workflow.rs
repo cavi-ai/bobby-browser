@@ -1507,7 +1507,8 @@ mod tests {
             &self,
             _: types::RequestContext,
             _: types::CommandEnvelope,
-        ) -> interface_core::InterfaceResult<(types::CommandOutcome, types::CheckpointId)> {
+        ) -> interface_core::InterfaceResult<(types::CommandOutcome, Option<types::CheckpointId>)>
+        {
             unused()
         }
 

@@ -48,8 +48,12 @@ those keys. Missing or invalid startup input fails closed.
 For agent hosts, default `bobby init` (and install / loopback auto-init) mints
 the **agent** preset: no `authority:admin`, marker
 `# bobby-bootstrap-preset: agent`, heal never widens past that floor. Operators
-who need to mint principals use `bobby init --preset unrestricted`. Marker-less
-existing files still heal as unrestricted (back-compat).
+who need to mint principals use `bobby init --preset unrestricted`. Host floors
+are narrower: `--preset claude` or `--preset codex` (no JavaScript evaluation,
+fingerprint, or humanize) and `--preset openshell`; the
+[preset matrix](../concepts/capabilities.md#generated-preset-matrix) lists what
+each one withholds. Marker-less existing files still heal as unrestricted
+(back-compat).
 
 There is no single `AUTOMATION_RUNTIME_TOKEN` env var for stdio startup. That
 name is only a conventional alias for the **client** bearer when talking to the

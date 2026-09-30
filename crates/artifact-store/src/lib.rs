@@ -566,9 +566,12 @@ fn storage_error(error: impl std::fmt::Display) -> ArtifactError {
 }
 
 pub fn artifact_path(root: &Path, session_id: &SessionId, artifact_id: &str) -> PathBuf {
-    root.join(session_id.0.to_string())
-        .join(artifact_id)
-        .join(format!("{artifact_id}.png"))
+    artifact_dir(root, session_id, artifact_id).join(format!("{artifact_id}.png"))
+}
+
+/// The directory holding one committed artifact's manifest and payload.
+pub fn artifact_dir(root: &Path, session_id: &SessionId, artifact_id: &str) -> PathBuf {
+    root.join(session_id.0.to_string()).join(artifact_id)
 }
 
 #[cfg(test)]

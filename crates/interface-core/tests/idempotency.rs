@@ -145,6 +145,104 @@ async fn interrupted_durable_reservation_reopens_as_unresolved() {
     assert!(error.reconciliation_required);
 }
 
+/// After a restart the agent's session is new, so the same order under the
+/// same key arrives with a different digest. The key's outcome is unknown,
+/// so the answer must be "reconcile", never a plain conflict that reads as
+/// "mint a fresh key and resubmit".
+#[tokio::test]
+async fn a_different_request_under_an_uncertain_key_must_reconcile_not_conflict() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("idempotency.json");
+    let lookup = |_value| async { Ok::<Option<CommandOutcome>, std::io::Error>(None) };
+    let principal = principal("10000000-0000-0000-0000-000000000001");
+    let idempotency_key = key("order-42");
+    let first_session = canonical_sha256(&"place order in session A").unwrap();
+    let next_session = canonical_sha256(&"place order in session B").unwrap();
+    let store = IdempotencyStore::open_durable(&path, lookup).await.unwrap();
+    let IdempotencyReservation::Acquired(permit) = reserve(
+        &store,
+        principal.clone(),
+        idempotency_key.clone(),
+        first_session,
+        CorrelationId::new(),
+    )
+    .await
+    .unwrap() else {
+        panic!("new key replayed");
+    };
+    // The process dies mid-command: the durable ledger keeps the reservation.
+    std::mem::forget(permit);
+    drop(store);
+
+    let reopened = IdempotencyStore::open_durable(&path, lookup).await.unwrap();
+    let error = reserve(
+        &reopened,
+        principal.clone(),
+        idempotency_key,
+        next_session,
+        CorrelationId::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, InterfaceErrorCode::IdempotencyConflict);
+    assert!(error.reconciliation_required, "{error:?}");
+
+    let retained = IdempotencyStore::with_global_capacity(4, 8, Duration::minutes(5));
+    let retained_key = key("order-43");
+    let IdempotencyReservation::Acquired(permit) = reserve(
+        &retained,
+        principal.clone(),
+        retained_key.clone(),
+        first_session,
+        CorrelationId::new(),
+    )
+    .await
+    .unwrap() else {
+        panic!("new key replayed");
+    };
+    retained
+        .finish(permit, reconciliation(CommandId::new()), Utc::now())
+        .await
+        .unwrap();
+    let error = reserve(
+        &retained,
+        principal.clone(),
+        retained_key,
+        next_session,
+        CorrelationId::new(),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.reconciliation_required, "{error:?}");
+
+    let known_key = key("order-44");
+    let IdempotencyReservation::Acquired(permit) = reserve(
+        &retained,
+        principal.clone(),
+        known_key.clone(),
+        first_session,
+        CorrelationId::new(),
+    )
+    .await
+    .unwrap() else {
+        panic!("new key replayed");
+    };
+    retained
+        .finish(permit, completed(CommandId::new()), Utc::now())
+        .await
+        .unwrap();
+    let error = reserve(
+        &retained,
+        principal,
+        known_key,
+        next_session,
+        CorrelationId::new(),
+    )
+    .await
+    .unwrap_err();
+    assert!(!error.reconciliation_required, "{error:?}");
+}
+
 #[tokio::test]
 async fn durable_ledger_is_single_writer_and_ignores_uncommitted_temporary_files() {
     let dir = tempfile::tempdir().unwrap();

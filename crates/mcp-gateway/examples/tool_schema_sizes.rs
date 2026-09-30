@@ -80,7 +80,7 @@ async fn main() {
             rows.len(),
             TOOLS_LIST_BYTE_BUDGET.saturating_sub(frame)
         );
-        if phase == Toolset::Full {
+        if matches!(phase, Toolset::Full | Toolset::Explore) {
             for (n, b) in rows.iter().take(12) {
                 println!("  {n}\t{b}");
             }

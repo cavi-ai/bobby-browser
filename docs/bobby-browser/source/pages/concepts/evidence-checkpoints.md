@@ -90,6 +90,26 @@ screenshots, JavaScript results, …). Artifact bytes are fetched separately wit
 Do not treat screenshots or JS results in the outcome envelope as a substitute
 for a durable checkpoint when you need restart safety.
 
+## Audit bundles
+
+`bobby audit export --workflow <workflowId>` writes one workflow's record to a
+tar a reviewer can check offline:
+
+- `journal.jsonl`: every command-journal line for the workflow's commands,
+  copied byte for byte (phases, envelopes, outcomes, evidence)
+- `checkpoint.json`: the workflow's checkpoint file, when one exists
+- `artifacts/<id>/…`: each artifact the journal names that is still on disk;
+  evicted ones are listed as `missingArtifacts`
+- `manifest.json`: the SHA-256 and size of every file above
+- `signature.json`: an Ed25519 signature over `manifest.json`
+
+The signing key is created on first use at
+`<config dir>/audit-signing-key.pk8` (owner-only). `bobby audit key` prints its
+public key. `bobby audit verify <bundle> --public-key <hex>` recomputes every
+digest, rejects missing, extra, or altered files, and checks the signature
+against that key; without `--public-key` it accepts any valid signer and says
+so. Export only reads the runtime's files, so it runs next to a live runtime.
+
 ## Next
 
 - [Events and recovery](../guides/events-recovery.md)

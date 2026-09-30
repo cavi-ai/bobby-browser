@@ -4,9 +4,10 @@ pub mod live;
 mod support_matrix;
 
 pub use support_matrix::{
-    execution_policy_requirements, operation_support, render_support_matrix_markdown,
-    AdapterSupport, EngineSupport, ExecutionPolicyRequirement, OperationSupport,
-    SUPPORT_MATRIX_BEGIN, SUPPORT_MATRIX_END,
+    execution_policy_requirements, operation_support, render_preset_matrix_markdown,
+    render_support_matrix_markdown, AdapterSupport, EngineSupport, ExecutionPolicyRequirement,
+    OperationSupport, PRESET_MATRIX_BEGIN, PRESET_MATRIX_END, SUPPORT_MATRIX_BEGIN,
+    SUPPORT_MATRIX_END,
 };
 
 pub const CANONICAL_STEPS: [&str; 10] = [

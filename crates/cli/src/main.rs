@@ -1,3 +1,4 @@
+mod audit_bundle;
 mod bootstrap_local;
 mod deployment_profiles;
 mod doctor;
@@ -106,7 +107,8 @@ enum CliCommand {
         /// Days until the bootstrap credential expires
         #[arg(long, default_value_t = bootstrap_local::DEFAULT_TTL_DAYS as u32)]
         ttl_days: u32,
-        /// Capability floor: agent (default, no authority:admin) or unrestricted
+        /// Capability floor: agent (default, no authority:admin), unrestricted,
+        /// or a host floor: claude, codex, openshell
         #[arg(long, value_enum, default_value_t = bootstrap_local::BootstrapPreset::Agent)]
         preset: bootstrap_local::BootstrapPreset,
         /// Bootstrap env file path
@@ -331,6 +333,11 @@ enum CliCommand {
         #[command(subcommand)]
         command: ContextCommands,
     },
+    /// Export or verify a signed audit bundle for one workflow
+    Audit {
+        #[command(subcommand)]
+        command: AuditCommands,
+    },
     /// Vision provider setup and loopback proxy
     Vision {
         #[command(subcommand)]
@@ -521,6 +528,38 @@ enum VisionCommands {
         timeout_ms: u64,
         #[command(flatten)]
         common: JobsCommonArgs,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum AuditCommands {
+    /// Bundle a workflow's journal lines, checkpoint, and artifacts into a
+    /// tar with a signed manifest of SHA-256 digests
+    Export {
+        /// Workflow id, as returned by workflow_start or any command result
+        #[arg(long)]
+        workflow: String,
+        /// Output path (default: bobby-audit-<workflow>.tar); must not exist
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Path to config.toml (overrides BOBBY_BROWSER_CONFIG)
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Signing key (default: <config dir>/audit-signing-key.pk8, created on first use)
+        #[arg(long)]
+        key: Option<PathBuf>,
+    },
+    /// Check a bundle's digests and signature
+    Verify {
+        bundle: PathBuf,
+        /// Require this signer (hex public key from `bobby audit key`)
+        #[arg(long)]
+        public_key: Option<String>,
+    },
+    /// Print the audit signing public key, creating the key on first use
+    Key {
+        #[arg(long)]
+        key: Option<PathBuf>,
     },
 }
 
@@ -923,6 +962,7 @@ pub async fn run() -> Result<()> {
         CliCommand::Jobs { command } => run_jobs(command)?,
         CliCommand::Openshell { command } => run_openshell(command)?,
         CliCommand::Context { command } => run_context(command).await?,
+        CliCommand::Audit { command } => run_audit(command)?,
         CliCommand::Vision { command } => match command {
             VisionCommands::Connect(args) => vision_connect::connect(args.into())?,
             VisionCommands::Login(args) => vision_login::login(args.config, &args.name).await?,
@@ -1500,6 +1540,78 @@ pub(crate) fn default_context_dir() -> Result<PathBuf> {
     config::default_context_dir().ok_or_else(|| anyhow::anyhow!("config directory unavailable"))
 }
 
+fn run_audit(command: AuditCommands) -> Result<()> {
+    match command {
+        AuditCommands::Export {
+            workflow,
+            out,
+            config,
+            key,
+        } => {
+            let workflow = types::WorkflowId(
+                uuid::Uuid::parse_str(workflow.trim())
+                    .map_err(|_| anyhow::anyhow!("--workflow must be a workflow id (UUID)"))?,
+            );
+            let config_path = resolve_config_path(config);
+            let config = config::AppConfig::load(&config_path)
+                .with_context(|| format!("failed to load config from {}", config_path.display()))?;
+            let key_path = match key {
+                Some(path) => path,
+                None => audit_bundle::default_key_path()?,
+            };
+            let key = audit_bundle::load_or_create_key(&key_path)?;
+            let out =
+                out.unwrap_or_else(|| PathBuf::from(format!("bobby-audit-{}.tar", workflow.0)));
+            let summary = audit_bundle::export(
+                &audit_bundle::BundleSources::from_config(&config),
+                &workflow,
+                &key,
+                &out,
+            )?;
+            println!("{}", summary.path.display());
+            eprintln!(
+                "{} files ({} journal lines), signed by {}",
+                summary.files, summary.journal_lines, summary.public_key
+            );
+            if !summary.missing_artifacts.is_empty() {
+                eprintln!(
+                    "artifacts no longer on disk: {}",
+                    summary.missing_artifacts.join(", ")
+                );
+            }
+        }
+        AuditCommands::Verify { bundle, public_key } => {
+            let summary = audit_bundle::verify(&bundle, public_key.as_deref())?;
+            println!(
+                "verified: workflow {}, {} files, signed by {} ({})",
+                summary.workflow_id,
+                summary.files,
+                summary.public_key,
+                if summary.pinned {
+                    "pinned"
+                } else {
+                    "not pinned; pass --public-key to require a signer"
+                }
+            );
+            if !summary.missing_artifacts.is_empty() {
+                println!(
+                    "artifacts missing at export: {}",
+                    summary.missing_artifacts.join(", ")
+                );
+            }
+        }
+        AuditCommands::Key { key } => {
+            let key_path = match key {
+                Some(path) => path,
+                None => audit_bundle::default_key_path()?,
+            };
+            let key = audit_bundle::load_or_create_key(&key_path)?;
+            println!("{}", audit_bundle::public_key_hex(&key));
+        }
+    }
+    Ok(())
+}
+
 async fn run_context(command: ContextCommands) -> Result<()> {
     match command {
         ContextCommands::List { profile, dir } => {
@@ -1873,10 +1985,7 @@ fn run_init(
     eprintln!(
         "Preset: {} ({})",
         preset.as_str(),
-        match preset {
-            bootstrap_local::BootstrapPreset::Agent => "no authority:admin",
-            bootstrap_local::BootstrapPreset::Unrestricted => "includes authority:admin",
-        }
+        preset.capability_preset().summary()
     );
     eprintln!("Map this bearer to AUTOMATION_RUNTIME_TOKEN / Authorization bearer for the SDK.");
     eprintln!(
@@ -4491,6 +4600,43 @@ endpoint_url = "http://127.0.0.1:8080/propose"
         assert_eq!(check.status, DoctorStatus::Ok);
         assert!(check.detail.contains("agent"));
         assert!(check.detail.contains("no authority:admin"));
+    }
+
+    #[test]
+    fn doctor_warns_when_a_host_preset_holds_more_than_its_floor() {
+        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
+        let _env = DoctorEnvGuard::clear();
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config.toml");
+        std::fs::write(&config, "").unwrap();
+        let bootstrap = root.path().join("bootstrap.env");
+        let material = bootstrap_local::generate_bootstrap_for_preset(
+            chrono::Duration::days(30),
+            bootstrap_local::BootstrapPreset::Claude,
+        )
+        .unwrap();
+        bootstrap_local::write_bootstrap_env(&bootstrap, &material, true).unwrap();
+
+        let report = run_doctor(Some(config.clone()), Some(bootstrap.clone()), false).unwrap();
+        let check = report.check("bootstrap-preset").expect("bootstrap-preset");
+        assert_eq!(check.status, DoctorStatus::Ok, "{check:?}");
+        assert!(check.detail.starts_with("claude ("), "{check:?}");
+        assert!(
+            report
+                .check("bootstrap-capabilities")
+                .is_none_or(|check| !check.detail.contains("browser:fingerprint")),
+            "a claude credential is not expected to hold browser:fingerprint"
+        );
+
+        let widened = std::fs::read_to_string(&bootstrap)
+            .unwrap()
+            .replace("session:read,", "session:read,javascript:evaluate,");
+        std::fs::write(&bootstrap, widened).unwrap();
+        let report = run_doctor(Some(config), Some(bootstrap), false).unwrap();
+        let check = report.check("bootstrap-preset").expect("bootstrap-preset");
+        assert_eq!(check.status, DoctorStatus::Warn, "{check:?}");
+        assert!(check.detail.contains("javascript:evaluate"), "{check:?}");
+        assert!(check.detail.contains("--preset claude"), "{check:?}");
     }
 
     #[test]
