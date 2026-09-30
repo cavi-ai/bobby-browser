@@ -90,8 +90,12 @@ class LiveRuntimeTests(unittest.TestCase):
 
             port = _free_tcp_port()
             config_path = tmp_path / "config.toml"
+            # Managed Chromium remembers under the context store; keep it in
+            # tmp instead of the user's config directory.
             config_path.write_text(
-                f'[server]\nhost = "127.0.0.1"\nport = {port}\n', encoding="utf-8"
+                f'[server]\nhost = "127.0.0.1"\nport = {port}\n'
+                f"[context]\ndir = {json.dumps(str(tmp_path / 'context'))}\n",
+                encoding="utf-8",
             )
 
             env = dict(os.environ)

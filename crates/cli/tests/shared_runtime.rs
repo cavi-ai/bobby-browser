@@ -123,6 +123,29 @@ async fn existing_config_without_context_dir_retains_durable_profile_memory() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn managed_chromium_owner_holds_the_shared_memory_store() {
+    let scope = Cleanup(tempfile::tempdir().unwrap());
+    let path = scope.0.path();
+    checked(command(path).args(["runtime", "start"]).output().unwrap());
+    let opened = context_store::ContextStore::open(
+        path.join("context"),
+        config::MANAGED_CHROMIUM_CONTEXT_PROFILE,
+    )
+    .await;
+    assert!(matches!(
+        opened,
+        Err(context_store::ContextStoreError::AlreadyLocked)
+    ));
+    checked(command(path).args(["runtime", "stop"]).output().unwrap());
+    assert!(context_store::ContextStore::open(
+        path.join("context"),
+        config::MANAGED_CHROMIUM_CONTEXT_PROFILE
+    )
+    .await
+    .is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn concurrent_cli_starts_share_one_owner_and_keep_connection_lifecycles_independent() {
     let scope = Cleanup(tempfile::tempdir().unwrap());
     let path = scope.0.path().to_owned();

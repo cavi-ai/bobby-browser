@@ -20,9 +20,10 @@ Deleting a session (`DELETE /v1/sessions/{id}` / MCP `session_close`) releases
 that principal's worker binding for the session.
 
 Remembered site context (the persisted context graph) is keyed by the durable
-browser profile, not by principal: any principal holding `context:read` on a
-runtime with a durable-profile engine can read it, and principals without it
-are denied on every surface. It contains structure and counters only — never
+profile identity, not by principal: any principal holding `context:read` on a
+runtime with a durable profile identity (including managed Chromium's shared
+`managed-chromium`) can read it, and principals without it are denied on every
+surface. It contains structure and counters only — never
 typed values or page content.
 
 The bootstrap credential holds `authority:admin` only when minted with
