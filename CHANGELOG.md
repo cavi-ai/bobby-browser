@@ -21,6 +21,15 @@
 
 ### Added
 
+- `bobby init --preset claude`, `codex`, and `openshell` mint host
+  credentials. `claude` and `codex` hold what the shipped agent skill uses:
+  the agent floor without `javascript:evaluate`, `browser:fingerprint`, and
+  `browser:humanize`. `openshell` is the sandbox floor `bobby openshell` already
+  used. Heal never widens past the chosen floor, and `bobby doctor` warns when
+  a credential holds a capability outside its preset.
+- The capabilities page carries a generated preset matrix: every preset
+  against every capability, and what each preset cannot do, with the
+  operations and `executionPolicy` opt-ins each withheld capability closes.
 - `recovery_demo` live test: an MCP gateway killed mid-submit on real
   Chromium, restarted on the same data directory, places one order, not two.
   The transcript is on the first-session page.
