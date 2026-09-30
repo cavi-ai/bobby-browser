@@ -4,6 +4,7 @@ mod doctor;
 mod jobs_client;
 mod onboarding;
 mod openshell;
+mod runtime_scopes;
 mod v1_client;
 mod vision_child;
 mod vision_collect;
@@ -63,6 +64,8 @@ pub struct NativeHostInstallConfig {
 #[derive(clap::Parser)]
 #[command(name = "bobby", version, about = "bobby-browser automation runtime")]
 struct Cli {
+    #[command(flatten)]
+    scope: runtime_scopes::Scope,
     #[command(subcommand)]
     command: Option<CliCommand>,
 }
@@ -75,6 +78,26 @@ impl Cli {
 
 #[derive(clap::Subcommand)]
 enum CliCommand {
+    /// Open this scope's installed Firefox profile for pairing or browsing.
+    FirefoxStart,
+    /// Manage shared local runtime owners.
+    Runtime {
+        #[command(subcommand)]
+        command: runtime_scopes::RuntimeCommand,
+    },
+    #[command(hide = true)]
+    RuntimeOwner {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        bootstrap_env: PathBuf,
+        #[arg(long, conflicts_with = "no_vision")]
+        vision: bool,
+        #[arg(long, conflicts_with = "vision")]
+        no_vision: bool,
+    },
     /// Generate a loopback bootstrap credential
     Init {
         /// Overwrite an existing bootstrap file
@@ -665,7 +688,36 @@ pub async fn run() -> Result<()> {
         println!("\nFirst run: `bobby install`, then `bobby doctor`.");
         return Ok(());
     };
+    cli.scope.apply()?;
     match command {
+        CliCommand::FirefoxStart => {
+            let root = config::bobby_config_dir().context("config directory unavailable")?;
+            let defaults = read_enroll_defaults(&enroll_defaults_path(&root))
+                .context("Firefox profile not installed; run `bobby install --companion` with the same team/project flags")?;
+            let endpoint = firefox_companion::selection::start_installed_firefox(
+                &defaults.profile_dir,
+                Duration::from_secs(30),
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+            println!("Firefox ready at {endpoint}; Pair from the companion toolbar if not already enrolled");
+        }
+        CliCommand::Runtime { command } => runtime_scopes::run(command).await?,
+        CliCommand::RuntimeOwner {
+            state_dir,
+            config,
+            bootstrap_env,
+            vision,
+            no_vision,
+        } => {
+            runtime_scopes::owner(
+                state_dir,
+                config,
+                bootstrap_env,
+                policy_from_flags(vision, no_vision),
+            )
+            .await?
+        }
         CliCommand::Init {
             force,
             ttl_days,
@@ -683,18 +735,13 @@ pub async fn run() -> Result<()> {
             load_managed_vision_token(&bootstrap_path, "BOBBY_VISION_TOKEN")?;
             let config_path = resolve_config_path(config);
             let policy = policy_from_flags(vision, no_vision);
-            let config = AppConfig::load(&config_path)
-                .with_context(|| format!("failed to load config from {}", config_path.display()))?;
-            let (_config, decision, vision_child) =
-                prepare_vision_child(&config_path, config, policy)?;
-            if decision.should_spawn {
-                let child = vision_child.ok_or_else(|| {
-                    anyhow::anyhow!("vision sidecar missing after spawn decision")
-                })?;
-                onboarding::run_mcp_stdio_with_sidecar(&bootstrap_path, &config_path, child)?;
-            } else {
-                onboarding::exec_mcp_stdio(&bootstrap_path, &config_path)?;
+            let origin =
+                runtime_scopes::ensure_owner(config_path.clone(), bootstrap_path.clone(), policy)
+                    .await?;
+            unsafe {
+                std::env::set_var("BOBBY_RUNTIME_URL", origin);
             }
+            onboarding::exec_mcp_stdio(&bootstrap_path, &config_path)?;
         }
         CliCommand::AcpStdio {
             bootstrap_env,
@@ -706,18 +753,13 @@ pub async fn run() -> Result<()> {
             load_managed_vision_token(&bootstrap_path, "BOBBY_VISION_TOKEN")?;
             let config_path = resolve_config_path(config);
             let policy = policy_from_flags(vision, no_vision);
-            let config = AppConfig::load(&config_path)
-                .with_context(|| format!("failed to load config from {}", config_path.display()))?;
-            let (_config, decision, vision_child) =
-                prepare_vision_child(&config_path, config, policy)?;
-            if decision.should_spawn {
-                let child = vision_child.ok_or_else(|| {
-                    anyhow::anyhow!("vision sidecar missing after spawn decision")
-                })?;
-                onboarding::run_acp_stdio_with_sidecar(&bootstrap_path, &config_path, child)?;
-            } else {
-                onboarding::exec_acp_stdio(&bootstrap_path, &config_path)?;
+            let origin =
+                runtime_scopes::ensure_owner(config_path.clone(), bootstrap_path.clone(), policy)
+                    .await?;
+            unsafe {
+                std::env::set_var("BOBBY_RUNTIME_URL", origin);
             }
+            onboarding::exec_acp_stdio(&bootstrap_path, &config_path)?;
         }
         CliCommand::Install {
             host,
@@ -779,7 +821,17 @@ pub async fn run() -> Result<()> {
             no_vision,
         } => {
             let policy = policy_from_flags(vision, no_vision);
-            run_broker_serve(config, bootstrap_env, policy, false, None).await?;
+            if std::env::var_os("BOBBY_BROWSER_SCOPE_DIR").is_some() {
+                runtime_scopes::owner(
+                    runtime_scopes::runtime_dir()?,
+                    resolve_config_path(config),
+                    resolve_bootstrap_path(bootstrap_env)?,
+                    policy,
+                )
+                .await?;
+            } else {
+                run_broker_serve(config, bootstrap_env, policy, false, None).await?;
+            }
         }
         CliCommand::Cdp {
             config,
@@ -789,7 +841,18 @@ pub async fn run() -> Result<()> {
             no_vision,
         } => {
             let policy = policy_from_flags(vision, no_vision);
-            run_broker_serve(config, bootstrap_env, policy, true, cdp_port).await?;
+            if std::env::var_os("BOBBY_BROWSER_SCOPE_DIR").is_some() {
+                runtime_scopes::owner_with_cdp(
+                    runtime_scopes::runtime_dir()?,
+                    resolve_config_path(config),
+                    resolve_bootstrap_path(bootstrap_env)?,
+                    policy,
+                    cdp_port,
+                )
+                .await?;
+            } else {
+                run_broker_serve(config, bootstrap_env, policy, true, cdp_port).await?;
+            }
         }
         CliCommand::FirefoxNativeHost { descriptor } => {
             let _telemetry = observability::init(&Default::default())?;
@@ -1434,10 +1497,7 @@ impl Drop for ManagedPythonServer {
 }
 
 pub(crate) fn default_context_dir() -> Result<PathBuf> {
-    Ok(dirs::config_dir()
-        .ok_or_else(|| anyhow::anyhow!("config directory unavailable"))?
-        .join("bobby-browser")
-        .join("context"))
+    config::default_context_dir().ok_or_else(|| anyhow::anyhow!("config directory unavailable"))
 }
 
 async fn run_context(command: ContextCommands) -> Result<()> {
@@ -1696,7 +1756,14 @@ fn prepare_jobs_client(common: &JobsCommonArgs) -> Result<(String, String)> {
 
 pub(crate) fn resolve_config_path(cli: Option<PathBuf>) -> PathBuf {
     cli.or_else(|| std::env::var_os("BOBBY_BROWSER_CONFIG").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("./config.toml"))
+        .unwrap_or_else(|| {
+            if Path::new("./config.toml").exists() {
+                PathBuf::from("./config.toml")
+            } else {
+                runtime_scopes::default_config_path()
+                    .unwrap_or_else(|| PathBuf::from("./config.toml"))
+            }
+        })
 }
 
 pub(crate) fn resolve_bootstrap_path(cli: Option<PathBuf>) -> Result<PathBuf> {
@@ -1857,7 +1924,13 @@ pub fn install_native_host(config: NativeHostInstallConfig) -> Result<()> {
         shell_quote(&config.cli_path),
         shell_quote(&config.descriptor_path),
     );
-    let manifest = native_host_manifest_bytes(&config.wrapper_path)?;
+    let host_name = config
+        .manifest_path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .filter(|name| valid_native_host_name(name))
+        .unwrap_or("com.bobby_browser.companion");
+    let manifest = native_host_manifest_bytes_named(&config.wrapper_path, host_name)?;
     // Refuse operator-owned destinations before writing either file.
     preflight_install_destination(
         &config.wrapper_path,
@@ -1893,8 +1966,19 @@ pub fn install_native_host(config: NativeHostInstallConfig) -> Result<()> {
     Ok(())
 }
 
-/// Stable Firefox native-messaging manifest bytes (alphabetical keys).
-fn native_host_manifest_bytes(wrapper_path: &Path) -> Result<Vec<u8>> {
+fn valid_native_host_name(name: &str) -> bool {
+    name == "com.bobby_browser.companion"
+        || name
+            .strip_prefix("com.bobby_browser.companion.scope_")
+            .is_some_and(|suffix| {
+                suffix.len() == 16
+                    && suffix
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            })
+}
+
+fn native_host_manifest_bytes_named(wrapper_path: &Path, host_name: &str) -> Result<Vec<u8>> {
     // Insert alphabetically so reinstalls stay byte-stable across serde versions.
     let mut map = serde_json::Map::new();
     map.insert(
@@ -1905,10 +1989,7 @@ fn native_host_manifest_bytes(wrapper_path: &Path) -> Result<Vec<u8>> {
         "description".to_owned(),
         serde_json::json!("Bobby Browser Firefox companion native host"),
     );
-    map.insert(
-        "name".to_owned(),
-        serde_json::json!("com.bobby_browser.companion"),
-    );
+    map.insert("name".to_owned(), serde_json::json!(host_name));
     map.insert(
         "path".to_owned(),
         serde_json::Value::String(wrapper_path.display().to_string()),
@@ -1983,7 +2064,10 @@ fn is_bobby_managed_manifest(contents: &[u8]) -> bool {
     let Some(object) = value.as_object() else {
         return false;
     };
-    object.get("name").and_then(|value| value.as_str()) == Some("com.bobby_browser.companion")
+    object
+        .get("name")
+        .and_then(|value| value.as_str())
+        .is_some_and(valid_native_host_name)
         && object.get("type").and_then(|value| value.as_str()) == Some("stdio")
         && object
             .get("allowed_extensions")
@@ -2303,7 +2387,8 @@ async fn run_configured_native_host(descriptor_path: PathBuf) -> Result<()> {
         Ok(bytes) => {
             let descriptor: NativeHostDescriptor = serde_json::from_slice(&bytes)?;
             Some(follow_native_host_descriptor(
-                NativeHostConfig::new(descriptor.endpoint, descriptor.pairing_code),
+                NativeHostConfig::new(descriptor.endpoint, descriptor.pairing_code)
+                    .with_ownership_id(descriptor.ownership_id),
                 descriptor_path.clone(),
             )?)
         }
@@ -2351,10 +2436,10 @@ fn follow_native_host_descriptor(
         let _keep_watcher_alive = &watcher;
         let bytes = std::fs::read(&path).ok()?;
         let descriptor: NativeHostDescriptor = serde_json::from_slice(&bytes).ok()?;
-        Some(NativeHostConfig::new(
-            descriptor.endpoint,
-            descriptor.pairing_code,
-        ))
+        Some(
+            NativeHostConfig::new(descriptor.endpoint, descriptor.pairing_code)
+                .with_ownership_id(descriptor.ownership_id),
+        )
     }))
 }
 
@@ -2426,7 +2511,8 @@ fn load_usable_live_descriptor(path: &Path) -> Option<NativeHostConfig> {
         return None;
     }
     follow_native_host_descriptor(
-        NativeHostConfig::new(descriptor.endpoint, descriptor.pairing_code),
+        NativeHostConfig::new(descriptor.endpoint, descriptor.pairing_code)
+            .with_ownership_id(descriptor.ownership_id),
         path.to_path_buf(),
     )
     .ok()
@@ -2497,7 +2583,8 @@ impl NativeHostEnroll for NativeHostFirefoxEnroll {
             )
             .map_err(|_| EnrollHostError::ListenerUnavailable)?;
             let config = follow_native_host_descriptor(
-                NativeHostConfig::new(descriptor.endpoint, descriptor.pairing_code),
+                NativeHostConfig::new(descriptor.endpoint, descriptor.pairing_code)
+                    .with_ownership_id(descriptor.ownership_id),
                 defaults.descriptor_path.clone(),
             )
             .map_err(|_| EnrollHostError::ListenerUnavailable)?;
@@ -2541,8 +2628,11 @@ impl NativeHostEnroll for NativeHostFirefoxEnroll {
                     defaults.companion_bind,
                     &defaults.descriptor_path,
                 );
-                let path =
-                    default_selection_path().map_err(|_| EnrollHostError::ListenerUnavailable)?;
+                let path = self
+                    .defaults_path
+                    .parent()
+                    .ok_or(EnrollHostError::DefaultsMissing)?
+                    .join("browser-selection.json");
                 persist_browser_selection(&path, &selection)
                     .map_err(|_| EnrollHostError::ListenerUnavailable)?;
                 return Ok(EnrollFinalize::KeepRelay);
@@ -2566,8 +2656,11 @@ impl NativeHostEnroll for NativeHostFirefoxEnroll {
                 defaults.companion_bind,
                 &defaults.descriptor_path,
             );
-            let path =
-                default_selection_path().map_err(|_| EnrollHostError::ListenerUnavailable)?;
+            let path = self
+                .defaults_path
+                .parent()
+                .ok_or(EnrollHostError::DefaultsMissing)?
+                .join("browser-selection.json");
             persist_browser_selection(&path, &selection)
                 .map_err(|_| EnrollHostError::ListenerUnavailable)?;
             // Drop the temporary companion so day-2 `bobby serve` can bind.
@@ -2879,6 +2972,91 @@ model = "mlx-community/example-selected"
                 Path::new("other.json")
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn native_host_recovers_restarted_owner_on_the_same_port() {
+        use companion_core::{CompanionServer, CompanionServerConfig};
+        let root = tempfile::tempdir().unwrap();
+        let descriptor = root.path().join("descriptor.json");
+        let server_config = |bind_addr| CompanionServerConfig {
+            bind_addr,
+            pairing_code_ttl: Duration::from_secs(60),
+            attachment_ttl: Duration::from_secs(60),
+        };
+        let first = CompanionServer::bind_loopback(server_config("127.0.0.1:0".parse().unwrap()))
+            .await
+            .unwrap();
+        let addr = first.local_addr();
+        let code = first.registry().issue_pairing_code().await;
+        std::fs::write(
+            &descriptor,
+            serde_json::to_vec(&NativeHostDescriptor {
+                endpoint: format!("ws://{addr}/v1/companion"),
+                pairing_code: code.clone(),
+                ownership_id: uuid::Uuid::new_v4().to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let config = follow_native_host_descriptor(
+            NativeHostConfig::new(format!("ws://{addr}/v1/companion"), code),
+            descriptor.clone(),
+        )
+        .unwrap();
+        let (stream, mut extension) =
+            tokio::io::duplex(2 * companion_core::MAX_NATIVE_MESSAGE_BYTES);
+        let (reader, writer) = tokio::io::split(stream);
+        let host = tokio::spawn(companion_core::run_native_host(reader, writer, config));
+        companion_core::write_native_message(
+            &mut extension,
+            &serde_json::json!({"kind":"pair","input":sample_native_connect_request()}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            companion_core::read_native_message(&mut extension)
+                .await
+                .unwrap()
+                .unwrap()["kind"],
+            "paired"
+        );
+        first.disconnect_clients();
+        drop(first);
+        let second = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(server) = CompanionServer::bind_loopback(server_config(addr)).await {
+                    break server;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        std::fs::write(
+            &descriptor,
+            serde_json::to_vec(&NativeHostDescriptor {
+                endpoint: format!("ws://{addr}/v1/companion"),
+                pairing_code: second.registry().issue_pairing_code().await,
+                ownership_id: uuid::Uuid::new_v4().to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let message = tokio::time::timeout(
+            Duration::from_secs(2),
+            companion_core::read_native_message(&mut extension),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            message["kind"], "paired",
+            "a new owner must recover even when its endpoint is unchanged"
+        );
+        drop(extension);
+        host.await.unwrap().unwrap();
     }
 
     #[tokio::test]

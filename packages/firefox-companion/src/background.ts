@@ -1,5 +1,6 @@
 import {
   NativeCompanionTransport,
+  NATIVE_HOST_NAME,
   createEnrollProfileRequest,
   enrollOperatorMessage,
   parseNativeInboundMessage,
@@ -846,6 +847,7 @@ export class CompanionBackground {
 export type ProductionBrowserApi = {
   runtime: {
     id: string;
+    getURL?(path: string): string;
     connectNative(hostName: string): NativePort;
     onMessage: {
       addListener(listener: (message: unknown, sender: RuntimeSender) => unknown): void;
@@ -919,6 +921,26 @@ async function loadIdentity(browserApi: ProductionBrowserApi): Promise<{
   return created;
 }
 
+export async function loadNativeHostName(browserApi: ProductionBrowserApi): Promise<string> {
+  if (!browserApi.runtime.getURL) return NATIVE_HOST_NAME;
+  let response: Response;
+  try {
+    response = await fetch(browserApi.runtime.getURL("bobby-scope.json"));
+  } catch {
+    // Older, unscoped extension packages do not contain this resource.
+    return NATIVE_HOST_NAME;
+  }
+  if (response.status === 404) return NATIVE_HOST_NAME;
+  if (!response.ok) throw new Error("Bobby scope configuration could not be loaded");
+  const config: unknown = await response.json();
+  if (typeof config !== "object" || config === null || !("nativeHostName" in config)
+      || typeof config.nativeHostName !== "string"
+      || !/^com\.bobby_browser\.companion(?:\.scope_[0-9a-f]{16})?$/.test(config.nativeHostName)) {
+    throw new Error("Bobby scope configuration contains an invalid native host");
+  }
+  return config.nativeHostName;
+}
+
 export async function startProductionBackground(
   browserApi: ProductionBrowserApi,
 ): Promise<CompanionBackground> {
@@ -928,6 +950,7 @@ export async function startProductionBackground(
     browserApi.runtime.getPlatformInfo(),
   ]);
   const transport = new NativeCompanionTransport({
+    nativeHostName: await loadNativeHostName(browserApi),
     connectNative: (hostName) => browserApi.runtime.connectNative(hostName),
   });
   const discoverTabTargets = async (

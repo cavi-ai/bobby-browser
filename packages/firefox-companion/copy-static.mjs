@@ -13,7 +13,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const dist = join(here, "dist");
 
 mkdirSync(dist, { recursive: true });
-for (const file of ["manifest.json", "popup.html"]) {
+for (const file of ["manifest.json", "popup.html", "bobby-scope.json"]) {
   cpSync(join(here, file), join(dist, file));
 }
 cpSync(join(here, "icons"), join(dist, "icons"), { recursive: true });

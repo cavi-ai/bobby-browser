@@ -30,6 +30,20 @@ async fn main() {
 }
 
 async fn run() -> anyhow::Result<()> {
+    if let Ok(origin) = std::env::var("BOBBY_RUNTIME_URL") {
+        let bearer = required_env("AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN")?;
+        gateway_transport::connect(
+            &origin,
+            "acp",
+            &bearer,
+            tokio::io::stdin(),
+            tokio::io::stdout(),
+        )
+        .await?;
+        // Tokio's stdin reader can hold an uncancellable blocking read after
+        // the owner closes. The adapter owns no runtime resources to drain.
+        std::process::exit(0);
+    }
     let (handle, capabilities) = explicit_startup_handle().await?;
     let config = AppConfig::default();
     config.validate().map_err(anyhow::Error::msg)?;

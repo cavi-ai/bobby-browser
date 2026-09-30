@@ -111,6 +111,7 @@ impl CompanionServer {
             coordinator,
             disconnect,
             task,
+            background_tasks: std::sync::Mutex::new(Vec::new()),
         })
     }
 }
@@ -122,9 +123,17 @@ pub struct CompanionServerHandle {
     coordinator: Arc<SessionCoordinator>,
     disconnect: watch::Sender<u64>,
     task: JoinHandle<()>,
+    background_tasks: std::sync::Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl CompanionServerHandle {
+    /// Tie auxiliary task cancellation to the listener owner's lifetime.
+    /// Tasks must hold only a weak reference back to this handle.
+    pub fn retain_background_task(&self, task: JoinHandle<()>) {
+        observability::locks::lock_recovering(&self.background_tasks, "companion.background_tasks")
+            .push(task);
+    }
+
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
@@ -203,6 +212,15 @@ impl CompanionServerHandle {
 
 impl Drop for CompanionServerHandle {
     fn drop(&mut self) {
+        self.disconnect_clients();
+        for task in self
+            .background_tasks
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner())
+            .drain(..)
+        {
+            task.abort();
+        }
         self.task.abort();
     }
 }

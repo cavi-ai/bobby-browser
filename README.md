@@ -52,6 +52,35 @@ and `http_fetch`.
 
 ## Install
 
+### Share a local runtime by team or project
+
+Use the same scope flags across installation, Firefox pairing, agent hosts,
+and CLI commands:
+
+```bash
+bobby --team engineering --project checkout install --companion --host claude --yes
+bobby --team engineering --project checkout firefox-start
+# Pair from the Bobby companion toolbar in that Firefox window.
+bobby --team engineering --project checkout runtime start
+bobby --team engineering --project checkout mcp-stdio
+bobby --team engineering --project checkout acp-stdio
+bobby --team engineering --project checkout runtime status
+bobby runtime list
+bobby --team engineering --project checkout runtime stop
+```
+
+Either flag can be used independently. Each scope has its own configuration,
+credential, browser profile, context, and storage. Clients in the same scope
+reuse one authenticated runtime on an automatically assigned loopback port.
+Each MCP/ACP connection keeps its own protocol state; disconnecting an agent
+leaves the owner available for other clients. `runtime stop` stops the scope
+explicitly. Stop and restart after changing its configuration.
+
+Scopes organize runtimes on one machine under the current OS user. Existing
+capability gates apply to every connection. Scoped host installation records
+the flags in its CLI entrypoint; `jobs`, `context`, `doctor`, and foreground
+`serve` use the same scope. Without flags, the CLI uses the personal scope.
+
 One command builds the runtime, mints a local credential, wires your agent host,
 and installs the agent skill:
 
@@ -259,6 +288,6 @@ pnpm install && pnpm --filter @cavi-ai/bobby-browser test
 
 The CDP allowlist is published in
 [`docs/cdp-support.json`](docs/cdp-support.json). The same pages are built into
-an immutable versioned artifact, `bobby-browser-docs-v0.17.0.tar.gz` on the
+an immutable versioned artifact, `bobby-browser-docs-v0.18.0.tar.gz` on the
 matching GitHub Release, for documentation hosts. The built tree is not
 tracked; `pnpm docs:build` regenerates it from `docs/bobby-browser/source`.

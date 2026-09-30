@@ -178,8 +178,10 @@ pub fn cancel_job(base_url: &str, bearer: String, job_id: &str) -> Result<()> {
 
 pub fn load_config_for_jobs(config: Option<PathBuf>) -> Result<config::AppConfig> {
     let config_path = crate::resolve_config_path(config);
-    config::AppConfig::load(&config_path)
-        .with_context(|| format!("failed to load config from {}", config_path.display()))
+    let mut config = config::AppConfig::load(&config_path)
+        .with_context(|| format!("failed to load config from {}", config_path.display()))?;
+    crate::runtime_scopes::use_owner_address(&mut config);
+    Ok(config)
 }
 
 #[cfg(test)]

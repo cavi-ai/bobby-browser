@@ -67,7 +67,14 @@ impl EnginePreferenceConfig {
 /// durable profile identity but `[context].dir` is unset. `None` when the
 /// platform has no config directory.
 pub fn default_context_dir() -> Option<PathBuf> {
-    dirs::config_dir().map(|dir| dir.join("bobby-browser").join("context"))
+    bobby_config_dir().map(|dir| dir.join("context"))
+}
+
+/// The local scope root selected by the CLI; absent keeps existing user paths.
+pub fn bobby_config_dir() -> Option<PathBuf> {
+    std::env::var_os("BOBBY_BROWSER_SCOPE_DIR")
+        .map(PathBuf::from)
+        .or_else(|| dirs::config_dir().map(|dir| dir.join("bobby-browser")))
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

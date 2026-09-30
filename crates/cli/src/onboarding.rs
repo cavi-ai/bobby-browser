@@ -267,6 +267,9 @@ impl Drop for JsonRpcChild {
 pub fn mcp_handshake(bootstrap: &BTreeMap<String, String>) -> Result<HandshakeReport> {
     let gateway = resolve_gateway()?;
     let mut command = Command::new(&gateway);
+    if let Some(origin) = crate::runtime_scopes::current_origin() {
+        command.env("BOBBY_RUNTIME_URL", origin);
+    }
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -473,7 +476,7 @@ fn static_cli_entry(subcommand: &str) -> Result<(String, Vec<String>)> {
         exe.to_str()
             .ok_or_else(|| anyhow!("executable path is not valid UTF-8"))?
             .to_owned(),
-        vec![subcommand.to_owned()],
+        crate::runtime_scopes::gateway_args(subcommand)?,
     ))
 }
 
@@ -778,6 +781,7 @@ fn load_bootstrap_into_env(bootstrap_path: &Path) -> Result<()> {
 }
 
 /// Spawn the stdio gateway with inherited stdio and wait for it to exit.
+#[cfg(windows)]
 fn spawn_gateway_inherited_stdio(gateway: &Path) -> Result<()> {
     let status = Command::new(gateway)
         .stdin(Stdio::inherit())
@@ -801,20 +805,6 @@ pub fn exec_mcp_stdio(bootstrap_path: &Path, config_path: &Path) -> Result<()> {
     exec_gateway(&gateway)
 }
 
-/// Like [`exec_mcp_stdio`], but stays resident as parent so a vision sidecar
-/// child can be torn down when the gateway exits. Used on Unix when a loopback
-/// vision-proxy must outlive the gateway process.
-pub fn run_mcp_stdio_with_sidecar(
-    bootstrap_path: &Path,
-    config_path: &Path,
-    _vision_child: crate::vision_child::ManagedVisionProxy,
-) -> Result<()> {
-    apply_config_env(config_path);
-    load_bootstrap_into_env(bootstrap_path)?;
-    let gateway = resolve_gateway()?;
-    spawn_gateway_inherited_stdio(&gateway)
-}
-
 /// `bobby acp-stdio`: ACP-host entrypoint. Loads bootstrap and execs
 /// `acp-gateway` the same way `mcp-stdio` launches `mcp-gateway`.
 pub fn exec_acp_stdio(bootstrap_path: &Path, config_path: &Path) -> Result<()> {
@@ -822,19 +812,6 @@ pub fn exec_acp_stdio(bootstrap_path: &Path, config_path: &Path) -> Result<()> {
     load_bootstrap_into_env(bootstrap_path)?;
     let gateway = resolve_acp_gateway()?;
     exec_gateway(&gateway)
-}
-
-/// Like [`exec_acp_stdio`], but stays resident so a vision sidecar can be
-/// torn down when the gateway exits.
-pub fn run_acp_stdio_with_sidecar(
-    bootstrap_path: &Path,
-    config_path: &Path,
-    _vision_child: crate::vision_child::ManagedVisionProxy,
-) -> Result<()> {
-    apply_config_env(config_path);
-    load_bootstrap_into_env(bootstrap_path)?;
-    let gateway = resolve_acp_gateway()?;
-    spawn_gateway_inherited_stdio(&gateway)
 }
 
 /// Unix replaces this process outright, so the agent host keeps talking to a
@@ -1407,7 +1384,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         run: Box::new(move || {
             let install = install_firefox_companion(extension_path.as_deref())?;
             Ok(format!(
-                "sideloaded into {}; config copy at {}; native host at {}. Next: `make firefox-start` (Bobby profile at {}; BiDi on :9224), then Pair from the toolbar popup. Local agents use `bobby mcp-stdio` — no `bobby serve` required",
+                "sideloaded into {}; config copy at {}; native host at {}. Next: `bobby firefox-start` with the same team/project flags (profile at {}), then Pair from the toolbar popup. Local agents use `bobby mcp-stdio` — no `bobby serve` required",
                 install.sideload_dir.display(),
                 install.extension_dir.display(),
                 install.manifest_path.display(),
@@ -2376,9 +2353,7 @@ const FIREFOX_PROFILE_PREFS: &[(&str, &str)] = &[
 ];
 
 fn bobby_config_dir() -> Result<PathBuf> {
-    Ok(dirs::config_dir()
-        .context("config directory unavailable")?
-        .join("bobby-browser"))
+    config::bobby_config_dir().context("config directory unavailable")
 }
 
 fn native_messaging_dir() -> Result<PathBuf> {
@@ -2459,7 +2434,10 @@ pub fn install_firefox_companion(extension: Option<&Path>) -> Result<CompanionIn
     let install = CompanionInstall {
         extension_dir,
         wrapper_path: config.join("firefox-native-host"),
-        manifest_path: native_messaging_dir()?.join("com.bobby_browser.companion.json"),
+        manifest_path: native_messaging_dir()?.join(format!(
+            "{}.json",
+            crate::runtime_scopes::native_host_name(&config)?
+        )),
         descriptor_path: config.join("firefox-native-host-descriptor.json"),
         profile_dir: profile_dir.clone(),
         sideload_dir,
@@ -2471,6 +2449,12 @@ pub fn install_firefox_companion(extension: Option<&Path>) -> Result<CompanionIn
         cli_path: exe,
         descriptor_path: install.descriptor_path.clone(),
     })?;
+    std::fs::write(
+        install.sideload_dir.join("bobby-scope.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "nativeHostName": crate::runtime_scopes::native_host_name(&config)?
+        }))?,
+    )?;
     let defaults = firefox_companion::selection::FirefoxEnrollDefaults {
         profile_dir,
         companion_bind: firefox_companion::selection::DEFAULT_COMPANION_BIND

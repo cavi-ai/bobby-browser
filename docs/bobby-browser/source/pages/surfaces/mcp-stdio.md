@@ -4,6 +4,19 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 # MCP stdio
 
+The CLI entrypoint `bobby mcp-stdio` starts or connects to the personal shared
+runtime. Add `--team engineering --project checkout` to use an organized local
+scope; either flag can be used independently. Use the same flags for `install`,
+`firefox-start`, `acp-stdio`, `jobs`, `context`, and `doctor`. Scoped host
+installation records them in the agent host's command arguments.
+
+`bobby runtime start`, `status`, and `stop` manage the selected scope;
+`bobby runtime list` lists local scopes. Agents reuse one owner on an assigned
+loopback port. Each connection keeps its own MCP state and opening toolset,
+while browser profiles, storage, context, and jobs belong to the owner.
+Disconnecting an agent leaves the runtime available. Stop and restart the
+scope after configuration changes. Scope sharing is local to the current OS user.
+
 `mcp-gateway` is a single-process MCP server over stdio. It enrolls a startup
 bootstrap credential from environment variables, then speaks MCP protocol
 version `2025-11-25` on stdin/stdout. Stdout is reserved for newline-delimited

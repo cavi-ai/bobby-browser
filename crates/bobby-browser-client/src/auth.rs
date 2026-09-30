@@ -186,6 +186,10 @@ impl CapabilitySet {
         self.0.contains(&capability)
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = Capability> + '_ {
+        self.0.iter().copied()
+    }
+
     pub fn allows(&self, operation: InterfaceOperation) -> bool {
         operation
             .required()

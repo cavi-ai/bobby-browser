@@ -30,8 +30,10 @@ firefox-companion.workspace = true
 async-trait.workspace = true
 task-scheduler.workspace = true
 network-engine.workspace = true
+gateway-transport.workspace = true
 
 [dev-dependencies]
+tokio-tungstenite.workspace = true
 types = { workspace = true, features = ["schema"] }
 schemars.workspace = true
 jsonschema.workspace = true

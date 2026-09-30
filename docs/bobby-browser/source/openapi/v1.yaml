@@ -7,10 +7,11 @@ info:
     Browser automation runtime for agents. Prefer MCP for tool discovery; this
     document catalogs HTTP `/v1/*` for HTTP clients.
 
-    Every broker `/v1/*` request (except `/v1/mcp`) needs headers Authorization
+    Every broker `/v1/*` request (except `/v1/mcp` and `/v1/gateway/{protocol}`) needs headers Authorization
     (Bearer), x-interface-version, x-correlation-id, and x-deadline. Mutating
     POSTs also take idempotency-key. `/v1/mcp` uses bearer-only auth (no
-    per-request interface headers).
+    per-request interface headers). `/v1/gateway/{protocol}` authenticates its
+    WebSocket upgrade using the same bearer-only contract.
 
     Any authenticated `/v1/*` route can return **408** when `x-deadline` elapses
     and **500** for internal failures (`InterfaceErrorBody`). Command outcomes
@@ -41,6 +42,56 @@ tags:
 security:
   - bearerAuth: []
 paths:
+  /_bobby/runtime:
+    get:
+      operationId: sharedRuntimeIdentity
+      summary: Identify the local shared owner generation (managed owners only)
+      security: []
+      responses:
+        '200':
+          description: Owner generation UUID; no credential or configuration data
+    post:
+      operationId: sharedRuntimeStop
+      summary: Gracefully stop the local shared owner (managed owners only)
+      security: []
+      parameters:
+        - in: header
+          name: x-bobby-owner-stop
+          required: true
+          schema:
+            type: string
+          description: Owner-only secret read by the CLI from its private registry
+      responses:
+        '202':
+          description: Shutdown requested
+        '401':
+          description: Missing or invalid owner secret
+  /v1/gateway/{protocol}:
+    get:
+      operationId: sharedGatewayConnect
+      summary: Upgrade a connection-local MCP or ACP adapter to WebSocket
+      parameters:
+        - in: path
+          name: protocol
+          required: true
+          schema:
+            type: string
+            enum: [mcp, acp]
+        - in: header
+          name: x-bobby-mcp-toolset
+          required: false
+          schema:
+            type: string
+            enum: [full, explore, act, intent, verify]
+      responses:
+        '101':
+          description: Authenticated bounded JSON-RPC text frames over WebSocket
+        '401':
+          description: Missing or invalid bearer credential
+        '404':
+          description: Unsupported protocol
+        '501':
+          description: ACP is unavailable for this runtime binding
   /healthz:
     get:
       operationId: getHealthz

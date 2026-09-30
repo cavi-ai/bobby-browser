@@ -1305,7 +1305,8 @@ pub(crate) fn run_doctor_with_profile(
     let config_path = resolve_config_path(config_cli);
     let bootstrap_path = resolve_bootstrap_path(bootstrap_cli.clone()).ok();
     let config = match AppConfig::load(&config_path) {
-        Ok(config) => {
+        Ok(mut config) => {
+            crate::runtime_scopes::use_owner_address(&mut config);
             let source = if config_path.exists() {
                 config_path.display().to_string()
             } else {

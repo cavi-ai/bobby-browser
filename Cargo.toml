@@ -21,6 +21,7 @@ members = [
   "crates/session-manager",
   "crates/page-runtime",
   "crates/network-engine",
+  "crates/gateway-transport",
   "crates/dom-engine",
   "crates/intent-engine",
   "crates/js-engine",
@@ -44,7 +45,7 @@ resolver = "2"
 
 [workspace.package]
 edition = "2021"
-version = "0.17.0"
+version = "0.18.0"
 license = "MIT"
 authors = ["Sasan Sotoodehfar"]
 repository = "https://github.com/cavi-ai/bobby-browser"
@@ -128,6 +129,7 @@ interface-core = { path = "crates/interface-core" }
 js-engine = { path = "crates/js-engine" }
 mcp-gateway = { path = "crates/mcp-gateway" }
 network-engine = { path = "crates/network-engine" }
+gateway-transport = { path = "crates/gateway-transport" }
 node-registry = { path = "crates/node-registry" }
 observability = { path = "crates/observability" }
 page-runtime = { path = "crates/page-runtime" }
