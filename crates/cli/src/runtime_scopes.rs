@@ -108,9 +108,12 @@ pub(crate) fn gateway_args(subcommand: &str) -> Result<Vec<String>> {
     Ok(args)
 }
 
+/// The native host the packaged extension (and its signed build) connects to.
+pub(crate) const DEFAULT_NATIVE_HOST_NAME: &str = "com.bobby_browser.companion";
+
 pub(crate) fn native_host_name(root: &Path) -> Result<String> {
     if root == user_root()? {
-        return Ok("com.bobby_browser.companion".into());
+        return Ok(DEFAULT_NATIVE_HOST_NAME.into());
     }
     let hash = hex::encode(Sha256::digest(root.as_os_str().as_encoded_bytes()));
     Ok(format!("com.bobby_browser.companion.scope_{}", &hash[..16]))

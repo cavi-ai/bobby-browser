@@ -21,8 +21,11 @@ with TTL-bound leases.
 All steps run on the machine that hosts Firefox. Paths below use the macOS
 state dir `~/Library/Application Support/bobby-browser`; adjust as needed.
 
-Unsigned permanent sideloading requires Firefox Developer Edition, Nightly,
-or ESR — release Firefox refuses unsigned extensions.
+Release archives (install script, Homebrew) carry a Mozilla-signed build of the
+extension, which any Firefox 128 or later accepts; `bobby install --companion`
+installs it for the default scope. A team or project scope, or a build from a
+checkout, sideloads the unpacked extension instead, and only Firefox Developer
+Edition, Nightly, or ESR accept an unsigned extension.
 
 ### 1. Install (build + native host + profile sideload)
 
@@ -44,8 +47,10 @@ That single step:
 - copies the built extension into the bobby config dir
 - installs the native messaging host (`com.bobby_browser.companion`)
 - creates the Bobby Firefox profile and writes required `user.js` prefs
-- permanently sideloads an **unpacked** extension into
-  `$PROFILE/extensions/firefox-companion@bobby-browser.local/`
+- permanently installs the extension into the profile: the signed
+  `$PROFILE/extensions/firefox-companion@bobby-browser.local.xpi` when the
+  bundle carries it and the scope is the default, otherwise an **unpacked**
+  sideload at `$PROFILE/extensions/firefox-companion@bobby-browser.local/`
 - writes `firefox-enroll-defaults.json` for popup Pair
 
 Prefs written (appended if missing; existing custom lines are kept):
@@ -57,8 +62,9 @@ user_pref("privacy.resistFingerprinting", false);
 user_pref("ui.systemUsesDarkTheme", 1);
 ```
 
-Both extension prefs are required: the first permits unsigned extensions, the
-second auto-enables sideloaded ones (otherwise the extension installs disabled
+Both extension prefs are required for the unpacked sideload: the first permits
+unsigned extensions (release Firefox ignores it), the second auto-enables
+sideloaded ones (otherwise the extension installs disabled
 pending a consent click). The fingerprint prefs keep Resist Fingerprinting from
 clobbering the BiDi/init-script persona and lean `prefers-color-scheme` toward
 dark (init script also forces the matchMedia result).
