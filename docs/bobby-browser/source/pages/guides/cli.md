@@ -129,6 +129,22 @@ Shared flags on all `jobs` subcommands:
 `--payload-file`, `--priority` (`low|normal|high|critical`, default `normal`),
 `--max-retries`, `--timeout-ms`, `--idempotency-key`.
 
+### `bobby audit`
+
+Signed audit bundles for one workflow; see
+[Audit bundles](../concepts/evidence-checkpoints.md#audit-bundles).
+
+```bash
+bobby audit key
+bobby audit export --workflow <workflowId> --out bundle.tar
+bobby audit verify bundle.tar --public-key <hex>
+```
+
+`export` takes `--config <path>` (same as `serve`) and `--key <path>` (default
+`<config dir>/audit-signing-key.pk8`, created on first use). `verify` exits
+non-zero and names the file when a digest, an entry, or the signature does not
+match.
+
 ### `bobby vision`
 
 Vision provider setup. `connect` writes a provider profile into `config.toml`,
