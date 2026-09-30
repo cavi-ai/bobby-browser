@@ -1,7 +1,9 @@
-use types::{Capability, InterfaceOperation};
+use types::{capability_effect, Capability, CapabilityPreset, InterfaceOperation};
 
 pub const SUPPORT_MATRIX_BEGIN: &str = "<!-- BEGIN GENERATED INTERFACE SUPPORT -->";
 pub const SUPPORT_MATRIX_END: &str = "<!-- END GENERATED INTERFACE SUPPORT -->";
+pub const PRESET_MATRIX_BEGIN: &str = "<!-- BEGIN GENERATED PRESET MATRIX -->";
+pub const PRESET_MATRIX_END: &str = "<!-- END GENERATED PRESET MATRIX -->";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdapterSupport {
@@ -206,5 +208,78 @@ pub fn render_support_matrix_markdown() -> String {
         ));
     }
     output.push_str(&format!("\n{SUPPORT_MATRIX_END}"));
+    output
+}
+
+/// Every named preset against every capability, then what each preset
+/// withholds and the operations and opt-ins that withholding closes.
+pub fn render_preset_matrix_markdown() -> String {
+    let presets = CapabilityPreset::ALL;
+    let mut output = String::from(PRESET_MATRIX_BEGIN);
+    output.push_str(
+        "\n## Generated preset matrix\n\n\
+         `bobby init --preset <name>` mints the loopback credential with one of these sets. \
+         A call that needs a capability the credential lacks fails with `missingCapability`.\n\n\
+         | Capability | Lets a principal |",
+    );
+    for preset in presets {
+        output.push_str(&format!(" `{}` |", preset.as_str()));
+    }
+    output.push_str("\n|---|---|");
+    output.push_str(&"---|".repeat(presets.len()));
+    output.push('\n');
+    for capability in Capability::ALL {
+        output.push_str(&format!(
+            "| `{}` | {} |",
+            capability.as_str(),
+            capability_effect(capability)
+        ));
+        for preset in presets {
+            output.push_str(if preset.contains(capability) {
+                " yes |"
+            } else {
+                " — |"
+            });
+        }
+        output.push('\n');
+    }
+    output.push_str("\n## What each preset cannot do\n\n");
+    for preset in presets {
+        let withheld: Vec<Capability> = Capability::ALL
+            .into_iter()
+            .filter(|capability| !preset.contains(*capability))
+            .collect();
+        output.push_str(&format!("- `{}`: {}.", preset.as_str(), preset.summary()));
+        if withheld.is_empty() {
+            output.push_str(" Nothing is withheld.\n");
+            continue;
+        }
+        output.push_str(" Cannot:\n");
+        for capability in withheld {
+            let mut gates: Vec<String> = operation_support()
+                .iter()
+                .filter(|row| row.operation.required().contains(&capability))
+                .map(|row| format!("`{}`", row.operation.as_str()))
+                .collect();
+            gates.extend(
+                execution_policy_requirements()
+                    .iter()
+                    .filter(|requirement| requirement.capability == capability)
+                    .map(|requirement| format!("`executionPolicy.{}`", requirement.field)),
+            );
+            let gates = if gates.is_empty() {
+                String::from("checked by the job or command that uses it")
+            } else {
+                gates.join(", ")
+            };
+            output.push_str(&format!(
+                "  - {} (`{}`: {})\n",
+                capability_effect(capability),
+                capability.as_str(),
+                gates
+            ));
+        }
+    }
+    output.push_str(PRESET_MATRIX_END);
     output
 }

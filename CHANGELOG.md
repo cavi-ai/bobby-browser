@@ -4,6 +4,16 @@
 
 ### Added
 
+- `bobby init --preset claude`, `codex`, and `openshell` mint host
+  credentials. `claude` and `codex` hold what the shipped agent skill uses:
+  the agent floor without `javascript:evaluate`, `browser:fingerprint`, and
+  `browser:humanize`. `openshell` is the sandbox floor `bobby openshell` already
+  used. Heal never widens past the chosen floor, and `bobby doctor` warns when
+  a credential holds a capability outside its preset.
+- The capabilities page carries a generated preset matrix: every preset
+  against every capability, and what each preset cannot do, with the
+  operations and `executionPolicy` opt-ins each withheld capability closes.
+
 - Release builds sign the Firefox companion through addons.mozilla.org
   (unlisted) on each release tag and ship it as
   `firefox-companion/bobby-firefox-companion.xpi` in every platform archive and
