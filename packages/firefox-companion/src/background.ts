@@ -952,7 +952,7 @@ export async function startProductionBackground(
   const transport = new NativeCompanionTransport({
     nativeHostName: await loadNativeHostName(browserApi),
     connectNative: (hostName) => browserApi.runtime.connectNative(hostName),
-});
+  });
   const discoverTabTargets = async (
     tabId: number,
     fallbackUrl?: string,

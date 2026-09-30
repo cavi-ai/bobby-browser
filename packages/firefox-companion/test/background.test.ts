@@ -1,9 +1,17 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import * as backgroundModule from "../src/background.js";
 import { CompanionBackground, type DiscoveredTarget } from "../src/background.js";
+
+test("packaged extension includes an explicit default native host resource", async () => {
+  execFileSync(process.execPath, [fileURLToPath(new URL("../copy-static.mjs", import.meta.url))]);
+  const config = JSON.parse(await readFile(new URL("../dist/bobby-scope.json", import.meta.url), "utf8"));
+  assert.deepEqual(config, { nativeHostName: "com.bobby_browser.companion" });
+});
 
 test("scope resource selects the native host and rejects invalid names", async (t) => {
   const api = { runtime: { getURL: (path: string) => `moz-extension://scope/${path}` } } as backgroundModule.ProductionBrowserApi;
