@@ -56,7 +56,8 @@ enrolled Firefox profile does, by naming it in the exact-engine form:
 persists the session's user-data-dir at `<profiles_dir>/chromium/<name>`
 instead of a disposable per-session directory, and attaches context-graph
 promotion under the same id (see `[context]` below). A managed-Chromium
-selection with no `profileId` stays disposable, unchanged.
+selection with no `profileId` keeps a disposable browser profile per session
+and remembers under the shared `managed-chromium` identity.
 
 ## `[storage]`
 
@@ -69,11 +70,12 @@ selection with no `profileId` stays disposable, unchanged.
 
 ## `[context]`
 
-Durable shared context graph (remembered form structure per site). Only
-runtimes whose engine selection carries a durable profile identity open the
-store: a Firefox companion enrollment, or a managed-Chromium selection with an
-explicit `profileId` (see `[browser]` above). A managed-Chromium session
-without a `profileId` still reads and writes nothing.
+Durable shared context graph (remembered form structure per site). Runtimes
+whose engine selection carries a durable profile identity open the store: a
+Firefox companion enrollment, a Chromium selection with an explicit
+`profileId` (see `[browser]` above), or managed Chromium without one, under
+`managed-chromium`. A profile-less Firefox selection and a `prefer` list read
+and write nothing.
 
 | Field | Default | Meaning |
 |---|---|---|

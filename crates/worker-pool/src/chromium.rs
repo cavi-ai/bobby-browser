@@ -112,9 +112,10 @@ impl ChromiumWorkerFactory {
 
     /// Opts every session this factory launches into the same persistent
     /// user-data-dir at `<profiles_dir>/chromium/<profile_id>`, instead of a
-    /// disposable one keyed by `SessionId`. Mirrors
-    /// `EnginePreferenceConfig::durable_profile_id`, which gates whether the
-    /// runtime attaches context-graph promotion for this profile.
+    /// disposable one keyed by `SessionId`. Only a named Chromium selection
+    /// opts in; managed Chromium stays disposable here while its runtime
+    /// still attaches context-graph promotion under
+    /// `EnginePreferenceConfig::durable_profile_id` (`managed-chromium`).
     pub fn with_durable_profile(mut self, profile_id: String) -> Self {
         self.durable_profile_id = Some(profile_id);
         self

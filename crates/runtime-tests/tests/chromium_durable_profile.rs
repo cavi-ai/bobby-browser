@@ -8,8 +8,12 @@
 //! Two sessions on the same named Chromium profile against the gauntlet
 //! onboarding page: the second session's `context_ask` answers persisted for
 //! a field the first session verified, before the second session takes any
-//! snapshot. A third, disposable session (no durable profile, no context
-//! promotion attached) answers `None` for the same field.
+//! snapshot. A third session on a runtime with no context store attached
+//! answers `None` for the same field.
+//!
+//! Managed Chromium without a profile id keeps a disposable browser profile
+//! and still remembers: its runtime promotes under the shared
+//! `managed-chromium` identity, and a restarted runtime answers from disk.
 
 #[allow(dead_code)]
 #[path = "modern_gauntlet/mod.rs"]
@@ -284,9 +288,8 @@ async fn durable_chromium_profile_persists_context_across_sessions() {
     assert!(answer.confidence >= 0.75);
     warm.close().await;
 
-    // Session 3, disposable: a separate runtime with a plain
-    // ChromiumWorkerFactory (no durable profile) and no context promotion
-    // attached -- the unchanged, pre-existing behavior. Answers None.
+    // Session 3: a separate runtime with a plain ChromiumWorkerFactory and no
+    // context store attached never sees another store's memory.
     let disposable_root = tempfile::tempdir().unwrap();
     let disposable_config = config(disposable_root.path(), None);
     let disposable_runtime = RuntimeService::build(&disposable_config).await.unwrap();
@@ -297,4 +300,70 @@ async fn durable_chromium_profile_persists_context_across_sessions() {
         "a disposable session was answered by another profile's persisted context"
     );
     disposable.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chromium"]
+async fn managed_chromium_remembers_across_runtimes_with_a_disposable_profile() {
+    let server = ScenarioServer::start(ScenarioConfig::seeded("managed-chromium-memory"))
+        .await
+        .unwrap();
+    let url = server.application_url("/onboarding");
+    let profile_id = config::EnginePreferenceConfig::ManagedChromium
+        .durable_profile_id()
+        .expect("managed Chromium carries a memory identity");
+    let root = tempfile::tempdir().unwrap();
+    let context_dir = root.path().join("context");
+    let managed_config = config(root.path(), Some(&context_dir));
+
+    // A plain factory, as `compose_worker_factory_inner` wires ManagedChromium:
+    // every session gets its own user-data-dir.
+    let first_runtime = RuntimeService::build_with_context_promotion(
+        &managed_config,
+        Arc::new(ChromiumWorkerFactory::new(managed_config.browser.clone())),
+        profile_id,
+    )
+    .await
+    .unwrap();
+    let mut cold = Session::open(&first_runtime, &url).await;
+    assert_eq!(
+        cold.ask(FIELD_PURPOSE).await,
+        None,
+        "a cold session was answered by context it never observed"
+    );
+    cold.fill(FIELD_PURPOSE, FIELD_VALUE).await;
+    cold.close().await;
+    drop(first_runtime);
+
+    assert!(
+        !managed_config
+            .browser
+            .profiles_dir
+            .join("chromium")
+            .join(profile_id)
+            .exists(),
+        "managed Chromium persisted a browser profile"
+    );
+
+    // A fresh runtime over the same context dir: the memory came from disk,
+    // not from the first runtime's process state.
+    let second_runtime = RuntimeService::build_with_context_promotion(
+        &managed_config,
+        Arc::new(ChromiumWorkerFactory::new(managed_config.browser.clone())),
+        profile_id,
+    )
+    .await
+    .unwrap();
+    let warm = Session::open(&second_runtime, &url).await;
+    let answer = warm
+        .ask(FIELD_PURPOSE)
+        .await
+        .unwrap_or_else(|| panic!("managed Chromium did not remember {FIELD_PURPOSE:?}"));
+    assert_eq!(
+        answer.observed_at,
+        types::ContextObservedAt::Persisted,
+        "the warm answer was not marked as remembered"
+    );
+    assert!(answer.confidence >= 0.75);
+    warm.close().await;
 }

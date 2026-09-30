@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Changed
+
+- Managed Chromium remembers site structure across sessions and runtime
+  restarts without a named profile. A `managedChromium` selection, or an exact
+  Chromium selection without `profileId`, promotes verified intent outcomes
+  into the context store under the shared `managed-chromium` identity; each
+  session's browser profile stays disposable. Previously only a Firefox
+  enrollment or a named Chromium profile remembered anything. `bobby context
+  list --profile managed-chromium` shows the sites.
+- Docker image: the context store lives at `/var/lib/bobby/data/context` on
+  the data volume.
+
 ## 0.18.0 - 2026-09-30
 
 ### Added

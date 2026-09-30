@@ -14,14 +14,15 @@ Two layers:
 - **Session-hot** — observations from the current session, invalidated on any
   command that may have changed the page. Always available, never persisted.
 - **Persisted** — per-profile, per-site structural memory promoted from
-  verified intent outcomes. Only runtimes whose engine selection carries a
-  durable profile identity write or read this layer: a Firefox companion
-  enrollment, or an opt-in named managed-Chromium profile (`{"mode": "exact",
-  "engine": "chromium", "profileId": "<name>"}`), which persists its
-  user-data-dir at `<profiles_dir>/chromium/<name>` instead of a disposable
-  one. A managed Chromium session without a `profileId` still has a
-  disposable profile and no durable identity, so it reads nothing and writes
-  nothing — by design, not by accident.
+  verified intent outcomes. Runtimes whose engine selection carries a durable
+  profile identity write and read this layer: a Firefox companion enrollment;
+  a named Chromium profile (`{"mode": "exact", "engine": "chromium",
+  "profileId": "<name>"}`), which also persists its user-data-dir at
+  `<profiles_dir>/chromium/<name>`; or managed Chromium without a
+  `profileId`, which remembers under the shared `managed-chromium` identity
+  while each session's browser profile stays disposable. A profile-less
+  Firefox selection and a `prefer` list have no stable identity and neither
+  read nor write it.
 
 ## What persists
 
@@ -75,7 +76,8 @@ escalations by transport (`providerEscalations`, `providerHttp`,
 
 - Records not verified within `[context].ttl_days` (default 90) are swept at
   store open.
-- `bobby context list --profile <id>` shows remembered sites.
+- `bobby context list --profile <id>` shows remembered sites
+  (`--profile managed-chromium` for managed Chromium).
 - `bobby context forget <site-key> --profile <id>` erases one site
   immediately and totally, and verifies the erasure before reporting.
 - `bobby doctor` reports the store path, site count, bytes, and lock health.
