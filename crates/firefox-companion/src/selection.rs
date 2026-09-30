@@ -928,15 +928,17 @@ impl OwnedDescriptorFile {
             }
         };
         #[cfg(unix)]
-        let owned = current == self.identity;
+        if current != self.identity {
+            return Ok(());
+        }
         #[cfg(not(unix))]
-        let owned = {
-            let _ = metadata;
-            std::fs::read(&self.path)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<NativeHostDescriptor>(&bytes).ok())
-                .is_some_and(|descriptor| descriptor.ownership_id == self.ownership_id)
-        };
+        let _ = metadata;
+        // An unlinked file's inode may be reused by a replacement publication.
+        // File identity alone cannot establish ownership after that handoff.
+        let owned = std::fs::read(&self.path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<NativeHostDescriptor>(&bytes).ok())
+            .is_some_and(|descriptor| descriptor.ownership_id == self.ownership_id);
         if owned {
             std::fs::remove_file(&self.path)?;
         }
@@ -2277,6 +2279,32 @@ mod tests {
         );
         drop(publication);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn descriptor_cleanup_preserves_a_new_owner_on_the_same_inode() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("descriptor.json");
+        let publication = write_descriptor(
+            &path,
+            &NativeHostDescriptor {
+                endpoint: "ws://127.0.0.1:1234/v1/companion".into(),
+                pairing_code: "original-material".into(),
+                ownership_id: uuid::Uuid::new_v4().to_string(),
+            },
+        )
+        .unwrap();
+        let replacement = serde_json::to_vec(&NativeHostDescriptor {
+            endpoint: "ws://127.0.0.1:5678/v1/companion".into(),
+            pairing_code: "replacement-material".into(),
+            ownership_id: uuid::Uuid::new_v4().to_string(),
+        })
+        .unwrap();
+        // Overwrite in place to deterministically exercise matching file identity
+        // with a different owner, as can happen after Linux reuses an inode.
+        std::fs::write(&path, &replacement).unwrap();
+        drop(publication);
+        assert_eq!(std::fs::read(&path).unwrap(), replacement);
     }
 
     #[test]
