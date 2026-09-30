@@ -2341,7 +2341,7 @@ fn follow_native_host_descriptor(
     );
     let (changed, changes) = tokio::sync::watch::channel(0_u64);
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        if event.is_ok_and(|event| event.paths.contains(&watched_path)) {
+        if event.is_ok_and(|event| descriptor_event_requires_refresh(&event, &watched_path)) {
             changed.send_modify(|version| *version = version.wrapping_add(1));
         }
     })?;
@@ -2356,6 +2356,19 @@ fn follow_native_host_descriptor(
             descriptor.pairing_code,
         ))
     }))
+}
+
+fn descriptor_event_requires_refresh(event: &notify::Event, path: &Path) -> bool {
+    // Linux inotify reports opens and reads. Reloading the descriptor generates
+    // these events itself and can otherwise cancel every WebSocket handshake.
+    let changed = !event.kind.is_access()
+        || matches!(
+            event.kind,
+            notify::EventKind::Access(notify::event::AccessKind::Close(
+                notify::event::AccessMode::Write
+            ))
+        );
+    changed && event.paths.iter().any(|event_path| event_path == path)
 }
 
 struct NativeHostFirefoxEnroll {
@@ -2837,6 +2850,35 @@ model = "mlx-community/example-selected"
 
         assert!(!super::doctor::repair_vision_config(&config_path).unwrap());
         assert_eq!(std::fs::read_to_string(&config_path).unwrap(), first);
+    }
+
+    #[test]
+    fn native_host_descriptor_reads_do_not_trigger_refresh() {
+        use notify::event::{AccessKind, AccessMode, CreateKind, ModifyKind, RemoveKind};
+        use notify::{Event, EventKind};
+        let path = Path::new("descriptor.json");
+        for kind in [
+            AccessKind::Read,
+            AccessKind::Open(AccessMode::Read),
+            AccessKind::Open(AccessMode::Any),
+            AccessKind::Close(AccessMode::Read),
+        ] {
+            let event = Event::new(EventKind::Access(kind)).add_path(path.to_path_buf());
+            assert!(!descriptor_event_requires_refresh(&event, path), "{kind:?}");
+        }
+        for kind in [
+            EventKind::Create(CreateKind::File),
+            EventKind::Modify(ModifyKind::Any),
+            EventKind::Remove(RemoveKind::File),
+            EventKind::Access(AccessKind::Close(AccessMode::Write)),
+        ] {
+            let event = Event::new(kind).add_path(path.to_path_buf());
+            assert!(descriptor_event_requires_refresh(&event, path), "{kind:?}");
+            assert!(!descriptor_event_requires_refresh(
+                &event,
+                Path::new("other.json")
+            ));
+        }
     }
 
     #[tokio::test]
