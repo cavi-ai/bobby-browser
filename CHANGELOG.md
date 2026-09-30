@@ -4,6 +4,11 @@
 
 ### Added
 
+- Zed over ACP guide: `agent_servers` setup for `bobby acp-stdio` and a
+  transcript of the `acp_walkthrough` live test (fill, `contextAsk`,
+  `checkpointSave`, `recoveryStatus`, `workflowRecover`, close), which asserts
+  MCP `context_ask` and `recovery_status` answer the same on the same runtime.
+
 - Release builds sign the Firefox companion through addons.mozilla.org
   (unlisted) on each release tag and ship it as
   `firefox-companion/bobby-firefox-companion.xpi` in every platform archive and
@@ -31,6 +36,13 @@
   list --profile managed-chromium` shows the sites.
 - Docker image: the context store lives at `/var/lib/bobby/data/context` on
   the data volume.
+
+### Fixed
+
+- ACP `contextAsk` and `contextNeighbors` answered a bare `null` on a miss and
+  the raw record on a hit; they now return the MCP and HTTP shape with `hit`,
+  `reason`, `nextStep`, and `pageDerived`. MCP `context_ask` and
+  `context_neighbors` hits now carry `hit: true`, as HTTP's always did.
 
 ## 0.18.0 - 2026-09-30
 

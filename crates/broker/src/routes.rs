@@ -136,19 +136,12 @@ async fn context_ask(
         )
         .await
         .map_err(ProtocolError::from)?;
-    // `None` is an answer, not a failure — same contract as MCP context_ask:
-    // the miss carries `hit:false` and the snapshot repair so HTTP consumers
-    // get the same machine-readable next step.
-    Ok(Json(match answer {
-        Some(answer) => serde_json::json!({ "answer": answer, "hit": true, "pageDerived": true }),
-        None => serde_json::json!({
-            "answer": null,
-            "hit": false,
-            "reason": "notRemembered",
-            "nextStep": "a11y_snapshot",
-            "pageDerived": true
-        }),
-    }))
+    // `None` is an answer, not a failure — same contract as MCP and ACP:
+    // the miss carries `hit:false` and the snapshot repair.
+    let mut body = serde_json::to_value(types::ContextAskResponse::from_answer(answer))
+        .map_err(|_| ProtocolError::invalid(types::InterfaceErrorCode::Internal))?;
+    body["pageDerived"] = serde_json::json!(true);
+    Ok(Json(body))
 }
 
 async fn context_neighbors(
@@ -165,18 +158,10 @@ async fn context_neighbors(
         )
         .await
         .map_err(ProtocolError::from)?;
-    Ok(Json(match neighbors {
-        Some(neighbors) => {
-            serde_json::json!({ "neighbors": neighbors, "hit": true, "pageDerived": true })
-        }
-        None => serde_json::json!({
-            "neighbors": null,
-            "hit": false,
-            "reason": "notRemembered",
-            "nextStep": "a11y_snapshot",
-            "pageDerived": true
-        }),
-    }))
+    let mut body = serde_json::to_value(types::ContextNeighborsResponse::from_neighbors(neighbors))
+        .map_err(|_| ProtocolError::invalid(types::InterfaceErrorCode::Internal))?;
+    body["pageDerived"] = serde_json::json!(true);
+    Ok(Json(body))
 }
 
 async fn context_site(

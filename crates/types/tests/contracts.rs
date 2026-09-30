@@ -1736,3 +1736,33 @@ fn legacy_fill_value_shapes_are_rejected() {
         );
     }
 }
+
+#[test]
+fn context_answers_have_one_shape_for_hits_and_misses() {
+    let miss = serde_json::to_value(types::ContextAskResponse::from_answer(None)).unwrap();
+    assert_eq!(
+        miss,
+        json!({"answer":null,"hit":false,"reason":"notRemembered","nextStep":"a11y_snapshot"})
+    );
+    let answer: types::ContextAnswer = serde_json::from_value(json!({
+        "target":{"role":"textbox","accessibleName":"Name"},
+        "confidence":1.0,
+        "observedAt":{"kind":"persisted"},
+        "source":"observed"
+    }))
+    .unwrap();
+    let hit =
+        serde_json::to_value(types::ContextAskResponse::from_answer(Some(answer.clone()))).unwrap();
+    assert_eq!(hit["hit"], true);
+    assert_eq!(hit["answer"], serde_json::to_value(&answer).unwrap());
+    assert!(
+        hit.get("reason").is_none() && hit.get("nextStep").is_none(),
+        "{hit}"
+    );
+
+    let miss = serde_json::to_value(types::ContextNeighborsResponse::from_neighbors(None)).unwrap();
+    assert_eq!(
+        miss,
+        json!({"neighbors":null,"hit":false,"reason":"notRemembered","nextStep":"a11y_snapshot"})
+    );
+}

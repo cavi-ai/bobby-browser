@@ -878,7 +878,10 @@ impl AcpServer {
                         .await
                         .map_err(|_| PromptStepError::Cancelled)?
                         .map_err(|error| PromptStepError::Failed(interface_error(error)))?;
-                    serde_json::json!({"operation":"contextAsk", "result":result})
+                    serde_json::json!({
+                        "operation":"contextAsk",
+                        "result":page_derived(types::ContextAskResponse::from_answer(result))?,
+                    })
                 }
                 PromptOperation::ContextNeighbors { description } => {
                     let page = page.ok_or_else(|| {
@@ -896,7 +899,10 @@ impl AcpServer {
                         .await
                         .map_err(|_| PromptStepError::Cancelled)?
                         .map_err(|error| PromptStepError::Failed(interface_error(error)))?;
-                    serde_json::json!({"operation":"contextNeighbors", "result":result})
+                    serde_json::json!({
+                        "operation":"contextNeighbors",
+                        "result":page_derived(types::ContextNeighborsResponse::from_neighbors(result))?,
+                    })
                 }
                 PromptOperation::ContextSite { site_key } => {
                     let result = prompt_turn
@@ -1336,6 +1342,15 @@ fn outcome_payload(
         "attemptId":attempt_id,
         "outcome":outcome,
     })
+}
+
+/// The HTTP and MCP context answer shape: remembered structure came from a
+/// page, so it is marked page-derived on every surface.
+fn page_derived(response: impl serde::Serialize) -> Result<serde_json::Value, PromptStepError> {
+    let mut value = serde_json::to_value(response)
+        .map_err(|error| PromptStepError::Failed(internal_error(error)))?;
+    value["pageDerived"] = serde_json::Value::Bool(true);
+    Ok(value)
 }
 
 fn invalid_request(message: impl Into<String>) -> agent_client_protocol::Error {
