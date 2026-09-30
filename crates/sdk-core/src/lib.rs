@@ -242,9 +242,10 @@ impl RuntimeService {
         Self::build_inner(config, factory, None, Some(assist), None).await
     }
 
-    /// Build with a durable profile identity (Firefox-companion runtimes):
-    /// attaches context promotion so verified intent outcomes persist
-    /// structural control memory under `<context.dir>/<profile-id>/`.
+    /// Build with a durable profile identity (an enrolled Firefox profile or a
+    /// Chromium selection): attaches context promotion so verified intent
+    /// outcomes persist structural control memory under
+    /// `<context.dir>/<profile-id>/`.
     /// Promotion is absent when `config.context.dir` is unset or the store
     /// cannot be opened — never a startup failure.
     pub async fn build_with_context_promotion(
