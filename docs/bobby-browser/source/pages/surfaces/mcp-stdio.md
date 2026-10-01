@@ -17,6 +17,32 @@ while browser profiles, storage, context, and jobs belong to the owner.
 Disconnecting an agent leaves the runtime available. Stop and restart the
 scope after configuration changes. Scope sharing is local to the current OS user.
 
+### How many agents
+
+An open connection holds one of its principal's
+`interface.max_in_flight_per_principal` permits (default 8) until it closes;
+in-flight HTTP requests from the same principal draw on the same permits.
+Agents that share the bootstrap credential share one principal, so with eight
+attached the ninth is refused:
+`the shared runtime refused the connection: resourceExhausted: principal
+in-flight capacity exhausted (retry after 1000 ms)`. Raise the setting, or
+give agents their own principals ([Authentication](../guides/auth.md)).
+
+Measured on one owner with managed Chromium, each agent running
+`workflow_start`, `intent_complete_form`, and `session_close` against a local
+page at the same moment (3 runs, Apple M5 Max). `workflow_start` includes
+launching that agent's browser.
+
+| Agents at once | Journeys completed | Requests lost | `workflow_start` p95 | `intent_complete_form` p95 | `session_close` p95 |
+|---|---|---|---|---|---|
+| 1 | 1/1 | 0 | 379–455 ms | 111–121 ms | 21–23 ms |
+| 4 | 4/4 | 0 | 847–898 ms | 218–227 ms | 28–33 ms |
+| 8 | 8/8 | 0 | 1,638–1,731 ms | 391–398 ms | 24–41 ms |
+
+Reproduce with
+`cargo test -p bobby-browser --test shared_runtime_load -- --ignored --nocapture`
+(`BOBBY_CHROME_EXECUTABLE` names the browser).
+
 `mcp-gateway` is a single-process MCP server over stdio. It enrolls a startup
 bootstrap credential from environment variables, then speaks MCP protocol
 version `2025-11-25` on stdin/stdout. Stdout is reserved for newline-delimited

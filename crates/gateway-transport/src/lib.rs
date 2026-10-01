@@ -115,7 +115,7 @@ pub async fn connect<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         .max_frame_size(Some(MAX_FRAME_BYTES));
     let (socket, _) = tokio_tungstenite::connect_async_with_config(request, Some(config), false)
         .await
-        .map_err(|_| anyhow::anyhow!("could not authenticate or connect to the shared runtime"))?;
+        .map_err(refused)?;
     let (sink, stream) = socket.split();
     let incoming = stream.filter_map(async |message| match message {
         Ok(Message::Text(text)) => Some(Ok(text.to_string())),
@@ -132,6 +132,37 @@ pub async fn connect<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     bridge(reader, writer, Box::pin(incoming), Box::pin(outgoing)).await
 }
 
+/// The runtime's own reason when it answers the upgrade with an error, so a
+/// full connection quota reads as that and not as a bad credential.
+fn refused(error: tokio_tungstenite::tungstenite::Error) -> anyhow::Error {
+    let tokio_tungstenite::tungstenite::Error::Http(response) = &error else {
+        return anyhow::anyhow!("could not connect to the shared runtime");
+    };
+    let reason = response
+        .body()
+        .as_deref()
+        .and_then(|body| serde_json::from_slice::<serde_json::Value>(body).ok())
+        .and_then(|body| {
+            let error = &body["error"];
+            let mut reason = format!(
+                "{}: {}",
+                error["code"].as_str()?,
+                error["message"].as_str()?
+            );
+            if let Some(milliseconds) = error["retryAfterMs"].as_u64() {
+                reason.push_str(&format!(" (retry after {milliseconds} ms)"));
+            }
+            Some(reason)
+        });
+    match reason {
+        Some(reason) => anyhow::anyhow!("the shared runtime refused the connection: {reason}"),
+        None => anyhow::anyhow!(
+            "the shared runtime refused the connection with HTTP {}",
+            response.status()
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,6 +173,39 @@ mod tests {
             .await
             .is_err());
     }
+    #[tokio::test]
+    async fn a_refused_upgrade_reports_the_runtime_reason() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await.unwrap();
+            let body = r#"{"error":{"code":"resourceExhausted","layer":"interface","message":"principal in-flight capacity exhausted","correlationId":"00000000-0000-4000-8000-000000000000","commandId":null,"retryable":true,"retryAfterMs":1000,"reconciliationRequired":false,"requiredCapability":null}}"#;
+            let response = format!(
+                "HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\nretry-after: 1\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let error = connect(
+            &origin,
+            "mcp",
+            "private-test-bearer",
+            tokio::io::empty(),
+            tokio::io::sink(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            error,
+            "the shared runtime refused the connection: resourceExhausted: \
+             principal in-flight capacity exhausted (retry after 1000 ms)"
+        );
+        assert!(!error.contains("private-test-bearer"));
+    }
+
     #[tokio::test]
     async fn remote_origins_are_rejected_before_sending_credentials() {
         assert!(connect(
