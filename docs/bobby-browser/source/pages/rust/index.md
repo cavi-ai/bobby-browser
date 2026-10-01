@@ -16,8 +16,8 @@ The CLI package `bobby-browser` is separate.
 | **Embed** | Supported for in-process use; alpha may still break |
 | **Internal** | Workspace-only; do not treat as a public API |
 
-Publishing is phased. Prefer building from this repo until `cargo add` /
-`cargo install` succeed for the version you want.
+Only `bobby-browser-client` is on crates.io. The CLI ships as release binaries
+and Homebrew; the other crates build from this repo.
 
 ## Contents
 

@@ -18,6 +18,13 @@
   to retry or mint a new key and to check for the effect first. The
   `idempotencyConflict` repair ("mint a fresh idempotency key") no longer
   applies to them.
+- ACP `contextAsk` and `contextNeighbors` answered a bare `null` on a miss and
+  the raw record on a hit; they now return the MCP and HTTP shape with `hit`,
+  `reason`, `nextStep`, and `pageDerived`. MCP `context_ask` and
+  `context_neighbors` hits now carry `hit: true`, as HTTP's always did.
+- Docs list the Python SDK (`bobby-browser` on PyPI) beside the TypeScript and
+  Rust clients. Install docs no longer offer `cargo install bobby-browser`:
+  only `bobby-browser-client` is on crates.io.
 
 ### Added
 
@@ -82,13 +89,6 @@
   list --profile managed-chromium` shows the sites.
 - Docker image: the context store lives at `/var/lib/bobby/data/context` on
   the data volume.
-
-### Fixed
-
-- ACP `contextAsk` and `contextNeighbors` answered a bare `null` on a miss and
-  the raw record on a hit; they now return the MCP and HTTP shape with `hit`,
-  `reason`, `nextStep`, and `pageDerived`. MCP `context_ask` and
-  `context_neighbors` hits now carry `hit: true`, as HTTP's always did.
 
 ## 0.18.0 - 2026-09-30
 

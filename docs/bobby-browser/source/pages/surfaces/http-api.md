@@ -170,7 +170,7 @@ header over spinning.
 
 ## Clients
 
-- Typed client: [TypeScript SDK](typescript-sdk.md)
+- Typed clients: [TypeScript SDK](typescript-sdk.md) · [Python SDK](python-sdk.md)
 - Rust HTTP client: [bobby-browser-client](../rust/bobby-browser-client.md)
 - [MCP tools](mcp-tools.md)
 - Compact a11y trees: [Accessibility snapshot](../guides/accessibility-snapshot.md)

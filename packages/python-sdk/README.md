@@ -30,7 +30,7 @@ client = BrowserRuntimeClient("http://127.0.0.1:7777", os.environ["AUTOMATION_RU
 ```
 
 Full method catalog, headers, and error shape:
-[docs/bobby-browser/source/pages/surfaces/python-sdk.md](../../docs/bobby-browser/source/pages/surfaces/python-sdk.md).
+[Python SDK reference](https://github.com/cavi-ai/bobby-browser/blob/main/docs/bobby-browser/source/pages/surfaces/python-sdk.md).
 
 ## Test
 
@@ -39,5 +39,5 @@ python3 -m unittest discover -s tests
 ```
 
 `tests/test_live_runtime.py` additionally starts the real `bobby` runtime
-from this worktree's release build and skips cleanly when
+from this checkout's release build and skips cleanly when
 `BOBBY_CHROME_EXECUTABLE` is unset.

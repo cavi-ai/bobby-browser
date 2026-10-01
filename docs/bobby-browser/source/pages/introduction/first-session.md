@@ -212,5 +212,6 @@ new key. Run it with
 (`BOBBY_CHROME_EXECUTABLE` names the browser).
 
 Next: [TypeScript SDK](../surfaces/typescript-sdk.md) ·
+[Python SDK](../surfaces/python-sdk.md) ·
 [Rust HTTP client](../rust/bobby-browser-client.md) ·
 [HTTP API](../surfaces/http-api.md) · [Quickstart](quickstart.md)
