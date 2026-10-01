@@ -38,7 +38,7 @@ Start the authenticated HTTP broker (and MCP HTTP mount).
 
 | Flag | Meaning |
 |---|---|
-| `--config <path>` | `config.toml` path (else `BOBBY_BROWSER_CONFIG`, else `./config.toml`) |
+| `--config <path>` | `config.toml` path (else `BOBBY_BROWSER_CONFIG`, else the scope's `config.toml`; never the working directory) |
 | `--bootstrap-env <path>` | Bootstrap dotenv path (else `BOBBY_BROWSER_BOOTSTRAP_ENV`, else default) |
 
 On loopback, if no bootstrap credential exists, `serve` may generate one and

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use tokio::io::AsyncWriteExt;
 use types::{CommandId, CommandPhase};
-use workflow_journal::{CommandJournal, JournalError, JournalRecord, JsonlJournal};
+use workflow_journal::{CommandJournal, JournalRecord, JsonlJournal};
 
 /// A journal line as written before `ea42d97` bumped `CommandEnvelope::SCHEMA_VERSION`
 /// to 2: the command is tagged `navigate` instead of `primitive`.
@@ -121,7 +121,7 @@ async fn skips_records_written_under_an_older_schema_version() {
 }
 
 #[tokio::test]
-async fn rejects_a_line_it_cannot_decode_at_the_current_schema_version() {
+async fn skips_a_line_it_cannot_decode_and_keeps_appending() {
     let dir = tempfile::tempdir().unwrap();
     let command_id = CommandId::new();
     let id = command_id.0;
@@ -136,19 +136,30 @@ async fn rejects_a_line_it_cannot_decode_at_the_current_schema_version() {
     )
     .await
     .unwrap();
-    let Err(error) = JsonlJournal::open(&current_version).await else {
-        panic!("a line at the current schema version must stay fatal");
-    };
-    assert!(matches!(error, JournalError::Corrupt { line: 1 }));
-
-    let no_version = dir.path().join("no-version.jsonl");
-    tokio::fs::write(&no_version, "{\"sequence\":0,\"phase\":\"accepted\"}\n")
+    let journal = JsonlJournal::open(&current_version)
+        .await
+        .expect("an unreadable line must not stop the journal from opening");
+    let next = CommandId::new();
+    journal
+        .append(record(&next, CommandPhase::Accepted))
         .await
         .unwrap();
-    let Err(error) = JsonlJournal::open(&no_version).await else {
-        panic!("a line without an envelope schema version must stay fatal");
-    };
-    assert!(matches!(error, JournalError::Corrupt { line: 1 }));
+    assert_eq!(journal.history(next).await.unwrap().records[0].sequence, 1);
+    let health = JsonlJournal::inspect(&current_version).await.unwrap();
+    assert_eq!((health.records, health.incompatible_records), (1, 1));
+
+    let no_version = dir.path().join("no-version.jsonl");
+    tokio::fs::write(
+        &no_version,
+        "{\"sequence\":0,\"phase\":\"accepted\"}\nnot json at all\n",
+    )
+    .await
+    .unwrap();
+    JsonlJournal::open(&no_version)
+        .await
+        .expect("damaged lines must not stop the journal from opening");
+    let health = JsonlJournal::inspect(&no_version).await.unwrap();
+    assert_eq!((health.records, health.incompatible_records), (0, 2));
 }
 
 #[tokio::test]
@@ -179,7 +190,6 @@ async fn inspect_reports_torn_tail_without_truncating() {
     assert!(health.exists);
     assert!(health.torn_tail);
     assert_eq!(health.records, 1);
-    assert_eq!(health.corrupt_line, None);
     let after = tokio::fs::read(&path).await.unwrap();
     assert_eq!(before, after);
 }
@@ -266,7 +276,7 @@ async fn hot_history_tracks_durable_appends_and_cold_records_remain_recoverable(
 }
 
 #[tokio::test]
-async fn a_corrupt_external_append_invalidates_cached_history() {
+async fn a_corrupt_external_append_is_skipped_by_history() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("commands.jsonl");
     let journal = JsonlJournal::open(&path).await.unwrap();
@@ -283,8 +293,5 @@ async fn a_corrupt_external_append_invalidates_cached_history() {
         .unwrap();
     file.write_all(b"bad-json\n").await.unwrap();
     file.sync_all().await.unwrap();
-    assert!(matches!(
-        journal.history(id).await,
-        Err(JournalError::Corrupt { line: 2 })
-    ));
+    assert_eq!(journal.history(id).await.unwrap().records.len(), 1);
 }

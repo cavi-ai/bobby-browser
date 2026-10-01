@@ -14,8 +14,14 @@ installation records them in the agent host's command arguments.
 `bobby runtime list` lists local scopes. Agents reuse one owner on an assigned
 loopback port. Each connection keeps its own MCP state and opening toolset,
 while browser profiles, storage, context, and jobs belong to the owner.
-Disconnecting an agent leaves the runtime available. Stop and restart the
-scope after configuration changes. Scope sharing is local to the current OS user.
+Disconnecting an agent leaves the runtime available. An agent always reaches
+the running owner, including after the scope's files change; `bobby runtime
+status` reports a pending change and `bobby runtime stop` applies it. A
+gateway binary launched directly with the scope's bootstrap credential
+attaches to the scope's owner when one is running. Unreadable records in the
+journals or the idempotency ledger never stop the runtime from starting:
+journal lines are skipped and counted by `bobby doctor`, and an unreadable
+ledger is moved aside. Scope sharing is local to the current OS user.
 
 ### How many agents
 

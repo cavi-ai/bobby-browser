@@ -266,8 +266,8 @@ enum CliCommand {
         /// Absolute path the native-host descriptor is published to
         #[arg(long)]
         descriptor: PathBuf,
-        /// Loopback address the pairing server binds to
-        #[arg(long, default_value = "127.0.0.1:9876")]
+        /// Loopback address the pairing server binds to; the OS picks the port
+        #[arg(long, default_value = "127.0.0.1:0")]
         bind: SocketAddr,
         /// BiDi WebSocket URL of the running Firefox (e.g. ws://127.0.0.1:9224/session)
         #[arg(long)]
@@ -1889,16 +1889,13 @@ fn prepare_jobs_client(common: &JobsCommonArgs) -> Result<(String, String)> {
     Ok((base_url, bearer))
 }
 
+/// `--config`, then `BOBBY_BROWSER_CONFIG`, then the scope's own
+/// `config.toml`. The working directory never picks the config: agents
+/// started anywhere must reach the same runtime.
 pub(crate) fn resolve_config_path(cli: Option<PathBuf>) -> PathBuf {
     cli.or_else(|| std::env::var_os("BOBBY_BROWSER_CONFIG").map(PathBuf::from))
-        .unwrap_or_else(|| {
-            if Path::new("./config.toml").exists() {
-                PathBuf::from("./config.toml")
-            } else {
-                runtime_scopes::default_config_path()
-                    .unwrap_or_else(|| PathBuf::from("./config.toml"))
-            }
-        })
+        .or_else(runtime_scopes::default_config_path)
+        .unwrap_or_else(|| PathBuf::from("config.toml"))
 }
 
 pub(crate) fn resolve_bootstrap_path(cli: Option<PathBuf>) -> Result<PathBuf> {
@@ -2650,17 +2647,6 @@ fn load_usable_live_descriptor(path: &Path) -> Option<NativeHostConfig> {
     .ok()
 }
 
-fn companion_bind_in_use(addr: SocketAddr) -> bool {
-    match std::net::TcpListener::bind(addr) {
-        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => true,
-        Ok(listener) => {
-            drop(listener);
-            false
-        }
-        Err(_) => false,
-    }
-}
-
 impl NativeHostEnroll for NativeHostFirefoxEnroll {
     #[allow(clippy::manual_async_fn)]
     fn enroll_and_wait_for_pair(
@@ -2704,9 +2690,6 @@ impl NativeHostEnroll for NativeHostFirefoxEnroll {
             .await
             {
                 Ok(enrollment) => enrollment,
-                Err(_) if companion_bind_in_use(defaults.companion_bind) => {
-                    return Err(EnrollHostError::BindInUse);
-                }
                 Err(_) => return Err(EnrollHostError::ListenerUnavailable),
             };
             let descriptor: NativeHostDescriptor = serde_json::from_slice(

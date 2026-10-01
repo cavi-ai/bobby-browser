@@ -336,20 +336,6 @@ fn client() -> Result<reqwest::Client> {
         .build()?)
 }
 
-fn compatible_owner(
-    owner: Owner,
-    digest: &str,
-    policy: crate::VisionSpawnPolicy,
-) -> Result<String> {
-    if owner.configuration_digest != digest
-        || (policy != crate::VisionSpawnPolicy::Auto
-            && owner.vision_policy != format!("{policy:?}"))
-    {
-        bail!("this scope is running with different configuration; run `bobby runtime stop` with the same team/project flags before restarting it");
-    }
-    Ok(owner.url)
-}
-
 async fn live_owner(dir: &Path) -> Result<Option<Owner>> {
     let path = dir.join("owner.json");
     let owner: Owner = match std::fs::read(path) {
@@ -401,26 +387,17 @@ pub(crate) async fn ensure_owner(
     let bootstrap = absolute(bootstrap)?;
     ensure_config(&config, root)?;
     let loaded = config::AppConfig::load(&config)?;
-    let (selection, _) = crate::resolve_browser_selection()?;
-    if matches!(
-        selection.preference,
-        config::EnginePreferenceConfig::Exact {
-            engine: config::BrowserEngineConfig::Firefox,
-            ..
-        }
-    ) && selection.firefox.is_empty()
-    {
-        bail!("this scope has no enrolled Firefox profile; run `bobby install --companion`, then `bobby firefox-start` and Pair from the toolbar, using the same team/project flags");
-    }
     crate::bootstrap_local::ensure_unrestricted_bootstrap(&bootstrap)?;
     crate::bootstrap_local::resolve_startup_credential_with(
         "127.0.0.1",
         &bootstrap,
         broker::StartupCredential::from_env,
     )?;
-    let expected_digest = digest(&config, &bootstrap)?;
+    // A running owner always takes the agent, even when the scope's files
+    // changed since it started: refusing would leave the agent with no
+    // runtime at all. `bobby runtime status` reports the pending change.
     if let Some(owner) = live_owner(&dir).await? {
-        return compatible_owner(owner, &expected_digest, policy);
+        return Ok(owner.url);
     }
     if loaded
         .server
@@ -439,7 +416,7 @@ pub(crate) async fn ensure_owner(
             Err(error) => return Err(error.into()),
         }
         if let Some(owner) = live_owner(&dir).await? {
-            return compatible_owner(owner, &digest(&config, &bootstrap)?, policy);
+            return Ok(owner.url);
         }
         if tokio::time::Instant::now() >= deadline {
             bail!(
@@ -473,6 +450,7 @@ pub(crate) async fn ensure_owner(
             .append(true)
             .open(dir.join("owner.log"))?;
         command
+            .current_dir(root)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(log));
@@ -496,8 +474,7 @@ pub(crate) async fn ensure_owner(
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         loop {
             if let Some(owner) = live_owner(&dir).await? {
-                // Explicit vision setup may persist config during startup.
-                return compatible_owner(owner, &digest(&config, &bootstrap)?, policy);
+                return Ok(owner.url);
             }
             if child.try_wait()?.is_some() {
                 bail!(
@@ -622,7 +599,18 @@ pub(crate) async fn run(command: RuntimeCommand) -> Result<()> {
             .await?
         ),
         RuntimeCommand::Status => match live_owner(&dir).await? {
-            Some(owner) => println!("running {} pid={} {}", owner.owner_id, owner.pid, owner.url),
+            Some(owner) => {
+                println!("running {} pid={} {}", owner.owner_id, owner.pid, owner.url);
+                let current = digest(
+                    &absolute(crate::resolve_config_path(None))?,
+                    &absolute(crate::resolve_bootstrap_path(None)?)?,
+                )?;
+                if current != owner.configuration_digest {
+                    println!(
+                        "configuration changed since this runtime started; `bobby runtime stop` applies it"
+                    );
+                }
+            }
             None => println!("stopped"),
         },
         RuntimeCommand::Stop => {

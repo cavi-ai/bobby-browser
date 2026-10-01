@@ -2148,124 +2148,26 @@ fn probe_http_status_blocking(url: &str) -> Result<u16> {
     Ok(response.status().as_u16())
 }
 
-fn address_accepts_connections(address: SocketAddr) -> bool {
-    std::net::TcpStream::connect_timeout(&address, Duration::from_millis(500)).is_ok()
-}
-
-fn probe_companion_route(url: &str) -> Result<u16> {
-    let url = url.to_owned();
-    match std::thread::spawn(move || probe_http_status_blocking(&url)).join() {
-        Ok(result) => result,
-        Err(_) => anyhow::bail!("companion route probe thread panicked"),
-    }
-}
-
-/// Report the preferred companion port; collisions are recovered automatically.
+/// The companion never binds its configured port: the OS picks a free one at
+/// every start and the native-host descriptor publishes it.
 fn check_companion_port(bind: SocketAddr) -> DoctorCheck {
-    let check = |status, detail| DoctorCheck {
-        status,
+    let detail = if bind.port() == 0 {
+        format!(
+            "the runtime binds a free loopback port on {} at every start",
+            bind.ip()
+        )
+    } else {
+        format!(
+            "the runtime binds a free loopback port on {} at every start; configured port {} is not used",
+            bind.ip(),
+            bind.port()
+        )
+    };
+    DoctorCheck {
+        status: DoctorStatus::Ok,
         name: "companion-port".to_string(),
         detail,
-    };
-
-    if !address_accepts_connections(bind) {
-        return check(
-            DoctorStatus::Ok,
-            format!("{bind} is free for the Firefox companion server"),
-        );
     }
-
-    // The companion route is a WebSocket upgrade: a plain GET is rejected 400
-    // and an unauthenticated upgrade 401. Either answer identifies our own
-    // server. The next runtime automatically selects another loopback port.
-    match probe_companion_route(&format!("http://{bind}/v1/companion")) {
-        Ok(400) | Ok(401) => {
-            let owner = companion_port_owner(bind.port())
-                .map(|(pid, command)| format!(" (pid {pid}, {command})"))
-                .unwrap_or_default();
-            check(
-                DoctorStatus::Ok,
-                format!(
-                    "{bind} is held by a running bobby runtime{owner}; the next runtime \
-                     automatically selects another loopback port"
-                ),
-            )
-        }
-        Ok(status) => check(
-            DoctorStatus::Ok,
-            format!(
-                "{bind} answered {status}; another service holds the preferred port -- \
-                 the next runtime automatically selects another loopback port"
-            ),
-        ),
-        Err(error) => check(
-            DoctorStatus::Ok,
-            format!(
-                "{bind} is held by a service that does not answer the companion route ({error}) \
-                 -- the next runtime automatically selects another loopback port"
-            ),
-        ),
-    }
-}
-
-/// Best-effort `(pid, command)` of the process listening on `port`.
-///
-/// Shells out to `lsof` on unix with a 2 s cap; returns `None` on any
-/// failure, timeout, or non-unix platform rather than block or mislead.
-fn companion_port_owner(port: u16) -> Option<(u32, String)> {
-    if !cfg!(unix) {
-        return None;
-    }
-    lsof_listen_owner(port, Duration::from_secs(2))
-}
-
-fn lsof_listen_owner(port: u16, timeout: Duration) -> Option<(u32, String)> {
-    use std::process::{Command, Stdio};
-    use std::sync::mpsc;
-
-    let mut child = Command::new("lsof")
-        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-Fpc"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let mut stdout = child.stdout.take()?;
-
-    let (sender, receiver) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut output = String::new();
-        let _ = stdout.read_to_string(&mut output);
-        let _ = sender.send(output);
-    });
-
-    match receiver.recv_timeout(timeout) {
-        Ok(output) => {
-            let _ = child.wait();
-            parse_lsof_owner(&output)
-        }
-        Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            None
-        }
-    }
-}
-
-/// Parses `lsof -Fpc` output (`p<pid>` and `c<command>` lines) into the
-/// listener's pid and command name.
-fn parse_lsof_owner(output: &str) -> Option<(u32, String)> {
-    let mut pid = None;
-    let mut command = None;
-    for line in output.lines() {
-        if let Some(rest) = line.strip_prefix('p') {
-            if let Ok(parsed) = rest.parse::<u32>() {
-                pid = Some(parsed);
-            }
-        } else if let Some(rest) = line.strip_prefix('c') {
-            command = Some(rest.to_string());
-        }
-    }
-    pid.zip(command)
 }
 
 /// Why a WebDriver BiDi probe failed.
@@ -2414,7 +2316,7 @@ fn record_jsonl_health(report: &mut DoctorReport, name: &str, path: &Path, healt
         report.warn(
             name,
             format!(
-                "{} incompatible records in {}",
+                "{} unreadable records skipped in {}",
                 health.incompatible_records,
                 path.display()
             ),
@@ -2445,7 +2347,7 @@ fn record_command_journal(report: &mut DoctorReport, path: &Path) {
                 bytes: health.bytes,
                 torn_tail: health.torn_tail,
                 incompatible_records: health.incompatible_records,
-                corrupt_line: health.corrupt_line,
+                corrupt_line: None,
             },
         ),
         Err(error) => report.fail("command-journal", format!("{error:#}")),
@@ -2466,7 +2368,7 @@ fn record_scheduler_journal(report: &mut DoctorReport, path: &Path) {
                 bytes: health.bytes,
                 torn_tail: health.torn_tail,
                 incompatible_records: health.incompatible_records,
-                corrupt_line: health.corrupt_line,
+                corrupt_line: None,
             },
         ),
         Err(error) => report.fail("scheduler-journal", format!("{error:#}")),
@@ -2956,98 +2858,18 @@ mod cdp_port_tests {
         assert!(check.detail.contains("bobby cdp"), "{}", check.detail);
     }
 
-    /// Nothing holds the companion port, so the next runtime can bind it.
     #[test]
-    fn a_free_companion_port_reports_ok() {
-        let bind: SocketAddr = format!("127.0.0.1:{}", free_port()).parse().unwrap();
-        let check = check_companion_port(bind);
+    fn the_companion_port_check_never_depends_on_the_configured_port() {
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let check = check_companion_port(held.local_addr().unwrap());
         assert_eq!(check.status, DoctorStatus::Ok, "{}", check.detail);
         assert_eq!(check.name, "companion-port");
-        assert!(check.detail.contains("is free"), "{}", check.detail);
-    }
-
-    /// A running companion on the preferred port is recoverable at startup.
-    #[test]
-    fn an_occupied_companion_port_reports_automatic_reassignment() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let bind = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || {
-            // Two connections arrive: the reachability probe, which opens and
-            // drops without writing, and the HTTP probe behind it.
-            for _ in 0..2 {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    return;
-                };
-                let mut request = Vec::new();
-                loop {
-                    let mut chunk = [0_u8; 256];
-                    match stream.read(&mut chunk) {
-                        Ok(0) | Err(_) => break,
-                        Ok(read) => {
-                            request.extend_from_slice(&chunk[..read]);
-                            if request.ends_with(b"\r\n\r\n") {
-                                break;
-                            }
-                        }
-                    }
-                }
-                if request.is_empty() {
-                    continue;
-                }
-                // How the companion route answers a plain GET: it is a
-                // WebSocket upgrade, so a bare request is rejected 400.
-                let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
-                let _ = stream.flush();
-            }
-        });
-
-        let check = check_companion_port(bind);
-        assert_eq!(check.status, DoctorStatus::Ok, "{}", check.detail);
-        assert!(
-            check
-                .detail
-                .contains("automatically selects another loopback port"),
-            "{}",
-            check.detail
+        assert!(check.detail.contains("is not used"), "{}", check.detail);
+        let check = check_companion_port("127.0.0.1:0".parse().unwrap());
+        assert_eq!(
+            check.detail,
+            "the runtime binds a free loopback port on 127.0.0.1 at every start"
         );
-        server.join().unwrap();
-    }
-
-    /// An unrelated listener also triggers automatic port reassignment.
-    #[test]
-    fn a_stranger_on_the_companion_port_reports_automatic_reassignment() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let bind = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || {
-            let _accepted = listener.accept().map(|(stream, _)| {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                drop(stream);
-            });
-        });
-
-        let check = check_companion_port(bind);
-        assert_eq!(check.status, DoctorStatus::Ok, "{}", check.detail);
-        assert!(
-            check
-                .detail
-                .contains("automatically selects another loopback port"),
-            "{}",
-            check.detail
-        );
-        let _ = server.join();
-    }
-
-    #[test]
-    fn lsof_owner_output_parses_pid_and_command() {
-        let owner = parse_lsof_owner("p20298\ncmcp-gateway\n");
-        assert_eq!(owner, Some((20298, "mcp-gateway".to_string())));
-    }
-
-    #[test]
-    fn lsof_owner_output_missing_a_field_is_none() {
-        assert_eq!(parse_lsof_owner("p20298\n"), None);
-        assert_eq!(parse_lsof_owner("cmcp-gateway\n"), None);
-        assert_eq!(parse_lsof_owner(""), None);
     }
 
     #[test]

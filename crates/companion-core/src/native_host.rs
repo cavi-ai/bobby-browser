@@ -298,8 +298,6 @@ pub enum NativeRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnrollHostError {
     ListenerUnavailable,
-    /// Defaults bind is occupied but no usable live descriptor was found.
-    BindInUse,
     BidiMissing,
     DefaultsMissing,
     Timeout,
@@ -309,7 +307,6 @@ impl EnrollHostError {
     pub fn code(self) -> &'static str {
         match self {
             Self::ListenerUnavailable => "listenerUnavailable",
-            Self::BindInUse => "bindInUse",
             Self::BidiMissing => "bidiMissing",
             Self::DefaultsMissing => "defaultsMissing",
             Self::Timeout => "timeout",

@@ -2308,7 +2308,7 @@ mod install_tests {
         let defaults = read_enroll_defaults(&defaults_path).unwrap();
         assert_eq!(defaults.profile_dir, config_dir.join("firefox-profile"));
         assert!(defaults.profile_dir.is_dir());
-        assert_eq!(defaults.companion_bind.to_string(), "127.0.0.1:9876");
+        assert_eq!(defaults.companion_bind.to_string(), "127.0.0.1:0");
         assert_eq!(defaults.descriptor_path, install.descriptor_path);
     }
 

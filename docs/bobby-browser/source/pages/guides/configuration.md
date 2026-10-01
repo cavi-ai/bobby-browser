@@ -4,9 +4,13 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 # Configuration
 
-`bobby serve` loads `./config.toml` at startup, overridable with
-`--config` / `BOBBY_BROWSER_CONFIG`. A missing file uses built-in defaults; a
-malformed file fails startup and names the path.
+`bobby serve`, `bobby mcp-stdio`, and the gateways load the scope's
+`config.toml` (the OS config dir `bobby-browser/` for the personal scope),
+overridable with `--config` / `BOBBY_BROWSER_CONFIG`. The working directory
+never selects the config, so agents started anywhere reach the same runtime.
+Relative paths inside the file resolve next to it. A missing file uses
+built-in defaults anchored the same way; a malformed file fails startup and
+names the path.
 
 The committed
 [`config.toml`](https://github.com/cavi-ai/bobby-browser/blob/main/config.toml)

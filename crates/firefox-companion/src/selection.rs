@@ -7,9 +7,7 @@
 use anyhow::Result;
 use artifact_store::ArtifactStore;
 use async_trait::async_trait;
-use companion_core::{
-    CompanionServer, CompanionServerConfig, CompanionServerError, CompanionServerHandle,
-};
+use companion_core::{CompanionServer, CompanionServerConfig, CompanionServerHandle};
 use companion_protocol::{BrowserEngine, CompanionCapabilities};
 use config::{
     AppConfig, BrowserEngineConfig, BrowserSelectionConfig, EnginePreferenceConfig,
@@ -525,33 +523,17 @@ async fn start_bootstrap_attempt(
     attachment_ttl: Duration,
     pairing_code_observer: Arc<dyn Fn(&str) + Send + Sync>,
 ) -> Result<FirefoxBootstrapAttempt, CommandError> {
-    let server = match CompanionServer::bind_loopback(CompanionServerConfig {
-        bind_addr: companion_bind,
-        pairing_code_ttl,
-        attachment_ttl,
-    })
-    .await
-    {
-        Ok(server) => Arc::new(server),
-        Err(CompanionServerError::Bind { source, .. })
-            if source.kind() == std::io::ErrorKind::AddrInUse =>
-        {
-            tracing::warn!(
-                bind = %companion_bind,
-                "configured companion port is taken; selecting a dynamic loopback port"
-            );
-            Arc::new(
-                CompanionServer::bind_loopback(CompanionServerConfig {
-                    bind_addr: SocketAddr::new(companion_bind.ip(), 0),
-                    pairing_code_ttl,
-                    attachment_ttl,
-                })
-                .await
-                .map_err(companion_error)?,
-            )
-        }
-        Err(error) => return Err(companion_error(error)),
-    };
+    // The OS picks the port and the descriptor publishes it; a configured
+    // port is never bound, so no other listener can make startup fail.
+    let server = Arc::new(
+        CompanionServer::bind_loopback(CompanionServerConfig {
+            bind_addr: SocketAddr::new(companion_bind.ip(), 0),
+            pairing_code_ttl,
+            attachment_ttl,
+        })
+        .await
+        .map_err(companion_error)?,
+    );
     let pairing_code = server.registry().issue_pairing_code().await;
     pairing_code_observer(&pairing_code);
     let descriptor = NativeHostDescriptor {
@@ -562,6 +544,7 @@ async fn start_bootstrap_attempt(
     let publication_path = descriptor_path.clone();
     let publication = tokio::task::spawn_blocking(move || {
         let _publication_lock = DescriptorLock::claim(&publication_path)?;
+        remove_orphaned_pending(&publication_path)?;
         remove_stale_descriptor(&publication_path)?;
         write_descriptor(&publication_path, &descriptor)
     })
@@ -1249,6 +1232,33 @@ fn write_descriptor(
     write_descriptor_with_pending_remove(path, descriptor, |pending| std::fs::remove_file(pending))
 }
 
+/// Remove `<descriptor>.pending-*` temp files left by a publication that was
+/// killed or failed before it could clean up. Callers hold the descriptor
+/// lock, so no publication is writing one right now.
+fn remove_orphaned_pending(path: &Path) -> std::io::Result<()> {
+    let (Some(parent), Some(stem)) = (path.parent(), path.file_stem()) else {
+        return Ok(());
+    };
+    let prefix = format!("{}.pending-", stem.to_string_lossy());
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with(&prefix) && entry.file_type()?.is_file()
+        {
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Recover from a descriptor leaked by a process that died mid-publication
 /// (a SIGKILL cannot run `Drop`): remove a pre-existing descriptor only when
 /// it parses as our own descriptor format, never a foreign file.
@@ -1574,8 +1584,9 @@ pub fn parse_selection(value: Option<&str>) -> Result<BrowserSelectionConfig> {
 pub const SELECTION_ENV: &str = "AUTOMATION_RUNTIME_BROWSER_SELECTION";
 
 /// Default loopback bind address written at companion install for later
-/// enrollment (CLI or native-host `enrollProfile`).
-pub const DEFAULT_COMPANION_BIND: &str = "127.0.0.1:9876";
+/// enrollment (CLI or native-host `enrollProfile`). Port 0: the OS picks a
+/// free port at every start and the descriptor publishes it.
+pub const DEFAULT_COMPANION_BIND: &str = "127.0.0.1:0";
 
 /// Install-time defaults consumed by Task 5 native-host enroll and the CLI
 /// enroll command when profile paths are not passed explicitly.
@@ -1662,6 +1673,32 @@ pub fn resolve_browser_selection_with(
     env: Option<&str>,
     persisted_path: Option<&Path>,
 ) -> Result<(BrowserSelectionConfig, SelectionSource)> {
+    resolve_declared_selection(env, persisted_path)
+        .map(|(selection, source)| (startable(selection), source))
+}
+
+/// A Firefox preference with no enrolled profile has nothing to launch;
+/// managed Chromium needs no enrollment, so the runtime starts on it until a
+/// profile is paired.
+fn startable(mut selection: BrowserSelectionConfig) -> BrowserSelectionConfig {
+    if selection.firefox.is_empty()
+        && matches!(
+            selection.preference,
+            EnginePreferenceConfig::Exact {
+                engine: BrowserEngineConfig::Firefox,
+                ..
+            }
+        )
+    {
+        selection.preference = EnginePreferenceConfig::ManagedChromium;
+    }
+    selection
+}
+
+fn resolve_declared_selection(
+    env: Option<&str>,
+    persisted_path: Option<&Path>,
+) -> Result<(BrowserSelectionConfig, SelectionSource)> {
     if let Some(value) = env {
         let selection = parse_selection(Some(value))
             .map_err(|error| anyhow::anyhow!("{SELECTION_ENV} is invalid: {error:#}"))?;
@@ -1711,7 +1748,7 @@ pub fn build_enrolled_browser_selection(
             profile_id,
             bidi_url: bidi_url.to_owned(),
             profile_dir: profile_dir.to_path_buf(),
-            companion_bind: companion_bind.to_string(),
+            companion_bind: SocketAddr::new(companion_bind.ip(), 0).to_string(),
             descriptor_path: descriptor_path.to_path_buf(),
             timeout_ms: 30_000,
             pairing_code_ttl_ms: 300_000,
@@ -1928,6 +1965,87 @@ mod tests {
         assert_eq!(published.endpoint, format!("ws://{bound}/v1/companion"));
         drop(attempt);
         assert!(!descriptor.exists());
+    }
+
+    /// A configured port is never bound, even when it is free: the OS picks
+    /// the port and the descriptor publishes it.
+    #[tokio::test]
+    async fn a_free_configured_companion_port_is_never_bound() {
+        let configured = {
+            let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            probe.local_addr().unwrap()
+        };
+        let root = tempfile::tempdir().unwrap();
+        let descriptor = root.path().join("descriptor.json");
+        let attempt = start_bootstrap_attempt(
+            configured,
+            descriptor.clone(),
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        let bound = attempt.server().local_addr();
+        assert_eq!(bound.ip(), configured.ip());
+        assert_ne!(
+            bound.port(),
+            configured.port(),
+            "the configured port was pinned"
+        );
+        let published: NativeHostDescriptor =
+            serde_json::from_slice(&std::fs::read(&descriptor).unwrap()).unwrap();
+        assert_eq!(published.endpoint, format!("ws://{bound}/v1/companion"));
+        drop(attempt);
+    }
+
+    /// Temp files left by a killed or failed publication are removed by the
+    /// next one; other files in the directory are left alone.
+    #[tokio::test]
+    async fn publication_removes_orphaned_pending_descriptors() {
+        let root = tempfile::tempdir().unwrap();
+        let descriptor = root.path().join("firefox-native-host-descriptor.json");
+        let orphans = [b"".as_slice(), b"{\"endp".as_slice(), b"{}".as_slice()]
+            .into_iter()
+            .map(|bytes| {
+                let path = descriptor.with_extension(format!("pending-{}", uuid::Uuid::new_v4()));
+                std::fs::write(&path, bytes).unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+        let unrelated = root.path().join(format!(
+            "browser-selection.pending-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&unrelated, b"{}").unwrap();
+
+        let attempt = start_bootstrap_attempt(
+            "127.0.0.1:0".parse().unwrap(),
+            descriptor.clone(),
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        for orphan in &orphans {
+            assert!(!orphan.exists(), "{} survived", orphan.display());
+        }
+        assert!(unrelated.exists());
+        assert!(descriptor.exists());
+        drop(attempt);
+    }
+
+    #[test]
+    fn enrolled_selection_never_pins_a_companion_port() {
+        let selection = build_enrolled_browser_selection(
+            &ProfileId(uuid::Uuid::new_v4()),
+            "ws://127.0.0.1:9224/session",
+            Path::new("/tmp/profile"),
+            "127.0.0.1:9877".parse().unwrap(),
+            Path::new("/tmp/descriptor.json"),
+        );
+        assert_eq!(selection.firefox[0].companion_bind, "127.0.0.1:0");
     }
 
     #[tokio::test]
@@ -2225,7 +2343,7 @@ mod tests {
             "ws://127.0.0.1:9222/session"
         );
         assert_eq!(value["firefox"][0]["profileDir"], "/tmp/firefox-profile");
-        assert_eq!(value["firefox"][0]["companionBind"], "127.0.0.1:9876");
+        assert_eq!(value["firefox"][0]["companionBind"], "127.0.0.1:0");
         assert_eq!(
             value["firefox"][0]["descriptorPath"],
             "/tmp/descriptor.json"
@@ -2790,15 +2908,23 @@ mod tests {
             }
         );
 
+        // Nothing enrolled: the Firefox default has nothing to launch, so the
+        // runtime starts on managed Chromium.
         let missing = root.path().join("absent.json");
         let (selection, source) = resolve_browser_selection_with(None, Some(&missing)).unwrap();
         assert_eq!(source, SelectionSource::Default);
         assert_eq!(
             selection.preference,
-            EnginePreferenceConfig::Exact {
-                engine: BrowserEngineConfig::Firefox,
-                profile_id: None,
-            }
+            EnginePreferenceConfig::ManagedChromium
+        );
+        let (selection, _) = resolve_browser_selection_with(
+            Some(r#"{"preference":{"mode":"exact","engine":"firefox"}}"#),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            selection.preference,
+            EnginePreferenceConfig::ManagedChromium
         );
     }
 
