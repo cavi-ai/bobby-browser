@@ -115,3 +115,4 @@ so. Export only reads the runtime's files, so it runs next to a live runtime.
 - [Events and recovery](../guides/events-recovery.md)
 - [Intent commands](../guides/intents.md)
 - [TypeScript SDK](../surfaces/typescript-sdk.md)
+- [Python SDK](../surfaces/python-sdk.md)

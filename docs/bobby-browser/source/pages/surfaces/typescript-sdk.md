@@ -108,3 +108,4 @@ Failures throw `RuntimeClientError` with `kind` of `http` | `transport` |
 - [First browser session](../introduction/first-session.md)
 - [HTTP API reference](http-api.md)
 - [Authentication](../guides/auth.md)
+- [Python SDK](python-sdk.md)

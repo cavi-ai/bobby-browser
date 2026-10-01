@@ -226,24 +226,27 @@ pip install bobby-browser
 ```
 
 ```python
+import os
 from bobby_browser import BrowserRuntimeClient
 
 client = BrowserRuntimeClient("http://127.0.0.1:7777", os.environ["AUTOMATION_RUNTIME_TOKEN"])
 ```
 
+[`bobby-browser` on PyPI](https://pypi.org/project/bobby-browser/) ·
 [Python SDK guide](docs/bobby-browser/source/pages/surfaces/python-sdk.md) ·
 installable from this repo path with `pip install -e packages/python-sdk`
 
 ## Published artifacts
 
-One version, one `v*` tag, three artifacts:
+One version, one `v*` tag:
 
 | Artifact | Name |
 |---|---|
-| Binary | [GitHub release assets](https://github.com/cavi-ai/bobby-browser/releases/latest) — `bobby`, `mcp-gateway`, `acp-gateway` |
+| Binary | [GitHub release assets](https://github.com/cavi-ai/bobby-browser/releases/latest) — `bobby`, `mcp-gateway`, `acp-gateway`, and the Firefox companion |
 | Homebrew | [`cavi-ai/tap/bobby-browser`](https://github.com/cavi-ai/homebrew-tap) |
 | npm | [`@cavi-ai/bobby-browser`](https://www.npmjs.com/package/@cavi-ai/bobby-browser) |
 | crates.io | [`bobby-browser-client`](https://crates.io/crates/bobby-browser-client) — [docs.rs](https://docs.rs/bobby-browser-client) |
+| PyPI | [`bobby-browser`](https://pypi.org/project/bobby-browser/) |
 
 Everything else in `crates/` and `packages/` is implementation and is not
 published. `scripts/check-version-agreement.py` enforces this in CI.

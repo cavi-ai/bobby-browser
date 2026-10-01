@@ -8,6 +8,7 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 - Rust toolchain matching `rust-toolchain.toml`
 - Node.js 22+ and pnpm for TypeScript packages (SDK / docs)
+- Python 3.10+ for the Python SDK
 - Firefox (default engine) and/or Chromium when running live browser workflows
 
 ## Build from source (always works)
@@ -76,21 +77,23 @@ Selecting an agent host generates a missing agent bootstrap credential.
 Vision setup generates a separate owner-only local vision credential. Bobby
 does not print either secret during routine install or doctor output.
 
-## Install from registries (when published)
+## Install the SDKs from registries
 
 ```bash
-# CLI — after crates.io publish succeeds for this version
-cargo install bobby-browser
-
-# TypeScript SDK — after npm publish succeeds
+# TypeScript SDK
 npm install @cavi-ai/bobby-browser
 
-# Rust HTTP client — after crates.io publish
+# Python SDK
+pip install bobby-browser
+
+# Rust HTTP client
 cargo add bobby-browser-client
 ```
 
-Do not treat registry installs as available until `npm view` / `cargo search`
-shows the version you need.
+Each `v*` tag publishes all three. A registry can trail the tag by a few
+minutes; `npm view`, `pip index versions`, or `cargo search` shows the version
+it serves. The CLI is not on crates.io: install it from a release binary,
+Homebrew, or source.
 
 ## Install a GitHub Release binary
 

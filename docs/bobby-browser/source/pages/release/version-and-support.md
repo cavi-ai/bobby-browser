@@ -13,9 +13,9 @@ Product docs line: **{{PRODUCT_VERSION}}**. Interface version string:
 - Public docs are published as the GitHub Release asset
   `bobby-browser-docs-v{{PRODUCT_VERSION}}.tar.gz` with an integrity manifest
   (`CONSUMER.md`), built from `docs/bobby-browser/source`.
-- Registry publishes (npm / crates.io / Release binaries) may lag the git tag —
-  verify with `npm view` / `cargo search` / GitHub Releases before documenting
-  an install as live.
+- Registry publishes (npm / PyPI / crates.io / Release binaries) may lag the
+  git tag — verify with `npm view` / `pip index versions` / `cargo search` /
+  GitHub Releases before documenting an install as live.
 
 ## Where to look
 

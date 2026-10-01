@@ -11,8 +11,8 @@ Two ways to use Rust with bobby-browser:
 2. **Embed** — workspace crates such as `interface-core` / `sdk-core` / `broker`
    (Embed tier) — see the [Rust crate book](../rust/index.md)
 
-The installable CLI package is `bobby-browser` (`cargo install bobby-browser` →
-`bobby`) once published; until then build from source.
+The CLI (`bobby`) is not on crates.io: install it from a release binary,
+Homebrew, or source ([Installation](../introduction/installation.md)).
 
 ## HTTP client (recommended for apps)
 
