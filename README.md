@@ -41,6 +41,8 @@ roles, names, ordinals — never typed values or credentials. `context_ask` and
 `context_neighbors` answer from it, so a cold session can locate a control
 before its first snapshot. `bobby context list` and `bobby context forget
 <site>` manage it; a release gate scans the store to prove no values land there.
+After a runtime restart, `workflow_observe` on the gauntlet onboarding form
+answers from memory in 866 bytes instead of a 7,536-byte live snapshot.
 
 **It survives losing its place.** `recovery_status` takes a `workflowId`, or a
 `sessionId` when a compaction lost it, and lists that session's recoverable

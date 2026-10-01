@@ -15,6 +15,20 @@
   with managed Chromium complete every journey with no request lost; the
   ninth connection of one principal is refused with `resourceExhausted`. The
   MCP stdio page carries the latencies.
+- Remembered site structure is written to disk when each outcome is
+  verified. It was written only when a client closed its session, so an
+  agent that never called `session_close` lost it at the next runtime
+  restart.
+- A completed `intent_complete_form` or `intent_extract` remembers every
+  field it resolved; only the first was recorded. A failed one counts the
+  failure against the field that failed instead of the first field.
+- Two context flushes of one site at once could leave the older snapshot on
+  disk; flushes now run one at a time.
+
+- `remembered_site_calls` live test: after a runtime restart on managed
+  Chromium, `workflow_observe` on the gauntlet onboarding form answers from
+  memory in 866 bytes instead of a 7,536-byte live snapshot, with the same
+  two calls.
 
 ### Changed
 

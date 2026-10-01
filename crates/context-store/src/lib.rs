@@ -152,6 +152,9 @@ pub struct ContextStore {
     root: Arc<PathBuf>,
     sites: Mutex<BTreeMap<String, SiteContext>>,
     dirty: Mutex<BTreeMap<String, bool>>,
+    /// One flush at a time: two overlapping flushes of one site could
+    /// otherwise rename an older snapshot over a newer one.
+    flushing: Mutex<()>,
     _lock: Lockfile,
 }
 
@@ -190,6 +193,7 @@ impl ContextStore {
                 root: Arc::new(root),
                 sites: Mutex::new(index),
                 dirty: Mutex::new(BTreeMap::new()),
+                flushing: Mutex::new(()),
                 _lock: lock,
             },
             report,
@@ -263,6 +267,7 @@ impl ContextStore {
     /// Persists every dirty site. Returns the keys that failed to write;
     /// they stay dirty and remain available in memory for this session.
     pub async fn flush(&self) -> Vec<String> {
+        let _flushing = self.flushing.lock().await;
         let dirty_keys: Vec<String> = {
             let mut dirty = self.dirty.lock().await;
             let keys = dirty.keys().cloned().collect();

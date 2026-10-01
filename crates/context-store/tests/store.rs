@@ -345,3 +345,40 @@ async fn a_live_store_still_refuses_a_second_writer() {
     );
     drop(held);
 }
+
+/// Concurrent sessions flush the same site: whatever order the writes land in,
+/// the file on disk ends up equal to the newest in-memory state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_flushes_leave_the_newest_state_on_disk() {
+    let temp = tempfile::tempdir().unwrap();
+    for round in 0..20 {
+        let (store, _) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
+        let store = std::sync::Arc::new(store);
+        let mut tasks = Vec::new();
+        for writer in 0..32 {
+            let store = std::sync::Arc::clone(&store);
+            tasks.push(tokio::spawn(async move {
+                // Larger files keep each write in flight longer.
+                let names = (0..writer * 20)
+                    .map(|field| format!("Field {round}-{writer}-{field}"))
+                    .collect::<Vec<_>>();
+                let names = names.iter().map(String::as_str).collect::<Vec<_>>();
+                store
+                    .upsert_site("https://example.test", site(&names, 1))
+                    .await;
+                assert!(store.flush().await.is_empty());
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        let newest = store.site("https://example.test").await.unwrap();
+        drop(store);
+        let (reopened, _) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
+        assert_eq!(
+            reopened.site("https://example.test").await.unwrap(),
+            newest,
+            "round {round}: an older flush overwrote a newer one"
+        );
+    }
+}

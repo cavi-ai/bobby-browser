@@ -3,16 +3,16 @@
 //! per-profile [`ContextStore`].
 //!
 //! Attached to a [`PageRuntime`] only when the runtime's engine selection
-//! carries a durable profile identity (Firefox companion). Chromium sessions
-//! run with no promotion handle at all: disposable profiles have no durable
-//! identity to key by, so they read nothing and write nothing.
+//! carries a durable profile identity: an enrolled Firefox companion, a named
+//! Chromium profile, or managed Chromium's shared `managed-chromium` identity.
 //!
 //! Only structure is promoted: the resolved control's role, accessible name,
 //! and ordinal; the intent kind; counters; a coarse day-precision timestamp.
 //! Typed values, credentials, page text, and exact timestamps never leave
-//! the session. Writes are buffered in memory and flushed on session close;
-//! a persistence failure degrades to session-only with one log event and
-//! never fails the command that triggered it.
+//! the session. Each promoted outcome is written to disk before the command
+//! returns; a persistence failure degrades to session-only with one log
+//! event, is retried at the next flush, and never fails the command that
+//! triggered it.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -49,12 +49,16 @@ impl ContextPromotion {
         self.store.clone()
     }
 
-    /// Promotes the resolved target of a completed or failed command.
+    /// Promotes the resolved targets of a completed or failed command and
+    /// writes them to disk before returning.
     ///
-    /// `evidence` is the command's evidence; a `Resolution` item pins the
-    /// exact target that was acted on, an `IntentExecution` record supplies
-    /// the intent kind, the resolution path, and (on failure, where no
-    /// resolution was reached) the best candidate seen.
+    /// `evidence` is the command's evidence. Each `IntentExecution` record
+    /// supplies an intent kind and resolution path for the `Resolution`
+    /// items emitted since the previous record: one for a fill, one per
+    /// field for a completed form or an extraction. A completed command
+    /// promotes every such group; a failed one promotes only its last group,
+    /// the step that failed, falling back to that record's best candidate
+    /// when no resolution was reached.
     pub async fn record_outcome(
         &self,
         page_url: Option<&str>,
@@ -66,73 +70,91 @@ impl ContextPromotion {
         let Some(pattern) = page_pattern(url) else {
             return;
         };
-        let record = evidence.iter().find_map(|item| match item {
-            Evidence::IntentExecution { record } => Some(record),
-            _ => None,
-        });
-        let Some(record) = record else { return };
-        // A challenge solve has no resolved control — it acts on pixels
-        // inside a widget iframe. Record it at site level as the challenge
-        // prior instead of forcing it into the control schema.
-        if record.intent_kind == "solveChallenge" {
-            self.store
-                .record_challenge(
-                    &site,
-                    "solveChallenge",
-                    success,
-                    day_since_epoch(chrono::Utc::now()),
-                )
-                .await;
+        let mut groups = Vec::new();
+        let mut resolved = Vec::new();
+        for item in evidence {
+            match item {
+                Evidence::Resolution { target, .. } => resolved.push(target.as_ref()),
+                Evidence::IntentExecution { record } => {
+                    groups.push((record, std::mem::take(&mut resolved)));
+                }
+                _ => {}
+            }
+        }
+        if !success {
+            groups = groups.split_off(groups.len().saturating_sub(1));
+        }
+        if groups.is_empty() {
             return;
         }
-        let resolution = evidence.iter().find_map(|item| match item {
-            Evidence::Resolution { target, .. } => Some(target.as_ref()),
-            _ => None,
-        });
-        let control = match resolution {
-            Some(target) => control_from_target(target),
-            None if !success => record.candidates.first().and_then(|candidate| {
-                Some(ControlContext {
-                    role: candidate.role.clone()?,
-                    accessible_name: candidate.name.clone()?,
-                    ordinal: None,
-                    form_membership: PAGE_LEVEL_FORM.to_string(),
-                    intents: BTreeMap::new(),
-                })
-            }),
-            None => None,
-        };
-        let Some(mut control) = control else { return };
-        let source = match record.resolution_path {
-            IntentResolutionPath::VisionFallback | IntentResolutionPath::VisionPrefill => {
-                RecordSource::VisionPromoted
-            }
-            IntentResolutionPath::Deterministic => RecordSource::Observed,
-        };
-        let stats = control
-            .intents
-            .entry(record.intent_kind.clone())
-            .or_default();
-        apply_outcome(stats, success, source);
 
-        let mut site_context = self.store.site(&site).await.unwrap_or_default();
-        let page = site_context.pages.entry(pattern).or_default();
-        let form = page.forms.entry(PAGE_LEVEL_FORM.to_string()).or_default();
-        match form.controls.iter_mut().find(|existing| {
-            existing.role == control.role
-                && existing.accessible_name == control.accessible_name
-                && existing.ordinal == control.ordinal
-        }) {
-            Some(existing) => {
-                let stats = existing
-                    .intents
-                    .entry(record.intent_kind.clone())
-                    .or_default();
+        let mut controls = Vec::new();
+        for (record, targets) in groups {
+            // A challenge solve has no resolved control — it acts on pixels
+            // inside a widget iframe. Record it at site level as the challenge
+            // prior instead of forcing it into the control schema.
+            if record.intent_kind == "solveChallenge" {
+                self.store
+                    .record_challenge(
+                        &site,
+                        "solveChallenge",
+                        success,
+                        day_since_epoch(chrono::Utc::now()),
+                    )
+                    .await;
+                continue;
+            }
+            let source = match record.resolution_path {
+                IntentResolutionPath::VisionFallback | IntentResolutionPath::VisionPrefill => {
+                    RecordSource::VisionPromoted
+                }
+                IntentResolutionPath::Deterministic => RecordSource::Observed,
+            };
+            if targets.is_empty() && !success {
+                if let Some(control) = record.candidates.first().and_then(|candidate| {
+                    Some(ControlContext {
+                        role: candidate.role.clone()?,
+                        accessible_name: candidate.name.clone()?,
+                        ordinal: None,
+                        form_membership: PAGE_LEVEL_FORM.to_string(),
+                        intents: BTreeMap::new(),
+                    })
+                }) {
+                    controls.push((control, record.intent_kind.clone(), source));
+                }
+            }
+            for target in targets {
+                if let Some(control) = control_from_target(target) {
+                    controls.push((control, record.intent_kind.clone(), source));
+                }
+            }
+        }
+
+        if !controls.is_empty() {
+            let mut site_context = self.store.site(&site).await.unwrap_or_default();
+            let page = site_context.pages.entry(pattern).or_default();
+            let form = page.forms.entry(PAGE_LEVEL_FORM.to_string()).or_default();
+            for (control, intent_kind, source) in controls {
+                let index = match form.controls.iter().position(|existing| {
+                    existing.role == control.role
+                        && existing.accessible_name == control.accessible_name
+                        && existing.ordinal == control.ordinal
+                }) {
+                    Some(index) => index,
+                    None => {
+                        form.controls.push(control);
+                        form.controls.len() - 1
+                    }
+                };
+                let stats = form.controls[index].intents.entry(intent_kind).or_default();
                 apply_outcome(stats, success, source);
             }
-            None => form.controls.push(control),
+            self.store.upsert_site(&site, site_context).await;
         }
-        self.store.upsert_site(&site, site_context).await;
+        // A runtime can stop without any session closing (a shared owner
+        // restart, a killed process), so the outcome is written now rather
+        // than at session close.
+        self.flush().await;
     }
 
     /// Answers a control question from the persisted store alone — the
