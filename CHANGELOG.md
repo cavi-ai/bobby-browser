@@ -8,13 +8,6 @@
   refused a connection (for example `resourceExhausted: principal in-flight
   capacity exhausted (retry after 1000 ms)`) instead of "could not
   authenticate or connect to the shared runtime".
-
-### Added
-
-- `shared_runtime_load` live test: 1, 4, and 8 agents on one runtime owner
-  with managed Chromium complete every journey with no request lost; the
-  ninth connection of one principal is refused with `resourceExhausted`. The
-  MCP stdio page carries the latencies.
 - Remembered site structure is written to disk when each outcome is
   verified. It was written only when a client closed its session, so an
   agent that never called `session_close` lost it at the next runtime
@@ -25,6 +18,12 @@
 - Two context flushes of one site at once could leave the older snapshot on
   disk; flushes now run one at a time.
 
+### Added
+
+- `shared_runtime_load` live test: 1, 4, and 8 agents on one runtime owner
+  with managed Chromium complete every journey with no request lost; the
+  ninth connection of one principal is refused with `resourceExhausted`. The
+  MCP stdio page carries the latencies.
 - `remembered_site_calls` live test: after a runtime restart on managed
   Chromium, `workflow_observe` on the gauntlet onboarding form answers from
   memory in 866 bytes instead of a 7,536-byte live snapshot, with the same
@@ -222,9 +221,6 @@
   reason with none falls back to the general one. The duplicate-request-id
   rejection's `data.repair` is now the `{action, doc}` object instead of a
   bare string.
-
-### Changed
-
 - Vision proxy error responses are a structured object,
   `{"error": {"code", "kind", "message", "retryable"}}` (codes
   `visionAuthRejected`, `visionInvalidRequest`, `visionUpstreamTransport`,
