@@ -342,8 +342,9 @@ impl RuntimeInterface for AuthenticatedRuntime {
             .pages
             .context()
             .forget_all(&pages.into_iter().collect::<Vec<_>>());
-        // Session close is the flush point for durable context promotion;
-        // flush failures stay session-only and never fail the close.
+        // Promotion writes each outcome as it lands; closing retries any
+        // write that failed then. Failures stay session-only and never fail
+        // the close.
         if let Some(promotion) = self.inner.pages.context_promotion() {
             promotion.flush().await;
         }

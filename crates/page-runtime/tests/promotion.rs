@@ -85,6 +85,118 @@ async fn verified_success_promotes_the_resolved_control() {
 }
 
 #[tokio::test]
+async fn promoted_outcomes_reach_disk_without_a_session_close() {
+    let (promotion, temp) = promotion().await;
+    let evidence = vec![
+        resolution("Email address", Some(1)),
+        Evidence::IntentExecution {
+            record: record("fill", IntentResolutionPath::Deterministic),
+        },
+    ];
+    promotion.record_outcome(Some(URL), &evidence, true).await;
+    drop(promotion);
+
+    let (store, report) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
+    assert_eq!(report.sites_loaded, 1, "the outcome stayed in memory only");
+    assert!(store.site("https://example.test").await.is_some());
+}
+
+fn form_field(name: &str) -> Evidence {
+    Evidence::Configuration {
+        name: "completeFormField".into(),
+        value: name.into(),
+    }
+}
+
+fn fill_record(verification: &str) -> Evidence {
+    let mut record = record("fill", IntentResolutionPath::Deterministic);
+    record.verification = verification.into();
+    Evidence::IntentExecution { record }
+}
+
+#[tokio::test]
+async fn every_field_of_a_completed_form_is_promoted() {
+    let (promotion, _temp) = promotion().await;
+    let evidence = vec![
+        form_field("fullName"),
+        resolution("Full name", None),
+        fill_record("filled"),
+        form_field("workEmail"),
+        resolution("Work email", None),
+        fill_record("filled"),
+    ];
+    promotion.record_outcome(Some(URL), &evidence, true).await;
+
+    let site = promotion
+        .store()
+        .site("https://example.test")
+        .await
+        .unwrap();
+    let controls = &site.pages["/login"].forms["page"].controls;
+    let names = controls
+        .iter()
+        .map(|control| control.accessible_name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["Full name", "Work email"]);
+    for control in controls {
+        assert_eq!(control.intents["fill"].success_count, 1);
+    }
+}
+
+#[tokio::test]
+async fn every_extracted_field_is_promoted() {
+    let (promotion, _temp) = promotion().await;
+    let mut record = record("extract", IntentResolutionPath::Deterministic);
+    record.verification = "extracted".into();
+    let evidence = vec![
+        resolution("Invoice number", None),
+        resolution("Amount due", None),
+        Evidence::IntentExecution { record },
+    ];
+    promotion.record_outcome(Some(URL), &evidence, true).await;
+
+    let site = promotion
+        .store()
+        .site("https://example.test")
+        .await
+        .unwrap();
+    let controls = &site.pages["/login"].forms["page"].controls;
+    let names = controls
+        .iter()
+        .map(|control| control.accessible_name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["Invoice number", "Amount due"]);
+    for control in controls {
+        assert_eq!(control.intents["extract"].success_count, 1);
+    }
+}
+
+#[tokio::test]
+async fn a_failed_form_counts_only_the_field_that_failed() {
+    let (promotion, _temp) = promotion().await;
+    let evidence = vec![
+        form_field("fullName"),
+        resolution("Full name", None),
+        fill_record("filled"),
+        form_field("workEmail"),
+        resolution("Work email", None),
+        fill_record("verifyFailed"),
+    ];
+    promotion.record_outcome(Some(URL), &evidence, false).await;
+
+    let site = promotion
+        .store()
+        .site("https://example.test")
+        .await
+        .unwrap();
+    let controls = &site.pages["/login"].forms["page"].controls;
+    assert_eq!(controls.len(), 1, "{controls:?}");
+    assert_eq!(controls[0].accessible_name, "Work email");
+    assert_eq!(controls[0].intents["fill"].failure_count, 1);
+    assert_eq!(controls[0].intents["fill"].success_count, 0);
+}
+
+#[tokio::test]
 async fn repeated_outcomes_accumulate_counters() {
     let (promotion, _temp) = promotion().await;
     let evidence = vec![
