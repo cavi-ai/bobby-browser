@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.19.0 - 2026-10-01
+
 ### Fixed
 
 - `intent_submit_and_verify` and a boundary `intent_follow` honor their
@@ -89,6 +91,7 @@
   list --profile managed-chromium` shows the sites.
 - Docker image: the context store lives at `/var/lib/bobby/data/context` on
   the data volume.
+- `Formula/bobby-browser.rb` carries the v0.18.0 asset digests.
 
 ## 0.18.0 - 2026-09-30
 
