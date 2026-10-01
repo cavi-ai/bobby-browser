@@ -74,7 +74,10 @@ credential, browser profile, context, and storage. Clients in the same scope
 reuse one authenticated runtime on an automatically assigned loopback port.
 Each MCP/ACP connection keeps its own protocol state; disconnecting an agent
 leaves the owner available for other clients. `runtime stop` stops the scope
-explicitly. Stop and restart after changing its configuration.
+explicitly. Stop and restart after changing its configuration. Eight agents on
+one owner each started a browser, filled a form, and closed in 2.0–2.1 s
+together, with no request lost; agents sharing one credential are capped at 8
+connections ([measurements](docs/bobby-browser/source/pages/surfaces/mcp-stdio.md#how-many-agents)).
 
 Scopes organize runtimes on one machine under the current OS user. Existing
 capability gates apply to every connection. Scoped host installation records

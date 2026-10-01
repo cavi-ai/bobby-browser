@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Fixed
+
+- `bobby mcp-stdio` and `bobby acp-stdio` report why the shared runtime
+  refused a connection (for example `resourceExhausted: principal in-flight
+  capacity exhausted (retry after 1000 ms)`) instead of "could not
+  authenticate or connect to the shared runtime".
+
+### Added
+
+- `shared_runtime_load` live test: 1, 4, and 8 agents on one runtime owner
+  with managed Chromium complete every journey with no request lost; the
+  ninth connection of one principal is refused with `resourceExhausted`. The
+  MCP stdio page carries the latencies.
+
 ### Changed
 
 - `Formula/bobby-browser.rb` carries the v0.19.0 asset digests.

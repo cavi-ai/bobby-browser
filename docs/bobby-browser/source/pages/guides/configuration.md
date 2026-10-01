@@ -348,7 +348,7 @@ reachable as a node named `vision`.
 | `max_connections` | `64` | Concurrent interface connections |
 | `token_records_path` | `./data/storage/authorities.json` | Issued principal records |
 | `max_principals` | `16` | Max enrolled principals |
-| `max_in_flight_per_principal` | `8` | Fairness / concurrency cap |
+| `max_in_flight_per_principal` | `8` | Per principal: open MCP/ACP connections plus in-flight HTTP requests; the next one is refused with `resourceExhausted` |
 | `max_rejection_workers` | `16` | Concurrent rejection / policy-worker permits (must be > 0) |
 
 ## Bootstrap env (not in config.toml)
