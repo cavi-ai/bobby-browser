@@ -69,6 +69,11 @@
   `bobby openshell install` writes the pack into a project.
 - The vision docs name the `vision-service` doctor check; they named a
   `vision-endpoint` check that does not exist.
+- The Firefox companion's native-host wrapper runs the installed `bobby` (the
+  one the same `bobby install` put on PATH, else one already in the bin dir),
+  the binary host MCP entries launch. It ran the binary that ran the install,
+  so after `make install` a rebuild of the checkout replaced the host binary
+  and `cargo clean` broke pairing.
 
 ### Added
 
