@@ -4042,21 +4042,27 @@ model = "mlx-community/example-selected"
     /// variable they touch so they cannot leak into each other or the host.
     struct DoctorEnvGuard {
         saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        _home: tempfile::TempDir,
     }
 
     impl DoctorEnvGuard {
-        const VARS: [&'static str; 9] = [
+        const VARS: [&'static str; 12] = [
             "AUTOMATION_RUNTIME_BROWSER_SELECTION",
             "AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN",
             "AUTOMATION_RUNTIME_BOOTSTRAP_PRINCIPAL",
             "AUTOMATION_RUNTIME_BOOTSTRAP_CAPABILITIES",
             "AUTOMATION_RUNTIME_BOOTSTRAP_EXPIRES_AT",
             "BOBBY_BROWSER_BOOTSTRAP_ENV",
+            "BOBBY_BROWSER_SCOPE_DIR",
             "BOBBY_VISION_TOKEN",
+            "HOME",
             "OPENAI_API_KEY",
             "PATH",
+            "XDG_CONFIG_HOME",
         ];
 
+        /// Clears the variables and gives doctor an empty home, so it never
+        /// reads this machine's scope, running runtime, or host configs.
         fn clear() -> Self {
             let saved = Self::VARS
                 .iter()
@@ -4066,7 +4072,14 @@ model = "mlx-community/example-selected"
                     (*name, value)
                 })
                 .collect();
-            Self { saved }
+            let home = tempfile::tempdir().unwrap();
+            #[cfg(target_os = "macos")]
+            std::fs::create_dir_all(home.path().join("Library/Application Support")).unwrap();
+            unsafe {
+                std::env::set_var("HOME", home.path());
+                std::env::set_var("XDG_CONFIG_HOME", home.path().join(".config"));
+            }
+            Self { saved, _home: home }
         }
 
         fn set(&self, name: &str, value: &str) {
@@ -4086,7 +4099,7 @@ model = "mlx-community/example-selected"
         }
     }
 
-    static DOCTOR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::onboarding::INSTALL_ENV_LOCK as DOCTOR_ENV_LOCK;
 
     fn doctor_config_fixture(root: &Path) -> PathBuf {
         let path = root.join("config.toml");
