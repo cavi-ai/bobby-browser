@@ -405,7 +405,8 @@ Otherwise vision escalation is denied (`VisionAssistDenied` / failed).
 Capability + session grant is **not** sufficient for functional vision assist:
 the configured endpoint must be **reachable** at runtime. A granted principal
 and an opted-in session still fail closed when the provider is down or
-misconfigured — `bobby doctor` warns on `vision-endpoint` reachability, and on
+misconfigured — `bobby doctor` warns on `vision-service` when the route cannot
+answer, and on
 `vision-provider` / `vision-upstream-key` when the selected upstream profile is
 missing or its required API key env is empty. Preferred local path:
 [Configuration — Setup](configuration.md#setup-preferred).

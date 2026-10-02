@@ -137,9 +137,8 @@ Send `x-interface-version: {{INTERFACE_VERSION}}`. Mismatch →
   `executionPolicy.visionAssist = true`, and `[vision].endpoint_url`.
 - Capability + session opt-in alone does **not** make vision assist work — the
   provider endpoint must be **reachable**. `bobby doctor` warns on
-  `vision-endpoint` when the configured URL does not accept a connection.
-  Loopback URLs suggest `bobby serve --vision` (auto-spawn) or manual
-  `bobby vision-proxy`; external URLs suggest verifying the remote service.
+  `vision-service` when a loopback URL has no selected `provider` and nothing
+  listening on it, or when a propose round-trip to the URL fails.
 - **Preferred setup:** `bobby vision connect` → export printed env vars →
   `bobby serve --vision`. With a selected `provider` and a loopback URL, each
   runtime starts its own vision proxy on a free loopback port, and

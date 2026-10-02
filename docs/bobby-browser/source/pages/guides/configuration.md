@@ -216,10 +216,9 @@ Granting `vision:assist` and creating a session with
 `executionPolicy.visionAssist = true` is **not** enough for functional vision
 assist — the runtime must also reach a live provider at `[vision].endpoint_url`.
 When the URL is unset, escalation is unavailable even with capability and
-session opt-in. When the URL is set but nothing is listening,
-`bobby doctor` warns on `vision-endpoint` reachability (loopback endpoints
-suggest `bobby serve --vision` or manual `bobby vision-proxy`; external
-endpoints suggest verifying the remote service).
+session opt-in. `bobby doctor` warns on `vision-service` when a loopback URL
+has no selected `provider` and nothing listening on it, or when a propose
+round-trip to the URL fails.
 
 Code-review-graph answers **code structure**; bobby vision answers **page
 pixels** — do not conflate the two.

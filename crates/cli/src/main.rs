@@ -4512,8 +4512,8 @@ auth = "oauth-device-code"
     #[test]
     fn vision_endpoint_unreachable_detail_distinguishes_loopback_from_external() {
         let loopback = vision_endpoint_unreachable_detail("http://127.0.0.1:9100/vision");
-        assert!(loopback.contains("starts the vision service on demand"));
-        assert!(loopback.contains("bobby vision start"));
+        assert!(loopback.contains("no vision provider is selected"));
+        assert!(loopback.contains("bobby vision connect"));
         assert!(!loopback.contains("vision-proxy"));
 
         let external = vision_endpoint_unreachable_detail("https://vision.example.com/propose");

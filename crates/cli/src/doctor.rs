@@ -826,7 +826,7 @@ fn vision_endpoint_is_loopback(endpoint: &str) -> bool {
 pub(crate) fn vision_endpoint_unreachable_detail(endpoint: &str) -> String {
     if vision_endpoint_is_loopback(endpoint) {
         format!(
-            "{endpoint} is stopped; Bobby starts the vision service on demand (`bobby vision start` runs it manually)"
+            "nothing listens on {endpoint} and no vision provider is selected, so no runtime starts a proxy for it; select one with `bobby vision connect`"
         )
     } else {
         format!("{endpoint} not reachable (verify the external vision endpoint is running)")
@@ -1014,7 +1014,7 @@ fn check_vision_propose_probe(
             });
         if !running {
             return Some(DoctorCheck {
-                status: DoctorStatus::Ok,
+                status: DoctorStatus::Warn,
                 name: "vision-service".to_string(),
                 detail: vision_endpoint_unreachable_detail(&endpoint),
             });
@@ -2971,6 +2971,24 @@ mod cdp_port_tests {
             profile: "/profiles/enrolled".into(),
         })
         .context("compose browser workers")
+    }
+
+    /// With no provider selected no runtime starts a proxy, so a loopback URL
+    /// that nothing answers is a vision route that cannot work.
+    #[test]
+    fn an_unanswered_loopback_url_without_a_provider_warns() {
+        let vacant = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = vacant.local_addr().unwrap();
+        drop(vacant);
+        let mut config = AppConfig::default();
+        config.vision.endpoint_url = Some(format!("http://{address}/vision"));
+        let check = check_vision_propose_probe(&config, None).unwrap();
+        assert_eq!(check.status, DoctorStatus::Warn, "{}", check.detail);
+        assert!(
+            check.detail.contains("no vision provider is selected"),
+            "{}",
+            check.detail
+        );
     }
 
     #[test]
