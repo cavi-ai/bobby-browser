@@ -335,6 +335,97 @@ async fn native_host_keeps_pairing_material_out_of_the_extension_channel() {
     host.await.unwrap().unwrap();
 }
 
+/// The server spends a pairing code on the upgrade, so a descriptor notice
+/// that names the same endpoint and owner must not abandon the attempt: a
+/// retry with the spent code is refused and the host stops on invalidAuth.
+#[tokio::test]
+async fn a_descriptor_notice_without_a_new_owner_keeps_the_pairing_attempt() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::{oneshot, watch};
+
+    let server = CompanionServer::bind_loopback(CompanionServerConfig {
+        bind_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+        pairing_code_ttl: Duration::from_secs(60),
+        attachment_ttl: Duration::from_secs(300),
+    })
+    .await
+    .unwrap();
+    let pairing_code = server.registry().issue_pairing_code().await;
+    let upstream = server.local_addr();
+
+    // Holds the server's answer to the first connection until released;
+    // later connections pass straight through.
+    let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("ws://{}/v1/companion", proxy.local_addr().unwrap());
+    let (answered_tx, answered) = oneshot::channel::<()>();
+    let (release, release_rx) = oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let mut hold = Some((answered_tx, release_rx));
+        while let Ok((client, _)) = proxy.accept().await {
+            let upstream = TcpStream::connect(upstream).await.unwrap();
+            let held = hold.take();
+            tokio::spawn(async move {
+                let (mut client_read, mut client_write) = client.into_split();
+                let (mut upstream_read, mut upstream_write) = upstream.into_split();
+                tokio::spawn(async move {
+                    let _ = tokio::io::copy(&mut client_read, &mut upstream_write).await;
+                });
+                if let Some((answered, release)) = held {
+                    let mut first = [0_u8; 4096];
+                    let count = upstream_read.read(&mut first).await.unwrap_or(0);
+                    let _ = answered.send(());
+                    let _ = release.await;
+                    if client_write.write_all(&first[..count]).await.is_err() {
+                        return;
+                    }
+                }
+                let _ = tokio::io::copy(&mut upstream_read, &mut client_write).await;
+            });
+        }
+    });
+
+    let (notice, changes) = watch::channel(0_u64);
+    let same_endpoint = endpoint.clone();
+    let same_code = pairing_code.clone();
+    let config =
+        NativeHostConfig::new(endpoint, pairing_code).with_config_refresh(changes, move || {
+            Some(NativeHostConfig::new(
+                same_endpoint.clone(),
+                same_code.clone(),
+            ))
+        });
+    let (host_stream, mut extension_stream) = duplex(2 * MAX_NATIVE_MESSAGE_BYTES);
+    let (host_reader, host_writer) = split(host_stream);
+    let host = tokio::spawn(run_native_host(host_reader, host_writer, config));
+    write_native_message(
+        &mut extension_stream,
+        &json!({"kind": "pair", "input": connect_request()}),
+    )
+    .await
+    .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), answered)
+        .await
+        .unwrap()
+        .unwrap();
+    notice.send_modify(|version| *version += 1);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    release.send(()).unwrap();
+
+    let message = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_native_message(&mut extension_stream),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    assert_eq!(message["kind"], "paired", "{message}");
+    drop(extension_stream);
+    host.await.unwrap().unwrap();
+}
+
 #[tokio::test]
 async fn rust_request_crosses_server_native_and_extension_and_event_returns_without_close() {
     let server = CompanionServer::bind_loopback(CompanionServerConfig {
