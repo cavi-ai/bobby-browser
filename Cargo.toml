@@ -45,7 +45,7 @@ resolver = "2"
 
 [workspace.package]
 edition = "2021"
-version = "0.19.0"
+version = "0.19.1"
 license = "MIT"
 authors = ["Sasan Sotoodehfar"]
 repository = "https://github.com/cavi-ai/bobby-browser"

@@ -106,6 +106,21 @@ def firefox_companion_extension_version(expected: str) -> list[str]:
     return []
 
 
+def formula_may_trail(formula_version: str, expected: str) -> bool:
+    """The formula is at the release or at an earlier one no older than the
+    previous minor line: 0.19.1 accepts 0.19.0, and 0.20.0 accepts 0.19.1."""
+    try:
+        formula = tuple(int(part) for part in formula_version.split("."))
+        release = tuple(int(part) for part in expected.split("."))
+    except ValueError:
+        return False
+    if len(formula) != 3 or len(release) != 3:
+        return False
+    return formula == release or (
+        formula < release and formula[0] == release[0] and formula[1] >= release[1] - 1
+    )
+
+
 def homebrew_formula_version(expected: str) -> list[str]:
     """The formula may trail one minor release until its binary hashes exist.
 
@@ -122,12 +137,11 @@ def homebrew_formula_version(expected: str) -> list[str]:
         return ["Formula/bobby-browser.rb: no version declared"]
     formula_version = found.group(1)
     try:
-        major, minor, patch = (int(part) for part in expected.split("."))
+        major, minor, _ = (int(part) for part in expected.split("."))
     except ValueError:
         return [f"workspace version {expected} is not a stable version"]
-    previous_minor = f"{major}.{minor - 1}.0" if minor > 0 and patch == 0 else None
-    if formula_version not in (expected, previous_minor):
-        return [f"Formula/bobby-browser.rb: {formula_version} must be {expected} or the prior minor release ({previous_minor})"]
+    if not formula_may_trail(formula_version, expected):
+        return [f"Formula/bobby-browser.rb: {formula_version} must be {expected} or an earlier release since {major}.{max(minor - 1, 0)}.0"]
     digests = re.findall(r'^\s*sha256 "([^"]+)"', formula, re.M)
     if len(digests) != 4 or any(not re.fullmatch(r"[a-f0-9]{64}", digest) for digest in digests):
         return ["Formula/bobby-browser.rb: expected four SHA-256 digests"]

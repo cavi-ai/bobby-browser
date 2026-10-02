@@ -58,11 +58,13 @@ async fn overflow_flood_uses_a_bounded_rejection_worker_pool() {
     for _ in 0..FLOOD {
         flood.push(TcpStream::connect(address).await.unwrap());
     }
+    // Closing is the property; `peak` below proves no worker was spawned for
+    // these, so the bound only has to outlast a loaded test machine.
     let mut reads = tokio::task::JoinSet::new();
     for mut stream in flood {
         reads.spawn(async move {
             let mut byte = [0_u8; 1];
-            tokio::time::timeout(Duration::from_millis(250), stream.read(&mut byte))
+            tokio::time::timeout(Duration::from_secs(30), stream.read(&mut byte))
                 .await
                 .is_ok_and(|result| result.is_ok_and(|count| count == 0))
         });

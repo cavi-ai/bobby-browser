@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.19.1 - 2026-10-02
+
 ### Fixed
 
 - `bobby mcp-stdio` starts on a machine with no paired Firefox profile: an
@@ -74,6 +76,10 @@
   the binary host MCP entries launch. It ran the binary that ran the install,
   so after `make install` a rebuild of the checkout replaced the host binary
   and `cargo clean` broke pairing.
+- The Firefox companion's native host no longer stops with `invalidAuth` when
+  the descriptor file changes during pairing without naming a new endpoint
+  or owner. It abandoned the connection and retried with the pairing code
+  the server had already accepted.
 
 ### Added
 
@@ -98,6 +104,9 @@
 ### Changed
 
 - `Formula/bobby-browser.rb` carries the v0.19.0 asset digests.
+- The release version check accepts a Homebrew formula at an earlier release
+  of the current or previous minor line, so a patch release passes before its
+  formula is updated.
 - `bobby doctor` `companion-port` reports that the runtime binds a free
   loopback port at every start instead of probing the configured port.
 

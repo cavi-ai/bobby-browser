@@ -99,9 +99,8 @@ pub(crate) fn ensure_managed_vision_token(bootstrap_path: &Path) -> Result<Strin
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::Mutex;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::onboarding::INSTALL_ENV_LOCK as ENV_LOCK;
 
     #[test]
     fn managed_token_is_private_stable_and_environment_has_precedence() {

@@ -8,12 +8,16 @@ mod unix {
     use std::path::Path;
     use std::time::{Duration, Instant};
 
+    /// Deadline for runs whose outcome is not a timeout: it only stops a hung
+    /// test, so it has to outlast a loaded machine starting `/bin/sh`.
+    const HANG_GUARD: Duration = Duration::from_secs(30);
+
     #[tokio::test]
     async fn process_runner_bounds_time_and_combined_output() {
         let ok = ProcessSpec::new(
             "/bin/sh",
             ["-c", "printf 1234; printf 5678 >&2"],
-            Duration::from_secs(1),
+            HANG_GUARD,
             8,
         );
         let outcome = run_process(&ok).await.unwrap();
@@ -24,7 +28,7 @@ mod unix {
         let overflow = ProcessSpec::new(
             "/bin/sh",
             ["-c", "printf 1234; printf 5678 >&2"],
-            Duration::from_secs(1),
+            HANG_GUARD,
             7,
         );
         let overflow_error = run_process(&overflow).await.unwrap_err();
@@ -48,7 +52,7 @@ mod unix {
                 "-c",
                 "(head -c 65536 /dev/zero) & (head -c 65536 /dev/zero >&2) & wait",
             ],
-            Duration::from_secs(1),
+            HANG_GUARD,
             131_072,
         );
 
@@ -65,7 +69,7 @@ mod unix {
                 "-c",
                 "(head -c 8192 /dev/zero) & (head -c 8192 /dev/zero >&2) & wait",
             ],
-            Duration::from_secs(1),
+            HANG_GUARD,
             16_383,
         );
 
@@ -78,12 +82,7 @@ mod unix {
     #[tokio::test]
     async fn quickly_exiting_process_groups_do_not_fail_successful_completion_cleanup() {
         for iteration in 0..64 {
-            let spec = ProcessSpec::new(
-                "/bin/sh",
-                ["-c", "sleep 0.01 &"],
-                Duration::from_secs(1),
-                16,
-            );
+            let spec = ProcessSpec::new("/bin/sh", ["-c", "sleep 0.01 &"], HANG_GUARD, 16);
 
             let outcome = run_process(&spec).await.unwrap_or_else(|error| {
                 panic!("quick-exit iteration {iteration} failed: {error:?}")
@@ -99,7 +98,7 @@ mod unix {
         let spec = ProcessSpec::new(
             "/bin/sh",
             ["-c", "sleep 0.05 </dev/null >/dev/null 2>&1 &"],
-            Duration::from_secs(1),
+            HANG_GUARD,
             16,
         );
 
@@ -125,7 +124,7 @@ mod unix {
             residual_pid_path.as_os_str().to_owned(),
             trigger_path.as_os_str().to_owned(),
         ];
-        let spec = ProcessSpec::new("/bin/sh", args, Duration::from_secs(2), 1_024);
+        let spec = ProcessSpec::new("/bin/sh", args, HANG_GUARD, 1_024);
         let process = tokio::spawn(async move { run_process(&spec).await });
         let (shell_pid, residual_pid) =
             wait_for_pid_fixtures(&shell_pid_path, &residual_pid_path).await;
@@ -161,7 +160,9 @@ mod unix {
             shell_pid_path.as_os_str().to_owned(),
             grandchild_pid_path.as_os_str().to_owned(),
         ];
-        let spec = ProcessSpec::new("/bin/sh", args, Duration::from_millis(500), 1_024);
+        // Long enough for the fixture to write both pids on a loaded machine;
+        // the run still ends by timeout because the grandchild sleeps 30 s.
+        let spec = ProcessSpec::new("/bin/sh", args, Duration::from_secs(5), 1_024);
         let process = tokio::spawn(async move { run_process(&spec).await });
         let (shell_pid, grandchild_pid) =
             wait_for_pid_fixtures(&shell_pid_path, &grandchild_pid_path).await;
@@ -191,7 +192,7 @@ mod unix {
             grandchild_pid_path.as_os_str().to_owned(),
             trigger_path.as_os_str().to_owned(),
         ];
-        let spec = ProcessSpec::new("/bin/sh", args, Duration::from_secs(2), 4);
+        let spec = ProcessSpec::new("/bin/sh", args, HANG_GUARD, 4);
         let process = tokio::spawn(async move { run_process(&spec).await });
         let (shell_pid, grandchild_pid) =
             wait_for_pid_fixtures(&shell_pid_path, &grandchild_pid_path).await;
@@ -253,12 +254,7 @@ mod unix {
             .map(|(name, value)| name.len() + 1 + value.len() + 1)
             .sum::<usize>()
             .max(1);
-        let spec = ProcessSpec::new(
-            "/usr/bin/env",
-            ["-0"],
-            Duration::from_secs(1),
-            expected_output_bytes,
-        );
+        let spec = ProcessSpec::new("/usr/bin/env", ["-0"], HANG_GUARD, expected_output_bytes);
 
         let outcome = run_process(&spec).await.unwrap();
         assert_eq!(outcome.exit_code, Some(0));
@@ -285,7 +281,7 @@ mod unix {
         let spec = ProcessSpec::new(
             "/bin/sh",
             ["-c", "test -f marker && printf cwd-ok"],
-            Duration::from_secs(1),
+            HANG_GUARD,
             16,
         )
         .with_current_dir(temp.path());
@@ -294,7 +290,7 @@ mod unix {
     }
 
     async fn wait_for_pid_fixtures(shell_path: &Path, grandchild_path: &Path) -> (i32, i32) {
-        let readiness = tokio::time::timeout(Duration::from_millis(300), async {
+        let readiness = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if let (Some(shell_pid), Some(grandchild_pid)) =
                     (try_read_pid(shell_path), try_read_pid(grandchild_path))
@@ -308,7 +304,7 @@ mod unix {
 
         readiness.unwrap_or_else(|_| {
             panic!(
-                "PID fixtures were not ready within 300ms: shell={} ({}), grandchild={} ({})",
+                "PID fixtures were not ready within 10s: shell={} ({}), grandchild={} ({})",
                 shell_path.display(),
                 pid_fixture_state(shell_path),
                 grandchild_path.display(),
@@ -332,7 +328,7 @@ mod unix {
     }
 
     fn assert_process_gone(pid: i32) {
-        let deadline = Instant::now() + Duration::from_secs(1);
+        let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let result = unsafe { libc::kill(pid, 0) };
             if result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {

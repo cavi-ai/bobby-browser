@@ -844,7 +844,7 @@ where
     let result = async {
         let mut enroll_finalized = !finalize_enroll;
         let mut backoff = NativeReconnectBackoff::default();
-        loop {
+        'reconnect: loop {
         if *native_closed_receiver.borrow() {
             break Ok(());
         }
@@ -854,13 +854,22 @@ where
         let has_credential = config.has_reconnect_credential()?;
         let token = config.authentication_token()?;
         let request = config.authenticated_request(&token)?;
-        let connection = tokio::select! {
-            _ = wait_for_config_change(&mut config_changes) => {
-                if config.refresh_endpoint() { backoff.reset(); }
-                continue;
+        let attempt = connect_async(request);
+        tokio::pin!(attempt);
+        // The server consumes a pairing code when the upgrade arrives, so an
+        // attempt is abandoned only for a new endpoint or owner: a retry with
+        // the same code would be refused.
+        let connection = loop {
+            tokio::select! {
+                _ = wait_for_config_change(&mut config_changes) => {
+                    if config.refresh_endpoint() {
+                        backoff.reset();
+                        continue 'reconnect;
+                    }
+                }
+                _ = wait_for_native_close(&mut native_closed_receiver) => break 'reconnect Ok(()),
+                result = &mut attempt => break result,
             }
-            _ = wait_for_native_close(&mut native_closed_receiver) => break Ok(()),
-            result = connect_async(request) => result,
         };
         let socket = match connection {
             Ok((socket, _)) => socket,

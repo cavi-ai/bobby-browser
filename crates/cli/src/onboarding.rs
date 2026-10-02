@@ -1643,8 +1643,8 @@ fn print_install_locations(config_path: &Path, bootstrap_path: &Path, project_ro
     }
 }
 
-/// Host configuration tests in both onboarding and doctor share process-global
-/// HOME/XDG state, so they must hold the same lock under parallel `cargo test`.
+/// Every test in this binary that reads or changes process environment (HOME,
+/// XDG, scope, PATH, tokens) holds this one lock under parallel `cargo test`.
 #[cfg(test)]
 pub(crate) static INSTALL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

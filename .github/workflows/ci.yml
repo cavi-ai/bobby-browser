@@ -79,7 +79,9 @@ jobs:
         # One tag ships binaries, npm, and the crate, so a version that
         # disagrees between manifests ships a mislabelled artifact. npm reached
         # 0.3.1 while the last sdk-v* tag was 0.3.0 because nothing checked.
-        run: python3 scripts/check-version-agreement.py
+        run: |
+          python3 -m unittest scripts/test_check_version_agreement.py
+          python3 scripts/check-version-agreement.py
 
       - name: Release installer regressions
         run: scripts/install-release.test.sh
