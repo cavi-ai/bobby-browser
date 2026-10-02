@@ -416,8 +416,9 @@ const OPENCLAW_STATE_DIR_ENV: &str = "OPENCLAW_STATE_DIR";
 const HERMES_HOME_ENV: &str = "HERMES_HOME";
 
 thread_local! {
-    /// Set when this process installs `bobby` onto PATH, so host MCP merges
-    /// point at the durable bin path instead of a transient `target/` binary.
+    /// Set when this process installs `bobby` onto PATH, so host MCP merges and
+    /// the Firefox native-host wrapper point at the durable bin path instead of
+    /// a transient `target/` binary.
     static INSTALLED_CLI: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -2271,6 +2272,58 @@ mod install_tests {
         }
     }
 
+    fn wrapper_after_companion_install(home: &Path) -> String {
+        let dist = tempfile::tempdir().unwrap();
+        std::fs::write(dist.path().join("manifest.json"), "{}").unwrap();
+        let _env = EnvRestore::capture(&["HOME", "XDG_CONFIG_HOME"]);
+        // SAFETY: tests hold INSTALL_ENV_LOCK; EnvRestore puts the process env back.
+        unsafe {
+            std::env::set_var("HOME", home);
+            #[cfg(not(target_os = "macos"))]
+            std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+        }
+        #[cfg(target_os = "macos")]
+        std::fs::create_dir_all(home.join("Library/Application Support")).unwrap();
+        let install = install_firefox_companion(Some(dist.path())).expect("companion installs");
+        std::fs::read_to_string(install.wrapper_path).unwrap()
+    }
+
+    #[test]
+    fn companion_wrapper_execs_the_cli_the_same_install_put_on_path() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
+        let build = build_dir_with(&["bobby", GATEWAY_COMMAND, ACP_GATEWAY_COMMAND]);
+        let bin = tempfile::tempdir().unwrap();
+        let (bobby, _) = install_cli_from(&build.path().join("bobby"), bin.path()).unwrap();
+        remember_installed_cli(&bobby);
+        let _clear = scopeguard_clear_installed_cli();
+        let home = tempfile::tempdir().unwrap();
+        let wrapper = wrapper_after_companion_install(home.path());
+        assert!(
+            wrapper.starts_with(&format!(
+                "#!/bin/sh\nexec {} firefox-native-host ",
+                crate::shell_quote(&bobby)
+            )),
+            "{wrapper}"
+        );
+    }
+
+    #[test]
+    fn companion_wrapper_execs_an_installed_cli_over_the_running_build() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
+        let build = build_dir_with(&["bobby", GATEWAY_COMMAND, ACP_GATEWAY_COMMAND]);
+        let home = tempfile::tempdir().unwrap();
+        let (bobby, _) =
+            install_cli_from(&build.path().join("bobby"), &home.path().join(".local/bin")).unwrap();
+        let wrapper = wrapper_after_companion_install(home.path());
+        assert!(
+            wrapper.starts_with(&format!(
+                "#!/bin/sh\nexec {} firefox-native-host ",
+                crate::shell_quote(&bobby)
+            )),
+            "{wrapper}"
+        );
+    }
+
     #[test]
     fn companion_install_sideload_upgrades_and_preserves_custom_user_js() {
         let _lock = INSTALL_ENV_LOCK.lock().unwrap();
@@ -2626,11 +2679,10 @@ pub fn install_firefox_companion(extension: Option<&Path>) -> Result<CompanionIn
         sideload_path,
         signed,
     };
-    let exe = std::env::current_exe().context("current executable unknown")?;
     crate::install_native_host(crate::NativeHostInstallConfig {
         wrapper_path: install.wrapper_path.clone(),
         manifest_path: install.manifest_path.clone(),
-        cli_path: exe,
+        cli_path: canonical_cli_path()?,
         descriptor_path: install.descriptor_path.clone(),
     })?;
     if !signed {
