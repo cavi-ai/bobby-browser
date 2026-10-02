@@ -98,15 +98,15 @@ fn ladder_is_ordered_bounded_and_never_replays_uncertain_mutation() {
 
 #[test]
 fn decisions_are_limited_by_the_workflow_deadline_and_tactic_budget() {
-    let deadline = Utc::now() + Duration::milliseconds(400);
+    let now = Utc::now();
     let mut state = state_with_budget(Vec::new());
-    state.deadline = deadline;
+    state.deadline = now + Duration::milliseconds(400);
     let mut engine = SkillZigZagZig::new(state, 1_000, [SkillBrowserEngine::Firefox]).unwrap();
 
     let decision = engine
-        .next_decision(&trigger(SkillFailure::TargetDrift), Utc::now())
+        .next_decision(&trigger(SkillFailure::TargetDrift), now)
         .unwrap();
-    assert!(decision.remaining_deadline_ms <= 400);
+    assert_eq!(decision.remaining_deadline_ms, 400);
     assert_eq!(decision.tactic_budget_ms, decision.remaining_deadline_ms);
 
     let mut expired = SkillZigZagZig::new(
@@ -359,11 +359,12 @@ fn issued_decisions_are_reserved_exactly_once_and_expire_after_the_deadline() {
 
 #[test]
 fn terminal_cleanup_outcome_finalizes_once_after_command_deadline() {
+    let now = Utc::now();
     let mut state = state_with_budget(Vec::new());
-    state.deadline = Utc::now() + Duration::milliseconds(10);
+    state.deadline = now + Duration::milliseconds(10);
     let mut engine = SkillZigZagZig::new(state, 10, [SkillBrowserEngine::Firefox]).unwrap();
     let decision = engine
-        .next_decision(&trigger(SkillFailure::TargetDrift), Utc::now())
+        .next_decision(&trigger(SkillFailure::TargetDrift), now)
         .unwrap();
     let finalized_at = engine.session_state().deadline + Duration::milliseconds(20);
     let finalization_deadline = finalized_at + Duration::seconds(1);
