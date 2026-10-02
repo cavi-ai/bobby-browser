@@ -51,8 +51,8 @@ use vision_child::{
     VisionSpawnPolicy,
 };
 use vision_proxy::{
-    serve as serve_vision_proxy, MlxUpstream, OllamaUpstream, OpenAiUpstream, ProxyConfig,
-    UpstreamKind,
+    serve_with_ready as serve_vision_proxy_with_ready, MlxUpstream, OllamaUpstream, OpenAiUpstream,
+    ProxyConfig, UpstreamKind,
 };
 
 #[derive(Clone)]
@@ -380,6 +380,10 @@ enum CliCommand {
         /// Upstream API key env var (default OPENAI_API_KEY; empty value skips key)
         #[arg(long)]
         api_key_env: Option<String>,
+        /// Run as a runtime's sidecar: print `listening <addr>` once bound and
+        /// exit when the parent closes stdin
+        #[arg(long)]
+        managed: bool,
     },
 }
 
@@ -1044,6 +1048,7 @@ pub async fn run() -> Result<()> {
             collect_training_data,
             training_data_dir,
             api_key_env,
+            managed,
         } => {
             run_vision_proxy(VisionProxyRunArgs {
                 bind,
@@ -1057,6 +1062,7 @@ pub async fn run() -> Result<()> {
                 training_data_dir,
                 api_key_env,
                 endpoint_url: None,
+                managed,
             })
             .await?;
         }
@@ -1217,14 +1223,16 @@ fn prepare_vision_child(
             let token = vision_token::ensure_managed_vision_token(&bootstrap_path)?;
             unsafe { std::env::set_var(token_env, token) };
         }
-        Some(ManagedVisionProxy::spawn_from_current_exe(
+        let proxy = ManagedVisionProxy::spawn_from_current_exe(
             &decision,
             provider_name,
             profile,
             token_env,
             config.vision.collect_training_data,
             &config.vision.training_data_dir,
-        )?)
+        )?;
+        vision_child::point_vision_nodes_at(&mut config, &decision, proxy.endpoint());
+        Some(proxy)
     } else {
         None
     };
@@ -1271,6 +1279,7 @@ struct VisionProxyRunArgs {
     training_data_dir: String,
     api_key_env: Option<String>,
     endpoint_url: Option<String>,
+    managed: bool,
 }
 
 fn configured_vision_proxy_args(config_cli: Option<PathBuf>) -> Result<VisionProxyRunArgs> {
@@ -1309,6 +1318,7 @@ fn configured_vision_proxy_args(config_cli: Option<PathBuf>) -> Result<VisionPro
         training_data_dir: config.vision.training_data_dir.display().to_string(),
         api_key_env: profile.api_key_env.clone(),
         endpoint_url: Some(url.to_string()),
+        managed: false,
     })
 }
 
@@ -1390,6 +1400,7 @@ async fn run_vision_proxy(args: VisionProxyRunArgs) -> Result<()> {
         training_data_dir,
         api_key_env,
         endpoint_url: _,
+        managed,
     } = args;
     let bind: SocketAddr = bind.parse().context("invalid --bind address")?;
     let bearer_token = require_vision_proxy_bearer()?;
@@ -1458,9 +1469,24 @@ async fn run_vision_proxy(args: VisionProxyRunArgs) -> Result<()> {
         upstream_kind: kind,
     };
 
-    serve_vision_proxy(config, upstream)
-        .await
-        .context("vision-proxy server failed")?;
+    if managed {
+        // A runtime's sidecar lives exactly as long as the runtime: its stdin
+        // is a pipe from the parent, which closes however the parent ends.
+        std::thread::spawn(|| {
+            let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+            std::process::exit(0);
+        });
+    }
+    serve_vision_proxy_with_ready(config, upstream, |address| {
+        if managed {
+            use std::io::Write;
+            let mut stdout = std::io::stdout();
+            let _ = writeln!(stdout, "listening {address}");
+            let _ = stdout.flush();
+        }
+    })
+    .await
+    .context("vision-proxy server failed")?;
 
     Ok(())
 }

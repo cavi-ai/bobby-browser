@@ -233,8 +233,11 @@ pixels** — do not conflate the two.
    require explicit `--download-model` consent.
 2. Export env vars the connect step printed (`BOBBY_VISION_TOKEN`, and
    `api_key_env` when the profile requires one).
-3. Start `bobby serve --vision` — on loopback, bobby auto-spawns
-   `bobby vision-proxy` when the port is free.
+3. Start `bobby serve --vision`. With a loopback `endpoint_url` and a
+   selected `provider`, every runtime starts its own `bobby vision-proxy` on a
+   loopback port the OS picks and sends vision there; the port in
+   `endpoint_url` is not used. The proxy exits with the runtime that started
+   it.
 
 These are distinct states:
 
@@ -253,8 +256,8 @@ the readiness check and then stopped; normal `serve`, `mcp-stdio`, and
 persistent daemon. Downloading a missing selected MLX model additionally
 requires `--download-model`.
 
-Manual `bobby vision-proxy` in a separate terminal remains valid when you want
-full control over the sidecar process.
+A `bobby vision-proxy` you run yourself serves `endpoint_url` only when no
+`provider` is selected; with a provider selected, each runtime uses its own.
 
 ```bash
 export BOBBY_VISION_TOKEN=…

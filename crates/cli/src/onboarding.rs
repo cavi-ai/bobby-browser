@@ -998,26 +998,40 @@ fn path_var_contains(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Copy this `bobby` binary (and sibling gateways when present) into
-/// `dest_dir`. Returns the installed `bobby` path and whether `dest_dir` is
-/// on PATH.
+/// Copy this `bobby` binary and both gateways into `dest_dir`. Returns the
+/// installed `bobby` path and whether `dest_dir` is on PATH.
 pub fn install_cli_into(dest_dir: &Path) -> Result<(PathBuf, bool)> {
+    let exe = std::env::current_exe().context("current executable unknown")?;
+    install_cli_from(&exe, dest_dir)
+}
+
+/// Install `bobby` and the two gateways beside it as one set. A gateway
+/// missing next to `bobby` refuses the install before anything is copied:
+/// a partial copy leaves an older gateway in place, and the host then runs
+/// two builds that do not match.
+fn install_cli_from(exe: &Path, dest_dir: &Path) -> Result<(PathBuf, bool)> {
+    let source_dir = exe
+        .parent()
+        .context("current executable has no directory")?;
+    let gateways = [GATEWAY_COMMAND, ACP_GATEWAY_COMMAND].map(|command| source_dir.join(command));
+    if let Some(missing) = gateways.iter().find(|gateway| !gateway.is_file()) {
+        anyhow::bail!(
+            "{} is missing next to {}; build all three from one checkout: \
+             cargo build --release -p bobby-browser -p mcp-gateway -p acp-gateway",
+            missing.display(),
+            exe.display()
+        );
+    }
     std::fs::create_dir_all(dest_dir)
         .with_context(|| format!("could not create {}", dest_dir.display()))?;
-    let exe = std::env::current_exe().context("current executable unknown")?;
     let bobby_dest = dest_dir.join(if cfg!(windows) { "bobby.exe" } else { "bobby" });
-    copy_executable(&exe, &bobby_dest)?;
-
-    if let Some(dir) = exe.parent() {
-        for command in [GATEWAY_COMMAND, ACP_GATEWAY_COMMAND] {
-            let gateway_src = dir.join(command);
-            if gateway_src.is_file() {
-                let gateway_dest = dest_dir.join(command);
-                copy_executable(&gateway_src, &gateway_dest)?;
-            }
-        }
+    copy_executable(exe, &bobby_dest)?;
+    for gateway in &gateways {
+        copy_executable(
+            gateway,
+            &dest_dir.join(gateway.file_name().expect("gateway file name")),
+        )?;
     }
-
     Ok((bobby_dest, directory_on_path(dest_dir)))
 }
 
@@ -1859,10 +1873,50 @@ mod install_tests {
         assert!(companion_dir.join("background.js").is_file());
     }
 
+    fn build_dir_with(binaries: &[&str]) -> tempfile::TempDir {
+        let build = tempfile::tempdir().unwrap();
+        for name in binaries {
+            std::fs::write(build.path().join(name), format!("#!/bin/sh\necho {name}\n")).unwrap();
+        }
+        build
+    }
+
+    #[test]
+    fn cli_install_copies_bobby_and_both_gateways_as_one_set() {
+        let build = build_dir_with(&["bobby", GATEWAY_COMMAND, ACP_GATEWAY_COMMAND]);
+        let dest = tempfile::tempdir().unwrap();
+        let (bobby, _) = install_cli_from(&build.path().join("bobby"), dest.path()).unwrap();
+        assert!(bobby.is_file());
+        for gateway in [GATEWAY_COMMAND, ACP_GATEWAY_COMMAND] {
+            assert_eq!(
+                std::fs::read(dest.path().join(gateway)).unwrap(),
+                std::fs::read(build.path().join(gateway)).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn cli_install_refuses_a_partial_build_and_leaves_the_old_set_alone() {
+        let build = build_dir_with(&["bobby", GATEWAY_COMMAND]);
+        let dest = tempfile::tempdir().unwrap();
+        std::fs::write(dest.path().join(ACP_GATEWAY_COMMAND), b"older build").unwrap();
+        std::fs::write(dest.path().join("bobby"), b"older bobby").unwrap();
+        let error = install_cli_from(&build.path().join("bobby"), dest.path())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(ACP_GATEWAY_COMMAND), "{error}");
+        assert!(error.contains("-p acp-gateway"), "{error}");
+        assert_eq!(
+            std::fs::read(dest.path().join("bobby")).unwrap(),
+            b"older bobby"
+        );
+    }
+
     #[test]
     fn cli_install_copies_bobby_into_the_bin_dir() {
+        let build = build_dir_with(&["bobby", GATEWAY_COMMAND, ACP_GATEWAY_COMMAND]);
         let dest = tempfile::tempdir().unwrap();
-        let (bobby, _) = install_cli_into(dest.path()).unwrap();
+        let (bobby, _) = install_cli_from(&build.path().join("bobby"), dest.path()).unwrap();
         assert!(bobby.is_file());
         let expected = if cfg!(windows) { "bobby.exe" } else { "bobby" };
         assert_eq!(bobby.file_name().unwrap(), expected);

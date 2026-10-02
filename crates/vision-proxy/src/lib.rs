@@ -21,7 +21,7 @@ pub use openai::{
     openai_upstream_from_env, OpenAiConfigError, OpenAiUpstream,
     DEFAULT_BASE_URL as OPENAI_DEFAULT_BASE_URL, DEFAULT_MODEL as OPENAI_DEFAULT_MODEL,
 };
-pub use server::{router, serve, AppState, ProxyConfig, UpstreamKind};
+pub use server::{router, serve, serve_with_ready, AppState, ProxyConfig, UpstreamKind};
 pub use upstream::{ExtractInput, ProposeInput, Upstream, UpstreamError};
 pub use validate::{validate_extract, validate_proposal, ValidateError};
 pub use wire::{ExtractRequest, ExtractResponse, ProposeRequest, ProposeResponse, VisionAction};
