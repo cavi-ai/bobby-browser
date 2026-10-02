@@ -57,11 +57,18 @@
 - `bobby doctor` reports no `engine-satisfiability` failure when the scope's
   own running runtime holds the enrolled Firefox profile, and no
   `vision-service` warning for the configured port when the runtime runs its
-  own proxy.
+  own proxy. A loopback vision URL with no selected provider and nothing
+  listening is a `vision-service` warning; it was reported ok with "Bobby
+  starts the vision service on demand", which nothing did.
 - `make install`, `make cli`, and `bobby install --cli` install `bobby`,
   `mcp-gateway`, and `acp-gateway` from one build, and refuse a build missing
   either gateway. A gateway left from an older release made `bobby doctor`
   fail `sidecar-version`.
+- The repository no longer carries a generated `openshell/` pack, which made
+  `bobby doctor` run inside a checkout report three OpenShell warnings.
+  `bobby openshell install` writes the pack into a project.
+- The vision docs name the `vision-service` doctor check; they named a
+  `vision-endpoint` check that does not exist.
 
 ### Added
 

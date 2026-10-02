@@ -1780,6 +1780,7 @@ mod install_tests {
 
     #[test]
     fn noninteractive_vision_only_install_writes_ollama_without_other_install_work() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
         let bootstrap_path = dir.path().join("bootstrap.env");
@@ -1804,6 +1805,7 @@ mod install_tests {
 
     #[test]
     fn vision_readiness_named_install_persists_selection_when_provider_is_not_ready() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
         run_install(
@@ -1883,6 +1885,7 @@ mod install_tests {
 
     #[test]
     fn cli_install_copies_bobby_and_both_gateways_as_one_set() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
         let build = build_dir_with(&["bobby", GATEWAY_COMMAND, ACP_GATEWAY_COMMAND]);
         let dest = tempfile::tempdir().unwrap();
         let (bobby, _) = install_cli_from(&build.path().join("bobby"), dest.path()).unwrap();
@@ -1897,6 +1900,7 @@ mod install_tests {
 
     #[test]
     fn cli_install_refuses_a_partial_build_and_leaves_the_old_set_alone() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
         let build = build_dir_with(&["bobby", GATEWAY_COMMAND]);
         let dest = tempfile::tempdir().unwrap();
         std::fs::write(dest.path().join(ACP_GATEWAY_COMMAND), b"older build").unwrap();
@@ -1914,6 +1918,7 @@ mod install_tests {
 
     #[test]
     fn cli_install_copies_bobby_into_the_bin_dir() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
         let build = build_dir_with(&["bobby", GATEWAY_COMMAND, ACP_GATEWAY_COMMAND]);
         let dest = tempfile::tempdir().unwrap();
         let (bobby, _) = install_cli_from(&build.path().join("bobby"), dest.path()).unwrap();
@@ -1930,6 +1935,7 @@ mod install_tests {
 
     #[test]
     fn merging_into_a_fresh_claude_config_creates_the_section() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
         let root = tempfile::tempdir().unwrap();
         let path = merge_host_config(HostKind::Claude, root.path()).unwrap();
         let written: serde_json::Value =
@@ -1947,6 +1953,7 @@ mod install_tests {
 
     #[test]
     fn merging_preserves_existing_servers_and_keys() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join(".mcp.json");
         std::fs::write(
@@ -1964,6 +1971,7 @@ mod install_tests {
 
     #[test]
     fn vscode_and_zed_use_their_own_shapes() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
         let root = tempfile::tempdir().unwrap();
         let vscode_path = merge_host_config(HostKind::Vscode, root.path()).unwrap();
         let vscode: serde_json::Value =
@@ -1973,6 +1981,7 @@ mod install_tests {
 
     #[test]
     fn acp_merge_writes_bobby_acp_stdio_without_bootstrap_env() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
         let root = tempfile::tempdir().unwrap();
         let path = merge_host_config(HostKind::Acp, root.path()).unwrap();
         assert!(path.ends_with(".acp.json"));
@@ -2057,6 +2066,7 @@ mod install_tests {
 
     #[test]
     fn host_config_status_distinguishes_missing_and_invalid_files() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join(".mcp.json");
         assert_eq!(
@@ -2093,6 +2103,7 @@ mod install_tests {
 
     #[test]
     fn the_agents_skill_installs_into_the_project_tree() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
         let root = tempfile::tempdir().unwrap();
         let path = install_skill(SkillKind::Agents, true, root.path()).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
@@ -2106,6 +2117,7 @@ mod install_tests {
 
     #[test]
     fn the_claude_skill_installs_into_the_claude_tree() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
         let root = tempfile::tempdir().unwrap();
         let path = install_skill(SkillKind::Claude, true, root.path()).unwrap();
         assert!(path.ends_with(".claude/skills/bobby-browser/SKILL.md"));
@@ -2466,6 +2478,7 @@ mod install_tests {
 
     #[test]
     fn merging_rejects_a_config_that_is_not_an_object() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join(".mcp.json"), "[1,2,3]").unwrap();
         assert!(merge_host_config(HostKind::Claude, root.path()).is_err());
