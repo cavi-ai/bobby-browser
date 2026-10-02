@@ -1,4 +1,5 @@
-use std::net::{SocketAddr, TcpStream};
+use std::io::BufRead;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -37,22 +38,13 @@ impl VisionChildDecision {
     }
 }
 
-pub const FORCE_ON_SKIP_REASON: &str = "vision endpoint already reachable";
-
-pub fn decide_vision_child(config: &AppConfig, policy: VisionSpawnPolicy) -> VisionChildDecision {
-    decide_vision_child_with_probe(config, policy, is_port_accepting)
-}
-
-/// When `--vision` is set, refuse to start unless spawn proceeds or the loopback
-/// endpoint is already healthy (attach/skip).
+/// When `--vision` is set, refuse to start unless the runtime spawns its own
+/// vision proxy.
 pub fn enforce_force_on_spawn(
     policy: VisionSpawnPolicy,
     decision: &VisionChildDecision,
 ) -> Result<()> {
-    if matches!(policy, VisionSpawnPolicy::ForceOn)
-        && !decision.should_spawn
-        && decision.reason != FORCE_ON_SKIP_REASON
-    {
+    if matches!(policy, VisionSpawnPolicy::ForceOn) && !decision.should_spawn {
         anyhow::bail!(
             "--vision requires a managed loopback vision-proxy: {}",
             decision.reason
@@ -61,11 +53,11 @@ pub fn enforce_force_on_spawn(
     Ok(())
 }
 
-fn decide_vision_child_with_probe(
-    config: &AppConfig,
-    policy: VisionSpawnPolicy,
-    probe: fn(SocketAddr) -> bool,
-) -> VisionChildDecision {
+/// Whether this runtime starts its own vision proxy. A loopback node with a
+/// selected provider always gets one, on a port the OS picks; whatever already
+/// answers on the configured port (a proxy an older runtime left behind, or
+/// another service) is never adopted.
+pub fn decide_vision_child(config: &AppConfig, policy: VisionSpawnPolicy) -> VisionChildDecision {
     if matches!(policy, VisionSpawnPolicy::Off) {
         return VisionChildDecision::skipped("vision spawn policy is off");
     }
@@ -114,20 +106,11 @@ fn decide_vision_child_with_probe(
         };
     }
 
-    if probe(bind) {
-        return VisionChildDecision {
-            should_spawn: false,
-            bind,
-            path,
-            reason: FORCE_ON_SKIP_REASON.to_string(),
-        };
-    }
-
     VisionChildDecision {
         should_spawn: true,
         bind,
         path,
-        reason: "loopback vision endpoint not reachable; spawn required".to_string(),
+        reason: "loopback vision provider selected; spawning this runtime's proxy".to_string(),
     }
 }
 
@@ -179,12 +162,11 @@ fn parse_loopback_endpoint(endpoint_url: &str) -> Option<(SocketAddr, String)> {
     Some((bind, path))
 }
 
-fn is_port_accepting(addr: SocketAddr) -> bool {
-    TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
-}
-
 pub struct ManagedVisionProxy {
     child: Child,
+    /// The child exits when this pipe closes, however the runtime ends.
+    _lifeline: std::process::ChildStdin,
+    endpoint: SocketAddr,
 }
 
 impl ManagedVisionProxy {
@@ -227,30 +209,76 @@ impl ManagedVisionProxy {
         let mut cmd = Command::new(exe);
         // vision-proxy validates BOBBY_VISION_TOKEN; copy from configurable token_env.
         cmd.env("BOBBY_VISION_TOKEN", &token_value);
+        let ephemeral = VisionChildDecision {
+            bind: SocketAddr::new(decision.bind.ip(), 0),
+            ..decision.clone()
+        };
         configure_vision_proxy_command(
             &mut cmd,
-            decision,
+            &ephemeral,
             provider_name,
             profile,
             collect_training_data,
             training_data_dir,
         );
-        // Inherit stderr so the child cannot fill a pipe and deadlock; discard
-        // stdin/stdout (proxy is HTTP-only).
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::null())
+        cmd.arg("--managed");
+        // stdin is the child's lifeline and stdout carries its one
+        // `listening <addr>` line; stderr is inherited so it cannot fill a pipe.
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
 
         let mut child = cmd.spawn().context("failed to spawn vision-proxy child")?;
-
-        std::thread::sleep(Duration::from_millis(250));
-        if !is_port_accepting(decision.bind) {
+        let lifeline = child.stdin.take().context("vision-proxy stdin")?;
+        let stdout = child.stdout.take().context("vision-proxy stdout")?;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            let _ = std::io::BufReader::new(stdout).read_line(&mut line);
+            let _ = sender.send(line);
+        });
+        let endpoint = receiver
+            .recv_timeout(Duration::from_secs(15))
+            .ok()
+            .and_then(|line| line.trim().strip_prefix("listening ")?.parse().ok());
+        let Some(endpoint) = endpoint else {
             let _ = child.kill();
             let _ = child.wait();
-            anyhow::bail!("vision-proxy did not become reachable on {}", decision.bind);
-        }
+            anyhow::bail!("vision-proxy did not report its listening address");
+        };
+        Ok(Self {
+            child,
+            _lifeline: lifeline,
+            endpoint,
+        })
+    }
 
-        Ok(Self { child })
+    /// The address the proxy is serving on.
+    pub fn endpoint(&self) -> SocketAddr {
+        self.endpoint
+    }
+}
+
+/// Point every vision node that named the configured loopback endpoint at the
+/// address this runtime's proxy actually serves on.
+pub(crate) fn point_vision_nodes_at(
+    config: &mut AppConfig,
+    decision: &VisionChildDecision,
+    served: SocketAddr,
+) {
+    let url = format!("http://{served}{}", decision.path);
+    let configured = Some((decision.bind, decision.path.clone()));
+    for node in config.nodes.values_mut() {
+        if node.kind == NodeKind::Vision
+            && parse_loopback_endpoint(&node.endpoint_url) == configured
+        {
+            node.endpoint_url = url.clone();
+        }
+    }
+    if let Some(endpoint) = config.vision.endpoint_url.as_mut() {
+        if parse_loopback_endpoint(endpoint) == configured {
+            *endpoint = url;
+        }
     }
 }
 
@@ -405,7 +433,7 @@ mod tests {
     #[test]
     fn no_vision_policy_never_spawns() {
         let config = loopback_config("http://127.0.0.1:19876/vision", true);
-        let decision = decide_vision_child_with_probe(&config, VisionSpawnPolicy::Off, |_| false);
+        let decision = decide_vision_child(&config, VisionSpawnPolicy::Off);
         assert!(!decision.should_spawn);
         assert!(decision.reason.contains("off"));
     }
@@ -413,7 +441,7 @@ mod tests {
     #[test]
     fn non_loopback_never_spawns() {
         let config = loopback_config("https://vision.example/vision", true);
-        let decision = decide_vision_child_with_probe(&config, VisionSpawnPolicy::Auto, |_| false);
+        let decision = decide_vision_child(&config, VisionSpawnPolicy::Auto);
         assert!(!decision.should_spawn);
         assert!(decision.reason.contains("loopback"));
     }
@@ -421,7 +449,7 @@ mod tests {
     #[test]
     fn loopback_with_provider_auto_spawns() {
         let config = loopback_config("http://127.0.0.1:19876/vision", true);
-        let decision = decide_vision_child_with_probe(&config, VisionSpawnPolicy::Auto, |_| false);
+        let decision = decide_vision_child(&config, VisionSpawnPolicy::Auto);
         assert!(decision.should_spawn);
         assert_eq!(decision.bind, "127.0.0.1:19876".parse().unwrap());
         assert_eq!(decision.path, "/vision");
@@ -430,7 +458,7 @@ mod tests {
     #[test]
     fn localhost_endpoint_maps_to_ipv4_loopback_bind() {
         let config = loopback_config("http://localhost:19876/vision", true);
-        let decision = decide_vision_child_with_probe(&config, VisionSpawnPolicy::Auto, |_| false);
+        let decision = decide_vision_child(&config, VisionSpawnPolicy::Auto);
         assert!(decision.should_spawn);
         assert_eq!(decision.bind, "127.0.0.1:19876".parse().unwrap());
     }
@@ -438,7 +466,7 @@ mod tests {
     #[test]
     fn ipv6_loopback_endpoint_parses_bind() {
         let config = loopback_config("http://[::1]:19876/vision", true);
-        let decision = decide_vision_child_with_probe(&config, VisionSpawnPolicy::Auto, |_| false);
+        let decision = decide_vision_child(&config, VisionSpawnPolicy::Auto);
         assert!(
             decision.should_spawn,
             "unexpected skip: {}",
@@ -450,23 +478,67 @@ mod tests {
     #[test]
     fn loopback_without_provider_auto_skips() {
         let config = loopback_config("http://127.0.0.1:19876/vision", false);
-        let decision = decide_vision_child_with_probe(&config, VisionSpawnPolicy::Auto, |_| false);
+        let decision = decide_vision_child(&config, VisionSpawnPolicy::Auto);
         assert!(!decision.should_spawn);
         assert!(decision.reason.contains("provider"));
     }
 
     #[test]
-    fn loopback_reachable_port_skips_spawn() {
-        let config = loopback_config("http://127.0.0.1:19876/vision", true);
-        let decision = decide_vision_child_with_probe(&config, VisionSpawnPolicy::Auto, |_| true);
-        assert!(!decision.should_spawn);
-        assert!(decision.reason.contains("reachable"));
+    fn vision_nodes_follow_the_proxy_to_its_served_port() {
+        let mut config = loopback_config("http://127.0.0.1:9100/vision", true);
+        let decision = decide_vision_child(&config, VisionSpawnPolicy::Auto);
+        assert!(decision.should_spawn, "{decision:?}");
+        let mut with_nodes = config.clone();
+        with_nodes.vision.endpoint_url = None;
+        for (name, endpoint) in [
+            ("vision", "http://127.0.0.1:9100/vision"),
+            ("remote", "https://vision.example/vision"),
+        ] {
+            with_nodes.nodes.insert(
+                name.into(),
+                NodeConfig {
+                    kind: NodeKind::Vision,
+                    endpoint_url: endpoint.into(),
+                    token_env: None,
+                    timeout_ms: 1_000,
+                },
+            );
+        }
+        let served = "127.0.0.1:53111".parse().unwrap();
+
+        point_vision_nodes_at(&mut config, &decision, served);
+        assert_eq!(
+            config.vision.endpoint_url.as_deref(),
+            Some("http://127.0.0.1:53111/vision")
+        );
+        point_vision_nodes_at(&mut with_nodes, &decision, served);
+        assert_eq!(
+            with_nodes.nodes["vision"].endpoint_url,
+            "http://127.0.0.1:53111/vision"
+        );
+        assert_eq!(
+            with_nodes.nodes["remote"].endpoint_url,
+            "https://vision.example/vision"
+        );
+    }
+
+    /// Something already answering on the configured port (a proxy an older
+    /// runtime left running, or another service) is never adopted.
+    #[test]
+    fn a_held_configured_port_still_gets_this_runtimes_own_proxy() {
+        let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let config = loopback_config(
+            &format!("http://{}/vision", held.local_addr().unwrap()),
+            true,
+        );
+        let decision = decide_vision_child(&config, VisionSpawnPolicy::Auto);
+        assert!(decision.should_spawn, "{decision:?}");
     }
 
     #[test]
     fn empty_registry_auto_skips() {
         let config = AppConfig::default();
-        let decision = decide_vision_child_with_probe(&config, VisionSpawnPolicy::Auto, |_| false);
+        let decision = decide_vision_child(&config, VisionSpawnPolicy::Auto);
         assert!(!decision.should_spawn);
         assert!(decision.reason.contains("no vision node"));
     }
@@ -498,7 +570,7 @@ mod tests {
             .providers
             .insert("openai".into(), sample_provider());
 
-        let decision = decide_vision_child_with_probe(&config, VisionSpawnPolicy::Auto, |_| false);
+        let decision = decide_vision_child(&config, VisionSpawnPolicy::Auto);
         assert!(!decision.should_spawn);
         assert!(decision.reason.contains("multiple"));
     }
@@ -506,20 +578,9 @@ mod tests {
     #[test]
     fn force_on_bails_when_non_loopback() {
         let config = loopback_config("https://vision.example/vision", true);
-        let decision =
-            decide_vision_child_with_probe(&config, VisionSpawnPolicy::ForceOn, |_| false);
+        let decision = decide_vision_child(&config, VisionSpawnPolicy::ForceOn);
         assert!(!decision.should_spawn);
         assert!(enforce_force_on_spawn(VisionSpawnPolicy::ForceOn, &decision).is_err());
-    }
-
-    #[test]
-    fn force_on_allows_reachable_port_skip() {
-        let config = loopback_config("http://127.0.0.1:19876/vision", true);
-        let decision =
-            decide_vision_child_with_probe(&config, VisionSpawnPolicy::ForceOn, |_| true);
-        assert!(!decision.should_spawn);
-        assert_eq!(decision.reason, FORCE_ON_SKIP_REASON);
-        assert!(enforce_force_on_spawn(VisionSpawnPolicy::ForceOn, &decision).is_ok());
     }
 
     #[test]
@@ -549,8 +610,7 @@ mod tests {
             .providers
             .insert("openai".into(), sample_provider());
 
-        let decision =
-            decide_vision_child_with_probe(&config, VisionSpawnPolicy::ForceOn, |_| false);
+        let decision = decide_vision_child(&config, VisionSpawnPolicy::ForceOn);
         assert!(!decision.should_spawn);
         assert!(enforce_force_on_spawn(VisionSpawnPolicy::ForceOn, &decision).is_err());
     }
@@ -582,7 +642,7 @@ mod tests {
             .providers
             .insert("openai".into(), sample_provider());
 
-        let decision = decide_vision_child_with_probe(&config, VisionSpawnPolicy::Auto, |_| false);
+        let decision = decide_vision_child(&config, VisionSpawnPolicy::Auto);
         assert!(decision.should_spawn);
         assert_eq!(decision.bind, "127.0.0.1:19878".parse().unwrap());
     }

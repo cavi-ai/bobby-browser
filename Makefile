@@ -74,7 +74,7 @@ build:
 # (credential, MCP config merge, agent skill). Non-interactive:
 #   ./target/release/bobby install --host claude --skill --yes
 install:
-	cargo build --release --manifest-path $(REPO_ROOT)Cargo.toml -p bobby-browser -p mcp-gateway
+	cargo build --release --manifest-path $(REPO_ROOT)Cargo.toml -p bobby-browser -p mcp-gateway -p acp-gateway
 	pnpm --filter @cavi-ai/bobby-firefox-companion build
 	$(REPO_ROOT)target/release/bobby install
 
@@ -85,9 +85,9 @@ firefox:
 	pnpm --filter @cavi-ai/bobby-firefox-companion build
 	$(REPO_ROOT)target/release/bobby install --companion
 
-# Install bobby (+ mcp-gateway) onto PATH (~/.cargo/bin when present, else ~/.local/bin).
+# Install bobby and both gateways onto PATH (~/.cargo/bin when present, else ~/.local/bin).
 cli:
-	cargo build --release --manifest-path $(REPO_ROOT)Cargo.toml -p bobby-browser -p mcp-gateway
+	cargo build --release --manifest-path $(REPO_ROOT)Cargo.toml -p bobby-browser -p mcp-gateway -p acp-gateway
 	$(REPO_ROOT)target/release/bobby install --cli
 
 # ---------------------------------------------------------------------------

@@ -50,6 +50,18 @@
   failure against the field that failed instead of the first field.
 - Two context flushes of one site at once could leave the older snapshot on
   disk; flushes now run one at a time.
+- Each runtime starts its own vision proxy on a loopback port the OS picks
+  and sends vision there; the proxy exits when its runtime exits. A runtime
+  no longer adopts whatever answers on the configured `endpoint_url` port,
+  and a proxy left by a killed runtime no longer holds that port.
+- `bobby doctor` reports no `engine-satisfiability` failure when the scope's
+  own running runtime holds the enrolled Firefox profile, and no
+  `vision-service` warning for the configured port when the runtime runs its
+  own proxy.
+- `make install`, `make cli`, and `bobby install --cli` install `bobby`,
+  `mcp-gateway`, and `acp-gateway` from one build, and refuse a build missing
+  either gateway. A gateway left from an older release made `bobby doctor`
+  fail `sidecar-version`.
 
 ### Added
 
@@ -60,6 +72,8 @@
   port with 40 orphaned descriptor files, and journals and ledgers holding
   unreadable data. Each must initialize, list tools, and answer
   `runtime_info` with nothing on stderr.
+- `bobby vision-proxy --managed`: prints `listening <address>` once bound and
+  exits when its stdin closes.
 - `shared_runtime_load` live test: 1, 4, and 8 agents on one runtime owner
   with managed Chromium complete every journey with no request lost; the
   ninth connection of one principal is refused with `resourceExhausted`. The

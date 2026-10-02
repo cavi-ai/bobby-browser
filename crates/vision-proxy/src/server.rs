@@ -207,6 +207,16 @@ pub fn router(state: AppState) -> Router {
 }
 
 pub async fn serve(config: ProxyConfig, upstream: Arc<dyn Upstream>) -> io::Result<()> {
+    serve_with_ready(config, upstream, |_| {}).await
+}
+
+/// Like [`serve`], reporting the bound address once listening, so a caller
+/// binding port 0 learns the port the OS picked.
+pub async fn serve_with_ready(
+    config: ProxyConfig,
+    upstream: Arc<dyn Upstream>,
+    ready: impl FnOnce(std::net::SocketAddr),
+) -> io::Result<()> {
     let state = AppState {
         path: config.path,
         bearer_token: config.bearer_token,
@@ -214,6 +224,7 @@ pub async fn serve(config: ProxyConfig, upstream: Arc<dyn Upstream>) -> io::Resu
     };
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
+    ready(listener.local_addr()?);
     axum::serve(listener, app).await?;
     Ok(())
 }

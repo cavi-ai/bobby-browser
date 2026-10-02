@@ -141,8 +141,11 @@ Send `x-interface-version: {{INTERFACE_VERSION}}`. Mismatch →
   Loopback URLs suggest `bobby serve --vision` (auto-spawn) or manual
   `bobby vision-proxy`; external URLs suggest verifying the remote service.
 - **Preferred setup:** `bobby vision connect` → export printed env vars →
-  `bobby serve --vision`. Manual `bobby vision-proxy` in a second terminal
-  still works.
+  `bobby serve --vision`. With a selected `provider` and a loopback URL, each
+  runtime starts its own vision proxy on a free loopback port, and
+  `bobby doctor` reports `vision-service` ok without probing the configured
+  port. A `bobby vision-proxy` you run yourself serves the URL only when no
+  `provider` is selected.
 - `bobby doctor` also warns on `vision-provider` when `provider` names a
   missing `[vision.providers.*]` entry, and on `vision-upstream-key` when the
   active profile's `api_key_env` is unset (local profiles like Ollama / LM

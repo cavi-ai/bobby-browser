@@ -827,6 +827,24 @@ fn validate_enrolled_profile(profile: &Path) -> Result<(), CommandError> {
     Ok(())
 }
 
+/// Another runtime holds the owner lock of this enrolled Firefox profile.
+#[derive(Debug)]
+pub struct ProfileOwned {
+    pub profile: PathBuf,
+}
+
+impl std::fmt::Display for ProfileOwned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Firefox profile {} already has a runtime owner; use the same team/project scope or a separately enrolled profile",
+            self.profile.display()
+        )
+    }
+}
+
+impl std::error::Error for ProfileOwned {}
+
 fn claim_profile_owner(profile: &Path) -> Result<Option<std::fs::File>> {
     if !profile.exists() {
         return Ok(None);
@@ -844,7 +862,9 @@ fn claim_profile_owner(profile: &Path) -> Result<Option<std::fs::File>> {
     if !file.metadata()?.is_file() {
         anyhow::bail!("Firefox owner lock must be a regular file");
     }
-    file.try_lock().map_err(|_| anyhow::anyhow!("Firefox profile {} already has a runtime owner; use the same team/project scope or a separately enrolled profile", profile.display()))?;
+    file.try_lock().map_err(|_| ProfileOwned {
+        profile: profile.to_path_buf(),
+    })?;
     Ok(Some(file))
 }
 
@@ -1799,7 +1819,8 @@ mod tests {
     fn profile_owner_lock_prevents_takeover_and_releases_on_drop() {
         let root = tempfile::tempdir().unwrap();
         let first = claim_profile_owner(root.path()).unwrap();
-        assert!(claim_profile_owner(root.path()).is_err());
+        let held = claim_profile_owner(root.path()).unwrap_err();
+        assert!(held.downcast_ref::<ProfileOwned>().is_some(), "{held:#}");
         drop(first);
         assert!(claim_profile_owner(root.path()).unwrap().is_some());
     }

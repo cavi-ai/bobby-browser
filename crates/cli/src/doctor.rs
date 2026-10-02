@@ -783,6 +783,37 @@ pub(crate) fn handshake_error_status(message: &str) -> DoctorStatus {
     }
 }
 
+/// A browser composition that failed only because this scope's running
+/// runtime holds the enrolled profile is that runtime working: it composed the
+/// same registrations to start. Every other composition error stays a failure.
+fn engine_composition_finding(
+    error: &anyhow::Error,
+    running_owner: Option<String>,
+    firefox_unenrolled: bool,
+) -> (DoctorStatus, &'static str, String) {
+    let held_by_a_runtime = error
+        .chain()
+        .any(|cause| cause.is::<firefox_companion::selection::ProfileOwned>());
+    match running_owner {
+        Some(origin) if held_by_a_runtime => (
+            DoctorStatus::Ok,
+            "engine-satisfiability",
+            format!("the running runtime at {origin} holds this scope's browser registrations"),
+        ),
+        _ if firefox_unenrolled && format!("{error:#}").contains("Firefox") => (
+            DoctorStatus::Warn,
+            "firefox-enrollment",
+            "Firefox is not paired yet. Run `bobby install --companion`, then `make firefox-start`, and click Pair in the Bobby companion toolbar popup. Re-run `bobby doctor` afterward."
+                .to_string(),
+        ),
+        _ => (
+            DoctorStatus::Fail,
+            "engine-satisfiability",
+            format!("{error:#}"),
+        ),
+    }
+}
+
 fn vision_endpoint_is_loopback(endpoint: &str) -> bool {
     Url::parse(endpoint).is_ok_and(|url| {
         matches!(
@@ -958,6 +989,16 @@ fn check_vision_propose_probe(
     let registry = node_registry::NodeRegistry::from_config(config);
     let (_, node) = registry.primary_http_vision_node()?;
     let endpoint = node.endpoint_url.clone();
+    if vision_endpoint_is_loopback(&endpoint) && config.vision.selected_provider().is_some() {
+        // The runtime starts its own proxy on a port the OS picks, so the
+        // configured port says nothing about it; provider-health reports its
+        // calls once a runtime has made any.
+        return Some(DoctorCheck {
+            status: DoctorStatus::Ok,
+            name: "vision-service".to_string(),
+            detail: "each runtime starts its own vision proxy on a free loopback port".to_string(),
+        });
+    }
     if vision_endpoint_is_loopback(&endpoint) {
         let running = Url::parse(&endpoint)
             .ok()
@@ -1543,15 +1584,12 @@ pub(crate) fn run_doctor_with_profile(
                 "engine preference can be satisfied by configured registrations".to_string(),
             ),
             Err(error) => {
-                if selection.firefox.is_empty() && format!("{error:#}").contains("Firefox") {
-                    report.warn(
-                        "firefox-enrollment",
-                        "Firefox is not paired yet. Run `bobby install --companion`, then `make firefox-start`, and click Pair in the Bobby companion toolbar popup. Re-run `bobby doctor` afterward."
-                            .to_string(),
-                    );
-                } else {
-                    report.fail("engine-satisfiability", format!("{error:#}"));
-                }
+                let (status, name, detail) = engine_composition_finding(
+                    &error,
+                    crate::runtime_scopes::current_origin(),
+                    selection.firefox.is_empty(),
+                );
+                report.record(status, name, detail);
             }
         }
         for profile in &selection.firefox {
@@ -2900,6 +2938,71 @@ mod cdp_port_tests {
         let check = vision_probe_verdict(None, Some(500));
         assert_eq!(check.status, DoctorStatus::Warn);
         assert!(check.detail.contains("propose round-trip failed"));
+    }
+
+    /// With a provider selected the runtime runs its own proxy on a free port,
+    /// so whatever holds the configured port (here: a stranger) is not probed.
+    #[test]
+    fn a_runtime_managed_vision_proxy_is_not_probed_on_the_configured_port() {
+        let stranger = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut config = AppConfig::default();
+        config.vision.endpoint_url =
+            Some(format!("http://{}/vision", stranger.local_addr().unwrap()));
+        config.vision.provider = Some("ollama".into());
+        config.vision.providers.insert(
+            "ollama".into(),
+            config::VisionProviderConfig {
+                base_url: "http://127.0.0.1:11434/v1".into(),
+                model: "llava:7b".into(),
+                api_key_env: None,
+            },
+        );
+        let check = check_vision_propose_probe(&config, None).unwrap();
+        assert_eq!(check.status, DoctorStatus::Ok, "{}", check.detail);
+        assert!(
+            check.detail.contains("its own vision proxy"),
+            "{}",
+            check.detail
+        );
+    }
+
+    fn profile_owned() -> anyhow::Error {
+        anyhow::Error::new(firefox_companion::selection::ProfileOwned {
+            profile: "/profiles/enrolled".into(),
+        })
+        .context("compose browser workers")
+    }
+
+    #[test]
+    fn a_profile_held_by_the_scopes_running_runtime_is_not_a_failure() {
+        let (status, name, detail) = engine_composition_finding(
+            &profile_owned(),
+            Some("http://127.0.0.1:55371".into()),
+            false,
+        );
+        assert_eq!(status, DoctorStatus::Ok, "{detail}");
+        assert_eq!(name, "engine-satisfiability");
+        assert!(detail.contains("http://127.0.0.1:55371"), "{detail}");
+    }
+
+    #[test]
+    fn a_held_profile_with_no_running_runtime_still_fails() {
+        let (status, name, _) = engine_composition_finding(&profile_owned(), None, false);
+        assert_eq!(
+            (status, name),
+            (DoctorStatus::Fail, "engine-satisfiability")
+        );
+    }
+
+    #[test]
+    fn other_composition_errors_fail_even_with_a_running_runtime() {
+        let (status, name, detail) = engine_composition_finding(
+            &anyhow::anyhow!("chromium executable not found"),
+            Some("http://127.0.0.1:55371".into()),
+            false,
+        );
+        assert_eq!(status, DoctorStatus::Fail, "{detail}");
+        assert_eq!(name, "engine-satisfiability");
     }
 }
 

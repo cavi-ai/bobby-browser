@@ -100,8 +100,9 @@ Firefox companion only (extension + native host):
 make firefox
 ```
 
-Put `bobby` on your PATH (`~/.cargo/bin` when that is already on PATH, else
-`~/.local/bin`):
+Put `bobby`, `mcp-gateway`, and `acp-gateway` on your PATH as one set
+(`~/.cargo/bin` when that is already on PATH, else `~/.local/bin`); the
+install refuses a build missing either gateway:
 
 ```bash
 make cli
