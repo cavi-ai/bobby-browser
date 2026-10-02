@@ -132,6 +132,34 @@ pub async fn connect<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     bridge(reader, writer, Box::pin(incoming), Box::pin(outgoing)).await
 }
 
+/// The scope's running owner, from `<scope>/runtime/owner.json`, when its
+/// loopback port accepts connections and `bearer` is the scope's bootstrap
+/// credential. A gateway launched without `BOBBY_RUNTIME_URL` but holding
+/// that credential (a host entry written before `bobby mcp-stdio`) attaches
+/// here instead of opening the owner's store a second time; a gateway with
+/// any other credential stays a standalone runtime.
+pub fn live_owner_origin(scope_dir: &std::path::Path, bearer: &str) -> Option<String> {
+    let bootstrap = std::fs::read_to_string(scope_dir.join("bootstrap.env")).ok()?;
+    let scope_bearer = bootstrap.lines().find_map(|line| {
+        line.strip_prefix("AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN=")
+            .map(|value| value.trim().trim_matches('"'))
+    })?;
+    if scope_bearer.is_empty() || scope_bearer != bearer {
+        return None;
+    }
+    let owner: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(scope_dir.join("runtime/owner.json")).ok()?).ok()?;
+    let origin = owner["url"].as_str()?;
+    let url = url::Url::parse(origin).ok()?;
+    let host: std::net::IpAddr = url.host_str()?.parse().ok()?;
+    if url.scheme() != "http" || !host.is_loopback() {
+        return None;
+    }
+    let address = std::net::SocketAddr::new(host, url.port()?);
+    std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(500)).ok()?;
+    Some(origin.to_owned())
+}
+
 /// The runtime's own reason when it answers the upgrade with an error, so a
 /// full connection quota reads as that and not as a bad credential.
 fn refused(error: tokio_tungstenite::tungstenite::Error) -> anyhow::Error {
@@ -204,6 +232,46 @@ mod tests {
              principal in-flight capacity exhausted (retry after 1000 ms)"
         );
         assert!(!error.contains("private-test-bearer"));
+    }
+
+    #[test]
+    fn a_live_scope_owner_is_found_and_a_dead_or_remote_one_is_not() {
+        let scope = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(scope.path().join("runtime")).unwrap();
+        std::fs::write(
+            scope.path().join("bootstrap.env"),
+            "AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN=\"scope-bearer\"\n",
+        )
+        .unwrap();
+        let write = |url: &str| {
+            std::fs::write(
+                scope.path().join("runtime/owner.json"),
+                serde_json::json!({"url": url}).to_string(),
+            )
+            .unwrap()
+        };
+        assert_eq!(live_owner_origin(scope.path(), "scope-bearer"), None);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let live = format!("http://{}", listener.local_addr().unwrap());
+        write(&live);
+        assert_eq!(
+            live_owner_origin(scope.path(), "scope-bearer"),
+            Some(live.clone())
+        );
+        assert_eq!(
+            live_owner_origin(scope.path(), "another-bearer"),
+            None,
+            "a gateway with its own credential must stay standalone"
+        );
+        drop(listener);
+        let dead = {
+            let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}", probe.local_addr().unwrap())
+        };
+        write(&dead);
+        assert_eq!(live_owner_origin(scope.path(), "scope-bearer"), None);
+        write("http://203.0.113.7:80");
+        assert_eq!(live_owner_origin(scope.path(), "scope-bearer"), None);
     }
 
     #[tokio::test]

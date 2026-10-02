@@ -372,15 +372,41 @@ impl AppConfig {
     /// A missing file is not an error: built-in defaults ([`AppConfig::default`])
     /// are returned in that case. Any other I/O failure, parse failure, or
     /// validation failure is returned as a [`ConfigLoadError`].
+    /// Loads `path`, resolving its relative storage and browser paths
+    /// against the directory that holds it, so one file names the same
+    /// places from any working directory. A missing file loads the defaults,
+    /// anchored the same way.
     pub fn load(path: &std::path::Path) -> Result<Self, ConfigLoadError> {
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(AppConfig::default());
-            }
+        let mut config = match std::fs::read_to_string(path) {
+            Ok(text) => Self::from_toml_str(&text)?,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => AppConfig::default(),
             Err(err) => return Err(ConfigLoadError::Io(err)),
         };
-        Self::from_toml_str(&text)
+        let path = std::path::absolute(path).map_err(ConfigLoadError::Io)?;
+        if let Some(base) = path.parent() {
+            config.anchor_relative_paths(base);
+        }
+        Ok(config)
+    }
+
+    fn anchor_relative_paths(&mut self, base: &std::path::Path) {
+        let anchor = |path: &mut PathBuf| {
+            if path.is_relative() {
+                *path = base.join(&*path);
+            }
+        };
+        anchor(&mut self.browser.profiles_dir);
+        self.browser.upload_roots.iter_mut().for_each(anchor);
+        anchor(&mut self.browser.downloads_dir);
+        anchor(&mut self.browser.artifacts_dir);
+        anchor(&mut self.storage.journal_path);
+        anchor(&mut self.storage.checkpoints_dir);
+        anchor(&mut self.storage.authority_path);
+        anchor(&mut self.storage.scheduler_journal_path);
+        anchor(&mut self.interface.token_records_path);
+        if let Some(dir) = self.context.dir.as_mut() {
+            anchor(dir);
+        }
     }
 }
 
@@ -968,13 +994,43 @@ scheduler_journal_path = "s"
     }
 
     #[test]
-    fn load_of_a_missing_file_returns_defaults() {
-        let path = std::path::Path::new("/nonexistent/definitely-not-there/config.toml");
-        let config = AppConfig::load(path).unwrap();
+    fn load_of_a_missing_file_returns_defaults_next_to_it() {
+        let dir = std::path::Path::new("/nonexistent/definitely-not-there");
+        let config = AppConfig::load(&dir.join("config.toml")).unwrap();
+        let defaults = AppConfig::default();
+        assert_eq!(config.server.port, defaults.server.port);
         assert_eq!(
-            serde_json::to_value(&config).unwrap(),
-            serde_json::to_value(AppConfig::default()).unwrap()
+            config.storage.journal_path,
+            dir.join(&defaults.storage.journal_path)
         );
+        assert_eq!(
+            config.browser.profiles_dir,
+            dir.join(&defaults.browser.profiles_dir)
+        );
+    }
+
+    /// The same file names the same storage from any working directory.
+    #[test]
+    fn relative_paths_resolve_next_to_the_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[storage]\njournal_path = \"data/commands.jsonl\"\ncheckpoints_dir = \"/abs/checkpoints\"\nauthority_path = \"data/authority.json\"\n\n\
+             [browser]\nupload_roots = [\"up\"]\n\n[context]\ndir = \"memory\"\n",
+        )
+        .unwrap();
+        let config = AppConfig::load(&path).unwrap();
+        assert_eq!(
+            config.storage.journal_path,
+            dir.path().join("data/commands.jsonl")
+        );
+        assert_eq!(
+            config.storage.checkpoints_dir,
+            std::path::Path::new("/abs/checkpoints")
+        );
+        assert_eq!(config.browser.upload_roots, vec![dir.path().join("up")]);
+        assert_eq!(config.context.dir, Some(dir.path().join("memory")));
     }
 
     #[test]

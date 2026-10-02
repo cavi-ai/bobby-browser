@@ -22,8 +22,6 @@ pub enum StoreError {
     Io(#[from] std::io::Error),
     #[error("store serialization failed: {0}")]
     Serialization(#[from] serde_json::Error),
-    #[error("journal line {line} is corrupt")]
-    Corrupt { line: usize },
 }
 
 /// Read-only health of a scheduler journal. Never truncates, compact, or creates the path.
@@ -34,7 +32,6 @@ pub struct JournalHealth {
     pub records: usize,
     pub torn_tail: bool,
     pub incompatible_records: usize,
-    pub corrupt_line: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -320,25 +317,14 @@ impl JournalJobStore {
             Err(error) => return Err(error.into()),
         };
         let bytes_len = bytes.len() as u64;
-        match scan_bytes(&bytes) {
-            Ok(scan) => Ok(JournalHealth {
-                exists: true,
-                bytes: bytes_len,
-                records: complete_line_count(&bytes),
-                torn_tail: scan.torn_tail,
-                incompatible_records: scan.incompatible_records,
-                corrupt_line: None,
-            }),
-            Err(StoreError::Corrupt { line }) => Ok(JournalHealth {
-                exists: true,
-                bytes: bytes_len,
-                records: complete_line_count(&bytes).saturating_sub(1),
-                torn_tail: !bytes.is_empty() && !bytes.ends_with(b"\n"),
-                incompatible_records: 0,
-                corrupt_line: Some(line),
-            }),
-            Err(error) => Err(error),
-        }
+        let scan = scan_bytes(&bytes)?;
+        Ok(JournalHealth {
+            exists: true,
+            bytes: bytes_len,
+            records: complete_line_count(&bytes),
+            torn_tail: scan.torn_tail,
+            incompatible_records: scan.incompatible_records,
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -398,13 +384,6 @@ struct Scan {
     torn_tail: bool,
     max_sequence: Option<u64>,
     incompatible_records: usize,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RecordProbe {
-    #[serde(default)]
-    schema_version: Option<u16>,
 }
 
 async fn truncate_torn_tail(path: &Path) -> Result<(), StoreError> {
@@ -487,16 +466,15 @@ fn scan_bytes(bytes: &[u8]) -> Result<Scan, StoreError> {
                 max_sequence = max_sequence.max(Some(record.sequence));
                 latest.insert(record.job.id.clone(), record.job);
             }
-            Err(_) => match serde_json::from_slice::<RecordProbe>(line) {
-                Ok(probe)
-                    if probe
-                        .schema_version
-                        .is_some_and(|v| v != JOURNAL_SCHEMA_VERSION) =>
-                {
-                    incompatible_records += 1;
-                }
-                _ => return Err(StoreError::Corrupt { line: index + 1 }),
-            },
+            Err(_) => {
+                // A line this build cannot decode is skipped, so the job
+                // journal never stops the runtime from starting.
+                tracing::warn!(
+                    line = index + 1,
+                    "job journal line unreadable by this build; skipped"
+                );
+                incompatible_records += 1;
+            }
         }
     }
 

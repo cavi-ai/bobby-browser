@@ -156,8 +156,13 @@ ids. `bobby serve`, the MCP gateway, and `bobby doctor` then resolve the
 selection with no environment wiring:
 
 ```json
-{"firefox":[{"attachmentTtlMs":300000,"bidiUrl":"ws://127.0.0.1:9224/session","companionBind":"127.0.0.1:9876","descriptorPath":"…/firefox-native-host-descriptor.json","pairingCodeTtlMs":300000,"profileDir":"…/firefox-profile","profileId":"…","timeoutMs":30000}],"preference":{"engine":"firefox","mode":"exact","profileId":"…"}}
+{"firefox":[{"attachmentTtlMs":300000,"bidiUrl":"ws://127.0.0.1:9224/session","companionBind":"127.0.0.1:0","descriptorPath":"…/firefox-native-host-descriptor.json","pairingCodeTtlMs":300000,"profileDir":"…/firefox-profile","profileId":"…","timeoutMs":30000}],"preference":{"engine":"firefox","mode":"exact","profileId":"…"}}
 ```
+
+The companion never pins a port: every start binds a free loopback port and
+the native-host descriptor publishes it, so the extension always finds the
+current endpoint. A `companionBind` port written by an older version is not
+used. Until a Firefox profile is paired, the runtime runs on managed Chromium.
 
 Setting `AUTOMATION_RUNTIME_BROWSER_SELECTION` to that JSON remains
 supported as an override (it wins over the persisted file), e.g. for a
@@ -179,7 +184,7 @@ For headless CI or automation, keep the CLI enroll command:
 ```bash
 bobby enroll-firefox-profile \
   --descriptor "$STATE/firefox-native-host-descriptor.json" \
-  --bind 127.0.0.1:9876 \
+  --bind 127.0.0.1:0 \
   --bidi-url "ws://127.0.0.1:9224/session" \
   --profile-dir "$PROFILE" \
   --timeout-secs 120

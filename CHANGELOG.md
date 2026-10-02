@@ -4,6 +4,39 @@
 
 ### Fixed
 
+- `bobby mcp-stdio` starts on a machine with no paired Firefox profile: an
+  unenrolled Firefox preference runs on managed Chromium. It exited with
+  "this scope has no enrolled Firefox profile" before the agent's first
+  request.
+- The working directory no longer selects the config or the storage. An
+  agent started in a directory holding a `config.toml` (a checkout of this
+  repository) was refused with "this scope is running with different
+  configuration", and an owner started from a read-only directory failed
+  every journal write. The CLI and both gateways load the scope's
+  `config.toml`, relative paths in it resolve next to the file, and the owner
+  runs in the scope directory.
+- A running owner always takes the agent after the scope's files change;
+  `bobby runtime status` reports the pending change and `bobby runtime stop`
+  applies it. Agents were refused until someone stopped the runtime.
+- `mcp-gateway` and `acp-gateway` launched directly with the scope's
+  bootstrap credential (host entries written before `bobby mcp-stdio`)
+  attach to the scope's running owner instead of opening its store a second
+  time, which failed with "command idempotency ledger: operation would
+  block". A gateway with its own credential stays a standalone runtime.
+- Unreadable data in a durable store no longer stops the runtime from
+  starting. The command and job journals skip lines this build cannot decode
+  (a record shape from another build, a torn write, damage) and `bobby
+  doctor` counts them; an idempotency ledger this build cannot read is moved
+  aside to `*.unreadable-<time>` and the runtime starts with an empty one; a
+  repeated key keeps its first entry, entries past capacity are skipped, and
+  a retained outcome that cannot be resolved becomes unresolved, so a retry
+  reconciles instead of re-running. A single such line made every start fail
+  with "journal line N is corrupt".
+- The Firefox companion binds a port the OS picks at every start and the
+  native-host descriptor publishes it; a configured `companionBind` port is
+  never bound, enrollment writes `127.0.0.1:0` and never fails on a taken
+  port, and publication removes `.pending-*` descriptor files left by killed
+  or failed starts.
 - `bobby mcp-stdio` and `bobby acp-stdio` report why the shared runtime
   refused a connection (for example `resourceExhausted: principal in-flight
   capacity exhausted (retry after 1000 ms)`) instead of "could not
@@ -20,6 +53,13 @@
 
 ### Added
 
+- `agent_first_contact` suite: real `bobby mcp-stdio` sessions from a fresh
+  scope, two working directories (one holding its own `config.toml`), a
+  read-only working directory, a config edited under a running owner, a
+  killed owner, a directly launched gateway, and a taken pinned companion
+  port with 40 orphaned descriptor files, and journals and ledgers holding
+  unreadable data. Each must initialize, list tools, and answer
+  `runtime_info` with nothing on stderr.
 - `shared_runtime_load` live test: 1, 4, and 8 agents on one runtime owner
   with managed Chromium complete every journey with no request lost; the
   ninth connection of one principal is refused with `resourceExhausted`. The
@@ -32,6 +72,8 @@
 ### Changed
 
 - `Formula/bobby-browser.rb` carries the v0.19.0 asset digests.
+- `bobby doctor` `companion-port` reports that the runtime binds a free
+  loopback port at every start instead of probing the configured port.
 
 ## 0.19.0 - 2026-10-01
 

@@ -222,10 +222,24 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(store),
             Err(error) => return Err(error),
         };
-        let snapshot: DurableSnapshot = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-        if snapshot.schema_version != 1 {
-            return Err(io::Error::other("unsupported idempotency ledger schema"));
-        }
+        // A ledger this build cannot read never stops the runtime: it is
+        // moved aside, kept for inspection, and the runtime starts empty.
+        let snapshot = match serde_json::from_slice::<DurableSnapshot>(&bytes) {
+            Ok(snapshot) if snapshot.schema_version == 1 => snapshot,
+            _ => {
+                let aside = path.with_extension(format!(
+                    "unreadable-{}",
+                    Utc::now().format("%Y%m%dT%H%M%S%.3f")
+                ));
+                tracing::warn!(
+                    path = %path.display(),
+                    aside = %aside.display(),
+                    "idempotency ledger unreadable by this build; moved aside"
+                );
+                tokio::fs::rename(&path, &aside).await?;
+                return Ok(store);
+            }
+        };
         let now = Utc::now();
         let mut state = store.state.lock().await;
         for entry in snapshot.entries {
@@ -234,22 +248,28 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
             }
             let restored = match entry.state {
                 DurableState::Reserved | DurableState::Unresolved => EntryState::Unresolved,
-                DurableState::Retained(value) => match resolve(value).await? {
-                    Some(outcome) => EntryState::Retained {
+                // An outcome that cannot be resolved is unknown, so the key
+                // is unresolved: a retry reconciles instead of re-running.
+                DurableState::Retained(value) => match resolve(value).await {
+                    Ok(Some(outcome)) => EntryState::Retained {
                         safety_relevant: outcome.safety_relevant(),
                         outcome,
                     },
-                    None => EntryState::Unresolved,
+                    Ok(None) | Err(_) => EntryState::Unresolved,
                 },
             };
+            if entry_count(&state) >= store.global_capacity {
+                tracing::warn!("idempotency ledger exceeds capacity; skipping the remainder");
+                continue;
+            }
             let bucket = state.entries.entry(entry.principal_id).or_default();
             if bucket.iter().any(|prior| prior.key == entry.key) {
-                return Err(io::Error::other("duplicate idempotency ledger key"));
+                tracing::warn!("idempotency ledger repeats a key; keeping the first entry");
+                continue;
             }
             if bucket.len() >= store.per_principal_capacity {
-                return Err(io::Error::other(
-                    "idempotency ledger exceeds per-principal capacity",
-                ));
+                tracing::warn!("idempotency ledger exceeds capacity; skipping the remainder");
+                continue;
             }
             bucket.push(Entry {
                 key: entry.key,
@@ -260,11 +280,6 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
                 last_used: entry.last_used,
             });
             state.sequence = state.sequence.max(entry.last_used);
-            if entry_count(&state) > store.global_capacity {
-                return Err(io::Error::other(
-                    "idempotency ledger exceeds global capacity",
-                ));
-            }
         }
         drop(state);
         Ok(store)

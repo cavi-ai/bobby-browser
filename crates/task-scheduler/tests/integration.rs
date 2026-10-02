@@ -1193,6 +1193,48 @@ fn journal_torn_tail() {
     });
 }
 
+/// An unreadable line in the middle of the job journal is skipped: the
+/// store still opens and every readable job survives.
+#[test]
+fn journal_unreadable_middle_line_is_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("jobs.jsonl");
+    let rt = runtime();
+
+    let id = rt.block_on(async {
+        let scheduler = JobScheduler::open_journal(SchedulerConfig::default(), &path)
+            .await
+            .unwrap();
+        scheduler
+            .submit(JobConfig::new("keep".to_string(), serde_json::json!({})))
+            .await
+            .unwrap()
+    });
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(
+            f,
+            "{{\"schemaVersion\":1,\"sequence\":7,\"job\":{{\"status\":\"gone\"}}}}"
+        )
+        .unwrap();
+        writeln!(f, "not json").unwrap();
+    }
+
+    rt.block_on(async {
+        let store = JournalJobStore::open(&path)
+            .await
+            .expect("unreadable lines must not stop the job store from opening");
+        let job = store.get(&id).await.unwrap().unwrap();
+        assert_eq!(job.name, "keep");
+        let health = JournalJobStore::inspect(&path).await.unwrap();
+        assert_eq!(health.incompatible_records, 2);
+    });
+}
+
 #[test]
 fn inspect_reports_torn_tail_without_truncating() {
     let dir = tempfile::tempdir().unwrap();
@@ -1223,7 +1265,6 @@ fn inspect_reports_torn_tail_without_truncating() {
     let health = rt.block_on(async { JournalJobStore::inspect(&path).await.unwrap() });
     assert!(health.exists);
     assert!(health.torn_tail);
-    assert_eq!(health.corrupt_line, None);
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 

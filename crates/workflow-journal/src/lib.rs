@@ -75,23 +75,14 @@ pub struct JournalHealth {
     pub records: usize,
     pub torn_tail: bool,
     pub incompatible_records: usize,
-    pub corrupt_line: Option<usize>,
 }
 
-/// Enough of a journal line to classify one this build cannot decode.
+/// The sequence of a journal line this build cannot decode, when present.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RecordProbe {
     #[serde(default)]
     sequence: Option<u64>,
-    #[serde(default)]
-    envelope: Option<EnvelopeProbe>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct EnvelopeProbe {
-    schema_version: u16,
 }
 
 struct Scan {
@@ -106,8 +97,6 @@ pub enum JournalError {
     Io(#[from] std::io::Error),
     #[error("journal serialization failed: {0}")]
     Serialization(#[from] serde_json::Error),
-    #[error("journal line {line} is corrupt")]
-    Corrupt { line: usize },
 }
 
 #[derive(Clone)]
@@ -197,28 +186,14 @@ impl JsonlJournal {
             Err(error) => return Err(error.into()),
         };
         let bytes_len = bytes.len() as u64;
-        match scan_bytes(&bytes, None) {
-            Ok(Scan { scan, .. }) => Ok(JournalHealth {
-                exists: true,
-                bytes: bytes_len,
-                records: scan.records.len(),
-                torn_tail: scan.torn_tail,
-                incompatible_records: scan.incompatible_records,
-                corrupt_line: None,
-            }),
-            Err(JournalError::Corrupt { line }) => {
-                let records = count_records_before_corrupt(&bytes);
-                Ok(JournalHealth {
-                    exists: true,
-                    bytes: bytes_len,
-                    records,
-                    torn_tail: !bytes.is_empty() && !bytes.ends_with(b"\n"),
-                    incompatible_records: 0,
-                    corrupt_line: Some(line),
-                })
-            }
-            Err(error) => Err(error),
-        }
+        let Scan { scan, .. } = scan_bytes(&bytes, None)?;
+        Ok(JournalHealth {
+            exists: true,
+            bytes: bytes_len,
+            records: scan.records.len(),
+            torn_tail: scan.torn_tail,
+            incompatible_records: scan.incompatible_records,
+        })
     }
 }
 
@@ -300,29 +275,6 @@ async fn scan_path(path: &Path, filter: Option<&CommandId>) -> Result<Scan, Jour
     scan_bytes(&bytes, filter)
 }
 
-fn count_records_before_corrupt(bytes: &[u8]) -> usize {
-    let complete_len = if !bytes.is_empty() && !bytes.ends_with(b"\n") {
-        bytes
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |at| at + 1)
-    } else {
-        bytes.len()
-    };
-    let mut records = 0;
-    for line in bytes[..complete_len].split(|byte| *byte == b'\n') {
-        if line.is_empty() {
-            continue;
-        }
-        if serde_json::from_slice::<JournalRecord>(line).is_ok() {
-            records += 1;
-            continue;
-        }
-        break;
-    }
-    records
-}
-
 fn scan_bytes(bytes: &[u8], filter: Option<&CommandId>) -> Result<Scan, JournalError> {
     let torn_tail = !bytes.is_empty() && !bytes.ends_with(b"\n");
     let complete_len = if torn_tail {
@@ -352,16 +304,17 @@ fn scan_bytes(bytes: &[u8], filter: Option<&CommandId>) -> Result<Scan, JournalE
                 }
             }
             Err(_) => {
-                // An undecodable line is tolerated only when it declares a schema
-                // version other than this build's. Current-version lines, and lines
-                // with no envelope version, are corruption and stay fatal.
-                let probe = serde_json::from_slice::<RecordProbe>(line)
-                    .map_err(|_| JournalError::Corrupt { line: index + 1 })?;
-                let schema_version = probe.envelope.map(|envelope| envelope.schema_version);
-                if schema_version.is_none_or(|version| version == CommandEnvelope::SCHEMA_VERSION) {
-                    return Err(JournalError::Corrupt { line: index + 1 });
+                // A line this build cannot decode (another schema version, a
+                // record shape that changed, or damage) is skipped, so the
+                // journal never stops the runtime from starting. A readable
+                // sequence still keeps appends monotonic.
+                if let Ok(probe) = serde_json::from_slice::<RecordProbe>(line) {
+                    max_sequence = max_sequence.max(probe.sequence);
                 }
-                max_sequence = max_sequence.max(probe.sequence);
+                tracing::warn!(
+                    line = index + 1,
+                    "command journal line unreadable by this build; skipped"
+                );
                 incompatible_records += 1;
             }
         }

@@ -30,7 +30,12 @@ async fn main() {
 }
 
 async fn run() -> anyhow::Result<()> {
-    if let Ok(origin) = std::env::var("BOBBY_RUNTIME_URL") {
+    let owner = std::env::var("BOBBY_RUNTIME_URL").ok().or_else(|| {
+        let bearer = std::env::var("AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN").ok()?;
+        config::bobby_config_dir()
+            .and_then(|dir| gateway_transport::live_owner_origin(&dir, &bearer))
+    });
+    if let Some(origin) = owner {
         let bearer = required_env("AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN")?;
         gateway_transport::connect(
             &origin,

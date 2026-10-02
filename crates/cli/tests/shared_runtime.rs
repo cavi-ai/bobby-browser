@@ -224,7 +224,8 @@ async fn concurrent_cli_starts_share_one_owner_and_keep_connection_lifecycles_in
         checked(command(&path).args(["runtime", "status"]).output().unwrap())
             .contains(initial["owner_id"].as_str().unwrap())
     );
-    // A changed config must never silently reuse or take over the owner.
+    // A changed config never locks clients out: they keep reaching the
+    // running owner, and status says the change applies after a stop.
     use std::io::Write;
     std::fs::OpenOptions::new()
         .append(true)
@@ -232,9 +233,14 @@ async fn concurrent_cli_starts_share_one_owner_and_keep_connection_lifecycles_in
         .unwrap()
         .write_all(b"\n# changed after launch\n")
         .unwrap();
-    let refused = command(&path).args(["runtime", "start"]).output().unwrap();
-    assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("different configuration"));
+    assert_eq!(
+        checked(command(&path).args(["runtime", "start"]).output().unwrap()),
+        first
+    );
+    assert!(
+        checked(command(&path).args(["runtime", "status"]).output().unwrap())
+            .contains("configuration changed since this runtime started")
+    );
     checked(command(&path).args(["runtime", "stop"]).output().unwrap());
     two_task.await.unwrap().unwrap();
     assert!(!path.join("runtime/owner.json").exists());

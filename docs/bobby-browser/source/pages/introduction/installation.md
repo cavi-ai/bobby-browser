@@ -58,7 +58,7 @@ resolved paths.
 
 | What | Where |
 |---|---|
-| Runtime config (vision, ports, storage) | `./config.toml` in the directory you ran install from (`--config` / `BOBBY_BROWSER_CONFIG` override) |
+| Runtime config (vision, ports, storage) | `config.toml` in the scope directory, the OS config dir `bobby-browser/` for the personal scope (`--config` / `BOBBY_BROWSER_CONFIG` override). Relative paths inside it resolve next to the file. |
 | Bootstrap + vision credentials | OS config dir `bobby-browser/` (`~/Library/Application Support/bobby-browser/` on macOS) |
 | CLI + gateways | `~/.cargo/bin` when that dir is on PATH, else `~/.local/bin` |
 | Claude MCP | project `.mcp.json` |
