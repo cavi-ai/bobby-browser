@@ -40,6 +40,51 @@ impl VisionAssist for CountingVision {
 
 struct OfflineVision;
 
+struct BudgetedVision {
+    calls: AtomicUsize,
+    partial: bool,
+    started: tokio::sync::Semaphore,
+    active: Arc<AtomicUsize>,
+    cancelled: Arc<AtomicUsize>,
+}
+
+struct PendingPrefillCall {
+    active: Arc<AtomicUsize>,
+    cancelled: Arc<AtomicUsize>,
+}
+
+impl Drop for PendingPrefillCall {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        self.cancelled.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl VisionAssist for BudgetedVision {
+    async fn propose(
+        &self,
+        _request: VisionProposeRequest,
+    ) -> Result<VisionProposal, CommandError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call < 2 {
+            self.started.add_permits(1);
+            if !self.partial || call == 1 {
+                self.active.fetch_add(1, Ordering::SeqCst);
+                let _pending = PendingPrefillCall {
+                    active: self.active.clone(),
+                    cancelled: self.cancelled.clone(),
+                };
+                std::future::pending::<()>().await;
+            }
+        }
+        Ok(VisionProposal {
+            confidence: 0.95,
+            action: VisionAction::TypeIntoCandidate { index: 0 },
+        })
+    }
+}
+
 struct PausedVision {
     calls: AtomicUsize,
     started: tokio::sync::Semaphore,
@@ -217,6 +262,23 @@ async fn submit_intent(
     page_id: &PageId,
     command: IntentCommand,
 ) -> CommandOutcome {
+    submit_intent_until(
+        runtime,
+        session_id,
+        page_id,
+        command,
+        Utc::now() + Duration::seconds(30),
+    )
+    .await
+}
+
+async fn submit_intent_until(
+    runtime: &RuntimeService,
+    session_id: &SessionId,
+    page_id: &PageId,
+    command: IntentCommand,
+    deadline: chrono::DateTime<Utc>,
+) -> CommandOutcome {
     runtime
         .submit_with_vision_capability(
             CommandEnvelope {
@@ -226,7 +288,7 @@ async fn submit_intent(
                 attempt_id: AttemptId::new(),
                 session_id: session_id.clone(),
                 page_id: Some(page_id.clone()),
-                deadline: Utc::now() + Duration::seconds(30),
+                deadline,
                 command: RuntimeCommand::Intent(command),
             },
             true,
@@ -242,6 +304,120 @@ fn resolution_paths(evidence: &[Evidence]) -> Vec<IntentResolutionPath> {
             _ => None,
         })
         .collect()
+}
+
+async fn run_budgeted_prefill(
+    partial: bool,
+    invalidate: bool,
+) -> (Vec<IntentResolutionPath>, usize, usize) {
+    let fixture = test_site::spawn().await;
+    let root = tempfile::tempdir().unwrap();
+    let assist = Arc::new(BudgetedVision {
+        calls: AtomicUsize::new(0),
+        partial,
+        started: tokio::sync::Semaphore::new(0),
+        active: Arc::new(AtomicUsize::new(0)),
+        cancelled: Arc::new(AtomicUsize::new(0)),
+    });
+    let runtime =
+        RuntimeService::build_with_vision_assist(&base_config(root.path(), true), assist.clone())
+            .await
+            .unwrap();
+    let (session, page) = open_fixture(&runtime, &fixture.base_url()).await;
+    let pending = {
+        let runtime = runtime.clone();
+        let session = session.clone();
+        let page = page.clone();
+        tokio::spawn(async move {
+            submit_intent_until(
+                &runtime,
+                &session,
+                &page,
+                stuck_form(),
+                Utc::now() + Duration::seconds(10),
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        assist.started.acquire_many(2),
+    )
+    .await
+    .expect("both speculative requests started")
+    .unwrap()
+    .forget();
+    if invalidate {
+        runtime.pages.context().invalidate(&page);
+    }
+    let outcome = pending.await.unwrap();
+    let CommandOutcome::Completed { evidence, .. } = outcome else {
+        panic!("prefill must leave time for normal execution: {outcome:?}");
+    };
+    assert_eq!(
+        assist.active.load(Ordering::SeqCst),
+        0,
+        "unfinished requests must be dropped"
+    );
+    (
+        resolution_paths(&evidence),
+        assist.calls.load(Ordering::SeqCst),
+        assist.cancelled.load(Ordering::SeqCst),
+    )
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn partial_prefill_survives_a_hanging_request() {
+    let (paths, calls, cancelled) = run_budgeted_prefill(true, false).await;
+    assert_eq!(calls, 3);
+    assert_eq!(cancelled, 1);
+    assert_eq!(
+        paths
+            .iter()
+            .filter(|path| **path == IntentResolutionPath::VisionPrefill)
+            .count(),
+        1
+    );
+    assert_eq!(
+        paths
+            .iter()
+            .filter(|path| **path == IntentResolutionPath::VisionFallback)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn hanging_prefill_is_cancelled_before_normal_execution() {
+    let (paths, calls, cancelled) = run_budgeted_prefill(false, false).await;
+    assert_eq!(calls, 4);
+    assert_eq!(cancelled, 2);
+    assert!(!paths.contains(&IntentResolutionPath::VisionPrefill));
+    assert_eq!(
+        paths
+            .iter()
+            .filter(|path| **path == IntentResolutionPath::VisionFallback)
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn a_timed_out_partial_batch_cannot_cross_a_generation_change() {
+    let (paths, calls, cancelled) = run_budgeted_prefill(true, true).await;
+    assert_eq!(calls, 4);
+    assert_eq!(cancelled, 1);
+    assert!(!paths.contains(&IntentResolutionPath::VisionPrefill));
+    assert_eq!(
+        paths
+            .iter()
+            .filter(|path| **path == IntentResolutionPath::VisionFallback)
+            .count(),
+        2
+    );
 }
 
 async fn paused_prefill_after_cache_change(
@@ -360,6 +536,67 @@ async fn prefill_resolves_stuck_form_through_the_batch() {
     assert!(
         !paths.contains(&IntentResolutionPath::VisionFallback),
         "a live escalation ran despite the batch: {paths:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn oversized_form_does_not_request_proposals_the_cache_would_discard() {
+    let fixture = test_site::spawn().await;
+    let root = tempfile::tempdir().unwrap();
+    let propose_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = RuntimeService::build_with_vision_assist(
+        &base_config(root.path(), true),
+        Arc::new(CountingVision {
+            propose_calls: propose_calls.clone(),
+        }),
+    )
+    .await
+    .unwrap();
+    let (session, page) = open_fixture(&runtime, &fixture.base_url()).await;
+    let outcome = submit_intent(
+        &runtime,
+        &session,
+        &page,
+        IntentCommand::CompleteForm(CompleteFormIntent {
+            purpose: "register".into(),
+            fields: (0..40)
+                .map(|index| CompleteFormField {
+                    name: format!("field-{index}"),
+                    purpose: format!("Missing Alpha Field That Does Not Exist {index}"),
+                    hints: Default::default(),
+                    value: ControlAction::SetText {
+                        value: format!("value-{index}"),
+                        clear_first: true,
+                    },
+                    revealed_by: None,
+                })
+                .collect(),
+        }),
+    )
+    .await;
+    let CommandOutcome::Completed { evidence, .. } = outcome else {
+        panic!("expected all 40 fields to complete, got {outcome:?}");
+    };
+    assert_eq!(
+        propose_calls.load(Ordering::SeqCst),
+        40,
+        "discarded speculative replies must not cause duplicate provider calls"
+    );
+    let paths = resolution_paths(&evidence);
+    assert_eq!(
+        paths
+            .iter()
+            .filter(|path| **path == IntentResolutionPath::VisionPrefill)
+            .count(),
+        32
+    );
+    assert_eq!(
+        paths
+            .iter()
+            .filter(|path| **path == IntentResolutionPath::VisionFallback)
+            .count(),
+        8
     );
 }
 

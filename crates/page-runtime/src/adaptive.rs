@@ -1452,7 +1452,22 @@ async fn execute_intent(
         corpus,
         context_store,
     };
-    let outcome = IntentEngine::execute(intent, page_id, &browser, &vision).await;
+    // Speculation may spend at most half of the remaining command time;
+    // normal execution and fresh fallback keep the rest. Capture the
+    // monotonic start before reading wall time so the conversion is conservative.
+    let now = tokio::time::Instant::now();
+    let remaining = (envelope.deadline - chrono::Utc::now())
+        .to_std()
+        .unwrap_or_default();
+    let prefill_deadline = now.checked_add(remaining / 2).unwrap_or(now);
+    let outcome = IntentEngine::execute_with_prefill_deadline(
+        intent,
+        page_id,
+        &browser,
+        &vision,
+        prefill_deadline,
+    )
+    .await;
     record_intent_metrics(operational_metrics.as_ref(), intent, &outcome);
     match outcome {
         IntentOutcome::Completed { evidence } => Ok(AdaptiveExecution {

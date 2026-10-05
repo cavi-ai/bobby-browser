@@ -8,6 +8,10 @@ use crate::stuck::StuckKind;
 /// engine fails closed with `VisionAssistFailed`.
 pub const VISION_CONFIDENCE_FLOOR: f32 = 0.75;
 
+/// Maximum proposals retained per page and requested by one speculative batch.
+/// Remaining fields still execute through the normal per-field fallback.
+pub const MAX_CACHED_PROPOSALS: usize = 32;
+
 #[async_trait]
 pub trait VisionAssist: Send + Sync {
     async fn propose(&self, request: VisionProposeRequest) -> Result<VisionProposal, CommandError>;
