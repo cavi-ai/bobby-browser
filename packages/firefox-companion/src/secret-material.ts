@@ -38,6 +38,6 @@ export function containsSecretMaterial(value: string): boolean {
     PREFIXED_TOKEN.test(value) ||
     AWS_ACCESS_KEY.test(value) ||
     GOOGLE_API_KEY.test(value) ||
-    hasLongCredentialRun(value)
+    (!/^https?:\/\//i.test(value.trim()) && hasLongCredentialRun(value))
   );
 }

@@ -124,3 +124,36 @@ test("every redaction-test result passes the real outbound validator", () => {
     }
   }
 });
+
+const LONG_ID = "1A2b3C4d5E6f7G8h9I0jK1l2M3n4O5p6Q7r8S9t0UvWx";
+
+function observedUrl(url: string): string {
+  return observeDocument(
+    new JSDOM("<!doctype html><html><head><title>Example</title></head><body><p>x</p></body></html>", {
+      url,
+    }).window.document,
+  ).url;
+}
+
+test("an ordinary page URL with a long mixed-case id stays visible", () => {
+  const url = `https://docs.example.test/document/d/${LONG_ID}/edit`;
+  assert.equal(observedUrl(url), url);
+  assert.equal(containsSecretMaterial(url), false);
+});
+
+for (const url of [
+  "https://example.test/reset/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+  "https://example.test/t/ghp_0123456789abcdefghijABCDEFGHIJ012345",
+]) {
+  test(`a URL carrying a credential is redacted: ${url.slice(0, 40)}`, () => {
+    assert.equal(observedUrl(url), "[redacted]");
+    assert.equal(containsSecretMaterial(url), true);
+  });
+}
+
+test("the same long id outside a URL is still redacted", () => {
+  assert.equal(containsSecretMaterial(LONG_ID), true);
+  const document = pageFor(LONG_ID);
+  assert.ok(JSON.stringify(observeDocument(document)).includes("[redacted]"));
+  assert.equal(JSON.stringify(observeDocument(document)).includes(LONG_ID), false);
+});
