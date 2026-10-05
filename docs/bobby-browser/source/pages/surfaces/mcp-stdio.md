@@ -10,13 +10,13 @@ scope; either flag can be used independently. Use the same flags for `install`,
 `firefox-start`, `acp-stdio`, `jobs`, `context`, and `doctor`. Scoped host
 installation records them in the agent host's command arguments.
 
-`bobby runtime start`, `status`, and `stop` manage the selected scope;
+`bobby runtime start`, `status`, `stop`, and `restart` manage the selected scope;
 `bobby runtime list` lists local scopes. Agents reuse one owner on an assigned
 loopback port. Each connection keeps its own MCP state and opening toolset,
 while browser profiles, storage, context, and jobs belong to the owner.
 Disconnecting an agent leaves the runtime available. An agent always reaches
 the running owner, including after the scope's files change; `bobby runtime
-status` reports a pending change and `bobby runtime stop` applies it. A
+status` reports a pending change and `bobby runtime restart` applies it. A
 gateway binary launched directly with the scope's bootstrap credential
 attaches to the scope's owner when one is running. Unreadable records in the
 journals or the idempotency ledger never stop the runtime from starting:

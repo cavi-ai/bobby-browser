@@ -3728,6 +3728,27 @@ model = "mlx-community/example-selected"
     }
 
     #[test]
+    fn runtime_restart_clap_parses_with_and_without_force() {
+        use clap::Parser;
+        let plain = Cli::try_parse_from(["bobby", "runtime", "restart"]).unwrap();
+        assert!(matches!(
+            plain.command,
+            Some(CliCommand::Runtime {
+                command: runtime_scopes::RuntimeCommand::Restart { force: false }
+            })
+        ));
+        let forced =
+            Cli::try_parse_from(["bobby", "--team", "dev", "runtime", "restart", "--force"])
+                .unwrap();
+        assert!(matches!(
+            forced.command,
+            Some(CliCommand::Runtime {
+                command: runtime_scopes::RuntimeCommand::Restart { force: true }
+            })
+        ));
+    }
+
+    #[test]
     fn jobs_submit_clap_parses_required_name() {
         use clap::Parser;
         let cli = Cli::try_parse_from([

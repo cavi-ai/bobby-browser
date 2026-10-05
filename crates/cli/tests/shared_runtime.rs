@@ -337,3 +337,185 @@ async fn concurrent_cli_starts_share_one_owner_and_keep_connection_lifecycles_in
     checked(command(&path).args(["runtime", "stop"]).output().unwrap());
     assert!(foreground.0.wait().unwrap().success());
 }
+
+const DISCONNECTED: &str =
+    "attached agents were disconnected; each host reconnects when it next starts its bobby server";
+
+fn owner_pid(root: &Path) -> u32 {
+    checked(command(root).args(["runtime", "status"]).output().unwrap())
+        .split_whitespace()
+        .find_map(|word| word.strip_prefix("pid="))
+        .expect("status names the owner pid")
+        .parse()
+        .unwrap()
+}
+
+#[cfg(unix)]
+fn process_exists(pid: u32) -> bool {
+    // SAFETY: signal 0 only probes for existence.
+    let result = unsafe { libc::kill(pid as i32, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+#[cfg(unix)]
+fn assert_gone(pid: u32) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while process_exists(pid) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "old owner pid {pid} still exists"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn restart_replaces_a_running_owner_and_reports_the_swap() {
+    let scope = Cleanup(tempfile::tempdir().unwrap());
+    let path = scope.0.path();
+    checked(command(path).args(["runtime", "start"]).output().unwrap());
+    let old = owner_pid(path);
+    let out = checked(command(path).args(["runtime", "restart"]).output().unwrap());
+    let new = owner_pid(path);
+    assert_ne!(old, new);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 2, "{out}");
+    assert!(
+        lines[0].starts_with(&format!(
+            "restarted: runtime owner pid {new} (was {old}) http://127.0.0.1:"
+        )),
+        "{out}"
+    );
+    assert_eq!(lines[1], DISCONNECTED);
+    #[cfg(unix)]
+    assert_gone(old);
+}
+
+#[test]
+fn restart_without_an_owner_starts_one() {
+    let scope = Cleanup(tempfile::tempdir().unwrap());
+    let path = scope.0.path();
+    let out = checked(command(path).args(["runtime", "restart"]).output().unwrap());
+    let new = owner_pid(path);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 1, "{out}");
+    assert!(
+        lines[0].starts_with(&format!(
+            "started: runtime owner pid {new} http://127.0.0.1:"
+        )),
+        "{out}"
+    );
+}
+
+#[cfg(unix)]
+struct Frozen(u32, std::path::PathBuf);
+#[cfg(unix)]
+impl Drop for Frozen {
+    fn drop(&mut self) {
+        let command = Command::new("ps")
+            .args(["-ww", "-p", &self.0.to_string(), "-o", "command="])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        if command.contains("runtime-owner") && command.contains(&*self.1.to_string_lossy()) {
+            // SAFETY: the pid is a verified owner this test started in its temp scope.
+            unsafe { libc::kill(self.0 as i32, libc::SIGKILL) };
+        }
+    }
+}
+
+/// Freezes the scope's owner, restarts with `args`, and returns the elapsed time.
+#[cfg(unix)]
+fn restart_hung_owner(args: &[&str]) -> std::time::Duration {
+    let scope = Cleanup(tempfile::tempdir().unwrap());
+    let path = scope.0.path();
+    checked(command(path).args(["runtime", "start"]).output().unwrap());
+    let old = owner_pid(path);
+    let _frozen = Frozen(old, path.join("runtime"));
+    // SAFETY: the owner is a process this test started in its temp scope.
+    assert_eq!(unsafe { libc::kill(old as i32, libc::SIGSTOP) }, 0);
+    let started = std::time::Instant::now();
+    let out = checked(command(path).args(args).output().unwrap());
+    let elapsed = started.elapsed();
+    let new = owner_pid(path);
+    assert_ne!(old, new);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 3, "{out}");
+    assert_eq!(
+        lines[0],
+        format!("runtime owner pid {old} did not stop gracefully; terminated")
+    );
+    assert!(
+        lines[1].starts_with(&format!(
+            "restarted: runtime owner pid {new} (was {old}) http://127.0.0.1:"
+        )),
+        "{out}"
+    );
+    assert_eq!(lines[2], DISCONNECTED);
+    assert_gone(old);
+    elapsed
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_restart_terminates_a_hung_owner() {
+    let elapsed = restart_hung_owner(&["runtime", "restart", "--force"]);
+    assert!(elapsed < std::time::Duration::from_secs(60), "{elapsed:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn restart_falls_back_to_termination_when_the_owner_does_not_answer() {
+    let elapsed = restart_hung_owner(&["runtime", "restart"]);
+    assert!(elapsed < std::time::Duration::from_secs(60), "{elapsed:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_ends_attached_connections_and_the_new_owner_accepts_new_ones() {
+    let scope = Cleanup(tempfile::tempdir().unwrap());
+    let path = scope.0.path().to_owned();
+    let url = checked(command(&path).args(["runtime", "start"]).output().unwrap());
+    let bearer = std::fs::read_to_string(path.join("bootstrap.env"))
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN="))
+        .unwrap()
+        .trim_matches('\"')
+        .to_owned();
+    let initialize = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"restart-regression","version":"1"}}});
+    let (mut writer, mut reader, task) = connection(url, bearer.clone(), "mcp").await;
+    send(&mut writer, initialize.clone()).await;
+    assert!(response(&mut reader, 1).await.get("result").is_some());
+    let restarted = tokio::task::spawn_blocking({
+        let path = path.clone();
+        move || {
+            checked(
+                command(&path)
+                    .args(["runtime", "restart"])
+                    .output()
+                    .unwrap(),
+            )
+        }
+    })
+    .await
+    .unwrap();
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        while let Ok(Some(_)) = gateway_transport::read_frame(&mut reader).await {}
+    })
+    .await;
+    assert!(closed.is_ok(), "the attached connection stayed open");
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(15), task)
+        .await
+        .expect("the gateway task ended");
+    let new_url = restarted
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .last()
+        .unwrap()
+        .to_owned();
+    let (mut writer, mut reader, _task) = connection(new_url, bearer, "mcp").await;
+    send(&mut writer, initialize).await;
+    assert!(response(&mut reader, 1).await.get("result").is_some());
+}

@@ -68,6 +68,7 @@ bobby --team engineering --project checkout mcp-stdio
 bobby --team engineering --project checkout acp-stdio
 bobby --team engineering --project checkout runtime status
 bobby runtime list
+bobby --team engineering --project checkout runtime restart
 bobby --team engineering --project checkout runtime stop
 ```
 
@@ -76,8 +77,9 @@ credential, browser profile, context, and storage. Clients in the same scope
 reuse one authenticated runtime on an automatically assigned loopback port.
 Each MCP/ACP connection keeps its own protocol state; disconnecting an agent
 leaves the owner available for other clients. `runtime stop` stops the scope
-explicitly. Agents keep connecting after the scope's configuration changes;
-`runtime stop` applies the change. Eight agents on
+explicitly; `runtime restart` stops and starts it again (`--force` terminates a
+hung owner; attached agents disconnect). Agents keep connecting after the
+scope's configuration changes; `runtime restart` applies the change. Eight agents on
 one owner each started a browser, filled a form, and closed in 2.0–2.1 s
 together, with no request lost; agents sharing one credential are capped at 8
 connections ([measurements](docs/bobby-browser/source/pages/surfaces/mcp-stdio.md#how-many-agents)).

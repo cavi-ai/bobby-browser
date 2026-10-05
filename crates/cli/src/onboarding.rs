@@ -1109,7 +1109,7 @@ fn runtime_follow_up(
 
 fn stale_runtime_notice(pid: u32) -> String {
     format!(
-        "runtime owner pid {pid} still runs the previous build; `bobby runtime stop` (attached agents disconnect; the next agent connection starts the new build) or `make install RESTART=1`"
+        "runtime owner pid {pid} still runs the previous build; `bobby runtime restart` (attached agents disconnect; the next agent connection starts the new build) or `make install RESTART=1`"
     )
 }
 
@@ -1840,7 +1840,7 @@ mod install_tests {
         let notice = stale_runtime_notice(41);
         assert!(notice.contains("pid 41"), "{notice}");
         assert!(notice.contains("previous build"), "{notice}");
-        assert!(notice.contains("`bobby runtime stop`"), "{notice}");
+        assert!(notice.contains("`bobby runtime restart`"), "{notice}");
         assert!(notice.contains("`make install RESTART=1`"), "{notice}");
         assert_eq!(notice.lines().count(), 1);
         assert_eq!(
