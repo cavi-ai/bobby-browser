@@ -10,6 +10,37 @@ use std::{
 
 const MAX_SESSION_LINES: usize = 16;
 
+/// What the guarded command does to the owner; selects the wording.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Action {
+    Restart,
+    Stop,
+}
+
+impl Action {
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Restart => "restart",
+            Self::Stop => "stop",
+        }
+    }
+
+    pub(crate) fn refusal(self) -> String {
+        format!(
+            "refusing to {verb}: this disconnects every attached agent. Ask the operator to run `bobby runtime {verb}` in a terminal. Pass --disconnect-agents only when the operator has told you to.",
+            verb = self.verb()
+        )
+    }
+
+    fn prompt(self) -> &'static str {
+        match self {
+            Self::Restart => "Restart and disconnect them? [y/N] ",
+            Self::Stop => "Stop and disconnect them? [y/N] ",
+        }
+    }
+}
+
+#[cfg(test)]
 pub(crate) const REFUSAL: &str = "refusing to restart: this disconnects every attached agent. Ask the operator to run `bobby runtime restart` in a terminal. Pass --disconnect-agents only when the operator has told you to.";
 
 #[derive(Debug, Deserialize)]
@@ -150,8 +181,12 @@ pub(crate) fn render_summary(
 }
 
 /// Ask whether to go ahead; only `y` or `yes` (any case) says yes.
-pub(crate) fn confirm(input: &mut dyn BufRead, out: &mut dyn Write) -> std::io::Result<bool> {
-    write!(out, "Restart and disconnect them? [y/N] ")?;
+pub(crate) fn confirm(
+    action: Action,
+    input: &mut dyn BufRead,
+    out: &mut dyn Write,
+) -> std::io::Result<bool> {
+    write!(out, "{}", action.prompt())?;
     out.flush()?;
     let mut line = String::new();
     if input.read_line(&mut line)? == 0 {
@@ -229,6 +264,7 @@ fn write_snapshot(runtime_dir: &Path, pid: Option<u32>, raw: &str) -> Result<Pat
 /// Decide whether the restart goes ahead. On `Proceed` the impact report has
 /// been saved (when known); nothing has been stopped either way.
 pub(crate) fn guard(
+    action: Action,
     target: &Target,
     outcome: &ImpactOutcome,
     verdict: Verdict,
@@ -240,12 +276,12 @@ pub(crate) fn guard(
     match decide(outcome, verdict.terminal, verdict.disconnect_agents) {
         Decision::Refuse => {
             writeln!(out, "{}", summary())?;
-            return Ok(Guard::Refused(REFUSAL.to_owned()));
+            return Ok(Guard::Refused(action.refusal()));
         }
         Decision::Prompt => {
             writeln!(out, "{}", summary())?;
-            if !confirm(input, out)? {
-                return Ok(Guard::Refused("restart cancelled".to_owned()));
+            if !confirm(action, input, out)? {
+                return Ok(Guard::Refused(format!("{} cancelled", action.verb())));
             }
         }
         Decision::Proceed => {}
@@ -377,6 +413,45 @@ mod tests {
     }
 
     #[test]
+    fn stop_wording_differs_and_restart_wording_is_unchanged() {
+        assert_eq!(Action::Restart.refusal(), REFUSAL);
+        assert_eq!(
+            Action::Stop.refusal(),
+            "refusing to stop: this disconnects every attached agent. Ask the operator to run `bobby runtime stop` in a terminal. Pass --disconnect-agents only when the operator has told you to."
+        );
+        let mut out = Vec::new();
+        assert!(confirm(Action::Stop, &mut "y\n".as_bytes(), &mut out).unwrap());
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "Stop and disconnect them? [y/N] "
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let target = Target {
+            pid: Some(5),
+            url: None,
+        };
+        let outcome = known(1, 0, json!([]));
+        let verdict = Verdict {
+            terminal: true,
+            disconnect_agents: false,
+        };
+        match guard(
+            Action::Stop,
+            &target,
+            &outcome,
+            verdict,
+            dir.path(),
+            &mut "n\n".as_bytes(),
+            &mut Vec::new(),
+        )
+        .unwrap()
+        {
+            Guard::Refused(message) => assert_eq!(message, "stop cancelled"),
+            Guard::Proceed => panic!("must cancel"),
+        }
+    }
+
+    #[test]
     fn prompt_proceeds_only_on_yes() {
         for (input, expected) in [
             ("y\n", true),
@@ -389,7 +464,7 @@ mod tests {
             ("", false),
         ] {
             let mut out = Vec::new();
-            let answer = confirm(&mut input.as_bytes(), &mut out).unwrap();
+            let answer = confirm(Action::Restart, &mut input.as_bytes(), &mut out).unwrap();
             assert_eq!(answer, expected, "{input:?}");
             assert_eq!(
                 String::from_utf8(out).unwrap(),
@@ -404,6 +479,7 @@ mod tests {
         let outcome = known(1, 0, json!([]));
         let mut out = Vec::new();
         let result = guard(
+            Action::Restart,
             &Target {
                 pid: Some(5),
                 url: Some("http://x".into()),
@@ -442,6 +518,7 @@ mod tests {
         };
         let mut out = Vec::new();
         match guard(
+            Action::Restart,
             &target,
             &outcome,
             verdict,
@@ -458,6 +535,7 @@ mod tests {
         let mut out = Vec::new();
         assert!(matches!(
             guard(
+                Action::Restart,
                 &target,
                 &outcome,
                 verdict,
@@ -487,6 +565,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut out = Vec::new();
         let result = guard(
+            Action::Restart,
             &Target {
                 pid: Some(5),
                 url: None,

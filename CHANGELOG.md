@@ -54,6 +54,9 @@
 
 ### Changed
 
+- `bobby runtime stop` applies the same guard as `runtime restart`: it shows what is
+  attached and asks before disconnecting agents, refuses without a terminal unless
+  `--disconnect-agents` is given, and saves the impact report first.
 - `make install` runs `bobby install --yes` when stdin or stdout is not a
   terminal; with a terminal it still runs the checklist. `make install RESTART=1`
   passes `--restart-runtime`.

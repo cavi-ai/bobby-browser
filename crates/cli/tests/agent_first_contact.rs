@@ -93,7 +93,7 @@ impl Drop for Scope {
     fn drop(&mut self) {
         let _ = self
             .command(&bobby())
-            .args(["runtime", "stop"])
+            .args(["runtime", "stop", "--disconnect-agents"])
             .current_dir(self.path())
             .output();
     }
@@ -273,7 +273,7 @@ fn an_agent_connects_when_the_stores_hold_unreadable_data() {
     scope.agent(cwd.path()).first_contact();
     assert!(scope
         .command(&bobby())
-        .args(["runtime", "stop"])
+        .args(["runtime", "stop", "--disconnect-agents"])
         .status()
         .unwrap()
         .success());

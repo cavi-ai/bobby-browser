@@ -77,7 +77,9 @@ credential, browser profile, context, and storage. Clients in the same scope
 reuse one authenticated runtime on an automatically assigned loopback port.
 Each MCP/ACP connection keeps its own protocol state; disconnecting an agent
 leaves the owner available for other clients. `runtime stop` stops the scope
-explicitly; `runtime restart` stops and starts it again (`--force` terminates a
+explicitly, with the same guard as `runtime restart` (it asks before
+disconnecting attached agents, and refuses without a terminal unless
+`--disconnect-agents` is given); `runtime restart` stops and starts it again (`--force` terminates a
 hung owner). It lists what is attached and asks before disconnecting agents;
 without a terminal it refuses unless `--disconnect-agents` is given, and it saves
 the impact report to `runtime/restart-snapshots/` before stopping. Agents keep connecting after the

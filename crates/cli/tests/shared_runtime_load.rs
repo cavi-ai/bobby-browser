@@ -63,7 +63,9 @@ struct Owner(tempfile::TempDir);
 
 impl Drop for Owner {
     fn drop(&mut self) {
-        let _ = command(self.0.path()).args(["runtime", "stop"]).output();
+        let _ = command(self.0.path())
+            .args(["runtime", "stop", "--disconnect-agents"])
+            .output();
     }
 }
 
@@ -311,5 +313,12 @@ async fn eight_agents_share_one_runtime_owner_without_losing_a_request() {
     for agent in held {
         agent.close().await;
     }
-    checked(command(root).args(["runtime", "stop"]).output().unwrap());
+    // The held agents were just closed; their connections and sessions end
+    // asynchronously, so the stop must not depend on that having finished.
+    checked(
+        command(root)
+            .args(["runtime", "stop", "--disconnect-agents"])
+            .output()
+            .unwrap(),
+    );
 }

@@ -3734,6 +3734,25 @@ model = "mlx-community/example-selected"
     }
 
     #[test]
+    fn runtime_stop_clap_parses_disconnect_agents() {
+        use clap::Parser;
+        for (args, expected) in [
+            (vec!["bobby", "runtime", "stop"], false),
+            (
+                vec!["bobby", "runtime", "stop", "--disconnect-agents"],
+                true,
+            ),
+        ] {
+            match Cli::try_parse_from(args).unwrap().command {
+                Some(CliCommand::Runtime {
+                    command: runtime_scopes::RuntimeCommand::Stop { disconnect_agents },
+                }) => assert_eq!(disconnect_agents, expected),
+                _ => panic!("unexpected parse"),
+            }
+        }
+    }
+
+    #[test]
     fn runtime_restart_clap_parses_with_and_without_force() {
         use clap::Parser;
         let plain = Cli::try_parse_from(["bobby", "runtime", "restart"]).unwrap();
