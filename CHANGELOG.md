@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+
+- Firefox companion: a page opened or bound by the runtime keeps its lease when a
+  frame snapshot lands while the tab is still blank or frame discovery fails.
+
 ### Changed
 
 - `Formula/bobby-browser.rb` carries the v0.19.1 asset digests.
