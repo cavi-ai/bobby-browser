@@ -138,6 +138,19 @@ fn release_budget_accepts_the_limit_and_rejects_each_regression() {
 }
 
 #[test]
+fn release_gate_requires_actual_wall_and_response_measurements() {
+    for (wall, bytes) in [(0, 1), (1, 0)] {
+        let mut scorecard = release_scorecard("onboarding");
+        scorecard.journey_wall_ms = wall;
+        scorecard.serialized_response_bytes = bytes;
+        assert!(
+            scorecard.enforce_release_budget().is_err(),
+            "missing measurements must not pass"
+        );
+    }
+}
+
+#[test]
 fn assisted_runs_require_source_attribution() {
     let mut scorecard = release_scorecard("onboarding");
     scorecard.vision_escalations_attempted = 1;

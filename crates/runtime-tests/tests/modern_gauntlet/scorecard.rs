@@ -261,6 +261,12 @@ impl Scorecard {
             ))
         })?;
         let mut violations = Vec::new();
+        if self.journey_wall_ms == 0 {
+            violations.push("journeyWallMs missing".to_string());
+        }
+        if self.serialized_response_bytes == 0 {
+            violations.push("serializedResponseBytes missing".to_string());
+        }
         if !self.passed {
             violations.push("passed=false".to_string());
         }

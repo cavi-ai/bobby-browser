@@ -221,12 +221,13 @@ pub enum InterfaceOperation {
     SubmitJob,
     ReadJob,
     CancelJob,
+    ResolveJob,
     IssuePrincipal,
     RevokePrincipal,
 }
 
 impl InterfaceOperation {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::RuntimeInfo,
         Self::CreateSession,
         Self::ReadSession,
@@ -245,6 +246,7 @@ impl InterfaceOperation {
         Self::SubmitJob,
         Self::ReadJob,
         Self::CancelJob,
+        Self::ResolveJob,
         Self::IssuePrincipal,
         Self::RevokePrincipal,
     ];
@@ -269,6 +271,7 @@ impl InterfaceOperation {
             Self::SubmitJob => "submitJob",
             Self::ReadJob => "readJob",
             Self::CancelJob => "cancelJob",
+            Self::ResolveJob => "resolveJob",
             Self::IssuePrincipal => "issuePrincipal",
             Self::RevokePrincipal => "revokePrincipal",
         }
@@ -294,6 +297,11 @@ impl InterfaceOperation {
             Self::SubmitJob => &[Capability::JobSubmit],
             Self::ReadJob => &[Capability::JobRead],
             Self::CancelJob => &[Capability::JobCancel],
+            Self::ResolveJob => &[
+                Capability::JobRead,
+                Capability::JobCancel,
+                Capability::AuthorityAdmin,
+            ],
             Self::IssuePrincipal => &[Capability::AuthorityAdmin],
             Self::RevokePrincipal => &[Capability::AuthorityAdmin],
         }
@@ -326,6 +334,7 @@ mod interface_operation_tests {
             "submitJob",
             "readJob",
             "cancelJob",
+            "resolveJob",
             "issuePrincipal",
             "revokePrincipal",
         ];
@@ -350,6 +359,7 @@ mod interface_operation_tests {
                 | InterfaceOperation::SubmitJob
                 | InterfaceOperation::ReadJob
                 | InterfaceOperation::CancelJob
+                | InterfaceOperation::ResolveJob
                 | InterfaceOperation::IssuePrincipal
                 | InterfaceOperation::RevokePrincipal => {}
             }

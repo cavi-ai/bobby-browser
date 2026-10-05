@@ -28,6 +28,9 @@ import type {
   FormValidationIssue,
   InterfaceEvent,
   JsonValue,
+  JobResolutionRequest,
+  JobResolutionReceipt,
+  StorageIntegrityIssue,
   JobResult,
   JobStatusResponse,
   JobSubmitResponse,
@@ -190,7 +193,7 @@ function isJsonValue(value: unknown, depth = 0): value is JsonValue {
 }
 
 const JOB_PRIORITIES = ["low", "normal", "high", "critical"] as const;
-const JOB_STATUSES = ["pending", "running", "completed", "failed", "cancelled", "reconciliationRequired"] as const;
+const JOB_STATUSES = ["pending", "running", "completed", "failed", "cancelled", "reconciliationRequired", "resolved"] as const;
 
 export function isJobId(value: unknown): value is string {
   return typeof value === "string" && value.startsWith("job_") && isUuid(value.slice(4));
@@ -221,8 +224,20 @@ function isJobResult(value: unknown): value is JobResult {
     && isIsoTimestamp(value.completedAt);
 }
 
+export function isJobResolutionRequest(value: unknown): value is JobResolutionRequest {
+  return hasExactKeys(value, ["decision", "evidenceSha256"])
+    && (value.decision === "effectObserved" || value.decision === "effectAbsent")
+    && typeof value.evidenceSha256 === "string" && /^[0-9a-f]{64}$/.test(value.evidenceSha256);
+}
+export function isJobResolutionReceipt(value: unknown): value is JobResolutionReceipt {
+  return hasExactKeys(value, ["decision", "evidenceSha256", "jobId", "actor", "resolvedAt", "provenance"])
+    && isJobResolutionRequest({ decision: value.decision, evidenceSha256: value.evidenceSha256 })
+    && isJobId(value.jobId) && isUuid(value.actor)
+    && isIsoTimestamp(value.resolvedAt) && value.provenance === "operatorAttested";
+}
+
 export function isJobStatusResponse(value: unknown): value is JobStatusResponse {
-  if (!hasExactKeys(value, ["id", "name", "priority", "status", "payload", "createdAt", "startedAt", "completedAt", "retryCount", "maxRetries", "result", "error", "timeoutMs", "correlationId"])
+  if (!hasExactKeys(value, ["id", "name", "priority", "status", "payload", "createdAt", "startedAt", "completedAt", "retryCount", "maxRetries", "result", "error", "timeoutMs", "correlationId"], ["resolution"])
     || !isJobId(value.id)
     || typeof value.name !== "string" || value.name.trim().length === 0
     || !oneOf(value.priority, JOB_PRIORITIES)
@@ -240,10 +255,12 @@ export function isJobStatusResponse(value: unknown): value is JobStatusResponse 
     || !(value.correlationId === null || isUuid(value.correlationId))) return false;
 
   if (value.result !== null && value.result.jobId !== value.id) return false;
+  if (value.resolution !== undefined && (!isJobResolutionReceipt(value.resolution) || value.status !== "resolved" || value.resolution.jobId !== value.id || value.resolution.resolvedAt !== value.completedAt)) return false;
+  if (value.status === "resolved") return value.completedAt !== null && value.result === null && value.error === null && isJobResolutionReceipt(value.resolution);
   if (value.status === "pending") return value.startedAt === null && value.completedAt === null && value.result === null && value.error === null;
   if (value.status === "running") return value.startedAt !== null && value.completedAt === null && value.result === null && value.error === null;
   if (value.status === "completed") return value.startedAt !== null && value.completedAt !== null && value.result !== null && value.result.success && value.result.error === null && value.error === null;
-  if (value.status === "failed") return value.startedAt !== null && value.completedAt !== null && value.result === null && value.error !== null;
+  if (value.status === "failed") return value.startedAt !== null && value.completedAt !== null && (value.result === null || (!value.result.success && value.result.error !== null && value.result.error.length > 0)) && value.error !== null;
   if (value.status === "reconciliationRequired") return value.completedAt === null && value.result === null && value.error !== null;
   return value.completedAt !== null && value.result === null && value.error === null;
 }
@@ -261,8 +278,15 @@ export function isProviderHealthSnapshot(value: unknown): value is ProviderHealt
     && optional(value, "latencyBudgetMs", isSafeUnsigned);
 }
 
+export function isStorageIntegrityIssue(value: unknown): value is StorageIntegrityIssue {
+  return hasExactKeys(value, ["store", "reason"])
+    && oneOf(value.store, ["commandIdempotency", "lifecycleIdempotency", "jobIdempotency", "jobJournal"])
+    && oneOf(value.reason, ["unreadableLedger", "duplicateLedgerKey", "ledgerCapacityExceeded", "unreadableJobHistory"]);
+}
+
 export function isRuntimeInfo(value: unknown): value is RuntimeInfo {
-  return hasExactKeys(value, ["version", "capabilities", "active_sessions", "queued_jobs", "uptime_ms"], ["visionProposeBudgetMs", "operationalMetrics", "providerHealth"])
+  return hasExactKeys(value, ["version", "capabilities", "active_sessions", "queued_jobs", "uptime_ms"], ["visionProposeBudgetMs", "operationalMetrics", "providerHealth", "storageIntegrity"])
+    && optional(value, "storageIntegrity", (issues): issues is StorageIntegrityIssue[] => Array.isArray(issues) && issues.length <= 4 && issues.every(isStorageIntegrityIssue))
     && isString(value.version)
     && isStringArray(value.capabilities)
     && isSafeUnsigned(value.active_sessions)

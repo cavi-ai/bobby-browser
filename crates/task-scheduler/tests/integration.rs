@@ -1236,6 +1236,118 @@ fn journal_unreadable_middle_line_is_skipped() {
 }
 
 #[test]
+fn damaged_job_history_never_replays_an_older_pending_record() {
+    let rt = runtime();
+    rt.block_on(async {
+        for unsupported_schema in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("jobs.jsonl");
+            let store = JournalJobStore::open(&path).await.unwrap();
+            let job = Job::new("echo".into(), serde_json::json!({}), JobPriority::Normal);
+            store.put(&job).await.unwrap();
+            drop(store);
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            if unsupported_schema {
+                let record = serde_json::json!({"schemaVersion":99,"sequence":u64::MAX,
+                    "recordedAt":chrono::Utc::now(),"event":"started","job":job});
+                writeln!(file, "{record}").unwrap();
+            } else {
+                writeln!(file, "damaged started transition").unwrap();
+            }
+            drop(file);
+            let original = std::fs::read(&path).unwrap();
+            for _ in 0..2 {
+                let store = JournalJobStore::open(&path).await.unwrap();
+                assert!(
+                    store.pending().await.unwrap().is_empty(),
+                    "uncertain jobs must not replay"
+                );
+                assert_eq!(
+                    store.get(&job.id).await.unwrap().unwrap().status,
+                    JobStatus::ReconciliationRequired
+                );
+                assert!(store
+                    .put(&Job::new(
+                        "echo".into(),
+                        serde_json::json!({}),
+                        JobPriority::Normal
+                    ))
+                    .await
+                    .is_err());
+                assert_eq!(
+                    std::fs::read(&path).unwrap(),
+                    original,
+                    "inspection must preserve damaged evidence"
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn job_resolution_is_owner_scoped_durable_and_never_requeues() {
+    runtime().block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.jsonl");
+        let owner = types::PrincipalId::from_uuid(uuid::Uuid::new_v4());
+        let store = JournalJobStore::open(&path).await.unwrap();
+        let mut job = Job::new("echo".into(), serde_json::json!({}), JobPriority::Normal)
+            .with_owner(owner.clone());
+        job.start();
+        store.put(&job).await.unwrap();
+        drop(store);
+        let scheduler = JobScheduler::open_journal(SchedulerConfig::default(), &path)
+            .await
+            .unwrap();
+        let input: types::JobResolutionRequest = serde_json::from_value(serde_json::json!({
+            "decision":"effectObserved", "evidenceSha256":"a".repeat(64),
+        }))
+        .unwrap();
+        let intruder = types::PrincipalId::from_uuid(uuid::Uuid::new_v4());
+        assert!(scheduler
+            .resolve_job(&job.id, &intruder, input.clone())
+            .await
+            .is_err());
+        let receipt = scheduler
+            .resolve_job(&job.id, &owner, input.clone())
+            .await
+            .unwrap();
+        assert_eq!(receipt.provenance, "operatorAttested");
+        assert_eq!(
+            scheduler.get_job(&job.id).await.unwrap().status.to_string(),
+            "resolved"
+        );
+        assert_eq!(scheduler.stats().await.queued_jobs, 0);
+        assert_eq!(
+            scheduler
+                .resolve_job(&job.id, &owner, input.clone())
+                .await
+                .unwrap(),
+            receipt
+        );
+        let mut conflict = input.clone();
+        conflict.evidence_sha256 = "b".repeat(64);
+        assert!(scheduler
+            .resolve_job(&job.id, &owner, conflict)
+            .await
+            .is_err());
+        drop(scheduler);
+        let scheduler = JobScheduler::open_journal(SchedulerConfig::default(), &path)
+            .await
+            .unwrap();
+        assert_eq!(
+            scheduler.resolve_job(&job.id, &owner, input).await.unwrap(),
+            receipt
+        );
+        assert_eq!(scheduler.stats().await.queued_jobs, 0);
+    });
+}
+
+#[test]
 fn inspect_reports_torn_tail_without_truncating() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("jobs.jsonl");
@@ -1279,6 +1391,50 @@ fn inspect_missing_scheduler_journal_is_empty_health() {
     assert!(!health.exists);
     assert_eq!(health.bytes, 0);
     assert!(!health.torn_tail);
+}
+
+#[test]
+fn cancel_before_handler_first_poll_releases_active_slot() {
+    use std::future::Future;
+    use std::task::Poll;
+
+    runtime().block_on(async {
+        let calls = Arc::new(AtomicU32::new(0));
+        struct CountingHandler(Arc<AtomicU32>);
+        #[async_trait]
+        impl JobHandler for CountingHandler {
+            async fn execute(&self, _job: &Job) -> Result<serde_json::Value, String> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(serde_json::json!({}))
+            }
+        }
+        let mut scheduler = JobScheduler::new(SchedulerConfig::default());
+        scheduler.register_handler("test".into(), Arc::new(CountingHandler(calls.clone())));
+        let id = scheduler
+            .submit(JobConfig::new("test".into(), serde_json::json!({})))
+            .await
+            .unwrap();
+
+        // Poll only the runner, leaving its spawned handler unpolled on this
+        // current-thread executor before cancellation.
+        let mut runner = Box::pin(scheduler.run());
+        std::future::poll_fn(|cx| {
+            assert!(runner.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(scheduler.stats().await.active_jobs, 1);
+        scheduler.cancel_job(&id).await.unwrap();
+        scheduler.request_shutdown();
+        runner.await.unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(scheduler.stats().await.active_jobs, 0);
+        assert_eq!(
+            scheduler.get_job(&id).await.unwrap().status,
+            JobStatus::ReconciliationRequired
+        );
+    });
 }
 
 #[test]
@@ -1592,5 +1748,275 @@ fn oversized_journal_retains_newest_terminal_jobs() {
             !jobs.iter().any(|job| job.id.0 == "job-1"),
             "the oldest terminal job must be pruned"
         );
+    });
+}
+
+#[test]
+fn failed_resolution_persistence_leaves_uncertainty_and_never_admits_work() {
+    runtime().block_on(async {
+        let store = Arc::new(RejectEventStore {
+            inner: MemoryJobStore::new(),
+            denied: JobEvent::Resolved,
+        });
+        let owner = types::PrincipalId::from_uuid(uuid::Uuid::new_v4());
+        let mut job = Job::new("echo".into(), serde_json::json!({}), JobPriority::Normal)
+            .with_owner(owner.clone());
+        job.require_reconciliation("uncertain effect");
+        store.put(&job).await.unwrap();
+        let scheduler = JobScheduler::with_store(SchedulerConfig::default(), store);
+        scheduler.hydrate().await.unwrap();
+        assert!(scheduler
+            .resolve_job(
+                &job.id,
+                &owner,
+                types::JobResolutionRequest {
+                    decision: types::JobResolutionDecision::EffectAbsent,
+                    evidence_sha256: "a".repeat(64)
+                }
+            )
+            .await
+            .is_err());
+        let still_uncertain = scheduler.get_job(&job.id).await.unwrap();
+        assert_eq!(still_uncertain.status, JobStatus::ReconciliationRequired);
+        assert!(still_uncertain.resolution.is_none());
+        assert_eq!(scheduler.stats().await.queued_jobs, 0);
+        scheduler.deny_admission("unreadableLedger");
+        assert_eq!(
+            scheduler
+                .clone()
+                .submit(JobConfig::new("echo".into(), serde_json::json!({})))
+                .await
+                .unwrap_err(),
+            JobError::Integrity
+        );
+        assert_eq!(scheduler.stats().await.queued_jobs, 0);
+    });
+}
+
+struct DelayedEventStore {
+    inner: MemoryJobStore,
+    event: JobEvent,
+    first: std::sync::atomic::AtomicBool,
+    append_before_wait: bool,
+    fail_after_append: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+#[async_trait]
+impl JobStore for DelayedEventStore {
+    async fn put(&self, job: &Job) -> Result<(), StoreError> {
+        self.inner.put(job).await
+    }
+    async fn get(&self, id: &JobId) -> Result<Option<Job>, StoreError> {
+        self.inner.get(id).await
+    }
+    async fn update(&self, job: &Job, event: JobEvent) -> Result<(), StoreError> {
+        if event == self.event && self.first.swap(false, Ordering::SeqCst) {
+            if self.append_before_wait {
+                self.inner.update(job, event).await?;
+            }
+            self.entered.notify_one();
+            self.release.notified().await;
+            if self.fail_after_append.swap(false, Ordering::SeqCst) {
+                return Err(std::io::Error::other("acknowledgment lost after append").into());
+            }
+        }
+        self.inner.update(job, event).await
+    }
+    async fn pending(&self) -> Result<Vec<Job>, StoreError> {
+        self.inner.pending().await
+    }
+    async fn load_all(&self) -> Result<Vec<Job>, StoreError> {
+        self.inner.load_all().await
+    }
+}
+fn delayed_store(event: JobEvent, append_before_wait: bool) -> Arc<DelayedEventStore> {
+    Arc::new(DelayedEventStore {
+        inner: MemoryJobStore::new(),
+        event,
+        first: std::sync::atomic::AtomicBool::new(true),
+        append_before_wait,
+        fail_after_append: std::sync::atomic::AtomicBool::new(false),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    })
+}
+#[test]
+fn resolution_waits_for_older_timeout_transition_to_be_durable() {
+    runtime().block_on(async {
+        let store = delayed_store(JobEvent::Recovered, false);
+        let owner = types::PrincipalId::from_uuid(uuid::Uuid::new_v4());
+        let mut scheduler = JobScheduler::with_store(
+            SchedulerConfig::default().with_job_timeout(10),
+            store.clone(),
+        );
+        scheduler.register_handler("hang".into(), Arc::new(HangHandler));
+        let id = scheduler
+            .submit(JobConfig::new("hang".into(), serde_json::json!({})).with_owner(owner.clone()))
+            .await
+            .unwrap();
+        let runner_scheduler = scheduler.clone();
+        let runner = tokio::spawn(async move { runner_scheduler.run().await });
+        tokio::time::timeout(Duration::from_secs(2), store.entered.notified())
+            .await
+            .unwrap();
+        let resolver = scheduler.clone();
+        let resolver_id = id.clone();
+        let mut task = tokio::spawn(async move {
+            resolver
+                .resolve_job(
+                    &resolver_id,
+                    &owner,
+                    types::JobResolutionRequest {
+                        decision: types::JobResolutionDecision::EffectAbsent,
+                        evidence_sha256: "a".repeat(64),
+                    },
+                )
+                .await
+        });
+        let waited = tokio::time::timeout(Duration::from_millis(50), &mut task)
+            .await
+            .is_err();
+        store.release.notify_one();
+        if waited {
+            task.await.unwrap().unwrap();
+        }
+        scheduler.request_shutdown();
+        runner.await.unwrap().unwrap();
+        assert!(
+            waited,
+            "a resolution must wait for the older uncertain transition"
+        );
+        assert_eq!(
+            store.get(&id).await.unwrap().unwrap().status,
+            JobStatus::Resolved
+        );
+    });
+}
+#[test]
+fn cancelled_resolution_after_append_cannot_accept_a_conflicting_attestation() {
+    runtime().block_on(async {
+        let store = delayed_store(JobEvent::Resolved, true);
+        let owner = types::PrincipalId::from_uuid(uuid::Uuid::new_v4());
+        let mut job = Job::new("echo".into(), serde_json::json!({}), JobPriority::Normal)
+            .with_owner(owner.clone());
+        job.require_reconciliation("uncertain effect");
+        store.put(&job).await.unwrap();
+        let scheduler = JobScheduler::with_store(SchedulerConfig::default(), store.clone());
+        scheduler.hydrate().await.unwrap();
+        let resolver = scheduler.clone();
+        let id = job.id.clone();
+        let actor = owner.clone();
+        let task = tokio::spawn(async move {
+            resolver
+                .resolve_job(
+                    &id,
+                    &actor,
+                    types::JobResolutionRequest {
+                        decision: types::JobResolutionDecision::EffectObserved,
+                        evidence_sha256: "a".repeat(64),
+                    },
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), store.entered.notified())
+            .await
+            .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let conflict = scheduler
+            .resolve_job(
+                &job.id,
+                &owner,
+                types::JobResolutionRequest {
+                    decision: types::JobResolutionDecision::EffectAbsent,
+                    evidence_sha256: "b".repeat(64),
+                },
+            )
+            .await;
+        assert!(
+            conflict.is_err(),
+            "an uncertain write must not be overwritten in this process"
+        );
+        assert_eq!(
+            store
+                .get(&job.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .resolution
+                .unwrap()
+                .evidence_sha256,
+            "a".repeat(64)
+        );
+    });
+}
+
+#[test]
+fn malformed_stored_resolution_is_degraded_before_hydration() {
+    runtime().block_on(async {
+        let owner = types::PrincipalId::from_uuid(uuid::Uuid::new_v4());
+        let mut job = Job::new("echo".into(), serde_json::json!({}), JobPriority::Normal).with_owner(owner.clone());
+        let time = chrono::Utc::now();
+        job.status = JobStatus::Resolved; job.completed_at = Some(time);
+        job.resolution = Some(types::JobResolutionReceipt { job_id: job.id.0.clone(), actor: owner, resolved_at: time, decision: types::JobResolutionDecision::EffectAbsent, evidence_sha256: "a".repeat(64), provenance: "operatorAttested".into() });
+        for (field, value) in [("evidenceSha256", serde_json::json!("bad")), ("provenance", serde_json::json!("runtimeVerified")), ("jobId", serde_json::json!(JobId::new().0)), ("actor", serde_json::json!(uuid::Uuid::new_v4())), ("resolvedAt", serde_json::json!(time + chrono::Duration::seconds(1))), ("status", serde_json::json!("pending")), ("resolution", serde_json::Value::Null)] {
+            let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("jobs.jsonl");
+            let mut record = serde_json::json!({"schemaVersion":1,"sequence":0,"recordedAt":time,"event":"resolved","job":job});
+            if field == "status" || field == "resolution" { record["job"][field] = value; } else { record["job"]["resolution"][field] = value; }
+            let original = format!("{record}\n"); std::fs::write(&path, &original).unwrap();
+            let store = JournalJobStore::open(&path).await.unwrap();
+            assert!(store.integrity_issue().is_some(), "invalid {field} must degrade history");
+            assert!(store.pending().await.unwrap().is_empty());
+            assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+        }
+    });
+}
+
+#[test]
+fn resolution_acknowledgment_error_requires_reload_before_conflicting_retry() {
+    runtime().block_on(async {
+        let store = delayed_store(JobEvent::Resolved, true);
+        store.fail_after_append.store(true, Ordering::SeqCst);
+        store.release.notify_one();
+        let owner = types::PrincipalId::from_uuid(uuid::Uuid::new_v4());
+        let mut job = Job::new("echo".into(), serde_json::json!({}), JobPriority::Normal)
+            .with_owner(owner.clone());
+        job.require_reconciliation("uncertain effect");
+        store.put(&job).await.unwrap();
+        let scheduler = JobScheduler::with_store(SchedulerConfig::default(), store.clone());
+        scheduler.hydrate().await.unwrap();
+        let input = types::JobResolutionRequest {
+            decision: types::JobResolutionDecision::EffectObserved,
+            evidence_sha256: "a".repeat(64),
+        };
+        assert_eq!(
+            scheduler
+                .resolve_job(&job.id, &owner, input.clone())
+                .await
+                .unwrap_err(),
+            JobError::ResolutionUncertain
+        );
+        assert!(scheduler
+            .get_job(&job.id)
+            .await
+            .unwrap()
+            .resolution
+            .is_none());
+        let conflict = types::JobResolutionRequest {
+            decision: types::JobResolutionDecision::EffectAbsent,
+            evidence_sha256: "b".repeat(64),
+        };
+        assert_eq!(
+            scheduler
+                .resolve_job(&job.id, &owner, conflict)
+                .await
+                .unwrap_err(),
+            JobError::ResolutionUncertain
+        );
+        let reloaded = JobScheduler::with_store(SchedulerConfig::default(), store);
+        reloaded.hydrate().await.unwrap();
+        let receipt = reloaded.resolve_job(&job.id, &owner, input).await.unwrap();
+        assert_eq!(receipt.evidence_sha256, "a".repeat(64));
     });
 }

@@ -18,6 +18,13 @@ pub enum PageMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RuntimeInfo {
+    /// Nonempty means affected execution history requires authoritative repair.
+    #[serde(
+        default,
+        rename = "storageIntegrity",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub storage_integrity: Vec<StorageIntegrityIssue>,
     pub version: String,
     pub capabilities: Vec<String>,
     pub active_sessions: usize,
@@ -47,6 +54,14 @@ pub struct RuntimeInfo {
         skip_serializing_if = "Option::is_none"
     )]
     pub provider_health: Option<Vec<ProviderHealthSnapshot>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StorageIntegrityIssue {
+    pub store: String,
+    pub reason: String,
 }
 
 /// Health classification of one vision provider boundary. `degraded` means

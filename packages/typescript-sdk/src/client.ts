@@ -1,7 +1,7 @@
-import { INTERFACE_VERSION, type ArtifactReference, type CheckpointRequest, type CommandEnvelope, type CommandOutcome, type ContextAskResponse, type ContextNeighborsResponse, type ContextSiteResponse, type CreateSessionRequest, type EventOptions, type EventGap, type FormSnapshot, type FormSnapshotOptions, type InterfaceError, type InterfaceEvent, type JobStatusResponse, type JobSubmitResponse, type OpenPageRequest, type RecoveryDecision, type RecoveryStatus, type RequestOptions, type RuntimeInfo, type SessionState, type SubmitJobRequest, type PageState, type WorkflowCheckpoint } from "./contracts.js";
+import { INTERFACE_VERSION, type ArtifactReference, type CheckpointRequest, type CommandEnvelope, type CommandOutcome, type ContextAskResponse, type ContextNeighborsResponse, type ContextSiteResponse, type CreateSessionRequest, type EventOptions, type EventGap, type FormSnapshot, type FormSnapshotOptions, type InterfaceError, type InterfaceEvent, type JobResolutionRequest, type JobResolutionReceipt, type JobStatusResponse, type JobSubmitResponse, type OpenPageRequest, type RecoveryDecision, type RecoveryStatus, type RequestOptions, type RuntimeInfo, type SessionState, type SubmitJobRequest, type PageState, type WorkflowCheckpoint } from "./contracts.js";
 import { RuntimeClientError, type RuntimeErrorRedactor } from "./errors.js";
 import { isInterfaceError } from "./events.js";
-import { hasExactKeys, isCommandOutcome, isContextAskResponse, isContextNeighborsResponse, isContextSiteResponse, isEventBatch, isEventGap, isFormSnapshot, isJobId, isJobStatusResponse, isJobSubmitResponse, isPageState, isRecoveryDecision, isRecoveryStatus, isRuntimeInfo, isSessionState, isSessionStateList, isSubmitJobRequest, isUuid, isWorkflowCheckpoint } from "./validators.js";
+import { hasExactKeys, isCommandOutcome, isContextAskResponse, isContextNeighborsResponse, isContextSiteResponse, isEventBatch, isEventGap, isFormSnapshot, isJobId, isJobResolutionRequest, isJobResolutionReceipt, isJobStatusResponse, isJobSubmitResponse, isPageState, isRecoveryDecision, isRecoveryStatus, isRuntimeInfo, isSessionState, isSessionStateList, isSubmitJobRequest, isUuid, isWorkflowCheckpoint } from "./validators.js";
 
 const JSON_CONTENT_TYPE = /^application\/json(?:\s*;|$)/i;
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -152,6 +152,16 @@ export class BrowserRuntimeClient {
   async jobStatus(jobId: string, options?: RequestOptions): Promise<JobStatusResponse> {
     if (!isJobId(jobId)) throw this.#protocol("job id must use the runtime job identifier format");
     return this.#json("GET", `/v1/jobs/${encodeURIComponent(jobId)}`, undefined, options, isJobStatusResponse);
+  }
+
+  /** Record an operator attestation without replaying the job. Requires owner + authority:admin. */
+  async resolveJob(jobId: string, input: JobResolutionRequest, options?: RequestOptions): Promise<JobResolutionReceipt> {
+    if (!isJobId(jobId) || !isJobResolutionRequest(input)) throw this.#protocol("job resolution request has an invalid shape");
+    return this.#consumeJson("POST", `/v1/jobs/${encodeURIComponent(jobId)}/resolution`, input, options, (response, payload) => {
+      if (response.status !== 200 || !isJobResolutionReceipt(payload)) throw this.#responseError(response.status, payload);
+      if (payload.jobId !== jobId || payload.decision !== input.decision || payload.evidenceSha256 !== input.evidenceSha256) throw this.#protocol("resolution receipt does not match its request");
+      return payload;
+    });
   }
 
   /** `DELETE /v1/jobs/{jobId}` — cancel the authenticated principal's job. */

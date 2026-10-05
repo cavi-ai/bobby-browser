@@ -15,6 +15,10 @@ async fn server_with_jobs() -> Server {
 }
 
 async fn server_with_capabilities(capabilities: Vec<Capability>) -> Server {
+    server_with_admission(capabilities, false).await
+}
+
+async fn server_with_admission(capabilities: Vec<Capability>, degraded: bool) -> Server {
     let authority = AuthorityStore::with_capacity(1);
     let token = authority
         .issue(
@@ -26,6 +30,9 @@ async fn server_with_capabilities(capabilities: Vec<Capability>) -> Server {
         .unwrap();
     let handle = authority.verify(&token.expose_once()).await.unwrap();
     let (port, scheduler) = InProcessJobPort::memory();
+    if degraded {
+        scheduler.deny_admission("unreadableLedger");
+    }
     tokio::spawn(async move {
         let _ = scheduler.run().await;
     });
@@ -269,4 +276,15 @@ async fn http_fetch_to_loopback_fails_closed() {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     panic!("http_fetch loopback job did not finish");
+}
+
+#[tokio::test]
+async fn degraded_shared_ledger_refuses_unkeyed_mcp_job_admission() {
+    let server = server_with_admission(Capability::ALL.to_vec(), true).await;
+    let response = server.handle_message(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"job_submit","arguments":{"name":"echo","payload":{"secret":"value"}}}})).await.unwrap();
+    assert_eq!(response["error"]["data"]["code"], "idempotencyConflict");
+    assert_eq!(response["error"]["data"]["retryable"], false);
+    assert_eq!(response["error"]["data"]["reconciliationRequired"], true);
+    assert!(response["result"].is_null());
+    assert!(!response.to_string().contains("secret"));
 }

@@ -44,6 +44,98 @@ fn reconciliation(command_id: CommandId) -> CommandOutcome {
 }
 
 #[tokio::test]
+async fn unreadable_durable_ledger_preserves_bytes_and_refuses_new_reservations() {
+    for bytes in [
+        b"not json".as_slice(),
+        br#"{"schemaVersion":99,"entries":[]}"#,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("idempotency.json");
+        std::fs::write(&path, bytes).unwrap();
+        for _ in 0..2 {
+            let store = IdempotencyStore::open_durable(&path, |_| async {
+                Ok::<Option<CommandOutcome>, std::io::Error>(None)
+            })
+            .await
+            .unwrap();
+            let error = reserve(
+                &store,
+                principal("10000000-0000-0000-0000-000000000001"),
+                key("uncertain"),
+                canonical_sha256(&"effect").unwrap(),
+                CorrelationId::new(),
+            )
+            .await
+            .expect_err("unreadable history must not admit a new effect");
+            assert!(error.reconciliation_required);
+            assert!(!error.retryable);
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+    }
+}
+
+#[tokio::test]
+async fn duplicate_or_oversized_restored_ledger_does_not_drop_safety_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("idempotency.json");
+    let store = IdempotencyStore::open_durable(&path, |_| async {
+        Ok::<Option<CommandOutcome>, std::io::Error>(None)
+    })
+    .await
+    .unwrap();
+    let permit = match reserve(
+        &store,
+        principal("10000000-0000-0000-0000-000000000001"),
+        key("uncertain"),
+        canonical_sha256(&"effect").unwrap(),
+        CorrelationId::new(),
+    )
+    .await
+    .unwrap()
+    {
+        IdempotencyReservation::Acquired(permit) => permit,
+        _ => panic!("new ledger"),
+    };
+    drop(permit);
+    drop(store);
+    let original: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    for count in [2, 257] {
+        let mut snapshot = original.clone();
+        let entry = snapshot["entries"][0].clone();
+        snapshot["entries"] = serde_json::Value::Array(
+            (0..count)
+                .map(|i| {
+                    let mut item = entry.clone();
+                    if count > 2 {
+                        item["key"] = serde_json::json!(format!("key-{i}"));
+                    }
+                    item
+                })
+                .collect(),
+        );
+        let bytes = serde_json::to_vec(&snapshot).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let reopened = IdempotencyStore::open_durable(&path, |_| async {
+            Ok::<Option<CommandOutcome>, std::io::Error>(None)
+        })
+        .await
+        .unwrap();
+        let error = reserve(
+            &reopened,
+            principal("10000000-0000-0000-0000-000000000001"),
+            key("not-in-restored-prefix"),
+            canonical_sha256(&"effect").unwrap(),
+            CorrelationId::new(),
+        )
+        .await
+        .expect_err("invalid restored history must not admit effects");
+        assert!(error.reconciliation_required);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+}
+
+#[tokio::test]
 async fn durable_key_replays_after_reopen_without_storing_page_evidence() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("idempotency.json");

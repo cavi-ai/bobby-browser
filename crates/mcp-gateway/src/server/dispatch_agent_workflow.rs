@@ -365,10 +365,8 @@ impl Server {
     /// default bounds -- so the caller can skip the redundant re-observe
     /// (2026-09-23 transcripts: 7-9 `workflow_observe` calls per run, one
     /// after nearly every action). A failed action outcome is returned
-    /// unchanged; a `live_workflow_observation` that itself errors leaves
-    /// the action's own outcome exactly as it would have been without this
-    /// call -- `postState` is an elision, never a requirement for the
-    /// action's success.
+    /// with `postStateStatus: notRequested`; observation failure adds only a
+    /// bounded `unavailable` diagnostic. Optional state never changes action success.
     ///
     /// `workflowId` is read back from the completed outcome, not threaded in
     /// by the caller: an omitted `workflowId` argument mints a fresh one
@@ -389,8 +387,8 @@ impl Server {
             .and_then(|outcome| outcome.get("workflowId"))
             .cloned()
             .and_then(|value| serde_json::from_value::<types::WorkflowId>(value).ok());
-        let (mut outcome, post_state) = WorkflowService::new(Arc::clone(&self.runtime))
-            .post_action_with(
+        let (mut outcome, observation) = WorkflowService::new(Arc::clone(&self.runtime))
+            .post_action_report_with(
                 result,
                 |outcome| outcome.get("status").and_then(Value::as_str) == Some("completed"),
                 || {
@@ -407,8 +405,24 @@ impl Server {
                 },
             )
             .await?;
-        if let Some(live) = post_state {
-            outcome["postState"] = live.outcome;
+        match observation {
+            sdk_core::workflow::PostActionObservation::Available(live)
+                if live.outcome["status"] != "completed" =>
+            {
+                outcome["postStateStatus"] = json!({"status":"unavailable","code":"observationIncomplete","reconciliationRequired":false});
+            }
+            sdk_core::workflow::PostActionObservation::Available(live) => {
+                outcome["postState"] = live.outcome;
+                outcome["postStateStatus"] = json!({"status":"available"});
+            }
+            sdk_core::workflow::PostActionObservation::Unavailable(error) => {
+                // Codes are bounded contract values. Raw errors can contain page
+                // values and paths and must never enter this diagnostic field.
+                outcome["postStateStatus"] = json!({"status":"unavailable","code":error.code,"reconciliationRequired":error.reconciliation_required});
+            }
+            sdk_core::workflow::PostActionObservation::NotRequested => {
+                outcome["postStateStatus"] = json!({"status":"notRequested"});
+            }
         }
         Ok(outcome)
     }

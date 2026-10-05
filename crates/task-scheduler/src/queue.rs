@@ -161,6 +161,7 @@ impl JobQueue {
                     | JobStatus::Failed
                     | JobStatus::Cancelled
                     | JobStatus::ReconciliationRequired
+                    | JobStatus::Resolved
             ) {
                 return Err(crate::JobError::Execution(format!(
                     "job {} already finished with status {}",
@@ -207,7 +208,7 @@ impl JobQueue {
                 JobStatus::Completed => completed += 1,
                 JobStatus::Failed => failed += 1,
                 JobStatus::Cancelled => cancelled += 1,
-                JobStatus::ReconciliationRequired => {}
+                JobStatus::ReconciliationRequired | JobStatus::Resolved => {}
             }
         }
 
