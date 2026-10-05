@@ -292,12 +292,13 @@ async fn eight_agents_share_one_runtime_owner_without_losing_a_request() {
     for _ in 0..quota {
         held.push(Agent::attach(&origin, &bearer).await);
     }
-    let refused = gateway_transport::connect(
+    let refused = gateway_transport::connect_within(
         &origin,
         "mcp",
         &bearer,
         tokio::io::empty(),
         tokio::io::sink(),
+        std::time::Duration::ZERO,
     )
     .await
     .unwrap_err()

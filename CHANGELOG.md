@@ -14,6 +14,12 @@
   held a per-principal permit until the protocol server finished on its own,
   and a server with 64 requests pending stops reading frames, so it never saw
   the peer leave.
+- A gateway refused by the shared runtime with a retryable error retries the
+  connection after the runtime's `retryAfterMs`, for up to 10 s, instead of
+  exiting on the first refusal.
+- A gateway still refused after that answers the host's `initialize` request
+  on stdout with a JSON-RPC error (same `id`, the runtime's reason) before
+  exiting 1; the host saw only a closed pipe.
 
 ### Changed
 
