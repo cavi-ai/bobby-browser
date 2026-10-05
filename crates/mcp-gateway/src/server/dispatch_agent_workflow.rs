@@ -1322,7 +1322,7 @@ fn workflow_internal_error(context: &types::RequestContext) -> types::InterfaceE
     }
 }
 
-fn workflow_internal_error_with_correlation(
+pub(super) fn workflow_internal_error_with_correlation(
     correlation_id: types::CorrelationId,
 ) -> types::InterfaceError {
     types::InterfaceError {

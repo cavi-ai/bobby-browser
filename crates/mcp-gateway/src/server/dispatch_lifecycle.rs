@@ -29,37 +29,24 @@ impl Server {
         let handle = self.handle.clone();
         let sessions = Arc::clone(&self.sessions);
         let correlation_id = context.correlation_id.clone();
+        let task_correlation_id = correlation_id.clone();
         let task = tokio::spawn(async move {
             let session = runtime.create_session(context, request).await?;
             if !sessions.record(&session.id) {
                 connection_sessions::delete_session_quietly(&runtime, &handle, session.id).await;
-                return Err(types::InterfaceError {
-                    code: types::InterfaceErrorCode::Internal,
-                    layer: types::ErrorLayer::Interface,
-                    message: "connection closed".into(),
-                    correlation_id,
-                    command_id: None,
-                    retryable: false,
-                    retry_after_ms: None,
-                    reconciliation_required: false,
-                    required_capability: None,
-                });
+                return Err(
+                    dispatch_agent_workflow::workflow_internal_error_with_correlation(
+                        task_correlation_id,
+                    ),
+                );
             }
             Ok(session)
         });
         match task.await {
             Ok(result) => result,
-            Err(_) => Err(types::InterfaceError {
-                code: types::InterfaceErrorCode::Internal,
-                layer: types::ErrorLayer::Interface,
-                message: "runtime interface request failed".into(),
-                correlation_id: types::CorrelationId::new(),
-                command_id: None,
-                retryable: false,
-                retry_after_ms: None,
-                reconciliation_required: true,
-                required_capability: None,
-            }),
+            Err(_) => Err(
+                dispatch_agent_workflow::workflow_internal_error_with_correlation(correlation_id),
+            ),
         }
     }
 

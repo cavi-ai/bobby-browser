@@ -14,6 +14,9 @@ const DISCONNECT_DELETE_DEADLINE_SECONDS: i64 = 30;
 
 #[derive(Default)]
 struct State {
+    /// Set when `serve` starts. A `Server` that is never served (the cached
+    /// per-principal HTTP server) has no connection end, so it records nothing.
+    active: bool,
     closing: bool,
     ids: Vec<types::SessionId>,
 }
@@ -40,10 +43,18 @@ impl ConnectionSessions {
         if state.closing {
             return false;
         }
+        if !state.active {
+            return true;
+        }
         if !state.ids.contains(id) {
             state.ids.push(id.clone());
         }
         true
+    }
+
+    /// Starts recording; called when `serve` begins.
+    pub(super) fn activate(&self) {
+        self.state().active = true;
     }
 
     pub(super) fn forget(&self, id: &types::SessionId) {
@@ -53,7 +64,7 @@ impl ConnectionSessions {
     /// Marks the connection closing and takes every recorded id. Later calls
     /// return nothing, so cleanup is idempotent across the serve return paths
     /// and the drop guard.
-    fn close(&self) -> Vec<types::SessionId> {
+    pub(super) fn close(&self) -> Vec<types::SessionId> {
         let mut state = self.state();
         state.closing = true;
         std::mem::take(&mut state.ids)
@@ -139,5 +150,32 @@ impl Drop for DisconnectGuard {
     fn drop(&mut self) {
         // Already taken by `finish` leaves nothing to spawn.
         let _ = self.spawn_cleanup();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inactive_record_stores_nothing() {
+        let sessions = ConnectionSessions::default();
+        let id = types::SessionId::new();
+        assert!(sessions.record(&id));
+        assert!(sessions.close().is_empty());
+    }
+
+    #[test]
+    fn active_record_forgets_and_hands_ids_out_once() {
+        let sessions = ConnectionSessions::default();
+        sessions.activate();
+        let kept = types::SessionId::new();
+        let closed = types::SessionId::new();
+        assert!(sessions.record(&kept));
+        assert!(sessions.record(&closed));
+        sessions.forget(&closed);
+        assert_eq!(sessions.close(), vec![kept.clone()]);
+        assert!(sessions.close().is_empty());
+        assert!(!sessions.record(&kept));
     }
 }

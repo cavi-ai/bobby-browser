@@ -596,6 +596,7 @@ impl Server {
         R: AsyncRead + Unpin + Send,
         W: AsyncWrite + Unpin + Send,
     {
+        self.sessions.activate();
         let guard = connection_sessions::DisconnectGuard::new(
             Arc::clone(&self.runtime),
             self.handle.clone(),
