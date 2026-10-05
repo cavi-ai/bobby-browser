@@ -2092,6 +2092,14 @@ fn invalid_params_reason(id: Value, reason: &'static str) -> Value {
 
 fn job_port_error_response(id: Value, port_error: crate::jobs::JobPortError) -> Value {
     match port_error {
+        crate::jobs::JobPortError::Integrity => error(
+            id,
+            INTERFACE_ERROR,
+            "Runtime interface error: idempotencyConflict",
+            Some(
+                json!({"code":"idempotencyConflict","message":port_error.message(),"retryable":false,"reconciliationRequired":true}),
+            ),
+        ),
         crate::jobs::JobPortError::InvalidName | crate::jobs::JobPortError::InvalidPriority => {
             invalid_params_reason(id, "malformedArguments")
         }

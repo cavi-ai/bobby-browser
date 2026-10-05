@@ -46,6 +46,13 @@ pub struct WorkflowCleanup {
     pub session_delete: Result<(), InterfaceError>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum PostActionObservation<T, E> {
+    Available(T),
+    Unavailable(E),
+    NotRequested,
+}
+
 #[derive(Clone)]
 pub struct WorkflowService {
     runtime: Arc<dyn RuntimeInterface>,
@@ -248,13 +255,36 @@ impl WorkflowService {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<U, E>>,
     {
-        let action = result?;
-        let post_state = if completed(&action) {
-            observe().await.ok()
-        } else {
-            None
+        let (action, observation) = self
+            .post_action_report_with(result, completed, observe)
+            .await?;
+        let post_state = match observation {
+            PostActionObservation::Available(state) => Some(state),
+            _ => None,
         };
         Ok((action, post_state))
+    }
+
+    pub async fn post_action_report_with<T, E, U, F, Fut>(
+        &self,
+        result: Result<T, E>,
+        completed: impl FnOnce(&T) -> bool,
+        observe: F,
+    ) -> Result<(T, PostActionObservation<U, E>), E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<U, E>>,
+    {
+        let action = result?;
+        let observation = if completed(&action) {
+            match observe().await {
+                Ok(state) => PostActionObservation::Available(state),
+                Err(error) => PostActionObservation::Unavailable(error),
+            }
+        } else {
+            PostActionObservation::NotRequested
+        };
+        Ok((action, observation))
     }
 
     /// Clean partial setup with a fresh caller context for each operation.

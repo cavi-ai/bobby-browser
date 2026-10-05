@@ -36,6 +36,7 @@ Broker `/v1/*` routes require the shared headers in
 | POST | `/v1/jobs` | Submit a scheduled job | `job:submit` (+ `network:egress` for HTTP handlers) |
 | GET | `/v1/jobs/{job}` | Job status | `job:read` |
 | DELETE | `/v1/jobs/{job}` | Cancel a job | `job:cancel` |
+| POST | `/v1/jobs/{job}/resolution` | Record an owner attestation | `job:read` + `job:cancel` + `authority:admin` |
 | POST | `/v1/principals` | Issue scoped bearer | `authority:admin` |
 | DELETE | `/v1/principals/{principal}` | Revoke principal | `authority:admin` |
 
@@ -107,7 +108,16 @@ validators / Rust types.
   `status`, `payload`, timestamps, `retryCount`, `maxRetries`, `result`,
   `error`, …). `reconciliationRequired` means execution or persistence has
   an uncertain outcome; inspect the external effect before submitting new work.
-- **DELETE `/v1/jobs/{job}`** — cancel; returns the updated job status.
+- **DELETE `/v1/jobs/{job}`** — cancel; returns HTTP 204. Read job status afterward.
+- **POST `/v1/jobs/{job}/resolution`** — `{ decision, evidenceSha256 }` where
+  decision is `effectObserved` or `effectAbsent` and the digest is 64 lowercase
+  hex characters. The owner must have `job:read`, `job:cancel`, and
+  `authority:admin`. Only reconciliation-required jobs accept a resolution.
+  The stored receipt includes actor, timestamp, decision, and digest with
+  `provenance: "operatorAttested"`; job status becomes `resolved`. This records
+  an operator's assertion, never runtime verification, and never executes the
+  handler. Identical requests return the same receipt while retained;
+  conflicting requests are rejected. Receipts use terminal-job retention.
 
 Idempotency keys are scoped to the authenticated principal and operation. A
 completed key remains replayable for 15 minutes; unresolved keys remain in the

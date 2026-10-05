@@ -52,6 +52,7 @@ Wire strings (camelCase JSON uses these exact values):
 | `submitJob` | `job:submit` | direct | direct | — | — | engine-agnostic |
 | `readJob` | `job:read` | direct | direct | — | — | engine-agnostic |
 | `cancelJob` | `job:cancel` | direct | direct | — | — | engine-agnostic |
+| `resolveJob` | `job:read`, `job:cancel`, `authority:admin` | direct | — | — | — | engine-agnostic |
 | `issuePrincipal` | `authority:admin` | direct | — | — | — | engine-agnostic |
 | `revokePrincipal` | `authority:admin` | direct | — | — | — | engine-agnostic |
 
@@ -120,15 +121,15 @@ Missing capability → `missingCapability` (HTTP 403) with `requiredCapability` 
 
 - `unrestricted`: local operator: every capability, including authority:admin. Nothing is withheld.
 - `agent`: no authority:admin; every other capability. Cannot:
-  - mint and revoke principals (`authority:admin`: `issuePrincipal`, `revokePrincipal`)
+  - mint and revoke principals (`authority:admin`: `resolveJob`, `issuePrincipal`, `revokePrincipal`)
 - `claude`: the shipped agent skill's workflow: no JavaScript evaluation, fingerprint, humanize, or authority:admin. Cannot:
   - run JavaScript in the page (`javascript:evaluate`: `executionPolicy.javascriptEvaluation`)
-  - mint and revoke principals (`authority:admin`: `issuePrincipal`, `revokePrincipal`)
+  - mint and revoke principals (`authority:admin`: `resolveJob`, `issuePrincipal`, `revokePrincipal`)
   - spoof the browser fingerprint (`browser:fingerprint`: `executionPolicy.fingerprint`)
   - humanize input timing (`browser:humanize`: `executionPolicy.humanize`)
 - `codex`: the shipped agent skill's workflow: no JavaScript evaluation, fingerprint, humanize, or authority:admin. Cannot:
   - run JavaScript in the page (`javascript:evaluate`: `executionPolicy.javascriptEvaluation`)
-  - mint and revoke principals (`authority:admin`: `issuePrincipal`, `revokePrincipal`)
+  - mint and revoke principals (`authority:admin`: `resolveJob`, `issuePrincipal`, `revokePrincipal`)
   - spoof the browser fingerprint (`browser:fingerprint`: `executionPolicy.fingerprint`)
   - humanize input timing (`browser:humanize`: `executionPolicy.humanize`)
 - `openshell`: sandboxed tenant: browse, intents, files, evidence, and recovery only. Cannot:
@@ -136,9 +137,9 @@ Missing capability → `missingCapability` (HTTP 403) with `requiredCapability` 
   - run JavaScript in the page (`javascript:evaluate`: `executionPolicy.javascriptEvaluation`)
   - escalate stuck intents and extraction to a vision model (`vision:assist`: `executionPolicy.visionAssist`)
   - submit background jobs (`job:submit`: `submitJob`)
-  - read background jobs (`job:read`: `readJob`)
-  - cancel background jobs (`job:cancel`: `cancelJob`)
-  - mint and revoke principals (`authority:admin`: `issuePrincipal`, `revokePrincipal`)
+  - read background jobs (`job:read`: `readJob`, `resolveJob`)
+  - cancel background jobs (`job:cancel`: `cancelJob`, `resolveJob`)
+  - mint and revoke principals (`authority:admin`: `resolveJob`, `issuePrincipal`, `revokePrincipal`)
   - spoof the browser fingerprint (`browser:fingerprint`: `executionPolicy.fingerprint`)
   - humanize input timing (`browser:humanize`: `executionPolicy.humanize`)
 <!-- END GENERATED PRESET MATRIX -->

@@ -75,3 +75,13 @@ plaintext bearers. HTTP issuance for remote principals is
 - [CLI reference](../guides/cli.md)
 - [HTTP API](http-api.md)
 - [Capabilities](../concepts/capabilities.md)
+
+## Resolving uncertain jobs
+
+`resolve_job(&job_id, &input, options)` records an owner-scoped operator attestation for a
+reconciliation-required job. Supply `effectObserved` or `effectAbsent` with a
+64-character lowercase evidence SHA-256. The owner needs `job:read`,
+`job:cancel`, and `authority:admin`. The receipt has `operatorAttested`
+provenance, is validated against the request, and never replays the handler.
+See [Events and recovery](../guides/events-recovery.md) for degraded storage
+and retention semantics.

@@ -413,6 +413,76 @@ fn submit_request() -> CommandEnvelope {
     }
 }
 
+#[tokio::test]
+async fn damaged_ledger_blocks_unkeyed_mutations_before_dispatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("idempotency.json");
+    std::fs::write(&path, b"unreadable execution history").unwrap();
+    let ledger = IdempotencyStore::open_durable(&path, |_| async {
+        Ok::<Option<CommandOutcome>, std::io::Error>(None)
+    })
+    .await
+    .unwrap();
+    let authority = AuthorityStore::in_memory();
+    let (runtime, _, _) = runtime_with_workers(false);
+    let (api, handle) = authenticated_with_store(runtime, &authority, expiry(), ledger).await;
+    let context = handle.context(expiry(), None);
+    assert!(context.idempotency_key.is_none());
+    let mut request = submit_request();
+    request.command =
+        RuntimeCommand::Primitive(types::PrimitiveCommand::Navigate(NavigateCommand {
+            url: "https://example.test/effect".into(),
+            wait_until: types::WaitUntil::Interactive,
+            timeout_ms: 1000,
+        }));
+    let error = api
+        .submit(context, request)
+        .await
+        .expect_err("unkeyed mutation must fail closed");
+    assert!(error.reconciliation_required);
+    assert_eq!(api.submit_dispatch_count(), 0);
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        b"unreadable execution history"
+    );
+}
+
+#[tokio::test]
+async fn optional_observation_reports_failure_without_losing_completed_action() {
+    let (runtime, _, _) = runtime_with_workers(false);
+    let (api, _) = authenticated(runtime).await;
+    let service = WorkflowService::new(Arc::new(api));
+    let (action, observation) = service
+        .post_action_report_with(
+            Ok::<_, &str>(7),
+            |_| true,
+            || async { Err::<u32, _>("observation unavailable") },
+        )
+        .await
+        .unwrap();
+    assert_eq!(action, 7);
+    assert!(matches!(
+        observation,
+        sdk_core::workflow::PostActionObservation::Unavailable("observation unavailable")
+    ));
+    let (_, observation) = service
+        .post_action_report_with(
+            Ok::<_, &str>(7),
+            |_| false,
+            || async {
+                panic!("unfinished action must not observe");
+                #[allow(unreachable_code)]
+                Ok::<_, &str>(9)
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        observation,
+        sdk_core::workflow::PostActionObservation::NotRequested
+    ));
+}
+
 async fn hold_reservation(
     store: &IdempotencyStore,
     context: &types::RequestContext,

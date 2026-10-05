@@ -304,3 +304,110 @@ async fn jobs_are_invisible_and_immovable_across_principals() {
     assert_eq!(job["status"], "completed");
     assert_eq!(job["result"]["output"]["secret"], "owner-only");
 }
+
+#[tokio::test]
+async fn resolution_requires_owner_admin_capability_and_bounded_evidence() {
+    let (app, authority, admin) = app_with_admin(8).await;
+    let submit = context_headers(Request::post("/v1/jobs"), &admin)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"name":"sleep","payload":{"ms":5000},"maxRetries":0}).to_string(),
+        ))
+        .unwrap();
+    let response = app.clone().oneshot(submit).await.unwrap();
+    let created: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    let id = created["jobId"].as_str().unwrap();
+    for attempt in 0..50 {
+        let request = context_headers(Request::get(format!("/v1/jobs/{id}")), &admin)
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+        if value["status"] == "running" {
+            break;
+        }
+        assert!(attempt < 49, "job never started");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let request = context_headers(Request::delete(format!("/v1/jobs/{id}")), &admin)
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(request).await.unwrap().status(),
+        StatusCode::NO_CONTENT
+    );
+    let input = json!({"decision":"effectAbsent","evidenceSha256":"a".repeat(64)});
+    let route = format!("/v1/jobs/{id}/resolution");
+    let call = |bearer: &str, body: serde_json::Value| {
+        context_headers(Request::post(&route), bearer)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let limited = issue_bearer(&app, &admin, Uuid::new_v4(), &["job:read", "job:cancel"]).await;
+    assert_eq!(
+        app.clone()
+            .oneshot(call(&limited, input.clone()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    // Privileged identities are enrolled by the trusted host, never minted through HTTP.
+    let intruder = authority
+        .issue(
+            types::PrincipalId::from_uuid(Uuid::new_v4()),
+            vec![
+                types::Capability::JobRead,
+                types::Capability::JobCancel,
+                types::Capability::AuthorityAdmin,
+            ],
+            chrono::Utc::now() + chrono::Duration::minutes(10),
+        )
+        .await
+        .unwrap()
+        .expose_once();
+    assert_eq!(
+        app.clone()
+            .oneshot(call(&intruder, input.clone()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    for invalid in [
+        json!({"decision":"effectAbsent","evidenceSha256":"bad"}),
+        json!({"decision":"effectAbsent","evidenceSha256":"a".repeat(64),"force":true}),
+    ] {
+        assert_eq!(
+            app.clone()
+                .oneshot(call(&admin, invalid))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+    let response = app
+        .clone()
+        .oneshot(call(&admin, input.clone()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 65536).await.unwrap();
+    assert!(bytes.len() < 512, "resolution receipt must stay bounded");
+    let receipt: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(receipt["provenance"], "operatorAttested");
+    let retry = app.clone().oneshot(call(&admin, input)).await.unwrap();
+    assert_eq!(to_bytes(retry.into_body(), 65536).await.unwrap(), bytes);
+    let read = context_headers(Request::get(format!("/v1/jobs/{id}")), &admin)
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(read).await.unwrap();
+    let job: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(job["status"], "resolved");
+    assert_eq!(job["resolution"], receipt);
+}

@@ -93,3 +93,13 @@ The bearer token is never included in any error message or `repr()`.
 - [HTTP API reference](http-api.md)
 - [Authentication](../guides/auth.md)
 - [TypeScript SDK](typescript-sdk.md)
+
+## Resolving uncertain jobs
+
+`resolve_job(job_id, input, options=None)` records an owner-scoped operator attestation for a
+reconciliation-required job. Supply `effectObserved` or `effectAbsent` with a
+64-character lowercase evidence SHA-256. The owner needs `job:read`,
+`job:cancel`, and `authority:admin`. The receipt has `operatorAttested`
+provenance, is validated against the request, and never replays the handler.
+See [Events and recovery](../guides/events-recovery.md) for degraded storage
+and retention semantics.

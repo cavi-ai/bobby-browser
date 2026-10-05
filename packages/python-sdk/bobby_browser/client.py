@@ -345,6 +345,26 @@ class BrowserRuntimeClient:
         path = f"/v1/jobs/{urllib.parse.quote(job_id)}"
         return self._json("GET", path, None, options, expected_status=200)
 
+    def resolve_job(self, job_id: str, input: Mapping[str, Any], options: Optional[RequestOptions] = None) -> Dict[str, Any]:
+        """Record an owner-scoped operator attestation without replaying the job."""
+        try:
+            valid_id = job_id.startswith("job_") and str(uuid.UUID(job_id[4:])) == job_id[4:]
+        except (ValueError, AttributeError):
+            valid_id = False
+        digest = input.get("evidenceSha256")
+        if not valid_id or set(input) != {"decision", "evidenceSha256"} or input.get("decision") not in ("effectObserved", "effectAbsent") or not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            raise self._protocol("job resolution request has an invalid shape")
+        receipt = self._json("POST", f"/v1/jobs/{urllib.parse.quote(job_id, safe='')}/resolution", input, options, expected_status=200)
+        if set(receipt) != {"decision", "evidenceSha256", "jobId", "actor", "resolvedAt", "provenance"} or receipt.get("jobId") != job_id or receipt.get("decision") != input["decision"] or receipt.get("evidenceSha256") != digest or receipt.get("provenance") != "operatorAttested" or not isinstance(receipt.get("actor"), str) or not 0 < len(receipt["actor"]) <= 256:
+            raise self._protocol("resolution receipt does not match its request")
+        try:
+            if str(uuid.UUID(receipt["actor"])) != receipt["actor"]: raise ValueError("invalid actor")
+            resolved_at = datetime.fromisoformat(receipt["resolvedAt"].replace("Z", "+00:00"))
+            if resolved_at.tzinfo is None: raise ValueError("missing timezone")
+        except (ValueError, TypeError, KeyError, AttributeError):
+            raise self._protocol("invalid resolution timestamp")
+        return receipt
+
     def cancel_job(self, job_id: str, options: Optional[RequestOptions] = None) -> None:
         """``DELETE /v1/jobs/{jobId}`` -- cancel the authenticated principal's job."""
         self._empty("DELETE", f"/v1/jobs/{urllib.parse.quote(job_id)}", options)
