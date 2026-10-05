@@ -10,6 +10,10 @@
   size-bounded so its result is never rejected by the extension channel; a
   rejected result reports its reason with code `resultRejected` instead of
   "the content action failed".
+- A shared-runtime gateway connection ends within 5 s of its peer leaving. It
+  held a per-principal permit until the protocol server finished on its own,
+  and a server with 64 requests pending stops reading frames, so it never saw
+  the peer leave.
 
 ### Changed
 

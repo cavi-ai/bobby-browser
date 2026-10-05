@@ -157,14 +157,44 @@ pub(crate) async fn connect(
                         bridge_socket(socket, bridge_io, state.authority.clone(), bearer, stopped);
                     // Drive disconnect through the protocol server so ACP closes only
                     // its own sessions, while the shared browser owner remains alive.
-                    let (served, bridged) = tokio::join!(serving, bridge);
-                    if let Err(error) = served.and(bridged) {
+                    if let Err(error) = run_until_peer_gone(serving, bridge, PEER_GONE_GRACE).await
+                    {
                         tracing::warn!(%error, "shared gateway connection ended");
                     }
                 })
                 .await;
         })
         .into_response()
+}
+
+/// How long the protocol server may keep running after its peer is gone. The
+/// connection holds a principal permit until it ends, and a server whose
+/// requests are stuck on work nobody can receive would never end on its own.
+const PEER_GONE_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Drives the protocol server and the socket bridge together. Once the bridge
+/// ends the peer is gone and the server gets `grace` to finish its own
+/// teardown before it is dropped.
+async fn run_until_peer_gone(
+    serving: impl std::future::Future<Output = anyhow::Result<()>>,
+    bridge: impl std::future::Future<Output = anyhow::Result<()>>,
+    grace: std::time::Duration,
+) -> anyhow::Result<()> {
+    tokio::pin!(serving, bridge);
+    let (served, bridged) = tokio::select! {
+        served = &mut serving => (served, bridge.await),
+        bridged = &mut bridge => {
+            let served = tokio::time::timeout(grace, &mut serving)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(anyhow::anyhow!(
+                        "protocol server abandoned {grace:?} after the peer left"
+                    ))
+                });
+            (served, bridged)
+        }
+    };
+    served.and(bridged)
 }
 
 async fn bridge_socket(
@@ -207,4 +237,52 @@ async fn bridge_socket(
         sink.with(async |frame: String| Ok::<_, axum::Error>(Message::Text(frame.into())));
     let (reader, writer) = tokio::io::split(io);
     gateway_transport::bridge(reader, writer, Box::pin(incoming), Box::pin(outgoing)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::run_until_peer_gone;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_server_stuck_after_the_peer_left_is_abandoned() {
+        let started = tokio::time::Instant::now();
+        let result = run_until_peer_gone(
+            std::future::pending::<anyhow::Result<()>>(),
+            async { Ok(()) },
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(started.elapsed(), Duration::from_secs(5));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_server_that_finishes_inside_the_grace_is_not_cut_short() {
+        let result = run_until_peer_gone(
+            async {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                Ok(())
+            },
+            async { Ok(()) },
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_bridge_still_finishes_when_the_server_ends_first() {
+        let result = run_until_peer_gone(
+            async { Ok(()) },
+            async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Ok(())
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(result.is_ok());
+    }
 }
