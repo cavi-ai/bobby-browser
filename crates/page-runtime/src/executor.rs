@@ -1541,9 +1541,12 @@ fn browser_revived_evidence(
 
 fn classify_failure(
     envelope: &CommandEnvelope,
-    error: CommandError,
+    mut error: CommandError,
     evidence: Vec<Evidence>,
 ) -> CommandOutcome {
+    if error.message == worker_pool::FIREFOX_WORKER_CLOSED_MESSAGE {
+        error.message = worker_pool::BROWSER_GONE_MESSAGE.into();
+    }
     if matches!(
         error.code,
         ErrorCode::NetworkPolicyDenied | ErrorCode::PolicyDenied

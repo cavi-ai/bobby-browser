@@ -3852,6 +3852,7 @@ async fn worker_close_cleans_ready_pages_once_and_prevents_reopening() {
         .await
         .expect_err("a closed worker must not create another context");
     assert_eq!(error.code, ErrorCode::BrowserCommandFailed);
+    assert!(worker_pool::is_browser_gone_error(&error), "{error:?}");
 
     worker.close().await.unwrap();
     assert_eq!(

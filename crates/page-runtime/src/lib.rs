@@ -40,6 +40,21 @@ pub trait ExecutionPhaseObserver: Send + Sync {
     async fn durable_phase_reached(&self, phase: CommandPhase);
 }
 
+/// A worker failure folded into the runtime error canon. A browser that is
+/// gone is an unreachable engine with a recovery path, never an opaque
+/// internal failure. The "browser launch failed:" lead is the diagnostic the
+/// MCP gateway lets through to the caller.
+fn worker_command_error(error: types::CommandError) -> RuntimeError {
+    if worker_pool::is_browser_gone_error(&error) {
+        RuntimeError::EngineUnreachable(format!(
+            "browser launch failed: {}",
+            worker_pool::BROWSER_GONE_MESSAGE
+        ))
+    } else {
+        RuntimeError::Internal(error.message)
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct PageRuntime {
     inner: Arc<RwLock<HashMap<PageId, PageState>>>,
@@ -238,12 +253,12 @@ impl PageRuntime {
                     Ok(()) => return Ok(page),
                     Err(retry) => {
                         self.inner.write().await.remove(&page.id);
-                        return Err(RuntimeError::Internal(retry.message));
+                        return Err(worker_command_error(retry));
                     }
                 }
             }
             self.inner.write().await.remove(&page.id);
-            return Err(RuntimeError::Internal(error.message));
+            return Err(worker_command_error(error));
         }
         Ok(page)
     }
@@ -276,7 +291,7 @@ impl PageRuntime {
             .worker()
             .form_snapshot(page_id, max_controls)
             .await
-            .map_err(|error| RuntimeError::Internal(error.message))?;
+            .map_err(worker_command_error)?;
         evidence
             .into_iter()
             .find_map(|item| match item {

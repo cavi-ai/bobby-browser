@@ -1590,7 +1590,7 @@ impl FirefoxCompanionWorker {
         if self.closed.load(Ordering::Acquire) {
             return Err(driver_error(
                 ErrorCode::BrowserCommandFailed,
-                "Firefox companion worker is closed",
+                worker_pool::FIREFOX_WORKER_CLOSED_MESSAGE,
                 false,
             ));
         }

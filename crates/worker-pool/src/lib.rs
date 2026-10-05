@@ -26,6 +26,19 @@ use types::{
 };
 
 pub use chromium::{is_dead_worker_error, ChromiumWorkerFactory};
+
+/// The Firefox worker's message once its transport is gone or it was closed.
+pub const FIREFOX_WORKER_CLOSED_MESSAGE: &str = "Firefox companion worker is closed";
+
+/// What a caller is told when its session's browser is gone.
+pub const BROWSER_GONE_MESSAGE: &str =
+    "this session's browser is gone; create a new session and close this one";
+
+/// The session's browser can never serve another command: a dead worker
+/// (either engine) or a closed Firefox worker.
+pub fn is_browser_gone_error(error: &types::CommandError) -> bool {
+    is_dead_worker_error(error) || error.message == FIREFOX_WORKER_CLOSED_MESSAGE
+}
 pub use fingerprint_host::ChromiumPageHost;
 pub use form_snapshot::{
     control_action_evidence, decode_form_snapshot, form_snapshot_expression,
