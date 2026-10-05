@@ -2120,11 +2120,29 @@ impl VisionAssist for CountingVision {
 
 #[derive(Default)]
 struct RecordingProposals {
+    generation: intent_engine::ProposalGeneration,
     inner: std::sync::Mutex<std::collections::HashMap<String, intent_engine::CachedProposal>>,
     record_calls: AtomicUsize,
 }
 
 impl intent_engine::ProposalLookup for RecordingProposals {
+    fn proposal_generation(&self, _page: &PageId) -> Option<intent_engine::ProposalGeneration> {
+        Some(self.generation.clone())
+    }
+
+    fn record_proposals_if_current(
+        &self,
+        page: &PageId,
+        generation: &intent_engine::ProposalGeneration,
+        proposals: Vec<(String, intent_engine::CachedProposal)>,
+    ) -> bool {
+        if &self.generation != generation {
+            return false;
+        }
+        self.record_proposals(page, proposals);
+        true
+    }
+
     fn proposal_for(&self, _page: &PageId, purpose: &str) -> Option<intent_engine::CachedProposal> {
         self.inner
             .lock()
