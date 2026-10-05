@@ -51,6 +51,7 @@ pub(crate) fn protected_router() -> Router<AppState> {
         .route("/v1/artifacts/{id}", get(artifact))
         .route("/v1/jobs", post(submit_job))
         .route("/v1/jobs/{job}", get(get_job).delete(cancel_job))
+        .route("/v1/jobs/{job}/resolution", post(resolve_job))
         .route("/v1/principals", post(issue_principal))
         .route(
             "/v1/principals/{principal}",
@@ -63,14 +64,26 @@ pub(crate) async fn healthz() -> Json<serde_json::Value> {
 }
 
 async fn runtime_info(
+    State(state): State<AppState>,
     Extension(request): Extension<AuthenticatedRequest>,
 ) -> Result<Json<types::RuntimeInfo>, ProtocolError> {
-    request
+    let mut info = request
         .runtime
         .runtime_info(request.context)
         .await
-        .map(Json)
-        .map_err(ProtocolError::from)
+        .map_err(ProtocolError::from)?;
+    for (store, reason) in [
+        ("jobJournal", state.scheduler.integrity_issue()),
+        ("jobIdempotency", state.job_idempotency.integrity_issue()),
+    ] {
+        if let Some(reason) = reason {
+            info.storage_integrity.push(types::StorageIntegrityIssue {
+                store: store.into(),
+                reason: reason.into(),
+            });
+        }
+    }
+    Ok(Json(info))
 }
 
 async fn list_sessions(
@@ -617,6 +630,8 @@ struct JobSubmitResponse {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct JobStatusResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolution: Option<types::JobResolutionReceipt>,
     id: String,
     name: String,
     priority: String,
@@ -641,6 +656,7 @@ fn status_wire(status: &JobStatus) -> String {
         JobStatus::Failed => "failed",
         JobStatus::Cancelled => "cancelled",
         JobStatus::ReconciliationRequired => "reconciliationRequired",
+        JobStatus::Resolved => "resolved",
     }
     .to_string()
 }
@@ -657,6 +673,7 @@ fn priority_wire(priority: &JobPriority) -> String {
 
 fn job_status_response(job: Job) -> JobStatusResponse {
     JobStatusResponse {
+        resolution: job.resolution,
         id: job.id.0,
         name: job.name,
         priority: priority_wire(&job.priority),
@@ -684,6 +701,16 @@ fn job_status_response(job: Job) -> JobStatusResponse {
 
 fn job_error(err: JobError, correlation_id: CorrelationId) -> ProtocolError {
     match err {
+        JobError::Integrity | JobError::ResolutionUncertain => {
+            let mut error = interface_error(
+                InterfaceErrorCode::IdempotencyConflict,
+                "durable job history requires repair before mutation",
+                correlation_id,
+                None,
+            );
+            error.reconciliation_required = true;
+            ProtocolError::from(error)
+        }
         JobError::MissingCapability(capability) => {
             let mut error = interface_error(
                 InterfaceErrorCode::MissingCapability,
@@ -765,6 +792,10 @@ async fn submit_job(
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Response, ProtocolError> {
     authorize_boundary(&request, InterfaceOperation::SubmitJob)?;
+    state
+        .job_idempotency
+        .ensure_writable(&request.context.correlation_id)
+        .map_err(ProtocolError::from)?;
     let raw = match body {
         Ok(bytes) => bytes,
         Err(_) => {
@@ -873,6 +904,28 @@ async fn get_job(
         ));
     }
     Ok(Json(job_status_response(job)))
+}
+
+async fn resolve_job(
+    State(state): State<AppState>,
+    Extension(request): Extension<AuthenticatedRequest>,
+    Path(job): Path<String>,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Json<types::JobResolutionReceipt>, ProtocolError> {
+    authorize_boundary(&request, InterfaceOperation::ResolveJob)?;
+    let input: types::JobResolutionRequest = parse_json(body, &request.context.correlation_id)?;
+    input.validate().map_err(|_| {
+        ProtocolError::invalid_with(
+            InterfaceErrorCode::InvalidRequest,
+            request.context.correlation_id.clone(),
+        )
+    })?;
+    state
+        .scheduler
+        .resolve_job(&JobId(job), &request.context.principal_id, input)
+        .await
+        .map(Json)
+        .map_err(|error| job_error(error, request.context.correlation_id))
 }
 
 async fn cancel_job(
@@ -1038,15 +1091,18 @@ pub(crate) async fn validate_request_boundary(
         .map_err(|_| deadline_error(&correlation_id))?;
     let body_deadline = tokio::time::Instant::now() + remaining;
     let path = request.uri().path();
-    let bodyful = matches!(
-        (request.method(), path),
-        (&Method::POST, "/v1/sessions")
-            | (&Method::POST, "/v1/pages")
-            | (&Method::POST, "/v1/commands")
-            | (&Method::POST, "/v1/checkpoints")
-            | (&Method::POST, "/v1/principals")
-            | (&Method::POST, "/v1/jobs")
-    );
+    let bodyful = (request.method() == Method::POST
+        && path.starts_with("/v1/jobs/")
+        && path.ends_with("/resolution"))
+        || matches!(
+            (request.method(), path),
+            (&Method::POST, "/v1/sessions")
+                | (&Method::POST, "/v1/pages")
+                | (&Method::POST, "/v1/commands")
+                | (&Method::POST, "/v1/checkpoints")
+                | (&Method::POST, "/v1/principals")
+                | (&Method::POST, "/v1/jobs")
+        );
 
     if path == "/v1/events" {
         let query = parse_event_query(request.uri().query(), state, &correlation_id)?;

@@ -27,6 +27,9 @@ pub enum JobStatus {
     Completed,
     Failed,
     Cancelled,
+    #[serde(rename = "reconciliationRequired")]
+    ReconciliationRequired,
+    Resolved,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +79,8 @@ pub struct JobResult {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct JobStatusResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<crate::JobResolutionReceipt>,
     pub id: JobId,
     pub name: String,
     pub priority: JobPriority,
@@ -105,7 +110,27 @@ impl JobStatusResponse {
             return Err("job result identifier does not match its status");
         }
 
+        if let Some(receipt) = &self.resolution {
+            receipt.validate()?;
+            if self.status != JobStatus::Resolved
+                || receipt.job_id != self.id.as_str()
+                || self.completed_at != Some(receipt.resolved_at)
+            {
+                return Err("resolution receipt does not match its job status");
+            }
+        }
         let valid = match self.status {
+            JobStatus::ReconciliationRequired => {
+                self.completed_at.is_none()
+                    && self.result.is_none()
+                    && self.error.as_ref().is_some_and(|error| !error.is_empty())
+            }
+            JobStatus::Resolved => {
+                self.completed_at.is_some()
+                    && self.result.is_none()
+                    && self.error.is_none()
+                    && self.resolution.is_some()
+            }
             JobStatus::Pending => {
                 self.started_at.is_none()
                     && self.completed_at.is_none()
@@ -130,7 +155,10 @@ impl JobStatusResponse {
             JobStatus::Failed => {
                 self.started_at.is_some()
                     && self.completed_at.is_some()
-                    && self.result.is_none()
+                    && self.result.as_ref().is_none_or(|result| {
+                        !result.success
+                            && result.error.as_ref().is_some_and(|error| !error.is_empty())
+                    })
                     && self.error.as_ref().is_some_and(|error| !error.is_empty())
             }
             JobStatus::Cancelled => {

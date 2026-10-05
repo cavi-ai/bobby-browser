@@ -738,7 +738,7 @@ paths:
                   priority: normal
                   maxRetries: 3
       responses:
-        "200":
+        "201":
           description: Accepted
           content:
             application/json:
@@ -791,12 +791,8 @@ paths:
         - $ref: "#/components/parameters/CorrelationId"
         - $ref: "#/components/parameters/Deadline"
       responses:
-        "200":
-          description: Updated job status
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/JobStatusResponse"
+        "204":
+          description: Cancelled or marked reconciliationRequired
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -805,6 +801,37 @@ paths:
           $ref: "#/components/responses/NotFound"
         "429":
           $ref: "#/components/responses/TooManyRequests"
+  /v1/jobs/{job}/resolution:
+    post:
+      operationId: resolveJob
+      tags: [jobs]
+      summary: Record an operator attestation for an uncertain job
+      description: |
+        Requires the job owner with `job:read`, `job:cancel`, and `authority:admin`.
+        Only reconciliationRequired jobs can be resolved. Never executes the handler.
+        Repeating the identical decision and digest returns the stored receipt;
+        a conflicting receipt is rejected. Receipts follow terminal-job retention.
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+        - $ref: "#/components/parameters/Authorization"
+        - $ref: "#/components/parameters/InterfaceVersion"
+        - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/Deadline"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/JobResolutionRequest" }
+      responses:
+        "200":
+          description: Durable operator attestation receipt
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobResolutionReceipt" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/InvalidRequest" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
   /v1/principals:
     post:
       operationId: issuePrincipal
@@ -1287,6 +1314,17 @@ components:
     RuntimeInfo:
       type: object
       additionalProperties: true
+      properties:
+        storageIntegrity:
+          type: array
+          maxItems: 4
+          items:
+            type: object
+            additionalProperties: false
+            required: [store, reason]
+            properties:
+              store: { type: string, enum: [commandIdempotency, lifecycleIdempotency, jobIdempotency, jobJournal] }
+              reason: { type: string, enum: [unreadableLedger, duplicateLedgerKey, ledgerCapacityExceeded, unreadableJobHistory] }
     SessionState:
       type: object
       additionalProperties: true
@@ -1371,3 +1409,24 @@ components:
     JobStatusResponse:
       type: object
       additionalProperties: true
+      properties:
+        status: { type: string, enum: [pending, running, completed, failed, cancelled, reconciliationRequired, resolved] }
+        resolution: { $ref: "#/components/schemas/JobResolutionReceipt" }
+    JobResolutionRequest:
+      type: object
+      additionalProperties: false
+      required: [decision, evidenceSha256]
+      properties:
+        decision: { type: string, enum: [effectObserved, effectAbsent] }
+        evidenceSha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+    JobResolutionReceipt:
+      type: object
+      additionalProperties: false
+      required: [jobId, decision, evidenceSha256, actor, resolvedAt, provenance]
+      properties:
+        jobId: { type: string, pattern: '^job_[0-9a-f-]{36}$' }
+        decision: { type: string, enum: [effectObserved, effectAbsent] }
+        evidenceSha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        actor: { type: string, format: uuid }
+        resolvedAt: { type: string, format: date-time }
+        provenance: { type: string, const: operatorAttested }

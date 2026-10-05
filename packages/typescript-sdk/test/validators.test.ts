@@ -192,6 +192,7 @@ test("deep validators accept every exact public response variant", () => {
     visionProposeBudgetMs: 1500,
     operationalMetrics: { observationWindowMs: 10 },
     providerHealth: [{ providerMode: "http", status: "degraded", successes: 8, failures: 2, consecutiveFailures: 0, budgetViolations: 4, lastLatencyMs: 1900, latencyBudgetMs: 1500, failureThreshold: 3 }],
+    storageIntegrity: [{ store: "commandIdempotency", reason: "unreadableLedger" }],
   }), true);
   assert.equal(isSessionState({ id: ID, profile: "default", proxy: null, page_ids: [ID_2], created_at: TIME, last_used_at: TIME, execution_policy: { javascriptEvaluation: false, visionAssist: false, fingerprint: false, humanize: false } }), true);
   assert.equal(isPageState({ id: ID, session_id: ID_2, url: null, mode: "Document", ready_state: "complete", pending_requests: 0 }), true);
@@ -409,4 +410,24 @@ test("EventBatch validation is contextual to the requested cursor and limit", ()
   assert.equal(isEventBatch({ events: [{ cursor: 11, kind: "x", payload: null }, { cursor: 12, kind: "x", payload: null }], latestAvailable: 12 }, 10, 1), false);
   assert.equal(isEventBatch({ events: [{ cursor: 11, kind: "x", payload: null }], latestAvailable: 9 }, 10, 1), false);
   assert.equal(isEventBatch({ events: [{ cursor: 11, kind: "x", payload: null }], latestAvailable: 11 }, 10, 1), true);
+});
+
+test("resolution receipts require attestation provenance and match terminal job identity", () => {
+  const receipt = { jobId: JOB_ID, actor: ID, decision: "effectObserved", evidenceSha256: SHA, resolvedAt: TIME, provenance: "operatorAttested" };
+  const resolved = { ...JOB_STATUS, status: "resolved", result: null, resolution: receipt };
+  assert.equal(isJobStatusResponse(resolved), true);
+  for (const patch of [{ actor: "operator-name" }, { evidenceSha256: "bad" }, { provenance: "runtimeVerified" }, { jobId: `job_${ID_2}` }, { resolvedAt: "2026-07-18T12:34:56Z" }, { rawError: "secret-path" }]) {
+    assert.equal(isJobStatusResponse({ ...resolved, resolution: { ...receipt, ...patch } }), false);
+  }
+  assert.equal(isJobStatusResponse({ ...JOB_STATUS, resolution: receipt }), false);
+  assert.equal(isJobStatusResponse({ ...resolved, resolution: undefined }), false);
+});
+
+test("failed execution and uncertainty have distinct lifecycle fields", () => {
+  const failed = { ...JOB_STATUS, status: "failed", error: "job timeout", result: { ...JOB_STATUS.result, success: false, output: null, error: "job timeout" } };
+  assert.equal(isJobStatusResponse(failed), true);
+  const uncertain = { ...failed, status: "reconciliationRequired", completedAt: null, result: null };
+  assert.equal(isJobStatusResponse(uncertain), true);
+  assert.equal(isJobStatusResponse({ ...uncertain, result: failed.result }), false);
+  assert.equal(isJobStatusResponse({ ...uncertain, completedAt: TIME }), false);
 });

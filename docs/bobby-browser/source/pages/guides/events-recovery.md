@@ -84,6 +84,44 @@ boundaries that cannot prove the outcome remains `NeedsReconciliation`.
 Skill-assisted recovery (internal skill runtime) follows the same authority
 rules — see [Internal skill runtime](skills.md). Not the public agent skill.
 
+## Storage integrity and scheduled jobs
+
+`GET /v1/runtime` reports `storageIntegrity` when durable admission history is
+unreadable, has duplicate keys, or exceeds restoration capacity. The response
+contains stable store/reason names without filesystem paths or stored payloads.
+`bobby doctor` reports the degraded state. Reads remain available; affected new
+mutations, including requests without idempotency keys, are refused. Restarting
+cannot erase the issue. Fully delimited unreadable job transitions preserve the
+journal bytes and mark older pending/running records reconciliation-required;
+the runtime does not compact or replay them. A torn incomplete append still
+uses the existing write-before-execution truncation protocol.
+
+Keep damaged history as evidence and supply an authoritative repair before
+restarting. Deleting the ledger and resubmitting work can duplicate an effect.
+Resolution cannot write to a damaged job journal. Once the journal is writable,
+the owner with admin authority may record an attestation through
+`POST /v1/jobs/{job}/resolution`, or the SDK's `resolveJob` / `resolve_job`.
+Ordinary automation tokens cannot resolve jobs; operator involvement is required.
+If a resolution write fails or its request is canceled, the runtime refuses
+another attestation for that job until authoritative history is reloaded. A
+receipt may have reached storage even when its caller received no acknowledgment.
+See [HTTP API](../surfaces/http-api.md) for the receipt and retention contract.
+
+MCP actions with an optional follow-up observation return `postStateStatus`:
+`available`, `unavailable`, or `notRequested` when the action did not complete.
+An unavailable observation leaves the completed action successful and omits
+`postState`. Its bounded diagnostic has a contract error code (or
+`observationIncomplete`) and `reconciliationRequired`; raw error messages are
+omitted. Read fresh state before deciding the next action; do not repeat a
+successful action merely because its optional observation failed.
+
+Provider health and operational latency counters are process-local diagnostics.
+Provider health does not open a circuit breaker. The existing live Northstar
+release gate enforces action, tool-call, snapshot, and failure limits, and
+requires measured journey time and serialized-response bytes. Relative latency
+and byte comparisons require matching measured cohorts; a comparator unit test
+is not evidence that a live run met a performance threshold.
+
 ## Next
 
 - [Evidence and checkpoints](../concepts/evidence-checkpoints.md)

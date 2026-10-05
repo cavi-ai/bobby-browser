@@ -14,7 +14,8 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | { [key:
 /** Provider health classification from `/v1/runtime`. Report-only. */
 export type ProviderHealthStatus = "healthy" | "degraded" | "unhealthy";
 export interface ProviderHealthSnapshot { providerMode: string; status: ProviderHealthStatus; successes: number; failures: number; consecutiveFailures: number; budgetViolations: number; lastLatencyMs?: number; latencyBudgetMs?: number; failureThreshold: number; }
-export interface RuntimeInfo { version: string; capabilities: string[]; active_sessions: number; queued_jobs: number; uptime_ms: number; visionProposeBudgetMs?: number; /** Process-local operational metrics; nested counters stay opaque to this contract. */ operationalMetrics?: Record<string, JsonValue>; /** Present when a vision provider is configured. */ providerHealth?: ProviderHealthSnapshot[]; }
+export interface StorageIntegrityIssue { store: "commandIdempotency" | "lifecycleIdempotency" | "jobIdempotency" | "jobJournal"; reason: "unreadableLedger" | "duplicateLedgerKey" | "ledgerCapacityExceeded" | "unreadableJobHistory"; }
+export interface RuntimeInfo { storageIntegrity?: StorageIntegrityIssue[]; version: string; capabilities: string[]; active_sessions: number; queued_jobs: number; uptime_ms: number; visionProposeBudgetMs?: number; /** Process-local operational metrics; nested counters stay opaque to this contract. */ operationalMetrics?: Record<string, JsonValue>; /** Present when a vision provider is configured. */ providerHealth?: ProviderHealthSnapshot[]; }
 export interface SessionState { id: Id; profile: string; proxy: string | null; page_ids: Id[]; created_at: string; last_used_at: string; execution_policy: { javascriptEvaluation: boolean; visionAssist: boolean; fingerprint: boolean; humanize: boolean; visionNode?: string }; /** Present iff true: a godmode session running the ZigZagZig recovery ladder. */ zigzagzig?: boolean; }
 export type PageMode = "Document" | "Interactive" | "Render";
 export interface PageState { id: Id; session_id: Id; url: string | null; mode: PageMode; ready_state: string; pending_requests: number; }
@@ -24,7 +25,7 @@ export interface CreateSessionRequest { profile: string; proxy: string | null; e
 export interface OpenPageRequest { session_id: Id; }
 
 export type JobPriority = "low" | "normal" | "high" | "critical";
-export type JobStatus = "pending" | "running" | "completed" | "failed" | "cancelled" | "reconciliationRequired";
+export type JobStatus = "pending" | "running" | "completed" | "failed" | "cancelled" | "reconciliationRequired" | "resolved";
 export interface SubmitJobRequest {
   name: string;
   payload?: JsonValue;
@@ -40,7 +41,11 @@ export interface JobResult {
   error: string | null;
   completedAt: string;
 }
+export type JobResolutionDecision = "effectObserved" | "effectAbsent";
+export interface JobResolutionRequest { decision: JobResolutionDecision; evidenceSha256: string; }
+export interface JobResolutionReceipt extends JobResolutionRequest { jobId: string; actor: string; resolvedAt: string; provenance: "operatorAttested"; }
 export interface JobStatusResponse {
+  resolution?: JobResolutionReceipt;
   id: string;
   name: string;
   priority: JobPriority;

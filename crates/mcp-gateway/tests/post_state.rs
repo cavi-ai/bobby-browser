@@ -121,6 +121,13 @@ async fn assert_post_state_matches_fresh_observe(
     let structured = &response["result"]["structuredContent"];
     let post_state = structured["postState"].clone();
     assert!(post_state.is_object(), "postState missing: {response}");
+    assert_eq!(structured["postStateStatus"]["status"], "available");
+    assert!(
+        serde_json::to_vec(&structured["postStateStatus"])
+            .unwrap()
+            .len()
+            <= 256
+    );
     let workflow_id = structured["workflowId"]
         .as_str()
         .expect("completed outcome names its workflowId")
@@ -396,4 +403,36 @@ async fn intent_complete_form_carries_post_state_on_success_and_omits_it_on_fail
     );
     assert_post_state_matches_fresh_observe(&live, &completed, &session_id, &page_id, &mut next_id)
         .await;
+}
+
+#[tokio::test]
+async fn optional_observation_failure_preserves_completed_action_and_reports_bounded_status() {
+    use std::sync::atomic::Ordering;
+    let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+    let (session_id, page_id) = create_session_and_page(&live.server, &mut 900).await;
+    live.probe
+        .candidates
+        .lock()
+        .unwrap()
+        .push(clickable_candidate());
+    live.probe
+        .accessibility_failures_remaining
+        .store(20, Ordering::SeqCst);
+    let response = call_tool(
+        &live.server,
+        910,
+        "click",
+        json!({"sessionId":session_id,"pageId":page_id,"selector":"#continue","boundary":true,"autoCheckpoint":false}),
+    )
+    .await;
+    let content = &response["result"]["structuredContent"];
+    assert_eq!(content["status"], "completed", "{response}");
+    assert!(content["postState"].is_null());
+    assert_eq!(
+        content["postStateStatus"]["status"], "unavailable",
+        "{response}"
+    );
+    let status = serde_json::to_string(&content["postStateStatus"]).unwrap();
+    assert!(status.len() <= 256);
+    assert!(!status.contains("injected") && !status.contains("live-harness"));
 }

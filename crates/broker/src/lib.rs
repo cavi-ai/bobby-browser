@@ -284,11 +284,17 @@ impl AppState {
     }
 
     pub fn with_scheduler(mut self, scheduler: Arc<JobScheduler>) -> Self {
+        if let Some(reason) = self.job_idempotency.integrity_issue() {
+            scheduler.deny_admission(reason);
+        }
         self.scheduler = scheduler;
         self
     }
 
     pub fn with_job_idempotency(mut self, store: IdempotencyStore<JobSubmitOutcome>) -> Self {
+        if let Some(reason) = store.integrity_issue() {
+            self.scheduler.deny_admission(reason);
+        }
         self.job_idempotency = Arc::new(store);
         self
     }
@@ -1417,6 +1423,69 @@ mod tests {
     use uuid::uuid;
 
     use super::*;
+
+    #[tokio::test]
+    async fn degraded_job_ledger_refuses_unkeyed_http_and_shared_scheduler_admission() {
+        use axum::{
+            body::{to_bytes, Body},
+            http::{Request, StatusCode},
+        };
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("job-ledger.json");
+        std::fs::write(&path, "damaged job admission history").unwrap();
+        let ledger = IdempotencyStore::open_durable(&path, |_| async { Ok(None) })
+            .await
+            .unwrap();
+        let startup = StartupCredential::new(
+            "recovery-test-bearer-0000000000000001".into(),
+            PrincipalId::from_uuid(uuid::Uuid::new_v4()),
+            Capability::ALL.to_vec(),
+            Utc::now() + Duration::minutes(10),
+        )
+        .unwrap();
+        let authority = Arc::new(EnrolledAuthority::enroll(startup, 4).await.unwrap());
+        let handle = authority
+            .authenticate("recovery-test-bearer-0000000000000001", Utc::now())
+            .await
+            .unwrap();
+        let runtime = Arc::new(AuthenticatedRuntime::new(RuntimeService::default(), handle));
+        let state = AppState::new(
+            authority,
+            move |_| runtime.clone(),
+            InterfaceConfig::default(),
+        )
+        .with_job_idempotency(ledger);
+        let scheduler = state.scheduler.clone();
+        let app = router(state);
+        let request = testing::context_headers(
+            Request::post("/v1/jobs"),
+            "recovery-test-bearer-0000000000000001",
+        )
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"name":"echo"}"#))
+        .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap()).unwrap();
+        assert_eq!(body["error"]["reconciliationRequired"], true);
+        assert_eq!(body["error"]["retryable"], false);
+        assert_eq!(
+            scheduler
+                .submit(task_scheduler::JobConfig::new(
+                    "echo".into(),
+                    serde_json::json!({})
+                ))
+                .await
+                .unwrap_err(),
+            task_scheduler::JobError::Integrity
+        );
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "damaged job admission history"
+        );
+    }
 
     #[tokio::test]
     async fn credential_expiring_during_runtime_construction_prevents_listener_bind() {

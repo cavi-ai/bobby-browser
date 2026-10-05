@@ -827,3 +827,20 @@ test("client rejects malformed nested fixtures from every JSON response family",
     await assert.rejects(operation(client), (error: unknown) => error instanceof RuntimeClientError && error.kind === "protocol", family);
   }
 });
+
+test("resolveJob validates evidence and binds receipts to the requested job", async () => {
+  const input = { decision: "effectAbsent", evidenceSha256: "a".repeat(64) } as const;
+  let call = 0;
+  await withServer(async (request, response) => {
+    assert.equal(request.method, "POST");
+    assert.equal(request.url, `/v1/jobs/${JOB_ID}/resolution`);
+    call += 1;
+    writeJson(response, 200, { ...input, jobId: call === 1 ? JOB_ID : `job_${CORRELATION_ID}`, actor: CORRELATION_ID, resolvedAt: new Date().toISOString(), provenance: "operatorAttested" });
+  }, async (baseUrl) => {
+    const client = new BrowserRuntimeClient({ baseUrl, bearerToken: TOKEN });
+    await assert.rejects(client.resolveJob(JOB_ID, { ...input, evidenceSha256: "bad" }));
+    assert.equal(call, 0);
+    assert.equal((await client.resolveJob(JOB_ID, input)).provenance, "operatorAttested");
+    await assert.rejects(client.resolveJob(JOB_ID, input), (error: unknown) => error instanceof RuntimeClientError && error.kind === "protocol");
+  });
+});
