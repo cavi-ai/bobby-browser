@@ -66,6 +66,33 @@ paths:
           description: Shutdown requested
         '401':
           description: Missing or invalid owner secret
+  /_bobby/runtime/impact:
+    get:
+      operationId: sharedRuntimeImpact
+      summary: Report what stopping the local shared owner would affect (managed owners only)
+      description: >-
+        Read-only. Used by `bobby runtime restart` before it stops the owner.
+        Answered from runtime memory and the checkpoint listing; makes no
+        browser call and writes nothing.
+      security: []
+      parameters:
+        - in: header
+          name: x-bobby-owner-stop
+          required: true
+          schema:
+            type: string
+          description: Owner-only secret read by the CLI from its private registry
+      responses:
+        '200':
+          description: Live connections, in-flight commands, sessions and their recoverable workflows
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuntimeImpact'
+        '401':
+          description: Missing or invalid owner secret; empty body
+        '503':
+          description: The owner has not attached its runtime yet; empty body
   /v1/gateway/{protocol}:
     get:
       operationId: sharedGatewayConnect
@@ -1311,6 +1338,45 @@ components:
         correlationId: { type: string }
         retryAfterMs: { type: integer, minimum: 0 }
         layer: { type: string }
+    RuntimeImpact:
+      type: object
+      additionalProperties: false
+      required: [ownerId, takenAt, connections, inFlightCommands, sessions]
+      properties:
+        ownerId: { type: string, format: uuid }
+        takenAt: { type: string, format: date-time }
+        connections:
+          type: integer
+          minimum: 0
+          description: Live MCP and ACP gateway connections; the requesting HTTP call is not counted
+        inFlightCommands: { type: integer, minimum: 0 }
+        sessions:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [sessionId, profile, createdAt, lastUsedAt, pages, recoverableWorkflows]
+            properties:
+              sessionId: { type: string, format: uuid }
+              profile: { type: string }
+              createdAt: { type: string, format: date-time }
+              lastUsedAt: { type: string, format: date-time }
+              pages:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  required: [pageId]
+                  properties:
+                    pageId: { type: string, format: uuid }
+                    url:
+                      type: string
+                      description: Last known URL with userinfo, query and fragment removed; omitted when unknown
+              recoverableWorkflows:
+                type: array
+                maxItems: 16
+                description: Workflow ids with a saved checkpoint, newest first, at most 16
+                items: { type: string, format: uuid }
     RuntimeInfo:
       type: object
       additionalProperties: true
