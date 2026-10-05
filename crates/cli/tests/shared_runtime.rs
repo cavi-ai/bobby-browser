@@ -379,14 +379,15 @@ fn restart_replaces_a_running_owner_and_reports_the_swap() {
     let new = owner_pid(path);
     assert_ne!(old, new);
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines.len(), 2, "{out}");
+    assert_eq!(lines.len(), 3, "{out}");
+    assert!(lines[0].starts_with("snapshot: "), "{out}");
     assert!(
-        lines[0].starts_with(&format!(
+        lines[1].starts_with(&format!(
             "restarted: runtime owner pid {new} (was {old}) http://127.0.0.1:"
         )),
         "{out}"
     );
-    assert_eq!(lines[1], DISCONNECTED);
+    assert_eq!(lines[2], DISCONNECTED);
     #[cfg(unix)]
     assert_gone(old);
 }
@@ -434,24 +435,47 @@ fn restart_hung_owner(args: &[&str]) -> std::time::Duration {
     let _frozen = Frozen(old, path.join("runtime"));
     // SAFETY: the owner is a process this test started in its temp scope.
     assert_eq!(unsafe { libc::kill(old as i32, libc::SIGSTOP) }, 0);
+    // Without `--disconnect-agents` an owner that does not report its impact
+    // is refused, and nothing is signalled: it stays frozen.
+    let refused = command(path).args(args).output().unwrap();
+    assert!(!refused.status.success());
+    let text = text_of(&refused);
+    assert!(text.contains("impact unknown"), "{text}");
+    assert!(text.contains("refusing to restart"), "{text}");
+    let state = Command::new("ps")
+        .args(["-p", &old.to_string(), "-o", "stat="])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&state.stdout)
+            .trim()
+            .starts_with('T'),
+        "the frozen owner was signalled"
+    );
     let started = std::time::Instant::now();
-    let out = checked(command(path).args(args).output().unwrap());
+    let mut flagged = args.to_vec();
+    flagged.push("--disconnect-agents");
+    let out = checked(command(path).args(flagged).output().unwrap());
     let elapsed = started.elapsed();
     let new = owner_pid(path);
     assert_ne!(old, new);
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines.len(), 3, "{out}");
+    assert_eq!(lines.len(), 4, "{out}");
     assert_eq!(
         lines[0],
+        "snapshot unavailable: the running runtime did not report what is attached"
+    );
+    assert_eq!(
+        lines[1],
         format!("runtime owner pid {old} did not stop gracefully; terminated")
     );
     assert!(
-        lines[1].starts_with(&format!(
+        lines[2].starts_with(&format!(
             "restarted: runtime owner pid {new} (was {old}) http://127.0.0.1:"
         )),
         "{out}"
     );
-    assert_eq!(lines[2], DISCONNECTED);
+    assert_eq!(lines[3], DISCONNECTED);
     assert_gone(old);
     elapsed
 }
@@ -491,7 +515,7 @@ async fn restart_ends_attached_connections_and_the_new_owner_accepts_new_ones() 
         move || {
             checked(
                 command(&path)
-                    .args(["runtime", "restart"])
+                    .args(["runtime", "restart", "--disconnect-agents"])
                     .output()
                     .unwrap(),
             )
@@ -509,7 +533,7 @@ async fn restart_ends_attached_connections_and_the_new_owner_accepts_new_ones() 
         .expect("the gateway task ended");
     let new_url = restarted
         .lines()
-        .next()
+        .find(|line| line.starts_with("restarted:"))
         .unwrap()
         .split_whitespace()
         .last()
@@ -518,4 +542,193 @@ async fn restart_ends_attached_connections_and_the_new_owner_accepts_new_ones() 
     let (mut writer, mut reader, _task) = connection(new_url, bearer, "mcp").await;
     send(&mut writer, initialize).await;
     assert!(response(&mut reader, 1).await.get("result").is_some());
+}
+
+const REFUSAL: &str = "refusing to restart: this disconnects every attached agent. Ask the operator to run `bobby runtime restart` in a terminal. Pass --disconnect-agents only when the operator has told you to.";
+
+fn bearer(root: &Path) -> String {
+    std::fs::read_to_string(root.join("bootstrap.env"))
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN="))
+        .unwrap()
+        .trim_matches('\"')
+        .to_owned()
+}
+
+type Attached = (
+    tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+);
+
+/// Starts the scope's owner and attaches one initialized MCP connection.
+async fn start_with_connection(root: &Path) -> Attached {
+    let url = checked(command(root).args(["runtime", "start"]).output().unwrap());
+    let (mut writer, mut reader, task) = connection(url, bearer(root), "mcp").await;
+    send(&mut writer, json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"guard-regression","version":"1"}}})).await;
+    assert!(response(&mut reader, 1).await.get("result").is_some());
+    send(
+        &mut writer,
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    )
+    .await;
+    (writer, reader, task)
+}
+
+fn snapshots(root: &Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(root.join("runtime/restart-snapshots"))
+        .map(|entries| entries.map(|entry| entry.unwrap().path()).collect())
+        .unwrap_or_default()
+}
+
+fn text_of(output: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_with_an_attached_connection_is_refused_without_the_flag() {
+    let scope = Cleanup(tempfile::tempdir().unwrap());
+    let path = scope.0.path().to_owned();
+    let (mut writer, mut reader, _task) = start_with_connection(&path).await;
+    let old = owner_pid(&path);
+    let output = tokio::task::spawn_blocking({
+        let path = path.clone();
+        move || {
+            command(&path)
+                .args(["runtime", "restart"])
+                .output()
+                .unwrap()
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!output.status.success());
+    let text = text_of(&output);
+    assert!(
+        text.contains(&format!("runtime owner pid {old} http://127.0.0.1:")),
+        "{text}"
+    );
+    assert!(text.contains("1 agent connection"), "{text}");
+    assert!(text.contains(REFUSAL), "{text}");
+    assert_eq!(owner_pid(&path), old);
+    assert!(snapshots(&path).is_empty());
+    assert!(!path.join("runtime/restart-snapshots").exists());
+    send(
+        &mut writer,
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+    )
+    .await;
+    assert!(response(&mut reader, 2).await["result"]["tools"].is_array());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_with_the_flag_snapshots_what_was_attached_then_restarts() {
+    let scope = Cleanup(tempfile::tempdir().unwrap());
+    let path = scope.0.path().to_owned();
+    let (_writer, _reader, _task) = start_with_connection(&path).await;
+    let old = owner_pid(&path);
+    let out = tokio::task::spawn_blocking({
+        let path = path.clone();
+        move || {
+            checked(
+                command(&path)
+                    .args(["runtime", "restart", "--disconnect-agents"])
+                    .output()
+                    .unwrap(),
+            )
+        }
+    })
+    .await
+    .unwrap();
+    let new = owner_pid(&path);
+    assert_ne!(old, new);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 3, "{out}");
+    let file = std::path::PathBuf::from(lines[0].strip_prefix("snapshot: ").expect(&out));
+    assert!(file.is_file());
+    assert!(file.starts_with(path.join("runtime/restart-snapshots")));
+    let snapshot: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(snapshot["connections"], 1);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(file.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
+    assert!(lines[1].starts_with(&format!(
+        "restarted: runtime owner pid {new} (was {old}) http://127.0.0.1:"
+    )));
+    assert_eq!(lines[2], DISCONNECTED);
+}
+
+#[test]
+fn restart_with_nothing_attached_needs_no_flag_and_still_snapshots() {
+    let scope = Cleanup(tempfile::tempdir().unwrap());
+    let path = scope.0.path();
+    checked(command(path).args(["runtime", "start"]).output().unwrap());
+    checked(command(path).args(["runtime", "restart"]).output().unwrap());
+    let files = snapshots(path);
+    assert_eq!(files.len(), 1);
+    let snapshot: Value = serde_json::from_slice(&std::fs::read(&files[0]).unwrap()).unwrap();
+    assert_eq!(snapshot["connections"], 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn install_restart_runtime_is_guarded_like_restart() {
+    let scope = Cleanup(tempfile::tempdir().unwrap());
+    let path = scope.0.path().to_owned();
+    let cwd = tempfile::tempdir().unwrap();
+    let (_writer, _reader, _task) = start_with_connection(&path).await;
+    let old = owner_pid(&path);
+    let install = |extra: &'static [&'static str]| {
+        let path = path.clone();
+        let cwd = cwd.path().to_owned();
+        tokio::task::spawn_blocking(move || {
+            command(&path)
+                .current_dir(cwd)
+                .args(["install", "--project-skill", "--yes", "--restart-runtime"])
+                .args(extra)
+                .output()
+                .unwrap()
+        })
+    };
+    let refused = install(&[]).await.unwrap();
+    assert!(refused.status.success(), "{}", text_of(&refused));
+    let text = text_of(&refused);
+    assert!(text.contains(REFUSAL), "{text}");
+    assert!(
+        text.contains(&format!(
+            "runtime owner pid {old} still runs the previous build"
+        )),
+        "{text}"
+    );
+    assert_eq!(owner_pid(&path), old);
+    assert!(snapshots(&path).is_empty());
+    let allowed = install(&["--disconnect-agents"]).await.unwrap();
+    assert!(allowed.status.success(), "{}", text_of(&allowed));
+    let text = text_of(&allowed);
+    assert!(
+        text.contains(&format!("stopped runtime owner pid {old}")),
+        "{text}"
+    );
+    assert_eq!(snapshots(&path).len(), 1);
+    assert_eq!(
+        checked(command(&path).args(["runtime", "status"]).output().unwrap()),
+        "stopped"
+    );
 }

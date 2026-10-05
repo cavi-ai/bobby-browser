@@ -16,7 +16,7 @@ loopback port. Each connection keeps its own MCP state and opening toolset,
 while browser profiles, storage, context, and jobs belong to the owner.
 Disconnecting an agent leaves the runtime available. An agent always reaches
 the running owner, including after the scope's files change; `bobby runtime
-status` reports a pending change and `bobby runtime restart` applies it. A
+status` reports a pending change and `bobby runtime restart` applies it: it shows the attached connections and sessions and asks before disconnecting them (without a terminal it refuses unless `--disconnect-agents` is given), and saves what was attached to `runtime/restart-snapshots/`. A
 gateway binary launched directly with the scope's bootstrap credential
 attaches to the scope's owner when one is running. Unreadable records in the
 journals or the idempotency ledger never stop the runtime from starting:

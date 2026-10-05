@@ -33,6 +33,9 @@ pub(crate) enum RuntimeCommand {
         /// Skip the graceful stop and terminate the owner process.
         #[arg(long)]
         force: bool,
+        /// Restart even when agents are attached, without asking.
+        #[arg(long)]
+        disconnect_agents: bool,
     },
     /// List organized local scopes and their runtime status.
     List,
@@ -125,7 +128,7 @@ pub(crate) fn native_host_name(root: &Path) -> Result<String> {
     Ok(format!("com.bobby_browser.companion.scope_{}", &hash[..16]))
 }
 
-fn private_dir(path: &Path) -> Result<()> {
+pub(crate) fn private_dir(path: &Path) -> Result<()> {
     std::fs::create_dir_all(path)?;
     #[cfg(unix)]
     {
@@ -135,7 +138,7 @@ fn private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn private_options() -> OpenOptions {
+pub(crate) fn private_options() -> OpenOptions {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -758,7 +761,47 @@ async fn stop_for_restart(dir: &Path, force: bool) -> Result<Option<Replaced>> {
     }))
 }
 
-async fn restart_owner(dir: &Path, force: bool) -> Result<()> {
+/// Report what stopping this scope's owner would hit and decide whether to
+/// go on; saves the impact report before anything is stopped.
+async fn guard_owner(dir: &Path, disconnect_agents: bool) -> Result<crate::restart_guard::Guard> {
+    use crate::restart_guard::{guard, read_impact, ImpactOutcome, Target, Verdict};
+    let recorded = recorded_owner(dir);
+    let target = Target {
+        pid: recorded.as_ref().map(|owner| owner.pid),
+        url: recorded.as_ref().map(|owner| owner.url.clone()),
+    };
+    let mut outcome = match &recorded {
+        Some(owner) => read_impact(&owner.url, &owner.stop_secret).await,
+        None => ImpactOutcome::Unknown,
+    };
+    if !matches!(outcome, ImpactOutcome::Known(_)) {
+        outcome = if owner_lock_held(dir)? {
+            ImpactOutcome::Unknown
+        } else {
+            ImpactOutcome::NoOwner
+        };
+    }
+    guard(
+        &target,
+        &outcome,
+        Verdict {
+            terminal: crate::restart_guard::terminal(),
+            disconnect_agents,
+        },
+        dir,
+        &mut std::io::stdin().lock(),
+        &mut std::io::stdout(),
+    )
+}
+
+async fn restart_owner(dir: &Path, force: bool, disconnect_agents: bool) -> Result<()> {
+    // Asked before launch.lock is taken: a person at a prompt must not hold
+    // up agents that are connecting.
+    if let crate::restart_guard::Guard::Refused(message) =
+        guard_owner(dir, disconnect_agents).await?
+    {
+        bail!(message);
+    }
     let _launch = claim_launch(dir).await?;
     let replaced = stop_for_restart(dir, force).await?;
     let url = ensure_owner_locked(
@@ -819,12 +862,22 @@ pub(crate) fn running_owner_pid() -> Result<Option<u32>> {
     })
 }
 
-/// Stop this scope's owner through the `bobby runtime stop` path.
-pub(crate) fn stop_running_owner() -> Result<Option<u32>> {
+/// Stop this scope's owner after the restart guard, for `bobby install --restart-runtime`.
+pub(crate) fn guarded_stop_running_owner(disconnect_agents: bool) -> Result<GuardedStop> {
     block_on_thread(async {
         let dir = runtime_dir()?;
-        stop_owner(&dir).await
+        if let crate::restart_guard::Guard::Refused(message) =
+            guard_owner(&dir, disconnect_agents).await?
+        {
+            return Ok(GuardedStop::Refused(message));
+        }
+        Ok(GuardedStop::Stopped(stop_owner(&dir).await?))
     })
+}
+
+pub(crate) enum GuardedStop {
+    Stopped(Option<u32>),
+    Refused(String),
 }
 
 pub(crate) async fn run(command: RuntimeCommand) -> Result<()> {
@@ -858,7 +911,10 @@ pub(crate) async fn run(command: RuntimeCommand) -> Result<()> {
             stop_owner(&dir).await?;
             println!("stopped");
         }
-        RuntimeCommand::Restart { force } => restart_owner(&dir, force).await?,
+        RuntimeCommand::Restart {
+            force,
+            disconnect_agents,
+        } => restart_owner(&dir, force, disconnect_agents).await?,
         RuntimeCommand::List => {
             let mut roots = vec![user_root()?];
             let mut index = 0;
