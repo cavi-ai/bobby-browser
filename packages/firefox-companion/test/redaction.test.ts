@@ -157,3 +157,45 @@ test("the same long id outside a URL is still redacted", () => {
   assert.ok(JSON.stringify(observeDocument(document)).includes("[redacted]"));
   assert.equal(JSON.stringify(observeDocument(document)).includes(LONG_ID), false);
 });
+
+function controlsOf(body: string): { observe: ReturnType<typeof observeDocument>["controls"]; a11y: string } {
+  const document = new JSDOM(
+    `<!doctype html><html><head><title>E</title></head><body>${body}</body></html>`,
+    { url: "https://example.test/p" },
+  ).window.document;
+  return {
+    observe: observeDocument(document).controls,
+    a11y: JSON.stringify(executeContentAction(document, "a11yTree", { maxNodes: 64 })),
+  };
+}
+
+const AUTHOR_FIELDS = [
+  '<label for="author">Author name</label><input type="text" id="author" name="author" value="Jane Doe">',
+  '<span id="author-label">Author name</span><input type="text" value="Jane Doe" aria-labelledby="author-label">',
+  '<label for="a">Author name</label><input type="text" id="a" name="authority" value="Jane Doe">',
+];
+
+AUTHOR_FIELDS.forEach((body, index) => {
+  test(`author-family fields are not classified sensitive: ${index}`, () => {
+    const { observe, a11y } = controlsOf(body);
+    assert.equal(observe[0]?.name, "Author name");
+    assert.equal(observe[0]?.value, "Jane Doe");
+    assert.ok(a11y.includes('"name":"Author name"'));
+    assert.ok(a11y.includes('"value":"Jane Doe"'));
+  });
+});
+
+for (const attribute of [
+  'name="auth_code"',
+  'name="authCode"',
+  'id="oauth-token"',
+  'data-authorization="x"',
+  'name="authentication"',
+  'type="password"',
+]) {
+  test(`auth-family fields stay sensitive: ${attribute}`, () => {
+    const { observe, a11y } = controlsOf(`<input ${attribute} value="Jane Doe" aria-label="Field">`);
+    assert.equal(observe[0]?.value, "[redacted]");
+    assert.equal(a11y.includes("Jane Doe"), false);
+  });
+}

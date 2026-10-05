@@ -145,7 +145,7 @@ const CONTROL_SELECTOR = [
 ].join(",");
 
 const SENSITIVE_MARKER =
-  /(?:authorization|auth(?:entication)?|bearer|token|secret|password|passwd|api[-_]?key|credential)/i;
+  /(?:authorization|auth(?!or(?!i[sz]))|bearer|token|secret|password|passwd|api[-_]?key|credential)/i;
 const SECRET_VALUE = /(?:^|\s)(?:bearer|basic)\s+\S+/i;
 const textEncoder = new TextEncoder();
 

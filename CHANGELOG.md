@@ -12,7 +12,8 @@
   "the content action failed".
 - Firefox companion: page text is hidden only when it contains secret material or
   the extension channel would reject it; words such as "password" or "token" in
-  ordinary labels are no longer hidden.
+  ordinary labels are no longer hidden; fields named for an author are no longer
+  treated as credential fields.
 - A shared-runtime gateway connection ends within 5 s of its peer leaving. It
   held a per-principal permit until the protocol server finished on its own,
   and a server with 64 requests pending stops reading frames, so it never saw
