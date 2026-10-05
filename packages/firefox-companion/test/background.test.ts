@@ -462,6 +462,43 @@ test("mutating content actions never retry an absent response", async () => {
   });
 });
 
+test("a rejected completion is reported as a channel rejection, not a content failure", async () => {
+  const transport = new FakeTransport();
+  const send = transport.send.bind(transport);
+  transport.send = (message: unknown) => {
+    if ((message as { kind?: string }).kind === "actionCompleted") {
+      throw new Error("extension channel message nesting exceeds the safety limit");
+    }
+    send(message);
+  };
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [{ tabId: 9, frameId: 4 }],
+    createTargetId: (target) => targetId(target.tabId, target.frameId),
+    async sendTabMessage() {
+      return { nodes: [] };
+    },
+    async navigateTab() {},
+    now: () => 1_000,
+  });
+  background.connect(CONNECT_OPTIONS);
+  await pair(background);
+  await grant(background, [{ tabId: 9, frameId: 4 }]);
+
+  await background.receive(action(9, 4, { operation: "a11yTree", input: {} }));
+
+  assert.deepEqual(transport.sent.at(-1), {
+    kind: "actionFailed",
+    output: {
+      commandId: "command-1",
+      code: "resultRejected",
+      message:
+        "the action result was rejected by the extension channel: extension channel message nesting exceeds the safety limit",
+      effectUncertain: false,
+    },
+  });
+});
+
 test("paired discovery accepts profile-bound grants and rejects unrelated routes", async () => {
   const transport = new FakeTransport();
   const routed: unknown[] = [];

@@ -1,3 +1,4 @@
+import { isExtensionSafeString } from "./native-transport.js";
 import { MAX_COMPANION_PAYLOAD_BYTES } from "./protocol.js";
 
 export const MAX_VISIBLE_TEXT_LENGTH = 64 * 1024;
@@ -180,7 +181,7 @@ function observationString(
 ): string | undefined {
   const normalized = value?.slice(0, maximum * 8).replace(/\s+/g, " ").trim();
   if (!normalized) return undefined;
-  if (containsSensitiveMaterial(normalized)) {
+  if (containsSensitiveMaterial(normalized) || !isExtensionSafeString(normalized)) {
     return byteLength(REDACTED) <= maximum ? REDACTED : undefined;
   }
   return boundedUtf8(normalized, maximum);
@@ -774,6 +775,10 @@ function target(document: Document, input: Record<string, unknown>): Element {
 }
 
 const A11Y_MAX_DEPTH = 32;
+// The result sits at depth 3 of the actionCompleted event; each node adds an
+// object and a children array, and its target adds one more object level.
+const A11Y_MAX_NODE_LEVEL = 13;
+const A11Y_MAX_VALUES = 19_000;
 const A11Y_MAX_NODES = 2048;
 const A11Y_STRUCTURAL_ROLES = new Set([
   "banner",
@@ -909,7 +914,7 @@ function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode
   };
   countTargets(root, 0);
 
-  const build = (element: Element, depth: number): A11yNode | undefined => {
+  const build = (element: Element, depth: number, level: number): A11yNode[] => {
     let role: string | undefined;
     let name: string | undefined;
     let sensitive = false;
@@ -917,14 +922,17 @@ function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode
       ({ role, name, sensitive } = semantics(element));
     } catch {
       // Skip nodes that throw during inspection; never fatal.
-      return undefined;
+      return [];
+    }
+    if (role && level > A11Y_MAX_NODE_LEVEL) {
+      state.truncated = true;
+      return [];
     }
     const children: A11yNode[] = [];
     if (depth < A11Y_MAX_DEPTH) {
       for (const child of Array.from(element.children).slice(0, 256)) {
         if (state.remaining <= 0) break;
-        const built = build(child, depth + 1);
-        if (built) children.push(built);
+        children.push(...build(child, depth + 1, role ? level + 1 : level));
       }
     }
     let hidden = false;
@@ -933,11 +941,11 @@ function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode
     } catch {
       hidden = true;
     }
-    if (hidden) return undefined;
-    if (!role) return children.length ? { children } : undefined;
+    if (hidden) return [];
+    if (!role) return children;
     if (state.remaining <= 0) {
       state.truncated = true;
-      return undefined;
+      return [];
     }
     state.remaining -= 1;
     const node: A11yNode = { role };
@@ -970,18 +978,14 @@ function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode
       }
     }
     if (children.length) node.children = children;
-    return node;
+    return [node];
   };
 
-  const tree = build(root, 0);
-  let nodes = tree ? [tree] : [];
-  while (nodes.length === 1) {
-    const onlyNode = nodes[0];
-    if (!onlyNode || onlyNode.role || onlyNode.name || !onlyNode.children) break;
-    nodes = onlyNode.children;
-  }
+  const nodes = build(root, 0, 0);
   const targetSeen = new Map<string, number>();
-  const annotateTargets = (candidates: A11yNode[]): void => {
+  const sendBudget = { values: A11Y_MAX_VALUES, bytes: MAX_OBSERVATION_BYTES };
+  const annotateTargets = (candidates: A11yNode[]): A11yNode[] => {
+    const kept: A11yNode[] = [];
     for (const node of candidates) {
       if (node.role && node.name && node.name !== REDACTED && A11Y_ACTIONABLE_ROLES.has(node.role)) {
         const key = targetKey(node.role, node.name);
@@ -993,12 +997,29 @@ function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode
         };
         targetSeen.set(key, ordinal + 1);
       }
-      annotateTargets(node.children ?? []);
+      const { children, ...own } = node;
+      const values =
+        2 + Object.keys(own).length + (own.target ? Object.keys(own.target).length : 0);
+      const bytes = byteLength(JSON.stringify(own)) + 4;
+      if (sendBudget.values < values || sendBudget.bytes < bytes) {
+        state.truncated = true;
+        sendBudget.values = 0;
+        break;
+      }
+      sendBudget.values -= values;
+      sendBudget.bytes -= bytes;
+      if (children) {
+        const keptChildren = annotateTargets(children);
+        if (keptChildren.length) node.children = keptChildren;
+        else delete node.children;
+      }
+      kept.push(node);
     }
+    return kept;
   };
-  annotateTargets(nodes);
+  const sent = annotateTargets(nodes);
   if (state.remaining <= 0) state.truncated = true;
-  return { nodes, truncated: state.truncated };
+  return { nodes: sent, truncated: state.truncated };
 }
 
 export function executeContentAction(

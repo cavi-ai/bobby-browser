@@ -517,8 +517,8 @@ export class CompanionBackground {
       return;
     }
 
+    let output: unknown;
     try {
-      let output: unknown;
       if (input.operation === "navigate") {
         const url = navigationUrl(input.input);
         await this.#dependencies.navigateTab(lease.tabId, url);
@@ -531,21 +531,33 @@ export class CompanionBackground {
           input.deadlineUnixMs,
         );
       }
-      const event: CompanionEvent = {
-        kind: "actionCompleted",
-        output: {
-          commandId: input.commandId,
-          interactionPath: "extensionApi",
-          output,
-        },
-      };
-      this.#dependencies.transport.send(event);
     } catch (error) {
       const deadlineExceeded = error instanceof ContentDeadlineError;
       this.#sendFailure(
         input.commandId,
         deadlineExceeded ? "deadlineExceeded" : "actionFailed",
         deadlineExceeded ? "the command deadline expired" : "the content action failed",
+        input.operation !== "observe" && input.operation !== "a11yTree",
+      );
+      return;
+    }
+    const event: CompanionEvent = {
+      kind: "actionCompleted",
+      output: {
+        commandId: input.commandId,
+        interactionPath: "extensionApi",
+        output,
+      },
+    };
+    try {
+      this.#dependencies.transport.send(event);
+    } catch (error) {
+      this.#sendFailure(
+        input.commandId,
+        "resultRejected",
+        `the action result was rejected by the extension channel: ${
+          error instanceof Error ? error.message : "unknown"
+        }`,
         input.operation !== "observe" && input.operation !== "a11yTree",
       );
     }
