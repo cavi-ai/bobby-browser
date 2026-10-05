@@ -210,6 +210,9 @@ enum CliCommand {
         /// Run with defaults, no interactive checklist
         #[arg(long)]
         yes: bool,
+        /// After installing, stop this scope's running runtime owner so the next agent connection starts the new build
+        #[arg(long)]
+        restart_runtime: bool,
         /// Bootstrap env file path
         #[arg(long)]
         path: Option<PathBuf>,
@@ -837,6 +840,7 @@ pub async fn run() -> Result<()> {
             config,
             force,
             yes,
+            restart_runtime,
             path,
         } => {
             let path = match path {
@@ -866,6 +870,7 @@ pub async fn run() -> Result<()> {
                     config,
                     force,
                     yes,
+                    restart_runtime,
                 },
             )?;
         }
@@ -4380,6 +4385,28 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
     }
 
     #[test]
+    fn install_parses_restart_runtime_flag() {
+        let cli = Cli::try_parse_from(["bobby", "install", "--yes", "--restart-runtime"]).unwrap();
+        match cli.command {
+            Some(CliCommand::Install {
+                restart_runtime,
+                yes,
+                ..
+            }) => {
+                assert!(restart_runtime);
+                assert!(yes);
+            }
+            _ => panic!("unexpected install parse"),
+        }
+        match Cli::try_parse_from(["bobby", "install"]).unwrap().command {
+            Some(CliCommand::Install {
+                restart_runtime, ..
+            }) => assert!(!restart_runtime),
+            _ => panic!("unexpected install parse"),
+        }
+    }
+
+    #[test]
     fn install_rejects_conflicting_vision_switches_at_parse_time() {
         assert!(Cli::try_parse_from(["bobby", "install", "--vision", "--no-vision"]).is_err());
         assert!(Cli::try_parse_from([
@@ -4985,7 +5012,11 @@ port = 9333
         let mut perms = std::fs::metadata(&script).unwrap().permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&script, perms).unwrap();
-        assert_eq!(onboarding::sidecar_version(&script).unwrap(), "0.0.0");
+        assert_eq!(
+            onboarding::sidecar_version_within(&script, std::time::Duration::from_secs(30))
+                .unwrap(),
+            "0.0.0"
+        );
     }
 
     #[test]

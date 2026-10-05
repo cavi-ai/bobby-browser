@@ -36,6 +36,11 @@ For a non-interactive host-specific install:
 bobby install --host claude --yes
 ```
 
+A running runtime owner keeps serving the build it started with. When the
+installed `bobby` changed, `bobby install` prints the owner pid; add
+`--restart-runtime` to stop that owner after the install, so the next agent
+connection starts the new build (attached agents disconnect).
+
 Supported host contracts:
 
 | Host | Protocol | Config |

@@ -145,6 +145,40 @@ async fn managed_chromium_owner_holds_the_shared_memory_store() {
     .is_ok());
 }
 
+#[test]
+fn install_restart_runtime_stops_the_scope_owner_and_names_its_pid() {
+    let scope = Cleanup(tempfile::tempdir().unwrap());
+    let path = scope.0.path();
+    let cwd = tempfile::tempdir().unwrap();
+    checked(command(path).args(["runtime", "start"]).output().unwrap());
+    let status = checked(command(path).args(["runtime", "status"]).output().unwrap());
+    let pid = status
+        .split_whitespace()
+        .find_map(|word| word.strip_prefix("pid="))
+        .expect("status names the owner pid")
+        .to_owned();
+    // `--project-skill` selects only the skill written under the cwd; the
+    // CLI, companion, host-config and credential items stay off.
+    let installed = checked(
+        command(path)
+            .current_dir(cwd.path())
+            .args(["install", "--project-skill", "--yes", "--restart-runtime"])
+            .output()
+            .unwrap(),
+    );
+    assert!(
+        installed.contains(&format!(
+            "stopped runtime owner pid {pid}; the next agent connection starts the new build"
+        )),
+        "{installed}"
+    );
+    assert!(cwd.path().join(".agents/skills").is_dir());
+    assert_eq!(
+        checked(command(path).args(["runtime", "status"]).output().unwrap()),
+        "stopped"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_cli_starts_share_one_owner_and_keep_connection_lifecycles_independent() {
     let scope = Cleanup(tempfile::tempdir().unwrap());
