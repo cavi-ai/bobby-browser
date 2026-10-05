@@ -1,4 +1,5 @@
 //! One local runtime owner per team/project scope, shared by all adapters.
+use crate::restart_guard::{Action, Guard};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -27,7 +28,11 @@ pub(crate) enum RuntimeCommand {
     /// Show this scope's owner and connection URL.
     Status,
     /// Gracefully stop this scope's runtime.
-    Stop,
+    Stop {
+        /// Stop even when agents are attached, without asking.
+        #[arg(long)]
+        disconnect_agents: bool,
+    },
     /// Stop this scope's runtime if it is running, then start a new one.
     Restart {
         /// Skip the graceful stop and terminate the owner process.
@@ -763,7 +768,7 @@ async fn stop_for_restart(dir: &Path, force: bool) -> Result<Option<Replaced>> {
 
 /// Report what stopping this scope's owner would hit and decide whether to
 /// go on; saves the impact report before anything is stopped.
-async fn guard_owner(dir: &Path, disconnect_agents: bool) -> Result<crate::restart_guard::Guard> {
+async fn guard_owner(action: Action, dir: &Path, disconnect_agents: bool) -> Result<Guard> {
     use crate::restart_guard::{guard, read_impact, ImpactOutcome, Target, Verdict};
     let recorded = recorded_owner(dir);
     let target = Target {
@@ -782,6 +787,7 @@ async fn guard_owner(dir: &Path, disconnect_agents: bool) -> Result<crate::resta
         };
     }
     guard(
+        action,
         &target,
         &outcome,
         Verdict {
@@ -797,9 +803,7 @@ async fn guard_owner(dir: &Path, disconnect_agents: bool) -> Result<crate::resta
 async fn restart_owner(dir: &Path, force: bool, disconnect_agents: bool) -> Result<()> {
     // Asked before launch.lock is taken: a person at a prompt must not hold
     // up agents that are connecting.
-    if let crate::restart_guard::Guard::Refused(message) =
-        guard_owner(dir, disconnect_agents).await?
-    {
+    if let Guard::Refused(message) = guard_owner(Action::Restart, dir, disconnect_agents).await? {
         bail!(message);
     }
     let _launch = claim_launch(dir).await?;
@@ -866,8 +870,8 @@ pub(crate) fn running_owner_pid() -> Result<Option<u32>> {
 pub(crate) fn guarded_stop_running_owner(disconnect_agents: bool) -> Result<GuardedStop> {
     block_on_thread(async {
         let dir = runtime_dir()?;
-        if let crate::restart_guard::Guard::Refused(message) =
-            guard_owner(&dir, disconnect_agents).await?
+        if let Guard::Refused(message) =
+            guard_owner(Action::Restart, &dir, disconnect_agents).await?
         {
             return Ok(GuardedStop::Refused(message));
         }
@@ -907,7 +911,12 @@ pub(crate) async fn run(command: RuntimeCommand) -> Result<()> {
             }
             None => println!("stopped"),
         },
-        RuntimeCommand::Stop => {
+        RuntimeCommand::Stop { disconnect_agents } => {
+            if let Guard::Refused(message) =
+                guard_owner(Action::Stop, &dir, disconnect_agents).await?
+            {
+                bail!(message);
+            }
             stop_owner(&dir).await?;
             println!("stopped");
         }

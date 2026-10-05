@@ -37,7 +37,9 @@ fn checked(output: Output) -> String {
 struct Cleanup(tempfile::TempDir);
 impl Drop for Cleanup {
     fn drop(&mut self) {
-        let _ = command(self.0.path()).args(["runtime", "stop"]).output();
+        let _ = command(self.0.path())
+            .args(["runtime", "stop", "--disconnect-agents"])
+            .output();
     }
 }
 
@@ -275,7 +277,13 @@ async fn concurrent_cli_starts_share_one_owner_and_keep_connection_lifecycles_in
         checked(command(&path).args(["runtime", "status"]).output().unwrap())
             .contains("configuration changed since this runtime started")
     );
-    checked(command(&path).args(["runtime", "stop"]).output().unwrap());
+    // Connection `two` is still attached.
+    checked(
+        command(&path)
+            .args(["runtime", "stop", "--disconnect-agents"])
+            .output()
+            .unwrap(),
+    );
     two_task.await.unwrap().unwrap();
     assert!(!path.join("runtime/owner.json").exists());
     let released = std::fs::OpenOptions::new()
@@ -731,4 +739,94 @@ async fn install_restart_runtime_is_guarded_like_restart() {
         checked(command(&path).args(["runtime", "status"]).output().unwrap()),
         "stopped"
     );
+}
+
+const STOP_REFUSAL: &str = "refusing to stop: this disconnects every attached agent. Ask the operator to run `bobby runtime stop` in a terminal. Pass --disconnect-agents only when the operator has told you to.";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stop_with_an_attached_connection_is_refused_without_the_flag() {
+    let scope = Cleanup(tempfile::tempdir().unwrap());
+    let path = scope.0.path().to_owned();
+    let (mut writer, mut reader, _task) = start_with_connection(&path).await;
+    let old = owner_pid(&path);
+    let output = tokio::task::spawn_blocking({
+        let path = path.clone();
+        move || command(&path).args(["runtime", "stop"]).output().unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(!output.status.success());
+    let text = text_of(&output);
+    assert!(
+        text.contains(&format!("runtime owner pid {old} http://127.0.0.1:")),
+        "{text}"
+    );
+    assert!(text.contains("1 agent connection"), "{text}");
+    assert!(text.contains(STOP_REFUSAL), "{text}");
+    assert!(!text.contains("refusing to restart"), "{text}");
+    assert_eq!(owner_pid(&path), old);
+    assert!(!path.join("runtime/restart-snapshots").exists());
+    send(
+        &mut writer,
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+    )
+    .await;
+    assert!(response(&mut reader, 2).await["result"]["tools"].is_array());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stop_with_the_flag_snapshots_what_was_attached_then_stops() {
+    let scope = Cleanup(tempfile::tempdir().unwrap());
+    let path = scope.0.path().to_owned();
+    let (_writer, _reader, _task) = start_with_connection(&path).await;
+    let out = tokio::task::spawn_blocking({
+        let path = path.clone();
+        move || {
+            checked(
+                command(&path)
+                    .args(["runtime", "stop", "--disconnect-agents"])
+                    .output()
+                    .unwrap(),
+            )
+        }
+    })
+    .await
+    .unwrap();
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 2, "{out}");
+    let file = std::path::PathBuf::from(lines[0].strip_prefix("snapshot: ").expect(&out));
+    let snapshot: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(snapshot["connections"], 1);
+    assert_eq!(lines[1], "stopped");
+    assert_eq!(
+        checked(command(&path).args(["runtime", "status"]).output().unwrap()),
+        "stopped"
+    );
+}
+
+#[test]
+fn stop_with_nothing_attached_needs_no_flag_and_snapshots_like_restart() {
+    let scope = Cleanup(tempfile::tempdir().unwrap());
+    let path = scope.0.path();
+    checked(command(path).args(["runtime", "start"]).output().unwrap());
+    let out = checked(command(path).args(["runtime", "stop"]).output().unwrap());
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 2, "{out}");
+    assert!(lines[0].starts_with("snapshot: "), "{out}");
+    assert_eq!(lines[1], "stopped");
+    let files = snapshots(path);
+    assert_eq!(files.len(), 1);
+    let snapshot: Value = serde_json::from_slice(&std::fs::read(&files[0]).unwrap()).unwrap();
+    assert_eq!(snapshot["connections"], 0);
+}
+
+#[test]
+fn stop_without_an_owner_prints_stopped_and_writes_nothing() {
+    let scope = Cleanup(tempfile::tempdir().unwrap());
+    let path = scope.0.path();
+    assert_eq!(
+        checked(command(path).args(["runtime", "stop"]).output().unwrap()),
+        "stopped"
+    );
+    assert!(!path.join("runtime/restart-snapshots").exists());
 }
