@@ -871,6 +871,8 @@ pub struct InstallOptions {
     pub config: Option<PathBuf>,
     pub force: bool,
     pub yes: bool,
+    /// Stop this scope's runtime owner after the install so it restarts on the new build.
+    pub restart_runtime: bool,
 }
 
 /// Named flags select only that work; no named flags (interactive or `--yes`
@@ -1001,16 +1003,25 @@ fn path_var_contains(dir: &Path) -> bool {
 
 /// Copy this `bobby` binary and both gateways into `dest_dir`. Returns the
 /// installed `bobby` path and whether `dest_dir` is on PATH.
-pub fn install_cli_into(dest_dir: &Path) -> Result<(PathBuf, bool)> {
+pub fn install_cli_into(dest_dir: &Path) -> Result<CliInstall> {
     let exe = std::env::current_exe().context("current executable unknown")?;
     install_cli_from(&exe, dest_dir)
+}
+
+/// What one CLI copy did: the installed `bobby`, whether its directory is on
+/// PATH, and whether the copy replaced `bobby` with different contents.
+#[derive(Debug)]
+pub struct CliInstall {
+    pub bobby: PathBuf,
+    pub on_path: bool,
+    pub bobby_changed: bool,
 }
 
 /// Install `bobby` and the two gateways beside it as one set. A gateway
 /// missing next to `bobby` refuses the install before anything is copied:
 /// a partial copy leaves an older gateway in place, and the host then runs
 /// two builds that do not match.
-fn install_cli_from(exe: &Path, dest_dir: &Path) -> Result<(PathBuf, bool)> {
+fn install_cli_from(exe: &Path, dest_dir: &Path) -> Result<CliInstall> {
     let source_dir = exe
         .parent()
         .context("current executable has no directory")?;
@@ -1026,17 +1037,33 @@ fn install_cli_from(exe: &Path, dest_dir: &Path) -> Result<(PathBuf, bool)> {
     std::fs::create_dir_all(dest_dir)
         .with_context(|| format!("could not create {}", dest_dir.display()))?;
     let bobby_dest = dest_dir.join(if cfg!(windows) { "bobby.exe" } else { "bobby" });
-    copy_executable(exe, &bobby_dest)?;
+    let bobby_changed = copy_executable(exe, &bobby_dest)?;
     for gateway in &gateways {
         copy_executable(
             gateway,
             &dest_dir.join(gateway.file_name().expect("gateway file name")),
         )?;
     }
-    Ok((bobby_dest, directory_on_path(dest_dir)))
+    Ok(CliInstall {
+        on_path: directory_on_path(dest_dir),
+        bobby: bobby_dest,
+        bobby_changed,
+    })
 }
 
-fn copy_executable(src: &Path, dest: &Path) -> Result<()> {
+/// Whether `dest` already holds exactly the bytes of `src`.
+fn same_contents(src: &Path, dest: &Path) -> bool {
+    let (Ok(src_meta), Ok(dest_meta)) = (std::fs::metadata(src), std::fs::metadata(dest)) else {
+        return false;
+    };
+    src_meta.len() == dest_meta.len()
+        && matches!((std::fs::read(src), std::fs::read(dest)), (Ok(a), Ok(b)) if a == b)
+}
+
+/// Replace `dest` with a copy of `src`; returns whether `dest` held
+/// different contents (or did not exist) before the replacement.
+fn copy_executable(src: &Path, dest: &Path) -> Result<bool> {
+    let changed = !same_contents(src, dest);
     let pending = dest.with_extension(format!("pending-{}", uuid::Uuid::new_v4().simple()));
     std::fs::copy(src, &pending)
         .with_context(|| format!("copy {} → {}", src.display(), pending.display()))?;
@@ -1046,7 +1073,39 @@ fn copy_executable(src: &Path, dest: &Path) -> Result<()> {
         std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0o755))?;
     }
     std::fs::rename(&pending, dest).with_context(|| format!("install {}", dest.display()))?;
-    Ok(())
+    Ok(changed)
+}
+
+/// What the end of `bobby install` does about this scope's runtime owner.
+#[derive(Debug, PartialEq, Eq)]
+enum RuntimeFollowUp {
+    Nothing,
+    /// Print that the owner still runs the previous build.
+    Notice(u32),
+    /// Stop the owner (`--restart-runtime`).
+    Stop(u32),
+}
+
+fn runtime_follow_up(
+    bobby_changed: bool,
+    owner_pid: Option<u32>,
+    restart_runtime: bool,
+) -> RuntimeFollowUp {
+    match owner_pid {
+        Some(pid) if restart_runtime => RuntimeFollowUp::Stop(pid),
+        Some(pid) if bobby_changed => RuntimeFollowUp::Notice(pid),
+        _ => RuntimeFollowUp::Nothing,
+    }
+}
+
+fn stale_runtime_notice(pid: u32) -> String {
+    format!(
+        "runtime owner pid {pid} still runs the previous build; `bobby runtime stop` (attached agents disconnect; the next agent connection starts the new build) or `make install RESTART=1`"
+    )
+}
+
+fn stopped_runtime_line(pid: u32) -> String {
+    format!("stopped runtime owner pid {pid}; the next agent connection starts the new build")
 }
 
 fn remember_installed_cli(bobby: &Path) {
@@ -1218,6 +1277,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         config,
         force,
         yes,
+        restart_runtime,
     } = &options;
     let hosts = hosts.as_slice();
     let extension = extension.as_deref();
@@ -1235,6 +1295,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
     let no_collect_training_data = *no_collect_training_data;
     let force = *force;
     let yes = *yes;
+    let restart_runtime = *restart_runtime;
     let readiness_requested =
         vision_provider.is_some() || vision_model.is_some() || download_vision_model;
     let project_root = std::env::current_dir()?;
@@ -1333,12 +1394,20 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
                 .to_owned()
         }
     };
+    let bobby_changed = std::rc::Rc::new(std::cell::Cell::new(false));
     items.push(InstallItem {
         label: cli_label,
         enabled: cli_enabled,
-        run: Box::new(move || {
+        run: Box::new({
+            let bobby_changed = std::rc::Rc::clone(&bobby_changed);
+            move || {
             let dest = resolve_cli_bin_dir()?;
-            let (bobby, on_path) = install_cli_into(&dest)?;
+            let CliInstall {
+                bobby,
+                on_path,
+                bobby_changed: changed,
+            } = install_cli_into(&dest)?;
+            bobby_changed.set(changed);
             remember_installed_cli(&bobby);
             if let Some(path_bobby) = path_cli() {
                 if !same_cli(&path_bobby, &bobby) {
@@ -1358,6 +1427,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
                     bobby.display(),
                     dest.display()
                 ))
+            }
             }
         }),
     });
@@ -1603,6 +1673,20 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         print_install_locations(&config_path, bootstrap_path, &project_root);
         println!("installation applied. Next: run `bobby doctor`.");
     }
+    let owner_pid = if restart_runtime || bobby_changed.get() {
+        crate::runtime_scopes::running_owner_pid()?
+    } else {
+        None
+    };
+    match runtime_follow_up(bobby_changed.get(), owner_pid, restart_runtime) {
+        RuntimeFollowUp::Nothing => {}
+        RuntimeFollowUp::Notice(pid) => println!("{}", stale_runtime_notice(pid)),
+        RuntimeFollowUp::Stop(_) => {
+            if let Some(pid) = crate::runtime_scopes::stop_running_owner()? {
+                println!("{}", stopped_runtime_line(pid));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1668,6 +1752,92 @@ mod install_tests {
         ));
         assert!(agents_skill_item_enabled(false, false, true));
         assert!(!agents_skill_item_enabled(false, false, false));
+    }
+
+    #[test]
+    fn restart_runtime_alone_keeps_the_install_defaults() {
+        assert!(use_install_defaults(&InstallOptions {
+            restart_runtime: true,
+            ..InstallOptions::default()
+        }));
+        assert!(use_install_defaults(&InstallOptions {
+            restart_runtime: true,
+            yes: true,
+            ..InstallOptions::default()
+        }));
+    }
+
+    #[test]
+    fn copy_executable_reports_whether_the_contents_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src-bin");
+        let dest = dir.path().join("dest-bin");
+        std::fs::write(&src, b"build one").unwrap();
+        assert!(copy_executable(&src, &dest).unwrap(), "missing destination");
+        assert!(!copy_executable(&src, &dest).unwrap(), "identical bytes");
+        std::fs::write(&src, b"build two").unwrap();
+        assert!(
+            copy_executable(&src, &dest).unwrap(),
+            "same length, other bytes"
+        );
+        assert_eq!(std::fs::read(&dest).unwrap(), b"build two");
+        std::fs::write(&src, b"build three, longer").unwrap();
+        assert!(copy_executable(&src, &dest).unwrap(), "other length");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"build three, longer");
+    }
+
+    #[test]
+    fn cli_install_reports_whether_bobby_changed() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
+        let build = build_dir_with(&["bobby", GATEWAY_COMMAND, ACP_GATEWAY_COMMAND]);
+        let dest = tempfile::tempdir().unwrap();
+        let first = install_cli_from(&build.path().join("bobby"), dest.path()).unwrap();
+        assert!(first.bobby_changed);
+        let second = install_cli_from(&build.path().join("bobby"), dest.path()).unwrap();
+        assert!(!second.bobby_changed);
+        std::fs::write(build.path().join(GATEWAY_COMMAND), b"newer gateway").unwrap();
+        let gateway_only = install_cli_from(&build.path().join("bobby"), dest.path()).unwrap();
+        assert!(!gateway_only.bobby_changed, "only bobby decides the notice");
+        std::fs::write(build.path().join("bobby"), b"newer bobby").unwrap();
+        let third = install_cli_from(&build.path().join("bobby"), dest.path()).unwrap();
+        assert!(third.bobby_changed);
+    }
+
+    #[test]
+    fn runtime_follow_up_decides_notice_stop_or_nothing() {
+        use RuntimeFollowUp::{Nothing, Notice, Stop};
+        let cases = [
+            // (binary changed, owner pid, restart flag, expected)
+            (false, None, false, Nothing),
+            (false, Some(41), false, Nothing),
+            (true, None, false, Nothing),
+            (true, Some(41), false, Notice(41)),
+            (false, None, true, Nothing),
+            (false, Some(41), true, Stop(41)),
+            (true, None, true, Nothing),
+            (true, Some(41), true, Stop(41)),
+        ];
+        for (changed, owner, restart, expected) in cases {
+            assert_eq!(
+                runtime_follow_up(changed, owner, restart),
+                expected,
+                "changed={changed} owner={owner:?} restart={restart}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_follow_up_lines_name_the_pid_and_both_ways_forward() {
+        let notice = stale_runtime_notice(41);
+        assert!(notice.contains("pid 41"), "{notice}");
+        assert!(notice.contains("previous build"), "{notice}");
+        assert!(notice.contains("`bobby runtime stop`"), "{notice}");
+        assert!(notice.contains("`make install RESTART=1`"), "{notice}");
+        assert_eq!(notice.lines().count(), 1);
+        assert_eq!(
+            stopped_runtime_line(41),
+            "stopped runtime owner pid 41; the next agent connection starts the new build"
+        );
     }
 
     #[test]
@@ -1889,7 +2059,9 @@ mod install_tests {
         let _lock = INSTALL_ENV_LOCK.lock().unwrap();
         let build = build_dir_with(&["bobby", GATEWAY_COMMAND, ACP_GATEWAY_COMMAND]);
         let dest = tempfile::tempdir().unwrap();
-        let (bobby, _) = install_cli_from(&build.path().join("bobby"), dest.path()).unwrap();
+        let bobby = install_cli_from(&build.path().join("bobby"), dest.path())
+            .unwrap()
+            .bobby;
         assert!(bobby.is_file());
         for gateway in [GATEWAY_COMMAND, ACP_GATEWAY_COMMAND] {
             assert_eq!(
@@ -1922,7 +2094,9 @@ mod install_tests {
         let _lock = INSTALL_ENV_LOCK.lock().unwrap();
         let build = build_dir_with(&["bobby", GATEWAY_COMMAND, ACP_GATEWAY_COMMAND]);
         let dest = tempfile::tempdir().unwrap();
-        let (bobby, _) = install_cli_from(&build.path().join("bobby"), dest.path()).unwrap();
+        let bobby = install_cli_from(&build.path().join("bobby"), dest.path())
+            .unwrap()
+            .bobby;
         assert!(bobby.is_file());
         let expected = if cfg!(windows) { "bobby.exe" } else { "bobby" };
         assert_eq!(bobby.file_name().unwrap(), expected);
@@ -2293,7 +2467,9 @@ mod install_tests {
         let _lock = INSTALL_ENV_LOCK.lock().unwrap();
         let build = build_dir_with(&["bobby", GATEWAY_COMMAND, ACP_GATEWAY_COMMAND]);
         let bin = tempfile::tempdir().unwrap();
-        let (bobby, _) = install_cli_from(&build.path().join("bobby"), bin.path()).unwrap();
+        let bobby = install_cli_from(&build.path().join("bobby"), bin.path())
+            .unwrap()
+            .bobby;
         remember_installed_cli(&bobby);
         let _clear = scopeguard_clear_installed_cli();
         let home = tempfile::tempdir().unwrap();
@@ -2312,8 +2488,9 @@ mod install_tests {
         let _lock = INSTALL_ENV_LOCK.lock().unwrap();
         let build = build_dir_with(&["bobby", GATEWAY_COMMAND, ACP_GATEWAY_COMMAND]);
         let home = tempfile::tempdir().unwrap();
-        let (bobby, _) =
-            install_cli_from(&build.path().join("bobby"), &home.path().join(".local/bin")).unwrap();
+        let bobby = install_cli_from(&build.path().join("bobby"), &home.path().join(".local/bin"))
+            .unwrap()
+            .bobby;
         let wrapper = wrapper_after_companion_install(home.path());
         assert!(
             wrapper.starts_with(&format!(

@@ -35,8 +35,19 @@
   worker is closed".
 - MCP: a wrongly shaped `kind` union (wait conditions, form field values) is rejected with the allowed kinds and the chosen kind's required properties; `intent_follow` without a wait shows a valid example.
 
+### Added
+
+- `bobby install --restart-runtime` stops this scope's running runtime owner after
+  the install. When the install replaced the PATH `bobby` with different contents
+  and the owner is running, `bobby install` ends with one line naming the owner
+  pid, saying it still runs the previous build, and giving `bobby runtime stop`
+  or `make install RESTART=1`.
+
 ### Changed
 
+- `make install` runs `bobby install --yes` when stdin or stdout is not a
+  terminal; with a terminal it still runs the checklist. `make install RESTART=1`
+  passes `--restart-runtime`.
 - `Formula/bobby-browser.rb` carries the v0.19.1 asset digests.
 
 ## 0.19.1 - 2026-10-02

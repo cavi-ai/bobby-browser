@@ -2,6 +2,8 @@ SHELL := /bin/bash
 REPO_ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 SERVICE := $(REPO_ROOT)scripts/dev/service.sh
 AGENT_EVAL_MODEL ?= claude-opus-5
+# `make install RESTART=1` also stops the running runtime owner after installing.
+INSTALL_RESTART := $(if $(filter 1,$(RESTART)),--restart-runtime)
 
 .DEFAULT_GOAL := help
 
@@ -19,7 +21,8 @@ help:
 	@echo
 	@echo "Setup"
 	@echo "  build      release-build bobby (./target/release/bobby)"
-	@echo "  install    build runtime + companion, then interactive agent setup"
+	@echo "  install    build, then update PATH binaries, companion, host config, credential"
+	@echo "             (checklist with a terminal, unattended without; RESTART=1 stops the running runtime)"
 	@echo "  firefox    build + install Firefox companion only"
 	@echo "  cli        build + install bobby (+ mcp-gateway) onto PATH"
 	@echo
@@ -60,6 +63,7 @@ help:
 	@echo "  Set BOBBY_BROWSER_TOKEN to include the MCP handshake in reload/verify."
 	@echo "  Non-interactive full setup:"
 	@echo "    ./target/release/bobby install --host claude --skill --cli --yes"
+	@echo "  Update an existing install: make install   (RESTART=1 stops the running runtime owner)"
 	@echo "  Companion only:  make firefox && make firefox-start  # then Pair"
 	@echo "  CLI on PATH:     make cli"
 
@@ -70,13 +74,21 @@ help:
 build:
 	cargo build --release --manifest-path $(REPO_ROOT)Cargo.toml -p bobby-browser
 
-# Build bobby + the gateways and run the interactive agent-host installer
-# (credential, MCP config merge, agent skill). Non-interactive:
-#   ./target/release/bobby install --host claude --skill --yes
+# Build bobby + the gateways, the Firefox companion, then run `bobby install`:
+# PATH binaries (bobby, mcp-gateway, acp-gateway), companion, host config,
+# credential. With a terminal on stdin and stdout it runs the checklist; without
+# one it runs `bobby install --yes` (the same defaults, unattended). A running
+# runtime owner keeps serving its old build: `bobby install` prints its pid when
+# the installed bobby changed; RESTART=1 stops it so the next agent connection
+# starts the new build (attached agents disconnect).
 install:
 	cargo build --release --manifest-path $(REPO_ROOT)Cargo.toml -p bobby-browser -p mcp-gateway -p acp-gateway
 	pnpm --filter @cavi-ai/bobby-firefox-companion build
-	$(REPO_ROOT)target/release/bobby install
+	if [ -t 0 ] && [ -t 1 ]; then \
+		$(REPO_ROOT)target/release/bobby install $(INSTALL_RESTART); \
+	else \
+		$(REPO_ROOT)target/release/bobby install --yes $(INSTALL_RESTART); \
+	fi
 
 # Build the companion extension and install it (native host + extension copy).
 # Does not touch host MCP configs or the bootstrap credential.

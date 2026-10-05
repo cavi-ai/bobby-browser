@@ -586,6 +586,74 @@ async fn owner_inner(
     result
 }
 
+/// Stop this scope's owner and wait for it to release the owner lock.
+/// Returns the stopped owner's pid, or `None` when no owner was running.
+async fn stop_owner(dir: &Path) -> Result<Option<u32>> {
+    let launch = dir.join("launch.lock");
+    let _launch = tokio::task::spawn_blocking(move || claim(&launch)).await??;
+    let owner_lock = lock_file(&dir.join("owner.lock"))?;
+    if let Some(owner) = live_owner(dir).await? {
+        client()?
+            .post(format!("{}/_bobby/runtime", owner.url))
+            .header("x-bobby-owner-stop", owner.stop_secret)
+            .send()
+            .await?
+            .error_for_status()?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            match owner_lock.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) => {}
+                Err(error) => return Err(error.into()),
+            }
+            if tokio::time::Instant::now() >= deadline {
+                bail!("runtime shutdown is still pending");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        Ok(Some(owner.pid))
+    } else {
+        owner_lock.try_lock().map_err(|_| {
+            anyhow::anyhow!("runtime owner is starting or shutting down; retry `runtime stop`")
+        })?;
+        Ok(None)
+    }
+}
+
+/// Run `future` to completion from synchronous code, on its own thread and
+/// runtime so it is safe inside an already-running tokio runtime.
+fn block_on_thread<T: Send>(
+    future: impl std::future::Future<Output = Result<T>> + Send,
+) -> Result<T> {
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?
+                    .block_on(future)
+            })
+            .join()
+            .map_err(|_| anyhow::anyhow!("runtime probe thread panicked"))?
+    })
+}
+
+/// Pid of this scope's running owner, as `bobby runtime status` reports it.
+pub(crate) fn running_owner_pid() -> Result<Option<u32>> {
+    block_on_thread(async {
+        let dir = runtime_dir()?;
+        Ok(live_owner(&dir).await?.map(|owner| owner.pid))
+    })
+}
+
+/// Stop this scope's owner through the `bobby runtime stop` path.
+pub(crate) fn stop_running_owner() -> Result<Option<u32>> {
+    block_on_thread(async {
+        let dir = runtime_dir()?;
+        stop_owner(&dir).await
+    })
+}
+
 pub(crate) async fn run(command: RuntimeCommand) -> Result<()> {
     let dir = runtime_dir()?;
     match command {
@@ -614,37 +682,8 @@ pub(crate) async fn run(command: RuntimeCommand) -> Result<()> {
             None => println!("stopped"),
         },
         RuntimeCommand::Stop => {
-            let launch = dir.join("launch.lock");
-            let _launch = tokio::task::spawn_blocking(move || claim(&launch)).await??;
-            let owner_lock = lock_file(&dir.join("owner.lock"))?;
-            if let Some(owner) = live_owner(&dir).await? {
-                client()?
-                    .post(format!("{}/_bobby/runtime", owner.url))
-                    .header("x-bobby-owner-stop", owner.stop_secret)
-                    .send()
-                    .await?
-                    .error_for_status()?;
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-                loop {
-                    match owner_lock.try_lock() {
-                        Ok(()) => break,
-                        Err(std::fs::TryLockError::WouldBlock) => {}
-                        Err(error) => return Err(error.into()),
-                    }
-                    if tokio::time::Instant::now() >= deadline {
-                        bail!("runtime shutdown is still pending");
-                    }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-                println!("stopped");
-            } else {
-                owner_lock.try_lock().map_err(|_| {
-                    anyhow::anyhow!(
-                        "runtime owner is starting or shutting down; retry `runtime stop`"
-                    )
-                })?;
-                println!("stopped");
-            }
+            stop_owner(&dir).await?;
+            println!("stopped");
         }
         RuntimeCommand::List => {
             let mut roots = vec![user_root()?];

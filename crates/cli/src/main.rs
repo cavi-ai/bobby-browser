@@ -210,6 +210,9 @@ enum CliCommand {
         /// Run with defaults, no interactive checklist
         #[arg(long)]
         yes: bool,
+        /// After installing, stop this scope's running runtime owner so the next agent connection starts the new build
+        #[arg(long)]
+        restart_runtime: bool,
         /// Bootstrap env file path
         #[arg(long)]
         path: Option<PathBuf>,
@@ -837,6 +840,7 @@ pub async fn run() -> Result<()> {
             config,
             force,
             yes,
+            restart_runtime,
             path,
         } => {
             let path = match path {
@@ -866,6 +870,7 @@ pub async fn run() -> Result<()> {
                     config,
                     force,
                     yes,
+                    restart_runtime,
                 },
             )?;
         }
@@ -4375,6 +4380,28 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
                 assert!(skill_hermes);
                 assert!(yes);
             }
+            _ => panic!("unexpected install parse"),
+        }
+    }
+
+    #[test]
+    fn install_parses_restart_runtime_flag() {
+        let cli = Cli::try_parse_from(["bobby", "install", "--yes", "--restart-runtime"]).unwrap();
+        match cli.command {
+            Some(CliCommand::Install {
+                restart_runtime,
+                yes,
+                ..
+            }) => {
+                assert!(restart_runtime);
+                assert!(yes);
+            }
+            _ => panic!("unexpected install parse"),
+        }
+        match Cli::try_parse_from(["bobby", "install"]).unwrap().command {
+            Some(CliCommand::Install {
+                restart_runtime, ..
+            }) => assert!(!restart_runtime),
             _ => panic!("unexpected install parse"),
         }
     }

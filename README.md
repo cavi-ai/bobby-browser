@@ -87,12 +87,19 @@ capability gates apply to every connection. Scoped host installation records
 the flags in its CLI entrypoint; `jobs`, `context`, `doctor`, and foreground
 `serve` use the same scope. Without flags, the CLI uses the personal scope.
 
-One command builds the runtime, mints a local credential, wires your agent host,
-and installs the agent skill:
+One command builds the runtime, updates the `bobby`, `mcp-gateway`, and
+`acp-gateway` binaries on PATH, installs the Firefox companion, wires your agent
+host, and creates the credential when missing:
 
 ```bash
 make install
 ```
+
+With a terminal it runs the checklist; without one (an agent shell, CI) it runs
+`bobby install --yes`. A running runtime owner keeps serving its old build:
+`bobby install` prints the owner pid when the installed `bobby` changed, and
+`make install RESTART=1` (`bobby install --restart-runtime`) stops that owner so
+the next agent connection starts the new build. Attached agents disconnect.
 
 Firefox companion only (extension + native host):
 
