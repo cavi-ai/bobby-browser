@@ -40,7 +40,7 @@ impl DeadableWorker {
         if self.dead.load(Ordering::SeqCst) {
             return Err(CommandError {
                 code: ErrorCode::BrowserCommandFailed,
-                message: "Firefox companion worker is closed".into(),
+                message: worker_pool::FIREFOX_WORKER_CLOSED_MESSAGE.into(),
                 layer: ErrorLayer::Driver,
                 retryable: false,
             });
