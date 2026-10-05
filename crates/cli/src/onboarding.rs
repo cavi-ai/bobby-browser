@@ -140,13 +140,18 @@ pub fn find_sidecar_binary(command: &str) -> Option<PathBuf> {
 
 /// Print `CARGO_PKG_VERSION` from `binary --version`. 2s cap, argv only.
 pub fn sidecar_version(binary: &Path) -> Result<String> {
+    sidecar_version_within(binary, Duration::from_secs(2))
+}
+
+/// `sidecar_version` with an explicit hang-guard deadline.
+pub fn sidecar_version_within(binary: &Path, timeout: Duration) -> Result<String> {
     let mut child = Command::new(binary)
         .arg("--version")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("failed to spawn {}", binary.display()))?;
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let deadline = std::time::Instant::now() + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -173,7 +178,11 @@ pub fn sidecar_version(binary: &Path) -> Result<String> {
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                anyhow::bail!("{} --version timed out after 2s", binary.display());
+                anyhow::bail!(
+                    "{} --version timed out after {}s",
+                    binary.display(),
+                    timeout.as_secs()
+                );
             }
             Err(error) => return Err(error.into()),
         }

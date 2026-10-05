@@ -5012,7 +5012,11 @@ port = 9333
         let mut perms = std::fs::metadata(&script).unwrap().permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&script, perms).unwrap();
-        assert_eq!(onboarding::sidecar_version(&script).unwrap(), "0.0.0");
+        assert_eq!(
+            onboarding::sidecar_version_within(&script, std::time::Duration::from_secs(30))
+                .unwrap(),
+            "0.0.0"
+        );
     }
 
     #[test]
