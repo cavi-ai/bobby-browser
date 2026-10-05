@@ -472,7 +472,8 @@ impl Server {
 /// `malformedArguments`; this replaces only the derived message with the
 /// exact fix so an agent reading `error.message` alone still sees the shape.
 const INTENT_FOLLOW_MISSING_EXPECTED_STATE_MESSAGE: &str = "intent_follow needs exactly one of \
-    expectedState or expectedDestination (a WaitForCommand: {condition, timeoutMs})";
+    expectedState or expectedDestination (a WaitForCommand: {condition, timeoutMs}); e.g. \
+    expectedState: {\"condition\":{\"kind\":\"url\",\"matcher\":{\"kind\":\"contains\",\"value\":\"/next\"}},\"timeoutMs\":10000}";
 
 fn project_verified_action_outcome(mut outcome: Value, detail: EvidenceDetail) -> Value {
     if detail == EvidenceDetail::Full || outcome["status"] != "completed" {

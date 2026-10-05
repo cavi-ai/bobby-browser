@@ -2776,7 +2776,246 @@ async fn intent_follow_without_expected_state_names_the_fix() {
     assert_eq!(
         response["error"]["message"],
         "intent_follow needs exactly one of expectedState or expectedDestination \
-         (a WaitForCommand: {condition, timeoutMs})",
+         (a WaitForCommand: {condition, timeoutMs}); e.g. expectedState: \
+         {\"condition\":{\"kind\":\"url\",\"matcher\":{\"kind\":\"contains\",\"value\":\"/next\"}},\"timeoutMs\":10000}",
         "{response}"
     );
+}
+
+const UNION_CAPS: [Capability; 4] = [
+    Capability::SessionWrite,
+    Capability::PageWrite,
+    Capability::BrowserMutate,
+    Capability::IntentExecute,
+];
+
+/// One `tools/call` against a fresh live gateway with the session and page
+/// ids merged into `arguments`; returns the JSON-RPC response.
+async fn scoped_call(tool: &str, mut arguments: Value) -> Value {
+    let live = live_with_capabilities(UNION_CAPS.to_vec()).await;
+    let mut next_id = 10;
+    let (session_id, page_id) = create_session_and_page(&live.server, &mut next_id).await;
+    arguments["sessionId"] = json!(session_id.0.to_string());
+    arguments["pageId"] = json!(page_id.0.to_string());
+    call_tool(&live.server, 20, tool, arguments).await
+}
+
+fn follow_with(key: &str, wait: Value) -> Value {
+    json!({"purpose":"Follow the next link","hints":{"role":"link","accessibleName":"Next"}, key: wait})
+}
+
+fn message_of(response: &Value) -> String {
+    response["error"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no error.message: {response}"))
+        .to_owned()
+}
+
+fn assert_union_rejection(response: &Value, pointer: &str) {
+    assert_eq!(response["error"]["code"], -32602, "{response}");
+    assert_eq!(
+        response["error"]["data"]["reason"], "schemaViolation",
+        "{response}"
+    );
+    assert_eq!(response["error"]["data"]["pointer"], pointer, "{response}");
+    assert_eq!(
+        response["error"]["data"]["constraint"], "oneOf",
+        "{response}"
+    );
+}
+
+const WAIT_KINDS: &str = "element, text, value, url, document, networkQuiet";
+
+#[tokio::test]
+async fn intent_follow_unknown_wait_kind_url_contains_names_allowed_kinds() {
+    let response = scoped_call(
+        "intent_follow",
+        follow_with(
+            "expectedDestination",
+            json!({"condition":{"kind":"urlContains","value":"oneclick-ui"},"timeoutMs":20000}),
+        ),
+    )
+    .await;
+    assert_union_rejection(&response, "/expectedDestination/condition");
+    let message = message_of(&response);
+    assert!(message.contains(WAIT_KINDS), "{message}");
+    assert!(
+        message.contains("the supplied `kind` is not allowed"),
+        "{message}"
+    );
+    assert_eq!(
+        response["error"]["data"]["repair"]["allowedKinds"],
+        json!([
+            "element",
+            "text",
+            "value",
+            "url",
+            "document",
+            "networkQuiet"
+        ]),
+        "{response}"
+    );
+}
+
+#[tokio::test]
+async fn intent_follow_unknown_wait_kind_navigation_names_allowed_kinds() {
+    let response = scoped_call(
+        "intent_follow",
+        follow_with(
+            "expectedState",
+            json!({"condition":{"kind":"navigation"},"timeoutMs":15000}),
+        ),
+    )
+    .await;
+    assert_union_rejection(&response, "/expectedState/condition");
+    let message = message_of(&response);
+    assert!(message.contains(WAIT_KINDS), "{message}");
+    assert!(
+        message.contains("the supplied `kind` is not allowed"),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn intent_follow_unknown_wait_kind_url_matches_names_allowed_kinds() {
+    let response = scoped_call(
+        "intent_follow",
+        follow_with(
+            "expectedState",
+            json!({"condition":{"kind":"urlMatches","pattern":"apply"},"timeoutMs":10000}),
+        ),
+    )
+    .await;
+    assert_union_rejection(&response, "/expectedState/condition");
+    let message = message_of(&response);
+    assert!(message.contains(WAIT_KINDS), "{message}");
+    assert!(
+        message.contains("the supplied `kind` is not allowed"),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn complete_form_field_value_with_wrong_shape_names_allowed_kinds() {
+    let response = scoped_call(
+        "intent_complete_form",
+        json!({
+            "purpose":"Fill the application form",
+            "fields":[{"name":"First Name","purpose":"first name","value":{"kind":"setText","text":"Sasan"}}]
+        }),
+    )
+    .await;
+    assert_union_rejection(&response, "/fields/0/value");
+    let message = message_of(&response);
+    assert!(
+        message.contains("setText, setChecked, selectOne, selectMany, setFiles, clear"),
+        "{message}"
+    );
+    assert!(message.contains("requires `value`"), "{message}");
+    assert!(
+        message.contains("it defines only: value, clearFirst"),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn url_condition_with_wrong_matcher_names_nested_kinds() {
+    let response = scoped_call(
+        "intent_follow",
+        follow_with(
+            "expectedState",
+            json!({"condition":{"kind":"url","matcher":{"kind":"includes","value":"x"}},"timeoutMs":10000}),
+        ),
+    )
+    .await;
+    assert_union_rejection(&response, "/expectedState/condition");
+    let message = message_of(&response);
+    assert!(message.contains("exact, contains, regex"), "{message}");
+    assert!(
+        message.contains("At /matcher: the supplied `kind` is not allowed; allowed kinds: exact, contains, regex."),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn allowed_kind_with_wrong_property_names_required_and_undefined() {
+    let response = scoped_call(
+        "intent_follow",
+        follow_with(
+            "expectedState",
+            json!({"condition":{"kind":"url","pattern":"apply"},"timeoutMs":10000}),
+        ),
+    )
+    .await;
+    assert_union_rejection(&response, "/expectedState/condition");
+    let message = message_of(&response);
+    assert!(message.contains("requires `matcher`"), "{message}");
+    assert!(
+        message.contains("kind `url` requires `matcher`; it defines only: matcher."),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn valid_wait_condition_passes_schema_validation() {
+    let response = scoped_call(
+        "intent_follow",
+        follow_with(
+            "expectedState",
+            json!({"condition":{"kind":"url","matcher":{"kind":"contains","value":"apply"}},"timeoutMs":10000}),
+        ),
+    )
+    .await;
+    assert_ne!(
+        response["error"]["data"]["reason"], "schemaViolation",
+        "{response}"
+    );
+}
+
+#[tokio::test]
+async fn intent_follow_without_wait_appends_a_valid_example() {
+    let response = scoped_call(
+        "intent_follow",
+        json!({"purpose":"Follow the next link","hints":{"role":"link","accessibleName":"Next"}}),
+    )
+    .await;
+    let message = message_of(&response);
+    assert!(
+        message.starts_with(
+            "intent_follow needs exactly one of expectedState or expectedDestination \
+             (a WaitForCommand: {condition, timeoutMs})"
+        ),
+        "{message}"
+    );
+    assert!(
+        message.contains(
+            r#"e.g. expectedState: {"condition":{"kind":"url","matcher":{"kind":"contains","value":"/next"}},"timeoutMs":10000}"#
+        ),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn union_rejection_never_echoes_caller_strings() {
+    let response = scoped_call(
+        "intent_follow",
+        follow_with(
+            "expectedState",
+            json!({"condition":{"kind":"zzcallermarker1","zzcallermarker2":"zzcallermarker3"},"timeoutMs":10000}),
+        ),
+    )
+    .await;
+    assert_union_rejection(&response, "/expectedState/condition");
+    let other = scoped_call(
+        "intent_follow",
+        follow_with(
+            "expectedState",
+            json!({"condition":{"kind":"url","zzcallermarker2":"x"},"timeoutMs":10000}),
+        ),
+    )
+    .await;
+    for response in [response, other] {
+        let serialized = response.to_string();
+        assert!(!serialized.contains("zzcallermarker"), "{serialized}");
+    }
 }

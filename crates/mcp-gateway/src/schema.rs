@@ -3645,6 +3645,33 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn union_without_kind_discriminator_gets_no_union_repair() {
+        let root = json!({"$defs":{}});
+        let node = json!({"oneOf":[{"type":"string"},{"type":"integer"}]});
+        assert_eq!(union_repair_at(&root, &node, &json!(true), false), None);
+        let node = json!({"oneOf":[
+            discriminated_object("kind", "a", json!({}), &[]),
+            {"type":"string"}
+        ]});
+        assert_eq!(union_repair_at(&root, &node, &json!({}), false), None);
+    }
+
+    #[test]
+    fn union_repair_names_kinds_in_schema_order_and_bounds_the_hint() {
+        let variants: Vec<Value> = (0..60)
+            .map(|index| discriminated_object("kind", &format!("variant{index}"), json!({}), &[]))
+            .collect();
+        let root = json!({"$defs":{}});
+        let node = json!({"oneOf":variants});
+        let repair = union_repair_at(&root, &node, &json!({"kind":"nope"}), false)
+            .expect("discriminated union");
+        assert_eq!(repair.allowed_kinds.len(), 60);
+        assert_eq!(repair.allowed_kinds[0], "variant0");
+        assert!(repair.hint.len() <= MAX_UNION_HINT_BYTES, "{}", repair.hint);
+        assert!(repair.hint.contains(" more)"), "{}", repair.hint);
+    }
 }
 
 /// Must match `types::FormControlState`'s `tag = "kind"` serde output.
@@ -3814,6 +3841,196 @@ impl SchemaViolation {
 }
 
 type Validated = Result<(), SchemaViolation>;
+
+/// Cap on the text a union repair adds to an `error.message`.
+const MAX_UNION_HINT_BYTES: usize = 400;
+const MAX_KIND_LIST_BYTES: usize = 160;
+const MAX_NESTED_KIND_LIST_BYTES: usize = 100;
+const MAX_NAMED_PROPERTIES: usize = 4;
+
+/// What a failed `oneOf` over `kind`-tagged object variants tells the caller.
+/// `allowed_kinds` is the full list in schema order; `hint` is the bounded
+/// sentence for `error.message`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UnionRepair {
+    pub(crate) allowed_kinds: Vec<String>,
+    pub(crate) hint: String,
+}
+
+/// Repair for a `oneOf` violation, read from the tool's own input schema.
+/// `None` unless the schema node at the violation pointer is a union whose
+/// every variant carries a `kind` const. Names only schema-derived text plus
+/// the caller's `kind` and property names when they are short identifiers.
+pub(crate) fn union_repair(
+    tool: &str,
+    arguments: &Value,
+    violation: &SchemaViolation,
+) -> Option<UnionRepair> {
+    if !matches!(violation.constraint, "oneOf" | "anyOf") {
+        return None;
+    }
+    let root = tool_schema(tool);
+    let pointer = if violation.pointer == "/" {
+        ""
+    } else {
+        violation.pointer.as_str()
+    };
+    let node = schema_at(&root, &root, pointer)?;
+    let value = arguments.pointer(pointer)?;
+    union_repair_at(&root, node, value, false)
+}
+
+fn deref_schema<'a>(root: &'a Value, schema: &'a Value) -> Option<&'a Value> {
+    let mut node = schema;
+    for _ in 0..8 {
+        let Some(reference) = node.get("$ref").and_then(Value::as_str) else {
+            return Some(node);
+        };
+        let name = reference.strip_prefix("#/$defs/")?;
+        node = root.get("$defs")?.get(name)?;
+    }
+    None
+}
+
+fn schema_at<'a>(root: &'a Value, schema: &'a Value, pointer: &str) -> Option<&'a Value> {
+    let mut node = deref_schema(root, schema)?;
+    for token in pointer.split('/').skip(1) {
+        let token = token.replace("~1", "/").replace("~0", "~");
+        node = deref_schema(root, node)?;
+        node = node
+            .get("properties")
+            .and_then(|properties| properties.get(&token))
+            .or_else(|| node.get("items").filter(|_| token.parse::<usize>().is_ok()))
+            .or_else(|| node.get("additionalProperties").filter(|v| v.is_object()))?;
+    }
+    deref_schema(root, node)
+}
+
+fn variant_kind(variant: &Value) -> Option<&str> {
+    let kind = variant.get("properties")?.get("kind")?;
+    if let Some(kind) = kind.get("const") {
+        return kind.as_str();
+    }
+    match kind.get("enum")?.as_array()?.as_slice() {
+        [only] => only.as_str(),
+        _ => None,
+    }
+}
+
+fn fit_list(names: &[&str], budget: usize) -> String {
+    let mut out = String::new();
+    for (index, name) in names.iter().enumerate() {
+        let separator = if index == 0 { "" } else { ", " };
+        if out.len() + separator.len() + name.len() > budget {
+            return format!("{out} (+{} more)", names.len() - index);
+        }
+        out.push_str(separator);
+        out.push_str(name);
+    }
+    out
+}
+
+fn backticked(names: &[&str]) -> String {
+    names
+        .iter()
+        .take(MAX_NAMED_PROPERTIES)
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn truncate_to(mut text: String, max: usize) -> String {
+    if text.len() > max {
+        let mut end = max;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    text
+}
+
+fn union_repair_at(root: &Value, node: &Value, value: &Value, nested: bool) -> Option<UnionRepair> {
+    let choices = node
+        .get("oneOf")
+        .or_else(|| node.get("anyOf"))?
+        .as_array()?;
+    let mut variants = Vec::with_capacity(choices.len());
+    for choice in choices {
+        let choice = deref_schema(root, choice)?;
+        variants.push((variant_kind(choice)?, choice));
+    }
+    if variants.is_empty() {
+        return None;
+    }
+    let kinds: Vec<&str> = variants.iter().map(|(kind, _)| *kind).collect();
+    let list = fit_list(
+        &kinds,
+        if nested {
+            MAX_NESTED_KIND_LIST_BYTES
+        } else {
+            MAX_KIND_LIST_BYTES
+        },
+    );
+    let supplied = value.get("kind").and_then(Value::as_str);
+    let chosen = supplied.and_then(|kind| variants.iter().find(|(allowed, _)| *allowed == kind));
+    let hint = match chosen {
+        None => format!("the supplied `kind` is not allowed; allowed kinds: {list}."),
+        Some((kind, variant)) => {
+            let mut hint = format!("allowed kinds: {list}. kind `{kind}`");
+            let required: Vec<&str> = variant
+                .get("required")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter(|name| *name != "kind")
+                .collect();
+            let defined: Vec<&str> = variant
+                .get("properties")
+                .and_then(Value::as_object)
+                .into_iter()
+                .flat_map(|properties| properties.keys())
+                .map(String::as_str)
+                .filter(|name| *name != "kind")
+                .collect();
+            if !required.is_empty() {
+                hint.push_str(&format!(" requires {}", backticked(&required)));
+                hint.push_str("; it");
+            }
+            if defined.is_empty() {
+                hint.push_str(" defines no other properties");
+            } else {
+                hint.push_str(&format!(
+                    " defines only: {}",
+                    fit_list(&defined, MAX_KIND_LIST_BYTES)
+                ));
+            }
+            hint.push('.');
+            if !nested {
+                if let Err(inner) = validate_at(root, variant, value, 0, "") {
+                    if inner.constraint == "oneOf" && inner.pointer != "/" {
+                        if let (Some(inner_node), Some(inner_value)) = (
+                            schema_at(root, variant, &inner.pointer),
+                            value.pointer(&inner.pointer),
+                        ) {
+                            if let Some(deeper) =
+                                union_repair_at(root, inner_node, inner_value, true)
+                            {
+                                hint.push_str(&format!(" At {}: {}", inner.pointer, deeper.hint));
+                            }
+                        }
+                    }
+                }
+            }
+            hint
+        }
+    };
+    Some(UnionRepair {
+        allowed_kinds: kinds.iter().map(|kind| (*kind).to_owned()).collect(),
+        hint: truncate_to(hint, MAX_UNION_HINT_BYTES),
+    })
+}
 
 /// Escapes a JSON Pointer token per RFC 6901.
 fn push_pointer(pointer: &str, token: &str) -> String {

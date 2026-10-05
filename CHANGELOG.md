@@ -33,6 +33,7 @@
 - A command on a Firefox session whose worker is closed fails with a message
   telling the caller to create a new session, instead of "Firefox companion
   worker is closed".
+- MCP: a wrongly shaped `kind` union (wait conditions, form field values) is rejected with the allowed kinds and the chosen kind's required properties; `intent_follow` without a wait shows a valid example.
 
 ### Changed
 

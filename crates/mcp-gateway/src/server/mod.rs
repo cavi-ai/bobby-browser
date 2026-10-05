@@ -1981,10 +1981,18 @@ fn invalid_params(
         });
         let repair =
             crate::repair::repair_for_protocol_reason("schemaViolation").map(|mut repair| {
+                let union = crate::schema::union_repair(tool, arguments, &violation);
                 if let Some(action) = repair["action"].as_str() {
-                    if let Some(hint) = choice_constraint_hint(violation.constraint) {
+                    let hint = match &union {
+                        Some(union) => Some(union.hint.clone()),
+                        None => choice_constraint_hint(violation.constraint).map(str::to_owned),
+                    };
+                    if let Some(hint) = hint {
                         repair["action"] = json!(format!("{action} {hint}"));
                     }
+                }
+                if let Some(union) = &union {
+                    repair["allowedKinds"] = json!(union.allowed_kinds);
                 }
                 if let Some(migration) = crate::repair::legacy_fill_shape_migration(tool, arguments)
                 {
@@ -2777,6 +2785,26 @@ mod tests {
                 "Fix the value at error.data.pointer; error.data.constraint names the keyword it violated."
             )
         );
+    }
+
+    #[test]
+    fn invalid_params_one_of_without_a_kind_union_keeps_the_generic_sentence() {
+        let response = invalid_params(
+            json!(7),
+            "click",
+            &json!({}),
+            Some(crate::schema::SchemaViolation {
+                pointer: "/noSuchProperty".to_owned(),
+                constraint: "oneOf",
+            }),
+            0,
+        );
+        let message = response["error"]["message"].as_str().expect("message");
+        assert!(
+            message.contains("re-read the tool's inputSchema $defs and include each variant's `kind` discriminator"),
+            "{message}"
+        );
+        assert!(response["error"]["data"]["repair"]["allowedKinds"].is_null());
     }
 
     /// `click` is `WORKFLOW_SCOPE_TOOLS`-allowlisted and the violation is
