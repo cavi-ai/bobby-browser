@@ -322,3 +322,56 @@ async fn eight_agents_share_one_runtime_owner_without_losing_a_request() {
             .unwrap(),
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn stop_without_the_flag_succeeds_after_an_agent_leaves_with_a_session_open() {
+    let owner = Owner(tempfile::tempdir().unwrap());
+    let root = owner.0.path();
+    let mut config = config::AppConfig::default();
+    config.http.allow_loopback = true;
+    config.browser.executable = Some(chrome());
+    config.browser.headless = true;
+    config.browser.profiles_dir = root.join("profiles");
+    config.browser.downloads_dir = root.join("downloads");
+    config.browser.artifacts_dir = root.join("artifacts");
+    config.browser.upload_roots = Vec::new();
+    config.storage.journal_path = root.join("storage/commands.jsonl");
+    config.storage.checkpoints_dir = root.join("storage/checkpoints");
+    config.storage.authority_path = root.join("storage/authority.json");
+    config.storage.scheduler_journal_path = root.join("storage/scheduler-jobs.jsonl");
+    std::fs::write(root.join("config.toml"), toml::to_string(&config).unwrap()).unwrap();
+    let origin = checked(command(root).args(["runtime", "start"]).output().unwrap());
+    let bearer = std::fs::read_to_string(root.join("bootstrap.env"))
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN="))
+        .unwrap()
+        .trim_matches('"')
+        .to_owned();
+
+    let mut agent = Agent::attach(&origin, &bearer).await;
+    let (sample, created) = agent
+        .call(1, "session_create", json!({"profile":"leaves-open"}))
+        .await;
+    assert!(
+        sample.answered && created["id"].is_string(),
+        "session_create: {created}"
+    );
+    agent.close().await;
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let output = command(root).args(["runtime", "stop"]).output().unwrap();
+        if output.status.success() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "stop without --disconnect-agents still refused 20 s after the agent left: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
