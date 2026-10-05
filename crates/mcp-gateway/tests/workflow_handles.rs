@@ -2,6 +2,9 @@
 
 mod common;
 
+#[path = "../../runtime-tests/tests/modern_gauntlet/unlock.rs"]
+mod northstar_unlock;
+
 use std::{sync::Arc, time::Duration as StdDuration};
 
 use chrono::{Duration, Utc};
@@ -2201,6 +2204,17 @@ async fn workflow_handle_follows_a_popup_and_returns_to_the_opener_when_it_close
         .as_str()
         .unwrap_or_else(|| panic!("workflow_start did not return a handle: {start}"))
         .to_owned();
+
+    // The current Northstar fixture gates integrations behind consent and
+    // operator authentication. Reuse the live journey setup before exercising
+    // MCP popup handle routing; no popup behavior is bypassed here.
+    northstar_unlock::unlock_northstar_session(
+        &raw_runtime,
+        &serde_json::from_value(start["result"]["structuredContent"]["sessionId"].clone()).unwrap(),
+        &serde_json::from_value(start["result"]["structuredContent"]["pageId"].clone()).unwrap(),
+    )
+    .await
+    .unwrap();
 
     let followed = call(
         &server,

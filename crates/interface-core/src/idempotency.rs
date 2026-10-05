@@ -175,6 +175,7 @@ pub struct IdempotencyStore<O = CommandOutcome> {
     state: Arc<Mutex<StoreState<O>>>,
     durable_path: Option<Arc<PathBuf>>,
     _durable_lock: Option<Arc<DurableLock>>,
+    integrity_issue: Option<&'static str>,
 }
 
 impl<O> std::fmt::Debug for IdempotencyStore<O> {
@@ -212,7 +213,7 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
         lock_options.mode(0o600);
         let lock_file = lock_options.open(path.with_extension("lock"))?;
         lock_file.try_lock()?;
-        let store = Self {
+        let mut store = Self {
             durable_path: Some(Arc::new(path.clone())),
             _durable_lock: Some(Arc::new(DurableLock { file: lock_file })),
             ..Self::default()
@@ -222,25 +223,35 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(store),
             Err(error) => return Err(error),
         };
-        // A ledger this build cannot read never stops the runtime: it is
-        // moved aside, kept for inspection, and the runtime starts empty.
+        // Keep startup and inspection available, but never turn unreadable
+        // execution history into an empty writable ledger.
         let snapshot = match serde_json::from_slice::<DurableSnapshot>(&bytes) {
             Ok(snapshot) if snapshot.schema_version == 1 => snapshot,
             _ => {
-                let aside = path.with_extension(format!(
-                    "unreadable-{}",
-                    Utc::now().format("%Y%m%dT%H%M%S%.3f")
-                ));
-                tracing::warn!(
-                    path = %path.display(),
-                    aside = %aside.display(),
-                    "idempotency ledger unreadable by this build; moved aside"
-                );
-                tokio::fs::rename(&path, &aside).await?;
+                store.integrity_issue = Some("unreadableLedger");
                 return Ok(store);
             }
         };
         let now = Utc::now();
+        // Validate the entire active snapshot before restoring any key. A
+        // partial restore would make discarded keys look safe to execute.
+        let mut keys = std::collections::HashSet::new();
+        let mut counts = HashMap::<PrincipalId, usize>::new();
+        for entry in &snapshot.entries {
+            if entry.expires_at.is_some_and(|expires| expires <= now) {
+                continue;
+            }
+            if !keys.insert((entry.principal_id.clone(), entry.key.clone())) {
+                store.integrity_issue = Some("duplicateLedgerKey");
+                return Ok(store);
+            }
+            let count = counts.entry(entry.principal_id.clone()).or_default();
+            *count += 1;
+            if *count > store.per_principal_capacity || keys.len() > store.global_capacity {
+                store.integrity_issue = Some("ledgerCapacityExceeded");
+                return Ok(store);
+            }
+        }
         let mut state = store.state.lock().await;
         for entry in snapshot.entries {
             if entry.expires_at.is_some_and(|expires| expires <= now) {
@@ -258,19 +269,7 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
                     Ok(None) | Err(_) => EntryState::Unresolved,
                 },
             };
-            if entry_count(&state) >= store.global_capacity {
-                tracing::warn!("idempotency ledger exceeds capacity; skipping the remainder");
-                continue;
-            }
             let bucket = state.entries.entry(entry.principal_id).or_default();
-            if bucket.iter().any(|prior| prior.key == entry.key) {
-                tracing::warn!("idempotency ledger repeats a key; keeping the first entry");
-                continue;
-            }
-            if bucket.len() >= store.per_principal_capacity {
-                tracing::warn!("idempotency ledger exceeds capacity; skipping the remainder");
-                continue;
-            }
             bucket.push(Entry {
                 key: entry.key,
                 operation: entry.operation,
@@ -285,7 +284,26 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
         Ok(store)
     }
 
+    /// Stable, payload-free reason that durable history cannot authorize writes.
+    pub fn integrity_issue(&self) -> Option<&'static str> {
+        self.integrity_issue
+    }
+
+    pub fn ensure_writable(&self, correlation_id: &CorrelationId) -> Result<(), InterfaceError> {
+        if self.integrity_issue.is_some() {
+            let mut error = unresolved_error(correlation_id.clone());
+            error.message = "durable idempotency history requires repair before mutation".into();
+            return Err(error);
+        }
+        Ok(())
+    }
+
     async fn persist_locked(&self, state: &StoreState<O>) -> io::Result<()> {
+        if self.integrity_issue.is_some() {
+            return Err(io::Error::other(
+                "durable idempotency history requires repair",
+            ));
+        }
         let Some(path) = &self.durable_path else {
             return Ok(());
         };
@@ -366,6 +384,7 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
             state: Arc::new(Mutex::new(StoreState::default())),
             durable_path: None,
             _durable_lock: None,
+            integrity_issue: None,
         }
     }
 
@@ -380,6 +399,7 @@ impl<O: RetainedOutcome> IdempotencyStore<O> {
         deadline: DateTime<Utc>,
         correlation_id: CorrelationId,
     ) -> Result<IdempotencyReservation<O>, InterfaceError> {
+        self.ensure_writable(&correlation_id)?;
         loop {
             let wait = {
                 let mut state = self.state.lock().await;

@@ -18,6 +18,8 @@ mod forms;
 mod ids;
 #[path = "../../bobby-browser-client/src/interface.rs"]
 mod interface;
+#[path = "../../bobby-browser-client/src/job_resolution.rs"]
+mod job_resolution;
 #[path = "../../bobby-browser-client/src/outcomes.rs"]
 mod outcomes;
 mod presets;
@@ -35,6 +37,7 @@ pub use commands::*;
 pub use forms::*;
 pub use ids::*;
 pub use interface::*;
+pub use job_resolution::*;
 pub use outcomes::*;
 pub use presets::{capability_effect, CapabilityPreset};
 pub use recovery::*;

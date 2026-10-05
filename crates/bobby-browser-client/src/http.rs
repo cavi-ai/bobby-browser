@@ -10,9 +10,10 @@ use uuid::Uuid;
 use crate::{
     CheckpointRequest, CommandEnvelope, CommandOutcome, ContextAskResponse, ContextMissReason,
     ContextNeighborsResponse, ContextNextStep, ContextSiteResponse, CreateSessionRequest,
-    FormSnapshot, JobId, JobStatusResponse, JobSubmitResponse, OpenPageRequest, PageId, PageState,
-    RecoveryDecision, RecoveryStatus, RuntimeInfo, SessionId, SessionState, SubmitJobRequest,
-    WorkflowCheckpoint, WorkflowId, CURRENT_INTERFACE_VERSION,
+    FormSnapshot, JobId, JobResolutionReceipt, JobResolutionRequest, JobStatusResponse,
+    JobSubmitResponse, OpenPageRequest, PageId, PageState, RecoveryDecision, RecoveryStatus,
+    RuntimeInfo, SessionId, SessionState, SubmitJobRequest, WorkflowCheckpoint, WorkflowId,
+    CURRENT_INTERFACE_VERSION,
 };
 
 /// Client hard bounds for [`BrowserRuntimeClient::artifact`], mirroring the
@@ -286,6 +287,39 @@ impl BrowserRuntimeClient {
             .validate()
             .map_err(|message| ClientError::Protocol(message.into()))?;
         Ok(response)
+    }
+
+    /// Record an owner-scoped operator attestation. This never replays the job.
+    pub async fn resolve_job(
+        &self,
+        job_id: &JobId,
+        input: &JobResolutionRequest,
+        options: Option<RequestOptions>,
+    ) -> Result<JobResolutionReceipt, ClientError> {
+        input
+            .validate()
+            .map_err(|message| ClientError::Protocol(message.into()))?;
+        let receipt: JobResolutionReceipt = self
+            .json_with_status(
+                Method::POST,
+                &format!("/v1/jobs/{job_id}/resolution"),
+                Some(input),
+                options,
+                Some(reqwest::StatusCode::OK),
+            )
+            .await?;
+        receipt
+            .validate()
+            .map_err(|message| ClientError::Protocol(message.into()))?;
+        if receipt.job_id != job_id.as_str()
+            || receipt.decision != input.decision
+            || receipt.evidence_sha256 != input.evidence_sha256
+        {
+            return Err(ClientError::Protocol(
+                "resolution receipt does not match its request".into(),
+            ));
+        }
+        Ok(receipt)
     }
 
     /// `DELETE /v1/jobs/{job_id}` — cancel the authenticated principal's job.
@@ -1026,6 +1060,31 @@ mod tests {
                 "timeoutMs": 5_000,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn resolution_client_rejects_unbound_or_unverified_receipts() {
+        let id = JobId::new();
+        let input = JobResolutionRequest {
+            decision: crate::JobResolutionDecision::EffectAbsent,
+            evidence_sha256: "a".repeat(64),
+        };
+        for (job_id, provenance, expected_ok) in [
+            (id.clone(), "operatorAttested", true),
+            (JobId::new(), "operatorAttested", false),
+            (id.clone(), "runtimeVerified", false),
+        ] {
+            let (base, mut rx) = capture_uri("/v1/jobs/{job}/resolution", axum::Json(json!({"jobId":job_id,"decision":"effectAbsent","evidenceSha256":"a".repeat(64),"actor":Uuid::new_v4(),"resolvedAt":Utc::now(),"provenance":provenance}))).await;
+            let client = BrowserRuntimeClient::new(base, "test-token").unwrap();
+            assert_eq!(
+                client.resolve_job(&id, &input, None).await.is_ok(),
+                expected_ok
+            );
+            assert_eq!(
+                rx.recv().await.unwrap(),
+                format!("/v1/jobs/{id}/resolution")
+            );
+        }
     }
 
     #[tokio::test]

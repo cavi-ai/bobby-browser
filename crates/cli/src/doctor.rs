@@ -2350,6 +2350,16 @@ fn record_jsonl_health(report: &mut DoctorReport, name: &str, path: &Path, healt
         );
         return;
     }
+    if health.incompatible_records > 0 && name == "scheduler-journal" {
+        report.fail(
+            name,
+            format!(
+                "{} unreadable records; scheduler history is read-only and requires repair",
+                health.incompatible_records
+            ),
+        );
+        return;
+    }
     if health.incompatible_records > 0 {
         report.warn(
             name,
@@ -2523,6 +2533,17 @@ fn record_operational_slos(
         );
         return;
     };
+    if info.storage_integrity.is_empty() {
+        report.ok(
+            "storage-integrity",
+            "runtime storage has no reported integrity issue".into(),
+        );
+    } else {
+        report.fail(
+            "storage-integrity",
+            "durable history requires repair; affected mutations are disabled".into(),
+        );
+    }
     match &info.provider_health {
         None => report.ok(
             "provider-health",
@@ -3050,6 +3071,7 @@ mod slo_tests {
         metrics: &observability::OperationalMetrics,
     ) -> types::RuntimeInfo {
         types::RuntimeInfo {
+            storage_integrity: Vec::new(),
             version: "0.14.0".to_string(),
             capabilities: Vec::new(),
             active_sessions: 0,

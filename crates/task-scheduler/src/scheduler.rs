@@ -56,7 +56,10 @@ pub struct JobScheduler {
     semaphore: Arc<Semaphore>,
     handlers: Arc<HashMap<String, Arc<dyn JobHandler>>>,
     job_registry: Arc<Mutex<HashMap<JobId, Job>>>,
+    // Serializes terminal/reconciliation persistence with operator resolutions.
+    transition_lock: Arc<Mutex<()>>,
     abort_handles: Arc<std::sync::Mutex<HashMap<JobId, AbortHandle>>>,
+    admission_integrity_issue: Arc<std::sync::OnceLock<&'static str>>,
     shutdown: Arc<AtomicBool>,
     wake: Arc<Notify>,
     total_submitted: Arc<AtomicU64>,
@@ -67,6 +70,84 @@ pub struct JobScheduler {
 }
 
 impl JobScheduler {
+    pub fn integrity_issue(&self) -> Option<&'static str> {
+        self.store.integrity_issue()
+    }
+
+    /// Permanently refuse new work in this process after a shared ledger loses integrity.
+    /// This is shared by HTTP, MCP, and every scheduler clone. Repair requires restart.
+    pub fn deny_admission(&self, reason: &'static str) {
+        let _ = self.admission_integrity_issue.set(reason);
+    }
+
+    /// Terminal, owner-scoped operator attestation. No handler is dispatched.
+    pub async fn resolve_job(
+        &self,
+        id: &JobId,
+        actor: &types::PrincipalId,
+        input: types::JobResolutionRequest,
+    ) -> Result<types::JobResolutionReceipt, crate::JobError> {
+        let _transition = self.transition_lock.lock().await;
+        input
+            .validate()
+            .map_err(|reason| crate::JobError::Execution(reason.into()))?;
+        let mut registry = self.job_registry.lock().await;
+        let job = registry
+            .get_mut(id)
+            .ok_or_else(|| crate::JobError::NotFound(id.clone()))?;
+        if job.owner.as_ref() != Some(actor) {
+            return Err(crate::JobError::NotFound(id.clone()));
+        }
+        if job.resolution_pending || !job.has_valid_resolution() {
+            return Err(crate::JobError::ResolutionUncertain);
+        }
+        if let Some(receipt) = &job.resolution {
+            if receipt.actor == *actor
+                && receipt.decision == input.decision
+                && receipt.evidence_sha256 == input.evidence_sha256
+            {
+                return Ok(receipt.clone());
+            }
+            return Err(crate::JobError::Execution(
+                "job resolution conflicts with its durable receipt".into(),
+            ));
+        }
+        if job.status != JobStatus::ReconciliationRequired {
+            return Err(crate::JobError::Execution(
+                "only reconciliation-required jobs can be resolved".into(),
+            ));
+        }
+        // Set before awaiting I/O: cancellation or an error cannot prove that
+        // no bytes were appended. Keep this job uncertain until authoritative reload.
+        if self.store.integrity_issue().is_some() {
+            return Err(crate::JobError::ResolutionUncertain);
+        }
+        job.resolution_pending = true;
+        let receipt = types::JobResolutionReceipt {
+            job_id: id.0.clone(),
+            decision: input.decision,
+            evidence_sha256: input.evidence_sha256,
+            actor: actor.clone(),
+            resolved_at: Utc::now(),
+            provenance: "operatorAttested".into(),
+        };
+        let mut snapshot = job.clone();
+        snapshot.resolution_pending = false;
+        snapshot.status = JobStatus::Resolved;
+        snapshot.completed_at = Some(receipt.resolved_at);
+        snapshot.result = None;
+        snapshot.error = None;
+        snapshot.resolution = Some(receipt.clone());
+        if let Err(error) = self.store.update(&snapshot, JobEvent::Resolved).await {
+            warn!(job_id = %id, error = %error, "job resolution persistence uncertain");
+            return Err(crate::JobError::ResolutionUncertain);
+        }
+        *job = snapshot;
+        self.prune_terminal(&mut registry).await;
+        drop(registry);
+        self.prune_store_terminal().await;
+        Ok(receipt)
+    }
     /// Create a scheduler with an in-memory store.
     pub fn new(config: SchedulerConfig) -> Self {
         Self::with_store(config, Arc::new(MemoryJobStore::new()))
@@ -88,7 +169,9 @@ impl JobScheduler {
             semaphore,
             handlers: Arc::new(HashMap::new()),
             job_registry: Arc::new(Mutex::new(HashMap::new())),
+            transition_lock: Arc::new(Mutex::new(())),
             abort_handles: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            admission_integrity_issue: Arc::new(std::sync::OnceLock::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
             wake: Arc::new(Notify::new()),
             total_submitted: Arc::new(AtomicU64::new(0)),
@@ -140,7 +223,8 @@ impl JobScheduler {
                 JobStatus::Pending
                 | JobStatus::Running
                 | JobStatus::Cancelled
-                | JobStatus::ReconciliationRequired => {}
+                | JobStatus::ReconciliationRequired
+                | JobStatus::Resolved => {}
             }
             if is_pending {
                 queue.requeue(job)?;
@@ -158,6 +242,10 @@ impl JobScheduler {
 
     /// Submit a job to the scheduler.
     pub async fn submit(&self, config: JobConfig) -> Result<JobId, crate::JobError> {
+        if self.store.integrity_issue().is_some() || self.admission_integrity_issue.get().is_some()
+        {
+            return Err(crate::JobError::Integrity);
+        }
         let mut queue = self.queue.lock().await;
         let job = queue.prepare(config)?;
         let id = job.id.clone();
@@ -288,12 +376,14 @@ impl JobScheduler {
                 }
             };
 
+            let start_transition = self.transition_lock.lock().await;
             let mut queue = self.queue.lock().await;
             let job = queue.next_job();
 
             let Some(mut job) = job else {
                 drop(queue);
                 drop(permit);
+                drop(start_transition);
                 tokio::select! {
                     _ = self.wake.notified() => {}
                     _ = tokio::time::sleep(Duration::from_millis(100)) => {}
@@ -328,6 +418,7 @@ impl JobScheduler {
                 drop(queue);
                 // Returning drops the JoinSet and stops all other handlers. Record
                 // their uncertain effects before that happens.
+                drop(start_transition);
                 self.abort_all_running().await;
                 return Err(store_err_for_job(&job_id, e));
             }
@@ -347,13 +438,14 @@ impl JobScheduler {
             let timeout_ms = job.timeout_ms.unwrap_or(self.config.job_timeout_ms);
 
             let job_id_for_map = job_id.clone();
+            // Own the permit/counter before spawning: aborting an unpolled
+            // future must still release both resources.
+            let permit_guard = PermitGuard {
+                permit: Some(permit),
+                scheduler: scheduler.clone(),
+                job_id: job_id.clone(),
+            };
             let abort_handle = in_flight.spawn(async move {
-                let permit_guard = PermitGuard {
-                    permit: Some(permit),
-                    scheduler: scheduler.clone(),
-                    job_id: job_id.clone(),
-                };
-
                 let (result, timed_out) = match timeout(
                     Duration::from_millis(timeout_ms),
                     scheduler.execute_job(&job_clone),
@@ -395,30 +487,9 @@ impl JobScheduler {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(job_id_for_map.clone(), abort_handle);
-            // A task that finished before this insert left finish_job with
-            // nothing to remove; without this re-check the dead handle lives
-            // forever. Completion after the re-check is covered by
-            // finish_job's own removal.
-            let finished = self
-                .job_registry
-                .lock()
-                .await
-                .get(&job_id_for_map)
-                .is_some_and(|job| {
-                    matches!(
-                        job.status,
-                        JobStatus::Completed
-                            | JobStatus::Failed
-                            | JobStatus::Cancelled
-                            | JobStatus::ReconciliationRequired
-                    )
-                });
-            if finished {
-                self.abort_handles
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&job_id_for_map);
-            }
+            // Cancellation and resolution cannot pass this boundary before
+            // the task has an abort owner. finish_job uses the same lock.
+            drop(start_transition);
         }
 
         while let Some(res) = in_flight.join_next().await {
@@ -433,6 +504,7 @@ impl JobScheduler {
     }
 
     async fn abort_all_running(&self) {
+        let _transition = self.transition_lock.lock().await;
         let handles: Vec<_> = {
             let mut map = self.abort_handles.lock().unwrap_or_else(|e| e.into_inner());
             map.drain().map(|(_, h)| h).collect()
@@ -470,7 +542,10 @@ impl JobScheduler {
             .filter(|(_, job)| {
                 matches!(
                     job.status,
-                    JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+                    JobStatus::Completed
+                        | JobStatus::Failed
+                        | JobStatus::Cancelled
+                        | JobStatus::Resolved
                 )
             })
             .map(|(id, job)| (id.clone(), job.completed_at))
@@ -525,6 +600,7 @@ impl JobScheduler {
         result: JobResult,
         timed_out: bool,
     ) -> Option<(Duration, Job)> {
+        let _transition = self.transition_lock.lock().await;
         self.abort_handles
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -536,13 +612,12 @@ impl JobScheduler {
             return None;
         };
 
-        if job.status == JobStatus::Cancelled {
+        if job.status != JobStatus::Running {
             return None;
         }
 
         if timed_out {
             job.require_reconciliation("handler timed out; effect may have occurred");
-            job.result = Some(result);
             let snapshot = job.clone();
             drop(registry);
             self.persist_or_reconcile(&snapshot, JobEvent::Recovered)
@@ -639,13 +714,14 @@ impl JobScheduler {
     }
 
     async fn requeue_after_backoff(&self, requeue_job: Job) {
+        let _transition = self.transition_lock.lock().await;
         let job_id = requeue_job.id.clone();
         let mut queue = self.queue.lock().await;
         let mut registry = self.job_registry.lock().await;
         let Some(job) = registry.get_mut(&job_id) else {
             return;
         };
-        if job.status == JobStatus::Cancelled {
+        if job.status != JobStatus::Pending {
             return;
         }
         *job = requeue_job.clone();
@@ -739,6 +815,7 @@ impl JobScheduler {
 
     /// Cancel a job by ID. Running jobs are hard-aborted.
     pub async fn cancel_job(&self, job_id: &JobId) -> Result<(), crate::JobError> {
+        let _transition = self.transition_lock.lock().await;
         let mut queue = self.queue.lock().await;
         let mut registry = self.job_registry.lock().await;
         let Some(job) = registry.get_mut(job_id) else {
@@ -746,12 +823,13 @@ impl JobScheduler {
         };
 
         match job.status {
-            JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled => {
-                Err(crate::JobError::Execution(format!(
-                    "job {} already finished with status {}",
-                    job_id, job.status
-                )))
-            }
+            JobStatus::Completed
+            | JobStatus::Failed
+            | JobStatus::Cancelled
+            | JobStatus::Resolved => Err(crate::JobError::Execution(format!(
+                "job {} already finished with status {}",
+                job_id, job.status
+            ))),
             JobStatus::Pending => {
                 let mut snapshot = job.clone();
                 snapshot.cancel();
@@ -867,7 +945,9 @@ impl Clone for JobScheduler {
             semaphore: Arc::clone(&self.semaphore),
             handlers: Arc::clone(&self.handlers),
             job_registry: Arc::clone(&self.job_registry),
+            transition_lock: Arc::clone(&self.transition_lock),
             abort_handles: Arc::clone(&self.abort_handles),
+            admission_integrity_issue: Arc::clone(&self.admission_integrity_issue),
             shutdown: Arc::clone(&self.shutdown),
             wake: Arc::clone(&self.wake),
             total_submitted: Arc::clone(&self.total_submitted),

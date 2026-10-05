@@ -49,6 +49,7 @@ pub enum JobStatus {
     Failed,
     Cancelled,
     ReconciliationRequired,
+    Resolved,
 }
 
 impl fmt::Display for JobStatus {
@@ -60,6 +61,7 @@ impl fmt::Display for JobStatus {
             JobStatus::Failed => write!(f, "failed"),
             JobStatus::Cancelled => write!(f, "cancelled"),
             JobStatus::ReconciliationRequired => write!(f, "reconciliationRequired"),
+            JobStatus::Resolved => write!(f, "resolved"),
         }
     }
 }
@@ -68,6 +70,11 @@ impl fmt::Display for JobStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Job {
+    /// Process-local latch: an interrupted resolution write needs authoritative reload.
+    #[serde(skip)]
+    pub(crate) resolution_pending: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<types::JobResolutionReceipt>,
     pub id: JobId,
     pub name: String,
     pub priority: JobPriority,
@@ -95,6 +102,8 @@ pub struct Job {
 impl Job {
     pub fn new(name: String, payload: serde_json::Value, priority: JobPriority) -> Self {
         Self {
+            resolution: None,
+            resolution_pending: false,
             id: JobId::new(),
             name,
             priority,
@@ -163,7 +172,24 @@ impl Job {
 
     pub fn require_reconciliation(&mut self, reason: impl Into<String>) {
         self.status = JobStatus::ReconciliationRequired;
+        self.result = None;
+        self.completed_at = None;
         self.error = Some(reason.into());
+    }
+
+    pub(crate) fn has_valid_resolution(&self) -> bool {
+        match &self.resolution {
+            Some(receipt) => {
+                receipt.validate().is_ok()
+                    && self.status == JobStatus::Resolved
+                    && receipt.job_id == self.id.0
+                    && self.owner.as_ref() == Some(&receipt.actor)
+                    && self.completed_at == Some(receipt.resolved_at)
+                    && self.result.is_none()
+                    && self.error.is_none()
+            }
+            None => self.status != JobStatus::Resolved,
+        }
     }
 
     pub fn can_retry(&self) -> bool {
@@ -249,6 +275,10 @@ impl JobConfig {
 /// Errors that can occur during job execution.
 #[derive(Debug, Error, PartialEq)]
 pub enum JobError {
+    #[error("job resolution requires authoritative reload before another attestation")]
+    ResolutionUncertain,
+    #[error("durable job history requires repair before admission")]
+    Integrity,
     #[error("job execution timeout after {0:?}")]
     Timeout(Duration),
 

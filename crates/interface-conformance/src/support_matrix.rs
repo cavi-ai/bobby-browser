@@ -77,7 +77,7 @@ const T: AdapterSupport = AdapterSupport::Translated;
 const RUNTIME: EngineSupport = EngineSupport::EngineAgnostic;
 const BROWSERS: EngineSupport = EngineSupport::ChromiumAndFirefox;
 
-const OPERATION_SUPPORT: [OperationSupport; 20] = [
+const OPERATION_SUPPORT: [OperationSupport; 21] = [
     OperationSupport::new(InterfaceOperation::RuntimeInfo, D, D, D, U, RUNTIME),
     OperationSupport::new(InterfaceOperation::CreateSession, D, D, U, D, BROWSERS),
     OperationSupport::new(InterfaceOperation::ReadSession, D, D, D, U, BROWSERS),
@@ -96,6 +96,7 @@ const OPERATION_SUPPORT: [OperationSupport; 20] = [
     OperationSupport::new(InterfaceOperation::SubmitJob, D, D, U, U, RUNTIME),
     OperationSupport::new(InterfaceOperation::ReadJob, D, D, U, U, RUNTIME),
     OperationSupport::new(InterfaceOperation::CancelJob, D, D, U, U, RUNTIME),
+    OperationSupport::new(InterfaceOperation::ResolveJob, D, U, U, U, RUNTIME),
     OperationSupport::new(InterfaceOperation::IssuePrincipal, D, U, U, U, RUNTIME),
     OperationSupport::new(InterfaceOperation::RevokePrincipal, D, U, U, U, RUNTIME),
 ];

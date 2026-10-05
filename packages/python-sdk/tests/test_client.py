@@ -80,6 +80,22 @@ class ClientUnitTests(unittest.TestCase):
         self.addCleanup(server.close)
         return server
 
+    def test_resolution_validates_evidence_and_binds_receipts(self) -> None:
+        job_id = "job_00000000-0000-4000-8000-000000000001"
+        input = {"decision": "effectAbsent", "evidenceSha256": "a" * 64}
+        calls = []
+        def handler(req: _Handler) -> None:
+            calls.append(req.path)
+            self.assertEqual(json.loads(req.read_body()), input)
+            req.reply_json(200, {**input, "jobId": job_id, "actor": "00000000-0000-4000-8000-000000000002", "resolvedAt": "2026-10-05T00:00:00Z", "provenance": "operatorAttested" if len(calls) == 1 else "runtimeVerified"})
+        server = self._serve(handler)
+        client = BrowserRuntimeClient(base_url=server.base_url, bearer_token="test-token")
+        with self.assertRaises(RuntimeClientError): client.resolve_job(job_id, {**input, "evidenceSha256": "bad"})
+        self.assertEqual(calls, [])
+        self.assertEqual(client.resolve_job(job_id, input)["provenance"], "operatorAttested")
+        with self.assertRaises(RuntimeClientError): client.resolve_job(job_id, input)
+        self.assertEqual(calls, [f"/v1/jobs/{job_id}/resolution"] * 2)
+
     # ---- auth header contract ------------------------------------------
 
     def test_every_request_carries_the_documented_headers(self) -> None:

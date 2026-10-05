@@ -94,6 +94,7 @@ impl JobSubmitWire {
 
 #[derive(Debug, Clone)]
 pub struct JobStatusWire {
+    pub resolution: Option<types::JobResolutionReceipt>,
     pub id: String,
     pub name: String,
     pub priority: String,
@@ -112,7 +113,7 @@ pub struct JobStatusWire {
 
 impl JobStatusWire {
     pub fn to_value(&self) -> Value {
-        json!({
+        let mut value = json!({
             "id": self.id,
             "name": self.name,
             "priority": self.priority,
@@ -127,12 +128,17 @@ impl JobStatusWire {
             "error": self.error,
             "timeoutMs": self.timeout_ms,
             "correlationId": self.correlation_id,
-        })
+        });
+        if let Some(receipt) = &self.resolution {
+            value["resolution"] = json!(receipt);
+        }
+        value
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobPortError {
+    Integrity,
     NotFound,
     InvalidName,
     InvalidPriority,
@@ -143,6 +149,7 @@ pub enum JobPortError {
 impl JobPortError {
     pub fn message(&self) -> String {
         match self {
+            Self::Integrity => "durable job history requires repair before admission".to_owned(),
             Self::NotFound => "job not found".to_owned(),
             Self::InvalidName => "job name must be nonempty".to_owned(),
             Self::InvalidPriority => {
@@ -189,6 +196,7 @@ fn status_wire(status: &JobStatus) -> String {
         JobStatus::Failed => "failed",
         JobStatus::Cancelled => "cancelled",
         JobStatus::ReconciliationRequired => "reconciliationRequired",
+        JobStatus::Resolved => "resolved",
     }
     .to_owned()
 }
@@ -205,6 +213,7 @@ fn priority_wire(priority: &JobPriority) -> String {
 
 fn job_to_wire(job: Job) -> JobStatusWire {
     JobStatusWire {
+        resolution: job.resolution,
         id: job.id.0,
         name: job.name,
         priority: priority_wire(&job.priority),
@@ -232,6 +241,7 @@ fn job_to_wire(job: Job) -> JobStatusWire {
 
 fn map_scheduler_error(error: JobError) -> JobPortError {
     match error {
+        JobError::Integrity => JobPortError::Integrity,
         JobError::NotFound(_) => JobPortError::NotFound,
         JobError::MissingCapability(capability) => JobPortError::MissingCapability(capability),
         other => JobPortError::Unavailable(other.to_string()),

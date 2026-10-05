@@ -18,6 +18,8 @@ pub const JOURNAL_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
+    #[error("job journal integrity requires repair before mutation")]
+    Integrity,
     #[error("store I/O failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("store serialization failed: {0}")]
@@ -44,6 +46,7 @@ pub enum JobEvent {
     Retried,
     Cancelled,
     Recovered,
+    Resolved,
 }
 
 impl JobEvent {
@@ -55,6 +58,7 @@ impl JobEvent {
             JobStatus::Failed => JobEvent::Failed,
             JobStatus::Cancelled => JobEvent::Cancelled,
             JobStatus::ReconciliationRequired => JobEvent::Recovered,
+            JobStatus::Resolved => JobEvent::Resolved,
         }
     }
 }
@@ -71,6 +75,9 @@ pub struct JournalRecord {
 
 #[async_trait]
 pub trait JobStore: Send + Sync {
+    fn integrity_issue(&self) -> Option<&'static str> {
+        None
+    }
     async fn put(&self, job: &Job) -> Result<(), StoreError>;
     async fn get(&self, id: &JobId) -> Result<Option<Job>, StoreError>;
     async fn update(&self, job: &Job, event: JobEvent) -> Result<(), StoreError>;
@@ -136,7 +143,10 @@ impl JobStore for MemoryJobStore {
             .filter(|(_, job)| {
                 matches!(
                     job.status,
-                    JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+                    JobStatus::Completed
+                        | JobStatus::Failed
+                        | JobStatus::Cancelled
+                        | JobStatus::Resolved
                 )
             })
             .map(|(id, job)| (id.clone(), job.completed_at))
@@ -174,7 +184,7 @@ async fn compact_journal<'a>(
     let (mut terminal, mut jobs): (Vec<&Job>, Vec<&Job>) = jobs.partition(|job| {
         matches!(
             job.status,
-            JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+            JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled | JobStatus::Resolved
         )
     });
     terminal.sort_by_key(|job| std::cmp::Reverse(job.completed_at.unwrap_or(job.created_at)));
@@ -184,7 +194,7 @@ async fn compact_journal<'a>(
     for (sequence, job) in jobs.into_iter().enumerate() {
         let terminal = matches!(
             job.status,
-            JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+            JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled | JobStatus::Resolved
         );
         let event = if terminal {
             JobEvent::from_status(&job.status)
@@ -219,6 +229,7 @@ pub struct JournalJobStore {
     index: MemoryJobStore,
     writer: Mutex<WriterState>,
     recovered_torn_tail: bool,
+    integrity_issue: Option<&'static str>,
 }
 
 impl JournalJobStore {
@@ -235,7 +246,9 @@ impl JournalJobStore {
             incompatible_records,
         } = scan_path(&path).await?;
 
-        if torn_tail {
+        let integrity_issue = (incompatible_records > 0 || max_sequence == Some(u64::MAX))
+            .then_some("unreadableJobHistory");
+        if torn_tail && integrity_issue.is_none() {
             truncate_torn_tail(&path).await?;
         }
         if incompatible_records > 0 {
@@ -243,7 +256,7 @@ impl JournalJobStore {
                 path = %path.display(),
                 incompatible_records,
                 schema_version = JOURNAL_SCHEMA_VERSION,
-                "skipping journal records written under another schema version"
+                "job journal is read-only until unreadable history is repaired"
             );
         }
 
@@ -254,9 +267,22 @@ impl JournalJobStore {
             for mut job in jobs {
                 // A handler may have acted before the process stopped. Never
                 // replay an interrupted execution without reconciliation.
-                if job.status == JobStatus::Running {
+                if integrity_issue.is_some()
+                    && matches!(job.status, JobStatus::Pending | JobStatus::Running)
+                {
+                    job.require_reconciliation(
+                        "job history is unreadable; authoritative repair required",
+                    );
+                } else if job.status == JobStatus::Running {
                     job.require_reconciliation("execution interrupted; outcome must be reconciled");
                     recovered.push(job.clone());
+                }
+                if job.status == JobStatus::ReconciliationRequired {
+                    let reason = job
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "uncertain execution".into());
+                    job.require_reconciliation(reason);
                 }
                 map.insert(job.id.clone(), job);
             }
@@ -267,12 +293,19 @@ impl JournalJobStore {
         // rewrite it as one current-state record per known job.
         let (compacted_jobs, next_sequence) = {
             let jobs = index.jobs.lock().await;
-            if max_sequence.is_some_and(|sequence| sequence as usize >= COMPACT_THRESHOLD) {
+            if integrity_issue.is_none()
+                && max_sequence.is_some_and(|sequence| sequence as usize >= COMPACT_THRESHOLD)
+            {
                 compact_journal(&path, jobs.values()).await?;
                 let next_sequence = jobs.len() as u64;
                 (true, next_sequence)
             } else {
-                (false, max_sequence.map_or(0, |sequence| sequence + 1))
+                (
+                    false,
+                    max_sequence
+                        .and_then(|sequence| sequence.checked_add(1))
+                        .unwrap_or(0),
+                )
             }
         };
         if compacted_jobs {
@@ -297,6 +330,7 @@ impl JournalJobStore {
                 next_sequence,
             }),
             recovered_torn_tail: torn_tail,
+            integrity_issue,
         };
 
         for job in &recovered {
@@ -336,6 +370,9 @@ impl JournalJobStore {
     }
 
     async fn append(&self, event: JobEvent, job: &Job) -> Result<(), StoreError> {
+        if self.integrity_issue.is_some() {
+            return Err(StoreError::Integrity);
+        }
         let mut writer = self.writer.lock().await;
         let record = JournalRecord {
             schema_version: JOURNAL_SCHEMA_VERSION,
@@ -356,6 +393,9 @@ impl JournalJobStore {
 
 #[async_trait]
 impl JobStore for JournalJobStore {
+    fn integrity_issue(&self) -> Option<&'static str> {
+        self.integrity_issue
+    }
     async fn put(&self, job: &Job) -> Result<(), StoreError> {
         self.append(JobEvent::Submitted, job).await?;
         self.index.put(job).await
@@ -459,6 +499,14 @@ fn scan_bytes(bytes: &[u8]) -> Result<Scan, StoreError> {
         match serde_json::from_slice::<JournalRecord>(line) {
             Ok(record) => {
                 if record.schema_version != JOURNAL_SCHEMA_VERSION {
+                    incompatible_records += 1;
+                    max_sequence = max_sequence.max(Some(record.sequence));
+                    continue;
+                }
+                if !record.job.has_valid_resolution()
+                    || ((record.event == JobEvent::Resolved)
+                        != (record.job.status == JobStatus::Resolved))
+                {
                     incompatible_records += 1;
                     max_sequence = max_sequence.max(Some(record.sequence));
                     continue;

@@ -272,6 +272,20 @@ impl AuthenticatedRuntime {
     ) -> InterfaceResult<()> {
         self.authorization
             .authorize(ctx, InterfaceOperation::SubmitCommand)?;
+        if !matches!(
+            command,
+            RuntimeCommand::Primitive(
+                PrimitiveCommand::Inspect(_)
+                    | PrimitiveCommand::ListPages(_)
+                    | PrimitiveCommand::AccessibilitySnapshot(_)
+                    | PrimitiveCommand::GetCookies(_)
+                    | PrimitiveCommand::NetworkLog(_)
+            )
+        ) {
+            self.idempotency.ensure_writable(&ctx.correlation_id)?;
+            self.lifecycle_idempotency
+                .ensure_writable(&ctx.correlation_id)?;
+        }
         for capability in command_extra_capabilities(command) {
             self.authorization.require_capability(ctx, capability)?;
         }
@@ -299,7 +313,23 @@ impl RuntimeInterface for AuthenticatedRuntime {
     async fn runtime_info(&self, ctx: RequestContext) -> InterfaceResult<RuntimeInfo> {
         self.authorization
             .authorize(&ctx, InterfaceOperation::RuntimeInfo)?;
-        Ok(self.inner.runtime_info().await)
+        let mut info = self.inner.runtime_info().await;
+        info.storage_integrity.retain(|issue| {
+            issue.store != "commandIdempotency" && issue.store != "lifecycleIdempotency"
+        });
+        if let Some(reason) = self.idempotency.integrity_issue() {
+            info.storage_integrity.push(types::StorageIntegrityIssue {
+                store: "commandIdempotency".into(),
+                reason: reason.into(),
+            });
+        }
+        if let Some(reason) = self.lifecycle_idempotency.integrity_issue() {
+            info.storage_integrity.push(types::StorageIntegrityIssue {
+                store: "lifecycleIdempotency".into(),
+                reason: reason.into(),
+            });
+        }
+        Ok(info)
     }
 
     async fn list_sessions(&self, ctx: RequestContext) -> InterfaceResult<Vec<SessionState>> {
@@ -361,6 +391,8 @@ impl RuntimeInterface for AuthenticatedRuntime {
     ) -> InterfaceResult<SessionState> {
         self.authorization
             .authorize(&ctx, InterfaceOperation::CreateSession)?;
+        self.lifecycle_idempotency
+            .ensure_writable(&ctx.correlation_id)?;
         let Some(key) = ctx.idempotency_key.clone() else {
             return self.dispatch_create_session(&ctx, req).await;
         };
@@ -414,6 +446,8 @@ impl RuntimeInterface for AuthenticatedRuntime {
     ) -> InterfaceResult<PageState> {
         self.authorization
             .authorize(&ctx, InterfaceOperation::OpenPage)?;
+        self.lifecycle_idempotency
+            .ensure_writable(&ctx.correlation_id)?;
         self.require_owned_session(&ctx, &req.session_id)?;
         self.inner
             .open_page(req)
@@ -540,6 +574,8 @@ impl RuntimeInterface for AuthenticatedRuntime {
         // running the command. Sugar must not widen authority.
         self.authorization
             .authorize(&ctx, InterfaceOperation::CreateCheckpoint)?;
+        self.lifecycle_idempotency
+            .ensure_writable(&ctx.correlation_id)?;
         self.authorize_submit(&ctx, &envelope.command, false)?;
         self.require_owned_session(&ctx, &envelope.session_id)?;
         let vision_capability_ok = self
@@ -620,6 +656,8 @@ impl RuntimeInterface for AuthenticatedRuntime {
         self.authorization
             .authorize(&ctx, InterfaceOperation::CreateCheckpoint)?;
         self.require_owned_session(&ctx, &checkpoint.session_id)?;
+        self.lifecycle_idempotency
+            .ensure_writable(&ctx.correlation_id)?;
         let Some(key) = ctx.idempotency_key.clone() else {
             return self.dispatch_checkpoint(&ctx, checkpoint, evidence).await;
         };
@@ -763,6 +801,9 @@ impl RuntimeInterface for AuthenticatedRuntime {
     ) -> InterfaceResult<RecoveryDecision> {
         self.authorization
             .authorize(&ctx, InterfaceOperation::RecoverWorkflow)?;
+        self.idempotency.ensure_writable(&ctx.correlation_id)?;
+        self.lifecycle_idempotency
+            .ensure_writable(&ctx.correlation_id)?;
         let session_id = self
             .inner
             .recovery_session(&workflow)
@@ -892,5 +933,82 @@ fn error_with(ctx: &RequestContext, code: InterfaceErrorCode, message: &str) -> 
         retry_after_ms: None,
         reconciliation_required: false,
         required_capability: None,
+    }
+}
+
+#[cfg(test)]
+mod recovery_integrity_tests {
+    use super::*;
+    use interface_core::{AuthorityStore, SessionCheckpointOutcome};
+
+    #[tokio::test]
+    async fn damaged_lifecycle_ledger_blocks_keyed_and_unkeyed_checkpoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lifecycle.json");
+        std::fs::write(&path, "damaged lifecycle history").unwrap();
+        let authority = AuthorityStore::default();
+        let token = authority
+            .issue(
+                types::PrincipalId::from_uuid(uuid::Uuid::new_v4()),
+                Capability::ALL.to_vec(),
+                Utc::now() + chrono::Duration::minutes(10),
+            )
+            .await
+            .unwrap();
+        let handle = authority.verify(&token.expose_once()).await.unwrap();
+        let mut api = AuthenticatedRuntime::new(RuntimeService::default(), handle.clone());
+        api.lifecycle_idempotency =
+            IdempotencyStore::<SessionCheckpointOutcome>::open_durable(&path, |_| async {
+                Ok(None)
+            })
+            .await
+            .unwrap();
+        let checkpoint = types::WorkflowCheckpoint {
+            schema_version: types::WorkflowCheckpoint::SCHEMA_VERSION,
+            checkpoint_id: types::CheckpointId::new(),
+            workflow_id: WorkflowId::new(),
+            attempt_id: types::AttemptId::new(),
+            session_id: SessionId::new(),
+            page_id: types::PageId::new(),
+            restart_url: "https://example.test".into(),
+            current_url: "https://example.test".into(),
+            cursor: None,
+            boundary_command_id: None,
+            recovery_class: types::CommandClass::Replayable,
+            invariants: vec![],
+            replayable_inputs: vec![],
+            evidence: vec![],
+            recovery_history: vec![],
+            recovery_receipts: vec![],
+            created_at: Utc::now(),
+        };
+        for key in [
+            None,
+            Some(types::IdempotencyKey::try_from("checkpoint-1").unwrap()),
+        ] {
+            let error = api
+                .checkpoint(
+                    handle.context(Utc::now() + chrono::Duration::seconds(30), key),
+                    checkpoint.clone(),
+                    vec![],
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, InterfaceErrorCode::IdempotencyConflict);
+            assert!(error.reconciliation_required && !error.retryable);
+        }
+        assert_eq!(api.checkpoint_dispatch_count(), 0);
+        let info = api
+            .runtime_info(handle.context(Utc::now() + chrono::Duration::seconds(30), None))
+            .await
+            .unwrap();
+        assert!(info
+            .storage_integrity
+            .iter()
+            .any(|issue| issue.store == "lifecycleIdempotency"));
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "damaged lifecycle history"
+        );
     }
 }

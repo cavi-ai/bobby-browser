@@ -458,6 +458,21 @@ impl RuntimeService {
             capabilities.push("vision-provider".to_string());
         }
         RuntimeInfo {
+            storage_integrity: [
+                ("commandIdempotency", self.idempotency.integrity_issue()),
+                (
+                    "lifecycleIdempotency",
+                    self.lifecycle_idempotency.integrity_issue(),
+                ),
+            ]
+            .into_iter()
+            .filter_map(|(store, reason)| {
+                reason.map(|reason| types::StorageIntegrityIssue {
+                    store: store.into(),
+                    reason: reason.into(),
+                })
+            })
+            .collect(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             capabilities,
             active_sessions,
