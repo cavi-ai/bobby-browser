@@ -6,6 +6,10 @@
 
 - Firefox companion: a page opened or bound by the runtime keeps its lease when a
   frame snapshot lands while the tab is still blank or frame discovery fails.
+- Firefox companion: an accessibility snapshot is sanitized and depth- and
+  size-bounded so its result is never rejected by the extension channel; a
+  rejected result reports its reason with code `resultRejected` instead of
+  "the content action failed".
 
 ### Changed
 

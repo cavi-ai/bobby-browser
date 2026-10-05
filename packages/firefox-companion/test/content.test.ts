@@ -11,6 +11,7 @@ import {
   executeContentAction,
   observeDocument,
 } from "../src/content.js";
+import { NativeCompanionTransport } from "../src/native-transport.js";
 import { MAX_COMPANION_PAYLOAD_BYTES } from "../src/protocol.js";
 
 const EXPECTED_MAX_CONTROL_FIELD_LENGTH = 2 * 1024;
@@ -552,4 +553,83 @@ test("a11yTree keeps the global ordinal when a duplicate is truncated", () => {
     accessibleName: "Phone",
     ordinal: 0,
   });
+});
+
+function sendA11yThroughChannel(document: Document, maxNodes: number): {
+  nodes: Array<{ name?: string }>;
+  truncated: boolean;
+  posted: unknown[];
+} {
+  const result = executeContentAction(document, "a11yTree", { maxNodes }) as {
+    nodes: Array<{ name?: string }>;
+    truncated: boolean;
+  };
+  const posted: unknown[] = [];
+  const listeners = { addListener() {} };
+  const transport = new NativeCompanionTransport({
+    connectNative: () => ({
+      postMessage: (message: unknown) => void posted.push(message),
+      onMessage: listeners,
+      onDisconnect: listeners,
+      disconnect() {},
+    }),
+  });
+  transport.start(() => {});
+  transport.send({
+    kind: "actionCompleted",
+    output: {
+      commandId: "4c4dfe8c-7c69-4b33-a13e-1fcdf18f2952",
+      interactionPath: "extensionApi",
+      output: result,
+    },
+  });
+  return { ...result, posted };
+}
+
+function collectNames(nodes: Array<{ name?: string; children?: unknown }>): string[] {
+  return nodes.flatMap((node) => [
+    ...(node.name === undefined ? [] : [node.name]),
+    ...collectNames((node.children ?? []) as Array<{ name?: string }>),
+  ]);
+}
+
+test("a11yTree result is transmissible for a 40-level nested page", () => {
+  const body = `${"<section>".repeat(40)}<button>Deep leaf</button>${"</section>".repeat(40)}`;
+  const sent = sendA11yThroughChannel(documentFor(body), 256);
+  assert.equal(sent.posted.length, 1);
+  assert.equal(sent.truncated, true);
+});
+
+test("a11yTree result is transmissible for names that match the outbound secret patterns", () => {
+  const body =
+    '<button>Basic info and settings</button><button>private key backup</button>' +
+    '<button>Open mailbox</button>';
+  const sent = sendA11yThroughChannel(documentFor(body), 256);
+  assert.equal(sent.posted.length, 1);
+  assert.ok(collectNames(sent.nodes).includes("Open mailbox"));
+});
+
+test("a11yTree result is transmissible for names that parse as non-http or secret-query URLs", () => {
+  const body =
+    '<button>mailto:someone@example.test</button><button>Status:online</button>' +
+    '<a href="https://example.test/path?key=abc">https://example.test/path?key=abc</a>' +
+    '<button aria-label="Status:online">x</button>';
+  const sent = sendA11yThroughChannel(documentFor(body), 256);
+  assert.equal(sent.posted.length, 1);
+});
+
+test("a11yTree result stays transmissible at the maximum node budget", () => {
+  const filler = "w".repeat(250);
+  const body = Array.from(
+    { length: 12 },
+    (_, section) =>
+      `<section>${Array.from(
+        { length: 250 },
+        (_, index) => `<button>${section}-${index} ${filler}</button>`,
+      ).join("")}</section>`,
+  ).join("");
+  const sent = sendA11yThroughChannel(documentFor(body), 100_000);
+  assert.equal(sent.posted.length, 1);
+  assert.equal(sent.truncated, true);
+  assert.ok(Buffer.byteLength(JSON.stringify(sent.posted[0])) <= MAX_COMPANION_PAYLOAD_BYTES);
 });

@@ -244,6 +244,15 @@ function assertExtensionSafe(
   }
 }
 
+export function isExtensionSafeString(value: string): boolean {
+  try {
+    assertExtensionSafe(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function isNativePairRequest(message: unknown): message is NativePairRequest {
   if (!isObject(message) || message.kind !== "pair" || !isObject(message.input)) {
     return false;
