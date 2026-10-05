@@ -40,8 +40,17 @@
 - `bobby install --restart-runtime` stops this scope's running runtime owner after
   the install. When the install replaced the PATH `bobby` with different contents
   and the owner is running, `bobby install` ends with one line naming the owner
-  pid, saying it still runs the previous build, and giving `bobby runtime stop`
-  or `make install RESTART=1`.
+  pid, saying it still runs the previous build, and giving `bobby runtime restart`
+  or `make install RESTART=1`. The stop applies the same guard as `runtime
+  restart`: with agents attached and no terminal it refuses (the install still
+  succeeds) unless `--disconnect-agents` is given (`DISCONNECT_AGENTS=1` for make).
+- `bobby runtime restart [--force]` and `make restart` stop this scope's runtime
+  owner and start a new one. An owner that does not stop gracefully, or any owner
+  with `--force`, is terminated after its process is verified as this scope's
+  `runtime-owner`. `bobby runtime status` names `runtime restart` for a pending
+  configuration change. It shows what is attached and asks before disconnecting
+  agents, refuses without a terminal unless `--disconnect-agents` is given, and
+  saves the impact report under `runtime/restart-snapshots/`.
 
 ### Changed
 

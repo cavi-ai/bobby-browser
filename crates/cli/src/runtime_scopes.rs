@@ -28,6 +28,15 @@ pub(crate) enum RuntimeCommand {
     Status,
     /// Gracefully stop this scope's runtime.
     Stop,
+    /// Stop this scope's runtime if it is running, then start a new one.
+    Restart {
+        /// Skip the graceful stop and terminate the owner process.
+        #[arg(long)]
+        force: bool,
+        /// Restart even when agents are attached, without asking.
+        #[arg(long)]
+        disconnect_agents: bool,
+    },
     /// List organized local scopes and their runtime status.
     List,
 }
@@ -119,7 +128,7 @@ pub(crate) fn native_host_name(root: &Path) -> Result<String> {
     Ok(format!("com.bobby_browser.companion.scope_{}", &hash[..16]))
 }
 
-fn private_dir(path: &Path) -> Result<()> {
+pub(crate) fn private_dir(path: &Path) -> Result<()> {
     std::fs::create_dir_all(path)?;
     #[cfg(unix)]
     {
@@ -129,7 +138,7 @@ fn private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn private_options() -> OpenOptions {
+pub(crate) fn private_options() -> OpenOptions {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -374,14 +383,28 @@ async fn live_owner(dir: &Path) -> Result<Option<Owner>> {
     Ok((value["ownerId"].as_str() == Some(owner.owner_id.to_string().as_str())).then_some(owner))
 }
 
+async fn claim_launch(dir: &Path) -> Result<File> {
+    let launch = dir.join("launch.lock");
+    tokio::task::spawn_blocking(move || claim(&launch)).await?
+}
+
 pub(crate) async fn ensure_owner(
     config: PathBuf,
     bootstrap: PathBuf,
     policy: crate::VisionSpawnPolicy,
 ) -> Result<String> {
     let dir = runtime_dir()?;
-    let launch = dir.join("launch.lock");
-    let _launch = tokio::task::spawn_blocking(move || claim(&launch)).await??;
+    let _launch = claim_launch(&dir).await?;
+    ensure_owner_locked(&dir, config, bootstrap, policy).await
+}
+
+/// `ensure_owner` for a caller that already holds `launch.lock`.
+async fn ensure_owner_locked(
+    dir: &Path,
+    config: PathBuf,
+    bootstrap: PathBuf,
+    policy: crate::VisionSpawnPolicy,
+) -> Result<String> {
     let root = dir.parent().context("runtime scope root unavailable")?;
     let config = absolute(config)?;
     let bootstrap = absolute(bootstrap)?;
@@ -396,7 +419,7 @@ pub(crate) async fn ensure_owner(
     // A running owner always takes the agent, even when the scope's files
     // changed since it started: refusing would leave the agent with no
     // runtime at all. `bobby runtime status` reports the pending change.
-    if let Some(owner) = live_owner(&dir).await? {
+    if let Some(owner) = live_owner(dir).await? {
         return Ok(owner.url);
     }
     if loaded
@@ -415,7 +438,7 @@ pub(crate) async fn ensure_owner(
             Err(std::fs::TryLockError::WouldBlock) => {}
             Err(error) => return Err(error.into()),
         }
-        if let Some(owner) = live_owner(&dir).await? {
+        if let Some(owner) = live_owner(dir).await? {
             return Ok(owner.url);
         }
         if tokio::time::Instant::now() >= deadline {
@@ -431,7 +454,7 @@ pub(crate) async fn ensure_owner(
         command
             .arg("runtime-owner")
             .arg("--state-dir")
-            .arg(&dir)
+            .arg(dir)
             .arg("--config")
             .arg(&config)
             .arg("--bootstrap-env")
@@ -473,7 +496,7 @@ pub(crate) async fn ensure_owner(
             .context("failed to start shared runtime owner")?;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         loop {
-            if let Some(owner) = live_owner(&dir).await? {
+            if let Some(owner) = live_owner(dir).await? {
                 return Ok(owner.url);
             }
             if child.try_wait()?.is_some() {
@@ -589,8 +612,12 @@ async fn owner_inner(
 /// Stop this scope's owner and wait for it to release the owner lock.
 /// Returns the stopped owner's pid, or `None` when no owner was running.
 async fn stop_owner(dir: &Path) -> Result<Option<u32>> {
-    let launch = dir.join("launch.lock");
-    let _launch = tokio::task::spawn_blocking(move || claim(&launch)).await??;
+    let _launch = claim_launch(dir).await?;
+    stop_owner_locked(dir).await
+}
+
+/// `stop_owner` for a caller that already holds `launch.lock`.
+async fn stop_owner_locked(dir: &Path) -> Result<Option<u32>> {
     let owner_lock = lock_file(&dir.join("owner.lock"))?;
     if let Some(owner) = live_owner(dir).await? {
         client()?
@@ -620,6 +647,195 @@ async fn stop_owner(dir: &Path) -> Result<Option<u32>> {
     }
 }
 
+/// The registry entry of this scope's owner, whether or not it still answers.
+fn recorded_owner(dir: &Path) -> Option<Owner> {
+    serde_json::from_slice(&std::fs::read(dir.join("owner.json")).ok()?).ok()
+}
+
+/// Whether some process holds this scope's `owner.lock`.
+fn owner_lock_held(dir: &Path) -> Result<bool> {
+    let file = lock_file(&dir.join("owner.lock"))?;
+    match file.try_lock() {
+        Ok(()) => Ok(false),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(true),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Whether `command_line` is a `runtime-owner` process for the runtime dir `dir`.
+fn owner_command_matches(command_line: &str, dir: &Path) -> bool {
+    if !command_line
+        .split_whitespace()
+        .any(|word| word == "runtime-owner")
+    {
+        return false;
+    }
+    let dir = dir.to_string_lossy();
+    command_line
+        .match_indices("--state-dir ")
+        .any(|(at, flag)| {
+            command_line[at + flag.len()..]
+                .strip_prefix(&*dir)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+        })
+}
+
+async fn wait_owner_lock_free(dir: &Path, limit: Duration) -> Result<bool> {
+    let deadline = tokio::time::Instant::now() + limit;
+    loop {
+        if !owner_lock_held(dir)? {
+            return Ok(true);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Terminate the process recorded in `owner.json` after proving it is this
+/// scope's runtime owner. Returns its pid. Signals nothing when the identity
+/// cannot be verified.
+async fn terminate_owner(dir: &Path) -> Result<u32> {
+    let pid = recorded_owner(dir).map(|owner| owner.pid).context(
+        "runtime owner lock is held but owner.json names no owner; nothing was terminated",
+    )?;
+    let Some(command_line) = worker_pool::process_registry::process_command_line(pid) else {
+        if !owner_lock_held(dir)? {
+            return Ok(pid);
+        }
+        bail!(
+            "cannot terminate runtime owner pid {pid}: its command line cannot be read here, so it cannot be verified as this scope's owner; nothing was terminated"
+        );
+    };
+    if !owner_command_matches(&command_line, dir) {
+        bail!(
+            "cannot terminate runtime owner pid {pid}: it is not a `runtime-owner` process for {}; nothing was terminated",
+            dir.display()
+        );
+    }
+    worker_pool::process_registry::terminate_process(pid)
+        .with_context(|| format!("cannot terminate runtime owner pid {pid}"))?;
+    if !wait_owner_lock_free(dir, Duration::from_secs(5)).await? {
+        worker_pool::process_registry::kill_process(pid);
+        if !wait_owner_lock_free(dir, Duration::from_secs(5)).await? {
+            bail!("runtime owner pid {pid} still holds the owner lock after SIGTERM and SIGKILL");
+        }
+    }
+    Ok(pid)
+}
+
+/// What a restart's stop phase did to the previous owner.
+struct Replaced {
+    pid: u32,
+    terminated: bool,
+}
+
+/// Stop phase of a restart, with `launch.lock` held: stop gracefully (unless
+/// `force`), falling back to verified termination.
+async fn stop_for_restart(dir: &Path, force: bool) -> Result<Option<Replaced>> {
+    let recorded = recorded_owner(dir).map(|owner| owner.pid);
+    if !force {
+        match stop_owner_locked(dir).await {
+            Ok(stopped) => {
+                return Ok(stopped.map(|pid| Replaced {
+                    pid,
+                    terminated: false,
+                }))
+            }
+            Err(_) if !owner_lock_held(dir)? => {
+                return Ok(recorded.map(|pid| Replaced {
+                    pid,
+                    terminated: false,
+                }))
+            }
+            Err(_) => {}
+        }
+    } else if !owner_lock_held(dir)? {
+        return Ok(None);
+    }
+    let pid = terminate_owner(dir).await?;
+    Ok(Some(Replaced {
+        pid,
+        terminated: true,
+    }))
+}
+
+/// Report what stopping this scope's owner would hit and decide whether to
+/// go on; saves the impact report before anything is stopped.
+async fn guard_owner(dir: &Path, disconnect_agents: bool) -> Result<crate::restart_guard::Guard> {
+    use crate::restart_guard::{guard, read_impact, ImpactOutcome, Target, Verdict};
+    let recorded = recorded_owner(dir);
+    let target = Target {
+        pid: recorded.as_ref().map(|owner| owner.pid),
+        url: recorded.as_ref().map(|owner| owner.url.clone()),
+    };
+    let mut outcome = match &recorded {
+        Some(owner) => read_impact(&owner.url, &owner.stop_secret).await,
+        None => ImpactOutcome::Unknown,
+    };
+    if !matches!(outcome, ImpactOutcome::Known(_)) {
+        outcome = if owner_lock_held(dir)? {
+            ImpactOutcome::Unknown
+        } else {
+            ImpactOutcome::NoOwner
+        };
+    }
+    guard(
+        &target,
+        &outcome,
+        Verdict {
+            terminal: crate::restart_guard::terminal(),
+            disconnect_agents,
+        },
+        dir,
+        &mut std::io::stdin().lock(),
+        &mut std::io::stdout(),
+    )
+}
+
+async fn restart_owner(dir: &Path, force: bool, disconnect_agents: bool) -> Result<()> {
+    // Asked before launch.lock is taken: a person at a prompt must not hold
+    // up agents that are connecting.
+    if let crate::restart_guard::Guard::Refused(message) =
+        guard_owner(dir, disconnect_agents).await?
+    {
+        bail!(message);
+    }
+    let _launch = claim_launch(dir).await?;
+    let replaced = stop_for_restart(dir, force).await?;
+    let url = ensure_owner_locked(
+        dir,
+        crate::resolve_config_path(None),
+        crate::resolve_bootstrap_path(None)?,
+        crate::VisionSpawnPolicy::Auto,
+    )
+    .await
+    .map_err(|error| {
+        error.context("the previous runtime owner is stopped and the new one did not start")
+    })?;
+    let pid = live_owner(dir)
+        .await?
+        .map(|owner| owner.pid)
+        .context("the new runtime owner stopped answering")?;
+    match replaced {
+        Some(old) => {
+            if old.terminated {
+                println!(
+                    "runtime owner pid {} did not stop gracefully; terminated",
+                    old.pid
+                );
+            }
+            println!("restarted: runtime owner pid {pid} (was {}) {url}", old.pid);
+            println!(
+                "attached agents were disconnected; each host reconnects when it next starts its bobby server"
+            );
+        }
+        None => println!("started: runtime owner pid {pid} {url}"),
+    }
+    Ok(())
+}
+
 /// Run `future` to completion from synchronous code, on its own thread and
 /// runtime so it is safe inside an already-running tokio runtime.
 fn block_on_thread<T: Send>(
@@ -646,12 +862,22 @@ pub(crate) fn running_owner_pid() -> Result<Option<u32>> {
     })
 }
 
-/// Stop this scope's owner through the `bobby runtime stop` path.
-pub(crate) fn stop_running_owner() -> Result<Option<u32>> {
+/// Stop this scope's owner after the restart guard, for `bobby install --restart-runtime`.
+pub(crate) fn guarded_stop_running_owner(disconnect_agents: bool) -> Result<GuardedStop> {
     block_on_thread(async {
         let dir = runtime_dir()?;
-        stop_owner(&dir).await
+        if let crate::restart_guard::Guard::Refused(message) =
+            guard_owner(&dir, disconnect_agents).await?
+        {
+            return Ok(GuardedStop::Refused(message));
+        }
+        Ok(GuardedStop::Stopped(stop_owner(&dir).await?))
     })
+}
+
+pub(crate) enum GuardedStop {
+    Stopped(Option<u32>),
+    Refused(String),
 }
 
 pub(crate) async fn run(command: RuntimeCommand) -> Result<()> {
@@ -675,7 +901,7 @@ pub(crate) async fn run(command: RuntimeCommand) -> Result<()> {
                 )?;
                 if current != owner.configuration_digest {
                     println!(
-                        "configuration changed since this runtime started; `bobby runtime stop` applies it"
+                        "configuration changed since this runtime started; `bobby runtime restart` applies it"
                     );
                 }
             }
@@ -685,6 +911,10 @@ pub(crate) async fn run(command: RuntimeCommand) -> Result<()> {
             stop_owner(&dir).await?;
             println!("stopped");
         }
+        RuntimeCommand::Restart {
+            force,
+            disconnect_agents,
+        } => restart_owner(&dir, force, disconnect_agents).await?,
         RuntimeCommand::List => {
             let mut roots = vec![user_root()?];
             let mut index = 0;
@@ -770,5 +1000,32 @@ mod tests {
         }
         .root_at(root)
         .is_err());
+    }
+    #[test]
+    fn owner_identity_requires_the_runtime_owner_command_and_this_scopes_dir() {
+        let dir = Path::new("/scopes/a/runtime");
+        let owner = "/usr/bin/bobby runtime-owner --state-dir /scopes/a/runtime --config /scopes/a/config.toml --bootstrap-env /scopes/a/bootstrap.env";
+        assert!(owner_command_matches(owner, dir));
+        assert!(!owner_command_matches("/usr/bin/sleep 100", dir));
+        assert!(!owner_command_matches(
+            "/usr/bin/bobby serve --config /scopes/a/runtime",
+            dir
+        ));
+        assert!(!owner_command_matches(
+            "/usr/bin/bobby runtime-owner --state-dir /scopes/b/runtime --config c",
+            dir
+        ));
+        assert!(!owner_command_matches(
+            "/usr/bin/bobby runtime-owner --state-dir /scopes/a/runtime2 --config c",
+            dir
+        ));
+        assert!(owner_command_matches(
+            "/usr/bin/bobby runtime-owner --state-dir /scopes/a/runtime",
+            dir
+        ));
+        assert!(owner_command_matches(
+            "/Applications/My Apps/bobby runtime-owner --state-dir /Users/x/Library/Application Support/bobby-browser/runtime --config c",
+            Path::new("/Users/x/Library/Application Support/bobby-browser/runtime")
+        ));
     }
 }

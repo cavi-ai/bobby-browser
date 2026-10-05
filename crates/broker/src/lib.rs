@@ -664,6 +664,7 @@ async fn bootstrap_listener_with<T, Clock, Build, BuildFuture, Bind, BindFuture>
     Arc<JobScheduler>,
     Option<CdpBootstrap>,
     gateway::Lifecycle,
+    RuntimeService,
 )>
 where
     Clock: Fn() -> chrono::DateTime<chrono::Utc>,
@@ -691,6 +692,7 @@ where
     };
     gate.validate_at(now())?;
     let runtime = build_runtime(config.clone()).await?;
+    let impact_runtime = runtime.clone();
     gate.validate_at(now())?;
     let (ownership, recorder) = SessionOwnershipRegistry::bounded(config.browser.max_active);
     let artifact_store = artifact_store::ArtifactStore::new(
@@ -795,7 +797,14 @@ where
     let app = router(state);
     let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port).parse()?;
     let listener = gate.bind_if_valid_at(now(), || bind_listener(addr)).await?;
-    Ok((app, listener, scheduler, cdp_bootstrap, gateway_lifecycle))
+    Ok((
+        app,
+        listener,
+        scheduler,
+        cdp_bootstrap,
+        gateway_lifecycle,
+        impact_runtime,
+    ))
 }
 
 pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Result<()> {
@@ -803,7 +812,7 @@ pub async fn serve(config: AppConfig, startup: StartupCredential) -> anyhow::Res
     let max_rejection_workers = config.interface.max_rejection_workers;
     let shutdown_timeout = std::time::Duration::from_millis(config.server.shutdown_timeout_ms);
     let cdp_config = config.cdp.clone();
-    let (app, listener, scheduler, cdp_bootstrap, gateway_lifecycle) = bootstrap_listener_with(
+    let (app, listener, scheduler, cdp_bootstrap, gateway_lifecycle, _) = bootstrap_listener_with(
         config,
         startup,
         chrono::Utc::now,
@@ -1025,6 +1034,40 @@ pub mod testing {
         max_in_flight_per_principal: usize,
         authority_path: std::path::PathBuf,
     ) -> (axum::Router, Arc<EnrolledAuthority>, String) {
+        admin_app(
+            max_principals,
+            max_in_flight_per_principal,
+            authority_path,
+            RuntimeService::default(),
+            None,
+        )
+        .await
+    }
+
+    /// Serves the shared-runtime control routes next to the gateway routes over
+    /// `runtime`, wired the way `serve_shared_runtime` wires them.
+    pub async fn app_with_shared_control(
+        max_principals: usize,
+        runtime: RuntimeService,
+        control: &crate::SharedRuntimeControl,
+    ) -> (axum::Router, Arc<EnrolledAuthority>, String) {
+        admin_app(
+            max_principals,
+            InterfaceConfig::default().max_in_flight_per_principal,
+            unique_authority_path(),
+            runtime,
+            Some(control),
+        )
+        .await
+    }
+
+    async fn admin_app(
+        max_principals: usize,
+        max_in_flight_per_principal: usize,
+        authority_path: std::path::PathBuf,
+        runtime: RuntimeService,
+        control: Option<&crate::SharedRuntimeControl>,
+    ) -> (axum::Router, Arc<EnrolledAuthority>, String) {
         let startup = StartupCredential::new(
             ADMIN_BEARER.to_owned(),
             PrincipalId::from_uuid(Uuid::nil()),
@@ -1058,7 +1101,7 @@ pub mod testing {
                 .expect("test authority persistence path opens"),
         );
         let (_ownership, recorder) = SessionOwnershipRegistry::bounded(64);
-        let runtime = RuntimeService::default();
+        let served_runtime = runtime.clone();
         let interface = InterfaceConfig {
             max_principals,
             max_in_flight_per_principal,
@@ -1085,10 +1128,16 @@ pub mod testing {
             interface,
         );
         let scheduler = Arc::clone(&state.scheduler);
+        let gateways = state.gateway_lifecycle.clone();
+        let state_for_router = state;
         tokio::spawn(async move {
             let _ = scheduler.run().await;
         });
-        let app = router(state);
+        let mut app = router(state_for_router);
+        if let Some(control) = control {
+            control.attach(served_runtime, gateways);
+            app = app.merge(control.router());
+        }
         (app, authority, ADMIN_BEARER.to_owned())
     }
 
@@ -1253,6 +1302,12 @@ pub struct SharedRuntimeControl {
     stop_secret: String,
     stop: tokio::sync::watch::Sender<bool>,
     ready: Arc<dyn Fn(SocketAddr) -> anyhow::Result<()> + Send + Sync>,
+    impact: Arc<std::sync::OnceLock<ImpactSource>>,
+}
+
+struct ImpactSource {
+    runtime: RuntimeService,
+    gateways: gateway::Lifecycle,
 }
 
 impl SharedRuntimeControl {
@@ -1266,7 +1321,11 @@ impl SharedRuntimeControl {
             stop_secret,
             stop: tokio::sync::watch::channel(false).0,
             ready: Arc::new(ready),
+            impact: Arc::default(),
         }
+    }
+    fn attach(&self, runtime: RuntimeService, gateways: gateway::Lifecycle) {
+        let _ = self.impact.set(ImpactSource { runtime, gateways });
     }
     fn router(&self) -> Router {
         Router::new()
@@ -1274,6 +1333,7 @@ impl SharedRuntimeControl {
                 "/_bobby/runtime",
                 get(shared_runtime_identity).post(shared_runtime_stop),
             )
+            .route("/_bobby/runtime/impact", get(shared_runtime_impact))
             .with_state(self.clone())
     }
 }
@@ -1284,18 +1344,53 @@ async fn shared_runtime_identity(
     axum::Json(serde_json::json!({"ownerId": control.id}))
 }
 
-async fn shared_runtime_stop(
-    axum::extract::State(control): axum::extract::State<SharedRuntimeControl>,
-    headers: axum::http::HeaderMap,
-) -> axum::http::StatusCode {
+fn owner_stop_authorized(control: &SharedRuntimeControl, headers: &axum::http::HeaderMap) -> bool {
     let supplied = headers
         .get("x-bobby-owner-stop")
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
     use sha2::Digest;
-    if sha2::Sha256::digest(supplied.as_bytes())
-        != sha2::Sha256::digest(control.stop_secret.as_bytes())
-    {
+    sha2::Sha256::digest(supplied.as_bytes())
+        == sha2::Sha256::digest(control.stop_secret.as_bytes())
+}
+
+/// What a restart would affect; read-only and answered from runtime memory and
+/// the checkpoint listing, so a hung browser cannot stall it.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeImpact {
+    owner_id: uuid::Uuid,
+    taken_at: chrono::DateTime<chrono::Utc>,
+    connections: usize,
+    #[serde(flatten)]
+    runtime: sdk_core::RestartImpact,
+}
+
+async fn shared_runtime_impact(
+    axum::extract::State(control): axum::extract::State<SharedRuntimeControl>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !owner_stop_authorized(&control, &headers) {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(source) = control.impact.get() else {
+        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    axum::Json(RuntimeImpact {
+        owner_id: control.id,
+        taken_at: chrono::Utc::now(),
+        connections: source.gateways.live_connections(),
+        runtime: source.runtime.restart_impact().await,
+    })
+    .into_response()
+}
+
+async fn shared_runtime_stop(
+    axum::extract::State(control): axum::extract::State<SharedRuntimeControl>,
+    headers: axum::http::HeaderMap,
+) -> axum::http::StatusCode {
+    if !owner_stop_authorized(&control, &headers) {
         return axum::http::StatusCode::UNAUTHORIZED;
     }
     control.stop.send_replace(true);
@@ -1352,19 +1447,21 @@ where
     let max_rejection_workers = config.interface.max_rejection_workers;
     let shutdown_timeout = std::time::Duration::from_millis(config.server.shutdown_timeout_ms);
     let cdp_config = config.cdp.clone();
-    let (mut app, listener, scheduler, cdp_bootstrap, gateway_lifecycle) = bootstrap_listener_with(
-        config,
-        startup,
-        chrono::Utc::now,
-        build,
-        |addr| async move {
-            tokio::net::TcpListener::bind(addr)
-                .await
-                .map_err(anyhow::Error::new)
-        },
-    )
-    .await?;
+    let (mut app, listener, scheduler, cdp_bootstrap, gateway_lifecycle, impact_runtime) =
+        bootstrap_listener_with(
+            config,
+            startup,
+            chrono::Utc::now,
+            build,
+            |addr| async move {
+                tokio::net::TcpListener::bind(addr)
+                    .await
+                    .map_err(anyhow::Error::new)
+            },
+        )
+        .await?;
     if let Some(control) = &shared {
+        control.attach(impact_runtime, gateway_lifecycle.clone());
         app = app.merge(control.router());
         (control.ready)(listener.local_addr()?)?;
     }

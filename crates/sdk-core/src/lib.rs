@@ -26,8 +26,11 @@ use types::{
 use worker_pool::{ChromiumWorkerFactory, WorkerFactory, WorkerPool};
 use workflow_journal::JsonlJournal;
 
+mod impact;
 mod interface;
 pub mod workflow;
+
+pub use impact::{PageImpact, RestartImpact, SessionImpact};
 
 pub use interface::AuthenticatedRuntime;
 

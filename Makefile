@@ -3,14 +3,15 @@ REPO_ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 SERVICE := $(REPO_ROOT)scripts/dev/service.sh
 AGENT_EVAL_MODEL ?= claude-opus-5
 # `make install RESTART=1` also stops the running runtime owner after installing.
-INSTALL_RESTART := $(if $(filter 1,$(RESTART)),--restart-runtime)
+INSTALL_RESTART := $(if $(filter 1,$(RESTART)),--restart-runtime$(if $(filter 1,$(DISCONNECT_AGENTS)), --disconnect-agents))
+RESTART_FLAGS := $(if $(filter 1,$(FORCE)),--force)$(if $(filter 1,$(DISCONNECT_AGENTS)), --disconnect-agents)
 
 .DEFAULT_GOAL := help
 
 .PHONY: help \
 	build install firefox cli \
 	firefox-start firefox-stop \
-	start stop reload verify status \
+	restart start stop reload verify status \
 	fmt lint test \
 	fingerprint-dogfood fingerprint-collectors fingerprint-collectors-headed fingerprint-collectors-firefox \
 	behavioral-benchmark behavioral-e2e behavioral-dogfood \
@@ -29,6 +30,10 @@ help:
 	@echo "Firefox (local agents use stdio — no HTTP serve required)"
 	@echo "  firefox-start  launch Bobby Firefox with --remote-debugging-port (then Pair)"
 	@echo "  firefox-stop   quit that Firefox (also boots out a legacy KeepAlive agent)"
+	@echo
+	@echo "Runtime (the shared runtime owner behind bobby mcp-stdio; not the launchd service below)"
+	@echo "  restart    restart the running runtime owner with the installed bobby; asks before disconnecting attached agents"
+	@echo "             (FORCE=1 terminates a hung owner; DISCONNECT_AGENTS=1 skips the question, also for make install RESTART=1)"
 	@echo
 	@echo "Optional HTTP (launchd) — only if you need bobby serve over the network"
 	@echo "  start          start bobby serve MCP HTTP (com.bobby_browser.serve)"
@@ -101,6 +106,13 @@ firefox:
 cli:
 	cargo build --release --manifest-path $(REPO_ROOT)Cargo.toml -p bobby-browser -p mcp-gateway -p acp-gateway
 	$(REPO_ROOT)target/release/bobby install --cli
+
+# Restart the shared runtime owner with the `bobby` on PATH (the installed
+# build), so a new install or changed configuration takes effect. Attached
+# agents disconnect. Unrelated to the launchd start/stop/reload targets below.
+restart:
+	@command -v bobby >/dev/null 2>&1 || { echo "bobby is not on PATH; run make install first"; exit 1; }
+	bobby runtime restart $(RESTART_FLAGS)
 
 # ---------------------------------------------------------------------------
 # Firefox (direct launch — not launchd)

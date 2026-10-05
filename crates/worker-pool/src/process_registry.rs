@@ -167,6 +167,51 @@ pub fn process_command_name(_pid: u32) -> Option<String> {
     None
 }
 
+/// Full command line (executable and arguments) for `pid` per `ps`, or `None` if the
+/// process does not exist, `ps` failed, or the platform cannot report it. Unlike
+/// `process_command_name` this keeps the case and the arguments, so a caller can verify
+/// which instance of a program a pid belongs to before signalling it.
+#[cfg(unix)]
+pub fn process_command_line(pid: u32) -> Option<String> {
+    let output = std::process::Command::new("ps")
+        .args(["-ww", "-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!line.is_empty()).then_some(line)
+}
+
+#[cfg(not(unix))]
+pub fn process_command_line(_pid: u32) -> Option<String> {
+    None
+}
+
+/// Asks `pid` to exit (SIGTERM). Errors when the signal cannot be delivered, including
+/// on platforms without a graceful termination request.
+#[cfg(unix)]
+pub fn terminate_process(pid: u32) -> std::io::Result<()> {
+    let pid = i32::try_from(pid)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "pid out of range"))?;
+    // SAFETY: `kill` is a plain signal-delivery syscall; a bad pid fails with ESRCH/EPERM,
+    // which is returned to the caller.
+    if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+pub fn terminate_process(_pid: u32) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "terminating a process is not supported on this platform",
+    ))
+}
+
 #[cfg(unix)]
 pub fn kill_process(pid: u32) {
     if let Ok(pid) = i32::try_from(pid) {
@@ -383,6 +428,31 @@ mod tests {
         assert!(name.contains("sleep"));
         child.kill().unwrap();
         let _ = child.wait();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_command_line_keeps_the_arguments_of_a_running_process() {
+        use std::process::Command;
+
+        let mut child = Command::new("sleep").arg("5").spawn().unwrap();
+        let line = super::process_command_line(child.id()).expect("process must be running");
+        assert!(line.contains("sleep") && line.ends_with("5"), "{line}");
+        child.kill().unwrap();
+        let _ = child.wait();
+        assert!(super::process_command_line(i32::MAX as u32).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminate_process_delivers_sigterm_to_a_child() {
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::Command;
+
+        let mut child = Command::new("sleep").arg("5").spawn().unwrap();
+        super::terminate_process(child.id()).unwrap();
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGTERM));
+        assert!(super::terminate_process(i32::MAX as u32).is_err());
     }
 
     #[cfg(unix)]

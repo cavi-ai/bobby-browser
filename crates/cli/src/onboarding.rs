@@ -882,6 +882,8 @@ pub struct InstallOptions {
     pub yes: bool,
     /// Stop this scope's runtime owner after the install so it restarts on the new build.
     pub restart_runtime: bool,
+    /// With `restart_runtime`: stop the owner even when agents are attached, without asking.
+    pub disconnect_agents: bool,
 }
 
 /// Named flags select only that work; no named flags (interactive or `--yes`
@@ -1109,7 +1111,7 @@ fn runtime_follow_up(
 
 fn stale_runtime_notice(pid: u32) -> String {
     format!(
-        "runtime owner pid {pid} still runs the previous build; `bobby runtime stop` (attached agents disconnect; the next agent connection starts the new build) or `make install RESTART=1`"
+        "runtime owner pid {pid} still runs the previous build; `bobby runtime restart` (attached agents disconnect; the next agent connection starts the new build) or `make install RESTART=1`"
     )
 }
 
@@ -1287,6 +1289,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         force,
         yes,
         restart_runtime,
+        disconnect_agents,
     } = &options;
     let hosts = hosts.as_slice();
     let extension = extension.as_deref();
@@ -1305,6 +1308,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
     let force = *force;
     let yes = *yes;
     let restart_runtime = *restart_runtime;
+    let disconnect_agents = *disconnect_agents;
     let readiness_requested =
         vision_provider.is_some() || vision_model.is_some() || download_vision_model;
     let project_root = std::env::current_dir()?;
@@ -1690,9 +1694,16 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
     match runtime_follow_up(bobby_changed.get(), owner_pid, restart_runtime) {
         RuntimeFollowUp::Nothing => {}
         RuntimeFollowUp::Notice(pid) => println!("{}", stale_runtime_notice(pid)),
-        RuntimeFollowUp::Stop(_) => {
-            if let Some(pid) = crate::runtime_scopes::stop_running_owner()? {
-                println!("{}", stopped_runtime_line(pid));
+        RuntimeFollowUp::Stop(owner) => {
+            match crate::runtime_scopes::guarded_stop_running_owner(disconnect_agents)? {
+                crate::runtime_scopes::GuardedStop::Stopped(Some(pid)) => {
+                    println!("{}", stopped_runtime_line(pid))
+                }
+                crate::runtime_scopes::GuardedStop::Stopped(None) => {}
+                crate::runtime_scopes::GuardedStop::Refused(message) => {
+                    println!("{message}");
+                    println!("{}", stale_runtime_notice(owner));
+                }
             }
         }
     }
@@ -1840,7 +1851,7 @@ mod install_tests {
         let notice = stale_runtime_notice(41);
         assert!(notice.contains("pid 41"), "{notice}");
         assert!(notice.contains("previous build"), "{notice}");
-        assert!(notice.contains("`bobby runtime stop`"), "{notice}");
+        assert!(notice.contains("`bobby runtime restart`"), "{notice}");
         assert!(notice.contains("`make install RESTART=1`"), "{notice}");
         assert_eq!(notice.lines().count(), 1);
         assert_eq!(

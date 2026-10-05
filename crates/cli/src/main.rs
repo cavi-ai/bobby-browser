@@ -6,6 +6,7 @@ mod doctor;
 mod jobs_client;
 mod onboarding;
 mod openshell;
+mod restart_guard;
 mod runtime_scopes;
 mod v1_client;
 mod vision_child;
@@ -213,6 +214,9 @@ enum CliCommand {
         /// After installing, stop this scope's running runtime owner so the next agent connection starts the new build
         #[arg(long)]
         restart_runtime: bool,
+        /// With --restart-runtime, stop the runtime even when agents are attached, without asking
+        #[arg(long)]
+        disconnect_agents: bool,
         /// Bootstrap env file path
         #[arg(long)]
         path: Option<PathBuf>,
@@ -841,6 +845,7 @@ pub async fn run() -> Result<()> {
             force,
             yes,
             restart_runtime,
+            disconnect_agents,
             path,
         } => {
             let path = match path {
@@ -871,6 +876,7 @@ pub async fn run() -> Result<()> {
                     force,
                     yes,
                     restart_runtime,
+                    disconnect_agents,
                 },
             )?;
         }
@@ -3728,6 +3734,40 @@ model = "mlx-community/example-selected"
     }
 
     #[test]
+    fn runtime_restart_clap_parses_with_and_without_force() {
+        use clap::Parser;
+        let plain = Cli::try_parse_from(["bobby", "runtime", "restart"]).unwrap();
+        assert!(matches!(
+            plain.command,
+            Some(CliCommand::Runtime {
+                command: runtime_scopes::RuntimeCommand::Restart {
+                    force: false,
+                    disconnect_agents: false
+                }
+            })
+        ));
+        let forced = Cli::try_parse_from([
+            "bobby",
+            "--team",
+            "dev",
+            "runtime",
+            "restart",
+            "--force",
+            "--disconnect-agents",
+        ])
+        .unwrap();
+        assert!(matches!(
+            forced.command,
+            Some(CliCommand::Runtime {
+                command: runtime_scopes::RuntimeCommand::Restart {
+                    force: true,
+                    disconnect_agents: true
+                }
+            })
+        ));
+    }
+
+    #[test]
     fn jobs_submit_clap_parses_required_name() {
         use clap::Parser;
         let cli = Cli::try_parse_from([
@@ -4396,6 +4436,15 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
                 assert!(restart_runtime);
                 assert!(yes);
             }
+            _ => panic!("unexpected install parse"),
+        }
+        match Cli::try_parse_from(["bobby", "install", "--disconnect-agents"])
+            .unwrap()
+            .command
+        {
+            Some(CliCommand::Install {
+                disconnect_agents, ..
+            }) => assert!(disconnect_agents),
             _ => panic!("unexpected install parse"),
         }
         match Cli::try_parse_from(["bobby", "install"]).unwrap().command {
