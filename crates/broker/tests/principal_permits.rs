@@ -1,12 +1,17 @@
-//! Every exit path of a permit holder must return the per-principal permit.
-//! The cap is 1, so a leaked permit makes the next connection refuse.
+//! Every exit path of a permit holder must return its permit.
+//!
+//! A gateway connection holds one runtime-wide connection permit
+//! (`interface.max_connections`) and no per-principal permit; a plain or
+//! streamable HTTP request holds a per-principal permit
+//! (`interface.max_in_flight_per_principal`). Each cap is 1 where it is under
+//! test, so a leaked permit makes the next connection or request refuse.
 
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use broker::{
     serve_listener,
-    testing::{app_with_admin_and_quota, issue_bearer},
+    testing::{app_with_admin_and_limits, issue_bearer},
 };
 use futures_util::{SinkExt, StreamExt};
 use tokio::{
@@ -33,8 +38,22 @@ impl Drop for Rig {
     }
 }
 
+const DEFAULT_CONNECTIONS: usize = 64;
+
+/// One principal permit, the default connection capacity: the HTTP rig.
 async fn rig() -> Rig {
-    let (app, _authority, admin) = app_with_admin_and_quota(4, 1).await;
+    rig_with(1, DEFAULT_CONNECTIONS).await
+}
+
+/// One connection slot, the default per-principal quota: the gateway rig. The
+/// bearer is issued before the gateway opens, so issuance does not hold the slot.
+async fn connection_rig(max_connections: usize) -> Rig {
+    rig_with(8, max_connections).await
+}
+
+async fn rig_with(max_in_flight_per_principal: usize, max_connections: usize) -> Rig {
+    let (app, _authority, admin) =
+        app_with_admin_and_limits(4, max_in_flight_per_principal, max_connections).await;
     let bearer = issue_bearer(
         &app,
         &admin,
@@ -82,14 +101,14 @@ async fn assert_admitted(rig: &Rig, what: &str) {
     .await;
     assert!(
         admitted.is_ok(),
-        "{what}: the principal permit was not released within {ADMISSION_WINDOW:?}"
+        "{what}: the connection permit was not released within {ADMISSION_WINDOW:?}"
     );
 }
 
 async fn assert_refused_while_held(rig: &Rig) {
     assert!(
         open_gateway(rig).await.is_err(),
-        "cap of 1 must refuse a second connection while the first is held"
+        "max_connections of 1 must refuse a second gateway connection while the first is held"
     );
 }
 
@@ -126,7 +145,7 @@ fn mcp_initialize(rig: &Rig) -> String {
 
 #[tokio::test]
 async fn gateway_permit_returns_after_a_clean_close_while_idle() {
-    let rig = rig().await;
+    let rig = connection_rig(1).await;
     let mut first = open_gateway(&rig).await.expect("first connection admitted");
     assert_refused_while_held(&rig).await;
     first.close(None).await.unwrap();
@@ -136,7 +155,7 @@ async fn gateway_permit_returns_after_a_clean_close_while_idle() {
 
 #[tokio::test]
 async fn gateway_permit_returns_after_an_abrupt_drop_while_idle() {
-    let rig = rig().await;
+    let rig = connection_rig(1).await;
     let first = open_gateway(&rig).await.expect("first connection admitted");
     assert_refused_while_held(&rig).await;
     drop(first);
@@ -145,7 +164,7 @@ async fn gateway_permit_returns_after_an_abrupt_drop_while_idle() {
 
 #[tokio::test]
 async fn gateway_permit_returns_after_a_drop_mid_request() {
-    let rig = rig().await;
+    let rig = connection_rig(1).await;
     let mut first = open_gateway(&rig).await.expect("first connection admitted");
     first
         .send(Message::Text(
@@ -155,6 +174,45 @@ async fn gateway_permit_returns_after_a_drop_mid_request() {
         .unwrap();
     drop(first);
     assert_admitted(&rig, "drop right after initialize").await;
+}
+
+#[tokio::test]
+async fn gateway_connections_do_not_draw_on_the_principal_quota() {
+    let rig = rig().await;
+    let mut held = Vec::new();
+    for attached in 1..=3 {
+        held.push(
+            open_gateway(&rig)
+                .await
+                .unwrap_or_else(|error| panic!("gateway {attached} refused: {error}")),
+        );
+    }
+    assert_eq!(
+        http_status(&rig, &mcp_initialize(&rig)).await,
+        200,
+        "an HTTP request is admitted while three gateways of the same principal are open"
+    );
+    drop(held);
+}
+
+#[tokio::test]
+async fn gateway_refusal_at_connection_capacity_names_the_cap_and_a_retry_delay() {
+    let rig = connection_rig(2).await;
+    let _first = open_gateway(&rig).await.expect("first admitted");
+    let _second = open_gateway(&rig).await.expect("second admitted");
+    let refusal = match open_gateway(&rig).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => response,
+        other => panic!("third gateway must be refused over HTTP, got {other:?}"),
+    };
+    let body = String::from_utf8(refusal.body().clone().unwrap_or_default()).unwrap();
+    assert!(
+        body.contains("gateway connection capacity exhausted"),
+        "{body}"
+    );
+    assert!(
+        body.contains("\"retryAfterMs\":1000") && refusal.headers().contains_key("retry-after"),
+        "{body}"
+    );
 }
 
 #[tokio::test]

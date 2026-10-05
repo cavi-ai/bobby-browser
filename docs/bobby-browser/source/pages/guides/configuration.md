@@ -351,10 +351,10 @@ reachable as a node named `vision`.
 | `max_request_bytes` | `1048576` | Max inbound request body |
 | `max_event_batch` | `256` | Max events per batch read |
 | `max_event_retention` | `16384` | Retained events per principal stream |
-| `max_connections` | `64` | Concurrent interface connections |
+| `max_connections` | `64` | Concurrent interface connections, including attached MCP/ACP gateway connections |
 | `token_records_path` | `./data/storage/authorities.json` | Issued principal records |
 | `max_principals` | `16` | Max enrolled principals |
-| `max_in_flight_per_principal` | `8` | Per principal: open MCP/ACP connections plus in-flight HTTP requests; the next one is refused with `resourceExhausted` |
+| `max_in_flight_per_principal` | `8` | Per principal: in-flight HTTP requests; the next one is refused with `resourceExhausted` |
 | `max_rejection_workers` | `16` | Concurrent rejection / policy-worker permits (must be > 0) |
 
 ## Bootstrap env (not in config.toml)
