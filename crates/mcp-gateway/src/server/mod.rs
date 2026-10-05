@@ -39,6 +39,7 @@ use crate::tool_meta::{required_capabilities, required_operation, tool_descripti
 use crate::workflow_handles::{WorkflowHandleError, WorkflowHandles};
 use crate::ArtifactResources;
 
+mod connection_sessions;
 mod dispatch_agent_workflow;
 mod dispatch_intents;
 mod dispatch_lifecycle;
@@ -253,6 +254,9 @@ pub struct Server {
     in_flight: Mutex<BTreeMap<String, Arc<Notify>>>,
     pending_cancellations: Mutex<BTreeSet<String>>,
     workflow_handles: Arc<WorkflowHandles>,
+    /// Sessions this connection opened and has not closed; `serve` closes
+    /// them when the connection ends.
+    sessions: Arc<connection_sessions::ConnectionSessions>,
     /// Boundary submits that completed per (workflow, control) within the
     /// current handle generation: (workflowId, controlIdentity) ->
     /// [(generation, commandId)]. The control identity is the caller's
@@ -315,6 +319,7 @@ impl Server {
             in_flight: Mutex::new(BTreeMap::new()),
             pending_cancellations: Mutex::new(BTreeSet::new()),
             workflow_handles: Arc::new(WorkflowHandles::new()),
+            sessions: Arc::default(),
             boundary_executions: Mutex::new(HashMap::new()),
             shutting_down: AtomicBool::new(false),
             toolset: std::sync::Mutex::new(crate::toolset::Toolset::from_env().unwrap_or_default()),
@@ -583,8 +588,25 @@ impl Server {
     }
 
     /// Read newline-delimited JSON-RPC from `input` and write responses to
-    /// `output` until the client disconnects or the server shuts down.
+    /// `output` until the client disconnects or the server shuts down. The
+    /// sessions this connection opened and had not closed are closed on every
+    /// way out, including this future being dropped.
     pub async fn serve<R, W>(&self, input: R, output: W) -> io::Result<()>
+    where
+        R: AsyncRead + Unpin + Send,
+        W: AsyncWrite + Unpin + Send,
+    {
+        let guard = connection_sessions::DisconnectGuard::new(
+            Arc::clone(&self.runtime),
+            self.handle.clone(),
+            Arc::clone(&self.sessions),
+        );
+        let result = self.serve_connection(input, output).await;
+        guard.finish().await;
+        result
+    }
+
+    async fn serve_connection<R, W>(&self, input: R, output: W) -> io::Result<()>
     where
         R: AsyncRead + Unpin + Send,
         W: AsyncWrite + Unpin + Send,

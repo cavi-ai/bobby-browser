@@ -38,6 +38,24 @@ struct LiveObservation {
     outcome: Value,
 }
 
+/// The capability handle plus the connection's session record, so every
+/// workflow cleanup also drops the session it deleted from the record.
+#[derive(Clone)]
+struct CleanupHandle {
+    capability: CapabilityHandle,
+    sessions: Arc<connection_sessions::ConnectionSessions>,
+}
+
+#[cfg(test)]
+impl CleanupHandle {
+    fn untracked(capability: CapabilityHandle) -> Self {
+        Self {
+            capability,
+            sessions: Arc::default(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct CleanupResult {
     page_closed: bool,
@@ -490,7 +508,10 @@ impl Server {
         let workflow_id = types::WorkflowId::new();
         let handle = reservation.handle().to_owned();
         let runtime = Arc::clone(&self.runtime);
-        let capability_handle = self.handle.clone();
+        let capability_handle = CleanupHandle {
+            capability: self.handle.clone(),
+            sessions: Arc::clone(&self.sessions),
+        };
         let supervisor_runtime = Arc::clone(&runtime);
         let supervisor_handle = capability_handle.clone();
         let supervisor_workflow_id = workflow_id.clone();
@@ -734,7 +755,7 @@ impl Server {
 #[allow(clippy::too_many_arguments)]
 async fn supervise_start(
     runtime: Arc<dyn RuntimeInterface>,
-    handle: CapabilityHandle,
+    handle: CleanupHandle,
     context: types::RequestContext,
     reservation: WorkflowHandleReservation,
     create_request: types::CreateSessionRequest,
@@ -749,7 +770,28 @@ async fn supervise_start(
         })
         .await;
     let (session, page) = match setup {
-        Ok(setup) => (setup.session, setup.page),
+        Ok(setup) => {
+            if !handle.sessions.record(&setup.session.id) {
+                // The connection ended while the session was being created;
+                // nothing was recorded, so the creator deletes it.
+                let cleanup = cleanup_workflow(
+                    &runtime,
+                    &handle,
+                    setup.session.id.clone(),
+                    Some(setup.page.id.clone()),
+                    workflow_id,
+                )
+                .await;
+                warn_cancel_cleanup(
+                    &cleanup,
+                    &correlation_id,
+                    &setup.session.id,
+                    Some(&setup.page.id),
+                );
+                return;
+            }
+            (setup.session, setup.page)
+        }
         Err(WorkflowSetupFailure::Session(error)) => {
             let _ = setup_sender.send(SetupMessage::Failed(error));
             return;
@@ -966,7 +1008,7 @@ async fn supervise_start(
 #[allow(clippy::too_many_arguments)]
 async fn finish_generation_change(
     runtime: Arc<dyn RuntimeInterface>,
-    handle: CapabilityHandle,
+    handle: CleanupHandle,
     reservation: WorkflowHandleReservation,
     setup_sender: oneshot::Sender<SetupMessage>,
     session: types::SessionState,
@@ -1046,7 +1088,7 @@ async fn deliver_cleanup_reply(
 async fn request_supervisor_cleanup(
     disposition: oneshot::Sender<SupervisorDisposition>,
     runtime: Arc<dyn RuntimeInterface>,
-    handle: CapabilityHandle,
+    handle: CleanupHandle,
     session_id: types::SessionId,
     page_id: Option<types::PageId>,
     workflow_id: types::WorkflowId,
@@ -1083,7 +1125,7 @@ async fn request_supervisor_cleanup(
 async fn receive_supervisor_cleanup(
     receiver: oneshot::Receiver<CleanupReply>,
     runtime: Arc<dyn RuntimeInterface>,
-    handle: CapabilityHandle,
+    handle: CleanupHandle,
     session_id: types::SessionId,
     page_id: Option<types::PageId>,
     workflow_id: types::WorkflowId,
@@ -1107,7 +1149,7 @@ async fn receive_supervisor_cleanup(
 
 async fn cleanup_workflow(
     runtime: &Arc<dyn RuntimeInterface>,
-    handle: &CapabilityHandle,
+    handle: &CleanupHandle,
     session_id: types::SessionId,
     page_id: Option<types::PageId>,
     workflow_id: types::WorkflowId,
@@ -1115,16 +1157,24 @@ async fn cleanup_workflow(
     let cleanup = WorkflowService::new(Arc::clone(runtime))
         .cleanup(
             || {
-                handle.context(
+                handle.capability.context(
                     Utc::now() + Duration::seconds(CLEANUP_DEADLINE_SECONDS),
                     None,
                 )
             },
-            session_id,
+            session_id.clone(),
             page_id,
             workflow_id,
         )
         .await;
+    // A session that is gone, deleted here or already closed elsewhere, must
+    // not stay recorded for the disconnect cleanup. A failed delete stays
+    // recorded so the disconnect cleanup retries it.
+    if matches!(&cleanup.session_delete, Ok(()))
+        || matches!(&cleanup.session_delete, Err(error) if error.code == types::InterfaceErrorCode::NotFound)
+    {
+        handle.sessions.forget(&session_id);
+    }
     let mut result = CleanupResult {
         page_closed: false,
         session_deleted: false,
@@ -1151,7 +1201,7 @@ async fn cleanup_workflow(
 
 fn spawn_fallback_cleanup(
     runtime: Arc<dyn RuntimeInterface>,
-    handle: CapabilityHandle,
+    handle: CleanupHandle,
     session_id: types::SessionId,
     page_id: Option<types::PageId>,
     workflow_id: types::WorkflowId,
@@ -1577,7 +1627,7 @@ mod tests {
 
         let supervisor = tokio::spawn(supervise_start(
             runtime.clone(),
-            handle.clone(),
+            CleanupHandle::untracked(handle.clone()),
             original.clone(),
             reservation,
             types::CreateSessionRequest {
@@ -1869,7 +1919,7 @@ mod tests {
         let (setup_sender, setup_receiver) = oneshot::channel();
         let supervisor = tokio::spawn(supervise_start(
             runtime.clone(),
-            handle.clone(),
+            CleanupHandle::untracked(handle.clone()),
             handle.context(Utc::now() + Duration::minutes(1), None),
             reservation,
             types::CreateSessionRequest {
@@ -1896,7 +1946,7 @@ mod tests {
         let cleanup = request_supervisor_cleanup(
             disposition,
             runtime.clone(),
-            handle.clone(),
+            CleanupHandle::untracked(handle.clone()),
             session.id.clone(),
             Some(page.id.clone()),
             workflow_id.clone(),

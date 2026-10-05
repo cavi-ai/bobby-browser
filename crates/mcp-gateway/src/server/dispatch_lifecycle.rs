@@ -16,6 +16,53 @@ pub(super) const TOOLS: &[&str] = &[
 ];
 
 impl Server {
+    /// Creates a session and records it for this connection. Runs in a
+    /// spawned task so a request future dropped mid-create still finishes the
+    /// record-or-delete step instead of leaving an unrecorded session. When
+    /// the connection is already closing the creator deletes the session.
+    async fn create_recorded_session(
+        &self,
+        context: types::RequestContext,
+        request: types::CreateSessionRequest,
+    ) -> interface_core::InterfaceResult<types::SessionState> {
+        let runtime = Arc::clone(&self.runtime);
+        let handle = self.handle.clone();
+        let sessions = Arc::clone(&self.sessions);
+        let correlation_id = context.correlation_id.clone();
+        let task = tokio::spawn(async move {
+            let session = runtime.create_session(context, request).await?;
+            if !sessions.record(&session.id) {
+                connection_sessions::delete_session_quietly(&runtime, &handle, session.id).await;
+                return Err(types::InterfaceError {
+                    code: types::InterfaceErrorCode::Internal,
+                    layer: types::ErrorLayer::Interface,
+                    message: "connection closed".into(),
+                    correlation_id,
+                    command_id: None,
+                    retryable: false,
+                    retry_after_ms: None,
+                    reconciliation_required: false,
+                    required_capability: None,
+                });
+            }
+            Ok(session)
+        });
+        match task.await {
+            Ok(result) => result,
+            Err(_) => Err(types::InterfaceError {
+                code: types::InterfaceErrorCode::Internal,
+                layer: types::ErrorLayer::Interface,
+                message: "runtime interface request failed".into(),
+                correlation_id: types::CorrelationId::new(),
+                command_id: None,
+                retryable: false,
+                retry_after_ms: None,
+                reconciliation_required: true,
+                required_capability: None,
+            }),
+        }
+    }
+
     pub(super) async fn dispatch_lifecycle(
         &self,
         id: Value,
@@ -66,18 +113,17 @@ impl Server {
                 {
                     return invalid_params_reason(id, "malformedArguments");
                 }
-                self.runtime
-                    .create_session(
-                        context,
-                        types::CreateSessionRequest {
-                            profile: input.profile,
-                            proxy: input.proxy,
-                            execution_policy: input.execution_policy,
-                            zigzagzig: input.zigzagzig,
-                        },
-                    )
-                    .await
-                    .and_then(to_json)
+                self.create_recorded_session(
+                    context,
+                    types::CreateSessionRequest {
+                        profile: input.profile,
+                        proxy: input.proxy,
+                        execution_policy: input.execution_policy,
+                        zigzagzig: input.zigzagzig,
+                    },
+                )
+                .await
+                .and_then(to_json)
             }
             "session_close" => {
                 let input: SessionCloseArgs = match bounded_parse(call.arguments) {
@@ -92,6 +138,7 @@ impl Server {
                     .and_then(|()| to_json(json!({"closed": true})));
                 if result.is_ok() {
                     self.workflow_handles.remove_session(&session_id);
+                    self.sessions.forget(&session_id);
                 }
                 result
             }
