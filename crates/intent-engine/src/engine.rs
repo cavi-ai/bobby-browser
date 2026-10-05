@@ -520,6 +520,9 @@ async fn proactive_prefill(
     if !vision.session_ok || !vision.capability_ok {
         return;
     }
+    let Some(generation) = proposals.proposal_generation(page_id) else {
+        return;
+    };
 
     let mut requests = Vec::new();
     for field in fields {
@@ -683,8 +686,12 @@ async fn proactive_prefill(
         .collect::<Vec<_>>()
         .await;
     if !batch.is_empty() {
-        tracing::info!(recorded = batch.len(), "vision.prefill_batch");
-        proposals.record_proposals(page_id, batch);
+        let count = batch.len();
+        if proposals.record_proposals_if_current(page_id, &generation, batch) {
+            tracing::info!(recorded = count, "vision.prefill_batch");
+        } else {
+            tracing::info!(discarded = count, "vision.prefill_batch_stale");
+        }
     } else {
         tracing::info!("vision.prefill_batch_empty");
     }

@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use intent_engine::{CachedProposal, CachedProposalAction, ProposalLookup};
+use intent_engine::{CachedProposal, CachedProposalAction, ProposalGeneration, ProposalLookup};
 use types::{
     AccessibilityNode, AccessibilityTarget, CommandId, ContextAnswer, PageId, PrimitiveCommand,
     RuntimeCommand,
@@ -70,6 +70,9 @@ pub struct ContextGraph {
 }
 
 struct PageContext {
+    /// Rotates on invalidation; a new entry has a distinct identity even if
+    /// its numeric generation matches a previously forgotten entry.
+    proposal_generation: ProposalGeneration,
     /// Bumped on every navigation and every non-replayable command.
     generation: u64,
     /// The generation `nodes` was observed under.
@@ -115,7 +118,8 @@ impl ContextGraph {
                 pages.remove(&stalest);
             }
         }
-        let entry = pages.entry(page.clone()).or_insert(PageContext {
+        let entry = pages.entry(page.clone()).or_insert_with(|| PageContext {
+            proposal_generation: ProposalGeneration::default(),
             generation: 0,
             observed_at: 0,
             recorded_seq: seq,
@@ -143,7 +147,8 @@ impl ContextGraph {
         if !pages.contains_key(page) && pages.len() >= MAX_RETAINED_PAGES {
             return;
         }
-        let entry = pages.entry(page.clone()).or_insert(PageContext {
+        let entry = pages.entry(page.clone()).or_insert_with(|| PageContext {
+            proposal_generation: ProposalGeneration::default(),
             generation: 0,
             observed_at: 0,
             recorded_seq: seq,
@@ -195,6 +200,28 @@ impl ContextGraph {
         proposals.truncate(MAX_RETAINED_PROPOSALS);
         entry.proposals_at = entry.generation;
         entry.proposals = proposals;
+    }
+
+    /// Publishes an asynchronous batch only into its original, unchanged cache.
+    /// The comparison and replacement share one lock, so invalidation/forget
+    /// cannot race between checking the generation and writing the batch.
+    pub fn record_proposals_if_current(
+        &self,
+        page: &PageId,
+        generation: &ProposalGeneration,
+        mut proposals: Vec<CandidateProposal>,
+    ) -> bool {
+        let mut pages = self.lock();
+        let Some(entry) = pages.get_mut(page) else {
+            return false;
+        };
+        if &entry.proposal_generation != generation {
+            return false;
+        }
+        proposals.truncate(MAX_RETAINED_PROPOSALS);
+        entry.proposals_at = entry.generation;
+        entry.proposals = proposals;
+        true
     }
 
     /// The cached proposal for `purpose`, or `None`.
@@ -273,6 +300,8 @@ impl ContextGraph {
         let mut pages = self.lock();
         if let Some(entry) = pages.get_mut(page) {
             entry.generation = entry.generation.saturating_add(1);
+            entry.proposal_generation = ProposalGeneration::default();
+            entry.proposals.clear();
         }
     }
 
@@ -409,6 +438,26 @@ fn preserves_page_structure(command: &RuntimeCommand) -> bool {
 }
 
 impl ProposalLookup for ContextGraph {
+    fn proposal_generation(&self, page: &PageId) -> Option<ProposalGeneration> {
+        self.lock()
+            .get(page)
+            .map(|entry| entry.proposal_generation.clone())
+    }
+
+    fn record_proposals_if_current(
+        &self,
+        page: &PageId,
+        generation: &ProposalGeneration,
+        proposals: Vec<(String, CachedProposal)>,
+    ) -> bool {
+        ContextGraph::record_proposals_if_current(
+            self,
+            page,
+            generation,
+            candidate_proposals(proposals),
+        )
+    }
+
     fn proposal_for(&self, page: &PageId, purpose: &str) -> Option<CachedProposal> {
         ContextGraph::proposal_for(self, page, purpose).map(|proposal| CachedProposal {
             action: proposal.action,
@@ -421,20 +470,20 @@ impl ProposalLookup for ContextGraph {
     }
 
     fn record_proposals(&self, page: &PageId, proposals: Vec<(String, CachedProposal)>) {
-        ContextGraph::record_proposals(
-            self,
-            page,
-            proposals
-                .into_iter()
-                .map(|(purpose, cached)| CandidateProposal {
-                    purpose_key: purpose.trim().to_lowercase(),
-                    action: cached.action,
-                    confidence: cached.confidence,
-                    source: ProposalSource::Vision,
-                })
-                .collect(),
-        );
+        ContextGraph::record_proposals(self, page, candidate_proposals(proposals));
     }
+}
+
+fn candidate_proposals(proposals: Vec<(String, CachedProposal)>) -> Vec<CandidateProposal> {
+    proposals
+        .into_iter()
+        .map(|(purpose, cached)| CandidateProposal {
+            purpose_key: purpose.trim().to_lowercase(),
+            action: cached.action,
+            confidence: cached.confidence,
+            source: ProposalSource::Vision,
+        })
+        .collect()
 }
 
 /// Scores how well a described control matches a node, or `None` if it does not
@@ -754,6 +803,39 @@ mod tests {
             None,
             "a stale batch answered after the page changed"
         );
+    }
+
+    #[test]
+    fn a_late_batch_cannot_overwrite_a_new_generations_proposals() {
+        let (graph, page) = graph_with(vec![node("textbox", "Email address", Some(1))]);
+        let old = ProposalLookup::proposal_generation(&graph, &page).unwrap();
+        graph.invalidate(&page);
+        let current = ProposalLookup::proposal_generation(&graph, &page).unwrap();
+        assert!(graph.record_proposals_if_current(
+            &page,
+            &current,
+            vec![proposal("New field", 0.9)],
+        ));
+        assert!(!graph.record_proposals_if_current(&page, &old, vec![proposal("Old field", 0.9)],));
+        assert!(graph.proposal_for(&page, "New field").is_some());
+        assert!(graph.proposal_for(&page, "Old field").is_none());
+    }
+
+    #[test]
+    fn a_guarded_batch_retains_the_proposal_limit() {
+        let (graph, page) = graph_with(vec![node("textbox", "Email address", Some(1))]);
+        let current = ProposalLookup::proposal_generation(&graph, &page).unwrap();
+        assert!(graph.record_proposals_if_current(
+            &page,
+            &current,
+            (0..MAX_RETAINED_PROPOSALS + 1)
+                .map(|index| proposal(&format!("field {index}"), 0.9))
+                .collect(),
+        ));
+        assert!(graph.proposal_for(&page, "field 0").is_some());
+        assert!(graph
+            .proposal_for(&page, &format!("field {}", MAX_RETAINED_PROPOSALS))
+            .is_none());
     }
 
     #[test]

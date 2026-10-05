@@ -40,6 +40,40 @@ impl VisionAssist for CountingVision {
 
 struct OfflineVision;
 
+struct PausedVision {
+    calls: AtomicUsize,
+    started: tokio::sync::Semaphore,
+    release: tokio::sync::Semaphore,
+}
+
+impl Default for PausedVision {
+    fn default() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            started: tokio::sync::Semaphore::new(0),
+            release: tokio::sync::Semaphore::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl VisionAssist for PausedVision {
+    async fn propose(
+        &self,
+        _request: VisionProposeRequest,
+    ) -> Result<VisionProposal, CommandError> {
+        // Pause the two prefill requests; fresh fallback requests can finish.
+        if self.calls.fetch_add(1, Ordering::SeqCst) < 2 {
+            self.started.add_permits(1);
+            self.release.acquire().await.unwrap().forget();
+        }
+        Ok(VisionProposal {
+            confidence: 0.95,
+            action: VisionAction::TypeIntoCandidate { index: 0 },
+        })
+    }
+}
+
 #[async_trait]
 impl VisionAssist for OfflineVision {
     async fn propose(
@@ -208,6 +242,90 @@ fn resolution_paths(evidence: &[Evidence]) -> Vec<IntentResolutionPath> {
             _ => None,
         })
         .collect()
+}
+
+async fn paused_prefill_after_cache_change(
+    change: fn(&page_runtime::ContextGraph, &PageId),
+) -> Vec<IntentResolutionPath> {
+    let fixture = test_site::spawn().await;
+    let root = tempfile::tempdir().unwrap();
+    let assist = Arc::new(PausedVision::default());
+    let runtime =
+        RuntimeService::build_with_vision_assist(&base_config(root.path(), true), assist.clone())
+            .await
+            .unwrap();
+    let (session, page) = open_fixture(&runtime, &fixture.base_url()).await;
+    let pending = {
+        let runtime = runtime.clone();
+        let session = session.clone();
+        let page = page.clone();
+        tokio::spawn(async move { submit_intent(&runtime, &session, &page, stuck_form()).await })
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        assist.started.acquire_many(2),
+    )
+    .await
+    .expect("prefill requests started")
+    .unwrap()
+    .forget();
+
+    // Exercise the actual cache lifecycle boundary. Browser commands share
+    // a worker lease, so transport-level navigation is serialized with this
+    // pending intent and cannot reproduce a cache invalidation here.
+    change(runtime.pages.context(), &page);
+    assist.release.add_permits(2);
+    let outcome = pending.await.unwrap();
+    let CommandOutcome::Completed { evidence, .. } = outcome else {
+        panic!("fresh fallback should still finish: {outcome:?}");
+    };
+    resolution_paths(&evidence)
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn prefill_does_not_relabel_a_reply_after_generation_change() {
+    let paths = paused_prefill_after_cache_change(|graph, page| graph.invalidate(page)).await;
+    assert!(
+        !paths.contains(&IntentResolutionPath::VisionPrefill),
+        "a reply from the previous generation was consumed as fresh prefill: {paths:?}"
+    );
+    assert!(
+        paths.contains(&IntentResolutionPath::VisionFallback),
+        "{paths:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn prefill_does_not_relabel_a_reply_after_forgetting_and_reobserving_a_page() {
+    let paths = paused_prefill_after_cache_change(|graph, page| {
+        graph.forget(page);
+        graph.record(page, Vec::new());
+    })
+    .await;
+    assert!(
+        !paths.contains(&IntentResolutionPath::VisionPrefill),
+        "an old reply was published into a different cache incarnation: {paths:?}"
+    );
+    assert!(
+        paths.contains(&IntentResolutionPath::VisionFallback),
+        "{paths:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn prefill_cannot_publish_into_a_forgotten_page() {
+    let paths = paused_prefill_after_cache_change(|graph, page| graph.forget(page)).await;
+    assert!(
+        !paths.contains(&IntentResolutionPath::VisionPrefill),
+        "{paths:?}"
+    );
+    assert!(
+        paths.contains(&IntentResolutionPath::VisionFallback),
+        "{paths:?}"
+    );
 }
 
 #[tokio::test]

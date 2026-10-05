@@ -388,13 +388,44 @@ pub enum CachedProposalAction {
     },
 }
 
-/// Proposal cache lookup, implemented by the runtime's context graph. The
-/// engine asks before it escalates; a hit skips the screenshot round-trip.
-/// Sync like the graph it fronts: lookups are in-memory.
+/// Opaque identity for an unchanged page cache incarnation. Clones compare by
+/// identity, not numeric generation, so forgetting/re-observing cannot cause
+/// an old asynchronous reply to match a new entry.
+#[derive(Clone, Debug, Default)]
+pub struct ProposalGeneration(std::sync::Arc<()>);
+
+impl PartialEq for ProposalGeneration {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ProposalGeneration {}
+
+/// In-memory proposal cache lookup; a hit skips the screenshot round-trip.
+/// Caches must opt into atomic generation-checked publication before
+/// the engine uses them for asynchronous prefill. Legacy lookups remain usable.
 pub trait ProposalLookup: Send + Sync {
     fn proposal_for(&self, page: &types::PageId, purpose: &str) -> Option<CachedProposal>;
     fn drop_proposal(&self, page: &types::PageId, purpose: &str);
     fn record_proposals(&self, page: &types::PageId, proposals: Vec<(String, CachedProposal)>);
+
+    /// Opaque process-local identity for one unchanged page cache incarnation.
+    /// Capture before collecting candidates, not after a provider returns.
+    fn proposal_generation(&self, _page: &types::PageId) -> Option<ProposalGeneration> {
+        None
+    }
+
+    /// Atomically compare the captured generation and publish. The conservative
+    /// default disables prefill writes for caches without this guarantee.
+    fn record_proposals_if_current(
+        &self,
+        _page: &types::PageId,
+        _generation: &ProposalGeneration,
+        _proposals: Vec<(String, CachedProposal)>,
+    ) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone)]
