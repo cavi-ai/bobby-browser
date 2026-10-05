@@ -205,7 +205,6 @@ async fn gateway_refusal_at_connection_capacity_names_the_cap_and_a_retry_delay(
         other => panic!("third gateway must be refused over HTTP, got {other:?}"),
     };
     let body = String::from_utf8(refusal.body().clone().unwrap_or_default()).unwrap();
-    println!("refusal: {} {body}", refusal.status());
     assert!(
         body.contains("gateway connection capacity exhausted"),
         "{body}"
