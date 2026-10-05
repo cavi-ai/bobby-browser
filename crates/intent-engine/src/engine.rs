@@ -176,6 +176,30 @@ impl IntentEngine {
         browser: &dyn IntentBrowser,
         vision: &VisionContext,
     ) -> IntentOutcome {
+        Self::execute_inner(intent, page_id, browser, vision, None).await
+    }
+
+    /// Limits speculative prefill to `prefill_deadline`, retaining completed
+    /// proposals and dropping unfinished work before normal field execution.
+    /// The caller still enforces the overall command deadline. `execute`
+    /// preserves legacy behavior for callers without a deadline.
+    pub async fn execute_with_prefill_deadline(
+        intent: &IntentCommand,
+        page_id: &PageId,
+        browser: &dyn IntentBrowser,
+        vision: &VisionContext,
+        prefill_deadline: tokio::time::Instant,
+    ) -> IntentOutcome {
+        Self::execute_inner(intent, page_id, browser, vision, Some(prefill_deadline)).await
+    }
+
+    async fn execute_inner(
+        intent: &IntentCommand,
+        page_id: &PageId,
+        browser: &dyn IntentBrowser,
+        vision: &VisionContext,
+        prefill_deadline: Option<tokio::time::Instant>,
+    ) -> IntentOutcome {
         let plan = match compile_intent(intent) {
             Ok(plan) => plan,
             Err(error) => {
@@ -203,7 +227,7 @@ impl IntentEngine {
                 execute_fill(intent, page_id, browser, vision, target, value).await
             }
             IntentPlan::CompleteForm { fields } => {
-                execute_complete_form(page_id, browser, vision, fields).await
+                execute_complete_form(page_id, browser, vision, fields, prefill_deadline).await
             }
             IntentPlan::SubmitAndVerify {
                 target,
@@ -256,9 +280,10 @@ async fn execute_complete_form(
     browser: &dyn IntentBrowser,
     vision: &VisionContext,
     fields: Vec<CompleteFormFieldPlan>,
+    prefill_deadline: Option<tokio::time::Instant>,
 ) -> IntentOutcome {
     let mut evidence = Vec::new();
-    proactive_prefill(page_id, browser, vision, &fields).await;
+    proactive_prefill(page_id, browser, vision, &fields, prefill_deadline).await;
     for field in &fields {
         if let Some(reveal_target) = &field.revealed_by {
             match reveal_field(
@@ -514,14 +539,53 @@ async fn proactive_prefill(
     browser: &dyn IntentBrowser,
     vision: &VisionContext,
     fields: &[CompleteFormFieldPlan],
+    prefill_deadline: Option<tokio::time::Instant>,
 ) {
-    let (Some(proposals), Some(assist)) = (&vision.proposals, &vision.assist) else {
+    let (Some(proposals), Some(_)) = (&vision.proposals, &vision.assist) else {
         return;
     };
     if !vision.session_ok || !vision.capability_ok {
         return;
     }
     let Some(generation) = proposals.proposal_generation(page_id) else {
+        return;
+    };
+    // Tokio timeouts may poll a ready future even after their deadline.
+    // An exhausted budget must not start speculative browser/provider work.
+    if prefill_deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) {
+        tracing::info!(completed = 0, "vision.prefill_budget_exhausted");
+        return;
+    }
+
+    let mut batch = Vec::new();
+    let work = collect_prefill_batch(page_id, browser, vision, fields, &mut batch);
+    if let Some(deadline) = prefill_deadline {
+        if tokio::time::timeout_at(deadline, work).await.is_err() {
+            tracing::info!(completed = batch.len(), "vision.prefill_budget_exhausted");
+        }
+    } else {
+        work.await;
+    }
+    if !batch.is_empty() {
+        let count = batch.len();
+        if proposals.record_proposals_if_current(page_id, &generation, batch) {
+            tracing::info!(recorded = count, "vision.prefill_batch");
+        } else {
+            tracing::info!(discarded = count, "vision.prefill_batch_stale");
+        }
+    } else {
+        tracing::info!("vision.prefill_batch_empty");
+    }
+}
+
+async fn collect_prefill_batch(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    vision: &VisionContext,
+    fields: &[CompleteFormFieldPlan],
+    batch: &mut Vec<(String, crate::CachedProposal)>,
+) {
+    let (Some(proposals), Some(assist)) = (&vision.proposals, &vision.assist) else {
         return;
     };
 
@@ -598,7 +662,7 @@ async fn proactive_prefill(
         None
     };
     let metric_context = assist.operational_metrics();
-    let batch = stream::iter(requests)
+    let mut responses = stream::iter(requests)
         .map(|request| {
             let assist = Arc::clone(assist);
             let png = png.clone();
@@ -685,19 +749,11 @@ async fn proactive_prefill(
                 ))
             }
         })
-        .buffer_unordered(PREFILL_CONCURRENCY_LIMIT)
-        .filter_map(async move |proposal| proposal)
-        .collect::<Vec<_>>()
-        .await;
-    if !batch.is_empty() {
-        let count = batch.len();
-        if proposals.record_proposals_if_current(page_id, &generation, batch) {
-            tracing::info!(recorded = count, "vision.prefill_batch");
-        } else {
-            tracing::info!(discarded = count, "vision.prefill_batch_stale");
+        .buffer_unordered(PREFILL_CONCURRENCY_LIMIT);
+    while let Some(proposal) = responses.next().await {
+        if let Some(proposal) = proposal {
+            batch.push(proposal);
         }
-    } else {
-        tracing::info!("vision.prefill_batch_empty");
     }
 }
 

@@ -2444,6 +2444,60 @@ async fn cancelling_proactive_prefill_cancels_in_flight_provider_calls() {
 }
 
 #[tokio::test]
+async fn an_expired_prefill_deadline_skips_speculation_and_uses_fresh_fallback() {
+    let propose_calls = Arc::new(AtomicUsize::new(0));
+    let screenshot_calls = Arc::new(AtomicUsize::new(0));
+    let browser = CountingScreenshotBrowser {
+        inner: FakeBrowser {
+            candidates: vec![
+                form_candidate("primary", "checkbox", "Primary value"),
+                form_candidate("alternate", "checkbox", "Alternate value"),
+            ],
+            screenshot_png: b"png".to_vec(),
+            ..FakeBrowser::default()
+        },
+        screenshot_calls: screenshot_calls.clone(),
+    };
+    let outcome = IntentEngine::execute_with_prefill_deadline(
+        &IntentCommand::CompleteForm(types::CompleteFormIntent {
+            purpose: "configure notifications".into(),
+            fields: vec![
+                checked_field("first", "First choice", None),
+                checked_field("last", "Last choice", None),
+            ],
+        }),
+        &PageId::new(),
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(Arc::new(CountingVision {
+                propose_calls: propose_calls.clone(),
+                confidence: 0.95,
+                metrics: OperationalMetrics::default(),
+            })),
+            proposals: Some(Arc::new(RecordingProposals::default())),
+            ..VisionContext::default()
+        },
+        tokio::time::Instant::now(),
+    )
+    .await;
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("fresh fallback must still finish, got {outcome:?}");
+    };
+    assert!(!evidence
+        .iter()
+        .any(|item| matches!(item, Evidence::IntentExecution { record }
+        if record.resolution_path == IntentResolutionPath::VisionPrefill)));
+    assert_eq!(
+        screenshot_calls.load(Ordering::SeqCst),
+        2,
+        "only fresh fallbacks capture screenshots"
+    );
+    assert_eq!(propose_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn oversized_form_prefills_only_cache_capacity_and_executes_the_rest_live() {
     let propose_calls = Arc::new(AtomicUsize::new(0));
     let control_action_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
