@@ -40,7 +40,7 @@ pub const MAX_RETAINED_COMMANDS: usize = 64;
 /// Vision proposals retained per page. One lazy batch per form is the
 /// expected working set; the cap keeps a pathological form from growing the
 /// entry without bound.
-pub const MAX_RETAINED_PROPOSALS: usize = 32;
+pub const MAX_RETAINED_PROPOSALS: usize = intent_engine::MAX_CACHED_PROPOSALS;
 
 /// A vision-proposed click target for a field purpose, cached under the
 /// page's generation discipline. Structurally incapable of carrying a typed

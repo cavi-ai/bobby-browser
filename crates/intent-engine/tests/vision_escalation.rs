@@ -2444,6 +2444,77 @@ async fn cancelling_proactive_prefill_cancels_in_flight_provider_calls() {
 }
 
 #[tokio::test]
+async fn oversized_form_prefills_only_cache_capacity_and_executes_the_rest_live() {
+    let propose_calls = Arc::new(AtomicUsize::new(0));
+    let control_action_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let browser = FakeBrowser {
+        candidates: vec![
+            form_candidate("primary", "checkbox", "Primary value"),
+            form_candidate("alternate", "checkbox", "Alternate value"),
+        ],
+        control_action_calls: control_action_calls.clone(),
+        screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
+    };
+    let outcome = IntentEngine::execute(
+        &IntentCommand::CompleteForm(types::CompleteFormIntent {
+            purpose: "configure notifications".into(),
+            fields: (0..128)
+                .map(|index| {
+                    checked_field(&format!("field-{index}"), &format!("choice-{index}"), None)
+                })
+                .collect(),
+        }),
+        &PageId::new(),
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(Arc::new(CountingVision {
+                propose_calls: propose_calls.clone(),
+                confidence: 0.95,
+                metrics: OperationalMetrics::default(),
+            })),
+            proposals: Some(Arc::new(RecordingProposals::default())),
+            defer_escalation: false,
+            prompt_context: None,
+            corpus: None,
+            context_store: None,
+        },
+    )
+    .await;
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("expected every field to execute, got {outcome:?}");
+    };
+    let paths = evidence
+        .iter()
+        .filter_map(|item| match item {
+            Evidence::IntentExecution { record } if record.intent_kind == "fill" => {
+                Some(record.resolution_path)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(paths.len(), 128);
+    assert_eq!(
+        paths
+            .iter()
+            .filter(|path| **path == IntentResolutionPath::VisionPrefill)
+            .count(),
+        32,
+        "speculative work must fit the runtime cache"
+    );
+    assert!(paths[..32]
+        .iter()
+        .all(|path| *path == IntentResolutionPath::VisionPrefill));
+    assert!(paths[32..]
+        .iter()
+        .all(|path| *path == IntentResolutionPath::VisionFallback));
+    assert_eq!(control_action_calls.lock().unwrap().len(), 128);
+    assert_eq!(propose_calls.load(Ordering::SeqCst), 128);
+}
+
+#[tokio::test]
 async fn complete_form_batches_one_screenshot_for_all_stuck_fields() {
     let propose_calls = Arc::new(AtomicUsize::new(0));
     let screenshot_calls = Arc::new(AtomicUsize::new(0));

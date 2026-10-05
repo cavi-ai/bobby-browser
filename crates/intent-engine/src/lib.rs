@@ -24,5 +24,5 @@ pub use vision::{
     ProposalLookup, VisionAction, VisionAssist, VisionBackendResult, VisionContextBudget,
     VisionImageRegion, VisionPacketError, VisionPacketInput, VisionPromptCandidate,
     VisionPromptContext, VisionProposal, VisionProposeRequest, VisionTaskPacket,
-    VISION_CONFIDENCE_FLOOR,
+    MAX_CACHED_PROPOSALS, VISION_CONFIDENCE_FLOOR,
 };

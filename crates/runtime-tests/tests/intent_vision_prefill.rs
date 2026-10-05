@@ -365,6 +365,67 @@ async fn prefill_resolves_stuck_form_through_the_batch() {
 
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
+async fn oversized_form_does_not_request_proposals_the_cache_would_discard() {
+    let fixture = test_site::spawn().await;
+    let root = tempfile::tempdir().unwrap();
+    let propose_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = RuntimeService::build_with_vision_assist(
+        &base_config(root.path(), true),
+        Arc::new(CountingVision {
+            propose_calls: propose_calls.clone(),
+        }),
+    )
+    .await
+    .unwrap();
+    let (session, page) = open_fixture(&runtime, &fixture.base_url()).await;
+    let outcome = submit_intent(
+        &runtime,
+        &session,
+        &page,
+        IntentCommand::CompleteForm(CompleteFormIntent {
+            purpose: "register".into(),
+            fields: (0..40)
+                .map(|index| CompleteFormField {
+                    name: format!("field-{index}"),
+                    purpose: format!("Missing Alpha Field That Does Not Exist {index}"),
+                    hints: Default::default(),
+                    value: ControlAction::SetText {
+                        value: format!("value-{index}"),
+                        clear_first: true,
+                    },
+                    revealed_by: None,
+                })
+                .collect(),
+        }),
+    )
+    .await;
+    let CommandOutcome::Completed { evidence, .. } = outcome else {
+        panic!("expected all 40 fields to complete, got {outcome:?}");
+    };
+    assert_eq!(
+        propose_calls.load(Ordering::SeqCst),
+        40,
+        "discarded speculative replies must not cause duplicate provider calls"
+    );
+    let paths = resolution_paths(&evidence);
+    assert_eq!(
+        paths
+            .iter()
+            .filter(|path| **path == IntentResolutionPath::VisionPrefill)
+            .count(),
+        32
+    );
+    assert_eq!(
+        paths
+            .iter()
+            .filter(|path| **path == IntentResolutionPath::VisionFallback)
+            .count(),
+        8
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
 async fn prefill_off_escalates_each_stuck_field_live() {
     let fixture = test_site::spawn().await;
     let root = tempfile::tempdir().unwrap();

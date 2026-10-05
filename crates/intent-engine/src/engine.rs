@@ -23,7 +23,8 @@ use crate::verify::{
     summarize_target, verify_fill, ResolutionDetails,
 };
 use crate::vision::{
-    proposal_sha256, VisionAction, VisionAssist, VisionProposeRequest, VISION_CONFIDENCE_FLOOR,
+    proposal_sha256, VisionAction, VisionAssist, VisionProposeRequest, MAX_CACHED_PROPOSALS,
+    VISION_CONFIDENCE_FLOOR,
 };
 
 #[derive(Clone, Default)]
@@ -504,10 +505,10 @@ struct PrefillRequest {
 
 const PREFILL_CONCURRENCY_LIMIT: usize = 4;
 
-/// Preflights every field without mutating the page, then asks vision only for
-/// fields the deterministic resolver cannot settle. Candidate identities are
-/// cached; typed values remain in the runtime and are applied only when the
-/// field executes.
+/// Preflights fields without mutating the page, then asks vision only for
+/// fields the deterministic resolver cannot settle, up to the cache capacity.
+/// Candidate identities are cached; typed values remain in the runtime and
+/// are applied only when the field executes.
 async fn proactive_prefill(
     page_id: &PageId,
     browser: &dyn IntentBrowser,
@@ -526,6 +527,9 @@ async fn proactive_prefill(
 
     let mut requests = Vec::new();
     for field in fields {
+        if requests.len() == MAX_CACHED_PROPOSALS {
+            break;
+        }
         if field.revealed_by.is_some() {
             // Not yet in the DOM; nothing to preflight until its reveal
             // control is clicked in `execute_complete_form`.
