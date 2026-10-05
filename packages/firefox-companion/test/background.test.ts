@@ -1737,6 +1737,69 @@ test("a frame snapshot after the page binding and grant does not revoke the boun
   assert.deepEqual(discoveredTargetIds(transport), [targetId(32, 0)]);
 });
 
+test("a page-opened popup keeps its lease through its first navigation, frame-ready, and grant renewal", async () => {
+  const transport = new FakeTransport();
+  const routed: Array<{ tabId: number; frameId: number }> = [];
+  let registrations = 0;
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [],
+    discoverTabTargets: async () => [],
+    // Production target IDs are random, so a re-registered route gets a new ID.
+    createTargetId: (target) => `target-${target.tabId}-${target.frameId}-${(registrations += 1)}`,
+    async sendTabMessage(tabId, _message, frameId) {
+      routed.push({ tabId, frameId });
+      return { controls: [] };
+    },
+    async navigateTab() {},
+    now: () => 1_000,
+  });
+  background.connect(CONNECT_OPTIONS);
+  await pair(background);
+
+  const pages: Array<{ targetId: string; pageId: string }> = [];
+  const bind = (tabId: number): void => {
+    bindTab(background, tabId);
+    const bindings = transport.sent.filter(
+      (message): message is { kind: "pageBindingDiscovered"; output: { targetId: string } } =>
+        typeof message === "object" &&
+        message !== null &&
+        "kind" in message &&
+        message.kind === "pageBindingDiscovered",
+    );
+    const binding = bindings[bindings.length - 1];
+    assert.ok(binding);
+    pages.push({ targetId: binding.output.targetId, pageId: pageId(tabId, 0) });
+  };
+  const grantPages = (expiresAtUnixMs: number): Promise<void> =>
+    background.receive({
+      kind: "grant",
+      input: {
+        protocolVersion: 1,
+        attachmentId: ATTACHMENT_ID,
+        profileId: CONNECT_OPTIONS.profileId,
+        expiresAtUnixMs,
+        pages: [...pages],
+      },
+    });
+
+  bind(30);
+  await grantPages(61_000);
+  bind(31);
+  await grantPages(61_000);
+  await background.reconcileTab(31);
+  await background.receiveRuntimeMessage(
+    { type: "companionFrameReady" },
+    { id: "trusted-extension", tab: { id: 31 }, frameId: 0, url: "https://example.test/authorize" },
+    "trusted-extension",
+  );
+  await grantPages(91_000);
+  await background.receive(action(31, 0));
+
+  assert.deepEqual(routed, [{ tabId: 31, frameId: 0 }]);
+  assertNoFailure(transport);
+});
+
 async function productionBoundPage(
   getAllFrames: () => Promise<Array<{ frameId: number; url: string }>>,
 ): Promise<{ port: FakeNativePort; routed: unknown[] }> {
