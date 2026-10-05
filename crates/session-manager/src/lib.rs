@@ -1,23 +1,44 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
 use tokio::sync::RwLock;
 use types::{CreateSessionRequest, ExecutionPolicy, PageId, RuntimeError, SessionId, SessionState};
 use worker_pool::WorkerPool;
 
-#[derive(Clone, Default)]
+/// Longest a session close waits on browser-side teardown before it unregisters
+/// the session anyway.
+const DEFAULT_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Clone)]
 pub struct SessionManager {
     inner: Arc<RwLock<HashMap<SessionId, SessionState>>>,
     workers: Option<Arc<WorkerPool>>,
+    release_timeout: Duration,
+}
+
+impl Default for SessionManager {
+    fn default() -> Self {
+        Self {
+            inner: Arc::default(),
+            workers: None,
+            release_timeout: DEFAULT_RELEASE_TIMEOUT,
+        }
+    }
 }
 
 impl SessionManager {
     pub fn new(workers: Arc<WorkerPool>) -> Self {
         Self {
-            inner: Arc::default(),
             workers: Some(workers),
+            ..Self::default()
         }
+    }
+
+    pub fn with_release_timeout(mut self, release_timeout: Duration) -> Self {
+        self.release_timeout = release_timeout;
+        self
     }
 
     pub async fn create(&self, req: CreateSessionRequest) -> Result<SessionState, RuntimeError> {
@@ -76,14 +97,18 @@ impl SessionManager {
         if !self.inner.read().await.contains_key(id) {
             return Err(RuntimeError::NotFound("session".into()));
         }
-        // Release before unregistering: if the release fails, the session
-        // stays listed so the caller can retry -- removing first would leak
-        // the browser with no handle left to close it.
+        // The session is unregistered whatever the browser does: a dead or hung
+        // browser must not keep a closed session listed and holding capacity.
         if let Some(workers) = &self.workers {
-            workers
-                .release_session(id)
-                .await
-                .map_err(|error| RuntimeError::Internal(error.message))?;
+            match tokio::time::timeout(self.release_timeout, workers.release_session(id)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::warn!(
+                    session_id = %id.0,
+                    error = %error.message,
+                    "session.release_failed"
+                ),
+                Err(_) => tracing::warn!(session_id = %id.0, "session.release_timed_out"),
+            }
         }
         self.inner.write().await.remove(id);
         tracing::info!(session_id = %id.0, "session.deleted");

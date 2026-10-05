@@ -24,6 +24,15 @@
 - A gateway still refused after that answers the host's `initialize` request
   on stdout with a JSON-RPC error (same `id`, the runtime's reason) before
   exiting 1; the host saw only a closed pipe.
+- `session_close` removes the session from the registry even when its browser is
+  dead or refuses to close, and waits at most 10 s on browser teardown; it
+  returned `internal` and kept the session listed.
+- A form snapshot or page open on a session whose browser is gone returns
+  `engineUnreachable` telling the caller to create a new session; it returned
+  `internal`.
+- A command on a Firefox session whose worker is closed fails with a message
+  telling the caller to create a new session, instead of "Firefox companion
+  worker is closed".
 
 ### Changed
 

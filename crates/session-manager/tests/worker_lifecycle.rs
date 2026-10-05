@@ -187,7 +187,7 @@ impl WorkerFactory for FailingCloseFactory {
 }
 
 #[tokio::test]
-async fn failed_release_keeps_the_session_registered_for_retry() {
+async fn failed_release_still_unregisters_the_session() {
     let pool = Arc::new(WorkerPool::new(8, Arc::new(FailingCloseFactory)));
     let manager = SessionManager::new(pool);
     let session = manager
@@ -200,10 +200,10 @@ async fn failed_release_keeps_the_session_registered_for_retry() {
         .await
         .unwrap();
 
-    // The close failure must not unregister the session: deleting first
-    // would leak the browser with no handle left to close it.
-    assert!(manager.delete(&session.id).await.is_err());
-    assert!(manager.get(&session.id).await.is_ok());
+    // The pool has already dropped the worker, so a refused browser close
+    // must not keep a closed session listed.
+    manager.delete(&session.id).await.unwrap();
+    assert!(manager.get(&session.id).await.is_err());
 }
 
 struct DeadlineFactory;

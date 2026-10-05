@@ -1738,7 +1738,8 @@ async fn page_open_failure_returns_stable_bounded_fields_without_publishing_a_ha
 }
 
 #[tokio::test]
-async fn page_open_failure_with_failed_cleanup_still_never_publishes_a_handle() {
+async fn page_open_failure_with_failing_browser_close_never_publishes_a_handle_and_removes_the_session(
+) {
     let handle = verified_handle(vec![
         Capability::SessionRead,
         Capability::SessionWrite,
@@ -1768,8 +1769,8 @@ async fn page_open_failure_with_failed_cleanup_still_never_publishes_a_handle() 
     assert_eq!(result["reason"], "pageOpenFailed", "{response}");
     assert_eq!(result["workflowHandle"], Value::Null, "{response}");
     assert_eq!(result["pageId"], Value::Null, "{response}");
-    assert_eq!(result["sessionDeleted"], false, "{response}");
-    assert_eq!(result["cleanupErrorCode"], "internal", "{response}");
+    assert_eq!(result["sessionDeleted"], true, "{response}");
+    assert_eq!(result["cleanupErrorCode"], Value::Null, "{response}");
     assert_eq!(
         live.probe
             .worker_closes
@@ -1777,16 +1778,6 @@ async fn page_open_failure_with_failed_cleanup_still_never_publishes_a_handle() 
         1,
         "failed page-open cleanup is attempted once"
     );
-    assert_eq!(live.runtime.list_sessions().await.len(), 1);
-
-    let repaired = call_tool(
-        &live.server,
-        252,
-        "session_close",
-        json!({"sessionId":result["sessionId"]}),
-    )
-    .await;
-    assert_eq!(repaired["result"]["structuredContent"]["closed"], true);
     wait_for_no_sessions(&live.runtime).await;
 }
 
@@ -1942,7 +1933,8 @@ async fn intent_follow_description_preserves_boundary_no_retry_guidance() {
 }
 
 #[tokio::test]
-async fn normal_failure_reports_one_failed_compensation_attempt_and_keeps_session_repairable() {
+async fn normal_failure_attempts_compensation_once_and_removes_the_session_despite_a_failing_close()
+{
     let handle = verified_handle(Capability::ALL.to_vec()).await;
     let live = common::live_server_failing_delete_once(handle).await;
     initialize(&live.server).await;
@@ -1958,8 +1950,8 @@ async fn normal_failure_reports_one_failed_compensation_attempt_and_keeps_sessio
     let result = &response["result"]["structuredContent"];
     assert_eq!(result["status"], "failed", "{response}");
     assert_eq!(result["pageClosed"], true, "{response}");
-    assert_eq!(result["sessionDeleted"], false, "{response}");
-    assert_eq!(result["cleanupErrorCode"], "internal", "{response}");
+    assert_eq!(result["sessionDeleted"], true, "{response}");
+    assert_eq!(result["cleanupErrorCode"], Value::Null, "{response}");
     assert_eq!(
         live.probe
             .worker_closes
@@ -1967,16 +1959,6 @@ async fn normal_failure_reports_one_failed_compensation_attempt_and_keeps_sessio
         1,
         "compensation is attempted once without an internal retry loop"
     );
-    assert_eq!(live.runtime.list_sessions().await.len(), 1);
-
-    let repaired = call_tool(
-        &live.server,
-        271,
-        "session_close",
-        json!({"sessionId":result["sessionId"]}),
-    )
-    .await;
-    assert_eq!(repaired["result"]["structuredContent"]["closed"], true);
     wait_for_no_sessions(&live.runtime).await;
 }
 
@@ -2038,22 +2020,11 @@ async fn cancelled_failed_compensation_is_bounded_to_one_attempt_and_does_not_pa
         1,
         "cancelled cleanup performs no hidden retry"
     );
-    assert_eq!(live.runtime.list_sessions().await.len(), 1);
-
-    live.probe.delete_release.notify_one();
-    let session_id = live.runtime.list_sessions().await[0].id.clone();
-    let repaired = call_tool(
-        &live.server,
-        281,
-        "session_close",
-        json!({"sessionId":session_id}),
-    )
-    .await;
-    assert_eq!(repaired["result"]["structuredContent"]["closed"], true);
+    wait_for_no_sessions(&live.runtime).await;
 }
 
 #[tokio::test]
-async fn failed_authenticated_session_delete_preserves_page_runtime_until_successful_retry() {
+async fn session_close_with_a_failing_browser_close_still_removes_the_session_and_its_pages() {
     let handle = verified_handle(Capability::ALL.to_vec()).await;
     let live = common::live_server_failing_delete_once(handle).await;
     initialize(&live.server).await;
@@ -2069,24 +2040,14 @@ async fn failed_authenticated_session_delete_preserves_page_runtime_until_succes
     )
     .await;
     assert_eq!(
-        failed["error"]["data"]["interfaceError"]["code"], "internal",
+        failed["result"]["structuredContent"]["closed"], true,
         "{failed}"
     );
-    assert!(live.runtime.pages.get(&page_id).await.is_ok());
-    assert_eq!(live.runtime.list_sessions().await.len(), 1);
-
-    let retried = call_tool(
-        &live.server,
-        292,
-        "session_close",
-        json!({"sessionId":result["sessionId"]}),
-    )
-    .await;
-    assert_eq!(retried["result"]["structuredContent"]["closed"], true);
     assert!(matches!(
         live.runtime.pages.get(&page_id).await,
         Err(types::RuntimeError::NotFound(_))
     ));
+    assert_eq!(live.runtime.list_sessions().await.len(), 0);
 }
 
 #[tokio::test]
