@@ -34,6 +34,9 @@
   telling the caller to create a new session, instead of "Firefox companion
   worker is closed".
 - MCP: a wrongly shaped `kind` union (wait conditions, form field values) is rejected with the allowed kinds and the chosen kind's required properties; `intent_follow` without a wait shows a valid example.
+- An MCP connection that ends closes the sessions it opened and had not closed,
+  as ACP connections do; they stayed registered, held browser capacity, and made
+  `bobby runtime stop` and `restart` report them as attached.
 
 ### Added
 
