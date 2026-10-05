@@ -1037,7 +1037,26 @@ pub mod testing {
         admin_app(
             max_principals,
             max_in_flight_per_principal,
+            InterfaceConfig::default().max_connections,
             authority_path,
+            RuntimeService::default(),
+            None,
+        )
+        .await
+    }
+
+    /// Same as [`app_with_admin_and_quota`], but also overrides `max_connections`, the
+    /// runtime-wide bound that in-flight HTTP requests and gateway connections share.
+    pub async fn app_with_admin_and_limits(
+        max_principals: usize,
+        max_in_flight_per_principal: usize,
+        max_connections: usize,
+    ) -> (axum::Router, Arc<EnrolledAuthority>, String) {
+        admin_app(
+            max_principals,
+            max_in_flight_per_principal,
+            max_connections,
+            unique_authority_path(),
             RuntimeService::default(),
             None,
         )
@@ -1054,6 +1073,7 @@ pub mod testing {
         admin_app(
             max_principals,
             InterfaceConfig::default().max_in_flight_per_principal,
+            InterfaceConfig::default().max_connections,
             unique_authority_path(),
             runtime,
             Some(control),
@@ -1064,6 +1084,7 @@ pub mod testing {
     async fn admin_app(
         max_principals: usize,
         max_in_flight_per_principal: usize,
+        max_connections: usize,
         authority_path: std::path::PathBuf,
         runtime: RuntimeService,
         control: Option<&crate::SharedRuntimeControl>,
@@ -1105,6 +1126,7 @@ pub mod testing {
         let interface = InterfaceConfig {
             max_principals,
             max_in_flight_per_principal,
+            max_connections,
             ..InterfaceConfig::default()
         };
 

@@ -25,14 +25,14 @@ ledger is moved aside. Scope sharing is local to the current OS user.
 
 ### How many agents
 
-An open connection holds one of its principal's
-`interface.max_in_flight_per_principal` permits (default 8) until it closes;
-in-flight HTTP requests from the same principal draw on the same permits.
-Agents that share the bootstrap credential share one principal, so with eight
-attached the ninth is refused:
-`the shared runtime refused the connection: resourceExhausted: principal
-in-flight capacity exhausted (retry after 1000 ms)`. Raise the setting, or
-give agents their own principals ([Authentication](../guides/auth.md)).
+Each attached agent holds one of the runtime's `interface.max_connections`
+slots (default 64) until it closes; in-flight HTTP requests draw on the same
+slots. When all are held the next agent is refused:
+`the shared runtime refused the connection: resourceExhausted: gateway
+connection capacity exhausted (retry after 1000 ms)`. Raise the setting to
+attach more. `interface.max_in_flight_per_principal` bounds in-flight HTTP
+requests per principal only; agents sharing the bootstrap credential are not
+limited by it.
 
 Measured on one owner with managed Chromium, each agent running
 `workflow_start`, `intent_complete_form`, and `session_close` against a local

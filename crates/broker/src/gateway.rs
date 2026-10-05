@@ -1,8 +1,5 @@
 //! Connection-local protocol state over a shared authenticated runtime.
-use crate::{
-    auth::{acquire_principal_permit, ProtocolError},
-    AppState,
-};
+use crate::{auth::ProtocolError, AppState};
 
 #[derive(Clone)]
 pub(crate) struct Lifecycle {
@@ -126,13 +123,6 @@ pub(crate) async fn connect(
             .into_response()
         }
     };
-    let permit =
-        match acquire_principal_permit(&state, handle.principal_id(), types::CorrelationId::new())
-            .await
-        {
-            Ok(permit) => permit,
-            Err(error) => return error.into_response(),
-        };
     let bearer = bearer.to_owned();
     upgrade
         .max_message_size(gateway_transport::MAX_FRAME_BYTES)
@@ -141,7 +131,6 @@ pub(crate) async fn connect(
             let lifecycle = state.gateway_lifecycle.clone();
             lifecycle
                 .spawn(async move {
-                    let _permit = permit;
                     let _connection_permit = connection_permit;
                     let stopped = state.gateway_lifecycle.stop.subscribe();
                     let (server_io, bridge_io) =
@@ -194,7 +183,7 @@ pub(crate) async fn connect(
 }
 
 /// How long the protocol server may keep running after its peer is gone. The
-/// connection holds a principal permit until it ends, and a server whose
+/// connection holds a connection permit until it ends, and a server whose
 /// requests are stuck on work nobody can receive would never end on its own.
 const PEER_GONE_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 

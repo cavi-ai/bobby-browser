@@ -11,9 +11,9 @@
 //! are printed, not asserted; run with `--nocapture` for the table the docs
 //! reproduce.
 //!
-//! Every connection holds one of its principal's `max_in_flight_per_principal`
-//! permits for as long as it is open. With that many agents attached under the
-//! one bootstrap principal, the next is refused and told why.
+//! A gateway connection holds one `interface.max_connections` slot, not a
+//! per-principal permit. `max_in_flight_per_principal + 1` agents attached under
+//! the one bootstrap principal are all admitted and each answers `initialize`.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -291,24 +291,13 @@ async fn eight_agents_share_one_runtime_owner_without_losing_a_request() {
 
     let quota = config.interface.max_in_flight_per_principal;
     let mut held = Vec::new();
-    for _ in 0..quota {
+    for _ in 0..=quota {
         held.push(Agent::attach(&origin, &bearer).await);
     }
-    let refused = gateway_transport::connect_within(
-        &origin,
-        "mcp",
-        &bearer,
-        tokio::io::empty(),
-        tokio::io::sink(),
-        std::time::Duration::ZERO,
-    )
-    .await
-    .unwrap_err()
-    .to_string();
-    println!("connection {} of one principal: {refused}", quota + 1);
-    assert!(
-        refused.contains("resourceExhausted") && refused.contains("retry after"),
-        "{refused}"
+    assert_eq!(
+        held.len(),
+        quota + 1,
+        "every agent past the quota is admitted"
     );
     for agent in held {
         agent.close().await;

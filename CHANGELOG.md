@@ -18,6 +18,10 @@
   held a per-principal permit until the protocol server finished on its own,
   and a server with 64 requests pending stops reading frames, so it never saw
   the peer leave.
+- An attached MCP or ACP gateway connection no longer holds a per-principal
+  in-flight permit: agents that share one credential are bounded by
+  `interface.max_connections` (default 64) instead of 8, and that principal's
+  HTTP requests are no longer refused while 8 agents are attached.
 - A gateway refused by the shared runtime with a retryable error retries the
   connection after the runtime's `retryAfterMs`, for up to 10 s, instead of
   exiting on the first refusal.

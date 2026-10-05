@@ -318,7 +318,7 @@ mod tests {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = [0u8; 4096];
             let _ = stream.read(&mut request).await.unwrap();
-            let body = r#"{"error":{"code":"resourceExhausted","layer":"interface","message":"principal in-flight capacity exhausted","correlationId":"00000000-0000-4000-8000-000000000000","commandId":null,"retryable":true,"retryAfterMs":1000,"reconciliationRequired":false,"requiredCapability":null}}"#;
+            let body = r#"{"error":{"code":"resourceExhausted","layer":"interface","message":"gateway connection capacity exhausted","correlationId":"00000000-0000-4000-8000-000000000000","commandId":null,"retryable":true,"retryAfterMs":1000,"reconciliationRequired":false,"requiredCapability":null}}"#;
             let response = format!(
                 "HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\nretry-after: 1\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
@@ -339,14 +339,14 @@ mod tests {
         assert_eq!(
             error,
             "the shared runtime refused the connection: resourceExhausted: \
-             principal in-flight capacity exhausted (retry after 1000 ms)"
+             gateway connection capacity exhausted (retry after 1000 ms)"
         );
         assert!(!error.contains("private-test-bearer"));
     }
 
-    const REFUSAL_BODY: &str = r#"{"error":{"code":"resourceExhausted","layer":"interface","message":"principal in-flight capacity exhausted","correlationId":"00000000-0000-4000-8000-000000000000","commandId":null,"retryable":true,"retryAfterMs":20,"reconciliationRequired":false,"requiredCapability":null}}"#;
+    const REFUSAL_BODY: &str = r#"{"error":{"code":"resourceExhausted","layer":"interface","message":"gateway connection capacity exhausted","correlationId":"00000000-0000-4000-8000-000000000000","commandId":null,"retryable":true,"retryAfterMs":20,"reconciliationRequired":false,"requiredCapability":null}}"#;
     const REFUSAL_REASON: &str = "the shared runtime refused the connection: resourceExhausted: \
-        principal in-flight capacity exhausted (retry after 20 ms)";
+        gateway connection capacity exhausted (retry after 20 ms)";
 
     async fn refuse(stream: &mut tokio::net::TcpStream) {
         let mut request = [0u8; 4096];
