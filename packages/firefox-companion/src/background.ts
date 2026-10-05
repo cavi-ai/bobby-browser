@@ -197,10 +197,12 @@ function navigationUrl(input: unknown): string {
   return url.href;
 }
 
+type TrackedTarget = DiscoveredTarget & { kind: BrowserTarget["kind"]; bound: boolean };
+
 export class CompanionBackground {
   readonly #dependencies: BackgroundDependencies;
   readonly #leases = new Map<string, PageLease>();
-  readonly #targets = new Map<string, DiscoveredTarget & { kind: BrowserTarget["kind"] }>();
+  readonly #targets = new Map<string, TrackedTarget>();
   readonly #targetIdsByRoute = new Map<string, string>();
   readonly #tabLifecycles = new Map<number, TabLifecycle>();
   #options: BackgroundConnectOptions | undefined;
@@ -419,7 +421,9 @@ export class CompanionBackground {
       }
       let changed = this.#removeTargets(
         (target) =>
-          target.tabId === tabId && !current.has(browserRouteKey(target.tabId, target.frameId)),
+          target.tabId === tabId &&
+          !target.bound &&
+          !current.has(browserRouteKey(target.tabId, target.frameId)),
       );
       for (const target of current.values()) changed = this.#registerTarget(target) || changed;
       if (changed) this.#sendDiscovery();
@@ -455,6 +459,8 @@ export class CompanionBackground {
     if (!this.#paired || !this.#options) return;
     const targetId = this.#targetIdsByRoute.get(browserRouteKey(target.tabId, target.frameId));
     if (!targetId) return;
+    const bound = this.#targets.get(targetId);
+    if (bound) bound.bound = true;
     const event: CompanionEvent = {
       kind: "pageBindingDiscovered",
       output: {
@@ -748,11 +754,12 @@ export class CompanionBackground {
     this.#targets.set(targetId, {
       ...target,
       kind: target.frameId === 0 ? "page" : "frame",
+      bound: false,
     });
     return true;
   }
 
-  #removeTargets(predicate: (target: DiscoveredTarget) => boolean): boolean {
+  #removeTargets(predicate: (target: TrackedTarget) => boolean): boolean {
     const removedRoutes = new Set<string>();
     for (const [targetId, target] of this.#targets) {
       if (!predicate(target)) continue;

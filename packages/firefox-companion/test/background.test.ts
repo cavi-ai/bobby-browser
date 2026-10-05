@@ -1622,3 +1622,242 @@ test("production runtime listener enrollPair requires matching sender id", async
     message: "Start bobby serve, then Pair again",
   });
 });
+
+const BINDING_NONCE = "b5f6319a-6b36-43cb-9464-d337fc9d8201";
+
+function bindTab(background: CompanionBackground, tabId: number): void {
+  const title = `automation-runtime-binding:${BINDING_NONCE}`;
+  background.receiveTabUpdate(tabId, { title }, { id: tabId, url: "about:blank", title });
+}
+
+function boundBackground(
+  transport: FakeTransport,
+  routed: Array<{ tabId: number; frameId: number }>,
+  discoverTabTargets: (tabId: number) => Promise<readonly DiscoveredTarget[]>,
+  discoverTargets: () => Promise<readonly DiscoveredTarget[]> = async () => [],
+): CompanionBackground {
+  return new CompanionBackground({
+    transport,
+    discoverTargets,
+    discoverTabTargets,
+    createTargetId: (target) => targetId(target.tabId, target.frameId),
+    async sendTabMessage(tabId, _message, frameId) {
+      routed.push({ tabId, frameId });
+      return { controls: [] };
+    },
+    async navigateTab() {},
+    now: () => 1_000,
+  });
+}
+
+function assertNoFailure(transport: FakeTransport): void {
+  assert.equal(
+    transport.sent.some(
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        "kind" in message &&
+        message.kind === "actionFailed",
+    ),
+    false,
+  );
+}
+
+test("a frame snapshot in flight when the page binding lands does not revoke the bound route or its lease", async () => {
+  const transport = new FakeTransport();
+  const routed: Array<{ tabId: number; frameId: number }> = [];
+  const snapshot = deferred<readonly DiscoveredTarget[]>();
+  const background = boundBackground(transport, routed, async () => snapshot.promise);
+  background.connect(CONNECT_OPTIONS);
+  await pair(background);
+
+  const reconciliation = background.reconcileTab(31);
+  bindTab(background, 31);
+  await grant(background, [{ tabId: 31, frameId: 0 }]);
+  snapshot.resolve([]);
+  await reconciliation;
+  await background.receive(action(31, 0));
+
+  assert.deepEqual(routed, [{ tabId: 31, frameId: 0 }]);
+  assertNoFailure(transport);
+  assert.deepEqual(discoveredTargetIds(transport), [targetId(31, 0)]);
+});
+
+test("a frame snapshot after the page binding and grant does not revoke the bound route or its lease", async () => {
+  const transport = new FakeTransport();
+  const routed: Array<{ tabId: number; frameId: number }> = [];
+  const background = boundBackground(transport, routed, async () => []);
+  background.connect(CONNECT_OPTIONS);
+  await pair(background);
+
+  bindTab(background, 32);
+  await grant(background, [{ tabId: 32, frameId: 0 }]);
+  await background.reconcileTab(32);
+  await background.receive(action(32, 0));
+
+  assert.deepEqual(routed, [{ tabId: 32, frameId: 0 }]);
+  assertNoFailure(transport);
+  assert.deepEqual(discoveredTargetIds(transport), [targetId(32, 0)]);
+});
+
+async function productionBoundPage(
+  getAllFrames: () => Promise<Array<{ frameId: number; url: string }>>,
+): Promise<{ port: FakeNativePort; routed: unknown[] }> {
+  const port = new FakeNativePort();
+  const routed: unknown[] = [];
+  const tabUpdates = new ListenerSet<(
+    tabId: number,
+    changeInfo: { title?: string },
+    tab: { id?: number; url?: string; title?: string },
+  ) => void>();
+  const navigationCommits = new ListenerSet<(
+    details: { tabId: number; frameId: number; url: string },
+  ) => void>();
+  const browserApi = {
+    runtime: {
+      id: "trusted-extension",
+      connectNative: () => port,
+      onMessage: new ListenerSet(),
+      async getBrowserInfo() {
+        return { name: "Firefox", version: "128.0" };
+      },
+      async getPlatformInfo() {
+        return { os: "mac" };
+      },
+    },
+    storage: {
+      local: {
+        async get() {
+          return {
+            companionId: CONNECT_OPTIONS.companionId,
+            profileId: CONNECT_OPTIONS.profileId,
+          };
+        },
+        async set() {},
+      },
+    },
+    tabs: {
+      onUpdated: tabUpdates,
+      onRemoved: new ListenerSet(),
+      async query() {
+        return [];
+      },
+      async sendMessage(tabId: number, message: unknown, options: { frameId: number }) {
+        routed.push({ tabId, message, frameId: options.frameId });
+        return { controls: [] };
+      },
+      async update() {},
+    },
+    webNavigation: { onCommitted: navigationCommits, async getAllFrames() { return getAllFrames(); } },
+  };
+  const startProductionBackground = (
+    backgroundModule as typeof backgroundModule & {
+      startProductionBackground(api: unknown): Promise<CompanionBackground>;
+    }
+  ).startProductionBackground;
+  await startProductionBackground(browserApi);
+  port.onMessage.emit({
+    kind: "paired",
+    output: { companionId: CONNECT_OPTIONS.companionId, profileId: CONNECT_OPTIONS.profileId },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const title = `automation-runtime-binding:${BINDING_NONCE}`;
+  tabUpdates.emit(41, { title }, { id: 41, url: "about:blank", title });
+  await new Promise((resolve) => setImmediate(resolve));
+  const binding = port.sent.find(
+    (message): message is { kind: "pageBindingDiscovered"; output: { targetId: string } } =>
+      typeof message === "object" &&
+      message !== null &&
+      "kind" in message &&
+      message.kind === "pageBindingDiscovered",
+  );
+  assert.ok(binding);
+  port.onMessage.emit({
+    kind: "grant",
+    input: {
+      protocolVersion: 1,
+      attachmentId: ATTACHMENT_ID,
+      profileId: CONNECT_OPTIONS.profileId,
+      expiresAtUnixMs: Date.now() + 60_000,
+      pages: [{ targetId: binding.output.targetId, pageId: pageId(41, 0) }],
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  navigationCommits.emit({ tabId: 41, frameId: 0, url: "about:blank" });
+  await new Promise((resolve) => setImmediate(resolve));
+  port.onMessage.emit(action(41, 0, { deadlineUnixMs: Date.now() + 60_000 }));
+  await new Promise((resolve) => setImmediate(resolve));
+  return { port, routed };
+}
+
+function actionFailures(port: FakeNativePort): unknown[] {
+  return port.sent.filter(
+    (message) =>
+      typeof message === "object" &&
+      message !== null &&
+      "kind" in message &&
+      message.kind === "actionFailed",
+  );
+}
+
+test("production wiring keeps a bound blank tab's lease when its frame snapshot is filtered empty", async () => {
+  const { port, routed } = await productionBoundPage(async () => [
+    { frameId: 0, url: "about:blank" },
+  ]);
+
+  assert.equal(routed.length, 1);
+  assert.deepEqual(actionFailures(port), []);
+});
+
+test("production wiring keeps a bound tab's lease when frame discovery fails", async () => {
+  const { port, routed } = await productionBoundPage(async () => {
+    throw new Error("frame discovery unavailable");
+  });
+
+  assert.equal(routed.length, 1);
+  assert.deepEqual(actionFailures(port), []);
+});
+
+test("closing a bound tab still revokes its route and lease", async () => {
+  const transport = new FakeTransport();
+  const routed: Array<{ tabId: number; frameId: number }> = [];
+  const background = boundBackground(transport, routed, async () => []);
+  background.connect(CONNECT_OPTIONS);
+  await pair(background);
+  bindTab(background, 33);
+  await grant(background, [{ tabId: 33, frameId: 0 }]);
+
+  background.receiveTabRemoved(33);
+  await background.receive(action(33, 0));
+
+  assert.deepEqual(routed, []);
+  assert.deepEqual(discoveredTargetIds(transport), []);
+  assert.deepEqual(transport.sent.at(-1), {
+    kind: "actionFailed",
+    output: {
+      commandId: "command-1",
+      code: "leaseExpired",
+      message: "the page lease is missing or expired",
+      effectUncertain: false,
+    },
+  });
+});
+
+test("a frame snapshot prunes the subframes of a bound tab but not the bound page", async () => {
+  const transport = new FakeTransport();
+  const routed: Array<{ tabId: number; frameId: number }> = [];
+  const background = boundBackground(
+    transport,
+    routed,
+    async () => [],
+    async () => [{ tabId: 34, frameId: 4 }],
+  );
+  background.connect(CONNECT_OPTIONS);
+  await pair(background);
+  bindTab(background, 34);
+  assert.deepEqual(discoveredTargetIds(transport), [targetId(34, 0), targetId(34, 4)]);
+
+  await background.reconcileTab(34);
+
+  assert.deepEqual(discoveredTargetIds(transport), [targetId(34, 0)]);
+});
