@@ -8,6 +8,24 @@ use crate::{
 pub(crate) struct Lifecycle {
     stop: tokio::sync::watch::Sender<bool>,
     tasks: std::sync::Arc<tokio::sync::Mutex<tokio::task::JoinSet<()>>>,
+    live: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// Counts one live connection for as long as it is held; every exit path of the
+/// task, including an abort, drops it.
+struct LiveConnection(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl LiveConnection {
+    fn enter(live: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        live.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Self(live.clone())
+    }
+}
+
+impl Drop for LiveConnection {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
 }
 
 impl Default for Lifecycle {
@@ -15,6 +33,7 @@ impl Default for Lifecycle {
         Self {
             stop: tokio::sync::watch::channel(false).0,
             tasks: Default::default(),
+            live: Default::default(),
         }
     }
 }
@@ -24,8 +43,15 @@ impl Lifecycle {
         let mut tasks = self.tasks.lock().await;
         while tasks.try_join_next().is_some() {}
         if !*self.stop.borrow() {
-            tasks.spawn(task);
+            let live = LiveConnection::enter(&self.live);
+            tasks.spawn(async move {
+                let _live = live;
+                task.await
+            });
         }
+    }
+    pub(crate) fn live_connections(&self) -> usize {
+        self.live.load(std::sync::atomic::Ordering::Acquire)
     }
     pub(crate) fn stop(&self) {
         self.stop.send_replace(true);
