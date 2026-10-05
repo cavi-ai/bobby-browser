@@ -1,4 +1,5 @@
 import { isExtensionSafeString } from "./native-transport.js";
+import { containsSecretMaterial } from "./secret-material.js";
 import { MAX_COMPANION_PAYLOAD_BYTES } from "./protocol.js";
 
 export const MAX_VISIBLE_TEXT_LENGTH = 64 * 1024;
@@ -181,7 +182,7 @@ function observationString(
 ): string | undefined {
   const normalized = value?.slice(0, maximum * 8).replace(/\s+/g, " ").trim();
   if (!normalized) return undefined;
-  if (containsSensitiveMaterial(normalized) || !isExtensionSafeString(normalized)) {
+  if (containsSecretMaterial(normalized) || !isExtensionSafeString(normalized)) {
     return byteLength(REDACTED) <= maximum ? REDACTED : undefined;
   }
   return boundedUtf8(normalized, maximum);
