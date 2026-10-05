@@ -2826,7 +2826,7 @@ async fn intent_follow_unknown_wait_kind_url_contains_names_allowed_kinds() {
     let message = message_of(&response);
     assert!(message.contains(WAIT_KINDS), "{message}");
     assert!(
-        message.contains("`urlContains` is not an allowed kind"),
+        message.contains("the supplied `kind` is not allowed"),
         "{message}"
     );
     assert_eq!(
@@ -2857,7 +2857,7 @@ async fn intent_follow_unknown_wait_kind_navigation_names_allowed_kinds() {
     let message = message_of(&response);
     assert!(message.contains(WAIT_KINDS), "{message}");
     assert!(
-        message.contains("`navigation` is not an allowed kind"),
+        message.contains("the supplied `kind` is not allowed"),
         "{message}"
     );
 }
@@ -2876,7 +2876,7 @@ async fn intent_follow_unknown_wait_kind_url_matches_names_allowed_kinds() {
     let message = message_of(&response);
     assert!(message.contains(WAIT_KINDS), "{message}");
     assert!(
-        message.contains("`urlMatches` is not an allowed kind"),
+        message.contains("the supplied `kind` is not allowed"),
         "{message}"
     );
 }
@@ -2898,7 +2898,10 @@ async fn complete_form_field_value_with_wrong_shape_names_allowed_kinds() {
         "{message}"
     );
     assert!(message.contains("requires `value`"), "{message}");
-    assert!(message.contains("`text` is not defined"), "{message}");
+    assert!(
+        message.contains("it defines only: value, clearFirst"),
+        "{message}"
+    );
 }
 
 #[tokio::test]
@@ -2915,7 +2918,7 @@ async fn url_condition_with_wrong_matcher_names_nested_kinds() {
     let message = message_of(&response);
     assert!(message.contains("exact, contains, regex"), "{message}");
     assert!(
-        message.contains("`includes` is not an allowed kind"),
+        message.contains("At /matcher: the supplied `kind` is not allowed; allowed kinds: exact, contains, regex."),
         "{message}"
     );
 }
@@ -2933,7 +2936,10 @@ async fn allowed_kind_with_wrong_property_names_required_and_undefined() {
     assert_union_rejection(&response, "/expectedState/condition");
     let message = message_of(&response);
     assert!(message.contains("requires `matcher`"), "{message}");
-    assert!(message.contains("`pattern` is not defined"), "{message}");
+    assert!(
+        message.contains("kind `url` requires `matcher`; it defines only: matcher."),
+        "{message}"
+    );
 }
 
 #[tokio::test]
@@ -2973,4 +2979,29 @@ async fn intent_follow_without_wait_appends_a_valid_example() {
         ),
         "{message}"
     );
+}
+
+#[tokio::test]
+async fn union_rejection_never_echoes_caller_strings() {
+    let response = scoped_call(
+        "intent_follow",
+        follow_with(
+            "expectedState",
+            json!({"condition":{"kind":"zzcallermarker1","zzcallermarker2":"zzcallermarker3"},"timeoutMs":10000}),
+        ),
+    )
+    .await;
+    assert_union_rejection(&response, "/expectedState/condition");
+    let other = scoped_call(
+        "intent_follow",
+        follow_with(
+            "expectedState",
+            json!({"condition":{"kind":"url","zzcallermarker2":"x"},"timeoutMs":10000}),
+        ),
+    )
+    .await;
+    for response in [response, other] {
+        let serialized = response.to_string();
+        assert!(!serialized.contains("zzcallermarker"), "{serialized}");
+    }
 }

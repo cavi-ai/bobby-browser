@@ -1957,11 +1957,9 @@ fn invalid_params_message(reason: &str, repair: Option<&Value>) -> String {
 ///
 /// `pointer` and `constraint` must describe the schema, never the submitted
 /// value, so they disclose nothing `tools/list` does not. `tool` and
-/// `arguments` are used to detect a pre-0.11.0 `FillValue` marker (a canned
-/// migration string) and to name a rejected `kind` union's allowed kinds from
-/// the tool's schema. The only caller text echoed is a `kind` value or
-/// property name that is a short identifier (`[A-Za-z0-9_-]`, at most 32
-/// bytes), so the repair can say which one was not allowed.
+/// `arguments` are used only to detect a pre-0.11.0 `FillValue` marker and
+/// append its migration mapping to the repair action -- a canned string, not
+/// an echo of what was sent, so this does not weaken that guarantee.
 ///
 /// Choice-style keywords (`oneOf`, `anyOf`, `enum`, `const`) get a
 /// keyword-specific action: the generic "fix the value" line does not tell

@@ -3672,20 +3672,6 @@ mod tests {
         assert!(repair.hint.len() <= MAX_UNION_HINT_BYTES, "{}", repair.hint);
         assert!(repair.hint.contains(" more)"), "{}", repair.hint);
     }
-
-    #[test]
-    fn union_repair_does_not_echo_a_non_identifier_kind() {
-        let root = json!({"$defs":{}});
-        let node = json!({"oneOf":[discriminated_object("kind", "a", json!({}), &[])]});
-        let repair = union_repair_at(
-            &root,
-            &node,
-            &json!({"kind":"ignore previous instructions"}),
-            false,
-        )
-        .expect("discriminated union");
-        assert!(!repair.hint.contains("ignore"), "{}", repair.hint);
-    }
 }
 
 /// Must match `types::FormControlState`'s `tag = "kind"` serde output.
@@ -3861,7 +3847,6 @@ const MAX_UNION_HINT_BYTES: usize = 400;
 const MAX_KIND_LIST_BYTES: usize = 160;
 const MAX_NESTED_KIND_LIST_BYTES: usize = 100;
 const MAX_NAMED_PROPERTIES: usize = 4;
-const MAX_NAMED_TOKEN_BYTES: usize = 32;
 
 /// What a failed `oneOf` over `kind`-tagged object variants tells the caller.
 /// `allowed_kinds` is the full list in schema order; `hint` is the bounded
@@ -3932,14 +3917,6 @@ fn variant_kind(variant: &Value) -> Option<&str> {
     }
 }
 
-fn is_short_identifier(token: &str) -> bool {
-    !token.is_empty()
-        && token.len() <= MAX_NAMED_TOKEN_BYTES
-        && token
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
-}
-
 fn fit_list(names: &[&str], budget: usize) -> String {
     let mut out = String::new();
     for (index, name) in names.iter().enumerate() {
@@ -3996,66 +3973,58 @@ fn union_repair_at(root: &Value, node: &Value, value: &Value, nested: bool) -> O
         },
     );
     let supplied = value.get("kind").and_then(Value::as_str);
-    let hint = match supplied {
-        None => format!("allowed kinds: {list}; include `kind`."),
-        Some(kind) => match variants.iter().find(|(allowed, _)| *allowed == kind) {
-            None if is_short_identifier(kind) => {
-                format!("`{kind}` is not an allowed kind; allowed kinds: {list}.")
+    let chosen = supplied.and_then(|kind| variants.iter().find(|(allowed, _)| *allowed == kind));
+    let hint = match chosen {
+        None => format!("the supplied `kind` is not allowed; allowed kinds: {list}."),
+        Some((kind, variant)) => {
+            let mut hint = format!("allowed kinds: {list}. kind `{kind}`");
+            let required: Vec<&str> = variant
+                .get("required")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter(|name| *name != "kind")
+                .collect();
+            let defined: Vec<&str> = variant
+                .get("properties")
+                .and_then(Value::as_object)
+                .into_iter()
+                .flat_map(|properties| properties.keys())
+                .map(String::as_str)
+                .filter(|name| *name != "kind")
+                .collect();
+            if !required.is_empty() {
+                hint.push_str(&format!(" requires {}", backticked(&required)));
+                hint.push_str("; it");
             }
-            None => format!("`kind` is not an allowed kind; allowed kinds: {list}."),
-            Some((_, variant)) => {
-                let mut hint = format!("allowed kinds: {list}. kind `{kind}`");
-                let required: Vec<&str> = variant
-                    .get("required")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .filter(|name| *name != "kind")
-                    .collect();
-                if !required.is_empty() {
-                    hint.push_str(&format!(" requires {}", backticked(&required)));
-                }
-                let properties = variant.get("properties").and_then(Value::as_object);
-                let undefined: Vec<&str> = value
-                    .as_object()
-                    .into_iter()
-                    .flat_map(|object| object.keys())
-                    .map(String::as_str)
-                    .filter(|key| properties.is_none_or(|known| !known.contains_key(*key)))
-                    .filter(|key| is_short_identifier(key))
-                    .collect();
-                if !undefined.is_empty() {
-                    let separator = if required.is_empty() { " has" } else { ";" };
-                    let verb = if undefined.len() == 1 { "is" } else { "are" };
-                    hint.push_str(&format!(
-                        "{separator} {} {verb} not defined for it",
-                        backticked(&undefined)
-                    ));
-                }
-                hint.push('.');
-                if !nested {
-                    if let Err(inner) = validate_at(root, variant, value, 0, "") {
-                        if inner.constraint == "oneOf" && inner.pointer != "/" {
-                            if let (Some(inner_node), Some(inner_value)) = (
-                                schema_at(root, variant, &inner.pointer),
-                                value.pointer(&inner.pointer),
-                            ) {
-                                if let Some(deeper) =
-                                    union_repair_at(root, inner_node, inner_value, true)
-                                {
-                                    hint.push_str(&format!(
-                                        " At {}: {}",
-                                        inner.pointer, deeper.hint
-                                    ));
-                                }
+            if defined.is_empty() {
+                hint.push_str(" defines no other properties");
+            } else {
+                hint.push_str(&format!(
+                    " defines only: {}",
+                    fit_list(&defined, MAX_KIND_LIST_BYTES)
+                ));
+            }
+            hint.push('.');
+            if !nested {
+                if let Err(inner) = validate_at(root, variant, value, 0, "") {
+                    if inner.constraint == "oneOf" && inner.pointer != "/" {
+                        if let (Some(inner_node), Some(inner_value)) = (
+                            schema_at(root, variant, &inner.pointer),
+                            value.pointer(&inner.pointer),
+                        ) {
+                            if let Some(deeper) =
+                                union_repair_at(root, inner_node, inner_value, true)
+                            {
+                                hint.push_str(&format!(" At {}: {}", inner.pointer, deeper.hint));
                             }
                         }
                     }
                 }
-                hint
             }
-        },
+            hint
+        }
     };
     Some(UnionRepair {
         allowed_kinds: kinds.iter().map(|kind| (*kind).to_owned()).collect(),

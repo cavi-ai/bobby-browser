@@ -376,7 +376,10 @@ choice keyword (`oneOf`/`anyOf`/`enum`/`const`) extends the repair with the
 variant-list fix: the value must match exactly one variant of the schema's
 list, each variant's `kind` discriminator included — for a rejected
 `FillValue`, that means `{"kind":"setText","value":…}` rather than a bare
-`{"value":…}`.
+`{"value":…}`. For a union discriminated by `kind`, the repair
+instead lists the allowed kinds (also as `error.data.repair.allowedKinds`) and,
+when the supplied `kind` is one of them, that kind's required and defined
+properties.
 
 ## Tool metadata
 
