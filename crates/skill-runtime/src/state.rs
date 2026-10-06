@@ -72,13 +72,7 @@ impl SkillStateStore {
     {
         #[cfg(feature = "test-support")]
         {
-            if self
-                .injected_transition_failures
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-                    count.checked_sub(1)
-                })
-                .is_ok()
-            {
+            if consume_failure(&self.injected_transition_failures) {
                 return Err(SkillStateStoreError::Cancelled);
             }
         }
@@ -124,13 +118,7 @@ impl SkillStateStore {
     ) -> Result<(), SkillStateStoreError> {
         #[cfg(feature = "test-support")]
         {
-            if self
-                .injected_transition_failures
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-                    count.checked_sub(1)
-                })
-                .is_ok()
-            {
+            if consume_failure(&self.injected_transition_failures) {
                 return Err(SkillStateStoreError::Cancelled);
             }
         }
@@ -184,4 +172,43 @@ fn validate(state: &SkillSessionState) -> Result<(), SkillStateStoreError> {
     serde_json::to_vec(state)
         .map(|_| ())
         .map_err(|error| SkillStateStoreError::InvalidState(error.to_string()))
+}
+
+#[cfg(feature = "test-support")]
+fn consume_failure(counter: &AtomicUsize) -> bool {
+    let mut count = counter.load(Ordering::SeqCst);
+    while let Some(next) = count.checked_sub(1) {
+        match counter.compare_exchange_weak(count, next, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(current) => count = current,
+        }
+    }
+    false
+}
+
+#[cfg(all(test, feature = "test-support"))]
+mod failure_injection_tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_consumers_exhaust_only_the_injected_failures() {
+        let remaining = AtomicUsize::new(7);
+        let consumed = AtomicUsize::new(0);
+        let barrier = std::sync::Barrier::new(4);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    barrier.wait();
+                    for _ in 0..16 {
+                        if consume_failure(&remaining) {
+                            consumed.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                });
+            }
+        });
+        assert_eq!(consumed.load(Ordering::SeqCst), 7);
+        assert_eq!(remaining.load(Ordering::SeqCst), 0);
+        assert!(!consume_failure(&remaining));
+    }
 }

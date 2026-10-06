@@ -235,11 +235,15 @@ where
             return Ok(output);
         }
 
-        let reserved = budget.fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-            used.checked_add(read).filter(|total| *total <= limit)
-        });
-        if reserved.is_err() {
-            return Err(InternalFailure::OutputLimit);
+        let mut used = budget.load(Ordering::Acquire);
+        loop {
+            let Some(total) = used.checked_add(read).filter(|total| *total <= limit) else {
+                return Err(InternalFailure::OutputLimit);
+            };
+            match budget.compare_exchange_weak(used, total, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => break,
+                Err(current) => used = current,
+            }
         }
         output.extend_from_slice(&chunk[..read]);
     }
