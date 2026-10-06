@@ -306,9 +306,144 @@ fn resolution_paths(evidence: &[Evidence]) -> Vec<IntentResolutionPath> {
         .collect()
 }
 
+fn seed_form_proposals(runtime: &RuntimeService, page: &PageId, fields: &[CompleteFormField]) {
+    intent_engine::ProposalLookup::record_proposals(
+        runtime.pages.context().as_ref(),
+        page,
+        fields
+            .iter()
+            .map(|field| {
+                (
+                    field.purpose.clone(),
+                    intent_engine::CachedProposal {
+                        action: intent_engine::CachedProposalAction::TypeIntoCandidate {
+                            candidates: vec![intent_engine::VisionPromptCandidate {
+                                role: "textbox".into(),
+                                name: "Name".into(),
+                                ordinal: None,
+                            }],
+                            index: 0,
+                        },
+                        confidence: 0.95,
+                    },
+                )
+            })
+            .collect(),
+    );
+}
+
+async fn run_cached_form_prefill(
+    total: usize,
+    cached: std::ops::Range<usize>,
+    repeat_cached_purpose: bool,
+) -> (Vec<IntentResolutionPath>, usize) {
+    let fixture = test_site::spawn().await;
+    let root = tempfile::tempdir().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let runtime = RuntimeService::build_with_vision_assist(
+        &base_config(root.path(), true),
+        Arc::new(CountingVision {
+            propose_calls: calls.clone(),
+        }),
+    )
+    .await
+    .unwrap();
+    let (session, page) = open_fixture(&runtime, &fixture.base_url()).await;
+    let mut fields = (0..total)
+        .map(|index| CompleteFormField {
+            name: format!("field-{index}"),
+            purpose: format!("Missing Alpha Field That Does Not Exist {index}"),
+            hints: Default::default(),
+            value: ControlAction::SetText {
+                value: format!("value-{index}"),
+                clear_first: true,
+            },
+            revealed_by: None,
+        })
+        .collect::<Vec<_>>();
+    seed_form_proposals(&runtime, &page, &fields[cached]);
+    if repeat_cached_purpose {
+        let mut repeated = fields[0].clone();
+        repeated.name = "repeated-field".into();
+        repeated.value = ControlAction::SetText {
+            value: "repeated-value".into(),
+            clear_first: true,
+        };
+        fields.insert(1, repeated);
+    }
+    let outcome = submit_intent(
+        &runtime,
+        &session,
+        &page,
+        IntentCommand::CompleteForm(CompleteFormIntent {
+            purpose: "register".into(),
+            fields,
+        }),
+    )
+    .await;
+    let CommandOutcome::Completed { evidence, .. } = outcome else {
+        panic!("mixed cached/new form must complete: {outcome:?}");
+    };
+    (resolution_paths(&evidence), calls.load(Ordering::SeqCst))
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn mixed_prefill_preserves_a_cached_field_while_requesting_a_new_one() {
+    let (paths, calls) = run_cached_form_prefill(2, 0..1, false).await;
+    assert_eq!(
+        calls, 1,
+        "the cached field must not need a new provider call"
+    );
+    assert_eq!(paths, vec![IntentResolutionPath::VisionPrefill; 2]);
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn mixed_prefill_shares_capacity_with_retained_proposals() {
+    let (paths, calls) = run_cached_form_prefill(40, 0..8, false).await;
+    assert_eq!(calls, 32, "only the 32 uncached fields need provider calls");
+    assert_eq!(paths[..32], [IntentResolutionPath::VisionPrefill; 32]);
+    assert_eq!(paths[32..], [IntentResolutionPath::VisionFallback; 8]);
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn mixed_prefill_reserves_capacity_for_cached_fields_later_in_the_form() {
+    let (paths, calls) = run_cached_form_prefill(40, 32..40, false).await;
+    assert_eq!(calls, 32);
+    assert_eq!(paths[..24], [IntentResolutionPath::VisionPrefill; 24]);
+    assert_eq!(paths[24..32], [IntentResolutionPath::VisionFallback; 8]);
+    assert_eq!(paths[32..], [IntentResolutionPath::VisionPrefill; 8]);
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn mixed_prefill_with_a_full_cache_only_requests_live_fallbacks() {
+    let (paths, calls) = run_cached_form_prefill(40, 0..32, false).await;
+    assert_eq!(
+        calls, 8,
+        "a full cache must not be replaced by speculative work"
+    );
+    assert_eq!(paths[..32], [IntentResolutionPath::VisionPrefill; 32]);
+    assert_eq!(paths[32..], [IntentResolutionPath::VisionFallback; 8]);
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn mixed_prefill_retains_a_repeated_cached_purpose_once() {
+    let (paths, calls) = run_cached_form_prefill(2, 0..1, true).await;
+    assert_eq!(
+        calls, 1,
+        "retaining a repeated key must not manufacture ambiguity"
+    );
+    assert_eq!(paths, vec![IntentResolutionPath::VisionPrefill; 3]);
+}
+
 async fn run_budgeted_prefill(
     partial: bool,
     invalidate: bool,
+    with_cached_field: bool,
 ) -> (Vec<IntentResolutionPath>, usize, usize, serde_json::Value) {
     let fixture = test_site::spawn().await;
     let root = tempfile::tempdir().unwrap();
@@ -324,6 +459,17 @@ async fn run_budgeted_prefill(
             .await
             .unwrap();
     let (session, page) = open_fixture(&runtime, &fixture.base_url()).await;
+    let mut intent = stuck_form();
+    if with_cached_field {
+        let IntentCommand::CompleteForm(form) = &mut intent else {
+            unreachable!()
+        };
+        let mut cached = form.fields[0].clone();
+        cached.name = "cached-field".into();
+        cached.purpose = "Previously cached field".into();
+        seed_form_proposals(&runtime, &page, std::slice::from_ref(&cached));
+        form.fields.insert(0, cached);
+    }
     let pending = {
         let runtime = runtime.clone();
         let session = session.clone();
@@ -333,7 +479,7 @@ async fn run_budgeted_prefill(
                 &runtime,
                 &session,
                 &page,
-                stuck_form(),
+                intent,
                 Utc::now() + Duration::seconds(10),
             )
             .await
@@ -370,7 +516,7 @@ async fn run_budgeted_prefill(
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn partial_prefill_survives_a_hanging_request() {
-    let (paths, calls, cancelled, metrics) = run_budgeted_prefill(true, false).await;
+    let (paths, calls, cancelled, metrics) = run_budgeted_prefill(true, false, false).await;
     assert_eq!(metrics["prefill"]["budgetExhausted"], 1);
     assert_eq!(metrics["prefill"]["requestsCancelled"], 1);
     assert_eq!(metrics["prefill"]["partialBatchRetained"], 1);
@@ -399,7 +545,7 @@ async fn partial_prefill_survives_a_hanging_request() {
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn hanging_prefill_is_cancelled_before_normal_execution() {
-    let (paths, calls, cancelled, metrics) = run_budgeted_prefill(false, false).await;
+    let (paths, calls, cancelled, metrics) = run_budgeted_prefill(false, false, false).await;
     assert_eq!(metrics["prefill"]["budgetExhausted"], 1);
     assert_eq!(metrics["prefill"]["requestsCancelled"], 2);
     assert_eq!(metrics["prefill"]["partialBatchRetained"], 0);
@@ -422,7 +568,7 @@ async fn hanging_prefill_is_cancelled_before_normal_execution() {
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn a_timed_out_partial_batch_cannot_cross_a_generation_change() {
-    let (paths, calls, cancelled, metrics) = run_budgeted_prefill(true, true).await;
+    let (paths, calls, cancelled, metrics) = run_budgeted_prefill(true, true, false).await;
     assert_eq!(metrics["prefill"]["budgetExhausted"], 1);
     assert_eq!(metrics["prefill"]["requestsCancelled"], 1);
     assert_eq!(metrics["prefill"]["partialBatchRetained"], 0);
@@ -440,6 +586,37 @@ async fn a_timed_out_partial_batch_cannot_cross_a_generation_change() {
             .count(),
         2
     );
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn mixed_prefill_does_not_report_reuse_as_partial_completion() {
+    let (paths, calls, cancelled, metrics) = run_budgeted_prefill(false, false, true).await;
+    assert_eq!(calls, 4);
+    assert_eq!(cancelled, 2);
+    assert_eq!(
+        paths,
+        vec![
+            IntentResolutionPath::VisionPrefill,
+            IntentResolutionPath::VisionFallback,
+            IntentResolutionPath::VisionFallback,
+        ]
+    );
+    assert_eq!(metrics["prefill"]["budgetExhausted"], 1);
+    assert_eq!(metrics["prefill"]["partialBatchRetained"], 0);
+    assert_eq!(metrics["prefill"]["staleBatchDiscarded"], 0);
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn mixed_prefill_cannot_republish_cached_entries_after_generation_change() {
+    let (paths, calls, cancelled, metrics) = run_budgeted_prefill(true, true, true).await;
+    assert_eq!(calls, 5);
+    assert_eq!(cancelled, 1);
+    assert_eq!(paths, vec![IntentResolutionPath::VisionFallback; 3]);
+    assert_eq!(metrics["prefill"]["budgetExhausted"], 1);
+    assert_eq!(metrics["prefill"]["partialBatchRetained"], 0);
+    assert_eq!(metrics["prefill"]["staleBatchDiscarded"], 1);
 }
 
 async fn paused_prefill_after_cache_change(

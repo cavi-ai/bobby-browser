@@ -189,8 +189,8 @@ impl ContextGraph {
     }
 
     /// Caches vision proposals for `page`, stamped at the current
-    /// generation. Replaces any prior batch: a batch is one screenshot's
-    /// worth of answers, and a new batch supersedes it wholesale.
+    /// generation. Replaces the prior snapshot wholesale; callers may combine
+    /// newly completed proposals with usable entries from the same generation.
     pub fn record_proposals(&self, page: &PageId, proposals: Vec<CandidateProposal>) {
         let mut pages = self.lock();
         let Some(entry) = pages.get_mut(page) else {
