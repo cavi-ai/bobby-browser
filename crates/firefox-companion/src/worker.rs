@@ -2778,6 +2778,63 @@ impl PageOpenOperation {
     }
 }
 
+/// Longest a navigation waits for the document to stop changing.
+const NAVIGATION_SETTLE_CAP: Duration = Duration::from_secs(5);
+/// Time without a DOM mutation that counts as settled.
+const NAVIGATION_QUIET_MS: u64 = 300;
+
+/// Waits until the document in `context` has had no DOM mutation for
+/// [`NAVIGATION_QUIET_MS`], or `budget` runs out, and returns the URL and
+/// title read at that point. A redirect that replaces the document while the
+/// probe runs restarts it. `None` when no read succeeded within the budget.
+async fn settle_document(
+    transport: &Arc<dyn BidiTransport>,
+    context: &str,
+    budget: Duration,
+) -> Option<(String, String)> {
+    let deadline = Instant::now() + budget;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        let expression = format!(
+            "new Promise(resolve=>{{let timer;const read=()=>JSON.stringify({{url:location.href,title:document.title}});const finish=()=>{{observer.disconnect();clearTimeout(timer);clearTimeout(cap);resolve(read());}};const observer=new MutationObserver(()=>{{clearTimeout(timer);timer=setTimeout(finish,{NAVIGATION_QUIET_MS});}});observer.observe(document,{{subtree:true,childList:true,attributes:true,characterData:true}});timer=setTimeout(finish,{NAVIGATION_QUIET_MS});const cap=setTimeout(finish,{});}})",
+            remaining.as_millis().max(1)
+        );
+        let attempt = tokio::time::timeout(
+            remaining + Duration::from_secs(1),
+            transport.send(
+                "script.evaluate",
+                json!({
+                    "expression": expression,
+                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                    "awaitPromise": true,
+                    "resultOwnership": "none",
+                }),
+            ),
+        )
+        .await;
+        if let Ok(Ok(response)) = attempt {
+            let settled = response
+                .pointer("/result/value")
+                .or_else(|| response.get("value"))
+                .and_then(Value::as_str)
+                .and_then(|encoded| serde_json::from_str::<Value>(encoded).ok())
+                .and_then(|value| {
+                    Some((
+                        value.get("url")?.as_str()?.to_owned(),
+                        value.get("title")?.as_str()?.to_owned(),
+                    ))
+                });
+            if settled.is_some() {
+                return settled;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn capture_context_title(
     transport: &Arc<dyn BidiTransport>,
     context: &str,
@@ -3230,12 +3287,22 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 true,
             )
         })??;
-        let url = response
+        let response_url = response
             .get("url")
             .and_then(Value::as_str)
             .unwrap_or(&command.url)
             .to_owned();
-        let title = capture_context_title(&self.transport, &context).await?;
+        // A single-page app reports its load state long before it has built
+        // the page, and a redirect chain can still be running. Report the
+        // URL and title read after the document has stopped changing.
+        let settle_budget = Duration::from_millis(command.timeout_ms).min(NAVIGATION_SETTLE_CAP);
+        let (url, title) = match settle_document(&self.transport, &context, settle_budget).await {
+            Some(settled) => settled,
+            None => (
+                response_url,
+                capture_context_title(&self.transport, &context).await?,
+            ),
+        };
         Ok(vec![
             Evidence::Navigation { url, title },
             self.evidence(InteractionPath::EngineNative),

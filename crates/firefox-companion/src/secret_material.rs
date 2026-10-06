@@ -11,10 +11,6 @@ fn is_alnum(character: char) -> bool {
     character.is_ascii_alphanumeric()
 }
 
-fn is_word(character: char) -> bool {
-    character.is_ascii_alphanumeric() || character == '_'
-}
-
 fn is_auth_token_char(character: char) -> bool {
     is_alnum(character) || matches!(character, '.' | '_' | '~' | '+' | '/' | '=' | '-')
 }
@@ -28,8 +24,7 @@ fn is_base64url_char(character: char) -> bool {
 }
 
 fn starts_with_at(chars: &[char], at: usize, needle: &str, ignore_case: bool) -> bool {
-    let mut index = at;
-    for expected in needle.chars() {
+    for (index, expected) in (at..).zip(needle.chars()) {
         let Some(&actual) = chars.get(index) else {
             return false;
         };
@@ -41,7 +36,6 @@ fn starts_with_at(chars: &[char], at: usize, needle: &str, ignore_case: bool) ->
         if !equal {
             return false;
         }
-        index += 1;
     }
     true
 }
@@ -202,7 +196,9 @@ fn has_aws_access_key(chars: &[char]) -> bool {
     (0..chars.len()).any(|start| {
         (start == 0 || !is_upper_digit(chars[start - 1]))
             && starts_with_at(chars, start, "AKIA", false)
-            && chars.get(start + 4..start + 20).is_some_and(|tail| tail.iter().all(|c| is_upper_digit(*c)))
+            && chars
+                .get(start + 4..start + 20)
+                .is_some_and(|tail| tail.iter().all(|c| is_upper_digit(*c)))
     })
 }
 
@@ -239,7 +235,8 @@ fn has_long_credential_run(chars: &[char]) -> bool {
 fn is_http_url(value: &str) -> bool {
     let trimmed = value.trim().as_bytes();
     let has_prefix = |prefix: &str| {
-        trimmed.len() >= prefix.len() && trimmed[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+        trimmed.len() >= prefix.len()
+            && trimmed[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
     };
     has_prefix("http://") || has_prefix("https://")
 }

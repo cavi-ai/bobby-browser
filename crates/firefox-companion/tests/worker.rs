@@ -2218,7 +2218,7 @@ async fn semantic_frame_path_rejects_ambiguous_live_frame_candidates() {
 #[tokio::test]
 async fn frame_candidate_boundary_rejects_unsanitized_credential_metadata() {
     for name in [
-        "Password hunter2",
+        "Password: hunter2",
         "Authentication code 391726",
         "Card number 4242424242424242",
     ] {
