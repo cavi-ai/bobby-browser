@@ -8,6 +8,8 @@ export const MAX_VISIBLE_TEXT_VISITED_NODES = 4_096;
 export const MAX_CONTROL_VISITED_NODES = 4_096;
 export const MAX_ELEMENT_TEXT_VISITED_NODES = 512;
 export const MAX_CONTROL_HELPER_VISITS = 16_384;
+export const MAX_CONTROL_FILTER_VISITS = 262_144;
+const MAX_NAME_CONTENT_DEPTH = 24;
 export const MAX_CSS_SIBLING_VISITS = 128;
 export const MAX_CONTROL_FIELD_LENGTH = 256;
 export const MAX_SELECTOR_LENGTH = 512;
@@ -131,6 +133,8 @@ export type PageObservation = {
     disabled: boolean;
   }>;
   html?: string;
+  /** Present and true when the control walk stopped at a bound. */
+  controlsTruncated?: boolean;
 };
 
 const CONTROL_SELECTOR = [
@@ -428,25 +432,59 @@ function boundedElementText(
 ): string | undefined {
   let output = "";
   let outputBytes = 0;
-  const walker = element.ownerDocument.createTreeWalker(element, 4);
   let visited = 0;
-  while (visited < MAX_ELEMENT_TEXT_VISITED_NODES) {
-    const node = walker.nextNode();
-    if (!node) break;
-    visited += 1;
-    if (!takeWork(budget)) break;
-    const parent = node.parentElement;
-    if (!parent || isElementHidden(parent, budget)) continue;
+  const push = (text: string | undefined): boolean => {
+    if (!text) return true;
     const separatorBytes = output ? 1 : 0;
     const remaining = maximum - outputBytes - separatorBytes;
-    if (remaining <= 0) break;
-    const text = observationString(node.nodeValue, remaining);
-    if (!text) continue;
-    output += `${output ? " " : ""}${text}`;
-    outputBytes += separatorBytes + byteLength(text);
+    if (remaining <= 0) return false;
+    const bounded = observationString(text, remaining);
+    if (!bounded) return true;
+    output += `${output ? " " : ""}${bounded}`;
+    outputBytes += separatorBytes + byteLength(bounded);
+    return true;
+  };
+  const visit = (node: Node, depth: number): boolean => {
+    if (visited >= MAX_ELEMENT_TEXT_VISITED_NODES || !takeWork(budget)) return false;
+    visited += 1;
+    if (node.nodeType === 3) return push(node.nodeValue ?? undefined);
+    if (node.nodeType !== 1) return true;
+    const child = node as Element;
+    if (child !== element) {
+      if (["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT"].includes(child.tagName)) return true;
+      if (isLocallyHidden(child)) return true;
+      // An icon's own label stands for its content, as in the accessible
+      // name computation: aria-label, an image's alt, an svg's <title>.
+      const own = observationString(child.getAttribute("aria-label"));
+      if (own) return push(own);
+      if (child.tagName === "IMG") return push(child.getAttribute("alt") ?? undefined);
+      if (child.tagName.toLowerCase() === "svg") {
+        const title = Array.from(child.children).find((entry) => entry.tagName.toLowerCase() === "title");
+        const text = title?.textContent ?? child.getAttribute("title") ?? undefined;
+        if (text) return push(text);
+      }
+    }
+    if (depth >= MAX_NAME_CONTENT_DEPTH) return true;
+    for (const next of Array.from(child.childNodes).slice(0, 256)) {
+      if (!visit(next, depth + 1)) return false;
+    }
+    return true;
+  };
+  try {
+    if (!isElementHidden(element)) visit(element, 0);
+  } catch {
+    // A node that throws during inspection contributes no name.
   }
   return output || undefined;
 }
+
+function isLocallyHidden(element: Element): boolean {
+  if (element.hasAttribute("hidden") || element.getAttribute("aria-hidden") === "true") return true;
+  const style = element.ownerDocument.defaultView?.getComputedStyle(element);
+  return style?.display === "none" || style?.visibility === "hidden";
+}
+
+const NAME_FROM_CONTENT_EXCLUDED_TAGS = new Set(["TEXTAREA", "SELECT"]);
 
 function accessibleName(
   element: Element,
@@ -454,13 +492,17 @@ function accessibleName(
   budget: WorkBudget,
   sensitive: boolean,
 ): string | undefined {
+  const textEntry = element.tagName === "INPUT" || element.tagName === "TEXTAREA";
   return (
-    observationString(element.getAttribute("aria-label")) ??
     labelledByText(element, budget) ??
+    observationString(element.getAttribute("aria-label")) ??
     label ??
     observationString(element.getAttribute("alt")) ??
     observationString(element.getAttribute("title")) ??
-    boundedElementText(element, MAX_CONTROL_FIELD_LENGTH, budget) ??
+    (textEntry && !sensitive ? observationString(element.getAttribute("placeholder")) : undefined) ??
+    (NAME_FROM_CONTENT_EXCLUDED_TAGS.has(element.tagName)
+      ? undefined
+      : boundedElementText(element, MAX_CONTROL_FIELD_LENGTH, budget)) ??
     (element.tagName === "INPUT" && !sensitive
       ? observationString(element.getAttribute("value"))
       : undefined)
@@ -610,24 +652,49 @@ function observeRoot(document: Document, root: Element, includeHtml: boolean): P
   const siblingCountsByParent = new WeakMap<Element, Map<string, number>>();
   const candidateControls: Element[] = [];
   if (root.matches(CONTROL_SELECTOR)) candidateControls.push(root);
-  const walker = document.createTreeWalker(root, 1);
+  // Hidden subtrees are rejected by the walker's filter, so they cost neither
+  // the visit cap nor the helper budget. The filter still sees every element
+  // that is not inside a rejected subtree, which keeps sibling positions exact.
+  let filterCalls = 0;
+  let controlsTruncated = false;
+  const walker = document.createTreeWalker(root, 1, {
+    acceptNode: (node: Node): number => {
+      const element = node as Element;
+      filterCalls += 1;
+      if (filterCalls > MAX_CONTROL_FILTER_VISITS) {
+        controlsTruncated = true;
+        return 2;
+      }
+      const parent = element.parentElement;
+      if (parent) {
+        let counts = siblingCountsByParent.get(parent);
+        if (!counts) {
+          counts = new Map<string, number>();
+          siblingCountsByParent.set(parent, counts);
+        }
+        const position = (counts.get(element.tagName) ?? 0) + 1;
+        counts.set(element.tagName, position);
+        siblingPositions.set(element, position);
+      }
+      try {
+        if (element.hasAttribute("hidden") || element.getAttribute("aria-hidden") === "true") {
+          return 2;
+        }
+        const style = element.ownerDocument.defaultView?.getComputedStyle(element);
+        if (style?.display === "none") return 2;
+        if (style?.visibility === "hidden") return 3;
+      } catch {
+        return 2;
+      }
+      return 1;
+    },
+  });
   let visited = 0;
   while (visited < MAX_CONTROL_VISITED_NODES && takeWork(helperBudget)) {
     const node = walker.nextNode();
     if (!node) break;
     visited += 1;
     const element = node as Element;
-    const parent = element.parentElement;
-    if (parent) {
-      let counts = siblingCountsByParent.get(parent);
-      if (!counts) {
-        counts = new Map<string, number>();
-        siblingCountsByParent.set(parent, counts);
-      }
-      const position = (counts.get(element.tagName) ?? 0) + 1;
-      counts.set(element.tagName, position);
-      siblingPositions.set(element, position);
-    }
     if (element.tagName === "LABEL") {
       const controlId = element.getAttribute("for");
       if (
@@ -642,8 +709,12 @@ function observeRoot(document: Document, root: Element, includeHtml: boolean): P
       candidateControls.push(element);
     }
   }
+  if (visited >= MAX_CONTROL_VISITED_NODES || helperBudget.remaining <= 0) controlsTruncated = true;
   for (const element of candidateControls) {
-    if (observation.controls.length >= MAX_CONTROL_COUNT) break;
+    if (observation.controls.length >= MAX_CONTROL_COUNT) {
+      controlsTruncated = true;
+      break;
+    }
     if (isElementHidden(element, helperBudget)) continue;
     const sensitive = isSensitiveControl(element, helperBudget);
     const observedPath = cssPath(element, helperBudget, siblingPositions, !sensitive);
@@ -683,10 +754,15 @@ function observeRoot(document: Document, root: Element, includeHtml: boolean): P
         element.hasAttribute("disabled") || element.getAttribute("aria-disabled") === "true",
     };
     const controlBytes = byteLength(JSON.stringify(control)) + (observation.controls.length ? 1 : 0);
-    if (serializedBytes + controlBytes > MAX_OBSERVATION_BYTES) break;
+    if (serializedBytes + controlBytes > MAX_OBSERVATION_BYTES) {
+      controlsTruncated = true;
+      break;
+    }
     observation.controls.push(control);
     serializedBytes += controlBytes;
   }
+  if (helperBudget.remaining <= 0) controlsTruncated = true;
+  if (controlsTruncated) observation.controlsTruncated = true;
   if (includeHtml) {
     const html = sanitizedHtml(root);
     const overhead = byteLength(JSON.stringify({ html: "" })) - 2;
@@ -781,6 +857,7 @@ const A11Y_MAX_DEPTH = 32;
 const A11Y_MAX_NODE_LEVEL = 13;
 const A11Y_MAX_VALUES = 19_000;
 const A11Y_MAX_NODES = 2048;
+const A11Y_MAX_SCOPE_VISITS = 100_000;
 const A11Y_STRUCTURAL_ROLES = new Set([
   "banner",
   "navigation",
@@ -839,7 +916,11 @@ const A11Y_ACTIONABLE_ROLES = new Set([
   "iframe",
 ]);
 
-function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode[]; truncated: boolean } {
+function a11yTree(
+  document: Document,
+  maxNodesInput: unknown,
+  targetInput?: unknown,
+): { nodes: A11yNode[]; truncated: boolean } {
   let maxNodes = 256;
   if (typeof maxNodesInput === "number" && Number.isSafeInteger(maxNodesInput)) {
     maxNodes = Math.min(Math.max(1, maxNodesInput), A11Y_MAX_NODES);
@@ -883,7 +964,7 @@ function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode
   };
 
   const semantics = (element: Element): { role?: string; name?: string; sensitive: boolean } => {
-    const budget: WorkBudget = { remaining: 64 };
+    const budget: WorkBudget = { remaining: 256 };
     const sensitive = isSensitiveControl(element, budget);
     const role = implicitRole(element, !sensitive) ?? structuralRole(element);
     const name = sensitive
@@ -892,11 +973,93 @@ function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode
     return { role, name, sensitive };
   };
 
+  const resolveScope = (spec: unknown): Element => {
+    if (typeof spec !== "object" || spec === null || Array.isArray(spec)) {
+      throw new Error("a11y target must be an object");
+    }
+    const { css, testId, role, accessibleName, ordinal } = spec as Record<string, unknown>;
+    let selector: string | undefined;
+    if (typeof css === "string" && css.length > 0) {
+      selector = css;
+    } else if (typeof testId === "string" && testId.length > 0) {
+      selector = `[data-testid="${cssString(testId)}"]`;
+    }
+    if (selector !== undefined) {
+      if (byteLength(selector) > MAX_SELECTOR_LENGTH) throw new Error("a11y target selector must be bounded");
+      let found: Element | null;
+      try {
+        found = document.querySelector(selector);
+      } catch {
+        throw new Error("a11y target selector is invalid");
+      }
+      if (!found || isElementHidden(found)) throw new Error("a11y target was not found");
+      return found;
+    }
+    if (typeof role !== "string" || role.length === 0) {
+      throw new Error("a11y target requires a role, CSS selector, or test ID");
+    }
+    if (accessibleName !== null && accessibleName !== undefined && typeof accessibleName !== "string") {
+      throw new Error("a11y target accessibleName must be a string");
+    }
+    if (
+      ordinal !== null &&
+      ordinal !== undefined &&
+      !(typeof ordinal === "number" && Number.isSafeInteger(ordinal) && ordinal >= 0)
+    ) {
+      throw new Error("a11y target ordinal must be a non-negative integer");
+    }
+    const wanted = typeof ordinal === "number" ? ordinal : 0;
+    const matches: Element[] = [];
+    let visited = 0;
+    const walk = (element: Element, depth: number): void => {
+      visited += 1;
+      if (visited > A11Y_MAX_SCOPE_VISITS) return;
+      try {
+        if (isElementHidden(element)) return;
+        const found = semantics(element);
+        if (
+          found.role === role &&
+          (typeof accessibleName !== "string" || found.name === accessibleName)
+        ) {
+          matches.push(element);
+        }
+      } catch {
+        return;
+      }
+      // Without an ordinal a second match makes the target ambiguous, so the
+      // walk only needs to reach two matches; with one it needs ordinal + 1.
+      const needed = typeof ordinal === "number" ? wanted + 1 : 2;
+      if (depth < A11Y_MAX_DEPTH) {
+        for (const child of Array.from(element.children).slice(0, 256)) {
+          if (matches.length >= needed) return;
+          walk(child, depth + 1);
+        }
+      }
+    };
+    walk(root, 0);
+    if (typeof ordinal === "number") {
+      const picked = matches[wanted];
+      if (!picked) throw new Error("a11y target was not found");
+      return picked;
+    }
+    if (matches.length !== 1) {
+      throw new Error(matches.length === 0 ? "a11y target was not found" : "a11y target is ambiguous");
+    }
+    return matches[0]!;
+  };
+  const scope: Element =
+    targetInput === null || targetInput === undefined ? root : resolveScope(targetInput);
+
   const targetTotals = new Map<string, number>();
   const targetKey = (role: string, name: string): string => `${role}\u0000${name}`;
+  // Ordinals stay page-wide so a scoped snapshot's targets resolve exactly as
+  // the same nodes' targets from a full snapshot do: the running per-key
+  // counts at the moment the page-wide walk reaches the scope seed them.
+  let scopeSeen: Map<string, number> | undefined;
   const countTargets = (element: Element, depth: number): void => {
     try {
       if (isElementHidden(element)) return;
+      if (element === scope) scopeSeen = new Map(targetTotals);
       const { role, name } = semantics(element);
       if (role && name && name !== REDACTED && A11Y_ACTIONABLE_ROLES.has(role)) {
         const key = targetKey(role, name);
@@ -925,6 +1088,15 @@ function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode
       // Skip nodes that throw during inspection; never fatal.
       return [];
     }
+    // A hidden subtree is discarded whole, so it must be rejected before any
+    // descendant spends the node budget.
+    let hidden = false;
+    try {
+      hidden = isElementHidden(element);
+    } catch {
+      hidden = true;
+    }
+    if (hidden) return [];
     if (role && level > A11Y_MAX_NODE_LEVEL) {
       state.truncated = true;
       return [];
@@ -936,13 +1108,6 @@ function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode
         children.push(...build(child, depth + 1, role ? level + 1 : level));
       }
     }
-    let hidden = false;
-    try {
-      hidden = isElementHidden(element);
-    } catch {
-      hidden = true;
-    }
-    if (hidden) return [];
     if (!role) return children;
     if (state.remaining <= 0) {
       state.truncated = true;
@@ -982,8 +1147,8 @@ function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode
     return [node];
   };
 
-  const nodes = build(root, 0, 0);
-  const targetSeen = new Map<string, number>();
+  const nodes = build(scope, 0, 0);
+  const targetSeen = new Map<string, number>(scopeSeen ?? []);
   const sendBudget = { values: A11Y_MAX_VALUES, bytes: MAX_OBSERVATION_BYTES };
   const annotateTargets = (candidates: A11yNode[]): A11yNode[] => {
     const kept: A11yNode[] = [];
@@ -1033,7 +1198,7 @@ export function executeContentAction(
     return observeRoot(document, inspectionRoot(document, parsed), parsed.includeHtml as boolean);
   }
   if (operation === "a11yTree") {
-    return a11yTree(document, parsed.maxNodes);
+    return a11yTree(document, parsed.maxNodes, parsed.target);
   }
   const element = target(document, parsed);
   switch (operation) {
