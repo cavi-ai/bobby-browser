@@ -2778,13 +2778,12 @@ impl PageOpenOperation {
     }
 }
 
-/// Longest a navigation waits for the document to stop changing.
-const NAVIGATION_SETTLE_CAP: Duration = Duration::from_secs(5);
-/// Time without a DOM mutation that counts as settled.
-const NAVIGATION_QUIET_MS: u64 = 300;
+use worker_pool::navigation_settle::{
+    navigation_settle_expression, parse_settled, NAVIGATION_SETTLE_CAP,
+};
 
 /// Waits until the document in `context` has had no DOM mutation for
-/// [`NAVIGATION_QUIET_MS`], or `budget` runs out, and returns the URL and
+/// `NAVIGATION_QUIET_MS`, or `budget` runs out, and returns the URL and
 /// title read at that point. A redirect that replaces the document while the
 /// probe runs restarts it. `None` when no read succeeded within the budget.
 async fn settle_document(
@@ -2798,10 +2797,7 @@ async fn settle_document(
         if remaining.is_zero() {
             return None;
         }
-        let expression = format!(
-            "new Promise(resolve=>{{let timer;const read=()=>JSON.stringify({{url:location.href,title:document.title}});const finish=()=>{{observer.disconnect();clearTimeout(timer);clearTimeout(cap);resolve(read());}};const observer=new MutationObserver(()=>{{clearTimeout(timer);timer=setTimeout(finish,{NAVIGATION_QUIET_MS});}});observer.observe(document,{{subtree:true,childList:true,attributes:true,characterData:true}});timer=setTimeout(finish,{NAVIGATION_QUIET_MS});const cap=setTimeout(finish,{});}})",
-            remaining.as_millis().max(1)
-        );
+        let expression = navigation_settle_expression(remaining.as_millis().max(1));
         let attempt = tokio::time::timeout(
             remaining + Duration::from_secs(1),
             transport.send(
@@ -2820,13 +2816,7 @@ async fn settle_document(
                 .pointer("/result/value")
                 .or_else(|| response.get("value"))
                 .and_then(Value::as_str)
-                .and_then(|encoded| serde_json::from_str::<Value>(encoded).ok())
-                .and_then(|value| {
-                    Some((
-                        value.get("url")?.as_str()?.to_owned(),
-                        value.get("title")?.as_str()?.to_owned(),
-                    ))
-                });
+                .and_then(parse_settled);
             if settled.is_some() {
                 return settled;
             }
@@ -6295,7 +6285,7 @@ fn validate_observation(observation: &ExtensionObservation) -> Result<(), Comman
 /// level by the content script.
 fn unsafe_observation_text(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
-    crate::secret_material::contains_secret_material(value)
+    worker_pool::secret_material::contains_secret_material(value)
         || ["<script", " onclick=", " onload="]
             .iter()
             .any(|marker| lower.contains(marker))

@@ -233,6 +233,23 @@ pub fn assert_node(result: &Value, role: &str, name: Option<&str>) {
     );
 }
 
+/// Every `(role, target)` pair on a node that carries a target.
+pub fn targets_under<'a>(value: &'a Value, out: &mut Vec<(&'a str, &'a Value)>) {
+    match value {
+        Value::Object(map) => {
+            if let (Some(role), Some(target)) = (
+                map.get("role").and_then(Value::as_str),
+                map.get("target").filter(|target| target.is_object()),
+            ) {
+                out.push((role, target));
+            }
+            map.values().for_each(|child| targets_under(child, out));
+        }
+        Value::Array(items) => items.iter().for_each(|child| targets_under(child, out)),
+        _ => {}
+    }
+}
+
 pub fn strings_under<'a>(value: &'a Value, key: &str, out: &mut Vec<&'a str>) {
     match value {
         Value::Object(map) => {

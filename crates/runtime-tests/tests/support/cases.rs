@@ -5,7 +5,7 @@
 use serde_json::json;
 
 use super::fixture_site::{FixtureSite, Route};
-use super::rig::{assert_node, find_node, strings_under, Live, Rig};
+use super::rig::{assert_node, find_node, strings_under, targets_under, Live, Rig};
 
 const HIDDEN_NODES: usize = 3000;
 
@@ -129,10 +129,17 @@ pub async fn workflow_start_reports_the_settled_page(rig: &Rig) {
 pub async fn observe_after_navigate_includes_late_content(rig: &Rig) {
     let late = page(
         "Late",
-        r#"<div id="root"></div><script>setTimeout(() => {
-            document.getElementById("root").innerHTML =
-              "<main><h1>Late content</h1><button>Late action</button></main>";
-        }, 800);</script>"#,
+        r#"<div id="root"><p id="tick">loading</p></div><script>
+            // A loader keeps mutating the document until the content lands.
+            let ticks = 0;
+            const loader = setInterval(() => {
+              document.getElementById("tick").textContent = "loading " + ++ticks;
+              if (ticks < 8) return;
+              clearInterval(loader);
+              document.getElementById("root").innerHTML =
+                "<main><h1>Late content</h1><button>Late action</button></main>";
+            }, 100);
+        </script>"#,
     );
     let site = FixtureSite::spawn(vec![
         ("/blank", Route::Html(page("Blank", "<p>Blank</p>"))),
@@ -155,13 +162,13 @@ pub async fn observe_after_navigate_includes_late_content(rig: &Rig) {
 /// `alt` showed up in `a11y_snapshot` with no name, and `type_text` on the
 /// search box by `{role: textbox, accessibleName: "Search"}` failed.
 pub async fn accessible_names_are_computed(rig: &Rig) {
-    let body = r#"
+    let body = r##"
         <button><svg width="16" height="16"><title>Close dialog</title><path d="M0 0h16v16z"/></svg></button>
         <span id="first">First</span> <span id="second">Second</span>
         <button aria-labelledby="first second"></button>
         <input placeholder="Search">
         <h1><span>Nested</span><span> heading</span></h1>
-        <a href="/home"><img alt="Home page" src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw=="></a>"#;
+        <a href="#home"><img alt="Home page" width="16" height="16"src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw=="></a>"##;
     let site = FixtureSite::spawn(vec![("/names", Route::Html(page("Names", body)))]).await;
     let live = Live::open(rig, &site.url("/names")).await;
     let snapshot = live.snapshot(json!({})).await;
@@ -170,6 +177,26 @@ pub async fn accessible_names_are_computed(rig: &Rig) {
     assert_node(&snapshot, "textbox", Some("Search"));
     assert_node(&snapshot, "heading", Some("Nested heading"));
     assert_node(&snapshot, "link", Some("Home page"));
+    // Every target the snapshot returns resolves for the action that fits
+    // its role. The page's controls are inert, so acting is harmless.
+    let mut targets = Vec::new();
+    targets_under(&snapshot, &mut targets);
+    assert!(targets.len() >= 4, "snapshot targets: {snapshot}");
+    for (role, target) in targets {
+        let (tool, extra) = if role == "textbox" {
+            (
+                "type_text",
+                json!({"target":target,"value":"x","clearFirst":true}),
+            )
+        } else {
+            ("click", json!({"target":target}))
+        };
+        let result = live.call(tool, extra).await;
+        assert_eq!(
+            result["status"], "completed",
+            "{tool} on the snapshot target {target}: {result}"
+        );
+    }
     let typed = live
         .call(
             "type_text",

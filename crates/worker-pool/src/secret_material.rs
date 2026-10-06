@@ -1,6 +1,6 @@
-//! Secret-material detection shared in behavior with
-//! `packages/firefox-companion/src/secret-material.ts`; both are pinned to
-//! `tests/fixtures/secret-material.json`.
+//! Secret-material detection used by the Chromium and Firefox workers.
+//! Shared in behavior with `packages/firefox-companion/src/secret-material.ts`;
+//! both are pinned to `crates/firefox-companion/tests/fixtures/secret-material.json`.
 //!
 //! A word such as "password" or "token" is not a secret. Only text that
 //! discloses a credential is: auth-scheme credentials, `key=value`
@@ -241,7 +241,7 @@ fn is_http_url(value: &str) -> bool {
     has_prefix("http://") || has_prefix("https://")
 }
 
-pub(crate) fn contains_secret_material(value: &str) -> bool {
+pub fn contains_secret_material(value: &str) -> bool {
     let chars: Vec<char> = value.chars().collect();
     has_auth_scheme_credential(&chars)
         || has_key_value_disclosure(value)
@@ -264,7 +264,10 @@ mod tests {
     }
 
     fn fixture() -> Fixture {
-        serde_json::from_str(include_str!("../tests/fixtures/secret-material.json")).unwrap()
+        serde_json::from_str(include_str!(
+            "../../firefox-companion/tests/fixtures/secret-material.json"
+        ))
+        .unwrap()
     }
 
     #[test]

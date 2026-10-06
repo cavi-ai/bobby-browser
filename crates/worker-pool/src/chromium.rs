@@ -4,6 +4,9 @@ use std::sync::{Arc, Once};
 use std::time::Duration;
 use std::time::Instant;
 
+use crate::navigation_settle::{
+    navigation_settle_expression, parse_settled, NAVIGATION_SETTLE_CAP,
+};
 use artifact_store::ArtifactStore;
 use async_trait::async_trait;
 use behavioral_engine::{
@@ -1408,6 +1411,16 @@ impl BrowserWorker for ChromiumWorker {
         .await
         .map_err(|_| timeout_error(command.timeout_ms))?
         .map_err(|error| navigation_failed(command.url.as_str(), error))?;
+        // A single-page app reports its load state long before it has built
+        // the page, and a redirect chain can still be running. Report the
+        // URL and title read after the document has stopped changing.
+        let budget = Duration::from_millis(command.timeout_ms).min(NAVIGATION_SETTLE_CAP);
+        if let Some((url, title)) = settle_document(&page, budget).await {
+            return Ok(vec![Evidence::Navigation {
+                url,
+                title: redact_secret_material(title),
+            }]);
+        }
         let url = page
             .url()
             .await
@@ -1418,7 +1431,10 @@ impl BrowserWorker for ChromiumWorker {
             .await
             .map_err(command_failed)?
             .unwrap_or_default();
-        Ok(vec![Evidence::Navigation { url, title }])
+        Ok(vec![Evidence::Navigation {
+            url,
+            title: redact_secret_material(title),
+        }])
     }
 
     async fn inspect(
@@ -1487,9 +1503,9 @@ impl BrowserWorker for ChromiumWorker {
         let mut evidence = vec![Evidence::Inspection {
             selector: command.selector.clone(),
             url,
-            title,
-            text,
-            html,
+            title: redact_secret_material(title),
+            text: redact_secret_material(text),
+            html: html.map(redact_secret_material),
         }];
         if let Some(resolution) = resolution {
             evidence.push(resolution);
@@ -3687,6 +3703,46 @@ fn is_page_scoped_text_target(target: &types::TargetSpec) -> bool {
     }
 }
 
+/// Page text that discloses a credential never reaches the agent: the whole
+/// string is replaced, as the Firefox content script does for node names.
+fn redact_secret_material(value: String) -> String {
+    if crate::secret_material::contains_secret_material(&value) {
+        "[redacted]".to_owned()
+    } else {
+        value
+    }
+}
+
+/// Waits until the document has had no DOM mutation for the quiet window, or
+/// `budget` runs out, and returns the URL and title read at that point. A
+/// redirect that replaces the document while the probe runs restarts it.
+/// `None` when no read succeeded within the budget.
+async fn settle_document(page: &Page, budget: Duration) -> Option<(String, String)> {
+    let deadline = Instant::now() + budget;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        let mut params =
+            EvaluateParams::new(navigation_settle_expression(remaining.as_millis().max(1)));
+        params.await_promise = Some(true);
+        params.return_by_value = Some(true);
+        let attempt =
+            tokio::time::timeout(remaining + Duration::from_secs(1), page.evaluate(params)).await;
+        if let Ok(Ok(result)) = attempt {
+            if let Some(settled) = result
+                .into_value::<String>()
+                .ok()
+                .and_then(|encoded| parse_settled(&encoded))
+            {
+                return Some(settled);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn read_page_body_text(page: &Page) -> Result<String, CommandError> {
     let result = page
         .evaluate("document.body ? (document.body.innerText || '') : ''")
@@ -4301,6 +4357,7 @@ fn compact_ax_tree_from(
         text(value)
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
+            .map(redact_secret_material)
     }
 
     fn property_text(node: &AxNode, name: &str) -> Option<String> {
@@ -4406,7 +4463,7 @@ fn compact_ax_tree_from(
         let value = if masked_value || password_control {
             raw_value.map(|_| "[redacted]".to_owned())
         } else {
-            raw_value
+            raw_value.map(redact_secret_material)
         };
         // Only links: the AX `url` property also lands on the root web
         // area, where it is the document URL — which for a data: page
@@ -4419,7 +4476,7 @@ fn compact_ax_tree_from(
             name,
             target: None,
             value,
-            description: text(&node.description),
+            description: text(&node.description).map(redact_secret_material),
             required: property_bool(node, "required"),
             disabled: property_bool(node, "disabled"),
             read_only: property_bool(node, "readonly"),
