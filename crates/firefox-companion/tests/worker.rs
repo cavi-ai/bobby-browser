@@ -428,7 +428,7 @@ impl ExtensionObserver for CandidateObserver {
         max_nodes: u32,
         _target: Option<&TargetSpec>,
     ) -> Result<(Vec<types::AccessibilityNode>, bool), CommandError> {
-        assert_eq!(max_nodes, 100);
+        assert_eq!(max_nodes, 1024);
         Ok((
             vec![types::AccessibilityNode {
                 role: Some("main".into()),
@@ -770,6 +770,7 @@ fn observation() -> ExtensionObservation {
             disabled: false,
         }],
         html: Some("<main>Observed text</main>".into()),
+        controls_truncated: false,
     }
 }
 

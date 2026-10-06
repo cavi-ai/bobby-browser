@@ -8,6 +8,8 @@ export const MAX_VISIBLE_TEXT_VISITED_NODES = 4_096;
 export const MAX_CONTROL_VISITED_NODES = 4_096;
 export const MAX_ELEMENT_TEXT_VISITED_NODES = 512;
 export const MAX_CONTROL_HELPER_VISITS = 16_384;
+export const MAX_CONTROL_FILTER_VISITS = 262_144;
+const MAX_NAME_CONTENT_DEPTH = 24;
 export const MAX_CSS_SIBLING_VISITS = 128;
 export const MAX_CONTROL_FIELD_LENGTH = 256;
 export const MAX_SELECTOR_LENGTH = 512;
@@ -131,6 +133,8 @@ export type PageObservation = {
     disabled: boolean;
   }>;
   html?: string;
+  /** Present and true when the control walk stopped at a bound. */
+  controlsTruncated?: boolean;
 };
 
 const CONTROL_SELECTOR = [
@@ -428,25 +432,59 @@ function boundedElementText(
 ): string | undefined {
   let output = "";
   let outputBytes = 0;
-  const walker = element.ownerDocument.createTreeWalker(element, 4);
   let visited = 0;
-  while (visited < MAX_ELEMENT_TEXT_VISITED_NODES) {
-    const node = walker.nextNode();
-    if (!node) break;
-    visited += 1;
-    if (!takeWork(budget)) break;
-    const parent = node.parentElement;
-    if (!parent || isElementHidden(parent, budget)) continue;
+  const push = (text: string | undefined): boolean => {
+    if (!text) return true;
     const separatorBytes = output ? 1 : 0;
     const remaining = maximum - outputBytes - separatorBytes;
-    if (remaining <= 0) break;
-    const text = observationString(node.nodeValue, remaining);
-    if (!text) continue;
-    output += `${output ? " " : ""}${text}`;
-    outputBytes += separatorBytes + byteLength(text);
+    if (remaining <= 0) return false;
+    const bounded = observationString(text, remaining);
+    if (!bounded) return true;
+    output += `${output ? " " : ""}${bounded}`;
+    outputBytes += separatorBytes + byteLength(bounded);
+    return true;
+  };
+  const visit = (node: Node, depth: number): boolean => {
+    if (visited >= MAX_ELEMENT_TEXT_VISITED_NODES || !takeWork(budget)) return false;
+    visited += 1;
+    if (node.nodeType === 3) return push(node.nodeValue ?? undefined);
+    if (node.nodeType !== 1) return true;
+    const child = node as Element;
+    if (child !== element) {
+      if (["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT"].includes(child.tagName)) return true;
+      if (isLocallyHidden(child)) return true;
+      // An icon's own label stands for its content, as in the accessible
+      // name computation: aria-label, an image's alt, an svg's <title>.
+      const own = observationString(child.getAttribute("aria-label"));
+      if (own) return push(own);
+      if (child.tagName === "IMG") return push(child.getAttribute("alt") ?? undefined);
+      if (child.tagName.toLowerCase() === "svg") {
+        const title = Array.from(child.children).find((entry) => entry.tagName.toLowerCase() === "title");
+        const text = title?.textContent ?? child.getAttribute("title") ?? undefined;
+        if (text) return push(text);
+      }
+    }
+    if (depth >= MAX_NAME_CONTENT_DEPTH) return true;
+    for (const next of Array.from(child.childNodes).slice(0, 256)) {
+      if (!visit(next, depth + 1)) return false;
+    }
+    return true;
+  };
+  try {
+    if (!isElementHidden(element)) visit(element, 0);
+  } catch {
+    // A node that throws during inspection contributes no name.
   }
   return output || undefined;
 }
+
+function isLocallyHidden(element: Element): boolean {
+  if (element.hasAttribute("hidden") || element.getAttribute("aria-hidden") === "true") return true;
+  const style = element.ownerDocument.defaultView?.getComputedStyle(element);
+  return style?.display === "none" || style?.visibility === "hidden";
+}
+
+const NAME_FROM_CONTENT_EXCLUDED_TAGS = new Set(["TEXTAREA", "SELECT"]);
 
 function accessibleName(
   element: Element,
@@ -454,13 +492,17 @@ function accessibleName(
   budget: WorkBudget,
   sensitive: boolean,
 ): string | undefined {
+  const textEntry = element.tagName === "INPUT" || element.tagName === "TEXTAREA";
   return (
-    observationString(element.getAttribute("aria-label")) ??
     labelledByText(element, budget) ??
+    observationString(element.getAttribute("aria-label")) ??
     label ??
     observationString(element.getAttribute("alt")) ??
     observationString(element.getAttribute("title")) ??
-    boundedElementText(element, MAX_CONTROL_FIELD_LENGTH, budget) ??
+    (textEntry && !sensitive ? observationString(element.getAttribute("placeholder")) : undefined) ??
+    (NAME_FROM_CONTENT_EXCLUDED_TAGS.has(element.tagName)
+      ? undefined
+      : boundedElementText(element, MAX_CONTROL_FIELD_LENGTH, budget)) ??
     (element.tagName === "INPUT" && !sensitive
       ? observationString(element.getAttribute("value"))
       : undefined)
@@ -610,24 +652,49 @@ function observeRoot(document: Document, root: Element, includeHtml: boolean): P
   const siblingCountsByParent = new WeakMap<Element, Map<string, number>>();
   const candidateControls: Element[] = [];
   if (root.matches(CONTROL_SELECTOR)) candidateControls.push(root);
-  const walker = document.createTreeWalker(root, 1);
+  // Hidden subtrees are rejected by the walker's filter, so they cost neither
+  // the visit cap nor the helper budget. The filter still sees every element
+  // that is not inside a rejected subtree, which keeps sibling positions exact.
+  let filterCalls = 0;
+  let controlsTruncated = false;
+  const walker = document.createTreeWalker(root, 1, {
+    acceptNode: (node: Node): number => {
+      const element = node as Element;
+      filterCalls += 1;
+      if (filterCalls > MAX_CONTROL_FILTER_VISITS) {
+        controlsTruncated = true;
+        return 2;
+      }
+      const parent = element.parentElement;
+      if (parent) {
+        let counts = siblingCountsByParent.get(parent);
+        if (!counts) {
+          counts = new Map<string, number>();
+          siblingCountsByParent.set(parent, counts);
+        }
+        const position = (counts.get(element.tagName) ?? 0) + 1;
+        counts.set(element.tagName, position);
+        siblingPositions.set(element, position);
+      }
+      try {
+        if (element.hasAttribute("hidden") || element.getAttribute("aria-hidden") === "true") {
+          return 2;
+        }
+        const style = element.ownerDocument.defaultView?.getComputedStyle(element);
+        if (style?.display === "none") return 2;
+        if (style?.visibility === "hidden") return 3;
+      } catch {
+        return 2;
+      }
+      return 1;
+    },
+  });
   let visited = 0;
   while (visited < MAX_CONTROL_VISITED_NODES && takeWork(helperBudget)) {
     const node = walker.nextNode();
     if (!node) break;
     visited += 1;
     const element = node as Element;
-    const parent = element.parentElement;
-    if (parent) {
-      let counts = siblingCountsByParent.get(parent);
-      if (!counts) {
-        counts = new Map<string, number>();
-        siblingCountsByParent.set(parent, counts);
-      }
-      const position = (counts.get(element.tagName) ?? 0) + 1;
-      counts.set(element.tagName, position);
-      siblingPositions.set(element, position);
-    }
     if (element.tagName === "LABEL") {
       const controlId = element.getAttribute("for");
       if (
@@ -642,8 +709,12 @@ function observeRoot(document: Document, root: Element, includeHtml: boolean): P
       candidateControls.push(element);
     }
   }
+  if (visited >= MAX_CONTROL_VISITED_NODES || helperBudget.remaining <= 0) controlsTruncated = true;
   for (const element of candidateControls) {
-    if (observation.controls.length >= MAX_CONTROL_COUNT) break;
+    if (observation.controls.length >= MAX_CONTROL_COUNT) {
+      controlsTruncated = true;
+      break;
+    }
     if (isElementHidden(element, helperBudget)) continue;
     const sensitive = isSensitiveControl(element, helperBudget);
     const observedPath = cssPath(element, helperBudget, siblingPositions, !sensitive);
@@ -683,10 +754,15 @@ function observeRoot(document: Document, root: Element, includeHtml: boolean): P
         element.hasAttribute("disabled") || element.getAttribute("aria-disabled") === "true",
     };
     const controlBytes = byteLength(JSON.stringify(control)) + (observation.controls.length ? 1 : 0);
-    if (serializedBytes + controlBytes > MAX_OBSERVATION_BYTES) break;
+    if (serializedBytes + controlBytes > MAX_OBSERVATION_BYTES) {
+      controlsTruncated = true;
+      break;
+    }
     observation.controls.push(control);
     serializedBytes += controlBytes;
   }
+  if (helperBudget.remaining <= 0) controlsTruncated = true;
+  if (controlsTruncated) observation.controlsTruncated = true;
   if (includeHtml) {
     const html = sanitizedHtml(root);
     const overhead = byteLength(JSON.stringify({ html: "" })) - 2;
@@ -888,7 +964,7 @@ function a11yTree(
   };
 
   const semantics = (element: Element): { role?: string; name?: string; sensitive: boolean } => {
-    const budget: WorkBudget = { remaining: 64 };
+    const budget: WorkBudget = { remaining: 256 };
     const sensitive = isSensitiveControl(element, budget);
     const role = implicitRole(element, !sensitive) ?? structuralRole(element);
     const name = sensitive

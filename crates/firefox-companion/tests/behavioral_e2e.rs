@@ -322,6 +322,7 @@ fn observation() -> ExtensionObservation {
             disabled: false,
         }],
         html: Some("<main>Observed text</main>".into()),
+        controls_truncated: false,
     }
 }
 

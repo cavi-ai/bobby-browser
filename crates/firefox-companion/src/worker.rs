@@ -52,6 +52,8 @@ use crate::generate_session_seed;
 use crate::network_quiet::FirefoxNetworkQuiet;
 
 const COMPANION_SANDBOX: &str = "automation-runtime-companion";
+/// Accessibility nodes read to build intent candidates.
+const CANDIDATE_MAX_NODES: u32 = 1024;
 const FRAME_CANDIDATES_SCRIPT: &str = r#"(()=>{
   const controls=[];
   const nodes=document.querySelectorAll('input,textarea,select,button,a[href],iframe,[role]');
@@ -161,6 +163,10 @@ pub struct ExtensionObservation {
     pub controls: Vec<ExtensionControl>,
     #[serde(default)]
     pub html: Option<String>,
+    /// The page-side control walk stopped at a bound, so `controls` may omit
+    /// visible controls.
+    #[serde(default)]
+    pub controls_truncated: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1850,7 +1856,7 @@ impl FirefoxCompanionWorker {
     async fn gather_input_candidates(
         &self,
         page_id: &PageId,
-    ) -> Result<Vec<Candidate>, CommandError> {
+    ) -> Result<(Vec<Candidate>, bool), CommandError> {
         let observation = self
             .observer
             .observe(
@@ -1864,7 +1870,8 @@ impl FirefoxCompanionWorker {
             )
             .await?;
         validate_observation(&observation)?;
-        Ok(observation
+        let truncated = observation.controls_truncated;
+        let candidates = observation
             .controls
             .into_iter()
             .enumerate()
@@ -1893,19 +1900,22 @@ impl FirefoxCompanionWorker {
                     frame_path: Vec::new(),
                 }
             })
-            .collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        Ok((candidates, truncated))
     }
 
+    /// The candidates in `context` and whether the page-side walk stopped at
+    /// a bound before reaching every visible control.
     async fn gather_candidates_for_context(
         &self,
         page_id: &PageId,
         top_context: &str,
         context: &str,
-    ) -> Result<Vec<Candidate>, CommandError> {
+    ) -> Result<(Vec<Candidate>, bool), CommandError> {
         if context == top_context {
             return self.gather_input_candidates(page_id).await;
         }
-        self.gather_bidi_context_candidates(context).await
+        Ok((self.gather_bidi_context_candidates(context).await?, false))
     }
 
     async fn gather_bidi_context_candidates(
@@ -2004,7 +2014,7 @@ impl FirefoxCompanionWorker {
         if let Some(selector) = direct_target_selector(target) {
             return Ok((context, selector));
         }
-        let candidates = self
+        let (candidates, truncated) = self
             .gather_candidates_for_context(page_id, top_context, &context)
             .await?;
         match resolve_candidates(target, &candidates, &ResolutionPolicy::default()) {
@@ -2021,6 +2031,11 @@ impl FirefoxCompanionWorker {
             Ok(ResolutionDecision::Ambiguous { .. }) => Err(driver_error(
                 ErrorCode::TargetAmbiguous,
                 "Firefox semantic target is ambiguous",
+                false,
+            )),
+            Ok(ResolutionDecision::NotFound) if truncated => Err(driver_error(
+                ErrorCode::ResourceExhausted,
+                "Firefox semantic target was not found, but the candidate set was truncated before every visible control was read; narrow the target with a CSS selector or test ID",
                 false,
             )),
             Ok(ResolutionDecision::NotFound) => Err(driver_error(
@@ -2047,7 +2062,7 @@ impl FirefoxCompanionWorker {
         target: &types::TargetSpec,
     ) -> Result<Vec<(String, String)>, CommandError> {
         let context = self.resolve_input_context(top_context, target).await?;
-        let candidates = self
+        let (candidates, _) = self
             .gather_candidates_for_context(page_id, top_context, &context)
             .await?;
         let ranked = rank_candidates(target, &candidates, &ResolutionPolicy::default())
@@ -3104,10 +3119,19 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 false,
             ));
         }
-        let (nodes, _) = self
+        let (nodes, truncated) = self
             .observer
-            .a11y_snapshot(&self.current_lease(), page_id, 100, None)
+            .a11y_snapshot(&self.current_lease(), page_id, CANDIDATE_MAX_NODES, None)
             .await?;
+        if truncated && !accessibility_tree_has_match(&nodes, target) {
+            return Err(driver_error(
+                ErrorCode::ResourceExhausted,
+                format!(
+                    "the candidate set was truncated at {CANDIDATE_MAX_NODES} accessibility nodes before the target was found; narrow the target or scope the snapshot"
+                ),
+                false,
+            ));
+        }
         Ok(accessibility_candidates(&nodes))
     }
 
@@ -5733,6 +5757,22 @@ fn accessibility_tree_contains(nodes: &[types::AccessibilityNode], target: &Targ
         node.role.as_deref() == target.role.as_deref()
             && node.name.as_deref() == target.accessible_name.as_deref()
             || accessibility_tree_contains(&node.children, target)
+    })
+}
+
+/// Whether any node could be the target: its role matches and, when the
+/// target names one, so does its accessible name.
+fn accessibility_tree_has_match(nodes: &[types::AccessibilityNode], target: &TargetSpec) -> bool {
+    nodes.iter().any(|node| {
+        target
+            .role
+            .as_deref()
+            .is_none_or(|role| node.role.as_deref() == Some(role))
+            && target
+                .accessible_name
+                .as_deref()
+                .is_none_or(|name| node.name.as_deref() == Some(name))
+            || accessibility_tree_has_match(&node.children, target)
     })
 }
 
