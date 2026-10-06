@@ -60,7 +60,11 @@ const FRAME_CANDIDATES_SCRIPT: &str = r#"(()=>{
   const paymentValue=/(?:card(?: number)?|cvc|cvv|otp|expiry|challenge code)\s*[:=]?\s*\d{3,}/i;
   const credentialShape=/(?:\d[ -]?){12,19}|[a-zA-Z0-9_-]{32,}/;
   const publicLabels=new Set(['Password','Authentication code','Card details','Card number','Expiry','CVC','3-D Secure challenge','Challenge code']);
-  const safeLabel=value=>publicLabels.has(value)?value:(secret.test(value)||paymentValue.test(value)||credentialShape.test(value)?'[redacted]':value);
+  const isCredentialShaped=token=>/\d/.test(token)||token.endsWith('=')||(/[A-Z]/.test(token.slice(1))&&/[a-z]/.test(token));
+  const hasAuthScheme=value=>Array.from(value.matchAll(/(?:^|\s)(?:bearer|basic)\s+([A-Za-z0-9._~+\/=-]{8,})/gi)).some(match=>isCredentialShaped(match[1]));
+  const hasLongRun=value=>Array.from(value.matchAll(/[A-Za-z0-9+\/_=-]{40,}/g)).some(match=>/\d/.test(match[0])&&/[A-Z]/.test(match[0])&&/[a-z]/.test(match[0]));
+  const secretMaterial=value=>hasAuthScheme(value)||/(?:password|passwd|secret|token|api[-_ ]?key|credentials?|authorization|private[-_ ]?(?:key|token|secret)|pairing[-_ ]?code)\s*[:=]\s*\S{4}/i.test(value)||/-----BEGIN[\s\S]*?PRIVATE KEY-----/.test(value)||/eyJ[\w-]{7,}\.[\w-]{10,}\.[\w-]{10,}/.test(value)||/(?<![A-Za-z0-9])(?:sk-|sk_live_|sk_test_|rk_live_|ghp_|gho_|ghu_|ghs_|github_pat_|xox[abprs]-)[A-Za-z0-9_-]{16,}/.test(value)||/(?<![A-Z0-9])AKIA[A-Z0-9]{16}/.test(value)||/AIza[A-Za-z0-9_-]{35}/.test(value)||(!/^https?:\/\//i.test(value.trim())&&hasLongRun(value));
+  const safeLabel=value=>publicLabels.has(value)?value:(secretMaterial(value)||paymentValue.test(value)||credentialShape.test(value)?'[redacted]':value);
   const sensitive=element=>['input','textarea','select'].includes(element.localName)&&((element.localName==='input'&&element.type==='password')||Array.from(element.attributes).some(attribute=>secret.test(attribute.name)||secret.test(attribute.value)||paymentValue.test(attribute.value)||/(?:card|cvc|cvv|otp|one[-_]?time|expiry|challenge|code)/i.test(attribute.name)||credentialShape.test(attribute.value)));
   const path=element=>{
     const parts=[];
@@ -3533,7 +3537,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 )
                 .await?;
             if let Some(text) = response.pointer("/result/value").and_then(Value::as_str) {
-                if text.len() > MAX_VISIBLE_TEXT_BYTES || contains_sensitive_material(text) {
+                if text.len() > MAX_VISIBLE_TEXT_BYTES || unsafe_observation_text(text) {
                     return Err(driver_error(
                         ErrorCode::BrowserCommandFailed,
                         "inert JSON inspection failed its content safety bound",
@@ -3571,7 +3575,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 driver_error(ErrorCode::InvalidRequest, error.to_string(), false)
             })?;
             let response = self.transport.send("script.evaluate", json!({
-                "expression": format!("(()=>{{const el=document.querySelector({selector_json});if(!el)return null;if(el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement||el instanceof HTMLSelectElement)return '[redacted]';const value=String(el.innerText||el.textContent||'');const secret=/(?:authorization|authentication|bearer|token|secret|password|passwd|api[-_]?key|credential|card|cvc|cvv|otp|one[-_]?time|expiry|challenge|code)/i;const credentialShape=/(?:\\d[ -]?){{12,19}}|[a-zA-Z0-9_-]{{32,}}/;const sensitive=Array.from(el.attributes).some(attribute=>secret.test(attribute.name)||secret.test(attribute.value)||credentialShape.test(attribute.value))||secret.test(value)||credentialShape.test(value);return sensitive?'[redacted]':value.slice(0,8192);}})()"),
+                "expression": format!("(()=>{{const el=document.querySelector({selector_json});if(!el)return null;if(el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement||el instanceof HTMLSelectElement)return '[redacted]';const value=String(el.innerText||el.textContent||'');const secret=/(?:authorization|authentication|bearer|token|secret|password|passwd|api[-_]?key|credential|card|cvc|cvv|otp|one[-_]?time|expiry|challenge|code)/i;const credentialShape=/(?:\\d[ -]?){{12,19}}|[a-zA-Z0-9_-]{{32,}}/;const sensitive=Array.from(el.attributes).some(attribute=>secret.test(attribute.name)||secret.test(attribute.value)||credentialShape.test(attribute.value))||credentialShape.test(value);return sensitive?'[redacted]':value.slice(0,8192);}})()"),
                 "target": {"context": frame_context, "sandbox": COMPANION_SANDBOX},
                 "awaitPromise": false,
                 "resultOwnership": "none",
@@ -6155,23 +6159,18 @@ fn validate_observation(observation: &ExtensionObservation) -> Result<(), Comman
     ]
     .into_iter()
     .flatten()
-    .all(|value| !contains_sensitive_material(value));
+    .all(|value| !unsafe_observation_text(value));
     let safe_controls = observation.controls.iter().all(|control| {
         [
             Some(control.css_path.as_str()),
             control.role.as_deref(),
+            control.name.as_deref(),
+            control.label.as_deref(),
             control.value.as_deref(),
         ]
         .into_iter()
         .flatten()
-        .all(|value| !contains_sensitive_material(value))
-            && [control.name.as_deref(), control.label.as_deref()]
-                .into_iter()
-                .flatten()
-                .all(|value| {
-                    matches!(value, "Password" | "Authentication code")
-                        || !contains_sensitive_material(value)
-                })
+        .all(|value| !unsafe_observation_text(value))
     });
     if !safe_page || !safe_controls {
         return Err(driver_error(
@@ -6183,7 +6182,21 @@ fn validate_observation(observation: &ExtensionObservation) -> Result<(), Comman
     Ok(())
 }
 
-fn contains_sensitive_material(value: &str) -> bool {
+/// Page text the companion must not forward: disclosed secret material, or
+/// markup that was supposed to be sanitized away. A word like "password" is
+/// not a disclosure; a password FIELD's value is withheld at the control
+/// level by the content script.
+fn unsafe_observation_text(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    crate::secret_material::contains_secret_material(value)
+        || ["<script", " onclick=", " onload="]
+            .iter()
+            .any(|marker| lower.contains(marker))
+}
+
+/// Whether a target descriptor names a credential field (as opposed to page
+/// text that merely uses the word).
+fn names_credential_field(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     [
         "authorization",
@@ -6195,9 +6208,6 @@ fn contains_sensitive_material(value: &str) -> bool {
         "api-key",
         "api_key",
         "credential",
-        "<script",
-        " onclick=",
-        " onload=",
     ]
     .iter()
     .any(|marker| lower.contains(marker))
@@ -6218,8 +6228,7 @@ fn safe_frame_candidate_metadata(value: &str) -> bool {
         return true;
     }
     let lower = value.to_ascii_lowercase();
-    !contains_sensitive_material(value)
-        && !lower.contains("authentication")
+    !unsafe_observation_text(value)
         && !((lower.contains("card")
             || lower.contains("cvc")
             || lower.contains("cvv")
@@ -6236,7 +6245,7 @@ fn safe_frame_candidate_metadata(value: &str) -> bool {
 fn sensitive_frame_inspection_target(target: &TargetSpec, selector: &str) -> bool {
     let sensitive = |value: &str| {
         let lower = value.to_ascii_lowercase();
-        contains_sensitive_material(value)
+        names_credential_field(value)
             || [
                 "authentication",
                 "card",
