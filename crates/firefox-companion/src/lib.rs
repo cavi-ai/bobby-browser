@@ -4,6 +4,7 @@ pub mod bidi;
 pub mod bidi_endpoint;
 mod fingerprint_host;
 mod network_quiet;
+mod secret_material;
 pub mod selection;
 mod worker;
 
