@@ -101,13 +101,7 @@ impl IntentBrowser for FakeBrowser {
         _page_id: &PageId,
         _command: &CaptureScreenshotCommand,
     ) -> Result<(Vec<u8>, Vec<Evidence>), CommandError> {
-        if self
-            .screenshot_failures
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                remaining.checked_sub(1)
-            })
-            .is_ok()
-        {
+        if consume_failure(&self.screenshot_failures) {
             return Err(unsupported("capture_screenshot"));
         }
         Ok((
@@ -446,4 +440,15 @@ async fn solve_challenge_without_a_store_leaves_the_prompt_alone() {
     assert!(matches!(outcome, IntentOutcome::Completed { .. }));
     let purposes = probe.purposes.lock().unwrap_or_else(|p| p.into_inner());
     assert_eq!(purposes.as_slice(), ["solve the reCAPTCHA challenge"]);
+}
+
+fn consume_failure(counter: &AtomicUsize) -> bool {
+    let mut count = counter.load(Ordering::SeqCst);
+    while let Some(next) = count.checked_sub(1) {
+        match counter.compare_exchange_weak(count, next, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(current) => count = current,
+        }
+    }
+    false
 }

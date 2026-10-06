@@ -63,13 +63,7 @@ struct FailingJournal {
 #[async_trait]
 impl CommandJournal for FailingJournal {
     async fn append(&self, record: JournalRecord) -> Result<(), JournalError> {
-        if self
-            .failures
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-                count.checked_sub(1)
-            })
-            .is_ok()
-        {
+        if consume_failure(&self.failures) {
             return Err(JournalError::Io(std::io::Error::other(
                 "injected recovery journal failure",
             )));
@@ -1714,4 +1708,15 @@ async fn issued_identity_survives_receipt_write_failure_and_reconciles_only_exac
     ));
     assert_eq!(releases.load(Ordering::SeqCst), 0);
     assert_eq!(replacements.load(Ordering::SeqCst), 0);
+}
+
+fn consume_failure(counter: &AtomicUsize) -> bool {
+    let mut count = counter.load(Ordering::SeqCst);
+    while let Some(next) = count.checked_sub(1) {
+        match counter.compare_exchange_weak(count, next, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(current) => count = current,
+        }
+    }
+    false
 }
