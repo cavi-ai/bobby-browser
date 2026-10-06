@@ -8,7 +8,7 @@
 //! `element_at_point`.
 //!
 //! Records are schema-agnostic (raw action kinds + `target_index`), matching
-//! the gauntlet corpus contract; `build_completion` converts at training time.
+//! the corpus contract; `build_completion` converts at training time.
 
 use std::path::{Path, PathBuf};
 

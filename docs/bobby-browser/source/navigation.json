@@ -121,10 +121,6 @@
           "path": "guides/skills.md"
         },
         {
-          "title": "Browser gauntlet",
-          "path": "guides/gauntlet.md"
-        },
-        {
           "title": "Events and recovery",
           "path": "guides/events-recovery.md"
         },

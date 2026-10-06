@@ -102,13 +102,3 @@ On a known site, ask before you snapshot: `context_ask` answers before the
 first accessibility observation of a session. `workflow_observe` with a
 `goal` does this for you: when memory answers, it returns the remembered
 target (`"source":"retained"`) and takes no snapshot.
-
-| Gauntlet onboarding, managed Chromium | Cold | After a runtime restart |
-|---|---|---|
-| `workflow_observe` `{"goal":"Full name"}` | 7,536 bytes, live snapshot, 35–44 ms | 866 bytes, `retained`, 6–8 ms |
-| `intent_complete_form`, two fields | 8,778 bytes | 8,778 bytes |
-
-Same two calls in both runs; the remembered run reads 89% fewer bytes before
-it acts. Reproduce with
-`cargo test -p runtime-tests --test remembered_site_calls -- --ignored --nocapture`
-(`BOBBY_CHROME_EXECUTABLE` names the browser).

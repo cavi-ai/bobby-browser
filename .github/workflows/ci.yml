@@ -53,11 +53,6 @@ jobs:
           node-version: 24.18.1
           cache: pnpm
 
-      - name: Build the Northstar browser app for workspace tests
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm --filter @cavi-ai/bobby-gauntlet build
-
       - name: Install Chrome for workspace tests
         uses: browser-actions/setup-chrome@latest
         with:
@@ -71,8 +66,6 @@ jobs:
           "$(readlink -f "$BIN")" --version
 
       - name: Test
-        # Workspace tests include the mandatory Northstar browser journeys.
-        # The chromium job below runs them again against the pinned release browser.
         run: cargo test --workspace --locked
 
       - name: Version and naming agreement
@@ -159,11 +152,9 @@ jobs:
           node-version: 24.18.1
           cache: pnpm
 
-      - name: Build and test the Northstar browser app
+      - name: Build the SDK
         run: |
           pnpm install --frozen-lockfile
-          pnpm --filter @cavi-ai/bobby-gauntlet test
-          pnpm --filter @cavi-ai/bobby-gauntlet build
           # The conformance package typechecks against the SDK's emitted types.
           pnpm --filter @cavi-ai/bobby-browser build
 
@@ -189,27 +180,6 @@ jobs:
 
       - name: Worker live tests
         run: cargo test -p worker-pool --test chromium_worker --locked -- --ignored --test-threads=1
-
-      - name: Northstar end-to-end release gate
-        run: cargo test -p runtime-tests --locked --test modern_gauntlet_e2e -- --test-threads=1
-
-      - name: Vision corpus contract smoke
-        # One grow run per journey produces a small fresh corpus; the lint
-        # enforces the pipeline's invariants (actionable-role windows, no
-        # empty windows, target indices in range, abstain class present) so
-        # collector/engine drift fails at PR time, not at research time.
-        run: |
-          BOBBY_CORPUS_RUNS_PER_JOURNEY=1 cargo test -p runtime-tests --locked --test modern_gauntlet_corpus_grow -- --test-threads=1
-          cat target/vision-corpus/*.jsonl > /tmp/ci-corpus.jsonl
-          python3 scripts/vision-mlx/training/corpus_lint.py --input /tmp/ci-corpus.jsonl --skip-balance
-
-      - name: Upload Northstar failure evidence
-        if: failure()
-        uses: actions/upload-artifact@v6
-        with:
-          name: modern-gauntlet-evidence
-          path: target/modern-gauntlet-artifacts
-          if-no-files-found: warn
 
       - name: Runtime live tests
         run: >-
@@ -298,7 +268,6 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           pnpm --filter @cavi-ai/bobby-firefox-companion build
-          pnpm --filter @cavi-ai/bobby-gauntlet build
 
       - name: Install Firefox
         uses: browser-actions/setup-firefox@latest
@@ -332,11 +301,6 @@ jobs:
             --test behavioral_firefox \
             --test fingerprint_firefox \
             -- --ignored --test-threads=1
-
-      - name: Firefox Northstar end-to-end release gate
-        env:
-          BOBBY_GAUNTLET_ENGINE: firefox
-        run: xvfb-run -a cargo test -p runtime-tests --locked --test modern_gauntlet_e2e -- --test-threads=1
 
   node:
     name: node · typescript · docs

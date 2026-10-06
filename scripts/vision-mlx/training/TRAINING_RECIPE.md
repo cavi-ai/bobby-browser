@@ -21,7 +21,7 @@ data collection, fine-tuning, and evaluation.
 
 ### 1. Data Collection
 
-**Source**: Bobby's gauntlet runs (5 journeys)
+**Source**: Bobby journey runs (5 journeys)
 - `customer-update`: Customer search and priority update
 - `onboarding`: User registration form
 - `documents`: Document upload with iframe confirmation
@@ -52,8 +52,7 @@ data collection, fine-tuning, and evaluation.
 
 **Collection methods**:
 1. **Runtime hook**: Patch Bobby's vision proxy to log all proposals
-2. **Gauntlet integration**: Capture data from each journey step
-3. **Synthetic data**: Generate synthetic UI screenshots for testing
+2. **Synthetic data**: Generate synthetic UI screenshots for testing
 
 **Target dataset size**: 5,000+ examples (1,000 per journey)
 
@@ -90,7 +89,7 @@ data collection, fine-tuning, and evaluation.
 - **Journey success rate**: Fraction of journeys completed successfully
 
 **Evaluation harness**:
-1. Run all 5 gauntlet journeys
+1. Run all 5 journeys
 2. Capture vision proposals and outcomes
 3. Compute metrics per journey and overall
 4. Compare before/after fine-tuning
@@ -121,28 +120,6 @@ async fn propose(&self, input: ProposeInput) -> Result<ProposeResponse, Upstream
     });
     
     // ... existing code ...
-}
-```
-
-### Gauntlet Integration
-
-Modify gauntlet tests to capture vision data:
-
-```rust
-// In modern_gauntlet_e2e.rs
-#[tokio::test]
-async fn customer_discovery_and_update_is_durable() -> TestResult<()> {
-    let server = ScenarioServer::start(ScenarioConfig::seeded("customer-update")).await?;
-    let runtime = ModernRuntime::launch(&server, Journey::CustomerUpdate).await?;
-    
-    // Capture vision data for each step
-    runtime.type_text("input[aria-label='Search customers']", "Atlas").await?;
-    capture_vision_data(&runtime, "customer-update", "step_search").await?;
-    
-    runtime.click("form[aria-label='Customer search'] button", false).await?;
-    capture_vision_data(&runtime, "customer-update", "step_click").await?;
-    
-    // ... rest of test ...
 }
 ```
 
@@ -206,6 +183,6 @@ async fn customer_discovery_and_update_is_durable() -> TestResult<()> {
 ## Next Steps
 
 1. **Integrate data collection** into Bobby's runtime (patch vision proxy)
-2. **Run gauntlet** to collect real training data
+2. **Run journeys** to collect real training data
 3. **Fine-tune** Qwen2-VL-7B when MLX adds vision support
-4. **Evaluate** improvements on gauntlet journeys
+4. **Evaluate** improvements on the journeys

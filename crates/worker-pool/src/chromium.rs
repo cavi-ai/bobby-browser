@@ -4803,7 +4803,7 @@ mod tests {
         // exited", "no debug websocket url", "CDP connect: <error>") all
         // require `self.browser` to hold a live `chromiumoxide::Browser`
         // (a real CDP connection), which this child-less fixture cannot
-        // provide -- they are exercised by the gauntlet's live-Chromium
+        // provide -- they are exercised by live-Chromium
         // runs instead, not by a unit test.
         let temp = tempfile::tempdir().expect("temporary worker root");
         let worker = chromium_worker_without_browser(temp.path());

@@ -2855,8 +2855,7 @@ mod tests {
     /// The one live handle a scope-less call would have defaulted to is
     /// resolved before schema validation ever runs (`normalize_arguments`),
     /// so this rejection path only ever sees 0 or 2-or-more live handles --
-    /// exercised here with 2, matching the gauntlet scenario in
-    /// `tests/workflow_handles.rs`.
+    /// exercised here with 2.
     #[test]
     fn invalid_params_missing_scope_hint_names_the_live_handle_count() {
         let response = invalid_params(

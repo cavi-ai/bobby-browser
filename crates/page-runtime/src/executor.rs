@@ -1685,7 +1685,7 @@ fn is_postcondition_failure(error: &CommandError) -> bool {
 }
 
 /// Transient page/target loss after an act: retryable re-list/reattach, not
-/// Boundary never-retry reconciliation (which caused double-saves in gauntlet
+/// Boundary never-retry reconciliation (which caused double-saves
 /// when a tab died mid-submit).
 fn is_transient_target_loss(error: &CommandError) -> bool {
     matches!(error.code, ErrorCode::TargetDetached)

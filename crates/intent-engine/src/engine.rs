@@ -2118,7 +2118,7 @@ async fn execute_submit_and_verify(
     // at the FIRST poll (~50ms) — misuse is caught fast; the full window is
     // paid only by correctly-scoped matchers whose state genuinely does not
     // pre-hold, which is the ~1.25s price of not verifying against content
-    // that was still loading. Measured in the --runs 3 gauntlet batch: a
+    // that was still loading. Measured in a --runs 3 batch: a
     // 750ms window let a static "Atlas" matcher through on a slow-rendering
     // customer page, the submit "verified" nothing, and the agent re-ran the
     // Boundary submit (boundary-once now refuses that, but the first line of

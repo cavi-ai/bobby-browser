@@ -9,13 +9,13 @@ records become ground truth with production windows: same window the
 production path builds, label from the script.
 
 Purpose -> target mapping lives here (it must match the harvest
-harness's phrasing lists in intent_vision_gauntlet.rs). Relabeled
-records carry journey="gauntlet-live" and
+harness's phrasing lists). Relabeled
+records carry journey="live-window" and
 outcome_stage="liveWindowScriptedLabel" for provenance.
 
     python relabel_live_windows.py \
         --input /tmp/vision-harvest/vision-corpus.jsonl \
-        --output data/gauntlet-live-relabeled.jsonl
+        --output data/live-window-relabeled.jsonl
 """
 
 import argparse
@@ -164,7 +164,7 @@ def relabel(record):
             "action": {"kind": action, "index": index},
         },
         "success": True,
-        "journey": "gauntlet-live",
+        "journey": "live-window",
         "step": step,
         "outcome_stage": "liveWindowScriptedLabel",
     }

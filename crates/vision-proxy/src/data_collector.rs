@@ -48,7 +48,7 @@ pub struct VisionTrainingExample {
     pub model_response: Option<serde_json::Value>,
     /// Whether the action succeeded (set by runtime)
     pub success: Option<bool>,
-    /// Gauntlet journey name
+    /// Journey name
     pub journey: Option<String>,
     /// Step within journey
     pub step: Option<String>,

@@ -2072,7 +2072,7 @@ async fn wait_for_text_keeps_polling_instead_of_failing_when_every_candidate_det
 
 /// A listbox option the page replaces with an identical, unstamped node the
 /// instant the candidate collector stamps it with its per-scan
-/// `data-bobby-target` id -- the re-render the gauntlet combobox does when a
+/// `data-bobby-target` id -- the re-render a combobox does when a
 /// late suggestion render lands between a click's resolution and its
 /// dispatch (`intent_frames.rs`). The `MutationObserver` runs as soon as the
 /// collect pass returns, so the click's first read of the resolved element

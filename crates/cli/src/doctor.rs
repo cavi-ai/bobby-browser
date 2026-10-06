@@ -1874,7 +1874,7 @@ pub(crate) fn run_doctor_with_profile(
         };
     // Hand the same config path doctor validated into the gateway child so
     // `[mcp] startup_toolset` (and the rest of the file) apply to handshake —
-    // without this, doctor always probes explore defaults while gauntlet/agent
+    // without this, doctor always probes explore defaults while agent
     // hosts that set BOBBY_BROWSER_CONFIG see a different surface.
     let handshake_env = handshake_env.map(|mut env| {
         if config_path.exists() {
