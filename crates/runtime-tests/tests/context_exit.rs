@@ -441,14 +441,8 @@ async fn fuzzy_match_latency_across_100_sites() {
         "fuzzyAskMicros": fuzzy_us,
     });
     println!("context-graph measurements: {measurements}");
-    let benchmarks = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .unwrap()
-        .join("benchmarks");
-    std::fs::create_dir_all(&benchmarks).unwrap();
     std::fs::write(
-        benchmarks.join("context-graph.json"),
+        root.path().join("context-graph.json"),
         serde_json::to_string_pretty(&measurements).unwrap(),
     )
     .unwrap();

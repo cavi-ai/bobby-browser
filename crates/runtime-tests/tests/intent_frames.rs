@@ -37,7 +37,9 @@ class StaticPreview extends HTMLElement {
     confirm.setAttribute("aria-label", "Confirm document preview");
     confirm.textContent = "Confirm document";
     confirm.addEventListener("click", () => {
-      fetch("/api/documents/confirm", { method: "POST" });
+      fetch("/api/documents/confirm", { method: "POST" }).then(() => {
+        confirm.disabled = true;
+      });
     });
     root.append(frame, confirm);
   }
@@ -130,7 +132,10 @@ const ONBOARDING: &str = r##"<!doctype html><title>New relationship</title><main
 <section id="step3" hidden>
 <label for="plan">Plan</label>
 <select id="plan"><option value="starter">Starter</option><option value="growth">Growth</option></select>
-<div id="cycle-row"></div>
+<div id="cycle-row" hidden>
+<label for="cycle">Billing cycle</label>
+<select id="cycle"><option value="monthly">Monthly</option><option value="annual">Annual</option></select>
+</div>
 </section>
 <script>
 const show = (hide, reveal) => {
@@ -140,10 +145,7 @@ const show = (hide, reveal) => {
 document.getElementById("next1").addEventListener("click", () => show("step1", "step2"));
 document.getElementById("next2").addEventListener("click", () => show("step2", "step3"));
 document.getElementById("plan").addEventListener("change", (event) => {
-  // The billing cycle select does not exist until the growth plan is chosen.
-  document.getElementById("cycle-row").innerHTML = event.target.value === "growth"
-    ? '<label for="cycle">Billing cycle</label><select id="cycle"><option value="monthly">Monthly</option><option value="annual">Annual</option></select>'
-    : "";
+  document.getElementById("cycle-row").hidden = event.target.value !== "growth";
 });
 </script></main>"##;
 

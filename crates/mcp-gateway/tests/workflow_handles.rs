@@ -2111,7 +2111,7 @@ fn workflow_handle_chrome_executable() -> std::path::PathBuf {
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn workflow_handle_follows_a_popup_and_returns_to_the_opener_when_it_closes() {
-    let scenario = test_site::FixtureSite::spawn(vec![
+    let site = test_site::FixtureSite::spawn(vec![
         (
             "/integrations",
             test_site::Route::Html(
@@ -2201,7 +2201,7 @@ async fn workflow_handle_follows_a_popup_and_returns_to_the_opener_when_it_close
         "workflow_start",
         json!({
             "profile": "workflow-handle-popup-follow",
-            "url": scenario.url("/integrations"),
+            "url": site.url("/integrations"),
             // Only so the raw-runtime `window.close()` below (test setup,
             // not the behavior under test) is allowed to run.
             "executionPolicy": {"javascriptEvaluation": true},

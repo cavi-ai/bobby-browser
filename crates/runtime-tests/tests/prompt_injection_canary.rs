@@ -101,8 +101,8 @@ async fn call(server: &Server, id: u64, name: &str, arguments: Value) -> Value {
 #[tokio::test]
 async fn injected_page_text_is_marked_page_derived_and_cannot_escalate_capabilities() {
     let (service, _root) = runtime_service().await;
-    let scenario = FixtureSite::spawn(vec![("/agent-canary", Route::Html(CANARY.into()))]).await;
-    let canary_url = scenario.url("/agent-canary");
+    let site = FixtureSite::spawn(vec![("/agent-canary", Route::Html(CANARY.into()))]).await;
+    let canary_url = site.url("/agent-canary");
 
     // A fully-capable session runs the ordinary observe/extract loop over
     // the canary page.
@@ -179,7 +179,7 @@ async fn injected_page_text_is_marked_page_derived_and_cannot_escalate_capabilit
         &restricted,
         2,
         "workflow_start",
-        json!({"profile":"canary-restricted","url":scenario.url("/agent-canary")}),
+        json!({"profile":"canary-restricted","url":site.url("/agent-canary")}),
     )
     .await;
     assert_eq!(
