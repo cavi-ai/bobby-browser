@@ -362,14 +362,7 @@ impl BrowserWorker for LiveWorker {
             command.max_nodes.map_or(0, |value| value as usize),
             Ordering::SeqCst,
         );
-        if self
-            .probe
-            .accessibility_failures_remaining
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                remaining.checked_sub(1)
-            })
-            .is_ok()
-        {
+        if consume_failure(&self.probe.accessibility_failures_remaining) {
             return Err(CommandError {
                 code: ErrorCode::BrowserCommandFailed,
                 message: "injected live-harness accessibility failure".into(),
@@ -405,14 +398,7 @@ impl BrowserWorker for LiveWorker {
             max_controls.map_or(0, |value| value as usize),
             Ordering::SeqCst,
         );
-        if self
-            .probe
-            .form_failures_remaining
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                remaining.checked_sub(1)
-            })
-            .is_ok()
-        {
+        if consume_failure(&self.probe.form_failures_remaining) {
             return Err(CommandError {
                 code: ErrorCode::BrowserCommandFailed,
                 message: "injected live-harness form snapshot failure".into(),
@@ -497,14 +483,7 @@ impl BrowserWorker for LiveWorker {
         if self.block_delete {
             self.probe.delete_release.notified().await;
         }
-        if self
-            .probe
-            .delete_failures_remaining
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                remaining.checked_sub(1)
-            })
-            .is_ok()
-        {
+        if consume_failure(&self.probe.delete_failures_remaining) {
             return Err(CommandError {
                 code: ErrorCode::BrowserCommandFailed,
                 message: "injected live-harness session deletion failure".into(),
@@ -616,16 +595,11 @@ impl RuntimeInterface for FaultInjectingRuntime {
         ctx: types::RequestContext,
         envelope: types::CommandEnvelope,
     ) -> InterfaceResult<types::CommandOutcome> {
-        let fail_navigation = matches!(
-            envelope.command,
-            types::RuntimeCommand::Primitive(types::PrimitiveCommand::Navigate(_))
-        ) && self
-            .probe
-            .navigation_interface_failures_remaining
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                remaining.checked_sub(1)
-            })
-            .is_ok();
+        let fail_navigation =
+            matches!(
+                envelope.command,
+                types::RuntimeCommand::Primitive(types::PrimitiveCommand::Navigate(_))
+            ) && consume_failure(&self.probe.navigation_interface_failures_remaining);
         if fail_navigation {
             return Err(types::InterfaceError {
                 code: types::InterfaceErrorCode::Internal,
@@ -642,13 +616,7 @@ impl RuntimeInterface for FaultInjectingRuntime {
         let restart = matches!(
             envelope.command,
             types::RuntimeCommand::Primitive(types::PrimitiveCommand::AccessibilitySnapshot(_))
-        ) && self
-            .probe
-            .accessibility_restarts_remaining
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                remaining.checked_sub(1)
-            })
-            .is_ok();
+        ) && consume_failure(&self.probe.accessibility_restarts_remaining);
         let outcome = self.inner.submit(ctx, envelope.clone()).await?;
         if !restart {
             return Ok(outcome);
@@ -1058,4 +1026,15 @@ pub fn assert_intent_domain_failure(
         verification.starts_with("target"),
         "expected a target-resolution failure, got {verification}: {response}"
     );
+}
+
+fn consume_failure(counter: &AtomicUsize) -> bool {
+    let mut count = counter.load(Ordering::SeqCst);
+    while let Some(next) = count.checked_sub(1) {
+        match counter.compare_exchange_weak(count, next, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(current) => count = current,
+        }
+    }
+    false
 }
