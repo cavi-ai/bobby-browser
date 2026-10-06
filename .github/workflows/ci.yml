@@ -188,16 +188,24 @@ jobs:
           --test agentic_interaction
           --test browser_vertical_slice
           --test checkpoint_recovery
+          --test chromium_durable_profile
+          --test click_explicit_dispatch
+          --test context_exit
           --test context_privacy
           --test intent_dismiss_obstruction_workflow
           --test intent_extract_workflow
+          --test intent_follow_workflow
           --test intent_form_workflow
+          --test intent_frames
           --test intent_vision_escalation
           --test intent_vision_prefill
           --test interface_capacity
           --test interface_recovery
           --test interface_security
+          --test popup_discovery
+          --test prompt_injection_canary
           --test recovery_demo
+          --test remembered_site_calls
           --test site_regressions_chromium
           -- --ignored --test-threads=1
           --skip stuck_locate_records_a_real_local_vision_proposal

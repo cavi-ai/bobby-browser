@@ -43,5 +43,6 @@ checkpoint-store.workspace = true
 dom-engine.workspace = true
 page-runtime.workspace = true
 session-manager.workspace = true
+test-site.workspace = true
 worker-pool.workspace = true
 workflow-journal.workspace = true

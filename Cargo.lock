@@ -2630,6 +2630,7 @@ dependencies = [
  "sha2",
  "task-scheduler",
  "tempfile",
+ "test-site",
  "thiserror",
  "tokio",
  "tokio-tungstenite 0.30.0",

@@ -19,28 +19,39 @@ pub enum Route {
     Redirect(String),
     /// Answers 302 to `to` on the first request, then serves `then`.
     RedirectOnce { to: String, then: String },
+    /// Serves `body` with this content type. Any method is accepted.
+    Raw {
+        content_type: &'static str,
+        body: String,
+    },
 }
 
 struct Entry {
     route: Route,
-    hits: AtomicUsize,
+    hits: Arc<AtomicUsize>,
 }
 
 pub struct FixtureSite {
     address: SocketAddr,
     task: JoinHandle<()>,
+    hits: HashMap<String, Arc<AtomicUsize>>,
 }
 
 impl FixtureSite {
     pub async fn spawn(routes: Vec<(&str, Route)>) -> Self {
+        let hits: HashMap<String, Arc<AtomicUsize>> = routes
+            .iter()
+            .map(|(path, _)| ((*path).to_owned(), Arc::new(AtomicUsize::new(0))))
+            .collect();
         let table: HashMap<String, Entry> = routes
             .into_iter()
             .map(|(path, route)| {
+                let counter = Arc::clone(&hits[path]);
                 (
                     path.to_owned(),
                     Entry {
                         route,
-                        hits: AtomicUsize::new(0),
+                        hits: counter,
                     },
                 )
             })
@@ -55,11 +66,22 @@ impl FixtureSite {
                 .await
                 .expect("serve regression fixture");
         });
-        Self { address, task }
+        Self {
+            address,
+            task,
+            hits,
+        }
     }
 
     pub fn url(&self, path: &str) -> String {
         format!("http://{}{path}", self.address)
+    }
+
+    /// Requests the route at `path` has served so far (any method).
+    pub fn hits(&self, path: &str) -> usize {
+        self.hits
+            .get(path)
+            .map_or(0, |counter| counter.load(Ordering::SeqCst))
     }
 }
 
@@ -81,6 +103,9 @@ async fn serve(State(table): State<Arc<HashMap<String, Entry>>>, uri: Uri) -> Re
     match &entry.route {
         Route::Html(body) => Html(body.clone()).into_response(),
         Route::Redirect(to) => redirect(to),
+        Route::Raw { content_type, body } => {
+            ([(header::CONTENT_TYPE, *content_type)], body.clone()).into_response()
+        }
         Route::RedirectOnce { to, then } => {
             if hit == 0 {
                 redirect(to)

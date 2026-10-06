@@ -4,8 +4,8 @@
 
 use serde_json::json;
 
-use super::fixture_site::{FixtureSite, Route};
 use super::rig::{assert_node, find_node, strings_under, targets_under, Live, Rig};
+use test_site::{FixtureSite, Route};
 
 const HIDDEN_NODES: usize = 3000;
 
