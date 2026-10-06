@@ -415,9 +415,18 @@ fn atomic_array<const N: usize>() -> [AtomicU64; N] {
 }
 
 fn increment(counter: &AtomicU64) {
-    let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-        Some(value.saturating_add(1))
-    });
+    let mut value = counter.load(Ordering::Acquire);
+    loop {
+        match counter.compare_exchange_weak(
+            value,
+            value.saturating_add(1),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return,
+            Err(current) => value = current,
+        }
+    }
 }
 
 fn increment_latency(counters: &[AtomicU64; 11], latency_ms: u64) {
@@ -474,6 +483,23 @@ fn saturating_sum(values: &[u64]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn increments_are_atomic_and_saturating_under_contention() {
+        for (initial, expected) in [(0, 4_000), (u64::MAX - 2_000, u64::MAX)] {
+            let counter = AtomicU64::new(initial);
+            std::thread::scope(|scope| {
+                for _ in 0..4 {
+                    scope.spawn(|| {
+                        for _ in 0..1_000 {
+                            increment(&counter);
+                        }
+                    });
+                }
+            });
+            assert_eq!(counter.load(Ordering::Acquire), expected);
+        }
+    }
 
     #[test]
     fn increment_saturates() {
