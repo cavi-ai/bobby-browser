@@ -584,8 +584,26 @@ async fn proactive_prefill(
         return;
     }
 
+    // Reserve capacity for usable current-form entries before any await, even
+    // when their fields occur after the fields that need new proposals.
+    let mut retained = Vec::new();
+    let mut retained_keys = BTreeSet::new();
+    for field in fields {
+        if retained.len() == MAX_CACHED_PROPOSALS {
+            break;
+        }
+        let key = field.purpose.trim().to_lowercase();
+        if retained_keys.contains(&key) {
+            continue;
+        }
+        if let Some(proposal) = proposals.proposal_for(page_id, &field.purpose) {
+            retained_keys.insert(key);
+            retained.push((field.purpose.clone(), proposal));
+        }
+    }
+
     let mut batch = Vec::new();
-    let work = collect_prefill_batch(page_id, browser, vision, fields, &mut batch);
+    let work = collect_prefill_batch(page_id, browser, vision, fields, &retained_keys, &mut batch);
     let exhausted = if let Some(deadline) = prefill_deadline {
         tokio::time::timeout_at(deadline, work).await.is_err()
     } else {
@@ -598,7 +616,8 @@ async fn proactive_prefill(
     }
     if !batch.is_empty() {
         let count = batch.len();
-        if proposals.record_proposals_if_current(page_id, &generation, batch) {
+        retained.extend(batch);
+        if proposals.record_proposals_if_current(page_id, &generation, retained) {
             if exhausted {
                 record(observability::PrefillOutcome::PartialBatchRetained);
             }
@@ -617,15 +636,16 @@ async fn collect_prefill_batch(
     browser: &dyn IntentBrowser,
     vision: &VisionContext,
     fields: &[CompleteFormFieldPlan],
+    retained_keys: &BTreeSet<String>,
     batch: &mut Vec<(String, crate::CachedProposal)>,
 ) {
-    let (Some(proposals), Some(assist)) = (&vision.proposals, &vision.assist) else {
+    let Some(assist) = &vision.assist else {
         return;
     };
 
     let mut requests = Vec::new();
     for field in fields {
-        if requests.len() == MAX_CACHED_PROPOSALS {
+        if requests.len() == MAX_CACHED_PROPOSALS - retained_keys.len() {
             break;
         }
         if field.revealed_by.is_some() {
@@ -633,7 +653,7 @@ async fn collect_prefill_batch(
             // control is clicked in `execute_complete_form`.
             continue;
         }
-        if proposals.proposal_for(page_id, &field.purpose).is_some() {
+        if retained_keys.contains(&field.purpose.trim().to_lowercase()) {
             continue;
         }
         let Some((stuck, candidates)) = prefill_candidates(page_id, browser, field).await else {

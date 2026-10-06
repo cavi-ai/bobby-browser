@@ -446,9 +446,12 @@ provider's 5 are taken; see
 ## Vision prefill
 
 With `[vision].prefill = true` (the default), `complete_form` preflights
-field before the first page mutation. Deterministically resolved fields stay on
-the deterministic path. The remaining fields share one screenshot and use at
-most four concurrent provider calls, with at most 32 proposals per batch.
+fields before the first page mutation. Deterministically resolved fields stay on
+the deterministic path. Usable cached proposals for the current form are
+retained within the same page generation. They share a 32-entry limit with new
+proposals; repeated cached purposes occupy one entry. Unresolved fields that
+fit the remaining capacity share one screenshot and use at most four
+concurrent provider calls. Fields beyond that capacity use normal fallback.
 Runtime commands reserve half their remaining deadline for this speculative
 pass. When that budget expires, unfinished request futures are dropped and
 completed proposals may still be retained if the page generation matches.
@@ -471,7 +474,7 @@ Cancelling the form cancels all in-flight prefill calls.
 
 `operationalMetrics.prefill` reports `budgetExhausted` (expired batches,
 including those skipped before starting), `partialBatchRetained` (expired
-batches that publish completed proposals), and `staleBatchDiscarded` (nonempty
+batches that publish newly completed proposals), and `staleBatchDiscarded` (nonempty
 batches refused by the generation guard). `requestsCancelled` counts started
 provider requests dropped before returning a result, including when the intent
 is cancelled. Queued requests and completed requests are excluded. These
