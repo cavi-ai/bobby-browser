@@ -52,6 +52,8 @@ use crate::generate_session_seed;
 use crate::network_quiet::FirefoxNetworkQuiet;
 
 const COMPANION_SANDBOX: &str = "automation-runtime-companion";
+/// Accessibility nodes read to build intent candidates.
+const CANDIDATE_MAX_NODES: u32 = 1024;
 const FRAME_CANDIDATES_SCRIPT: &str = r#"(()=>{
   const controls=[];
   const nodes=document.querySelectorAll('input,textarea,select,button,a[href],iframe,[role]');
@@ -60,7 +62,11 @@ const FRAME_CANDIDATES_SCRIPT: &str = r#"(()=>{
   const paymentValue=/(?:card(?: number)?|cvc|cvv|otp|expiry|challenge code)\s*[:=]?\s*\d{3,}/i;
   const credentialShape=/(?:\d[ -]?){12,19}|[a-zA-Z0-9_-]{32,}/;
   const publicLabels=new Set(['Password','Authentication code','Card details','Card number','Expiry','CVC','3-D Secure challenge','Challenge code']);
-  const safeLabel=value=>publicLabels.has(value)?value:(secret.test(value)||paymentValue.test(value)||credentialShape.test(value)?'[redacted]':value);
+  const isCredentialShaped=token=>/\d/.test(token)||token.endsWith('=')||(/[A-Z]/.test(token.slice(1))&&/[a-z]/.test(token));
+  const hasAuthScheme=value=>Array.from(value.matchAll(/(?:^|\s)(?:bearer|basic)\s+([A-Za-z0-9._~+\/=-]{8,})/gi)).some(match=>isCredentialShaped(match[1]));
+  const hasLongRun=value=>Array.from(value.matchAll(/[A-Za-z0-9+\/_=-]{40,}/g)).some(match=>/\d/.test(match[0])&&/[A-Z]/.test(match[0])&&/[a-z]/.test(match[0]));
+  const secretMaterial=value=>hasAuthScheme(value)||/(?:password|passwd|secret|token|api[-_ ]?key|credentials?|authorization|private[-_ ]?(?:key|token|secret)|pairing[-_ ]?code)\s*[:=]\s*\S{4}/i.test(value)||/-----BEGIN[\s\S]*?PRIVATE KEY-----/.test(value)||/eyJ[\w-]{7,}\.[\w-]{10,}\.[\w-]{10,}/.test(value)||/(?<![A-Za-z0-9])(?:sk-|sk_live_|sk_test_|rk_live_|ghp_|gho_|ghu_|ghs_|github_pat_|xox[abprs]-)[A-Za-z0-9_-]{16,}/.test(value)||/(?<![A-Z0-9])AKIA[A-Z0-9]{16}/.test(value)||/AIza[A-Za-z0-9_-]{35}/.test(value)||(!/^https?:\/\//i.test(value.trim())&&hasLongRun(value));
+  const safeLabel=value=>publicLabels.has(value)?value:(secretMaterial(value)||paymentValue.test(value)||credentialShape.test(value)?'[redacted]':value);
   const sensitive=element=>['input','textarea','select'].includes(element.localName)&&((element.localName==='input'&&element.type==='password')||Array.from(element.attributes).some(attribute=>secret.test(attribute.name)||secret.test(attribute.value)||paymentValue.test(attribute.value)||/(?:card|cvc|cvv|otp|one[-_]?time|expiry|challenge|code)/i.test(attribute.name)||credentialShape.test(attribute.value)));
   const path=element=>{
     const parts=[];
@@ -157,6 +163,10 @@ pub struct ExtensionObservation {
     pub controls: Vec<ExtensionControl>,
     #[serde(default)]
     pub html: Option<String>,
+    /// The page-side control walk stopped at a bound, so `controls` may omit
+    /// visible controls.
+    #[serde(default)]
+    pub controls_truncated: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -217,15 +227,17 @@ pub trait ExtensionObserver: Send + Sync {
         page_id: &PageId,
     ) -> Result<(), CommandError>;
 
-    /// Capture a compact accessibility tree for the page. Returns the tree
-    /// and whether it was truncated to the node bound.
+    /// Capture a compact accessibility tree for the page, or for the subtree
+    /// rooted at `target` when one is given. Returns the tree and whether it
+    /// was truncated to the node bound.
     async fn a11y_snapshot(
         &self,
         lease: &AttachmentLease,
         page_id: &PageId,
         max_nodes: u32,
+        target: Option<&types::TargetSpec>,
     ) -> Result<(Vec<types::AccessibilityNode>, bool), CommandError> {
-        let _ = (lease, page_id, max_nodes);
+        let _ = (lease, page_id, max_nodes, target);
         Err(driver_error(
             ErrorCode::BrowserCommandFailed,
             "accessibility snapshot is not supported by this observer",
@@ -468,10 +480,15 @@ impl ExtensionObserver for CompanionExtensionObserver {
         lease: &AttachmentLease,
         page_id: &PageId,
         max_nodes: u32,
+        target: Option<&types::TargetSpec>,
     ) -> Result<(Vec<types::AccessibilityNode>, bool), CommandError> {
         if lease.expires_at <= Instant::now() {
             return Err(lease_error());
         }
+        let scope = match target {
+            Some(target) => Some(a11y_scope_input(target)?),
+            None => None,
+        };
         let command_id = CommandId::new();
         let action = ActionRequest {
             protocol_version: PROTOCOL_VERSION,
@@ -479,7 +496,7 @@ impl ExtensionObserver for CompanionExtensionObserver {
             command_id: command_id.clone(),
             page_id: page_id.clone(),
             operation: "a11yTree".into(),
-            input: json!({"maxNodes": max_nodes}),
+            input: json!({"maxNodes": max_nodes, "target": scope}),
             deadline_unix_ms: deadline_unix_ms(self.timeout),
         };
         match self
@@ -514,7 +531,11 @@ impl ExtensionObserver for CompanionExtensionObserver {
                 false,
             )),
             CompanionEvent::ActionFailed { code, message, .. } => Err(driver_error(
-                ErrorCode::BrowserCommandFailed,
+                if target.is_some() && code == "actionFailed" {
+                    ErrorCode::TargetNotFound
+                } else {
+                    ErrorCode::BrowserCommandFailed
+                },
                 format!("extension accessibility snapshot failed ({code}): {message}"),
                 false,
             )),
@@ -1835,7 +1856,7 @@ impl FirefoxCompanionWorker {
     async fn gather_input_candidates(
         &self,
         page_id: &PageId,
-    ) -> Result<Vec<Candidate>, CommandError> {
+    ) -> Result<(Vec<Candidate>, bool), CommandError> {
         let observation = self
             .observer
             .observe(
@@ -1849,7 +1870,8 @@ impl FirefoxCompanionWorker {
             )
             .await?;
         validate_observation(&observation)?;
-        Ok(observation
+        let truncated = observation.controls_truncated;
+        let candidates = observation
             .controls
             .into_iter()
             .enumerate()
@@ -1878,19 +1900,22 @@ impl FirefoxCompanionWorker {
                     frame_path: Vec::new(),
                 }
             })
-            .collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        Ok((candidates, truncated))
     }
 
+    /// The candidates in `context` and whether the page-side walk stopped at
+    /// a bound before reaching every visible control.
     async fn gather_candidates_for_context(
         &self,
         page_id: &PageId,
         top_context: &str,
         context: &str,
-    ) -> Result<Vec<Candidate>, CommandError> {
+    ) -> Result<(Vec<Candidate>, bool), CommandError> {
         if context == top_context {
             return self.gather_input_candidates(page_id).await;
         }
-        self.gather_bidi_context_candidates(context).await
+        Ok((self.gather_bidi_context_candidates(context).await?, false))
     }
 
     async fn gather_bidi_context_candidates(
@@ -1989,7 +2014,7 @@ impl FirefoxCompanionWorker {
         if let Some(selector) = direct_target_selector(target) {
             return Ok((context, selector));
         }
-        let candidates = self
+        let (candidates, truncated) = self
             .gather_candidates_for_context(page_id, top_context, &context)
             .await?;
         match resolve_candidates(target, &candidates, &ResolutionPolicy::default()) {
@@ -2006,6 +2031,11 @@ impl FirefoxCompanionWorker {
             Ok(ResolutionDecision::Ambiguous { .. }) => Err(driver_error(
                 ErrorCode::TargetAmbiguous,
                 "Firefox semantic target is ambiguous",
+                false,
+            )),
+            Ok(ResolutionDecision::NotFound) if truncated => Err(driver_error(
+                ErrorCode::ResourceExhausted,
+                "Firefox semantic target was not found, but the candidate set was truncated before every visible control was read; narrow the target with a CSS selector or test ID",
                 false,
             )),
             Ok(ResolutionDecision::NotFound) => Err(driver_error(
@@ -2032,7 +2062,7 @@ impl FirefoxCompanionWorker {
         target: &types::TargetSpec,
     ) -> Result<Vec<(String, String)>, CommandError> {
         let context = self.resolve_input_context(top_context, target).await?;
-        let candidates = self
+        let (candidates, _) = self
             .gather_candidates_for_context(page_id, top_context, &context)
             .await?;
         let ranked = rank_candidates(target, &candidates, &ResolutionPolicy::default())
@@ -2748,6 +2778,63 @@ impl PageOpenOperation {
     }
 }
 
+/// Longest a navigation waits for the document to stop changing.
+const NAVIGATION_SETTLE_CAP: Duration = Duration::from_secs(5);
+/// Time without a DOM mutation that counts as settled.
+const NAVIGATION_QUIET_MS: u64 = 300;
+
+/// Waits until the document in `context` has had no DOM mutation for
+/// [`NAVIGATION_QUIET_MS`], or `budget` runs out, and returns the URL and
+/// title read at that point. A redirect that replaces the document while the
+/// probe runs restarts it. `None` when no read succeeded within the budget.
+async fn settle_document(
+    transport: &Arc<dyn BidiTransport>,
+    context: &str,
+    budget: Duration,
+) -> Option<(String, String)> {
+    let deadline = Instant::now() + budget;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        let expression = format!(
+            "new Promise(resolve=>{{let timer;const read=()=>JSON.stringify({{url:location.href,title:document.title}});const finish=()=>{{observer.disconnect();clearTimeout(timer);clearTimeout(cap);resolve(read());}};const observer=new MutationObserver(()=>{{clearTimeout(timer);timer=setTimeout(finish,{NAVIGATION_QUIET_MS});}});observer.observe(document,{{subtree:true,childList:true,attributes:true,characterData:true}});timer=setTimeout(finish,{NAVIGATION_QUIET_MS});const cap=setTimeout(finish,{});}})",
+            remaining.as_millis().max(1)
+        );
+        let attempt = tokio::time::timeout(
+            remaining + Duration::from_secs(1),
+            transport.send(
+                "script.evaluate",
+                json!({
+                    "expression": expression,
+                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                    "awaitPromise": true,
+                    "resultOwnership": "none",
+                }),
+            ),
+        )
+        .await;
+        if let Ok(Ok(response)) = attempt {
+            let settled = response
+                .pointer("/result/value")
+                .or_else(|| response.get("value"))
+                .and_then(Value::as_str)
+                .and_then(|encoded| serde_json::from_str::<Value>(encoded).ok())
+                .and_then(|value| {
+                    Some((
+                        value.get("url")?.as_str()?.to_owned(),
+                        value.get("title")?.as_str()?.to_owned(),
+                    ))
+                });
+            if settled.is_some() {
+                return settled;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn capture_context_title(
     transport: &Arc<dyn BidiTransport>,
     context: &str,
@@ -3089,10 +3176,19 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 false,
             ));
         }
-        let (nodes, _) = self
+        let (nodes, truncated) = self
             .observer
-            .a11y_snapshot(&self.current_lease(), page_id, 100)
+            .a11y_snapshot(&self.current_lease(), page_id, CANDIDATE_MAX_NODES, None)
             .await?;
+        if truncated && !accessibility_tree_has_match(&nodes, target) {
+            return Err(driver_error(
+                ErrorCode::ResourceExhausted,
+                format!(
+                    "the candidate set was truncated at {CANDIDATE_MAX_NODES} accessibility nodes before the target was found; narrow the target or scope the snapshot"
+                ),
+                false,
+            ));
+        }
         Ok(accessibility_candidates(&nodes))
     }
 
@@ -3191,12 +3287,22 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 true,
             )
         })??;
-        let url = response
+        let response_url = response
             .get("url")
             .and_then(Value::as_str)
             .unwrap_or(&command.url)
             .to_owned();
-        let title = capture_context_title(&self.transport, &context).await?;
+        // A single-page app reports its load state long before it has built
+        // the page, and a redirect chain can still be running. Report the
+        // URL and title read after the document has stopped changing.
+        let settle_budget = Duration::from_millis(command.timeout_ms).min(NAVIGATION_SETTLE_CAP);
+        let (url, title) = match settle_document(&self.transport, &context, settle_budget).await {
+            Some(settled) => settled,
+            None => (
+                response_url,
+                capture_context_title(&self.transport, &context).await?,
+            ),
+        };
         Ok(vec![
             Evidence::Navigation { url, title },
             self.evidence(InteractionPath::EngineNative),
@@ -3522,7 +3628,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 )
                 .await?;
             if let Some(text) = response.pointer("/result/value").and_then(Value::as_str) {
-                if text.len() > MAX_VISIBLE_TEXT_BYTES || contains_sensitive_material(text) {
+                if text.len() > MAX_VISIBLE_TEXT_BYTES || unsafe_observation_text(text) {
                     return Err(driver_error(
                         ErrorCode::BrowserCommandFailed,
                         "inert JSON inspection failed its content safety bound",
@@ -3560,7 +3666,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 driver_error(ErrorCode::InvalidRequest, error.to_string(), false)
             })?;
             let response = self.transport.send("script.evaluate", json!({
-                "expression": format!("(()=>{{const el=document.querySelector({selector_json});if(!el)return null;if(el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement||el instanceof HTMLSelectElement)return '[redacted]';const value=String(el.innerText||el.textContent||'');const secret=/(?:authorization|authentication|bearer|token|secret|password|passwd|api[-_]?key|credential|card|cvc|cvv|otp|one[-_]?time|expiry|challenge|code)/i;const credentialShape=/(?:\\d[ -]?){{12,19}}|[a-zA-Z0-9_-]{{32,}}/;const sensitive=Array.from(el.attributes).some(attribute=>secret.test(attribute.name)||secret.test(attribute.value)||credentialShape.test(attribute.value))||secret.test(value)||credentialShape.test(value);return sensitive?'[redacted]':value.slice(0,8192);}})()"),
+                "expression": format!("(()=>{{const el=document.querySelector({selector_json});if(!el)return null;if(el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement||el instanceof HTMLSelectElement)return '[redacted]';const value=String(el.innerText||el.textContent||'');const secret=/(?:authorization|authentication|bearer|token|secret|password|passwd|api[-_]?key|credential|card|cvc|cvv|otp|one[-_]?time|expiry|challenge|code)/i;const credentialShape=/(?:\\d[ -]?){{12,19}}|[a-zA-Z0-9_-]{{32,}}/;const sensitive=Array.from(el.attributes).some(attribute=>secret.test(attribute.name)||secret.test(attribute.value)||credentialShape.test(attribute.value))||credentialShape.test(value);return sensitive?'[redacted]':value.slice(0,8192);}})()"),
                 "target": {"context": frame_context, "sandbox": COMPANION_SANDBOX},
                 "awaitPromise": false,
                 "resultOwnership": "none",
@@ -4644,7 +4750,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                     {
                         let (nodes, _) = self
                             .observer
-                            .a11y_snapshot(&self.current_lease(), page_id, 256)
+                            .a11y_snapshot(&self.current_lease(), page_id, 256, None)
                             .await?;
                         (accessibility_tree_contains(&nodes, target), None)
                     } else {
@@ -5168,7 +5274,12 @@ impl BrowserWorker for FirefoxCompanionWorker {
         let max_nodes = command.max_nodes.unwrap_or(256).clamp(1, 2048);
         let (mut nodes, truncated) = self
             .observer
-            .a11y_snapshot(&self.current_lease(), page_id, max_nodes)
+            .a11y_snapshot(
+                &self.current_lease(),
+                page_id,
+                max_nodes,
+                command.target.as_ref(),
+            )
             .await?;
         worker_pool::annotate_accessibility_targets(&mut nodes);
         let controls_omitted = if accessibility_contains_form_control(&nodes) {
@@ -5716,6 +5827,22 @@ fn accessibility_tree_contains(nodes: &[types::AccessibilityNode], target: &Targ
     })
 }
 
+/// Whether any node could be the target: its role matches and, when the
+/// target names one, so does its accessible name.
+fn accessibility_tree_has_match(nodes: &[types::AccessibilityNode], target: &TargetSpec) -> bool {
+    nodes.iter().any(|node| {
+        target
+            .role
+            .as_deref()
+            .is_none_or(|role| node.role.as_deref() == Some(role))
+            && target
+                .accessible_name
+                .as_deref()
+                .is_none_or(|name| node.name.as_deref() == Some(name))
+            || accessibility_tree_has_match(&node.children, target)
+    })
+}
+
 fn accessibility_candidates(nodes: &[types::AccessibilityNode]) -> Vec<Candidate> {
     fn collect(nodes: &[types::AccessibilityNode], candidates: &mut Vec<Candidate>) {
         for node in nodes {
@@ -6139,23 +6266,18 @@ fn validate_observation(observation: &ExtensionObservation) -> Result<(), Comman
     ]
     .into_iter()
     .flatten()
-    .all(|value| !contains_sensitive_material(value));
+    .all(|value| !unsafe_observation_text(value));
     let safe_controls = observation.controls.iter().all(|control| {
         [
             Some(control.css_path.as_str()),
             control.role.as_deref(),
+            control.name.as_deref(),
+            control.label.as_deref(),
             control.value.as_deref(),
         ]
         .into_iter()
         .flatten()
-        .all(|value| !contains_sensitive_material(value))
-            && [control.name.as_deref(), control.label.as_deref()]
-                .into_iter()
-                .flatten()
-                .all(|value| {
-                    matches!(value, "Password" | "Authentication code")
-                        || !contains_sensitive_material(value)
-                })
+        .all(|value| !unsafe_observation_text(value))
     });
     if !safe_page || !safe_controls {
         return Err(driver_error(
@@ -6167,7 +6289,21 @@ fn validate_observation(observation: &ExtensionObservation) -> Result<(), Comman
     Ok(())
 }
 
-fn contains_sensitive_material(value: &str) -> bool {
+/// Page text the companion must not forward: disclosed secret material, or
+/// markup that was supposed to be sanitized away. A word like "password" is
+/// not a disclosure; a password FIELD's value is withheld at the control
+/// level by the content script.
+fn unsafe_observation_text(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    crate::secret_material::contains_secret_material(value)
+        || ["<script", " onclick=", " onload="]
+            .iter()
+            .any(|marker| lower.contains(marker))
+}
+
+/// Whether a target descriptor names a credential field (as opposed to page
+/// text that merely uses the word).
+fn names_credential_field(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     [
         "authorization",
@@ -6179,9 +6315,6 @@ fn contains_sensitive_material(value: &str) -> bool {
         "api-key",
         "api_key",
         "credential",
-        "<script",
-        " onclick=",
-        " onload=",
     ]
     .iter()
     .any(|marker| lower.contains(marker))
@@ -6202,8 +6335,7 @@ fn safe_frame_candidate_metadata(value: &str) -> bool {
         return true;
     }
     let lower = value.to_ascii_lowercase();
-    !contains_sensitive_material(value)
-        && !lower.contains("authentication")
+    !unsafe_observation_text(value)
         && !((lower.contains("card")
             || lower.contains("cvc")
             || lower.contains("cvv")
@@ -6220,7 +6352,7 @@ fn safe_frame_candidate_metadata(value: &str) -> bool {
 fn sensitive_frame_inspection_target(target: &TargetSpec, selector: &str) -> bool {
     let sensitive = |value: &str| {
         let lower = value.to_ascii_lowercase();
-        contains_sensitive_material(value)
+        names_credential_field(value)
             || [
                 "authentication",
                 "card",
@@ -6516,6 +6648,34 @@ fn capability_error(capability: &str) -> CommandError {
         format!("Firefox companion lease does not grant {capability}"),
         false,
     )
+}
+
+/// The scope the content script resolves for a scoped accessibility snapshot:
+/// a landmark such as `main` carries no CSS identity in the control candidates
+/// the click path resolves against, so the page-side walk that annotates
+/// snapshot targets (same role + accessible-name + ordinal key) resolves it.
+fn a11y_scope_input(target: &types::TargetSpec) -> Result<Value, CommandError> {
+    if !target.frame_path.is_empty() || !target.shadow_path.is_empty() {
+        return Err(driver_error(
+            ErrorCode::InvalidRequest,
+            "Firefox scoped accessibility snapshots do not support frame or shadow paths",
+            false,
+        ));
+    }
+    if direct_target_selector(target).is_none() && target.role.is_none() {
+        return Err(driver_error(
+            ErrorCode::InvalidRequest,
+            "Firefox scoped accessibility snapshots need a role, CSS selector, or test ID target",
+            false,
+        ));
+    }
+    Ok(json!({
+        "css": target.css,
+        "testId": target.test_id,
+        "role": target.role,
+        "accessibleName": target.accessible_name,
+        "ordinal": target.ordinal,
+    }))
 }
 
 fn direct_target_selector(target: &types::TargetSpec) -> Option<String> {
