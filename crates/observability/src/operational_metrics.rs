@@ -75,6 +75,10 @@ pub enum PrefillOutcome {
     DroppedEntry,
     PolicyDenied,
     ProviderFailure,
+    BudgetExhausted,
+    PartialBatchRetained,
+    StaleBatchDiscarded,
+    RequestCancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,7 +161,7 @@ struct OperationalMetricsInner {
     context_rank_provider: [AtomicU64; 3],
     context_rank_confidence: [AtomicU64; 4],
     context_rank_verification: [AtomicU64; 2],
-    prefill: [AtomicU64; 5],
+    prefill: [AtomicU64; 9],
     vision_outcome: [AtomicU64; 5],
     provider_mode: [AtomicU64; 3],
     latency: [AtomicU64; 11],
@@ -353,6 +357,10 @@ impl OperationalMetrics {
                 dropped_entry: prefill[2],
                 policy_denied: prefill[3],
                 provider_failure: prefill[4],
+                budget_exhausted: prefill[5],
+                partial_batch_retained: prefill[6],
+                stale_batch_discarded: prefill[7],
+                requests_cancelled: prefill[8],
             },
             vision: VisionMetricsSnapshot {
                 attempted: saturating_sum(&vision_outcome),

@@ -203,4 +203,9 @@ fn operational_metrics_accept_an_older_snapshot_without_context_ranked_vision() 
     }))
     .unwrap();
     assert_eq!(snapshot.context_ranked_vision.attempted, 0);
+    let value = serde_json::to_value(snapshot).unwrap();
+    assert_eq!(value["prefill"]["budgetExhausted"], 0);
+    assert_eq!(value["prefill"]["partialBatchRetained"], 0);
+    assert_eq!(value["prefill"]["staleBatchDiscarded"], 0);
+    assert_eq!(value["prefill"]["requestsCancelled"], 0);
 }

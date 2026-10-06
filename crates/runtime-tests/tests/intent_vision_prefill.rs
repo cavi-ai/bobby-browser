@@ -309,7 +309,7 @@ fn resolution_paths(evidence: &[Evidence]) -> Vec<IntentResolutionPath> {
 async fn run_budgeted_prefill(
     partial: bool,
     invalidate: bool,
-) -> (Vec<IntentResolutionPath>, usize, usize) {
+) -> (Vec<IntentResolutionPath>, usize, usize, serde_json::Value) {
     let fixture = test_site::spawn().await;
     let root = tempfile::tempdir().unwrap();
     let assist = Arc::new(BudgetedVision {
@@ -363,13 +363,21 @@ async fn run_budgeted_prefill(
         resolution_paths(&evidence),
         assist.calls.load(Ordering::SeqCst),
         assist.cancelled.load(Ordering::SeqCst),
+        serde_json::to_value(runtime.operational_metrics().snapshot()).unwrap(),
     )
 }
 
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn partial_prefill_survives_a_hanging_request() {
-    let (paths, calls, cancelled) = run_budgeted_prefill(true, false).await;
+    let (paths, calls, cancelled, metrics) = run_budgeted_prefill(true, false).await;
+    assert_eq!(metrics["prefill"]["budgetExhausted"], 1);
+    assert_eq!(metrics["prefill"]["requestsCancelled"], 1);
+    assert_eq!(metrics["prefill"]["partialBatchRetained"], 1);
+    assert_eq!(metrics["prefill"]["staleBatchDiscarded"], 0);
+    assert_eq!(metrics["vision"]["attempted"], 2);
+    assert_eq!(metrics["vision"]["failed"], 0);
+    assert_eq!(metrics["vision"]["timedOut"], 0);
     assert_eq!(calls, 3);
     assert_eq!(cancelled, 1);
     assert_eq!(
@@ -391,7 +399,14 @@ async fn partial_prefill_survives_a_hanging_request() {
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn hanging_prefill_is_cancelled_before_normal_execution() {
-    let (paths, calls, cancelled) = run_budgeted_prefill(false, false).await;
+    let (paths, calls, cancelled, metrics) = run_budgeted_prefill(false, false).await;
+    assert_eq!(metrics["prefill"]["budgetExhausted"], 1);
+    assert_eq!(metrics["prefill"]["requestsCancelled"], 2);
+    assert_eq!(metrics["prefill"]["partialBatchRetained"], 0);
+    assert_eq!(metrics["prefill"]["staleBatchDiscarded"], 0);
+    assert_eq!(metrics["vision"]["attempted"], 2);
+    assert_eq!(metrics["vision"]["failed"], 0);
+    assert_eq!(metrics["vision"]["timedOut"], 0);
     assert_eq!(calls, 4);
     assert_eq!(cancelled, 2);
     assert!(!paths.contains(&IntentResolutionPath::VisionPrefill));
@@ -407,7 +422,14 @@ async fn hanging_prefill_is_cancelled_before_normal_execution() {
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn a_timed_out_partial_batch_cannot_cross_a_generation_change() {
-    let (paths, calls, cancelled) = run_budgeted_prefill(true, true).await;
+    let (paths, calls, cancelled, metrics) = run_budgeted_prefill(true, true).await;
+    assert_eq!(metrics["prefill"]["budgetExhausted"], 1);
+    assert_eq!(metrics["prefill"]["requestsCancelled"], 1);
+    assert_eq!(metrics["prefill"]["partialBatchRetained"], 0);
+    assert_eq!(metrics["prefill"]["staleBatchDiscarded"], 1);
+    assert_eq!(metrics["vision"]["attempted"], 3);
+    assert_eq!(metrics["vision"]["failed"], 0);
+    assert_eq!(metrics["vision"]["timedOut"], 0);
     assert_eq!(calls, 4);
     assert_eq!(cancelled, 1);
     assert!(!paths.contains(&IntentResolutionPath::VisionPrefill));
