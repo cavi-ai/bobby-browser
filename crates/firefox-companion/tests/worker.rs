@@ -426,6 +426,7 @@ impl ExtensionObserver for CandidateObserver {
         _lease: &AttachmentLease,
         _page_id: &PageId,
         max_nodes: u32,
+        _target: Option<&TargetSpec>,
     ) -> Result<(Vec<types::AccessibilityNode>, bool), CommandError> {
         assert_eq!(max_nodes, 100);
         Ok((

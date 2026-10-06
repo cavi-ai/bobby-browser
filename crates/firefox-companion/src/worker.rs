@@ -217,15 +217,17 @@ pub trait ExtensionObserver: Send + Sync {
         page_id: &PageId,
     ) -> Result<(), CommandError>;
 
-    /// Capture a compact accessibility tree for the page. Returns the tree
-    /// and whether it was truncated to the node bound.
+    /// Capture a compact accessibility tree for the page, or for the subtree
+    /// rooted at `target` when one is given. Returns the tree and whether it
+    /// was truncated to the node bound.
     async fn a11y_snapshot(
         &self,
         lease: &AttachmentLease,
         page_id: &PageId,
         max_nodes: u32,
+        target: Option<&types::TargetSpec>,
     ) -> Result<(Vec<types::AccessibilityNode>, bool), CommandError> {
-        let _ = (lease, page_id, max_nodes);
+        let _ = (lease, page_id, max_nodes, target);
         Err(driver_error(
             ErrorCode::BrowserCommandFailed,
             "accessibility snapshot is not supported by this observer",
@@ -468,10 +470,15 @@ impl ExtensionObserver for CompanionExtensionObserver {
         lease: &AttachmentLease,
         page_id: &PageId,
         max_nodes: u32,
+        target: Option<&types::TargetSpec>,
     ) -> Result<(Vec<types::AccessibilityNode>, bool), CommandError> {
         if lease.expires_at <= Instant::now() {
             return Err(lease_error());
         }
+        let scope = match target {
+            Some(target) => Some(a11y_scope_input(target)?),
+            None => None,
+        };
         let command_id = CommandId::new();
         let action = ActionRequest {
             protocol_version: PROTOCOL_VERSION,
@@ -479,7 +486,7 @@ impl ExtensionObserver for CompanionExtensionObserver {
             command_id: command_id.clone(),
             page_id: page_id.clone(),
             operation: "a11yTree".into(),
-            input: json!({"maxNodes": max_nodes}),
+            input: json!({"maxNodes": max_nodes, "target": scope}),
             deadline_unix_ms: deadline_unix_ms(self.timeout),
         };
         match self
@@ -514,7 +521,11 @@ impl ExtensionObserver for CompanionExtensionObserver {
                 false,
             )),
             CompanionEvent::ActionFailed { code, message, .. } => Err(driver_error(
-                ErrorCode::BrowserCommandFailed,
+                if target.is_some() && code == "actionFailed" {
+                    ErrorCode::TargetNotFound
+                } else {
+                    ErrorCode::BrowserCommandFailed
+                },
                 format!("extension accessibility snapshot failed ({code}): {message}"),
                 false,
             )),
@@ -3091,7 +3102,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
         }
         let (nodes, _) = self
             .observer
-            .a11y_snapshot(&self.current_lease(), page_id, 100)
+            .a11y_snapshot(&self.current_lease(), page_id, 100, None)
             .await?;
         Ok(accessibility_candidates(&nodes))
     }
@@ -4644,7 +4655,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                     {
                         let (nodes, _) = self
                             .observer
-                            .a11y_snapshot(&self.current_lease(), page_id, 256)
+                            .a11y_snapshot(&self.current_lease(), page_id, 256, None)
                             .await?;
                         (accessibility_tree_contains(&nodes, target), None)
                     } else {
@@ -5168,7 +5179,12 @@ impl BrowserWorker for FirefoxCompanionWorker {
         let max_nodes = command.max_nodes.unwrap_or(256).clamp(1, 2048);
         let (mut nodes, truncated) = self
             .observer
-            .a11y_snapshot(&self.current_lease(), page_id, max_nodes)
+            .a11y_snapshot(
+                &self.current_lease(),
+                page_id,
+                max_nodes,
+                command.target.as_ref(),
+            )
             .await?;
         worker_pool::annotate_accessibility_targets(&mut nodes);
         let controls_omitted = if accessibility_contains_form_control(&nodes) {
@@ -6516,6 +6532,34 @@ fn capability_error(capability: &str) -> CommandError {
         format!("Firefox companion lease does not grant {capability}"),
         false,
     )
+}
+
+/// The scope the content script resolves for a scoped accessibility snapshot:
+/// a landmark such as `main` carries no CSS identity in the control candidates
+/// the click path resolves against, so the page-side walk that annotates
+/// snapshot targets (same role + accessible-name + ordinal key) resolves it.
+fn a11y_scope_input(target: &types::TargetSpec) -> Result<Value, CommandError> {
+    if !target.frame_path.is_empty() || !target.shadow_path.is_empty() {
+        return Err(driver_error(
+            ErrorCode::InvalidRequest,
+            "Firefox scoped accessibility snapshots do not support frame or shadow paths",
+            false,
+        ));
+    }
+    if direct_target_selector(target).is_none() && target.role.is_none() {
+        return Err(driver_error(
+            ErrorCode::InvalidRequest,
+            "Firefox scoped accessibility snapshots need a role, CSS selector, or test ID target",
+            false,
+        ));
+    }
+    Ok(json!({
+        "css": target.css,
+        "testId": target.test_id,
+        "role": target.role,
+        "accessibleName": target.accessible_name,
+        "ordinal": target.ordinal,
+    }))
 }
 
 fn direct_target_selector(target: &types::TargetSpec) -> Option<String> {

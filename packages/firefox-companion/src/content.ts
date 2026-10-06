@@ -781,6 +781,7 @@ const A11Y_MAX_DEPTH = 32;
 const A11Y_MAX_NODE_LEVEL = 13;
 const A11Y_MAX_VALUES = 19_000;
 const A11Y_MAX_NODES = 2048;
+const A11Y_MAX_SCOPE_VISITS = 100_000;
 const A11Y_STRUCTURAL_ROLES = new Set([
   "banner",
   "navigation",
@@ -839,7 +840,11 @@ const A11Y_ACTIONABLE_ROLES = new Set([
   "iframe",
 ]);
 
-function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode[]; truncated: boolean } {
+function a11yTree(
+  document: Document,
+  maxNodesInput: unknown,
+  targetInput?: unknown,
+): { nodes: A11yNode[]; truncated: boolean } {
   let maxNodes = 256;
   if (typeof maxNodesInput === "number" && Number.isSafeInteger(maxNodesInput)) {
     maxNodes = Math.min(Math.max(1, maxNodesInput), A11Y_MAX_NODES);
@@ -892,11 +897,93 @@ function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode
     return { role, name, sensitive };
   };
 
+  const resolveScope = (spec: unknown): Element => {
+    if (typeof spec !== "object" || spec === null || Array.isArray(spec)) {
+      throw new Error("a11y target must be an object");
+    }
+    const { css, testId, role, accessibleName, ordinal } = spec as Record<string, unknown>;
+    let selector: string | undefined;
+    if (typeof css === "string" && css.length > 0) {
+      selector = css;
+    } else if (typeof testId === "string" && testId.length > 0) {
+      selector = `[data-testid="${cssString(testId)}"]`;
+    }
+    if (selector !== undefined) {
+      if (byteLength(selector) > MAX_SELECTOR_LENGTH) throw new Error("a11y target selector must be bounded");
+      let found: Element | null;
+      try {
+        found = document.querySelector(selector);
+      } catch {
+        throw new Error("a11y target selector is invalid");
+      }
+      if (!found || isElementHidden(found)) throw new Error("a11y target was not found");
+      return found;
+    }
+    if (typeof role !== "string" || role.length === 0) {
+      throw new Error("a11y target requires a role, CSS selector, or test ID");
+    }
+    if (accessibleName !== null && accessibleName !== undefined && typeof accessibleName !== "string") {
+      throw new Error("a11y target accessibleName must be a string");
+    }
+    if (
+      ordinal !== null &&
+      ordinal !== undefined &&
+      !(typeof ordinal === "number" && Number.isSafeInteger(ordinal) && ordinal >= 0)
+    ) {
+      throw new Error("a11y target ordinal must be a non-negative integer");
+    }
+    const wanted = typeof ordinal === "number" ? ordinal : 0;
+    const matches: Element[] = [];
+    let visited = 0;
+    const walk = (element: Element, depth: number): void => {
+      visited += 1;
+      if (visited > A11Y_MAX_SCOPE_VISITS) return;
+      try {
+        if (isElementHidden(element)) return;
+        const found = semantics(element);
+        if (
+          found.role === role &&
+          (typeof accessibleName !== "string" || found.name === accessibleName)
+        ) {
+          matches.push(element);
+        }
+      } catch {
+        return;
+      }
+      // Without an ordinal a second match makes the target ambiguous, so the
+      // walk only needs to reach two matches; with one it needs ordinal + 1.
+      const needed = typeof ordinal === "number" ? wanted + 1 : 2;
+      if (depth < A11Y_MAX_DEPTH) {
+        for (const child of Array.from(element.children).slice(0, 256)) {
+          if (matches.length >= needed) return;
+          walk(child, depth + 1);
+        }
+      }
+    };
+    walk(root, 0);
+    if (typeof ordinal === "number") {
+      const picked = matches[wanted];
+      if (!picked) throw new Error("a11y target was not found");
+      return picked;
+    }
+    if (matches.length !== 1) {
+      throw new Error(matches.length === 0 ? "a11y target was not found" : "a11y target is ambiguous");
+    }
+    return matches[0]!;
+  };
+  const scope: Element =
+    targetInput === null || targetInput === undefined ? root : resolveScope(targetInput);
+
   const targetTotals = new Map<string, number>();
   const targetKey = (role: string, name: string): string => `${role}\u0000${name}`;
+  // Ordinals stay page-wide so a scoped snapshot's targets resolve exactly as
+  // the same nodes' targets from a full snapshot do: the running per-key
+  // counts at the moment the page-wide walk reaches the scope seed them.
+  let scopeSeen: Map<string, number> | undefined;
   const countTargets = (element: Element, depth: number): void => {
     try {
       if (isElementHidden(element)) return;
+      if (element === scope) scopeSeen = new Map(targetTotals);
       const { role, name } = semantics(element);
       if (role && name && name !== REDACTED && A11Y_ACTIONABLE_ROLES.has(role)) {
         const key = targetKey(role, name);
@@ -925,6 +1012,15 @@ function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode
       // Skip nodes that throw during inspection; never fatal.
       return [];
     }
+    // A hidden subtree is discarded whole, so it must be rejected before any
+    // descendant spends the node budget.
+    let hidden = false;
+    try {
+      hidden = isElementHidden(element);
+    } catch {
+      hidden = true;
+    }
+    if (hidden) return [];
     if (role && level > A11Y_MAX_NODE_LEVEL) {
       state.truncated = true;
       return [];
@@ -936,13 +1032,6 @@ function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode
         children.push(...build(child, depth + 1, role ? level + 1 : level));
       }
     }
-    let hidden = false;
-    try {
-      hidden = isElementHidden(element);
-    } catch {
-      hidden = true;
-    }
-    if (hidden) return [];
     if (!role) return children;
     if (state.remaining <= 0) {
       state.truncated = true;
@@ -982,8 +1071,8 @@ function a11yTree(document: Document, maxNodesInput: unknown): { nodes: A11yNode
     return [node];
   };
 
-  const nodes = build(root, 0, 0);
-  const targetSeen = new Map<string, number>();
+  const nodes = build(scope, 0, 0);
+  const targetSeen = new Map<string, number>(scopeSeen ?? []);
   const sendBudget = { values: A11Y_MAX_VALUES, bytes: MAX_OBSERVATION_BYTES };
   const annotateTargets = (candidates: A11yNode[]): A11yNode[] => {
     const kept: A11yNode[] = [];
@@ -1033,7 +1122,7 @@ export function executeContentAction(
     return observeRoot(document, inspectionRoot(document, parsed), parsed.includeHtml as boolean);
   }
   if (operation === "a11yTree") {
-    return a11yTree(document, parsed.maxNodes);
+    return a11yTree(document, parsed.maxNodes, parsed.target);
   }
   const element = target(document, parsed);
   switch (operation) {
