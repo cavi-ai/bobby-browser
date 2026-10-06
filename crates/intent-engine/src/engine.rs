@@ -530,6 +530,26 @@ struct PrefillRequest {
 
 const PREFILL_CONCURRENCY_LIMIT: usize = 4;
 
+/// Only a started, unfinished provider request counts as cancelled. Kept
+/// inside each buffered future so queued requests are never counted.
+struct PrefillRequestCancellation {
+    metrics: Option<OperationalMetrics>,
+}
+
+impl PrefillRequestCancellation {
+    fn complete(mut self) {
+        self.metrics = None;
+    }
+}
+
+impl Drop for PrefillRequestCancellation {
+    fn drop(&mut self) {
+        if let Some(metrics) = &self.metrics {
+            metrics.record_prefill(observability::PrefillOutcome::RequestCancelled);
+        }
+    }
+}
+
 /// Preflights fields without mutating the page, then asks vision only for
 /// fields the deterministic resolver cannot settle, up to the cache capacity.
 /// Candidate identities are cached; typed values remain in the runtime and
@@ -541,7 +561,7 @@ async fn proactive_prefill(
     fields: &[CompleteFormFieldPlan],
     prefill_deadline: Option<tokio::time::Instant>,
 ) {
-    let (Some(proposals), Some(_)) = (&vision.proposals, &vision.assist) else {
+    let (Some(proposals), Some(assist)) = (&vision.proposals, &vision.assist) else {
         return;
     };
     if !vision.session_ok || !vision.capability_ok {
@@ -550,27 +570,41 @@ async fn proactive_prefill(
     let Some(generation) = proposals.proposal_generation(page_id) else {
         return;
     };
+    let metric_context = assist.operational_metrics();
+    let record = |outcome| {
+        if let Some((metrics, _)) = &metric_context {
+            metrics.record_prefill(outcome);
+        }
+    };
     // Tokio timeouts may poll a ready future even after their deadline.
     // An exhausted budget must not start speculative browser/provider work.
     if prefill_deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) {
+        record(observability::PrefillOutcome::BudgetExhausted);
         tracing::info!(completed = 0, "vision.prefill_budget_exhausted");
         return;
     }
 
     let mut batch = Vec::new();
     let work = collect_prefill_batch(page_id, browser, vision, fields, &mut batch);
-    if let Some(deadline) = prefill_deadline {
-        if tokio::time::timeout_at(deadline, work).await.is_err() {
-            tracing::info!(completed = batch.len(), "vision.prefill_budget_exhausted");
-        }
+    let exhausted = if let Some(deadline) = prefill_deadline {
+        tokio::time::timeout_at(deadline, work).await.is_err()
     } else {
         work.await;
+        false
+    };
+    if exhausted {
+        record(observability::PrefillOutcome::BudgetExhausted);
+        tracing::info!(completed = batch.len(), "vision.prefill_budget_exhausted");
     }
     if !batch.is_empty() {
         let count = batch.len();
         if proposals.record_proposals_if_current(page_id, &generation, batch) {
+            if exhausted {
+                record(observability::PrefillOutcome::PartialBatchRetained);
+            }
             tracing::info!(recorded = count, "vision.prefill_batch");
         } else {
+            record(observability::PrefillOutcome::StaleBatchDiscarded);
             tracing::info!(discarded = count, "vision.prefill_batch_stale");
         }
     } else {
@@ -670,7 +704,10 @@ async fn collect_prefill_batch(
             let metric_context = metric_context.clone();
             async move {
                 let propose_started = std::time::Instant::now();
-                let proposal = match assist
+                let cancellation = PrefillRequestCancellation {
+                    metrics: metric_context.as_ref().map(|(metrics, _)| metrics.clone()),
+                };
+                let response = assist
                     .propose(VisionProposeRequest {
                         purpose: request.purpose.clone(),
                         intent_kind: "fill".to_owned(),
@@ -679,8 +716,9 @@ async fn collect_prefill_batch(
                         stuck: request.stuck,
                         context: request.context.clone(),
                     })
-                    .await
-                {
+                    .await;
+                cancellation.complete();
+                let proposal = match response {
                     Ok(proposal) => proposal,
                     Err(_) => {
                         record_context_ranked_vision_metric(

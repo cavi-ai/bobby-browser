@@ -2169,19 +2169,6 @@ impl intent_engine::ProposalLookup for RecordingProposals {
     }
 }
 
-fn text_field(name: &str, purpose: &str) -> types::CompleteFormField {
-    types::CompleteFormField {
-        name: name.into(),
-        purpose: purpose.into(),
-        hints: IntentHints::default(),
-        value: types::ControlAction::SetText {
-            value: format!("value-{name}"),
-            clear_first: true,
-        },
-        revealed_by: None,
-    }
-}
-
 fn checked_field(
     name: &str,
     purpose: &str,
@@ -2389,6 +2376,8 @@ async fn proactive_prefill_limits_provider_concurrency_to_four() {
 
 #[tokio::test]
 async fn cancelling_proactive_prefill_cancels_in_flight_provider_calls() {
+    let metrics = OperationalMetrics::default();
+    let task_metrics = metrics.clone();
     let active = Arc::new(AtomicUsize::new(0));
     let max_active = Arc::new(AtomicUsize::new(0));
     let task_active = active.clone();
@@ -2415,10 +2404,13 @@ async fn cancelling_proactive_prefill_cancels_in_flight_provider_calls() {
             &VisionContext {
                 session_ok: true,
                 capability_ok: true,
-                assist: Some(Arc::new(PendingVision {
-                    active: task_active,
-                    max_active: task_max_active,
-                })),
+                assist: Some(instrument_vision_assist(
+                    Arc::new(PendingVision {
+                        active: task_active,
+                        max_active: task_max_active,
+                    }),
+                    task_metrics,
+                )),
                 proposals: Some(Arc::new(RecordingProposals::default())),
                 defer_escalation: false,
                 prompt_context: None,
@@ -2441,10 +2433,16 @@ async fn cancelling_proactive_prefill_cancels_in_flight_provider_calls() {
 
     assert_eq!(active.load(Ordering::SeqCst), 0);
     assert_eq!(max_active.load(Ordering::SeqCst), 4);
+    let snapshot = serde_json::to_value(metrics.snapshot()).unwrap();
+    assert_eq!(snapshot["prefill"]["requestsCancelled"], 4);
+    assert_eq!(snapshot["prefill"]["budgetExhausted"], 0);
+    assert_eq!(snapshot["vision"]["attempted"], 0);
+    assert!(metrics.provider_health().is_empty());
 }
 
 #[tokio::test]
 async fn an_expired_prefill_deadline_skips_speculation_and_uses_fresh_fallback() {
+    let metrics = OperationalMetrics::default();
     let propose_calls = Arc::new(AtomicUsize::new(0));
     let screenshot_calls = Arc::new(AtomicUsize::new(0));
     let browser = CountingScreenshotBrowser {
@@ -2474,7 +2472,7 @@ async fn an_expired_prefill_deadline_skips_speculation_and_uses_fresh_fallback()
             assist: Some(Arc::new(CountingVision {
                 propose_calls: propose_calls.clone(),
                 confidence: 0.95,
-                metrics: OperationalMetrics::default(),
+                metrics: metrics.clone(),
             })),
             proposals: Some(Arc::new(RecordingProposals::default())),
             ..VisionContext::default()
@@ -2495,6 +2493,11 @@ async fn an_expired_prefill_deadline_skips_speculation_and_uses_fresh_fallback()
         "only fresh fallbacks capture screenshots"
     );
     assert_eq!(propose_calls.load(Ordering::SeqCst), 2);
+    let snapshot = serde_json::to_value(metrics.snapshot()).unwrap();
+    assert_eq!(snapshot["prefill"]["budgetExhausted"], 1);
+    assert_eq!(snapshot["prefill"]["requestsCancelled"], 0);
+    assert_eq!(snapshot["prefill"]["partialBatchRetained"], 0);
+    assert_eq!(snapshot["prefill"]["staleBatchDiscarded"], 0);
 }
 
 #[tokio::test]
@@ -2636,6 +2639,11 @@ async fn complete_form_batches_one_screenshot_for_all_stuck_fields() {
         .count();
     assert_eq!(prefill_records, 3, "every field resolved from the batch");
     assert_eq!(metrics.snapshot().vision.accepted, 3);
+    let prefill = metrics.snapshot().prefill;
+    assert_eq!(prefill.budget_exhausted, 0);
+    assert_eq!(prefill.partial_batch_retained, 0);
+    assert_eq!(prefill.stale_batch_discarded, 0);
+    assert_eq!(prefill.requests_cancelled, 0);
 }
 
 #[tokio::test]
@@ -2750,6 +2758,7 @@ impl IntentBrowser for CountingScreenshotBrowser {
 
 #[tokio::test]
 async fn provider_loss_during_batch_degrades_to_the_deterministic_path() {
+    let metrics = OperationalMetrics::default();
     struct OfflineVision;
     #[async_trait]
     impl VisionAssist for OfflineVision {
@@ -2766,11 +2775,18 @@ async fn provider_loss_during_batch_degrades_to_the_deterministic_path() {
         }
     }
     let proposals = Arc::new(RecordingProposals::default());
-    let browser = FakeBrowser::default();
+    let browser = FakeBrowser {
+        candidates: vec![
+            form_candidate("primary", "checkbox", "Primary value"),
+            form_candidate("alternate", "checkbox", "Alternate value"),
+        ],
+        screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
+    };
     let page_id = PageId::new();
     let intent = IntentCommand::CompleteForm(types::CompleteFormIntent {
         purpose: "sign up".into(),
-        fields: vec![text_field("first", "First name")],
+        fields: vec![checked_field("first", "First choice", None)],
     });
 
     let outcome = IntentEngine::execute(
@@ -2780,7 +2796,10 @@ async fn provider_loss_during_batch_degrades_to_the_deterministic_path() {
         &VisionContext {
             session_ok: true,
             capability_ok: true,
-            assist: Some(Arc::new(OfflineVision)),
+            assist: Some(instrument_vision_assist(
+                Arc::new(OfflineVision),
+                metrics.clone(),
+            )),
             proposals: Some(proposals),
             defer_escalation: false,
             prompt_context: None,
@@ -2801,4 +2820,11 @@ async fn provider_loss_during_batch_degrades_to_the_deterministic_path() {
         evidence.iter().any(|item| matches!(item, Evidence::IntentExecution { record } if record.verification == "targetNotFound")),
         "stuck evidence lost during provider-loss degradation"
     );
+    let snapshot = metrics.snapshot();
+    assert_eq!(
+        snapshot.vision.failed, 2,
+        "prefill and fresh fallback both fail"
+    );
+    assert_eq!(snapshot.prefill.requests_cancelled, 0);
+    assert_eq!(metrics.provider_health()[0].failures, 2);
 }

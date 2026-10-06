@@ -445,11 +445,15 @@ provider's 5 are taken; see
 
 ## Vision prefill
 
-With `[vision].prefill = true` (the default), `complete_form` preflights every
+With `[vision].prefill = true` (the default), `complete_form` preflights
 field before the first page mutation. Deterministically resolved fields stay on
 the deterministic path. The remaining fields share one screenshot and use at
-most four concurrent provider calls. Set `prefill = false` to disable this
-pass.
+most four concurrent provider calls, with at most 32 proposals per batch.
+Runtime commands reserve half their remaining deadline for this speculative
+pass. When that budget expires, unfinished request futures are dropped and
+completed proposals may still be retained if the page generation matches.
+Remaining fields execute through normal fallback. Set `prefill = false` to
+disable this pass.
 
 Each request contains at most five role-and-name candidates. Retained page
 context may rank that window only when its structural record is fresh and has
@@ -464,6 +468,16 @@ cache-resolved field, `visionFallback` for a live stuck-rescue escalation,
 or fails verification is dropped and escalated live. Provider loss records no
 cache entry and the form continues through the ordinary execution path.
 Cancelling the form cancels all in-flight prefill calls.
+
+`operationalMetrics.prefill` reports `budgetExhausted` (expired batches,
+including those skipped before starting), `partialBatchRetained` (expired
+batches that publish completed proposals), and `staleBatchDiscarded` (nonempty
+batches refused by the generation guard). `requestsCancelled` counts started
+provider requests dropped before returning a result, including when the intent
+is cancelled. Queued requests and completed requests are excluded. These
+cancellations do not increment provider failures or timeouts; dropping a request
+future does not prove that remote inference stopped. Counters contain no field
+values, candidate names, page identifiers, or screenshots.
 
 ## Vision backend
 

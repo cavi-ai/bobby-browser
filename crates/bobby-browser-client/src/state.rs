@@ -145,13 +145,31 @@ metric_snapshot!(ContextMetricsSnapshot {
     stale_rejection,
     error,
 });
-metric_snapshot!(PrefillMetricsSnapshot {
-    hit,
-    miss,
-    dropped_entry,
-    policy_denied,
-    provider_failure,
-});
+/// Aggregate prefill outcomes. Batch counters and request counters have
+/// distinct units; cancelled requests do not imply provider failure.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PrefillMetricsSnapshot {
+    pub hit: u64,
+    pub miss: u64,
+    pub dropped_entry: u64,
+    pub policy_denied: u64,
+    pub provider_failure: u64,
+    /// Batches whose speculative deadline expired, including skips before work.
+    #[serde(default)]
+    pub budget_exhausted: u64,
+    /// Timed-out batches that published at least one completed proposal.
+    #[serde(default)]
+    pub partial_batch_retained: u64,
+    /// Nonempty batches refused by the page-generation guard.
+    #[serde(default)]
+    pub stale_batch_discarded: u64,
+    /// Started provider requests dropped before returning a result.
+    /// Includes deadline expiry and cancellation of the enclosing intent.
+    #[serde(default)]
+    pub requests_cancelled: u64,
+}
 metric_snapshot!(ConfidenceMetricsSnapshot {
     below_acceptance,
     accepted,
