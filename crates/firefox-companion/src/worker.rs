@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -167,6 +167,10 @@ pub struct ExtensionObservation {
     /// visible controls.
     #[serde(default)]
     pub controls_truncated: bool,
+    /// Kinds of page-derived field the companion replaced with `[redacted]`
+    /// (never their values). Set by the companion, never read from the page.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Vec::is_empty")]
+    pub redacted_fields: Vec<String>,
 }
 
 /// The outcome of an unbounded-by-count search for one target.
@@ -480,15 +484,15 @@ impl ExtensionObserver for CompanionExtensionObserver {
                         false,
                     ));
                 }
-                let observation: ExtensionObservation = serde_json::from_value(result.output)
+                let mut observation: ExtensionObservation = serde_json::from_value(result.output)
                     .map_err(|error| {
-                        driver_error(
-                            ErrorCode::BrowserCommandFailed,
-                            format!("invalid extension observation: {error}"),
-                            false,
-                        )
-                    })?;
-                validate_observation(&observation)?;
+                    driver_error(
+                        ErrorCode::BrowserCommandFailed,
+                        format!("invalid extension observation: {error}"),
+                        false,
+                    )
+                })?;
+                validate_observation(&mut observation)?;
                 Ok(observation)
             }
             CompanionEvent::ActionFailed { code, message, .. } => Err(driver_error(
@@ -794,6 +798,7 @@ pub struct FirefoxCompanionWorker {
     pending_prompts: Arc<RwLock<HashMap<String, PendingPrompt>>>,
     har_recorder: Arc<worker_pool::HarRecorder>,
     network_quiet: Arc<AsyncMutex<FirefoxNetworkQuiet>>,
+    redacted_fields: TaskMutex<BTreeSet<String>>,
     closed: AtomicBool,
     lifecycle: AsyncMutex<()>,
     shutdown: Arc<WorkerShutdown>,
@@ -1598,6 +1603,7 @@ impl FirefoxCompanionWorker {
             pending_prompts,
             har_recorder,
             network_quiet,
+            redacted_fields: TaskMutex::new(BTreeSet::new()),
             closed: AtomicBool::new(false),
             lifecycle: AsyncMutex::new(()),
             shutdown: Arc::new(WorkerShutdown {
@@ -1717,6 +1723,34 @@ impl FirefoxCompanionWorker {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    fn note_redactions(&self, observation: &ExtensionObservation) {
+        if observation.redacted_fields.is_empty() {
+            return;
+        }
+        self.redacted_fields
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(observation.redacted_fields.iter().cloned());
+    }
+
+    /// Appends one `redactedFields` diagnostic naming the page-field kinds
+    /// the companion redacted since the last command finished.
+    fn with_redaction_diagnostics(&self, mut evidence: Vec<Evidence>) -> Vec<Evidence> {
+        let kinds = std::mem::take(
+            &mut *self
+                .redacted_fields
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        if !kinds.is_empty() {
+            evidence.push(Evidence::Configuration {
+                name: "redactedFields".into(),
+                value: kinds.into_iter().collect::<Vec<_>>().join(","),
+            });
+        }
+        evidence
     }
 
     fn evidence(&self, interaction_path: InteractionPath) -> Evidence {
@@ -1952,7 +1986,9 @@ impl FirefoxCompanionWorker {
                 },
             )
             .await?;
-        validate_observation(&observation)?;
+        let mut observation = observation;
+        validate_observation(&mut observation)?;
+        self.note_redactions(&observation);
         let truncated = observation.controls_truncated;
         let candidates = observation
             .controls
@@ -3884,6 +3920,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
             if !command.include_html {
                 observation.html = None;
             }
+            self.note_redactions(&observation);
             if !bounded_text_matches(matcher, &observation.visible_text)? {
                 return Err(driver_error(
                     ErrorCode::TargetNotFound,
@@ -3891,7 +3928,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                     false,
                 ));
             }
-            return Ok(vec![
+            return Ok(self.with_redaction_diagnostics(vec![
                 Evidence::Inspection {
                     selector: None,
                     url: observation.url,
@@ -3900,7 +3937,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                     html: observation.html,
                 },
                 self.evidence(InteractionPath::ExtensionApi),
-            ]);
+            ]));
         }
         let semantic_target = command
             .target
@@ -3928,6 +3965,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
         if !command.include_html {
             observation.html = None;
         }
+        self.note_redactions(&observation);
         let scoped_control_value = (semantic_target || command.selector.is_some())
             .then(|| {
                 observation
@@ -3949,7 +3987,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
         } else {
             observation.visible_text.clone()
         };
-        Ok(vec![
+        Ok(self.with_redaction_diagnostics(vec![
             Evidence::Inspection {
                 selector: command.selector.clone().or_else(|| {
                     command
@@ -3963,7 +4001,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 html: observation.html,
             },
             self.evidence(InteractionPath::ExtensionApi),
-        ])
+        ]))
     }
 
     async fn click(
@@ -4016,13 +4054,13 @@ impl BrowserWorker for FirefoxCompanionWorker {
 
         self.dispatch_pointer_click(&context, &shared_id, Some(&path), &command.modifiers)
             .await?;
-        Ok(vec![
+        Ok(self.with_redaction_diagnostics(vec![
             Evidence::Element {
                 selector: command.selector.clone(),
                 text: None,
             },
             self.evidence(InteractionPath::EngineNative),
-        ])
+        ]))
     }
 
     async fn click_xy(
@@ -4662,7 +4700,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                     form_control_validity_evidence(&self.transport, &context, &selector_json)
                         .await?,
                 );
-                return Ok(evidence);
+                return Ok(self.with_redaction_diagnostics(evidence));
             }
             Some("missing") | Some("disabled") => {
                 return Err(driver_error(
@@ -4695,7 +4733,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                     form_control_validity_evidence(&self.transport, &context, &selector_json)
                         .await?,
                 );
-                return Ok(evidence);
+                return Ok(self.with_redaction_diagnostics(evidence));
             }
             Some("invalid-checked") | Some("radio-uncheck") => {
                 return Err(driver_error(
@@ -4782,7 +4820,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
         evidence.extend(
             form_control_validity_evidence(&self.transport, &context, &selector_json).await?,
         );
-        Ok(evidence)
+        Ok(self.with_redaction_diagnostics(evidence))
     }
 
     async fn wait_for(
@@ -6070,6 +6108,86 @@ fn accessibility_candidates(nodes: &[types::AccessibilityNode]) -> Vec<Candidate
 }
 
 #[cfg(test)]
+mod observation_redaction_tests {
+    use super::{validate_observation, ExtensionControl, ExtensionObservation};
+
+    fn control(css_path: &str, name: &str, value: Option<&str>) -> ExtensionControl {
+        ExtensionControl {
+            css_path: css_path.into(),
+            test_id: None,
+            role: Some("textbox".into()),
+            name: Some(name.into()),
+            label: None,
+            value: value.map(str::to_owned),
+            attributes: Default::default(),
+            disabled: false,
+        }
+    }
+
+    fn observation(visible_text: &str, controls: Vec<ExtensionControl>) -> ExtensionObservation {
+        ExtensionObservation {
+            url: "https://example.test/feed".into(),
+            title: "Feed".into(),
+            visible_text: visible_text.into(),
+            controls,
+            html: None,
+            controls_truncated: false,
+            redacted_fields: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn matching_page_fields_are_redacted_and_named_never_rejected() {
+        let mut observed = observation(
+            "Session token: k8Qm41ZzK2 Zx9Kq2Lm7Rt4Vw8Yb3Nc6Hd1Jf5Gs0Ae2PuXo7Ti9QaB4cDe",
+            vec![control(
+                "div:nth-of-type(2) > input",
+                "Search",
+                Some("Zx9Kq2Lm7Rt4Vw8Yb3Nc6Hd1Jf5Gs0Ae2PuXo7Ti9QaB4cDe"),
+            )],
+        );
+        validate_observation(&mut observed).expect("a redactable field never fails the action");
+        assert_eq!(observed.visible_text, "[redacted]");
+        assert_eq!(observed.controls[0].value.as_deref(), Some("[redacted]"));
+        assert_eq!(observed.controls[0].name.as_deref(), Some("Search"));
+        assert_eq!(observed.redacted_fields, ["control.value", "visibleText"]);
+    }
+
+    #[test]
+    fn companion_generated_fields_are_never_scanned() {
+        let long_path = format!("main > ul > li:nth-of-type(3) > {}", "div > ".repeat(8));
+        let mut observed = observation("Plain text", vec![control(&long_path, "Search", None)]);
+        observed.controls[0].role = Some("aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bC1dE3fG5hJ7kL9".into());
+        validate_observation(&mut observed).unwrap();
+        assert!(observed.redacted_fields.is_empty());
+        assert_eq!(observed.controls[0].css_path, long_path);
+    }
+
+    #[test]
+    fn unsanitized_markup_in_text_is_redacted() {
+        let mut observed = observation("see <script>alert(1)</script>", Vec::new());
+        validate_observation(&mut observed).unwrap();
+        assert_eq!(observed.visible_text, "[redacted]");
+        assert_eq!(observed.redacted_fields, ["visibleText"]);
+    }
+
+    #[test]
+    fn a_credential_url_keeps_its_origin_and_path() {
+        let mut observed = observation("ok", Vec::new());
+        observed.url = "https://example.test/feed?access_token=abcd1234efgh".into();
+        validate_observation(&mut observed).unwrap();
+        assert_eq!(observed.url, "https://example.test/feed");
+        assert_eq!(observed.redacted_fields, ["url"]);
+    }
+
+    #[test]
+    fn oversized_observations_are_still_rejected() {
+        let mut observed = observation(&"a ".repeat(super::MAX_VISIBLE_TEXT_BYTES), Vec::new());
+        assert!(validate_observation(&mut observed).is_err());
+    }
+}
+
+#[cfg(test)]
 mod accessibility_candidate_tests {
     use super::{accessibility_candidates, accessibility_tree_contains};
 
@@ -6407,7 +6525,41 @@ fn live_contexts(response: &Value) -> Option<HashSet<String>> {
     Some(contexts)
 }
 
-fn validate_observation(observation: &ExtensionObservation) -> Result<(), CommandError> {
+const REDACTED: &str = "[redacted]";
+
+fn redact_string(kinds: &mut BTreeSet<String>, kind: &str, value: &mut String) {
+    if unsafe_observation_text(value) {
+        *value = REDACTED.into();
+        kinds.insert(kind.into());
+    }
+}
+
+fn redact_optional(kinds: &mut BTreeSet<String>, kind: &str, value: &mut Option<String>) {
+    if let Some(value) = value {
+        redact_string(kinds, kind, value);
+    }
+}
+
+/// A URL that carries a credential loses its query and fragment first, so
+/// the origin and path still identify the page.
+fn redact_url(kinds: &mut BTreeSet<String>, url: &mut String) {
+    if !unsafe_observation_text(url) {
+        return;
+    }
+    kinds.insert("url".into());
+    if let Some(end) = url.find(['?', '#']) {
+        url.truncate(end);
+    }
+    if unsafe_observation_text(url) {
+        *url = REDACTED.into();
+    }
+}
+
+/// Bounds the observation and redacts page-derived fields that carry secret
+/// material or unsanitized markup. A redacted field never fails the action;
+/// `redacted_fields` names the kinds. Companion-generated fields (CSS paths,
+/// roles) cannot carry page text and are never scanned.
+fn validate_observation(observation: &mut ExtensionObservation) -> Result<(), CommandError> {
     let bounded = observation.url.len() <= MAX_URL_BYTES
         && observation.title.len() <= MAX_TITLE_BYTES
         && observation.visible_text.len() <= MAX_VISIBLE_TEXT_BYTES
@@ -6437,34 +6589,17 @@ fn validate_observation(observation: &ExtensionObservation) -> Result<(), Comman
             false,
         ));
     }
-    let safe_page = [
-        Some(observation.url.as_str()),
-        Some(observation.title.as_str()),
-        Some(observation.visible_text.as_str()),
-        observation.html.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .all(|value| !unsafe_observation_text(value));
-    let safe_controls = observation.controls.iter().all(|control| {
-        [
-            Some(control.css_path.as_str()),
-            control.role.as_deref(),
-            control.name.as_deref(),
-            control.label.as_deref(),
-            control.value.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .all(|value| !unsafe_observation_text(value))
-    });
-    if !safe_page || !safe_controls {
-        return Err(driver_error(
-            ErrorCode::BrowserCommandFailed,
-            "extension observation contained unsanitized sensitive material",
-            false,
-        ));
+    let mut kinds = BTreeSet::new();
+    redact_url(&mut kinds, &mut observation.url);
+    redact_string(&mut kinds, "title", &mut observation.title);
+    redact_string(&mut kinds, "visibleText", &mut observation.visible_text);
+    redact_optional(&mut kinds, "html", &mut observation.html);
+    for control in &mut observation.controls {
+        redact_optional(&mut kinds, "control.name", &mut control.name);
+        redact_optional(&mut kinds, "control.label", &mut control.label);
+        redact_optional(&mut kinds, "control.value", &mut control.value);
     }
+    observation.redacted_fields = kinds.into_iter().collect();
     Ok(())
 }
 

@@ -62,6 +62,10 @@ fn config(root: &std::path::Path) -> AppConfig {
 }
 
 impl Rig {
+    pub fn is_firefox(&self) -> bool {
+        self._firefox.is_some()
+    }
+
     pub async fn chromium() -> Self {
         let root = tempfile::tempdir().expect("create rig root");
         let mut config = config(root.path());

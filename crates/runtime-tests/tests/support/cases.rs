@@ -2,7 +2,7 @@
 //! observed on linkedin.com on 2026-10-06 through the real runtime and fixed
 //! in PR #612. The same cases run against Chromium and Firefox.
 
-use serde_json::json;
+use serde_json::{json, Value};
 
 use super::rig::{assert_node, find_node, strings_under, targets_under, Live, Rig};
 use test_site::{FixtureSite, Route};
@@ -344,5 +344,154 @@ pub async fn oversized_page_reports_truncation_not_target_not_found(rig: &Rig) {
         message.contains("truncated"),
         "the error does not name the truncation: {followed}"
     );
+    live.close().await;
+}
+
+const TRACKING_ID: &str = "Zx9Kq2Lm7Rt4Vw8Yb3Nc6Hd1Jf5Gs0Ae2PuXo7Ti9QaB4cDe";
+const CSRF_TOKEN: &str = "Qm41ZzK2xP9vLr7TnW3bYc8Hd5Jf6GsA";
+
+/// linkedin.com/feed, Firefox: `type_text` into the search box and
+/// `intent_follow` on "Show all" failed with "extension observation
+/// contained unsanitized sensitive material" because one page field
+/// matched the secret rule and the whole observation was rejected. A
+/// matching field is redacted instead and the action proceeds without
+/// exposing the secret.
+pub async fn redacted_page_fields_do_not_block_actions(rig: &Rig) {
+    assert_eq!(TRACKING_ID.len(), 48);
+    let body = format!(
+        r#"<main>
+        <p>Tracking <span>{TRACKING_ID}</span></p>
+        <p><span>Session token:</span><span>k8Qm41ZzK2</span></p>
+        <form><input type="hidden" name="csrfToken" value="{CSRF_TOKEN}">
+        <input placeholder="Search"></form>
+        <a href="/all">Show all</a></main>"#
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/tracked", Route::Html(page("Tracked", &body))),
+        (
+            "/all",
+            Route::Html(page("All", "<main><h1>All results</h1></main>")),
+        ),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/tracked")).await;
+    let typed = live
+        .call(
+            "type_text",
+            json!({"target":{"role":"textbox","accessibleName":"Search"},
+                   "value":"bobby","clearFirst":true}),
+        )
+        .await;
+    assert_eq!(typed["status"], "completed", "type_text: {typed}");
+    let typed_text = typed.to_string();
+    for secret in [TRACKING_ID, CSRF_TOKEN, "k8Qm41ZzK2"] {
+        assert!(
+            !typed_text.contains(secret),
+            "type_text exposed page secret material: {typed}"
+        );
+    }
+    let followed = live
+        .call(
+            "intent_follow",
+            json!({
+                "purpose":"Open every result",
+                "hints":{"role":"link","accessibleName":"Show all"},
+                "expectedDestination":{
+                    "condition":{"kind":"url","matcher":{"kind":"contains","value":"/all"}},
+                    "timeoutMs":15000
+                }
+            }),
+        )
+        .await;
+    assert_eq!(followed["status"], "completed", "intent_follow: {followed}");
+    live.close().await;
+}
+
+/// linkedin.com/feed: `a11y_snapshot` with `maxNodes: 120` returned only the
+/// header and `truncated: true` because a node was counted after its
+/// descendants, so a subtree that ran out of budget discarded its own root
+/// and every node already built under it. A node reserves its slot first.
+pub async fn snapshot_budget_keeps_ancestors_of_kept_nodes(rig: &Rig) {
+    let mut buttons = String::new();
+    for index in 0..200 {
+        buttons.push_str(&format!("<button>Item {index}</button>"));
+    }
+    let body =
+        format!(r#"<header><a href="/home">Home</a></header><main><div>{buttons}</div></main>"#);
+    let site = FixtureSite::spawn(vec![("/deep", Route::Html(page("Deep", &body)))]).await;
+    let live = Live::open(rig, &site.url("/deep")).await;
+    let snapshot = live.snapshot(json!({"maxNodes":60})).await;
+    assert_node(&snapshot, "main", None);
+    assert_node(&snapshot, "button", Some("Item 0"));
+    assert!(
+        find_node(&snapshot, "button", Some("Item 199")).is_none(),
+        "the snapshot was not bounded by maxNodes: {snapshot}"
+    );
+    assert!(
+        snapshot.to_string().contains(r#""truncated":true"#),
+        "the snapshot does not report truncation: {snapshot}"
+    );
+    live.close().await;
+}
+
+fn nodes_with_role<'a>(value: &'a Value, role: &str, out: &mut Vec<&'a Value>) {
+    match value {
+        Value::Object(map) => {
+            if map.get("role").and_then(Value::as_str) == Some(role) {
+                out.push(value);
+            }
+            map.values()
+                .for_each(|child| nodes_with_role(child, role, out));
+        }
+        Value::Array(items) => items
+            .iter()
+            .for_each(|child| nodes_with_role(child, role, out)),
+        _ => {}
+    }
+}
+
+/// linkedin.com/feed: `main`, `banner`, `navigation`, `list`, `form` and
+/// `contentinfo` were named by the concatenated text of every descendant,
+/// bloating each snapshot. Only roles that take their name from content are
+/// named from it; `listitem` keeps its text on purpose.
+pub async fn containers_are_not_named_from_content(rig: &Rig) {
+    let body = r#"<header>Site banner text</header>
+        <nav>Navigation words <a href="/a">Alpha</a></nav>
+        <main><p>Main body words</p>
+          <form>Form words <input placeholder="Search"></form>
+          <ul><li>First post text</li><li>Second post text</li></ul>
+        </main>
+        <footer>Footer words</footer>"#;
+    let site = FixtureSite::spawn(vec![("/names", Route::Html(page("Containers", body)))]).await;
+    let live = Live::open(rig, &site.url("/names")).await;
+    let snapshot = live.snapshot(json!({})).await;
+    for role in [
+        "banner",
+        "main",
+        "navigation",
+        "form",
+        "list",
+        "contentinfo",
+    ] {
+        let mut nodes = Vec::new();
+        nodes_with_role(&snapshot, role, &mut nodes);
+        assert!(!nodes.is_empty(), "no {role} node: {snapshot}");
+        for node in nodes {
+            assert!(
+                node.get("name").is_none_or(|name| name.is_null()),
+                "{role} is named from its content: {node}"
+            );
+        }
+    }
+    // Chromium reports the item text as its StaticText child; the Firefox
+    // companion names the listitem itself.
+    let item_role = if rig.is_firefox() {
+        "listitem"
+    } else {
+        "StaticText"
+    };
+    assert_node(&snapshot, item_role, Some("First post text"));
+    assert_node(&snapshot, item_role, Some("Second post text"));
+    assert_node(&snapshot, "link", Some("Alpha"));
     live.close().await;
 }

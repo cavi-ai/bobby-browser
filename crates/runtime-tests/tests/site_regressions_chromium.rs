@@ -25,5 +25,8 @@ chromium_case!(accessible_names_are_computed);
 chromium_case!(secret_words_are_not_secrets);
 chromium_case!(disclosed_credentials_are_withheld);
 chromium_case!(large_dom_link_resolves_for_intent_follow);
+chromium_case!(redacted_page_fields_do_not_block_actions);
+chromium_case!(snapshot_budget_keeps_ancestors_of_kept_nodes);
+chromium_case!(containers_are_not_named_from_content);
 // `oversized_page_reports_truncation_not_target_not_found` is Firefox-only:
 // the 1024-node candidate cap it exercises exists only in the Firefox companion.

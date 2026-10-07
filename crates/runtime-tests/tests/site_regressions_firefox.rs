@@ -4,19 +4,22 @@
 
 mod support;
 
+use std::future::Future;
 use std::panic::AssertUnwindSafe;
+use std::pin::Pin;
 
 use futures_util::FutureExt;
 use support::cases;
 use support::rig::Rig;
 
-macro_rules! run_cases {
-    ($rig:expr, $failures:expr, $($case:ident),+ $(,)?) => {
-        $(
-            if AssertUnwindSafe(cases::$case(&$rig)).catch_unwind().await.is_err() {
-                $failures.push(stringify!($case));
-            }
-        )+
+type Case = for<'a> fn(&'a Rig) -> Pin<Box<dyn Future<Output = ()> + 'a>>;
+
+/// The cases are a table of boxed futures walked by one loop. Awaiting each
+/// case inline made this test's debug-build poll frame grow with every case
+/// and overflowed the 2 MB test-thread stack before the first case finished.
+macro_rules! case_table {
+    ($($case:ident),+ $(,)?) => {
+        [$((stringify!($case), (|rig| Box::pin(cases::$case(rig))) as Case)),+]
     };
 }
 
@@ -25,9 +28,7 @@ macro_rules! run_cases {
 async fn site_regressions_hold_on_firefox() {
     let rig = Rig::firefox().await;
     let mut failures: Vec<&str> = Vec::new();
-    run_cases!(
-        rig,
-        failures,
+    let table = case_table!(
         hidden_subtrees_do_not_spend_the_node_budget,
         snapshot_target_scopes_the_tree,
         workflow_start_reports_the_settled_page,
@@ -37,6 +38,14 @@ async fn site_regressions_hold_on_firefox() {
         disclosed_credentials_are_withheld,
         large_dom_link_resolves_for_intent_follow,
         oversized_page_reports_truncation_not_target_not_found,
+        redacted_page_fields_do_not_block_actions,
+        snapshot_budget_keeps_ancestors_of_kept_nodes,
+        containers_are_not_named_from_content,
     );
+    for (name, case) in table {
+        if AssertUnwindSafe(case(&rig)).catch_unwind().await.is_err() {
+            failures.push(name);
+        }
+    }
     assert!(failures.is_empty(), "failing cases: {failures:?}");
 }

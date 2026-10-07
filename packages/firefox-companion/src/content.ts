@@ -486,12 +486,39 @@ function isLocallyHidden(element: Element): boolean {
 
 const NAME_FROM_CONTENT_EXCLUDED_TAGS = new Set(["TEXTAREA", "SELECT"]);
 
+// Roles ARIA names from content, plus `listitem` on purpose: bounded, and how
+// feed posts and message previews are read. Landmarks, lists, tables, dialogs
+// and groups take only aria-label / aria-labelledby.
+const NAME_FROM_CONTENT_ROLES = new Set([
+  "button",
+  "link",
+  "heading",
+  "cell",
+  "gridcell",
+  "columnheader",
+  "rowheader",
+  "row",
+  "checkbox",
+  "radio",
+  "switch",
+  "menuitem",
+  "menuitemcheckbox",
+  "menuitemradio",
+  "option",
+  "tab",
+  "treeitem",
+  "tooltip",
+  "listitem",
+]);
+
 function accessibleName(
   element: Element,
   label: string | undefined,
   budget: WorkBudget,
   sensitive: boolean,
+  role: string | undefined,
 ): string | undefined {
+  const nameFromContent = role !== undefined && NAME_FROM_CONTENT_ROLES.has(role);
   const textEntry = element.tagName === "INPUT" || element.tagName === "TEXTAREA";
   return (
     labelledByText(element, budget) ??
@@ -500,7 +527,7 @@ function accessibleName(
     observationString(element.getAttribute("alt")) ??
     observationString(element.getAttribute("title")) ??
     (textEntry && !sensitive ? observationString(element.getAttribute("placeholder")) : undefined) ??
-    (NAME_FROM_CONTENT_EXCLUDED_TAGS.has(element.tagName)
+    (!nameFromContent || NAME_FROM_CONTENT_EXCLUDED_TAGS.has(element.tagName)
       ? undefined
       : boundedElementText(element, MAX_CONTROL_FIELD_LENGTH, budget)) ??
     (element.tagName === "INPUT" && !sensitive
@@ -720,7 +747,13 @@ function observeRoot(document: Document, root: Element, includeHtml: boolean): P
     const observedPath = cssPath(element, helperBudget, siblingPositions, !sensitive);
     if (!observedPath) continue;
     const observedLabel = labelText(element, labelsByControlId, helperBudget);
-    const observedName = accessibleName(element, observedLabel, helperBudget, sensitive);
+    const observedName = accessibleName(
+      element,
+      observedLabel,
+      helperBudget,
+      sensitive,
+      implicitRole(element, !sensitive),
+    );
     const publicLabel = publicControlLabel(element);
     const label = publicLabel ?? (sensitive && observedLabel ? REDACTED : observedLabel);
     const testId = sensitive
@@ -980,7 +1013,13 @@ function a11yTree(
     const role = implicitRole(element, !sensitive) ?? structuralRole(element);
     const name = sensitive
       ? publicControlLabel(element) ?? REDACTED
-      : accessibleName(element, labelText(element, labelsByControlId, budget), budget, sensitive);
+      : accessibleName(
+          element,
+          labelText(element, labelsByControlId, budget),
+          budget,
+          sensitive,
+          role,
+        );
     return { role, name, sensitive };
   };
 
@@ -1164,21 +1203,28 @@ function a11yTree(
       state.truncated = true;
       return [];
     }
+    // A node reserves its own slot before its descendants do, so truncation
+    // drops later and deeper nodes and never an ancestor of kept ones.
+    if (role) {
+      if (state.remaining <= 0) {
+        state.truncated = true;
+        return [];
+      }
+      state.remaining -= 1;
+    }
     const children: A11yNode[] = [];
     if (depth < A11Y_MAX_DEPTH) {
       const siblings = Array.from(element.children);
       if (siblings.length > A11Y_MAX_CHILDREN) state.truncated = true;
       for (const child of siblings.slice(0, A11Y_MAX_CHILDREN)) {
-        if (state.remaining <= 0) break;
+        if (state.remaining <= 0) {
+          state.truncated = true;
+          break;
+        }
         children.push(...build(child, depth + 1, role ? level + 1 : level));
       }
     }
     if (!role) return children;
-    if (state.remaining <= 0) {
-      state.truncated = true;
-      return [];
-    }
-    state.remaining -= 1;
     const node: A11yNode = { role };
     if (name) node.name = name;
     if (["INPUT", "SELECT", "TEXTAREA"].includes(element.tagName)) {
