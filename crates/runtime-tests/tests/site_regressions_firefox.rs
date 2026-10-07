@@ -37,6 +37,9 @@ async fn site_regressions_hold_on_firefox() {
         disclosed_credentials_are_withheld,
         large_dom_link_resolves_for_intent_follow,
         oversized_page_reports_truncation_not_target_not_found,
+        redacted_page_fields_do_not_block_actions,
+        snapshot_budget_keeps_ancestors_of_kept_nodes,
+        containers_are_not_named_from_content,
     );
     assert!(failures.is_empty(), "failing cases: {failures:?}");
 }
