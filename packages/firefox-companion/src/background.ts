@@ -33,6 +33,7 @@ export const PAGE_LEASE_TTL_MS = 60_000;
 export const ENROLL_PAIR_TIMEOUT_MS = 30_000;
 const ENROLL_OPERATOR_FALLBACK = "Start bobby serve, then Pair again";
 const OBSERVATION_RECEIVER_ATTEMPTS = 20;
+const READ_ONLY_CONTENT_OPERATIONS = new Set(["observe", "a11yTree", "locateTarget"]);
 const OBSERVATION_RECEIVER_DELAY_MS = 50;
 const MAX_ID_COMPONENT_BYTES = 96;
 const PAGE_BINDING_TITLE_PREFIX = "automation-runtime-binding:";
@@ -537,7 +538,7 @@ export class CompanionBackground {
         input.commandId,
         deadlineExceeded ? "deadlineExceeded" : "actionFailed",
         deadlineExceeded ? "the command deadline expired" : "the content action failed",
-        input.operation !== "observe" && input.operation !== "a11yTree",
+        !READ_ONLY_CONTENT_OPERATIONS.has(input.operation),
       );
       return;
     }
@@ -558,7 +559,7 @@ export class CompanionBackground {
         `the action result was rejected by the extension channel: ${
           error instanceof Error ? error.message : "unknown"
         }`,
-        input.operation !== "observe" && input.operation !== "a11yTree",
+        !READ_ONLY_CONTENT_OPERATIONS.has(input.operation),
       );
     }
   }

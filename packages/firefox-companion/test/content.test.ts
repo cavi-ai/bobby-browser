@@ -633,3 +633,46 @@ test("a11yTree result stays transmissible at the maximum node budget", () => {
   assert.equal(sent.truncated, true);
   assert.ok(Buffer.byteLength(JSON.stringify(sent.posted[0])) <= MAX_COMPANION_PAYLOAD_BYTES);
 });
+
+function largeBody(visible: number, after: string): string {
+  const hidden = Array.from({ length: 3000 }, (_, index) => `<a href="#h${index}">Hidden ${index}</a>`).join("");
+  const buttons = Array.from({ length: visible }, (_, index) => `<button>Item ${index}</button>`).join("");
+  return `<div style="display:none">${hidden}</div><main>${buttons}${after}</main>`;
+}
+
+test("a11yTree flags a sibling list longer than its child bound as truncated", () => {
+  const document = documentFor(largeBody(300, ""));
+  const result = executeContentAction(document, "a11yTree", { maxNodes: 1024 }) as {
+    truncated: boolean;
+  };
+  assert.equal(result.truncated, true);
+});
+
+test("locateTarget finds a link past thousands of visible and hidden nodes", () => {
+  const document = documentFor(largeBody(4500, '<a href="/all">Show all</a>'));
+  const located = executeContentAction(document, "locateTarget", {
+    target: { role: "link", accessibleName: "Show all" },
+  }) as { found: boolean; ambiguous: boolean; cssPath?: string; name?: string };
+  assert.equal(located.found, true);
+  assert.equal(located.name, "Show all");
+  assert.equal(document.querySelector(located.cssPath as string)?.textContent, "Show all");
+});
+
+test("locateTarget reports an absent target and an ambiguous one", () => {
+  const document = documentFor(
+    largeBody(300, '<a href="/a">Same</a><a href="/b">Same</a>'),
+  );
+  const absent = executeContentAction(document, "locateTarget", {
+    target: { role: "link", accessibleName: "Missing" },
+  }) as { found: boolean; ambiguous: boolean };
+  assert.deepEqual(absent, { found: false, ambiguous: false });
+  const ambiguous = executeContentAction(document, "locateTarget", {
+    target: { role: "link", accessibleName: "Same" },
+  }) as { found: boolean; ambiguous: boolean };
+  assert.deepEqual(ambiguous, { found: false, ambiguous: true });
+  const second = executeContentAction(document, "locateTarget", {
+    target: { role: "link", accessibleName: "Same", ordinal: 1 },
+  }) as { found: boolean; cssPath?: string };
+  assert.equal(second.found, true);
+  assert.equal(document.querySelector(second.cssPath as string)?.getAttribute("href"), "/b");
+});

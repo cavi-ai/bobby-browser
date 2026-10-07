@@ -858,6 +858,7 @@ const A11Y_MAX_NODE_LEVEL = 13;
 const A11Y_MAX_VALUES = 19_000;
 const A11Y_MAX_NODES = 2048;
 const A11Y_MAX_SCOPE_VISITS = 100_000;
+const A11Y_MAX_CHILDREN = 256;
 const A11Y_STRUCTURAL_ROLES = new Set([
   "banner",
   "navigation",
@@ -883,6 +884,15 @@ const A11Y_STRUCTURAL_ROLES = new Set([
   "progressbar",
   "separator",
 ]);
+
+export type LocatedTarget = {
+  found: boolean;
+  ambiguous: boolean;
+  cssPath?: string;
+  role?: string;
+  name?: string;
+  disabled?: boolean;
+};
 
 type A11yNode = {
   role?: string;
@@ -920,7 +930,8 @@ function a11yTree(
   document: Document,
   maxNodesInput: unknown,
   targetInput?: unknown,
-): { nodes: A11yNode[]; truncated: boolean } {
+  locateOnly = false,
+): { nodes: A11yNode[]; truncated: boolean; located?: LocatedTarget } {
   let maxNodes = 256;
   if (typeof maxNodesInput === "number" && Number.isSafeInteger(maxNodesInput)) {
     maxNodes = Math.min(Math.max(1, maxNodesInput), A11Y_MAX_NODES);
@@ -1030,8 +1041,8 @@ function a11yTree(
       // walk only needs to reach two matches; with one it needs ordinal + 1.
       const needed = typeof ordinal === "number" ? wanted + 1 : 2;
       if (depth < A11Y_MAX_DEPTH) {
-        for (const child of Array.from(element.children).slice(0, 256)) {
-          if (matches.length >= needed) return;
+        for (const child of Array.from(element.children)) {
+          if (matches.length >= needed || visited > A11Y_MAX_SCOPE_VISITS) return;
           walk(child, depth + 1);
         }
       }
@@ -1047,6 +1058,58 @@ function a11yTree(
     }
     return matches[0]!;
   };
+  if (locateOnly) {
+    if (targetInput === null || targetInput === undefined) {
+      throw new Error("locateTarget requires a target");
+    }
+    let element: Element;
+    try {
+      element = resolveScope(targetInput);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (message === "a11y target is ambiguous") {
+        return { nodes: [], truncated: false, located: { found: false, ambiguous: true } };
+      }
+      if (message === "a11y target was not found") {
+        return { nodes: [], truncated: false, located: { found: false, ambiguous: false } };
+      }
+      throw error;
+    }
+    const { role, name, sensitive } = semantics(element);
+    // The page-wide walk stops at its visit bound, so sibling positions are
+    // counted here, exactly, for the element and the ancestors its path uses.
+    const siblingPositions = new WeakMap<Element, number>();
+    const budget: WorkBudget = { remaining: A11Y_MAX_SCOPE_VISITS };
+    for (
+      let current: Element | null = element, depth = 0;
+      current?.parentElement && depth < 8;
+      current = current.parentElement, depth += 1
+    ) {
+      let position = 0;
+      for (const sibling of Array.from(current.parentElement.children)) {
+        if (!takeWork(budget)) break;
+        if (sibling.tagName === current.tagName) position += 1;
+        if (sibling === current) {
+          siblingPositions.set(current, position);
+          break;
+        }
+      }
+    }
+    const cssPathValue = cssPath(element, { remaining: A11Y_MAX_SCOPE_VISITS }, siblingPositions, !sensitive);
+    if (!cssPathValue) return { nodes: [], truncated: false, located: { found: false, ambiguous: false } };
+    return {
+      nodes: [],
+      truncated: false,
+      located: {
+        found: true,
+        ambiguous: false,
+        cssPath: cssPathValue,
+        ...(role ? { role } : {}),
+        ...(name ? { name } : {}),
+        disabled: element.hasAttribute("disabled") || element.getAttribute("aria-disabled") === "true",
+      },
+    };
+  }
   const scope: Element =
     targetInput === null || targetInput === undefined ? root : resolveScope(targetInput);
 
@@ -1103,7 +1166,9 @@ function a11yTree(
     }
     const children: A11yNode[] = [];
     if (depth < A11Y_MAX_DEPTH) {
-      for (const child of Array.from(element.children).slice(0, 256)) {
+      const siblings = Array.from(element.children);
+      if (siblings.length > A11Y_MAX_CHILDREN) state.truncated = true;
+      for (const child of siblings.slice(0, A11Y_MAX_CHILDREN)) {
         if (state.remaining <= 0) break;
         children.push(...build(child, depth + 1, role ? level + 1 : level));
       }
@@ -1199,6 +1264,9 @@ export function executeContentAction(
   }
   if (operation === "a11yTree") {
     return a11yTree(document, parsed.maxNodes, parsed.target);
+  }
+  if (operation === "locateTarget") {
+    return a11yTree(document, 1, parsed.target, true).located;
   }
   const element = target(document, parsed);
   switch (operation) {

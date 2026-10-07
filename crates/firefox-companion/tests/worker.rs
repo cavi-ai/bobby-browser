@@ -14,7 +14,7 @@ use companion_core::AttachmentLease;
 use companion_protocol::{BrowserEngine, BrowserIdentity, CompanionCapabilities, InteractionPath};
 use firefox_companion::{
     BidiEvent, BidiTransport, ExtensionControl, ExtensionObservation, ExtensionObserver,
-    ExtensionPageBinding, FirefoxCompanionWorker, MAX_TRACKED_PAGES,
+    ExtensionPageBinding, FirefoxCompanionWorker, TargetLocation, MAX_TRACKED_PAGES,
 };
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, Mutex, Notify};
@@ -4421,4 +4421,234 @@ async fn close_page_returns_page_evidence_captured_before_teardown() {
     assert_eq!(page_id, page);
     assert_eq!(url, "https://example.test/closed");
     assert!(!title.is_empty());
+}
+
+/// An observer whose bounded walks are truncated before the target, and whose
+/// unbounded search answers with `location`.
+struct LargePageObserver {
+    location: Option<TargetLocation>,
+}
+
+#[async_trait]
+impl ExtensionObserver for LargePageObserver {
+    async fn begin_page_binding(
+        &self,
+        _lease: &AttachmentLease,
+        _page_id: &PageId,
+    ) -> Result<Box<dyn ExtensionPageBinding>, CommandError> {
+        Ok(Box::new(FakePageBinding {
+            nonce: "c9506f20-3021-4c15-b389-0ca762f89415".into(),
+        }))
+    }
+
+    async fn observe(
+        &self,
+        _lease: &AttachmentLease,
+        _page_id: &PageId,
+        _command: &InspectCommand,
+    ) -> Result<ExtensionObservation, CommandError> {
+        let mut observed = observation();
+        observed.controls_truncated = true;
+        Ok(observed)
+    }
+
+    async fn release_page_binding(
+        &self,
+        _lease: &AttachmentLease,
+        _page_id: &PageId,
+    ) -> Result<(), CommandError> {
+        Ok(())
+    }
+
+    async fn a11y_snapshot(
+        &self,
+        _lease: &AttachmentLease,
+        _page_id: &PageId,
+        _max_nodes: u32,
+        _target: Option<&TargetSpec>,
+    ) -> Result<(Vec<types::AccessibilityNode>, bool), CommandError> {
+        Ok((
+            vec![types::AccessibilityNode {
+                role: Some("button".into()),
+                name: Some("Item 0".into()),
+                ..types::AccessibilityNode::default()
+            }],
+            true,
+        ))
+    }
+
+    async fn locate_target(
+        &self,
+        _lease: &AttachmentLease,
+        _page_id: &PageId,
+        _target: &TargetSpec,
+    ) -> Result<TargetLocation, CommandError> {
+        self.location.clone().ok_or_else(|| CommandError {
+            code: ErrorCode::BrowserCommandFailed,
+            message: "target location is not supported by this observer".into(),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        })
+    }
+}
+
+fn show_all_link() -> TargetSpec {
+    TargetSpec {
+        role: Some("link".into()),
+        accessible_name: Some("Show all".into()),
+        ..TargetSpec::default()
+    }
+}
+
+fn located(found: bool, ambiguous: bool) -> TargetLocation {
+    TargetLocation {
+        found,
+        ambiguous,
+        css_path: found.then(|| "main > a".to_owned()),
+        role: found.then(|| "link".to_owned()),
+        name: found.then(|| "Show all".to_owned()),
+        disabled: false,
+    }
+}
+
+async fn large_page_worker(
+    location: Option<TargetLocation>,
+) -> (FirefoxCompanionWorker, PageId, Arc<FakeBidi>) {
+    let bidi = FakeBidi::new(Vec::new());
+    let worker = FirefoxCompanionWorker::new(
+        WorkerId::new(),
+        PathBuf::from("/profiles/firefox"),
+        lease(),
+        bidi.clone(),
+        Arc::new(LargePageObserver { location }),
+    )
+    .await
+    .unwrap();
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+    (worker, page, bidi)
+}
+
+#[tokio::test]
+async fn truncated_snapshot_still_yields_a_target_the_page_holds() {
+    let (worker, page, _) = large_page_worker(Some(located(true, false))).await;
+    let candidates = worker
+        .collect_candidates(&page, &show_all_link())
+        .await
+        .unwrap();
+    let found = candidates
+        .iter()
+        .find(|candidate| candidate.name.as_deref() == Some("Show all"))
+        .expect("the located link is a candidate");
+    assert_eq!(found.role.as_deref(), Some("link"));
+    assert_eq!(found.css.as_deref(), Some("main > a"));
+}
+
+#[tokio::test]
+async fn truncated_snapshot_without_the_target_reports_resource_exhausted() {
+    let (worker, page, _) = large_page_worker(Some(located(false, false))).await;
+    let error = worker
+        .collect_candidates(&page, &show_all_link())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::ResourceExhausted);
+    assert!(error.message.contains("truncated"), "{}", error.message);
+}
+
+#[tokio::test]
+async fn truncated_snapshot_with_an_ambiguous_target_reports_ambiguity() {
+    let (worker, page, _) = large_page_worker(Some(located(false, true))).await;
+    let error = worker
+        .collect_candidates(&page, &show_all_link())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::TargetAmbiguous);
+}
+
+#[tokio::test]
+async fn observer_that_cannot_locate_keeps_the_truncation_error() {
+    let (worker, page, _) = large_page_worker(None).await;
+    let error = worker
+        .collect_candidates(&page, &show_all_link())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::ResourceExhausted);
+}
+
+#[tokio::test]
+async fn click_on_a_target_past_the_control_walk_uses_the_located_selector() {
+    let (worker, page, bidi) = large_page_worker(Some(located(true, false))).await;
+    let _ = worker
+        .click(
+            &page,
+            &ClickCommand {
+                selector: String::new(),
+                target: Some(show_all_link()),
+                boundary: false,
+                expected_url: None,
+                modifiers: Vec::new(),
+            },
+        )
+        .await;
+    let calls = bidi.calls().await;
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.params.to_string().contains("main > a")),
+        "the located selector never reached the browser: {calls:?}"
+    );
+}
+
+#[tokio::test]
+async fn navigate_reports_the_document_a_script_redirect_settles_on() {
+    let login = "https://example.test/login?next=/feed";
+    let feed = "https://example.test/feed";
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"url": login, "navigation": "nav-1"})),
+        Ok(
+            json!({"result": {"type": "string", "value": json!({"url": feed, "title": "Feed"}).to_string()}}),
+        ),
+    ]);
+    bidi.set_tree(json!({"contexts": [{"context": "context-1", "url": login, "children": []}]}))
+        .await;
+    // The first probe runs in the login document, which the redirect then
+    // replaces; Firefox leaves that evaluation pending.
+    let _hung = bidi
+        .block_once("script.evaluate", Some("MutationObserver"))
+        .await;
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+    let flipper = {
+        let bidi = bidi.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            bidi.set_tree(
+                json!({"contexts": [{"context": "context-1", "url": feed, "children": []}]}),
+            )
+            .await;
+        })
+    };
+
+    let evidence = worker
+        .navigate(
+            &page,
+            &NavigateCommand {
+                url: "https://example.test/feed".into(),
+                wait_until: WaitUntil::NetworkIdle,
+                timeout_ms: 3_000,
+            },
+        )
+        .await
+        .unwrap();
+    flipper.await.unwrap();
+
+    assert!(
+        evidence.iter().any(|item| matches!(
+            item,
+            Evidence::Navigation { url, title } if url == feed && title == "Feed"
+        )),
+        "{evidence:?}"
+    );
 }
