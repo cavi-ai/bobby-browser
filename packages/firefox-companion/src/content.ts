@@ -305,6 +305,23 @@ function safeStableAttribute(element: Element): { name: string; value: string } 
   return undefined;
 }
 
+// The worker re-selects a resolved element with `document.querySelector`, which
+// returns the first match in document order: a selector that also matches an
+// earlier element (a hidden duplicate sharing an id, name or test id) hands
+// the action that other element.
+function selectsOnly(element: Element, selector: string): boolean {
+  try {
+    return element.ownerDocument.querySelector(selector) === element;
+  } catch {
+    return false;
+  }
+}
+
+// Positional parts past which a path unanchored by an id is first tried as is.
+const CSS_RELATIVE_PATH_PARTS = 8;
+
+// A selector whose first match in the document is `element`, or undefined
+// when no such selector fits the bound.
 function cssPath(
   element: Element,
   budget: WorkBudget,
@@ -319,13 +336,16 @@ function cssPath(
     !containsSensitiveMaterial(id)
   ) {
     const selector = `#${cssIdentifier(id)}`;
-    if (byteLength(selector) <= MAX_SELECTOR_LENGTH) return selector;
+    if (byteLength(selector) <= MAX_SELECTOR_LENGTH && selectsOnly(element, selector)) return selector;
   }
   const stable = allowStableMetadata ? safeStableAttribute(element) : undefined;
-  if (stable) return `[${stable.name}="${cssString(stable.value)}"]`;
+  if (stable) {
+    const selector = `[${stable.name}="${cssString(stable.value)}"]`;
+    if (selectsOnly(element, selector)) return selector;
+  }
 
   const parts: string[] = [];
-  for (let current: Element | null = element; current && parts.length < 8; current = current.parentElement) {
+  for (let current: Element | null = element; current; current = current.parentElement) {
     if (!takeWork(budget)) return undefined;
     const tag = current.tagName.toLowerCase();
     const parent: HTMLElement | null = current.parentElement;
@@ -355,17 +375,17 @@ function cssPath(
       byteLength(parentId) <= MAX_SELECTOR_LENGTH &&
       !containsSensitiveMaterial(parentId)
     ) {
-      const parentSelector = `#${cssIdentifier(parentId)}`;
-      const candidate = [parentSelector, ...parts].join(" > ");
-      if (byteLength(candidate) <= MAX_SELECTOR_LENGTH) {
-        parts.unshift(parentSelector);
-        break;
+      const candidate = [`#${cssIdentifier(parentId)}`, ...parts].join(" > ");
+      if (byteLength(candidate) <= MAX_SELECTOR_LENGTH && selectsOnly(element, candidate)) {
+        return candidate;
       }
     }
+    const relative = parts.join(" > ");
+    if (byteLength(relative) > MAX_SELECTOR_LENGTH) return undefined;
+    if (parts.length === CSS_RELATIVE_PATH_PARTS && selectsOnly(element, relative)) return relative;
   }
   const path = parts.join(" > ");
-  if (byteLength(path) <= MAX_SELECTOR_LENGTH) return path;
-  return parts.at(-1) ?? element.tagName.toLowerCase();
+  return byteLength(path) <= MAX_SELECTOR_LENGTH && selectsOnly(element, path) ? path : undefined;
 }
 
 function implicitRole(element: Element, allowExplicit = true): string | undefined {
@@ -1141,7 +1161,7 @@ function a11yTree(
     const budget: WorkBudget = { remaining: A11Y_MAX_SCOPE_VISITS };
     for (
       let current: Element | null = element, depth = 0;
-      current?.parentElement && depth < 8;
+      current?.parentElement && depth < A11Y_MAX_DEPTH;
       current = current.parentElement, depth += 1
     ) {
       let position = 0;
