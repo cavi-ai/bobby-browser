@@ -2900,6 +2900,128 @@ async fn popup_capture_ignores_unrelated_contexts_and_handles_event_during_click
 }
 
 #[tokio::test]
+async fn a_popup_opened_by_the_page_can_be_closed_like_any_page() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "node", "sharedId": "popup-button"}})),
+        Ok(json!({})),
+    ]);
+    let click = bidi.block_once("input.performActions", None).await;
+    let worker = Arc::new(worker(bidi.clone(), FakeObserver::new(observation())).await);
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+    let operation = {
+        let worker = Arc::clone(&worker);
+        let page = page.clone();
+        tokio::spawn(async move {
+            worker
+                .click_and_wait_for_popup(
+                    &page,
+                    &ClickAndWaitForPopupCommand {
+                        selector: String::new(),
+                        target: Some(types::TargetSpec {
+                            test_id: Some("popup-open".into()),
+                            ..Default::default()
+                        }),
+                        timeout_ms: 1_000,
+                    },
+                )
+                .await
+        })
+    };
+    click.started.notified().await;
+    bidi.emit(
+        "browsingContext.contextCreated",
+        json!({
+            "context": "popup-context",
+            "url": "https://example.test/popup",
+            "originalOpener": "context-1"
+        }),
+    );
+    click.release.notify_one();
+    let evidence = operation.await.unwrap().unwrap();
+    let popup_page = evidence
+        .iter()
+        .find_map(|item| match item {
+            Evidence::Popup { page_id, .. } => Some(page_id.clone()),
+            _ => None,
+        })
+        .unwrap();
+
+    worker
+        .close_page_command(&ClosePageCommand {
+            page_id: popup_page.clone(),
+        })
+        .await
+        .unwrap();
+
+    assert!(bidi.calls().await.iter().any(|call| {
+        call.method == "browsingContext.close" && call.params["context"] == "popup-context"
+    }));
+    assert_eq!(
+        worker
+            .inspect(&popup_page, &InspectCommand::default())
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::NotFound
+    );
+}
+
+#[tokio::test]
+async fn upload_dispatches_input_and_change_when_the_browser_skips_them() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("fixture.txt");
+    std::fs::write(&file, b"approved fixture").unwrap();
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "string", "value": "valid"}})),
+        Ok(json!({"result": {"type": "node", "sharedId": "file-input"}})),
+        Ok(json!({})),
+        Ok(json!({"result": {"type": "number", "value": 1}})),
+    ]);
+    let worker = worker(bidi.clone(), FakeObserver::new(observation()))
+        .await
+        .with_upload_roots(vec![root.path().to_path_buf()]);
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+    worker
+        .upload_files(
+            &page,
+            &UploadFilesCommand {
+                selector: "#hidden-file".into(),
+                target: None,
+                paths: vec![file.to_string_lossy().into_owned()],
+            },
+        )
+        .await
+        .unwrap();
+
+    let calls = bidi.calls().await;
+    let probe = calls
+        .iter()
+        .find(|call| {
+            call.params["expression"]
+                .as_str()
+                .is_some_and(|e| e.contains("'non-file'"))
+        })
+        .unwrap();
+    assert!(probe.params["expression"]
+        .as_str()
+        .unwrap()
+        .contains("addEventListener(name"));
+    let settle = calls
+        .iter()
+        .rev()
+        .find(|call| call.method == "script.evaluate")
+        .unwrap();
+    assert_eq!(settle.params["awaitPromise"], true);
+    let expression = settle.params["expression"].as_str().unwrap();
+    assert!(expression.contains("dispatchEvent(new Event(name"));
+    assert!(expression.contains("files?.length"));
+}
+
+#[tokio::test]
 async fn upload_uses_bidi_set_files_and_returns_only_opaque_evidence() {
     let root = tempfile::tempdir().unwrap();
     let file = root.path().join("fixture.txt");

@@ -161,8 +161,26 @@ test("file picker observations never expose the browser's local path", () => {
 
   const observed = observeDocument(document);
   assert.equal(observed.controls[0]?.name, "Customer document");
-  assert.equal(observed.controls[0]?.value, "[redacted]");
+  assert.equal(observed.controls[0]?.value, undefined);
   assert.equal(JSON.stringify(observed).includes("fakepath"), false);
+});
+
+test("search inputs observe as searchbox and file inputs as button with their selected names", () => {
+  const document = documentFor(
+    '<input id="q" type="search" placeholder="Search products"><label for="upload">Customer document</label><input id="upload" type="file">',
+  );
+  const upload = document.querySelector<HTMLInputElement>("#upload")!;
+  Object.defineProperty(upload, "files", {
+    value: [{ name: "resume.txt" }],
+  });
+
+  const observed = observeDocument(document);
+  const search = observed.controls.find((control) => control.cssPath === "#q");
+  const file = observed.controls.find((control) => control.cssPath === "#upload");
+  assert.equal(search?.role, "searchbox");
+  assert.equal(search?.name, "Search products");
+  assert.equal(file?.role, "button");
+  assert.equal(file?.value, "resume.txt");
 });
 
 test("invalid required fields retain the accessibility invalid state for resolution", () => {
@@ -501,6 +519,20 @@ test("a11yTree builds a bounded, hidden-aware, redacting accessibility tree", ()
     truncated: boolean;
   };
   assert.equal(bounded.truncated, true);
+});
+
+test("a11yTree marks a control invalid when the page flags it aria-invalid", () => {
+  const document = documentFor(
+    '<label>Name <input name="name" aria-invalid="true"></label><label>City <input name="city"></label>',
+  );
+  const tree = executeContentAction(document, "a11yTree", { maxNodes: 32 }) as {
+    nodes: Array<{ role?: string; name?: string; invalid?: boolean }>;
+  };
+  const flat = (nodes: typeof tree.nodes): typeof tree.nodes =>
+    nodes.flatMap((node) => [node, ...flat((node as { children?: typeof tree.nodes }).children ?? [])]);
+  const byName = (name: string) => flat(tree.nodes).find((node) => node.name === name);
+  assert.equal(byName("Name")?.invalid, true);
+  assert.equal(byName("City")?.invalid, false);
 });
 
 test("a11yTree exposes bounded form state without leaking sensitive values", () => {

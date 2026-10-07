@@ -375,7 +375,8 @@ function implicitRole(element: Element, allowExplicit = true): string | undefine
   if (tag === "iframe") return "iframe";
   if (tag === "input") {
     const type = (element.getAttribute("type") ?? "text").toLowerCase();
-    if (["button", "submit", "reset", "image"].includes(type)) return "button";
+    if (["button", "submit", "reset", "image", "file"].includes(type)) return "button";
+    if (type === "search") return "searchbox";
     if (type === "checkbox") return "checkbox";
     if (type === "radio") return "radio";
     if (type === "range") return "slider";
@@ -571,10 +572,12 @@ function isSensitiveControl(element: Element, budget?: WorkBudget): boolean {
 
 function controlValue(element: Element, sensitive = isSensitiveControl(element)): string | undefined {
   if (!["INPUT", "SELECT", "TEXTAREA"].includes(element.tagName)) return undefined;
-  // File inputs expose a browser-supplied local path through `value`. The
-  // selected filename is not needed for target discovery or observation.
-  if (sensitive || (element.tagName === "INPUT" && (element as HTMLInputElement).type === "file")) {
-    return REDACTED;
+  if (sensitive) return REDACTED;
+  // File inputs expose a browser-supplied local path through `value`; only
+  // the selected file names are reported.
+  if (element.tagName === "INPUT" && (element as HTMLInputElement).type === "file") {
+    const names = Array.from((element as HTMLInputElement).files ?? [], (file) => file.name);
+    return observationString(names.join(", "));
   }
   const value = (element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement).value;
   return observationString(value);
@@ -1253,6 +1256,9 @@ function a11yTree(
         // Control detail enrichment is best-effort: a hostile control drops
         // the extras, never the node.
       }
+    }
+    if (["true", "grammar", "spelling"].includes(element.getAttribute("aria-invalid")?.trim().toLowerCase() ?? "")) {
+      node.invalid = true;
     }
     if (children.length) node.children = children;
     return [node];

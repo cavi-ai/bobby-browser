@@ -52,6 +52,15 @@ use crate::generate_session_seed;
 use crate::network_quiet::FirefoxNetworkQuiet;
 
 const COMPANION_SANDBOX: &str = "automation-runtime-companion";
+
+/// Runs before `input.setFiles`: records which of `input`/`change` the
+/// browser dispatches for the chosen files.
+const UPLOAD_EVENT_WATCH: &str = "const seen={input:false,change:false};globalThis.__bobbyUploadSeen=seen;for(const name of ['input','change'])input.addEventListener(name,()=>{seen[name]=true},{once:true});";
+
+/// Runs after `input.setFiles`: dispatches whichever of `input`/`change` the
+/// browser did not fire (it skips them for inputs that are not rendered), so
+/// the page's handlers see the selection.
+const UPLOAD_EVENT_SETTLE: &str = "if(typeof setTimeout==='function')await new Promise(resolve=>setTimeout(resolve,50));const seen=globalThis.__bobbyUploadSeen;globalThis.__bobbyUploadSeen=undefined;if(input&&seen&&(input.files?.length??0)>0){for(const name of ['input','change']){if(!seen[name])input.dispatchEvent(new Event(name,{bubbles:true}));}}";
 /// Accessibility nodes read to build intent candidates.
 const CANDIDATE_MAX_NODES: u32 = 1024;
 const FRAME_CANDIDATES_SCRIPT: &str = r#"(()=>{
@@ -2776,6 +2785,28 @@ impl FirefoxCompanionWorker {
                 false,
             ));
         }
+        let cleanup = OpenPageCleanup::new(
+            PageOpenResources {
+                lease: self.current_lease(),
+                transport: Arc::clone(&self.transport),
+                observer: Arc::clone(&self.observer),
+                pages: Arc::clone(&self.pages),
+                page_cleanups: Arc::downgrade(&self.page_cleanups),
+                cleanup_timeout: self.observer.operation_timeout(),
+            },
+            page_id.clone(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        *cleanup
+            .details
+            .lock()
+            .expect("open-page cleanup details mutex poisoned") = OpenPageCleanupDetails {
+            context: Some(context.to_owned()),
+            original_title: Some(original_title.clone()),
+            binding_started: true,
+            exposed: true,
+            opening_settled: true,
+        };
         pages.insert(
             page_id.clone(),
             PageContext::Ready {
@@ -2783,6 +2814,10 @@ impl FirefoxCompanionWorker {
                 title: original_title.clone(),
             },
         );
+        self.page_cleanups
+            .write()
+            .await
+            .insert(page_id.clone(), cleanup);
         Ok((page_id, original_title))
     }
 }
@@ -4324,7 +4359,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
         let selector_json = serde_json::to_string(&selector)
             .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
         let probe = self.transport.send("script.evaluate", json!({
-            "expression": format!("(()=>{{const matches=[...document.querySelectorAll({selector_json})];if(matches.length===0)return 'missing';if(matches.length!==1)return 'ambiguous';const input=matches[0];if(!(input instanceof HTMLInputElement)||input.type!=='file')return 'non-file';if(input.disabled)return 'disabled';return 'valid';}})()"),
+            "expression": format!("(()=>{{const matches=[...document.querySelectorAll({selector_json})];if(matches.length===0)return 'missing';if(matches.length!==1)return 'ambiguous';const input=matches[0];if(!(input instanceof HTMLInputElement)||input.type!=='file')return 'non-file';if(input.disabled)return 'disabled';{UPLOAD_EVENT_WATCH}return 'valid';}})()"),
             "target": {"context": context, "sandbox": COMPANION_SANDBOX},
             "awaitPromise": false,
             "resultOwnership": "none",
@@ -4376,9 +4411,9 @@ impl BrowserWorker for FirefoxCompanionWorker {
             )
             .await?;
         let verified = self.transport.send("script.evaluate", json!({
-            "expression": format!("document.querySelector({selector_json})?.files?.length ?? -1"),
+            "expression": format!("(async()=>{{const input=document.querySelector({selector_json});{UPLOAD_EVENT_SETTLE}return input?.files?.length ?? -1;}})()"),
             "target": {"context": context, "sandbox": COMPANION_SANDBOX},
-            "awaitPromise": false,
+            "awaitPromise": true,
             "resultOwnership": "none",
         })).await?;
         if verified.pointer("/result/value").and_then(Value::as_u64) != Some(paths.len() as u64) {
