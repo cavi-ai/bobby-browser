@@ -615,12 +615,18 @@ export class CompanionBackground {
     ) {
       throw new Error("paired identity does not match the requested profile");
     }
+    // A respawned native host re-pairs the same identity: target ids stay so
+    // the grant the runtime re-sends still names known targets. Leases are
+    // only ever restored by that grant.
+    const reconnect = this.#paired;
     this.#paired = true;
     this.#lastError = undefined;
     this.#leases.clear();
-    this.#targets.clear();
-    this.#targetIdsByRoute.clear();
-    this.#tabLifecycles.clear();
+    if (!reconnect) {
+      this.#targets.clear();
+      this.#targetIdsByRoute.clear();
+      this.#tabLifecycles.clear();
+    }
     await this.#setFingerprintManagedByHost(true, undefined);
     try {
       const targets = (await this.#dependencies.discoverTargets?.()) ?? [];
