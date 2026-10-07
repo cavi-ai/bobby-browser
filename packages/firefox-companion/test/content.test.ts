@@ -521,6 +521,34 @@ test("a11yTree builds a bounded, hidden-aware, redacting accessibility tree", ()
   assert.equal(bounded.truncated, true);
 });
 
+test("a11yTree includes a same-origin iframe's controls with the frame hop in their targets", () => {
+  const document = documentFor(
+    '<button>Open</button><iframe title="Widget frame"></iframe><iframe title="Widget frame"></iframe>',
+  );
+  const frames = document.querySelectorAll("iframe");
+  frames[0]!.contentDocument!.body.innerHTML = "<button>Frame action</button>";
+  frames[1]!.contentDocument!.body.innerHTML = "<button>Frame action</button>";
+  type Node = {
+    role?: string;
+    name?: string;
+    target?: { ordinal?: number; framePath?: Array<{ role: string; accessibleName: string; ordinal?: number }> };
+    children?: Node[];
+  };
+  const tree = executeContentAction(document, "a11yTree", { maxNodes: 32 }) as { nodes: Node[] };
+  const flat = (nodes: Node[]): Node[] => nodes.flatMap((node) => [node, ...flat(node.children ?? [])]);
+  const inFrame = flat(tree.nodes).filter((node) => node.name === "Frame action");
+  assert.equal(inFrame.length, 2);
+  assert.deepEqual(inFrame[0]!.target?.framePath, [
+    { role: "iframe", accessibleName: "Widget frame", ordinal: 0 },
+  ]);
+  assert.deepEqual(inFrame[1]!.target?.framePath, [
+    { role: "iframe", accessibleName: "Widget frame", ordinal: 1 },
+  ]);
+  assert.equal(inFrame[0]!.target?.ordinal, undefined);
+  const open = flat(tree.nodes).find((node) => node.name === "Open");
+  assert.equal(open?.target?.framePath, undefined);
+});
+
 test("a11yTree marks a control invalid when the page flags it aria-invalid", () => {
   const document = documentFor(
     '<label>Name <input name="name" aria-invalid="true"></label><label>City <input name="city"></label>',

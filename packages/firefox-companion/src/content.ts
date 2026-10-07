@@ -930,10 +930,17 @@ export type LocatedTarget = {
   disabled?: boolean;
 };
 
+type A11yTarget = {
+  role: string;
+  accessibleName: string;
+  ordinal?: number;
+  framePath?: Array<{ role: string; accessibleName: string; ordinal?: number }>;
+};
+
 type A11yNode = {
   role?: string;
   name?: string;
-  target?: { role: string; accessibleName: string; ordinal?: number };
+  target?: A11yTarget;
   value?: string;
   description?: string;
   required?: boolean;
@@ -1183,6 +1190,45 @@ function a11yTree(
   };
   countTargets(root, 0);
 
+  // A same-origin frame's tree is built from its own document; each target in
+  // it carries the hop that re-resolves the iframe element, so it passes to
+  // the click path verbatim. Cross-origin frames stay a leaf.
+  const frameSeen = new Map<string, number>();
+  const frameNodes = (frame: HTMLIFrameElement, name: string): A11yNode[] => {
+    const key = targetKey("iframe", name);
+    const seen = frameSeen.get(key) ?? 0;
+    frameSeen.set(key, seen + 1);
+    let frameDocument: Document | null = null;
+    try {
+      frameDocument = frame.contentDocument;
+    } catch {
+      return [];
+    }
+    if (!frameDocument?.documentElement) return [];
+    if (state.remaining <= 0) {
+      state.truncated = true;
+      return [];
+    }
+    const inner = a11yTree(frameDocument, state.remaining);
+    if (inner.truncated) state.truncated = true;
+    const count = (nodes: A11yNode[]): number =>
+      nodes.reduce((total, node) => total + 1 + count(node.children ?? []), 0);
+    state.remaining = Math.max(0, state.remaining - count(inner.nodes));
+    const hop = {
+      role: "iframe",
+      accessibleName: name,
+      ...(targetTotals.get(key)! > 1 ? { ordinal: seen } : {}),
+    };
+    const stamp = (nodes: A11yNode[]): void => {
+      for (const node of nodes) {
+        if (node.target) node.target.framePath = [hop, ...(node.target.framePath ?? [])];
+        stamp(node.children ?? []);
+      }
+    };
+    stamp(inner.nodes);
+    return inner.nodes;
+  };
+
   const build = (element: Element, depth: number, level: number): A11yNode[] => {
     let role: string | undefined;
     let name: string | undefined;
@@ -1228,6 +1274,9 @@ function a11yTree(
       }
     }
     if (!role) return children;
+    if (element.tagName === "IFRAME" && name && name !== REDACTED) {
+      children.push(...frameNodes(element as HTMLIFrameElement, name));
+    }
     const node: A11yNode = { role };
     if (name) node.name = name;
     if (["INPUT", "SELECT", "TEXTAREA"].includes(element.tagName)) {
@@ -1270,7 +1319,13 @@ function a11yTree(
   const annotateTargets = (candidates: A11yNode[]): A11yNode[] => {
     const kept: A11yNode[] = [];
     for (const node of candidates) {
-      if (node.role && node.name && node.name !== REDACTED && A11Y_ACTIONABLE_ROLES.has(node.role)) {
+      if (
+        !node.target &&
+        node.role &&
+        node.name &&
+        node.name !== REDACTED &&
+        A11Y_ACTIONABLE_ROLES.has(node.role)
+      ) {
         const key = targetKey(node.role, node.name);
         const ordinal = targetSeen.get(key) ?? 0;
         node.target = {
