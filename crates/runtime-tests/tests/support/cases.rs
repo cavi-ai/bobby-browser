@@ -516,3 +516,166 @@ pub async fn containers_are_not_named_from_content(rig: &Rig) {
     assert_node(&snapshot, "link", Some("Alpha"));
     live.close().await;
 }
+
+/// The value of the first `textbox` node named `name`.
+fn textbox_value<'a>(snapshot: &'a Value, name: &str) -> Option<&'a str> {
+    find_node(snapshot, "textbox", Some(name)).and_then(|node| node["value"].as_str())
+}
+
+/// L4, linkedin.com/feed, Firefox: `type_text` with the snapshot's
+/// `{role: textbox, accessibleName: "I'm looking for…"}` failed with "Origin
+/// element ... is not displayed": a hidden duplicate earlier in the page
+/// shares the control's identifying attribute. A control below the fold
+/// takes text as well.
+pub async fn type_text_reaches_the_visible_duplicate(rig: &Rig) {
+    let body = r#"<header>
+        <div style="display:none"><input name="keywords" placeholder="I'm looking for…"></div>
+        <input name="keywords" placeholder="I'm looking for…"></header>
+        <main><div style="height:3000px"></div><input name="later" placeholder="Below the fold"></main>"#;
+    let site = FixtureSite::spawn(vec![("/feed", Route::Html(page("Feed", body)))]).await;
+    let live = Live::open(rig, &site.url("/feed")).await;
+    for (name, value) in [
+        ("I'm looking for…", "rust engineer"),
+        ("Below the fold", "later text"),
+    ] {
+        let typed = live
+            .call(
+                "type_text",
+                json!({"target":{"role":"textbox","accessibleName":name},
+                       "value":value,"clearFirst":true}),
+            )
+            .await;
+        assert_eq!(typed["status"], "completed", "type_text {name}: {typed}");
+        let snapshot = live.snapshot(json!({})).await;
+        assert_eq!(
+            textbox_value(&snapshot, name),
+            Some(value),
+            "the visible {name} textbox did not take the text: {snapshot}"
+        );
+    }
+    live.close().await;
+}
+
+/// L5, linkedin.com/jobs, Firefox: `intent_follow` on `{role: link,
+/// accessibleName: "Show all"}` clicked, but the page never navigated: the
+/// link shares its identifying attribute with a hidden menu copy and an
+/// element that is not a link.
+pub async fn intent_follow_clicks_the_visible_duplicate(rig: &Rig) {
+    let body = r#"<nav><div role="menu" style="display:none">
+          <a href="/jobs/wrong-menu" data-test="show-all">Show all</a></div>
+          <span data-test="show-all">Top picks</span></nav>
+        <main><section><div style="display:none">
+          <a href="/jobs/wrong-hidden" data-test="show-all">Show all</a></div>
+          <a href="/jobs/collections/recommended" data-test="show-all">Show all</a></section></main>"#;
+    let site = FixtureSite::spawn(vec![
+        ("/jobs", Route::Html(page("Jobs", body))),
+        (
+            "/jobs/collections/recommended",
+            Route::Html(page("Collection", "<main><h1>Collection</h1></main>")),
+        ),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/jobs")).await;
+    let followed = live
+        .call(
+            "intent_follow",
+            json!({
+                "purpose":"Open the full collection",
+                "hints":{"role":"link","accessibleName":"Show all"},
+                "expectedDestination":{
+                    "condition":{"kind":"url","matcher":{"kind":"contains","value":"/jobs/collections"}},
+                    "timeoutMs":15000
+                }
+            }),
+        )
+        .await;
+    assert_eq!(followed["status"], "completed", "intent_follow: {followed}");
+    live.close().await;
+}
+
+/// L6, linkedin.com/messaging, Firefox: the full snapshot listed `{role:
+/// list, accessibleName: "Conversation List"}` (named by `aria-label`), and
+/// a snapshot scoped to exactly that target failed with targetNotFound.
+pub async fn snapshot_scopes_to_a_named_list(rig: &Rig) {
+    let mut items = String::new();
+    for index in 0..40 {
+        items.push_str(&format!(
+            r##"<li><a href="#c{index}">Conversation {index}</a></li>"##
+        ));
+    }
+    let body = format!(
+        r#"<header><nav aria-label="Primary"><a href="/feed">Home</a></nav></header>
+        <div style="display:none"><ul aria-label="Conversation List"><li>Stale</li></ul></div>
+        <main><div><h2>Messaging</h2><ul aria-label="Conversation List">{items}</ul></div></main>"#
+    );
+    let site =
+        FixtureSite::spawn(vec![("/messaging", Route::Html(page("Messaging", &body)))]).await;
+    let live = Live::open(rig, &site.url("/messaging")).await;
+    let full = live.snapshot(json!({})).await;
+    assert_node(&full, "list", Some("Conversation List"));
+    let scoped = live
+        .snapshot(json!({"target":{"role":"list","accessibleName":"Conversation List"}}))
+        .await;
+    assert_eq!(scoped["status"], "completed", "scoped snapshot: {scoped}");
+    assert_node(&scoped, "link", Some("Conversation 39"));
+    assert!(
+        find_node(&scoped, "navigation", None).is_none(),
+        "the scoped snapshot leaked the page navigation: {scoped}"
+    );
+    live.close().await;
+}
+
+/// Every action target an `a11y_snapshot` returns resolves to the element
+/// the snapshot described, on a page whose hidden duplicates share an id, a
+/// name, or a test id with the visible controls, and whose visible
+/// duplicates are told apart by ordinal. Each click names the element it
+/// reached in the status region.
+pub async fn snapshot_targets_act_on_the_described_element(rig: &Rig) {
+    let body = r##"<div style="display:none">
+          <button id="save" data-id="hidden-save">Save</button>
+          <button name="apply" data-id="hidden-apply">Apply</button>
+          <a href="#" data-testid="more" data-id="hidden-more">More</a></div>
+        <main>
+          <button id="save" data-id="save">Save</button>
+          <button name="apply" data-id="apply-0">Apply</button>
+          <button data-id="apply-1">Apply</button>
+          <a href="#" data-testid="more" data-id="more">More</a>
+          <p role="status" aria-label="idle" id="status"></p></main>
+        <script>
+          document.addEventListener("click", (event) => {
+            const reached = event.target.closest("[data-id]");
+            if (reached) document.getElementById("status").setAttribute("aria-label", "acted " + reached.dataset.id);
+            event.preventDefault();
+          }, true);
+        </script>"##;
+    let site = FixtureSite::spawn(vec![("/dups", Route::Html(page("Duplicates", body)))]).await;
+    let live = Live::open(rig, &site.url("/dups")).await;
+    let snapshot = live.snapshot(json!({})).await;
+    let mut targets = Vec::new();
+    targets_under(&snapshot, &mut targets);
+    let mut expected = Vec::new();
+    for (_, target) in &targets {
+        let name = target["accessibleName"].as_str().unwrap_or_default();
+        let ordinal = target["ordinal"].as_u64();
+        let reached = match (name, ordinal) {
+            ("Save", None) => "save",
+            ("Apply", Some(0)) => "apply-0",
+            ("Apply", Some(1)) => "apply-1",
+            ("More", None) => "more",
+            _ => panic!("unexpected snapshot target {target}: {snapshot}"),
+        };
+        expected.push(((*target).clone(), reached));
+    }
+    assert_eq!(expected.len(), 4, "snapshot targets: {snapshot}");
+    for (target, reached) in expected {
+        let clicked = live.call("click", json!({"target":target})).await;
+        assert_eq!(clicked["status"], "completed", "click {target}: {clicked}");
+        let after = live.snapshot(json!({})).await;
+        let status = format!("acted {reached}");
+        assert!(
+            find_node(&after, "status", Some(&status)).is_some(),
+            "click {target} did not reach {reached}: {after}"
+        );
+    }
+    live.close().await;
+}
