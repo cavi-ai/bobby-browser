@@ -397,9 +397,16 @@ impl CompanionExtensionObserver {
         action.attachment_id = lease.attachment_id.clone();
         match self.server.dispatch_action(action.clone()).await {
             Err(CompanionSessionError::ConnectionClosed) => {
-                let refreshed = self.refresh_lease(&lease).await?;
-                action.attachment_id = refreshed.attachment_id;
-                self.server.dispatch_action(action).await
+                // The same attachment first: a reconnecting companion
+                // re-adopts its grant, and dispatch waits for that.
+                match self.server.dispatch_action(action.clone()).await {
+                    Err(CompanionSessionError::GrantUnavailable) => {
+                        let refreshed = self.refresh_lease(&lease).await?;
+                        action.attachment_id = refreshed.attachment_id;
+                        self.server.dispatch_action(action).await
+                    }
+                    result => result,
+                }
             }
             result => result,
         }
@@ -499,11 +506,14 @@ impl ExtensionObserver for CompanionExtensionObserver {
                 Ok(observation)
             }
             CompanionEvent::ActionFailed { code, message, .. } => Err(driver_error(
-                if command.target.is_some() || command.selector.is_some() {
-                    ErrorCode::TargetNotFound
-                } else {
-                    ErrorCode::BrowserCommandFailed
-                },
+                content_failure_code(
+                    &code,
+                    if command.target.is_some() || command.selector.is_some() {
+                        ErrorCode::TargetNotFound
+                    } else {
+                        ErrorCode::BrowserCommandFailed
+                    },
+                ),
                 format!("extension observation failed ({code}): {message}"),
                 false,
             )),
@@ -572,11 +582,14 @@ impl ExtensionObserver for CompanionExtensionObserver {
                 false,
             )),
             CompanionEvent::ActionFailed { code, message, .. } => Err(driver_error(
-                if target.is_some() && code == "actionFailed" {
-                    ErrorCode::TargetNotFound
-                } else {
-                    ErrorCode::BrowserCommandFailed
-                },
+                content_failure_code(
+                    &code,
+                    if target.is_some() && code == "actionFailed" {
+                        ErrorCode::TargetNotFound
+                    } else {
+                        ErrorCode::BrowserCommandFailed
+                    },
+                ),
                 format!("extension accessibility snapshot failed ({code}): {message}"),
                 false,
             )),
@@ -626,7 +639,7 @@ impl ExtensionObserver for CompanionExtensionObserver {
                 })
             }
             CompanionEvent::ActionFailed { code, message, .. } => Err(driver_error(
-                ErrorCode::BrowserCommandFailed,
+                content_failure_code(&code, ErrorCode::BrowserCommandFailed),
                 format!("extension target location failed ({code}): {message}"),
                 false,
             )),
@@ -6943,7 +6956,9 @@ fn session_error(error: CompanionSessionError) -> CommandError {
         | CompanionSessionError::QueueClosed
         | CompanionSessionError::ProfileUnavailable
         | CompanionSessionError::DiscoveryUnavailable
-        | CompanionSessionError::GrantUnavailable => (ErrorCode::BrowserCommandFailed, true),
+        | CompanionSessionError::Reconnecting => (ErrorCode::BrowserCommandFailed, true),
+        // No reconnect is pending for this grant: retrying cannot restore it.
+        CompanionSessionError::GrantUnavailable => (ErrorCode::BrowserCommandFailed, false),
         CompanionSessionError::AttachmentMismatch | CompanionSessionError::ProfileMismatch => {
             (ErrorCode::PolicyDenied, false)
         }
@@ -7019,6 +7034,19 @@ fn capability_error(capability: &str) -> CommandError {
         format!("Firefox companion lease does not grant {capability}"),
         false,
     )
+}
+
+/// The error code for the reason a content action failed, as the extension
+/// reports it in the failure code; `fallback` for codes that name no reason.
+fn content_failure_code(code: &str, fallback: ErrorCode) -> ErrorCode {
+    match code {
+        "targetNotFound" => ErrorCode::TargetNotFound,
+        "targetAmbiguous" => ErrorCode::TargetAmbiguous,
+        "scopeUnresolvable" | "invalidInput" => ErrorCode::InvalidRequest,
+        "budgetExhausted" => ErrorCode::ResourceExhausted,
+        "scriptException" => ErrorCode::BrowserCommandFailed,
+        _ => fallback,
+    }
 }
 
 /// The scope the content script resolves for a scoped accessibility snapshot:
@@ -7127,6 +7155,31 @@ fn driver_error(code: ErrorCode, message: impl Into<String>, retryable: bool) ->
 }
 
 #[cfg(test)]
+mod content_failure_tests {
+    use super::*;
+
+    #[test]
+    fn content_failure_reasons_map_to_their_error_codes() {
+        for (code, expected) in [
+            ("targetNotFound", ErrorCode::TargetNotFound),
+            ("targetAmbiguous", ErrorCode::TargetAmbiguous),
+            ("scopeUnresolvable", ErrorCode::InvalidRequest),
+            ("invalidInput", ErrorCode::InvalidRequest),
+            ("budgetExhausted", ErrorCode::ResourceExhausted),
+            ("scriptException", ErrorCode::BrowserCommandFailed),
+            ("actionFailed", ErrorCode::FrameNotFound),
+            ("deadlineExceeded", ErrorCode::FrameNotFound),
+        ] {
+            assert_eq!(
+                content_failure_code(code, ErrorCode::FrameNotFound),
+                expected,
+                "{code}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod session_error_tests {
     use super::*;
     use companion_core::RegistryError;
@@ -7155,6 +7208,11 @@ mod session_error_tests {
             ),
             (
                 CompanionSessionError::GrantUnavailable,
+                ErrorCode::BrowserCommandFailed,
+                false,
+            ),
+            (
+                CompanionSessionError::Reconnecting,
                 ErrorCode::BrowserCommandFailed,
                 true,
             ),

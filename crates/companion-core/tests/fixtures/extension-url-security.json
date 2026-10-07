@@ -17,6 +17,25 @@
     "https://example.test/?q=Basic%09private-value",
     "https://example.test/?q=Bearer%20",
     "https://example.test/private-token",
-    "mailto:user@example.test"
+    "mailto:user@example.test",
+    "javascript:alert(1)",
+    "ws://127.0.0.1:9876/v1/companion"
+  ],
+  "textBenign": [
+    "note: read this",
+    "Re: weekly sync",
+    "javascript:alert(1)",
+    "mailto:user@example.test",
+    "main:nth-of-type(1) > input:nth-of-type(2)",
+    "main:nth-of-type(1) > javascript:alert(1)",
+    "Docs at https://example.test/search?q=monkey.",
+    "(see https://example.test/results?q=api-keyboard)"
+  ],
+  "textSecret": [
+    "Bearer private-value",
+    "my private-token is here",
+    "see https://example.test/?token=private-value",
+    "(see https://user:password@example.test/private)",
+    "endpoint ws://127.0.0.1:9876/v1/companion."
   ]
 }

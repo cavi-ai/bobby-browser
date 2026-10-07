@@ -670,3 +670,57 @@ pub async fn j6_cross_site_navigation_recovery(rig: &Rig, _dirs: &Dirs) {
     assert_node(&snapshot, "heading", Some("Site B"));
     fresh.close().await;
 }
+
+/// The pid of the Firefox native host that last connected, from the
+/// lifecycle log beside the descriptor the rig published.
+fn connected_native_host_pid() -> Option<u64> {
+    let log = std::fs::read_to_string(runtime_tests::native_host_log_path()).ok()?;
+    log.lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|event| event["event"] == "connected")
+        .and_then(|event| event["pid"].as_u64())
+}
+
+/// J7 (Firefox): the native host process is killed mid-session. Firefox
+/// respawns it, it reconnects with the stored credential, and the same
+/// session's next snapshot succeeds without the agent recreating anything;
+/// a new session also starts.
+pub async fn j7_native_host_killed_mid_session(rig: &Rig, _dirs: &Dirs) {
+    let site = FixtureSite::spawn(vec![(
+        "/kept",
+        Route::Html(page("Kept", "<main><h1>Kept session</h1></main>")),
+    )])
+    .await;
+    let live = Live::open(rig, &site.url("/kept")).await;
+    let snapshot = live.snapshot(json!({})).await;
+    assert_completed(&snapshot, "snapshot before the kill");
+
+    let killed = connected_native_host_pid().unwrap_or_else(|| {
+        panic!(
+            "no connected native host in {}",
+            runtime_tests::native_host_log_path().display()
+        )
+    });
+    let status = std::process::Command::new("kill")
+        .args(["-9", &killed.to_string()])
+        .status()
+        .expect("run kill");
+    assert!(status.success(), "kill the native host {killed}");
+
+    let snapshot = live.snapshot(json!({})).await;
+    assert_completed(&snapshot, "same session's snapshot after the kill");
+    assert_node(&snapshot, "heading", Some("Kept session"));
+    let respawned = connected_native_host_pid();
+    assert!(
+        respawned.is_some_and(|pid| pid != killed),
+        "a respawned native host reconnected: {respawned:?} after {killed}"
+    );
+    live.close().await;
+
+    let fresh = Live::open(rig, &site.url("/kept")).await;
+    let snapshot = fresh.snapshot(json!({})).await;
+    assert_completed(&snapshot, "snapshot in a new session after the kill");
+    assert_node(&snapshot, "heading", Some("Kept session"));
+    fresh.close().await;
+}

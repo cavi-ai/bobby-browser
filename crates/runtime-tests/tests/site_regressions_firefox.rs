@@ -35,12 +35,17 @@ async fn site_regressions_hold_on_firefox() {
         observe_after_navigate_includes_late_content,
         accessible_names_are_computed,
         secret_words_are_not_secrets,
+        scheme_like_text_is_page_text,
         disclosed_credentials_are_withheld,
         large_dom_link_resolves_for_intent_follow,
         oversized_page_reports_truncation_not_target_not_found,
         redacted_page_fields_do_not_block_actions,
         snapshot_budget_keeps_ancestors_of_kept_nodes,
         containers_are_not_named_from_content,
+        type_text_reaches_the_visible_duplicate,
+        intent_follow_clicks_the_visible_duplicate,
+        snapshot_scopes_to_a_named_list,
+        snapshot_targets_act_on_the_described_element,
     );
     for (name, case) in table {
         if AssertUnwindSafe(case(&rig)).catch_unwind().await.is_err() {

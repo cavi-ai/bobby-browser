@@ -25,9 +25,12 @@ use tokio::io::{duplex, split, AsyncRead, ReadBuf};
 use types::{CommandId, CompanionId, ProfileId};
 
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct UrlSecurityFixtures {
     benign: Vec<String>,
     secret: Vec<String>,
+    text_benign: Vec<String>,
+    text_secret: Vec<String>,
 }
 
 fn url_security_fixtures() -> UrlSecurityFixtures {
@@ -235,36 +238,32 @@ fn shared_url_security_fixtures_match_the_rust_extension_boundary() {
     }
 }
 
+/// Free text (page text, names, selectors) is not URL-parsed as a whole;
+/// only the absolute URLs embedded in it meet the URL rules.
 #[test]
-fn generated_css_paths_are_not_mistaken_for_url_schemes() {
-    for selector in [
-        "main:nth-of-type(1) > input:nth-of-type(2)",
-        "custom-field:nth-of-type(3)",
-    ] {
-        let event = json!({
+fn shared_free_text_fixtures_match_the_rust_extension_boundary() {
+    let fixtures = url_security_fixtures();
+    let event = |text: &str| {
+        json!({
             "kind": "actionCompleted",
             "output": {
                 "commandId": CommandId::new(),
                 "interactionPath": "extensionApi",
-                "output": {"selector": selector}
+                "output": {"nodes": [{"role": "StaticText", "name": text}], "selector": text}
             }
-        });
-        assert!(validate_extension_message(event).is_ok(), "{selector}");
+        })
+    };
+    for text in fixtures.text_benign {
+        assert!(
+            validate_extension_message(event(&text)).is_ok(),
+            "benign text was rejected: {text}"
+        );
     }
-    for unsafe_value in [
-        "javascript:alert(1)",
-        "main:nth-of-type(1) > javascript:alert(1)",
-        "https://example.test/?token=private-value",
-    ] {
-        let event = json!({
-            "kind": "actionCompleted",
-            "output": {
-                "commandId": CommandId::new(),
-                "interactionPath": "extensionApi",
-                "output": {"selector": unsafe_value}
-            }
-        });
-        assert!(validate_extension_message(event).is_err(), "{unsafe_value}");
+    for text in fixtures.text_secret {
+        assert!(
+            validate_extension_message(event(&text)).is_err(),
+            "secret text was accepted: {text}"
+        );
     }
 }
 
@@ -562,10 +561,14 @@ async fn revoked_reconnect_credential_stops_the_native_host() {
     .await
     .unwrap();
     let pairing_code = server.registry().issue_pairing_code().await;
+    let store_dir = std::env::temp_dir().join(format!("native-host-store-{}", CommandId::new().0));
+    std::fs::create_dir_all(&store_dir).unwrap();
+    let store = store_dir.join("firefox-native-host-credential.json");
     let config = NativeHostConfig::new(
         format!("ws://{}/v1/companion", server.local_addr()),
         pairing_code,
-    );
+    )
+    .with_credential_store(store.clone());
     let request = connect_request();
     let companion_id = request.companion_id.clone();
     let connect = json!({"kind": "pair", "input": request});
@@ -582,6 +585,7 @@ async fn revoked_reconnect_credential_stops_the_native_host() {
         .unwrap()
         .unwrap();
     assert_eq!(paired["kind"], "paired");
+    assert!(store.exists(), "pairing stores the reconnect credential");
 
     server.registry().revoke(&companion_id).await.unwrap();
     server.disconnect_clients();
@@ -607,6 +611,7 @@ async fn revoked_reconnect_credential_stops_the_native_host() {
         result,
         Err(NativeHostError::InvalidPairingMaterial)
     ));
+    assert!(!store.exists(), "a refused credential is deleted");
 }
 
 #[tokio::test]
@@ -1103,6 +1108,245 @@ async fn endpoint_reassignment_interrupts_a_stalled_websocket_handshake() {
         .unwrap()
         .unwrap();
     assert_eq!(paired["kind"], "paired");
+    drop(extension);
+    host.await.unwrap().unwrap();
+}
+
+/// A result the relay refuses to forward fails its one command and keeps the
+/// connection: the next command on the same grant completes, and free text
+/// such as `note: read this` is forwarded.
+#[tokio::test]
+async fn a_rejected_action_result_fails_its_command_and_keeps_the_relay() {
+    let server = CompanionServer::bind_loopback(CompanionServerConfig {
+        bind_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+        pairing_code_ttl: Duration::from_secs(60),
+        attachment_ttl: Duration::from_secs(300),
+    })
+    .await
+    .unwrap();
+    let pairing_code = server.registry().issue_pairing_code().await;
+    let config = NativeHostConfig::new(
+        format!("ws://{}/v1/companion", server.local_addr()),
+        pairing_code,
+    );
+    let connect_request = connect_request();
+    let profile_id = connect_request.profile_id.clone();
+    let (host_stream, mut extension_stream) = duplex(2 * MAX_NATIVE_MESSAGE_BYTES);
+    let (host_reader, host_writer) = split(host_stream);
+    let host = tokio::spawn(run_native_host(host_reader, host_writer, config));
+    write_native_message(
+        &mut extension_stream,
+        &json!({"kind": "pair", "input": connect_request}),
+    )
+    .await
+    .unwrap();
+    let paired = read_native_message(&mut extension_stream).await.unwrap();
+    assert_eq!(paired.unwrap()["kind"], "paired");
+    let discovery = CompanionEvent::TargetsDiscovered(TargetDiscovery {
+        protocol_version: PROTOCOL_VERSION,
+        profile_id: profile_id.clone(),
+        targets: vec![BrowserTarget {
+            target_id: "tab-1".into(),
+            kind: TargetKind::Page,
+        }],
+    });
+    write_native_message(
+        &mut extension_stream,
+        &serde_json::to_value(discovery).unwrap(),
+    )
+    .await
+    .unwrap();
+    server
+        .wait_for_discovery(&profile_id, Duration::from_secs(1))
+        .await
+        .unwrap();
+    let grant = server.grant_discovered_targets(&profile_id).await.unwrap();
+    read_native_message(&mut extension_stream)
+        .await
+        .unwrap()
+        .unwrap();
+
+    for (text, rejected) in [
+        ("see https://example.test/?token=private-value", true),
+        ("note: read this", false),
+    ] {
+        let command_id = CommandId::new();
+        let action = ActionRequest {
+            protocol_version: PROTOCOL_VERSION,
+            attachment_id: grant.attachment_id.clone(),
+            command_id: command_id.clone(),
+            page_id: grant.pages[0].page_id.clone(),
+            operation: "a11yTree".into(),
+            input: json!({}),
+            deadline_unix_ms: 4_102_444_800_000,
+        };
+        let completed = CompanionEvent::ActionCompleted(ActionResult {
+            command_id: command_id.clone(),
+            interaction_path: InteractionPath::ExtensionApi,
+            output: json!({"nodes": [{"role": "StaticText", "name": text}]}),
+        });
+        let reply = serde_json::to_value(&completed).unwrap();
+        let extension = async {
+            read_native_message(&mut extension_stream)
+                .await
+                .unwrap()
+                .unwrap();
+            write_native_message(&mut extension_stream, &reply)
+                .await
+                .unwrap();
+        };
+        let (result, ()) = tokio::join!(server.dispatch_action(action), extension);
+        let result = result.unwrap();
+        if rejected {
+            let CompanionEvent::ActionFailed {
+                command_id: failed,
+                code,
+                effect_uncertain,
+                ..
+            } = result
+            else {
+                panic!("expected actionFailed, got {result:?}");
+            };
+            assert_eq!((failed, code.as_str()), (command_id, "outputRejected"));
+            assert!(effect_uncertain);
+        } else {
+            assert_eq!(result, completed);
+        }
+    }
+
+    drop(extension_stream);
+    host.await.unwrap().unwrap();
+}
+
+async fn within<T>(step: &str, future: impl std::future::Future<Output = T>) -> T {
+    tokio::time::timeout(Duration::from_secs(20), future)
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {step}"))
+}
+
+/// The native host process dies mid-session. A command issued while it is
+/// gone waits; the respawned host reconnects with the reconnect credential,
+/// the server re-sends the same attachment grant, and the command completes
+/// on the original attachment without the session being recreated.
+#[tokio::test]
+async fn a_respawned_native_host_restores_the_attachment_grant() {
+    let server = CompanionServer::bind_loopback(CompanionServerConfig {
+        bind_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+        pairing_code_ttl: Duration::from_secs(60),
+        attachment_ttl: Duration::from_secs(300),
+    })
+    .await
+    .unwrap();
+    let pairing_code = server.registry().issue_pairing_code().await;
+    let store_dir = std::env::temp_dir().join(format!("native-host-store-{}", CommandId::new().0));
+    std::fs::create_dir_all(&store_dir).unwrap();
+    let store = store_dir.join("firefox-native-host-credential.json");
+    let config = NativeHostConfig::new(
+        format!("ws://{}/v1/companion", server.local_addr()),
+        pairing_code,
+    )
+    .with_credential_store(store.clone());
+    let connect_request = connect_request();
+    let profile_id = connect_request.profile_id.clone();
+    let connect = json!({"kind": "pair", "input": connect_request});
+    let (host_stream, mut first_extension) = duplex(2 * MAX_NATIVE_MESSAGE_BYTES);
+    let (host_reader, host_writer) = split(host_stream);
+    let first_host = tokio::spawn(run_native_host(host_reader, host_writer, config.clone()));
+    write_native_message(&mut first_extension, &connect)
+        .await
+        .unwrap();
+    let paired = read_native_message(&mut first_extension).await.unwrap();
+    assert_eq!(paired.unwrap()["kind"], "paired");
+    let discovery = CompanionEvent::TargetsDiscovered(TargetDiscovery {
+        protocol_version: PROTOCOL_VERSION,
+        profile_id: profile_id.clone(),
+        targets: vec![BrowserTarget {
+            target_id: "tab-1".into(),
+            kind: TargetKind::Page,
+        }],
+    });
+    write_native_message(
+        &mut first_extension,
+        &serde_json::to_value(&discovery).unwrap(),
+    )
+    .await
+    .unwrap();
+    server
+        .wait_for_discovery(&profile_id, Duration::from_secs(1))
+        .await
+        .unwrap();
+    let grant = server.grant_discovered_targets(&profile_id).await.unwrap();
+    read_native_message(&mut first_extension)
+        .await
+        .unwrap()
+        .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&store).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    // Kill the host process: its relay and socket end without a goodbye.
+    first_host.abort();
+    let _ = first_host.await;
+    drop(first_extension);
+    // A command racing the close is routed to the dying connection and ends
+    // `ConnectionClosed`; this one is issued once the server saw the close.
+    within("the server to see the close", async {
+        // Discovery belongs to a connection and is dropped with it.
+        while server
+            .wait_for_discovery(&profile_id, Duration::from_millis(10))
+            .await
+            .is_ok()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+
+    let command_id = CommandId::new();
+    let action = ActionRequest {
+        protocol_version: PROTOCOL_VERSION,
+        attachment_id: grant.attachment_id.clone(),
+        command_id: command_id.clone(),
+        page_id: grant.pages[0].page_id.clone(),
+        operation: "a11yTree".into(),
+        input: json!({}),
+        deadline_unix_ms: 4_102_444_800_000,
+    };
+    let completed = CompanionEvent::ActionCompleted(ActionResult {
+        command_id,
+        interaction_path: InteractionPath::ExtensionApi,
+        output: json!({"nodes": []}),
+    });
+    let reply = serde_json::to_value(&completed).unwrap();
+    let respawn = async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // A new process: nothing shared with the first host but the store;
+        // the descriptor is gone.
+        let respawned = NativeHostConfig::from_credential_store(store.clone())
+            .expect("the first host stored its reconnect credential");
+        let (host_stream, mut extension) = duplex(2 * MAX_NATIVE_MESSAGE_BYTES);
+        let (host_reader, host_writer) = split(host_stream);
+        let host = tokio::spawn(run_native_host(host_reader, host_writer, respawned));
+        write_native_message(&mut extension, &connect)
+            .await
+            .unwrap();
+        let paired = within("paired", read_native_message(&mut extension)).await;
+        assert_eq!(paired.unwrap().unwrap()["kind"], "paired");
+        let regrant = within("re-sent grant", read_native_message(&mut extension)).await;
+        let regrant: CompanionRequest = serde_json::from_value(regrant.unwrap().unwrap()).unwrap();
+        assert_eq!(regrant, CompanionRequest::Grant(grant.clone()));
+        let request = within("action", read_native_message(&mut extension)).await;
+        assert_eq!(request.unwrap().unwrap()["kind"], "action");
+        write_native_message(&mut extension, &reply).await.unwrap();
+        (host, extension)
+    };
+    let (result, (host, extension)) =
+        tokio::join!(within("dispatch", server.dispatch_action(action)), respawn);
+    assert_eq!(result.unwrap(), completed);
+
     drop(extension);
     host.await.unwrap().unwrap();
 }

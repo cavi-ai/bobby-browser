@@ -19,7 +19,7 @@ mod vision_token;
 
 use anyhow::{Context, Result};
 use companion_core::{
-    run_native_host_with_enroll, EnrollFinalize, EnrollHostError, NativeConnectRequest,
+    run_native_host_logged, EnrollFinalize, EnrollHostError, LifecycleLog, NativeConnectRequest,
     NativeHostConfig, NativeHostEnroll,
 };
 use config::{ensure_loopback_vision_defaults, upsert_vision_platform, AppConfig};
@@ -2545,34 +2545,62 @@ fn installed_file_mode(path: &Path, _fallback: u32) -> std::io::Result<u32> {
     }
 }
 
+/// The Firefox native host's lifecycle log, written beside its descriptor.
+pub const FIREFOX_NATIVE_HOST_LOG: &str = "firefox-native-host.log";
+
 async fn run_configured_native_host(descriptor_path: PathBuf) -> Result<()> {
     if !descriptor_path.is_absolute() {
         anyhow::bail!("firefox native-host descriptor path must be absolute");
     }
+    // Beside the descriptor, mode 0600: lets a respawned host reconnect after
+    // the descriptor was unpublished. Rotated on every pairing, deleted when
+    // refused or when the endpoint owner changes.
+    let credential_path = descriptor_path.with_file_name("firefox-native-host-credential.json");
     let config = match std::fs::read(&descriptor_path) {
         Ok(bytes) => {
             let descriptor: NativeHostDescriptor = serde_json::from_slice(&bytes)?;
             Some(follow_native_host_descriptor(
                 NativeHostConfig::new(descriptor.endpoint, descriptor.pairing_code)
-                    .with_ownership_id(descriptor.ownership_id),
+                    .with_ownership_id(descriptor.ownership_id)
+                    .with_credential_store(credential_path),
                 descriptor_path.clone(),
             )?)
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            NativeHostConfig::from_credential_store(credential_path)
+                .map(|config| follow_native_host_descriptor(config, descriptor_path.clone()))
+                .transpose()?
+        }
         Err(error) => return Err(error.into()),
     };
     let config_dir = descriptor_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("firefox native-host descriptor path has no parent"))?
         .to_path_buf();
+    let log = LifecycleLog::open(&config_dir.join(FIREFOX_NATIVE_HOST_LOG));
+    log.record(
+        "start",
+        &format!(
+            "bobby {} {}",
+            env!("CARGO_PKG_VERSION"),
+            if config.is_some() {
+                "paired"
+            } else {
+                "enrolling"
+            }
+        ),
+    );
     let enroll = NativeHostFirefoxEnroll::new(config_dir, Duration::from_secs(120));
-    run_native_host_with_enroll(
+    let result = run_native_host_logged(
         tokio::io::stdin(),
         tokio::io::stdout(),
         config,
         Some(enroll),
+        &log,
     )
-    .await?;
+    .await;
+    log.record("exit", if result.is_ok() { "code 0" } else { "code 1" });
+    result?;
     Ok(())
 }
 

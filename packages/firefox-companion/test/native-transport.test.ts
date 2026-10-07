@@ -7,6 +7,7 @@ import {
   NativeCompanionTransport,
   TERMINAL_AUTH_COOLDOWN_MS,
   createEnrollProfileRequest,
+  isExtensionSafeString,
   parseNativeInboundMessage,
 } from "../src/native-transport.js";
 
@@ -37,7 +38,14 @@ class FakePort {
   }
 }
 
-async function urlSecurityFixtures(): Promise<{ benign: string[]; secret: string[] }> {
+type UrlSecurityFixtures = {
+  benign: string[];
+  secret: string[];
+  textBenign: string[];
+  textSecret: string[];
+};
+
+async function urlSecurityFixtures(): Promise<UrlSecurityFixtures> {
   return JSON.parse(
     await readFile(
       new URL(
@@ -46,7 +54,7 @@ async function urlSecurityFixtures(): Promise<{ benign: string[]; secret: string
       ),
       "utf8",
     ),
-  ) as { benign: string[]; secret: string[] };
+  ) as UrlSecurityFixtures;
 }
 
 function completedWithUrl(url: string): unknown {
@@ -177,6 +185,30 @@ test("shared URL security fixtures match the TypeScript extension boundary", asy
   }
   for (const url of fixtures.secret) {
     assert.throws(() => transport.send(completedWithUrl(url)), /secret|URL/i, url);
+  }
+});
+
+test("shared free-text fixtures match the TypeScript extension boundary", async () => {
+  const port = new FakePort();
+  const transport = new NativeCompanionTransport({ connectNative: () => port });
+  transport.start(() => {});
+  const fixtures = await urlSecurityFixtures();
+  const completedWithText = (text: string): unknown => ({
+    kind: "actionCompleted",
+    output: {
+      commandId: "4c4dfe8c-7c69-4b33-a13e-1fcdf18f2952",
+      interactionPath: "extensionApi",
+      output: { nodes: [{ role: "StaticText", name: text }], selector: text },
+    },
+  });
+
+  for (const text of fixtures.textBenign) {
+    assert.doesNotThrow(() => transport.send(completedWithText(text)), text);
+    assert.equal(isExtensionSafeString(text), true, text);
+  }
+  for (const text of fixtures.textSecret) {
+    assert.throws(() => transport.send(completedWithText(text)), /secret|URL/i, text);
+    assert.equal(isExtensionSafeString(text), false, text);
   }
 });
 

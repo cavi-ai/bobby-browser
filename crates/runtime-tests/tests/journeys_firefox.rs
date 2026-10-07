@@ -35,6 +35,7 @@ async fn journeys_hold_on_firefox() {
         j4_upload_hidden_and_visible,
         j5_popup_and_frame,
         j6_cross_site_navigation_recovery,
+        j7_native_host_killed_mid_session,
     );
     for (name, journey) in table {
         if AssertUnwindSafe(journey(&rig, &dirs))

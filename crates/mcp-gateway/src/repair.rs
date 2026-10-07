@@ -135,6 +135,17 @@ pub(crate) fn repair_for_rpc_code(code: i64) -> Value {
 const INTERNAL_ACTION: &str =
     "Nothing caller-side to fix; treat as non-retryable and escalate if it recurs.";
 
+/// [`repair_for_code`], except a failure marked non-retryable is never told to
+/// retry the same call.
+pub(crate) fn repair_for_failure(code: &str, retryable: Option<bool>) -> Option<Value> {
+    if code == "browserCommandFailed" && retryable == Some(false) {
+        return Some(repair(
+            "Not retryable as-is: the same call returns the same failure. Act on error.message; recreate the session or page only if it says to.",
+        ));
+    }
+    repair_for_code(code)
+}
+
 /// General repair for one `ErrorCode` or `InterfaceErrorCode` wire name
 /// (both serialize camelCase from the same vocabulary). Unknown codes get no
 /// hint rather than a guessed one.
@@ -406,6 +417,20 @@ mod tests {
     #[test]
     fn unknown_codes_get_no_guessed_hint() {
         assert!(repair_for_code("madeUpCode").is_none());
+    }
+
+    #[test]
+    fn a_non_retryable_command_failure_is_never_told_to_retry() {
+        let action = |retryable| {
+            repair_for_failure("browserCommandFailed", retryable).unwrap()["action"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert!(action(Some(false)).starts_with("Not retryable"));
+        assert!(!action(Some(false)).contains("Retry the same call"));
+        assert!(action(Some(true)).starts_with("Retry the same call"));
+        assert!(action(None).starts_with("Retry the same call"));
     }
 
     #[test]

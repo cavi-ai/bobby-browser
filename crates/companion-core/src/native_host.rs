@@ -9,6 +9,7 @@ use std::{
     fmt,
     future::Future,
     net::IpAddr,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -25,6 +26,8 @@ use tokio_tungstenite::{
 };
 use types::{CompanionId, ProfileId};
 use url::Url;
+
+use crate::lifecycle_log::LifecycleLog;
 
 pub const MAX_NATIVE_MESSAGE_BYTES: usize = 1024 * 1024;
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_millis(100);
@@ -103,8 +106,20 @@ pub struct NativeHostConfig {
     pairing_code: String,
     ownership_id: Option<String>,
     reconnect_credential: Arc<Mutex<Option<ReconnectCredential>>>,
+    credential_store: Option<PathBuf>,
     config_refresh: Option<Arc<dyn Fn() -> Option<NativeHostConfig> + Send + Sync>>,
     config_changes: Option<watch::Receiver<u64>>,
+}
+
+/// The reconnect credential a native host persists so its successor process
+/// reconnects without a freshly published descriptor. Bound to the endpoint
+/// and owner it was issued for; the server stays the authority.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoredCredential {
+    endpoint: String,
+    ownership_id: Option<String>,
+    reconnect_credential: String,
 }
 
 impl NativeHostConfig {
@@ -114,9 +129,65 @@ impl NativeHostConfig {
             pairing_code: pairing_code.into(),
             ownership_id: None,
             reconnect_credential: Arc::new(Mutex::new(None)),
+            credential_store: None,
             config_refresh: None,
             config_changes: None,
         }
+    }
+
+    /// Persist the reconnect credential at `path` (mode 0600), and reuse a
+    /// stored one issued for this endpoint and owner.
+    pub fn with_credential_store(self, path: PathBuf) -> Self {
+        let stored = read_stored_credential(&path).filter(|stored| {
+            stored.endpoint == self.endpoint && stored.ownership_id == self.ownership_id
+        });
+        let config = Self {
+            credential_store: Some(path),
+            ..self
+        };
+        if let Some(stored) = stored {
+            if let Ok(mut credential) = config.reconnect_credential.lock() {
+                *credential = Some(ReconnectCredential(stored.reconnect_credential));
+            }
+        }
+        config
+    }
+
+    /// A config from the stored credential alone, for a host started after
+    /// the descriptor was unpublished.
+    pub fn from_credential_store(path: PathBuf) -> Option<Self> {
+        let stored = read_stored_credential(&path)?;
+        let config = Self {
+            ownership_id: stored.ownership_id.clone(),
+            ..Self::new(stored.endpoint.clone(), String::new())
+        };
+        Some(config.with_credential_store(path))
+    }
+
+    fn validate_connect(&self, request: &NativeConnectRequest) -> Result<(), NativeHostError> {
+        if request.protocol_version != PROTOCOL_VERSION {
+            return Err(NativeHostError::UnsupportedProtocolVersion);
+        }
+        validate_native_connect(request)?;
+        if !self.has_reconnect_credential()? {
+            validate_secret(&self.pairing_code)?;
+        }
+        Ok(())
+    }
+
+    fn has_pairing_code(&self) -> bool {
+        validate_secret(&self.pairing_code).is_ok()
+    }
+
+    fn forget_reconnect_credential(&self) -> Result<(), NativeHostError> {
+        *self
+            .reconnect_credential
+            .lock()
+            .map_err(|_| NativeHostError::InvalidPairingMaterial)? = None;
+        if let Some(path) = &self.credential_store {
+            let _ = std::fs::remove_file(path);
+        }
+        Ok(())
     }
 
     /// Identify the listener's publication generation independently of its port.
@@ -151,6 +222,11 @@ impl NativeHostConfig {
         }
         next.config_refresh = self.config_refresh.clone();
         next.config_changes = self.config_changes.clone();
+        // A new endpoint or owner never inherits the old credential.
+        if let Some(path) = self.credential_store.take() {
+            let _ = std::fs::remove_file(&path);
+            next.credential_store = Some(path);
+        }
         *self = next;
         true
     }
@@ -197,6 +273,18 @@ impl NativeHostConfig {
 
     fn store_reconnect_credential(&self, credential: String) -> Result<(), NativeHostError> {
         validate_secret(&credential)?;
+        if let Some(path) = &self.credential_store {
+            // Rotated on every pairing; a write failure leaves the process
+            // credential in memory only.
+            let _ = write_stored_credential(
+                path,
+                &StoredCredential {
+                    endpoint: self.endpoint.clone(),
+                    ownership_id: self.ownership_id.clone(),
+                    reconnect_credential: credential.clone(),
+                },
+            );
+        }
         *self
             .reconnect_credential
             .lock()
@@ -243,6 +331,35 @@ impl fmt::Debug for NativeHostConfig {
             .field("reconnect_credential", &"[redacted]")
             .finish()
     }
+}
+
+fn read_stored_credential(path: &Path) -> Option<StoredCredential> {
+    let stored: StoredCredential = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    validate_secret(&stored.reconnect_credential).ok()?;
+    Some(stored)
+}
+
+fn write_stored_credential(path: &Path, stored: &StoredCredential) -> std::io::Result<()> {
+    let mut pending = path.as_os_str().to_owned();
+    pending.push(format!(".pending-{}", std::process::id()));
+    let pending = PathBuf::from(pending);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| {
+        let mut file = options.open(&pending)?;
+        std::io::Write::write_all(&mut file, &serde_json::to_vec(stored)?)?;
+        file.sync_all()?;
+        std::fs::rename(&pending, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&pending);
+    }
+    result
 }
 
 fn validate_secret(secret: &str) -> Result<(), NativeHostError> {
@@ -476,6 +593,19 @@ pub fn validate_server_message(value: Value) -> Result<Value, NativeHostError> {
 }
 
 fn reject_extension_secrets(value: &Value, depth: usize) -> Result<(), NativeHostError> {
+    reject_secrets_in_field(value, None, depth)
+}
+
+/// URL rules apply to URL-typed fields (`href`, `src`, `*url`). Any other
+/// string is free text: it is checked for credentials and for the absolute
+/// URLs embedded in it, never URL-parsed as a whole (`note: read this` is not
+/// a URL with the scheme `note:`). The extension applies the same split; the
+/// shared cases live in `tests/fixtures/extension-url-security.json`.
+fn reject_secrets_in_field(
+    value: &Value,
+    field: Option<&str>,
+    depth: usize,
+) -> Result<(), NativeHostError> {
     if depth > 32 {
         return Err(NativeHostError::InvalidProtocol);
     }
@@ -500,33 +630,55 @@ fn reject_extension_secrets(value: &Value, depth: usize) -> Result<(), NativeHos
                 {
                     return Err(NativeHostError::InvalidProtocol);
                 }
-                reject_extension_secrets(item, depth + 1)?;
+                reject_secrets_in_field(item, Some(name), depth + 1)?;
             }
         }
         Value::Array(items) => {
             for item in items {
-                reject_extension_secrets(item, depth + 1)?;
+                reject_secrets_in_field(item, field, depth + 1)?;
             }
         }
-        Value::String(text) => reject_secret_string(text)?,
+        Value::String(text) if field.is_some_and(is_url_field) => reject_secret_url(text)?,
+        Value::String(text) => reject_secret_text(text)?,
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
     Ok(())
 }
 
-fn reject_secret_string(text: &str) -> Result<(), NativeHostError> {
+fn is_url_field(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name == "href" || name == "src" || name.ends_with("url")
+}
+
+fn reject_secret_text(text: &str) -> Result<(), NativeHostError> {
+    if contains_explicit_credential(text) {
+        return Err(NativeHostError::InvalidProtocol);
+    }
+    embedded_urls(text).try_for_each(reject_secret_url)
+}
+
+/// Each `scheme://…` run inside free text, without the punctuation that
+/// commonly closes it in prose.
+fn embedded_urls(text: &str) -> impl Iterator<Item = &str> {
+    text.split_whitespace().filter_map(|token| {
+        let separator = token.find("://")?;
+        let start = token[..separator]
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-')))
+            .map_or(0, |index| index + 1);
+        (start < separator).then(|| {
+            token[start..]
+                .trim_end_matches([')', ']', '}', ',', '.', ';', ':', '!', '?', '\'', '"', '>'])
+        })
+    })
+}
+
+fn reject_secret_url(text: &str) -> Result<(), NativeHostError> {
     if contains_explicit_credential(text) {
         return Err(NativeHostError::InvalidProtocol);
     }
     let Ok(url) = Url::parse(text) else {
         return Ok(());
     };
-    // The extension's bounded CSS paths can begin `main:nth-of-type(1)`.
-    // URL parsers treat `main:` as a scheme. Accept only the exact selector
-    // shape the extension generates, never arbitrary scheme-like strings.
-    if generated_css_path(text) {
-        return Ok(());
-    }
     if !matches!(url.scheme(), "http" | "https")
         || !url.username().is_empty()
         || url.password().is_some()
@@ -539,41 +691,6 @@ fn reject_secret_string(text: &str) -> Result<(), NativeHostError> {
         }
     }
     Ok(())
-}
-
-fn generated_css_path(text: &str) -> bool {
-    if text.len() > 2_048 || text.contains("://") {
-        return false;
-    }
-    let mut segments = text.split(" > ");
-    let Some(first) = segments.next() else {
-        return false;
-    };
-    if !generated_css_nth_segment(first) {
-        return false;
-    }
-    segments.all(|segment| generated_css_nth_segment(segment) || generated_css_tag(segment))
-}
-
-fn generated_css_nth_segment(segment: &str) -> bool {
-    let Some((tag, position)) = segment.split_once(":nth-of-type(") else {
-        return false;
-    };
-    let Some(position) = position.strip_suffix(')') else {
-        return false;
-    };
-    generated_css_tag(tag)
-        && position.parse::<u32>().is_ok_and(|position| position > 0)
-        && !position.starts_with('0')
-}
-
-fn generated_css_tag(tag: &str) -> bool {
-    tag.chars()
-        .next()
-        .is_some_and(|first| first.is_ascii_lowercase())
-        && tag.chars().all(|character| {
-            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
-        })
 }
 
 fn is_sensitive_url_query_key(name: &str) -> bool {
@@ -666,8 +783,45 @@ fn public_paired(output: &InitialPairedOutput) -> Result<Value, NativeHostError>
 
 enum ConnectionResult {
     NativeClosed,
-    Reconnect,
+    Reconnect(&'static str),
     EndpointChanged,
+}
+
+fn connect_failure(error: &WebSocketError) -> String {
+    match error {
+        WebSocketError::Http(response) => format!("http {}", response.status().as_u16()),
+        WebSocketError::Io(error) => format!("io {:?}", error.kind()),
+        _ => "websocket handshake failed".to_owned(),
+    }
+}
+
+const OUTPUT_REJECTED_CODE: &str = "outputRejected";
+
+/// The `actionFailed` the server receives in place of an action result the
+/// relay refused to forward, so the command ends with a clear error.
+fn rejected_action_failure(kind: &str, command_id: Option<String>) -> Option<Value> {
+    if !matches!(kind, "actionCompleted" | "actionFailed") {
+        return None;
+    }
+    let failure = serde_json::json!({
+        "kind": "actionFailed",
+        "output": {
+            "commandId": command_id?,
+            "code": OUTPUT_REJECTED_CODE,
+            "message": "the page result contains text the companion relay does not forward; \
+                        the connection is intact and the same call returns the same result",
+            "effectUncertain": kind == "actionCompleted",
+        }
+    });
+    validate_extension_message(failure).ok()
+}
+
+fn message_kind(value: &Value) -> &str {
+    value
+        .get("kind")
+        .and_then(Value::as_str)
+        .filter(|kind| kind.len() <= 32 && kind.chars().all(|c| c.is_ascii_alphabetic()))
+        .unwrap_or("unknown")
 }
 
 async fn wait_for_config_change(changes: &mut Option<watch::Receiver<u64>>) {
@@ -785,10 +939,54 @@ where
 }
 
 pub async fn run_native_host_with_enroll<R, W, E>(
+    native_reader: R,
+    native_writer: W,
+    config: Option<NativeHostConfig>,
+    enroll: Option<E>,
+) -> Result<(), NativeHostError>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin,
+    E: NativeHostEnroll,
+{
+    run_native_host_logged(
+        native_reader,
+        native_writer,
+        config,
+        enroll,
+        &LifecycleLog::disabled(),
+    )
+    .await
+}
+
+/// [`run_native_host_with_enroll`] that records connect, disconnect, rejected
+/// messages and the fatal error to `log`.
+pub async fn run_native_host_logged<R, W, E>(
+    native_reader: R,
+    native_writer: W,
+    config: Option<NativeHostConfig>,
+    enroll: Option<E>,
+    log: &LifecycleLog,
+) -> Result<(), NativeHostError>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin,
+    E: NativeHostEnroll,
+{
+    let result = relay_native_host(native_reader, native_writer, config, enroll, log).await;
+    match &result {
+        Ok(()) => log.record("relay_closed", "extension port closed"),
+        Err(error) => log.record("fatal", &error.to_string()),
+    }
+    result
+}
+
+async fn relay_native_host<R, W, E>(
     mut native_reader: R,
     mut native_writer: W,
     config: Option<NativeHostConfig>,
     enroll: Option<E>,
+    log: &LifecycleLog,
 ) -> Result<(), NativeHostError>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -830,7 +1028,7 @@ where
 
     let expected_companion_id = connect.companion_id.clone();
     let expected_profile_id = connect.profile_id.clone();
-    config.pair_request(connect.clone())?;
+    config.validate_connect(&connect)?;
     let mut config_changes = config.config_changes.clone();
 
     let (native_messages, mut receiver) = mpsc::channel(32);
@@ -849,9 +1047,15 @@ where
             break Ok(());
         }
         config.refresh_endpoint();
-        let pair = config.pair_request(connect.clone())?;
-        let pair = serde_json::to_string(&pair).map_err(|_| NativeHostError::InvalidProtocol)?;
         let has_credential = config.has_reconnect_credential()?;
+        // A host started from a stored credential has no pairing code; the
+        // pair request is built only when pairing.
+        let pair = if has_credential {
+            String::new()
+        } else {
+            let pair = config.pair_request(connect.clone())?;
+            serde_json::to_string(&pair).map_err(|_| NativeHostError::InvalidProtocol)?
+        };
         let token = config.authentication_token()?;
         let request = config.authenticated_request(&token)?;
         let attempt = connect_async(request);
@@ -882,18 +1086,35 @@ where
                     backoff.reset();
                     continue;
                 }
+                // The server is the authority: a refused stored credential is
+                // deleted, and pairing falls back to the descriptor's code.
+                if has_credential {
+                    log.record("credential_refused", "stored reconnect credential deleted");
+                    config.forget_reconnect_credential()?;
+                    if config.has_pairing_code() {
+                        continue;
+                    }
+                }
                 write_terminal_auth_status(&mut native_writer).await;
                 break Err(NativeHostError::InvalidPairingMaterial)
             }
-            Err(_) if has_credential => {
+            Err(error) if has_credential => {
+                log.record("connect_failed", &connect_failure(&error));
                 let delay = backoff.next_delay();
                 if sleep_or_native_closed(delay, &mut native_closed_receiver).await {
                     break Ok(());
                 }
                 continue;
             }
-            Err(_) => break Err(NativeHostError::WebSocket),
+            Err(error) => {
+                log.record("connect_failed", &connect_failure(&error));
+                break Err(NativeHostError::WebSocket);
+            }
         };
+        log.record(
+            "connected",
+            if has_credential { "reconnect credential" } else { "pairing code" },
+        );
         backoff.reset();
         let (mut socket_writer, mut socket_reader) = socket.split();
         if !has_credential
@@ -914,19 +1135,38 @@ where
                         break Ok(ConnectionResult::EndpointChanged);
                     }
                 }
-                _ = &mut liveness => break Ok(ConnectionResult::Reconnect),
+                _ = &mut liveness => break Ok(ConnectionResult::Reconnect("server liveness timeout")),
                 native = receiver.recv() => {
                     match native {
                         Some(Ok(Some(value))) => {
-                            let value = validate_extension_message(value)?;
+                            let kind = message_kind(&value).to_owned();
+                            let command_id = value
+                                .pointer("/output/commandId")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned);
+                            let value = match validate_extension_message(value) {
+                                Ok(value) => value,
+                                Err(error) => {
+                                    // One unforwardable message fails its own command;
+                                    // it never ends the relay and every other session.
+                                    log.record("rejected_extension_message", &format!("{kind}: {error}"));
+                                    match rejected_action_failure(&kind, command_id) {
+                                        Some(failure) => failure,
+                                        None => continue,
+                                    }
+                                }
+                            };
                             let body = serde_json::to_string(&value)
                                 .map_err(|_| NativeHostError::InvalidProtocol)?;
                             if socket_writer.send(Message::Text(body.into())).await.is_err() {
-                                break Ok(ConnectionResult::Reconnect);
+                                break Ok(ConnectionResult::Reconnect("server send failed"));
                             }
                         }
                         Some(Ok(None)) | None => break Ok(ConnectionResult::NativeClosed),
-                        Some(Err(error)) => break Err(error),
+                        Some(Err(error)) => {
+                            log.record("native_read_failed", &error.to_string());
+                            break Err(error);
+                        }
                     }
                 }
                 message = socket_reader.next() => {
@@ -948,7 +1188,14 @@ where
                                 config.store_reconnect_credential(initial.reconnect_credential.clone())?;
                                 public_paired(&initial)?
                             } else {
-                                let value = validate_server_message(value)?;
+                                let kind = message_kind(&value).to_owned();
+                                let value = match validate_server_message(value) {
+                                    Ok(value) => value,
+                                    Err(error) => {
+                                        log.record("rejected_server_message", &format!("{kind}: {error}"));
+                                        break Err(error);
+                                    }
+                                };
                                 if let Ok(CompanionEvent::Paired { companion_id, profile_id }) =
                                     serde_json::from_value::<CompanionEvent>(value.clone())
                                 {
@@ -997,12 +1244,15 @@ where
                         }
                         Some(Ok(Message::Ping(payload))) => {
                             if socket_writer.send(Message::Pong(payload)).await.is_err() {
-                                break Ok(ConnectionResult::Reconnect);
+                                break Ok(ConnectionResult::Reconnect("server pong failed"));
                             }
                         }
                         Some(Ok(Message::Pong(_))) => {}
-                        Some(Ok(Message::Close(_))) | None | Some(Err(_)) => {
-                            break Ok(ConnectionResult::Reconnect);
+                        Some(Ok(Message::Close(_))) => {
+                            break Ok(ConnectionResult::Reconnect("server closed"));
+                        }
+                        None | Some(Err(_)) => {
+                            break Ok(ConnectionResult::Reconnect("server connection lost"));
                         }
                         Some(Ok(Message::Binary(_))) | Some(Ok(Message::Frame(_))) => {
                             break Err(NativeHostError::WebSocket);
@@ -1014,14 +1264,21 @@ where
 
         match connection? {
             ConnectionResult::NativeClosed => break Ok(()),
-            ConnectionResult::EndpointChanged => backoff.reset(),
-            ConnectionResult::Reconnect if config.has_reconnect_credential()? => {
+            ConnectionResult::EndpointChanged => {
+                log.record("disconnected", "endpoint changed");
+                backoff.reset()
+            }
+            ConnectionResult::Reconnect(reason) if config.has_reconnect_credential()? => {
+                log.record("disconnected", reason);
                 let delay = backoff.next_delay();
                 if sleep_or_native_closed(delay, &mut native_closed_receiver).await {
                     break Ok(());
                 }
             }
-            ConnectionResult::Reconnect => break Err(NativeHostError::WebSocket),
+            ConnectionResult::Reconnect(reason) => {
+                log.record("disconnected", reason);
+                break Err(NativeHostError::WebSocket);
+            }
         }
         }
     }

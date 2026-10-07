@@ -11,7 +11,7 @@ RESTART_FLAGS := $(if $(filter 1,$(FORCE)),--force)$(if $(filter 1,$(DISCONNECT_
 	build install firefox cli \
 	firefox-start firefox-stop \
 	restart start stop reload verify status \
-	fmt lint test test-browsers-setup test-browsers \
+	fmt lint test test-browsers-setup test-browsers test-browsers-chromium test-browsers-firefox \
 	fingerprint-dogfood fingerprint-collectors fingerprint-collectors-headed fingerprint-collectors-firefox \
 	behavioral-benchmark behavioral-e2e behavioral-dogfood
 
@@ -171,20 +171,30 @@ TEST_BROWSERS_MANIFEST := $(HOME)/.mozilla/native-messaging-hosts/$(TEST_BROWSER
 TEST_BROWSERS_FIREFOX := $(shell command -v firefox)
 endif
 
+# CI runs the same targets: it overrides the suites, the profile (the prefill
+# suite keeps a fresh one), and headless (0 under xvfb).
+TEST_BROWSERS_PROFILE ?= $(TEST_BROWSERS_DIR)/firefox-profile
+TEST_BROWSERS_HEADLESS ?= 1
+TEST_BROWSERS_FIREFOX_SUITES ?= --test site_regressions_firefox --test journeys_firefox
+
 test-browsers-setup:
 	@$(REPO_ROOT)scripts/dev/test-browsers-setup.sh
 
-test-browsers:
+test-browsers: test-browsers-chromium test-browsers-firefox
+
+test-browsers-chromium:
 	cargo test --manifest-path $(REPO_ROOT)Cargo.toml -p runtime-tests --locked \
 		--test site_regressions_chromium --test journeys_chromium \
 		-- --ignored --test-threads=1
+
+test-browsers-firefox:
 	@[ -f "$(TEST_BROWSERS_MANIFEST)" ] || { echo "test native host missing: run make test-browsers-setup"; exit 1; }
-	BOBBY_FIREFOX_HEADLESS=1 BOBBY_FIREFOX_BIN="$(TEST_BROWSERS_FIREFOX)" \
-		BOBBY_FIREFOX_PROFILE="$(TEST_BROWSERS_DIR)/firefox-profile" \
+	BOBBY_FIREFOX_HEADLESS="$(TEST_BROWSERS_HEADLESS)" BOBBY_FIREFOX_BIN="$(TEST_BROWSERS_FIREFOX)" \
+		BOBBY_FIREFOX_PROFILE="$(TEST_BROWSERS_PROFILE)" \
 		BOBBY_COMPANION_EXTENSION="$(TEST_BROWSERS_DIR)/extension" \
 		BOBBY_FIREFOX_PROOF_DIR="$(TEST_BROWSERS_DIR)" \
 		cargo test --manifest-path $(REPO_ROOT)Cargo.toml -p runtime-tests --locked \
-		--test site_regressions_firefox --test journeys_firefox \
+		$(TEST_BROWSERS_FIREFOX_SUITES) \
 		-- --ignored --test-threads=1
 
 # ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@ import {
 } from "./native-transport.js";
 import {
   PROTOCOL_VERSION,
+  contentFailure,
   type AttachmentGrant,
   type BrowserIdentity,
   type BrowserTarget,
@@ -72,6 +73,16 @@ type PageLease = {
 };
 
 class ContentDeadlineError extends Error {}
+
+// The content script reported why its action failed.
+class ContentFailureError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
 
 type TabLifecycle = {
   generation: number;
@@ -533,6 +544,17 @@ export class CompanionBackground {
         );
       }
     } catch (error) {
+      if (error instanceof ContentFailureError) {
+        // A scriptException may have thrown mid-action; every other reason is
+        // raised while resolving input, before any effect.
+        this.#sendFailure(
+          input.commandId,
+          error.code,
+          error.message,
+          error.code === "scriptException" && !READ_ONLY_CONTENT_OPERATIONS.has(input.operation),
+        );
+        return;
+      }
       const deadlineExceeded = error instanceof ContentDeadlineError;
       this.#sendFailure(
         input.commandId,
@@ -588,10 +610,12 @@ export class CompanionBackground {
             timeout = setTimeout(() => reject(new ContentDeadlineError()), remaining);
           }),
         ]);
+        const failure = contentFailure(output);
+        if (failure) throw new ContentFailureError(failure.code, failure.message);
         if (output !== undefined) return output;
         lastError = new Error("the content receiver returned no result");
       } catch (error) {
-        if (error instanceof ContentDeadlineError) throw error;
+        if (error instanceof ContentDeadlineError || error instanceof ContentFailureError) throw error;
         lastError = error;
       } finally {
         if (timeout !== undefined) clearTimeout(timeout);
@@ -615,12 +639,18 @@ export class CompanionBackground {
     ) {
       throw new Error("paired identity does not match the requested profile");
     }
+    // A respawned native host re-pairs the same identity: target ids stay so
+    // the grant the runtime re-sends still names known targets. Leases are
+    // only ever restored by that grant.
+    const reconnect = this.#paired;
     this.#paired = true;
     this.#lastError = undefined;
     this.#leases.clear();
-    this.#targets.clear();
-    this.#targetIdsByRoute.clear();
-    this.#tabLifecycles.clear();
+    if (!reconnect) {
+      this.#targets.clear();
+      this.#targetIdsByRoute.clear();
+      this.#tabLifecycles.clear();
+    }
     await this.#setFingerprintManagedByHost(true, undefined);
     try {
       const targets = (await this.#dependencies.discoverTargets?.()) ?? [];

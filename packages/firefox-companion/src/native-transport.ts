@@ -107,7 +107,7 @@ const FORBIDDEN_SECRET_FIELD =
   /(?:pairing[_-]?code|bearer|authorization|endpoint|credential|password|passwd|api[-_]?key|token|secret)/i;
 const SECRET_VALUE = /(?:^|\s)(?:bearer|basic)\s+/i;
 const PRIVATE_SECRET_VALUE = /private[-_ ]?(?:token|secret|key)/i;
-const SELECTOR_SYNTAX = /[\s>+~()[\]]/;
+const URL_FIELD = /^(?:href|src)$|url$/i;
 const SENSITIVE_URL_QUERY_KEYS = new Set([
   "authorization",
   "bearer",
@@ -188,9 +188,6 @@ function isCapabilities(value: unknown): value is CompanionCapabilities {
 
 function assertSafeUrl(value: string): void {
   if (!/^[a-z][a-z\d+.-]*:/i.test(value)) return;
-  // A CSS path such as `div:nth-of-type(2) > a` parses as a URL with the scheme
-  // `div:`, so selector syntax without an explicit `scheme://` is not a URL.
-  if (SELECTOR_SYNTAX.test(value) && !/^[a-z][a-z\d+.-]*:\/\//i.test(value)) return;
   let url: URL;
   try {
     url = new URL(value);
@@ -215,24 +212,50 @@ function assertSafeUrl(value: string): void {
   }
 }
 
+// Each `scheme://…` run inside free text, without the punctuation that
+// commonly closes it in prose. Mirrors `embedded_urls` in the native host.
+function embeddedUrls(text: string): string[] {
+  const urls: string[] = [];
+  for (const token of text.split(/\s+/)) {
+    const separator = token.indexOf("://");
+    if (separator < 0) continue;
+    let start = separator;
+    while (start > 0 && /[A-Za-z0-9+.-]/.test(token[start - 1] ?? "")) start -= 1;
+    if (start === separator) continue;
+    urls.push(token.slice(start).replace(/[)\]},.;:!?'">]+$/, ""));
+  }
+  return urls;
+}
+
+function assertSafeText(value: string): void {
+  if (SECRET_VALUE.test(value) || PRIVATE_SECRET_VALUE.test(value)) {
+    throw new Error("extension channel contains secret material");
+  }
+}
+
+// URL rules apply to URL-typed fields (`href`, `src`, `*url`). Any other
+// string is free text: checked for credentials and for the absolute URLs
+// embedded in it, never URL-parsed as a whole (`note: read this` is not a URL
+// with the scheme `note:`). The native host applies the same split; the
+// shared cases live in `extension-url-security.json`.
 function assertExtensionSafe(
   value: unknown,
   depth = 0,
   budget: { nodes: number } = { nodes: 20_000 },
+  field?: string,
 ): void {
   budget.nodes -= 1;
   if (budget.nodes < 0 || depth > 32) {
     throw new Error("extension channel message nesting exceeds the safety limit");
   }
   if (typeof value === "string") {
-    if (SECRET_VALUE.test(value) || PRIVATE_SECRET_VALUE.test(value)) {
-      throw new Error("extension channel contains secret material");
-    }
-    assertSafeUrl(value);
+    assertSafeText(value);
+    if (field !== undefined && URL_FIELD.test(field)) assertSafeUrl(value);
+    else for (const url of embeddedUrls(value)) assertSafeUrl(url);
     return;
   }
   if (Array.isArray(value)) {
-    for (const item of value) assertExtensionSafe(item, depth + 1, budget);
+    for (const item of value) assertExtensionSafe(item, depth + 1, budget, field);
     return;
   }
   if (!isObject(value)) return;
@@ -240,13 +263,24 @@ function assertExtensionSafe(
     if (FORBIDDEN_SECRET_FIELD.test(name)) {
       throw new Error("extension channel contains a forbidden secret field");
     }
-    assertExtensionSafe(item, depth + 1, budget);
+    assertExtensionSafe(item, depth + 1, budget, name);
   }
 }
 
+// Whether free text crosses the native channel.
 export function isExtensionSafeString(value: string): boolean {
   try {
     assertExtensionSafe(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Whether a URL-typed field value crosses the native channel.
+export function isExtensionSafeUrl(value: string): boolean {
+  try {
+    assertExtensionSafe({ url: value });
     return true;
   } catch {
     return false;
