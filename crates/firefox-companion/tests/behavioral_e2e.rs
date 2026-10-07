@@ -323,6 +323,7 @@ fn observation() -> ExtensionObservation {
         }],
         html: Some("<main>Observed text</main>".into()),
         controls_truncated: false,
+        redacted_fields: Vec::new(),
     }
 }
 

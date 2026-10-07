@@ -676,3 +676,54 @@ test("locateTarget reports an absent target and an ambiguous one", () => {
   assert.equal(second.found, true);
   assert.equal(document.querySelector(second.cssPath as string)?.getAttribute("href"), "/b");
 });
+
+test("a11yTree keeps main and its first children when the budget ends inside main", () => {
+  const buttons = Array.from({ length: 200 }, (_, index) => `<button>Item ${index}</button>`).join("");
+  const document = documentFor(`<header><a href="/home">Home</a></header><main><div>${buttons}</div></main>`);
+
+  const result = executeContentAction(document, "a11yTree", { maxNodes: 60 }) as {
+    nodes: Array<{ role?: string; name?: string; children?: unknown[] }>;
+    truncated: boolean;
+  };
+
+  assert.equal(result.truncated, true);
+  const serialized = JSON.stringify(result.nodes);
+  assert.match(serialized, /"role":"main"/);
+  assert.match(serialized, /"name":"Item 0"/);
+  assert.doesNotMatch(serialized, /"name":"Item 199"/);
+  const count = (nodes: Array<{ children?: unknown[] }>): number =>
+    nodes.reduce((total, node) => total + 1 + count((node.children ?? []) as never), 0);
+  assert.ok(count(result.nodes) <= 60);
+});
+
+test("a11yTree names containers only from aria attributes and keeps listitem text", () => {
+  const document = documentFor(`
+    <header>Site banner text</header>
+    <nav>Navigation words <a href="/a">Alpha</a></nav>
+    <main><p>Main body words</p>
+      <form>Form words <input placeholder="Search"></form>
+      <ul><li>First post text</li></ul>
+      <section aria-label="Labelled region">Region words</section>
+    </main>
+    <footer>Footer words</footer>
+  `);
+
+  const result = executeContentAction(document, "a11yTree", { maxNodes: 64 }) as {
+    nodes: unknown[];
+  };
+  const found = new Map<string, Array<string | undefined>>();
+  const walk = (nodes: Array<{ role?: string; name?: string; children?: unknown[] }>): void => {
+    for (const node of nodes) {
+      if (node.role) found.set(node.role, [...(found.get(node.role) ?? []), node.name]);
+      walk((node.children ?? []) as never);
+    }
+  };
+  walk(result.nodes as never);
+
+  for (const role of ["banner", "navigation", "main", "form", "list", "contentinfo"]) {
+    assert.deepEqual(found.get(role), [undefined], `${role} must not be named from content`);
+  }
+  assert.deepEqual(found.get("region"), ["Labelled region"]);
+  assert.deepEqual(found.get("listitem"), ["First post text"]);
+  assert.deepEqual(found.get("link"), ["Alpha"]);
+});
