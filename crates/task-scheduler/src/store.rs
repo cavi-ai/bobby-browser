@@ -10,7 +10,6 @@ use thiserror::Error;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
-use tracing::warn;
 
 use crate::job::{Job, JobId, JobStatus};
 
@@ -149,7 +148,7 @@ impl JobStore for MemoryJobStore {
                         | JobStatus::Resolved
                 )
             })
-            .map(|(id, job)| (id.clone(), job.completed_at))
+            .map(|(id, job)| (id.clone(), Some(job.completed_at.unwrap_or(job.created_at))))
             .collect();
         let excess = terminal.len().saturating_sub(retained);
         terminal.sort_by_key(|(_, completed_at)| *completed_at);
@@ -165,69 +164,57 @@ struct WriterState {
     next_sequence: u64,
 }
 
-/// Memory index backed by an append-only JSONL journal.
-/// Rewrite the journal as one current-state record per job, durably
-/// (temp file, sync, rename, directory sync). Terminal jobs past
-/// `COMPACT_RETAINED_TERMINAL` are dropped from the file entirely; recovery
-/// only needs current state, not history.
+/// Atomically publish exactly the retained current-state snapshot. The caller
+/// owns the writer lock and retention policy; compaction never drops active or
+/// uncertain work on its own.
 async fn compact_journal<'a>(
     path: &Path,
     jobs: impl Iterator<Item = &'a Job>,
 ) -> Result<(), StoreError> {
-    let temporary = path.with_extension("compact.tmp");
-    let mut file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&temporary)
-        .await?;
-    let (mut terminal, mut jobs): (Vec<&Job>, Vec<&Job>) = jobs.partition(|job| {
-        matches!(
-            job.status,
-            JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled | JobStatus::Resolved
-        )
-    });
-    terminal.sort_by_key(|job| std::cmp::Reverse(job.completed_at.unwrap_or(job.created_at)));
-    terminal.truncate(COMPACT_RETAINED_TERMINAL);
-    jobs.extend(terminal);
-    jobs.sort_by_key(|job| job.created_at);
-    for (sequence, job) in jobs.into_iter().enumerate() {
-        let terminal = matches!(
-            job.status,
-            JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled | JobStatus::Resolved
-        );
-        let event = if terminal {
-            JobEvent::from_status(&job.status)
-        } else {
-            JobEvent::Submitted
-        };
-        let record = JournalRecord {
-            schema_version: JOURNAL_SCHEMA_VERSION,
-            sequence: sequence as u64,
-            recorded_at: Utc::now(),
-            event,
-            job: job.clone(),
-        };
-        let mut bytes = serde_json::to_vec(&record)?;
-        bytes.push(b'\n');
-        file.write_all(&bytes).await?;
+    let temporary = path.with_extension(format!("{}.compact.tmp", uuid::Uuid::new_v4()));
+    let result = async {
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&temporary).await?;
+        let mut jobs: Vec<_> = jobs.collect();
+        jobs.sort_by_key(|job| job.created_at);
+        for (sequence, job) in jobs.into_iter().enumerate() {
+            let record = JournalRecord {
+                schema_version: JOURNAL_SCHEMA_VERSION,
+                sequence: sequence as u64,
+                recorded_at: Utc::now(),
+                event: JobEvent::from_status(&job.status),
+                job: job.clone(),
+            };
+            let mut bytes = serde_json::to_vec(&record)?;
+            bytes.push(b'\n');
+            file.write_all(&bytes).await?;
+        }
+        file.sync_all().await?;
+        drop(file);
+        tokio::fs::rename(&temporary, path).await?;
+        if let Some(parent) = path.parent() {
+            File::open(parent).await?.sync_all().await?;
+        }
+        Ok::<_, StoreError>(())
     }
-    file.sync_all().await?;
-    drop(file);
-    tokio::fs::rename(&temporary, path).await?;
-    if let Some(parent) = path.parent() {
-        File::open(parent).await?.sync_all().await?;
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&temporary).await;
     }
-    Ok(())
+    result
 }
 
 const COMPACT_THRESHOLD: usize = 4096;
 const COMPACT_RETAINED_TERMINAL: usize = 1024;
 
+#[derive(Clone)]
 pub struct JournalJobStore {
     path: Arc<PathBuf>,
-    index: MemoryJobStore,
-    writer: Mutex<WriterState>,
+    index: Arc<MemoryJobStore>,
+    writer: Arc<Mutex<WriterState>>,
     recovered_torn_tail: bool,
     integrity_issue: Option<&'static str>,
 }
@@ -246,32 +233,21 @@ impl JournalJobStore {
             incompatible_records,
         } = scan_path(&path).await?;
 
-        let integrity_issue = (incompatible_records > 0 || max_sequence == Some(u64::MAX))
-            .then_some("unreadableJobHistory");
-        if torn_tail && integrity_issue.is_none() {
-            truncate_torn_tail(&path).await?;
+        let damaged = torn_tail || incompatible_records > 0 || max_sequence == Some(u64::MAX);
+        if damaged {
+            workflow_journal::archive_damaged_journal(&path).await?;
         }
-        if incompatible_records > 0 {
-            warn!(
-                path = %path.display(),
-                incompatible_records,
-                schema_version = JOURNAL_SCHEMA_VERSION,
-                "job journal is read-only until unreadable history is repaired"
-            );
-        }
-
-        let index = MemoryJobStore::new();
+        let index = Arc::new(MemoryJobStore::new());
         let mut recovered = Vec::new();
         {
             let mut map = index.jobs.lock().await;
             for mut job in jobs {
                 // A handler may have acted before the process stopped. Never
                 // replay an interrupted execution without reconciliation.
-                if integrity_issue.is_some()
-                    && matches!(job.status, JobStatus::Pending | JobStatus::Running)
-                {
+                if damaged {
+                    job.resolution = None;
                     job.require_reconciliation(
-                        "job history is unreadable; authoritative repair required",
+                        "job history was damaged and archived; reconciliation required",
                     );
                 } else if job.status == JobStatus::Running {
                     job.require_reconciliation("execution interrupted; outcome must be reconciled");
@@ -288,49 +264,35 @@ impl JournalJobStore {
             }
         }
 
-        // Compaction: the journal is append-only, so it would grow forever
-        // and every restart would re-read all of it. Past the threshold,
-        // rewrite it as one current-state record per known job.
-        let (compacted_jobs, next_sequence) = {
+        let next_sequence = if damaged {
             let jobs = index.jobs.lock().await;
-            if integrity_issue.is_none()
-                && max_sequence.is_some_and(|sequence| sequence as usize >= COMPACT_THRESHOLD)
-            {
-                compact_journal(&path, jobs.values()).await?;
-                let next_sequence = jobs.len() as u64;
-                (true, next_sequence)
-            } else {
-                (
-                    false,
-                    max_sequence
-                        .and_then(|sequence| sequence.checked_add(1))
-                        .unwrap_or(0),
-                )
-            }
+            compact_journal(&path, jobs.values()).await?;
+            jobs.len() as u64
+        } else if max_sequence.is_some_and(|sequence| sequence >= COMPACT_THRESHOLD as u64) {
+            index.prune_terminal(COMPACT_RETAINED_TERMINAL).await?;
+            let jobs = index.jobs.lock().await;
+            compact_journal(&path, jobs.values()).await?;
+            jobs.len() as u64
+        } else {
+            max_sequence
+                .and_then(|sequence| sequence.checked_add(1))
+                .unwrap_or(0)
         };
-        if compacted_jobs {
-            tracing::info!(
-                path = %path.display(),
-                threshold = COMPACT_THRESHOLD,
-                "job journal compacted to current state"
-            );
-        }
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .read(true)
-            .open(&path)
-            .await?;
+        let mut options = OpenOptions::new();
+        options.create(true).append(true).read(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let file = options.open(&path).await?;
 
         let store = Self {
             path: Arc::new(path),
             index,
-            writer: Mutex::new(WriterState {
+            writer: Arc::new(Mutex::new(WriterState {
                 file,
                 next_sequence,
-            }),
+            })),
             recovered_torn_tail: torn_tail,
-            integrity_issue,
+            integrity_issue: None,
         };
 
         for job in &recovered {
@@ -370,24 +332,51 @@ impl JournalJobStore {
     }
 
     async fn append(&self, event: JobEvent, job: &Job) -> Result<(), StoreError> {
-        if self.integrity_issue.is_some() {
-            return Err(StoreError::Integrity);
-        }
-        let mut writer = self.writer.lock().await;
-        let record = JournalRecord {
-            schema_version: JOURNAL_SCHEMA_VERSION,
-            sequence: writer.next_sequence,
-            recorded_at: Utc::now(),
-            event,
-            job: job.clone(),
-        };
-        let mut bytes = serde_json::to_vec(&record)?;
-        bytes.push(b'\n');
-        writer.file.write_all(&bytes).await?;
-        writer.file.flush().await?;
-        writer.file.sync_data().await?;
-        writer.next_sequence += 1;
-        Ok(())
+        let store = self.clone();
+        let job = job.clone();
+        // Keep the durable append and memory transition under one owned writer,
+        // even when the submitting future is cancelled.
+        tokio::spawn(async move {
+            let mut writer = store.writer.lock().await;
+            let mut jobs = store.index.jobs.lock().await;
+            let next = writer
+                .next_sequence
+                .checked_add(1)
+                .ok_or(StoreError::Integrity)?;
+            let record = JournalRecord {
+                schema_version: JOURNAL_SCHEMA_VERSION,
+                sequence: writer.next_sequence,
+                recorded_at: Utc::now(),
+                event,
+                job: job.clone(),
+            };
+            let mut bytes = serde_json::to_vec(&record)?;
+            bytes.push(b'\n');
+            writer.file.write_all(&bytes).await?;
+            writer.file.flush().await?;
+            writer.file.sync_data().await?;
+            writer.next_sequence = next;
+            jobs.insert(job.id.clone(), job);
+            if writer.next_sequence >= jobs.len() as u64 + COMPACT_THRESHOLD as u64 {
+                let result = compact_journal(&store.path, jobs.values()).await;
+                // Reopen after any attempted rename, including a directory-sync
+                // error, so later appends never target an unlinked old inode.
+                writer.file = OpenOptions::new()
+                    .append(true)
+                    .read(true)
+                    .open(&*store.path)
+                    .await?;
+                writer.next_sequence = scan_path(&store.path)
+                    .await?
+                    .max_sequence
+                    .and_then(|seq| seq.checked_add(1))
+                    .ok_or(StoreError::Integrity)?;
+                result?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(std::io::Error::other)?
     }
 }
 
@@ -397,8 +386,12 @@ impl JobStore for JournalJobStore {
         self.integrity_issue
     }
     async fn put(&self, job: &Job) -> Result<(), StoreError> {
-        self.append(JobEvent::Submitted, job).await?;
-        self.index.put(job).await
+        let event = if job.status == JobStatus::Pending {
+            JobEvent::Submitted
+        } else {
+            JobEvent::from_status(&job.status)
+        };
+        self.append(event, job).await
     }
 
     async fn get(&self, id: &JobId) -> Result<Option<Job>, StoreError> {
@@ -406,8 +399,7 @@ impl JobStore for JournalJobStore {
     }
 
     async fn update(&self, job: &Job, event: JobEvent) -> Result<(), StoreError> {
-        self.append(event, job).await?;
-        self.index.update(job, event).await
+        self.append(event, job).await
     }
 
     async fn pending(&self) -> Result<Vec<Job>, StoreError> {
@@ -417,6 +409,54 @@ impl JobStore for JournalJobStore {
     async fn load_all(&self) -> Result<Vec<Job>, StoreError> {
         self.index.load_all().await
     }
+    async fn prune_terminal(&self, retained: usize) -> Result<(), StoreError> {
+        let store = self.clone();
+        tokio::spawn(async move {
+            let mut writer = store.writer.lock().await;
+            let mut jobs = store.index.jobs.lock().await;
+            let mut terminal: Vec<_> = jobs
+                .values()
+                .filter(|job| {
+                    matches!(
+                        job.status,
+                        JobStatus::Completed
+                            | JobStatus::Failed
+                            | JobStatus::Cancelled
+                            | JobStatus::Resolved
+                    )
+                })
+                .map(|job| (job.id.clone(), job.completed_at.unwrap_or(job.created_at)))
+                .collect();
+            let excess = terminal.len().saturating_sub(retained);
+            if excess == 0 {
+                return Ok(());
+            }
+            terminal.sort_by_key(|(_, at)| *at);
+            let mut retained_jobs = jobs.clone();
+            for (id, _) in terminal.into_iter().take(excess) {
+                retained_jobs.remove(&id);
+            }
+            let result = compact_journal(&store.path, retained_jobs.values()).await;
+            writer.file = OpenOptions::new()
+                .append(true)
+                .read(true)
+                .open(&*store.path)
+                .await?;
+            let scan = scan_path(&store.path).await?;
+            writer.next_sequence = scan
+                .max_sequence
+                .and_then(|seq| seq.checked_add(1))
+                .unwrap_or(0);
+            *jobs = scan
+                .jobs
+                .into_iter()
+                .map(|job| (job.id.clone(), job))
+                .collect();
+            result
+        })
+        .await
+        .map_err(std::io::Error::other)?
+    }
 }
 
 struct Scan {
@@ -424,18 +464,6 @@ struct Scan {
     torn_tail: bool,
     max_sequence: Option<u64>,
     incompatible_records: usize,
-}
-
-async fn truncate_torn_tail(path: &Path) -> Result<(), StoreError> {
-    let bytes = tokio::fs::read(path).await?;
-    let complete_len = bytes
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(0, |at| at + 1);
-    let file = OpenOptions::new().write(true).open(path).await?;
-    file.set_len(complete_len as u64).await?;
-    file.sync_data().await?;
-    Ok(())
 }
 
 fn complete_len(bytes: &[u8]) -> usize {

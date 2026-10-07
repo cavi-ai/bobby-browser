@@ -243,3 +243,45 @@ async fn context_ttl_is_applied_during_runtime_build() {
         .await
         .is_none());
 }
+
+#[tokio::test]
+async fn damaged_journal_is_archived_without_blocking_new_session_setup() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = config::AppConfig::default();
+    config.storage.journal_path = root.path().join("commands.jsonl");
+    config.storage.checkpoints_dir = root.path().join("checkpoints");
+    config.browser.artifacts_dir = root.path().join("artifacts");
+    let damaged = b"corrupt journal\nunfinished";
+    tokio::fs::write(&config.storage.journal_path, damaged)
+        .await
+        .unwrap();
+    let launches = Arc::new(AtomicUsize::new(0));
+    let runtime = RuntimeService::build_with_worker_factory(
+        &config,
+        Arc::new(CountingFactory(launches.clone())),
+    )
+    .await
+    .unwrap();
+    runtime
+        .create_session(CreateSessionRequest {
+            profile: "fresh-after-archive".into(),
+            proxy: None,
+            execution_policy: Default::default(),
+            zigzagzig: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(launches.load(Ordering::SeqCst), 1);
+    let archive = std::fs::read_dir(root.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("commands.jsonl.archive-")
+        })
+        .unwrap();
+    assert_eq!(std::fs::read(archive).unwrap(), damaged);
+    assert_eq!(std::fs::read(&config.storage.journal_path).unwrap(), b"");
+}

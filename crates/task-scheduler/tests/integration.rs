@@ -10,6 +10,21 @@ use task_scheduler::{
 use tokio::sync::Mutex;
 use types::{Capability, CapabilitySet};
 
+fn archived_journal(path: &std::path::Path) -> std::path::PathBuf {
+    let prefix = format!("{}.archive-", path.file_name().unwrap().to_string_lossy());
+    std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|candidate| {
+            candidate
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(&prefix)
+        })
+        .expect("damaged journal must be archived")
+}
+
 // ===== Job tests =====
 
 #[test]
@@ -1188,7 +1203,7 @@ fn journal_torn_tail() {
         let store = JournalJobStore::open(&path).await.unwrap();
         assert!(store.recovered_torn_tail());
         let job = store.get(&id).await.unwrap().unwrap();
-        assert_eq!(job.status, JobStatus::Pending);
+        assert_eq!(job.status, JobStatus::ReconciliationRequired);
         assert_eq!(job.name, "keep");
     });
 }
@@ -1231,7 +1246,15 @@ fn journal_unreadable_middle_line_is_skipped() {
         let job = store.get(&id).await.unwrap().unwrap();
         assert_eq!(job.name, "keep");
         let health = JournalJobStore::inspect(&path).await.unwrap();
-        assert_eq!(health.incompatible_records, 2);
+        assert_eq!(health.incompatible_records, 0);
+        assert_eq!(job.status, JobStatus::ReconciliationRequired);
+        assert_eq!(
+            JournalJobStore::inspect(archived_journal(&path))
+                .await
+                .unwrap()
+                .incompatible_records,
+            2
+        );
     });
 }
 
@@ -1263,7 +1286,12 @@ fn damaged_job_history_never_replays_an_older_pending_record() {
             for _ in 0..2 {
                 let store = JournalJobStore::open(&path).await.unwrap();
                 assert!(
-                    store.pending().await.unwrap().is_empty(),
+                    store
+                        .pending()
+                        .await
+                        .unwrap()
+                        .iter()
+                        .all(|candidate| candidate.id != job.id),
                     "uncertain jobs must not replay"
                 );
                 assert_eq!(
@@ -1277,9 +1305,9 @@ fn damaged_job_history_never_replays_an_older_pending_record() {
                         JobPriority::Normal
                     ))
                     .await
-                    .is_err());
+                    .is_ok());
                 assert_eq!(
-                    std::fs::read(&path).unwrap(),
+                    std::fs::read(archived_journal(&path)).unwrap(),
                     original,
                     "inspection must preserve damaged evidence"
                 );
@@ -1966,9 +1994,9 @@ fn malformed_stored_resolution_is_degraded_before_hydration() {
             if field == "status" || field == "resolution" { record["job"][field] = value; } else { record["job"]["resolution"][field] = value; }
             let original = format!("{record}\n"); std::fs::write(&path, &original).unwrap();
             let store = JournalJobStore::open(&path).await.unwrap();
-            assert!(store.integrity_issue().is_some(), "invalid {field} must degrade history");
+            assert!(store.integrity_issue().is_none(), "invalid {field} must be archived rather than block new work");
             assert!(store.pending().await.unwrap().is_empty());
-            assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+            assert_eq!(std::fs::read_to_string(archived_journal(&path)).unwrap(), original);
         }
     });
 }
@@ -2019,4 +2047,111 @@ fn resolution_acknowledgment_error_requires_reload_before_conflicting_retry() {
         let receipt = reloaded.resolve_job(&job.id, &owner, input).await.unwrap();
         assert_eq!(receipt.evidence_sha256, "a".repeat(64));
     });
+}
+
+#[tokio::test]
+async fn durable_pruning_survives_restart_and_keeps_pending_work() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("jobs.jsonl");
+    let store = JournalJobStore::open(&path).await.unwrap();
+    let pending = Job::new("pending".into(), serde_json::json!({}), JobPriority::Normal);
+    store.put(&pending).await.unwrap();
+    for _ in 0..5 {
+        let mut job = Job::new(
+            "terminal".into(),
+            serde_json::json!({}),
+            JobPriority::Normal,
+        );
+        job.fail("finished".into());
+        store.put(&job).await.unwrap();
+    }
+    store.prune_terminal(2).await.unwrap();
+    assert_eq!(store.load_all().await.unwrap().len(), 3);
+    drop(store);
+    let reopened = JournalJobStore::open(&path).await.unwrap();
+    assert_eq!(reopened.load_all().await.unwrap().len(), 3);
+    assert_eq!(reopened.pending().await.unwrap()[0].id, pending.id);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn compaction_never_overwrites_a_preexisting_temporary_path() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("jobs.jsonl");
+    let unrelated = root.path().join("unrelated.txt");
+    tokio::fs::write(&unrelated, b"preserve these bytes")
+        .await
+        .unwrap();
+    std::os::unix::fs::symlink(&unrelated, path.with_extension("compact.tmp")).unwrap();
+    let store = JournalJobStore::open(&path).await.unwrap();
+    let mut job = Job::new(
+        "terminal".into(),
+        serde_json::json!({}),
+        JobPriority::Normal,
+    );
+    job.fail("finished".into());
+    store.put(&job).await.unwrap();
+    store.prune_terminal(0).await.unwrap();
+    assert_eq!(
+        tokio::fs::read(&unrelated).await.unwrap(),
+        b"preserve these bytes"
+    );
+    assert!(tokio::fs::symlink_metadata(&path)
+        .await
+        .unwrap()
+        .file_type()
+        .is_file());
+}
+
+#[tokio::test]
+async fn online_compaction_keeps_appending_to_the_published_journal() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("jobs.jsonl");
+    let mut job = Job::new("before".into(), serde_json::json!({}), JobPriority::Normal);
+    let mut bytes = Vec::new();
+    // Below the startup threshold, but the next update crosses the online
+    // threshold. Bulk fixture construction avoids thousands of fsync calls.
+    for sequence in 0..4096 {
+        serde_json::to_writer(
+            &mut bytes,
+            &task_scheduler::JournalRecord {
+                schema_version: 1,
+                sequence,
+                recorded_at: chrono::Utc::now(),
+                event: JobEvent::Submitted,
+                job: job.clone(),
+            },
+        )
+        .unwrap();
+        bytes.push(b'\n');
+    }
+    tokio::fs::write(&path, &bytes).await.unwrap();
+    let store = JournalJobStore::open(&path).await.unwrap();
+    job.name = "latest".into();
+    store.update(&job, JobEvent::Retried).await.unwrap();
+    assert!(tokio::fs::metadata(&path).await.unwrap().len() < bytes.len() as u64 / 100);
+    let next = Job::new("after".into(), serde_json::json!({}), JobPriority::Normal);
+    store.put(&next).await.unwrap();
+    drop(store);
+    let reopened = JournalJobStore::open(&path).await.unwrap();
+    assert_eq!(reopened.get(&job.id).await.unwrap().unwrap().name, "latest");
+    assert!(reopened.get(&next.id).await.unwrap().is_some());
+    let text = tokio::fs::read_to_string(&path).await.unwrap();
+    let sequences: Vec<_> = text
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<task_scheduler::JournalRecord>(line)
+                .unwrap()
+                .sequence
+        })
+        .collect();
+    assert_eq!(sequences, vec![0, 1]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
 }

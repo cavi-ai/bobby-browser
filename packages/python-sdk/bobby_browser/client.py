@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -69,14 +70,71 @@ def _uuid4() -> str:
     return str(uuid.uuid4())
 
 
+def _effective_deadline(options: Optional[RequestOptions], default_timeout_ms: int) -> tuple:
+    now = datetime.now(timezone.utc)
+    monotonic_now = time.monotonic()
+    timeout_ms = options.timeout_ms if options else None
+    absolute = options.deadline if options else None
+    try:
+        deadlines = []
+        if absolute is not None:
+            deadline = datetime.fromisoformat(absolute.replace("Z", "+00:00"))
+            if deadline.tzinfo is None:
+                raise ValueError("deadline requires a timezone")
+            deadlines.append(deadline.astimezone(timezone.utc))
+        if timeout_ms is not None or absolute is None:
+            relative = default_timeout_ms if timeout_ms is None else timeout_ms
+            if isinstance(relative, bool) or not isinstance(relative, int) or relative <= 0:
+                raise ValueError("timeout_ms must be a positive integer")
+            deadlines.append(now + timedelta(milliseconds=relative))
+        deadline = min(deadlines)
+        remaining = (deadline - now).total_seconds()
+        if remaining <= 0:
+            raise ValueError("deadline has elapsed")
+    except (ValueError, TypeError, AttributeError, OverflowError) as error:
+        raise RuntimeClientError("deadline", message="Request deadline is invalid or has already elapsed") from error
+    return deadline, monotonic_now + remaining
+
+
+def _format_deadline(deadline: datetime) -> str:
+    return deadline.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 def _deadline_header(options: Optional[RequestOptions], default_timeout_ms: int) -> str:
-    if options is not None and options.deadline:
-        return options.deadline
-    timeout_ms = default_timeout_ms
-    if options is not None and options.timeout_ms is not None:
-        timeout_ms = options.timeout_ms
-    deadline = datetime.now(timezone.utc) + timedelta(milliseconds=timeout_ms)
-    return deadline.strftime("%Y-%m-%dT%H:%M:%S.") + f"{deadline.microsecond // 1000:03d}Z"
+    return _format_deadline(_effective_deadline(options, default_timeout_ms)[0])
+
+
+def _remaining(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("Request deadline exceeded")
+    return remaining
+
+
+def _read_response(response: Any, deadline: float) -> bytes:
+    # urllib's socket timeout covers one blocking read, not the entire body.
+    # read1 performs at most one raw read; renew its timeout from the remaining
+    # monotonic budget so a trickling peer cannot extend the request forever.
+    read = getattr(response, "read1", response.read)
+    chunks = []
+    while True:
+        remaining = _remaining(deadline)
+        # HTTPResponse can close its socket as the final chunk is consumed.
+        # Re-resolve it each time instead of retaining a closed descriptor.
+        stream = response
+        for _ in range(5):
+            sock = getattr(stream, "_sock", None)
+            if sock is not None:
+                sock.settimeout(remaining)
+                break
+            stream = getattr(stream, "fp", None) or getattr(stream, "raw", None)
+            if stream is None:
+                break
+        chunk = read(64 * 1024)
+        _remaining(deadline)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
 
 
 def _header_get(headers: Mapping[str, str], name: str) -> Optional[str]:
@@ -371,13 +429,13 @@ class BrowserRuntimeClient:
 
     # ---- transport --------------------------------------------------------
 
-    def _headers(self, options: Optional[RequestOptions], has_body: bool) -> Dict[str, str]:
+    def _headers(self, options: Optional[RequestOptions], has_body: bool, deadline: Optional[str] = None) -> Dict[str, str]:
         correlation_id = (options.correlation_id if options else None) or _uuid4()
         headers = {
             "Authorization": f"Bearer {self._bearer_token}",
             "x-interface-version": INTERFACE_VERSION,
             "x-correlation-id": correlation_id,
-            "x-deadline": _deadline_header(options, self._timeout_ms),
+            "x-deadline": deadline or _deadline_header(options, self._timeout_ms),
         }
         if options is not None and options.idempotency_key:
             headers["idempotency-key"] = options.idempotency_key
@@ -394,31 +452,27 @@ class BrowserRuntimeClient:
     ) -> tuple:
         """Returns (status, content_type, headers, raw_bytes)."""
         url = f"{self._base_url}{path}"
-        headers = self._headers(options, body is not None)
+        deadline, budget = _effective_deadline(options, self._timeout_ms)
+        headers = self._headers(options, body is not None, _format_deadline(deadline))
         data = json.dumps(body).encode("utf-8") if body is not None else None
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
-        timeout_ms = self._timeout_ms
-        if options is not None and options.timeout_ms is not None:
-            timeout_ms = options.timeout_ms
         try:
-            response = self._opener.open(request, timeout=timeout_ms / 1000)
             try:
-                status = response.status
-                response_headers = dict(response.headers.items())
-                raw = response.read()
+                response = self._opener.open(request, timeout=_remaining(budget))
+            except urllib.error.HTTPError as error:
+                response = error
+            try:
+                status = response.code
+                response_headers = dict(response.headers.items()) if response.headers else {}
+                raw = _read_response(response, budget)
             finally:
                 response.close()
-        except urllib.error.HTTPError as error:
-            status = error.code
-            response_headers = dict(error.headers.items()) if error.headers else {}
-            raw = error.read()
-            error.close()
         except TimeoutError as error:
             raise RuntimeClientError("deadline", message="Request deadline exceeded") from error
         except urllib.error.URLError as error:
-            raise RuntimeClientError(
-                "transport", message=f"Runtime transport request failed: {error.reason}"
-            ) from error
+            if isinstance(error.reason, TimeoutError):
+                raise RuntimeClientError("deadline", message="Request deadline exceeded") from error
+            raise RuntimeClientError("transport", message=f"Runtime transport request failed: {error.reason}") from error
         content_type = _content_type(response_headers)
         return status, content_type, response_headers, raw
 

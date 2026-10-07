@@ -51,7 +51,7 @@ async fn reopens_committed_history_in_order() {
 }
 
 #[tokio::test]
-async fn ignores_and_reports_a_torn_final_line() {
+async fn archives_and_reports_a_torn_final_line() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("commands.jsonl");
     let command_id = CommandId::new();
@@ -78,15 +78,25 @@ async fn ignores_and_reports_a_torn_final_line() {
     assert_eq!(scan.records.len(), 1);
     assert!(scan.torn_tail);
 
-    reopened
+    assert!(reopened
         .append(record(&command_id, CommandPhase::Prepared))
+        .await
+        .is_err());
+    let fresh = CommandId::new();
+    reopened
+        .append(record(&fresh, CommandPhase::Accepted))
         .await
         .unwrap();
     drop(reopened);
     let recovered = JsonlJournal::open(&path).await.unwrap();
     let scan = recovered.history(command_id).await.unwrap();
-    assert_eq!(scan.records.len(), 2);
-    assert!(!scan.torn_tail);
+    assert_eq!(scan.records.len(), 1);
+    assert!(scan.torn_tail);
+    assert!(scan.incompatible_records > 0);
+    assert_eq!(
+        recovered.history(fresh).await.unwrap().incompatible_records,
+        0
+    );
 }
 
 #[tokio::test]
@@ -111,13 +121,11 @@ async fn skips_records_written_under_an_older_schema_version() {
     assert_eq!(scan.records[0].phase, CommandPhase::Prepared);
     assert!(!scan.torn_tail);
 
-    journal
+    assert!(journal
         .append(record(&command_id, CommandPhase::Executing))
         .await
-        .unwrap();
-    let scan = journal.history(command_id).await.unwrap();
-    assert_eq!(scan.records.len(), 2);
-    assert_eq!(scan.records[1].sequence, 2);
+        .is_err());
+    assert_eq!(JsonlJournal::inspect(&path).await.unwrap().bytes, 0);
 }
 
 #[tokio::test]
@@ -144,9 +152,9 @@ async fn skips_a_line_it_cannot_decode_and_keeps_appending() {
         .append(record(&next, CommandPhase::Accepted))
         .await
         .unwrap();
-    assert_eq!(journal.history(next).await.unwrap().records[0].sequence, 1);
+    assert_eq!(journal.history(next).await.unwrap().records[0].sequence, 0);
     let health = JsonlJournal::inspect(&current_version).await.unwrap();
-    assert_eq!((health.records, health.incompatible_records), (1, 1));
+    assert_eq!((health.records, health.incompatible_records), (1, 0));
 
     let no_version = dir.path().join("no-version.jsonl");
     tokio::fs::write(
@@ -159,7 +167,7 @@ async fn skips_a_line_it_cannot_decode_and_keeps_appending() {
         .await
         .expect("damaged lines must not stop the journal from opening");
     let health = JsonlJournal::inspect(&no_version).await.unwrap();
-    assert_eq!((health.records, health.incompatible_records), (0, 2));
+    assert_eq!((health.records, health.incompatible_records), (0, 0));
 }
 
 #[tokio::test]
@@ -276,7 +284,7 @@ async fn hot_history_tracks_durable_appends_and_cold_records_remain_recoverable(
 }
 
 #[tokio::test]
-async fn a_corrupt_external_append_is_skipped_by_history() {
+async fn a_corrupt_external_append_archives_history() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("commands.jsonl");
     let journal = JsonlJournal::open(&path).await.unwrap();
@@ -293,5 +301,47 @@ async fn a_corrupt_external_append_is_skipped_by_history() {
         .unwrap();
     file.write_all(b"bad-json\n").await.unwrap();
     file.sync_all().await.unwrap();
-    assert_eq!(journal.history(id).await.unwrap().records.len(), 1);
+    let scan = journal.history(id).await.unwrap();
+    assert_eq!(scan.records.len(), 1);
+    assert!(scan.incompatible_records > 0);
+    assert_eq!(JsonlJournal::inspect(&path).await.unwrap().bytes, 0);
+}
+
+#[tokio::test]
+async fn corruption_is_archived_intact_and_new_commands_survive_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("commands.jsonl");
+    let damaged = b"bad-json\nunfinished";
+    tokio::fs::write(&path, damaged).await.unwrap();
+    let journal = JsonlJournal::open(&path).await.unwrap();
+    assert_eq!(tokio::fs::read(&path).await.unwrap(), b"");
+    let mut files = tokio::fs::read_dir(dir.path()).await.unwrap();
+    let mut archived = false;
+    while let Some(file) = files.next_entry().await.unwrap() {
+        if file.path() != path {
+            assert_eq!(tokio::fs::read(file.path()).await.unwrap(), damaged);
+            archived = true;
+        }
+    }
+    assert!(archived, "damage must be preserved for later repair");
+    let old = CommandId::new();
+    assert!(
+        journal
+            .history(old.clone())
+            .await
+            .unwrap()
+            .incompatible_records
+            > 0
+    );
+    let fresh = CommandId::new();
+    journal
+        .append(record(&fresh, CommandPhase::Accepted))
+        .await
+        .unwrap();
+    drop(journal);
+    let reopened = JsonlJournal::open(&path).await.unwrap();
+    let scan = reopened.history(fresh).await.unwrap();
+    assert_eq!(scan.records.len(), 1);
+    assert_eq!(scan.incompatible_records, 0);
+    assert!(reopened.history(old).await.unwrap().incompatible_records > 0);
 }

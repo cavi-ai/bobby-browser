@@ -204,6 +204,10 @@ impl JobScheduler {
 
     /// Hydrate registry + ready queue from the store (idempotent for empty stores).
     pub async fn hydrate(&self) -> Result<(), crate::JobError> {
+        self.store
+            .prune_terminal(self.config.retained_terminal_jobs)
+            .await
+            .map_err(store_err)?;
         let jobs = self.store.load_all().await.map_err(store_err)?;
         let mut queue = self.queue.lock().await;
         let mut registry = self.job_registry.lock().await;

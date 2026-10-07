@@ -345,6 +345,9 @@ impl RuntimeService {
                         workflow_journal::CommandJournal::history(&*command_journal, command_id)
                             .await
                             .map_err(std::io::Error::other)?;
+                    if history.torn_tail || history.incompatible_records > 0 {
+                        return Ok(None);
+                    }
                     Ok(history
                         .records
                         .into_iter()

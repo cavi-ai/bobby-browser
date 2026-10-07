@@ -1419,7 +1419,10 @@ impl FirefoxCompanionWorker {
         let pending_prompts = Arc::new(RwLock::new(HashMap::<String, PendingPrompt>::new()));
         let cleanup_prompts = Arc::clone(&pending_prompts);
         let har_recorder = Arc::new(worker_pool::HarRecorder::default());
-        let har_pending = Arc::new(RwLock::new(HashMap::<String, worker_pool::HarEntry>::new()));
+        let har_pending = Arc::new(RwLock::new(HashMap::<
+            String,
+            (Option<String>, worker_pool::HarEntry),
+        >::new()));
         let har_recorder_task = Arc::clone(&har_recorder);
         let har_pending_task = Arc::clone(&har_pending);
         let network_quiet = Arc::new(AsyncMutex::new(FirefoxNetworkQuiet::default()));
@@ -1430,6 +1433,7 @@ impl FirefoxCompanionWorker {
         let cleanup_failure = Arc::new(TaskMutex::new(None));
         let task_failure = Arc::clone(&cleanup_failure);
         let cleanup_task = Arc::new(TaskMutex::new(Some(tokio::spawn(async move {
+            let mut har_limit_reported = false;
             loop {
                 match events.recv().await {
                     Ok(event) if event.method == "browsingContext.contextDestroyed" => {
@@ -1443,6 +1447,10 @@ impl FirefoxCompanionWorker {
                             // never be handled; drop it or the map grows one
                             // orphan per killed tab with an open dialog.
                             cleanup_prompts.write().await.remove(context);
+                            har_pending_task
+                                .write()
+                                .await
+                                .retain(|_, (owner, _)| owner.as_deref() != Some(context));
                         }
                     }
                     Ok(event) if event.method == "network.beforeRequestSent" => {
@@ -1468,20 +1476,38 @@ impl FirefoxCompanionWorker {
                                 .and_then(Value::as_str)
                                 .unwrap_or("GET")
                                 .to_owned();
-                            har_pending_task.write().await.insert(
+                            let mut pending = har_pending_task.write().await;
+                            if pending.len() >= 512 && !pending.contains_key(&id) {
+                                if !har_limit_reported {
+                                    tracing::warn!(
+                                        "HAR pending request limit reached; request omitted"
+                                    );
+                                    har_limit_reported = true;
+                                }
+                                continue;
+                            }
+                            har_limit_reported = false;
+                            pending.insert(
                                 id,
-                                worker_pool::HarEntry {
-                                    url,
-                                    method,
-                                    status: None,
-                                    status_text: None,
-                                    redirect_url: None,
-                                    started_unix_ms: now_unix_seconds() * 1000.0,
-                                    elapsed_ms: None,
-                                    transfer_bytes: None,
-                                    mime_type: None,
-                                    error_text: None,
-                                },
+                                (
+                                    event
+                                        .params
+                                        .get("context")
+                                        .and_then(Value::as_str)
+                                        .map(str::to_owned),
+                                    worker_pool::HarEntry {
+                                        url,
+                                        method,
+                                        status: None,
+                                        status_text: None,
+                                        redirect_url: None,
+                                        started_unix_ms: now_unix_seconds() * 1000.0,
+                                        elapsed_ms: None,
+                                        transfer_bytes: None,
+                                        mime_type: None,
+                                        error_text: None,
+                                    },
+                                ),
                             );
                         }
                     }
@@ -1496,7 +1522,8 @@ impl FirefoxCompanionWorker {
                             .and_then(Value::as_str)
                             .map(str::to_owned);
                         if let Some(id) = id {
-                            if let Some(mut entry) = har_pending_task.write().await.remove(&id) {
+                            if let Some((_, mut entry)) = har_pending_task.write().await.remove(&id)
+                            {
                                 entry.status = event
                                     .params
                                     .pointer("/response/status")
@@ -1532,7 +1559,8 @@ impl FirefoxCompanionWorker {
                             .and_then(Value::as_str)
                             .map(str::to_owned);
                         if let Some(id) = id {
-                            if let Some(mut entry) = har_pending_task.write().await.remove(&id) {
+                            if let Some((_, mut entry)) = har_pending_task.write().await.remove(&id)
+                            {
                                 entry.error_text = event
                                     .params
                                     .get("errorText")
@@ -1560,6 +1588,9 @@ impl FirefoxCompanionWorker {
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        network_quiet_task.lock().await.mark_tracking_lost();
+                        har_pending_task.write().await.clear();
+                        tracing::warn!("Firefox event stream lost events; pending HAR discarded and network quiet marked uncertain");
                         reconcile_contexts(
                             &cleanup_transport,
                             &cleanup_pages,

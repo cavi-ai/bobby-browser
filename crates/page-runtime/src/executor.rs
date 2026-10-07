@@ -34,12 +34,22 @@ impl PageRuntime {
         let scan = match journal.history(command_id.clone()).await {
             Ok(scan) => scan,
             Err(error) => {
-                return CommandOutcome::RetryableFailure {
+                return CommandOutcome::NeedsReconciliation {
                     command_id,
                     error: journal_error(error),
+                    evidence: Vec::new(),
                 }
             }
         };
+        if scan.torn_tail || scan.incompatible_records > 0 {
+            return CommandOutcome::NeedsReconciliation {
+                command_id,
+                error: internal_error(
+                    "command history was damaged and archived; reconciliation is required",
+                ),
+                evidence: Vec::new(),
+            };
+        }
         if let Some(outcome) = scan
             .records
             .iter()

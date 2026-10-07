@@ -356,3 +356,57 @@ class ClientUnitTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class DeadlineTests(unittest.TestCase):
+    def test_relative_timeout_wins_over_later_absolute_deadline(self):
+        from datetime import datetime, timedelta, timezone
+        from bobby_browser.client import _deadline_header
+        now = datetime.now(timezone.utc)
+        header = _deadline_header(RequestOptions(timeout_ms=50, deadline=(now + timedelta(hours=1)).isoformat()), 30000)
+        effective = datetime.fromisoformat(header.replace("Z", "+00:00"))
+        self.assertLess((effective - now).total_seconds(), 0.1)
+
+    def test_expired_deadline_never_dispatches(self):
+        class Opener:
+            def open(self, *args, **kwargs):
+                raise AssertionError("expired request was dispatched")
+        client = BrowserRuntimeClient("http://localhost", "token", opener=Opener())
+        with self.assertRaises(RuntimeClientError) as result:
+            client._request_raw("GET", "/v1/info", None, RequestOptions(deadline="2000-01-01T00:00:00Z"))
+        self.assertEqual(result.exception.kind, "deadline")
+
+    def test_trickling_success_and_error_bodies_share_one_deadline(self):
+        import time
+        for status in (200, 503):
+            with self.subTest(status=status):
+                def handler(req):
+                    req.send_response(status)
+                    req.send_header("Content-Type", "application/json")
+                    req.send_header("Content-Length", "100")
+                    req.end_headers()
+                    try:
+                        for _ in range(100):
+                            req.wfile.write(b" ")
+                            req.wfile.flush()
+                            time.sleep(0.02)
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                server = _FakeServer(handler)
+                try:
+                    client = BrowserRuntimeClient(server.base_url, "token")
+                    started = time.monotonic()
+                    with self.assertRaises(RuntimeClientError) as result:
+                        client._request_raw("GET", "/v1/runtime", None, RequestOptions(timeout_ms=100))
+                    self.assertEqual(result.exception.kind, "deadline")
+                    self.assertLess(time.monotonic() - started, 0.6)
+                finally:
+                    server.close()
+
+    def test_invalid_deadlines_and_timeouts_never_dispatch(self):
+        class Opener:
+            def open(self, *args, **kwargs):
+                raise AssertionError("invalid request was dispatched")
+        client = BrowserRuntimeClient("http://localhost", "token", opener=Opener())
+        for options in (RequestOptions(timeout_ms=0), RequestOptions(timeout_ms=-1), RequestOptions(timeout_ms=True), RequestOptions(deadline="not-a-date"), RequestOptions(deadline="2030-01-01T00:00:00")):
+            with self.subTest(options=options), self.assertRaises(RuntimeClientError):
+                client._request_raw("GET", "/v1/runtime", None, options)

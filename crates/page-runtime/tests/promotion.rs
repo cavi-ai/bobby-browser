@@ -571,3 +571,37 @@ async fn ambiguous_remembered_controls_answer_nothing() {
         "two same-name remembered controls must tie-refuse"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_promotions_preserve_independent_controls_and_counters() {
+    let (promotion, temp) = promotion().await;
+    let promotion = Arc::new(promotion);
+    let barrier = Arc::new(tokio::sync::Barrier::new(32));
+    let mut tasks = Vec::new();
+    for index in 0..32 {
+        let promotion = promotion.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            let evidence = vec![
+                resolution(&format!("Field {index}"), None),
+                Evidence::IntentExecution {
+                    record: record("fill", IntentResolutionPath::Deterministic),
+                },
+            ];
+            barrier.wait().await;
+            promotion.record_outcome(Some(URL), &evidence, true).await;
+        }));
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+    promotion.flush().await;
+    drop(promotion);
+    let (store, _) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
+    let site = store.site("https://example.test").await.unwrap();
+    let controls = &site.pages["/login"].forms["page"].controls;
+    assert_eq!(controls.len(), 32);
+    assert!(controls
+        .iter()
+        .all(|control| control.intents["fill"].success_count == 1));
+}

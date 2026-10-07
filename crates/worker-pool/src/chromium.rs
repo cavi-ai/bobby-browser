@@ -345,6 +345,20 @@ struct ChromiumWorker {
     session_random: Mutex<SessionRandom>,
 }
 
+impl Drop for ChromiumWorker {
+    fn drop(&mut self) {
+        for (_, task) in self.har_tasks.get_mut().drain() {
+            task.abort();
+        }
+        for (_, task) in self.dialog_tasks.get_mut().drain() {
+            task.abort();
+        }
+        if let Some(task) = self.handler_task.get_mut().take() {
+            task.abort();
+        }
+    }
+}
+
 #[derive(Default)]
 struct HttpBridgeState {
     version: u64,
@@ -876,6 +890,7 @@ impl ChromiumWorker {
                 return;
             };
             let mut pending: HashMap<String, (crate::HarEntry, f64)> = HashMap::new();
+            let mut pending_limit_reported = false;
             loop {
                 tokio::select! {
                     event = will_send.next() => {
@@ -896,6 +911,14 @@ impl ChromiumWorker {
                             redirected.mime_type = Some(response.mime_type.clone());
                             task_recorder.record(redirected).await;
                         }
+                        if pending.len() >= 512 && !pending.contains_key(&id) {
+                            if !pending_limit_reported {
+                                tracing::warn!("HAR pending request limit reached; request omitted");
+                                pending_limit_reported = true;
+                            }
+                            continue;
+                        }
+                        pending_limit_reported = false;
                         pending.insert(
                             id,
                             (
@@ -3101,6 +3124,13 @@ return [role, name.slice(0, 200)];
     async fn close(&self) -> Result<(), CommandError> {
         self.pages.lock().await.clear();
         self.network_trackers.lock().await.clear();
+        for (_, task) in self.har_tasks.lock().await.drain() {
+            task.abort();
+        }
+        for (_, task) in self.dialog_tasks.lock().await.drain() {
+            task.abort();
+        }
+        self.har_recorders.lock().await.clear();
         if let Some(mut browser) = self.browser.lock().await.take() {
             // Teardown must not fail because the browser is already dead:
             // an uncloseable-but-gone browser would wedge the session in the
@@ -3126,6 +3156,13 @@ return [role, name.slice(0, 200)];
     async fn terminate(&self) -> Result<(), CommandError> {
         self.pages.lock().await.clear();
         self.network_trackers.lock().await.clear();
+        for (_, task) in self.har_tasks.lock().await.drain() {
+            task.abort();
+        }
+        for (_, task) in self.dialog_tasks.lock().await.drain() {
+            task.abort();
+        }
+        self.har_recorders.lock().await.clear();
         let close_result = if let Some(mut browser) = self.browser.lock().await.take() {
             match browser.close().await {
                 Ok(_) => Ok(()),
@@ -4839,6 +4876,39 @@ mod tests {
         assert!(!should_retry_click_target_detach(false, &dispatch_failure));
         // A stale node is the bounded drift retry's case, not this one.
         assert!(!should_retry_click_target_detach(false, &stale));
+    }
+
+    #[tokio::test]
+    async fn dropping_a_worker_aborts_its_owned_background_listeners() {
+        let root = tempfile::tempdir().unwrap();
+        let worker = chromium_worker_without_browser(root.path());
+        let (har_closed, har_receiver) = tokio::sync::oneshot::channel::<()>();
+        let (dialog_closed, dialog_receiver) = tokio::sync::oneshot::channel::<()>();
+        let har = tokio::spawn(async move {
+            std::future::pending::<()>().await;
+            drop(har_closed);
+        });
+        let dialog = tokio::spawn(async move {
+            std::future::pending::<()>().await;
+            drop(dialog_closed);
+        });
+        let har_abort = har.abort_handle();
+        let dialog_abort = dialog.abort_handle();
+        worker.har_tasks.lock().await.insert(PageId::new(), har);
+        worker
+            .dialog_tasks
+            .lock()
+            .await
+            .insert(PageId::new(), dialog);
+        drop(worker);
+        let har_result =
+            tokio::time::timeout(std::time::Duration::from_secs(1), har_receiver).await;
+        let dialog_result =
+            tokio::time::timeout(std::time::Duration::from_secs(1), dialog_receiver).await;
+        har_abort.abort();
+        dialog_abort.abort();
+        assert!(matches!(har_result, Ok(Err(_))));
+        assert!(matches!(dialog_result, Ok(Err(_))));
     }
 
     fn chromium_worker_without_browser(root: &std::path::Path) -> ChromiumWorker {

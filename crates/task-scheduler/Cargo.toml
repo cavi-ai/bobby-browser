@@ -19,6 +19,7 @@ tracing.workspace = true
 types.workspace = true
 uuid.workspace = true
 network-engine.workspace = true
+workflow-journal.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

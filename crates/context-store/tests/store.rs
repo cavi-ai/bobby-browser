@@ -382,3 +382,49 @@ async fn concurrent_flushes_leave_the_newest_state_on_disk() {
         );
     }
 }
+
+#[tokio::test]
+async fn sweep_accepts_an_empty_site_that_was_never_flushed() {
+    let temp = tempfile::tempdir().unwrap();
+    let (store, _) = ContextStore::open(temp.path(), "profile").await.unwrap();
+    store
+        .upsert_site("https://empty.test", SiteContext::default())
+        .await;
+    assert_eq!(store.sweep(30, 100).await.unwrap(), 0);
+    assert!(store.list_sites().await.is_empty());
+    assert!(store.flush().await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_challenges_preserve_every_outcome_and_unrelated_structure() {
+    let temp = tempfile::tempdir().unwrap();
+    let (store, _) = ContextStore::open(temp.path(), "profile").await.unwrap();
+    store
+        .upsert_site("https://example.test", site(&["Email"], 100))
+        .await;
+    let store = std::sync::Arc::new(store);
+    let mut tasks = Vec::new();
+    for _ in 0..32 {
+        let store = store.clone();
+        tasks.push(tokio::spawn(async move {
+            for _ in 0..10 {
+                store
+                    .record_challenge("https://example.test", "captcha", true, 100)
+                    .await;
+            }
+        }));
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+    let remembered = store.site("https://example.test").await.unwrap();
+    assert_eq!(remembered.challenges["captcha"].success_count, 320);
+    assert_eq!(remembered.pages, site(&["Email"], 100).pages);
+    assert!(store.flush().await.is_empty());
+    drop(store);
+    let (reopened, _) = ContextStore::open(temp.path(), "profile").await.unwrap();
+    assert_eq!(
+        reopened.site("https://example.test").await.unwrap(),
+        remembered
+    );
+}

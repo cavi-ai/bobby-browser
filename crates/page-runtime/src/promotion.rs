@@ -131,25 +131,27 @@ impl ContextPromotion {
         }
 
         if !controls.is_empty() {
-            let mut site_context = self.store.site(&site).await.unwrap_or_default();
-            let page = site_context.pages.entry(pattern).or_default();
-            let form = page.forms.entry(PAGE_LEVEL_FORM.to_string()).or_default();
-            for (control, intent_kind, source) in controls {
-                let index = match form.controls.iter().position(|existing| {
-                    existing.role == control.role
-                        && existing.accessible_name == control.accessible_name
-                        && existing.ordinal == control.ordinal
-                }) {
-                    Some(index) => index,
-                    None => {
-                        form.controls.push(control);
-                        form.controls.len() - 1
+            self.store
+                .update_site(&site, |site_context| {
+                    let page = site_context.pages.entry(pattern).or_default();
+                    let form = page.forms.entry(PAGE_LEVEL_FORM.to_string()).or_default();
+                    for (control, intent_kind, source) in controls {
+                        let index = match form.controls.iter().position(|existing| {
+                            existing.role == control.role
+                                && existing.accessible_name == control.accessible_name
+                                && existing.ordinal == control.ordinal
+                        }) {
+                            Some(index) => index,
+                            None => {
+                                form.controls.push(control);
+                                form.controls.len() - 1
+                            }
+                        };
+                        let stats = form.controls[index].intents.entry(intent_kind).or_default();
+                        apply_outcome(stats, success, source);
                     }
-                };
-                let stats = form.controls[index].intents.entry(intent_kind).or_default();
-                apply_outcome(stats, success, source);
-            }
-            self.store.upsert_site(&site, site_context).await;
+                })
+                .await;
         }
         // A runtime can stop without any session closing (a shared owner
         // restart, a killed process), so the outcome is written now rather

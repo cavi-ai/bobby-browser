@@ -606,6 +606,13 @@ impl SkillRecoveryCoordinator {
             .history(envelope.command_id.clone())
             .await
             .map_err(journal_error)?;
+        if history.torn_tail || history.incompatible_records > 0 {
+            return Err(recovery_error(
+                ErrorCode::Internal,
+                "command history was damaged and archived; reconciliation required",
+                false,
+            ));
+        }
         if history
             .records
             .iter()

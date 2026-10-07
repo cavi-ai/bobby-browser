@@ -148,14 +148,28 @@ pub fn day_since_epoch(time: chrono::DateTime<chrono::Utc>) -> u32 {
     (time.timestamp().max(0) / 86_400) as u32
 }
 
+#[derive(Default)]
+struct StoreState {
+    sites: BTreeMap<String, SiteContext>,
+    dirty: BTreeMap<String, u64>,
+    revision: u64,
+}
+
+impl StoreState {
+    fn mark_dirty(&mut self, key: &str) {
+        self.revision = self.revision.wrapping_add(1);
+        self.dirty.insert(key.to_string(), self.revision);
+    }
+}
+
+#[derive(Clone)]
 pub struct ContextStore {
     root: Arc<PathBuf>,
-    sites: Mutex<BTreeMap<String, SiteContext>>,
-    dirty: Mutex<BTreeMap<String, bool>>,
+    state: Arc<Mutex<StoreState>>,
     /// One flush at a time: two overlapping flushes of one site could
     /// otherwise rename an older snapshot over a newer one.
-    flushing: Mutex<()>,
-    _lock: Lockfile,
+    flushing: Arc<Mutex<()>>,
+    _lock: Arc<Lockfile>,
 }
 
 impl ContextStore {
@@ -191,10 +205,12 @@ impl ContextStore {
         Ok((
             Self {
                 root: Arc::new(root),
-                sites: Mutex::new(index),
-                dirty: Mutex::new(BTreeMap::new()),
-                flushing: Mutex::new(()),
-                _lock: lock,
+                state: Arc::new(Mutex::new(StoreState {
+                    sites: index,
+                    ..StoreState::default()
+                })),
+                flushing: Arc::new(Mutex::new(())),
+                _lock: Arc::new(lock),
             },
             report,
         ))
@@ -215,19 +231,25 @@ impl ContextStore {
 
     /// In-memory view of a site, if present.
     pub async fn site(&self, site_key: &str) -> Option<SiteContext> {
-        self.sites.lock().await.get(site_key).cloned()
+        self.state.lock().await.sites.get(site_key).cloned()
     }
 
     pub async fn list_sites(&self) -> Vec<String> {
-        self.sites.lock().await.keys().cloned().collect()
+        self.state.lock().await.sites.keys().cloned().collect()
     }
 
     /// Replaces (or inserts) a site's context, buffering the write behind
     /// `flush`. Never fails the caller's workflow: persistence happens on
     /// flush, and flush errors degrade to session-only.
     pub async fn upsert_site(&self, site_key: &str, site: SiteContext) {
-        self.sites.lock().await.insert(site_key.to_string(), site);
-        self.dirty.lock().await.insert(site_key.to_string(), true);
+        self.update_site(site_key, |current| *current = site).await;
+    }
+
+    /// Mutate a site atomically, avoiding lost updates from cloned snapshots.
+    pub async fn update_site(&self, site_key: &str, update: impl FnOnce(&mut SiteContext)) {
+        let mut state = self.state.lock().await;
+        update(state.sites.entry(site_key.to_string()).or_default());
+        state.mark_dirty(site_key);
     }
 
     /// Records one challenge outcome against a site. Success stamps the
@@ -239,18 +261,19 @@ impl ContextStore {
         success: bool,
         today: u32,
     ) {
-        let mut site = self.site(site_key).await.unwrap_or_default();
-        let stats = site
-            .challenges
-            .entry(challenge_kind.to_string())
-            .or_default();
-        if success {
-            stats.success_count += 1;
-            stats.last_verified_day = Some(today);
-        } else {
-            stats.failure_count += 1;
-        }
-        self.upsert_site(site_key, site).await;
+        self.update_site(site_key, |site| {
+            let stats = site
+                .challenges
+                .entry(challenge_kind.to_string())
+                .or_default();
+            if success {
+                stats.success_count += 1;
+                stats.last_verified_day = Some(today);
+            } else {
+                stats.failure_count += 1;
+            }
+        })
+        .await;
     }
 
     /// The most-attempted challenge kind for a site and its stats — the
@@ -267,52 +290,101 @@ impl ContextStore {
     /// Persists every dirty site. Returns the keys that failed to write;
     /// they stay dirty and remain available in memory for this session.
     pub async fn flush(&self) -> Vec<String> {
-        let _flushing = self.flushing.lock().await;
-        let dirty_keys: Vec<String> = {
-            let mut dirty = self.dirty.lock().await;
-            let keys = dirty.keys().cloned().collect();
-            dirty.clear();
-            keys
-        };
+        let guard = self.flushing.clone().lock_owned().await;
+        let store = self.clone();
+        // The owned writer continues through cancellation of its caller. The
+        // lock stays held until all filesystem work has finished.
+        tokio::spawn(async move {
+            let _guard = guard;
+            store.flush_locked().await
+        })
+        .await
+        .expect("context persistence task panicked")
+    }
+
+    async fn flush_locked(&self) -> Vec<String> {
+        let dirty_keys: Vec<_> = self.state.lock().await.dirty.keys().cloned().collect();
         let mut failed = Vec::new();
         for key in dirty_keys {
-            let site = self.sites.lock().await.get(&key).cloned();
-            let Some(site) = site else { continue };
-            if let Err(error) = self.write_site(&key, &site).await {
+            let (revision, site) = {
+                let state = self.state.lock().await;
+                let Some(revision) = state.dirty.get(&key).copied() else {
+                    continue;
+                };
+                (revision, state.sites.get(&key).cloned())
+            };
+            let result = match site {
+                Some(site) => self.write_site(&key, &site).await,
+                None => self.remove_site_file(&key).await,
+            };
+            if let Err(error) = result {
                 tracing::warn!(site = %key, %error, "context.flush_failed");
-                self.dirty.lock().await.insert(key.clone(), true);
                 failed.push(key);
+            } else {
+                let mut state = self.state.lock().await;
+                if state.dirty.get(&key) == Some(&revision) {
+                    state.dirty.remove(&key);
+                }
             }
         }
         failed
     }
 
-    /// Removes a site's context entirely — memory and file. Total and
-    /// immediate.
-    pub async fn forget(&self, site_key: &str) -> Result<(), ContextStoreError> {
-        self.sites.lock().await.remove(site_key);
-        self.dirty.lock().await.remove(site_key);
-        match tokio::fs::remove_file(self.path(site_key)).await {
-            Ok(()) => {
-                File::open(self.root.as_ref()).await?.sync_all().await?;
-                Ok(())
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error.into()),
+    async fn remove_site_file(&self, key: &str) -> Result<(), ContextStoreError> {
+        match tokio::fs::remove_file(self.path(key)).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
+        File::open(self.root.as_ref()).await?.sync_all().await?;
+        Ok(())
+    }
+
+    /// Erasure is ordered after earlier writes and remains pending if I/O fails.
+    pub async fn forget(&self, site_key: &str) -> Result<(), ContextStoreError> {
+        let guard = self.flushing.clone().lock_owned().await;
+        let store = self.clone();
+        let key = site_key.to_string();
+        tokio::spawn(async move {
+            let _guard = guard;
+            let mut state = store.state.lock().await;
+            state.sites.remove(&key);
+            state.mark_dirty(&key);
+            let revision = state.dirty[&key];
+            drop(state);
+            store.remove_site_file(&key).await?;
+            let mut state = store.state.lock().await;
+            if state.dirty.get(&key) == Some(&revision) {
+                state.dirty.remove(&key);
+            }
+            Ok(())
+        })
+        .await
+        .map_err(std::io::Error::other)?
     }
 
     /// Drops intent stats not verified within `ttl_days` of `today` (a
     /// day-since-epoch value). Empty forms, pages, and sites are pruned and
     /// their files removed. Returns the number of stats dropped.
     pub async fn sweep(&self, ttl_days: u32, today: u32) -> Result<u64, ContextStoreError> {
+        let guard = self.flushing.clone().lock_owned().await;
+        let store = self.clone();
+        tokio::spawn(async move {
+            let _guard = guard;
+            store.sweep_locked(ttl_days, today).await
+        })
+        .await
+        .map_err(std::io::Error::other)?
+    }
+
+    async fn sweep_locked(&self, ttl_days: u32, today: u32) -> Result<u64, ContextStoreError> {
         let cutoff = today.saturating_sub(ttl_days);
         let mut dropped = 0_u64;
         let mut emptied = Vec::new();
         let mut changed = Vec::new();
         {
-            let mut sites = self.sites.lock().await;
-            for (key, site) in sites.iter_mut() {
+            let mut state = self.state.lock().await;
+            for (key, site) in state.sites.iter_mut() {
                 let before_pages = site.pages.len();
                 let before = dropped;
                 for page in site.pages.values_mut() {
@@ -331,26 +403,21 @@ impl ContextStore {
                     page.forms.retain(|_, form| !form.controls.is_empty());
                 }
                 site.pages.retain(|_, page| !page.forms.is_empty());
-                if site.pages.is_empty() {
+                if site.pages.is_empty() && site.challenges.is_empty() {
                     emptied.push(key.clone());
                 } else if dropped != before || site.pages.len() != before_pages {
                     changed.push(key.clone());
                 }
             }
             for key in &emptied {
-                sites.remove(key);
+                state.sites.remove(key);
+                state.mark_dirty(key);
             }
-        }
-        {
-            let mut dirty = self.dirty.lock().await;
             for key in changed {
-                dirty.insert(key, true);
+                state.mark_dirty(&key);
             }
         }
-        for key in emptied {
-            tokio::fs::remove_file(self.path(&key)).await?;
-        }
-        let failed = self.flush().await;
+        let failed = self.flush_locked().await;
         if !failed.is_empty() {
             return Err(std::io::Error::other(format!(
                 "retention sweep failed to persist {} site(s): {}",
@@ -489,5 +556,30 @@ impl Drop for Lockfile {
     /// not exist. Unlocking drops the lock for every copy at once.
     fn drop(&mut self) {
         let _ = self.file.unlock();
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelled_flush_finishes_before_erasure_and_does_not_revive_a_site() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = ContextStore::open(dir.path(), "profile").await.unwrap();
+        store.upsert_site("site", SiteContext::default()).await;
+        let state_guard = store.state.lock().await;
+        let flushing_store = store.clone();
+        let flush = tokio::spawn(async move { flushing_store.flush().await });
+        while store.flushing.try_lock().is_ok() {
+            tokio::task::yield_now().await;
+        }
+        flush.abort();
+        let _ = flush.await;
+        drop(state_guard);
+        store.forget("site").await.unwrap();
+        assert!(!store.path("site").exists());
+        assert!(store.site("site").await.is_none());
+        assert!(store.flush().await.is_empty());
     }
 }
