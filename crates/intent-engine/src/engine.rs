@@ -10,10 +10,10 @@ use observability::{
 };
 use types::{
     CaptureScreenshotCommand, ClickCommand, CommandError, ControlAction, ControlActionCommand,
-    ElementState, ErrorCode, ErrorLayer, Evidence, ExecutionRecord, ExtractValueKind,
-    FormControlTarget, IntentCommand, IntentResolutionPath, PageId, ScreenshotMode,
-    SemanticTargetSegment, TargetFingerprint, TargetSpec, TypeTextCommand, UploadFilesCommand,
-    WaitCondition, WaitForCommand,
+    ErrorCode, ErrorLayer, Evidence, ExecutionRecord, ExtractValueKind, FormControlTarget,
+    IntentCommand, IntentResolutionPath, PageId, ScreenshotMode, SemanticTargetSegment,
+    TargetFingerprint, TargetSpec, TypeTextCommand, UploadFilesCommand, WaitCondition,
+    WaitForCommand,
 };
 
 use crate::compiler::{compile_intent, CompleteFormFieldPlan, ExtractFieldPlan, IntentPlan};
@@ -293,6 +293,7 @@ async fn execute_complete_form(
                 &field.purpose,
                 reveal_target,
                 &field.target,
+                &field.value,
             )
             .await
             {
@@ -356,6 +357,7 @@ async fn reveal_field(
     purpose: &str,
     reveal_target: &TargetSpec,
     revealed_field_target: &TargetSpec,
+    revealed_field_value: &ControlAction,
 ) -> IntentOutcome {
     let plan_summary = format!("reveal {}", summarize_target(reveal_target));
     let candidates = match browser.collect_candidates(page_id, reveal_target).await {
@@ -478,14 +480,14 @@ async fn reveal_field(
         }
     };
 
-    let wait = WaitForCommand {
-        condition: WaitCondition::Element {
-            target: Box::new(revealed_field_target.clone()),
-            state: ElementState::Visible,
-        },
-        timeout_ms: REVEAL_WAIT_TIMEOUT_MS,
-    };
-    match browser.wait_for(page_id, &wait).await {
+    match wait_for_revealed_field(
+        page_id,
+        browser,
+        revealed_field_target,
+        revealed_field_value,
+    )
+    .await
+    {
         Ok(mut wait_evidence) => {
             click_evidence.append(&mut wait_evidence);
             click_evidence.push(intent_evidence(execution_record(
@@ -518,6 +520,50 @@ async fn reveal_field(
                 evidence: click_evidence,
             }
         }
+    }
+}
+
+/// Waits until the revealed field resolves to exactly one rendered form
+/// control through the same candidate collection the fill step uses. The
+/// generic element wait matches a wrapping `<label>` with the same name as
+/// the control and reports the pair as ambiguous; a label is never the
+/// target of a fill, so the wait must not see it either.
+async fn wait_for_revealed_field(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    field_target: &TargetSpec,
+    field_value: &ControlAction,
+) -> Result<Vec<Evidence>, CommandError> {
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_millis(REVEAL_WAIT_TIMEOUT_MS);
+    loop {
+        let gathered = browser.collect_candidates(page_id, field_target).await?;
+        let compatible_candidates = gathered
+            .iter()
+            .filter(|candidate| compatible(field_value, candidate))
+            .cloned()
+            .collect::<Vec<_>>();
+        let candidates = if compatible_candidates.is_empty() {
+            gathered
+        } else {
+            compatible_candidates
+        };
+        if let Ok(ResolutionDecision::Resolved { .. }) =
+            resolve_candidates(field_target, &candidates, &ResolutionPolicy::default())
+        {
+            return Ok(Vec::new());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(CommandError {
+                code: ErrorCode::WaitConditionTimedOut,
+                message: format!(
+                    "wait condition was not satisfied within {REVEAL_WAIT_TIMEOUT_MS}ms"
+                ),
+                layer: ErrorLayer::Driver,
+                retryable: false,
+            });
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
 

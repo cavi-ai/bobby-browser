@@ -253,17 +253,30 @@ impl ResolvedTarget {
             // Split into runs of chars the US keyboard layout can key-press
             // versus runs that need a caret-level insert (Unicode outside
             // the US map, or newlines, which type_str cannot key-press).
-            let mut runs: Vec<(bool, String)> = Vec::new();
+            //
+            // In a single-line `<input>` a newline is the Enter key: it
+            // submits the form, as an agent typing "query\n" expects. Text
+            // areas and editable regions keep the newline as text.
+            let single_line: bool = self
+                .eval(page, "return el instanceof HTMLInputElement")
+                .await?;
+            let mut runs: Vec<(u8, String)> = Vec::new();
             for ch in value.chars() {
-                let keyable =
-                    ch != '\n' && ch != '\r' && get_key_definition(ch.to_string()).is_some();
+                let line_break = ch == '\n' || ch == '\r';
+                let kind = if line_break && single_line {
+                    2
+                } else {
+                    u8::from(!line_break && get_key_definition(ch.to_string()).is_some())
+                };
                 match runs.last_mut() {
-                    Some((run_keyable, run)) if *run_keyable == keyable => run.push(ch),
-                    _ => runs.push((keyable, ch.to_string())),
+                    Some((run_kind, run)) if *run_kind == kind && kind != 2 => run.push(ch),
+                    _ => runs.push((kind, ch.to_string())),
                 }
             }
-            for (keyable, run) in runs {
-                if keyable {
+            for (kind, run) in runs {
+                if kind == 2 {
+                    element.press_key("Enter").await.map_err(cdp_error)?;
+                } else if kind == 1 {
                     element.type_str(run).await.map_err(cdp_error)?;
                 } else {
                     page.execute(InsertTextParams::new(run))
@@ -280,9 +293,14 @@ impl ResolvedTarget {
             )
         })?;
         let clear = if clear_first { "el.value=''" } else { "" };
+        // A newline typed into a single-line `<input>` is the Enter key: the
+        // text lands without it and the form is submitted, as a key press
+        // would. Elsewhere the newline stays part of the text.
+        let enter = "const single=el instanceof HTMLInputElement;const text=single?String(raw).replace(/[\\r\\n]/g,''):raw;const pressed=single&&/[\\r\\n]/.test(raw);";
+        let submit = "if(pressed){const key={key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true};const down=el.dispatchEvent(new KeyboardEvent('keydown',key));el.dispatchEvent(new KeyboardEvent('keypress',key));el.dispatchEvent(new KeyboardEvent('keyup',key));if(down&&el.form){el.form.requestSubmit()}}";
         self.eval::<bool>(
             page,
-            &format!("{clear}; el.focus(); el.value += {value}; el.dispatchEvent(new Event('input',{{bubbles:true}})); el.dispatchEvent(new Event('change',{{bubbles:true}})); return true"),
+            &format!("const raw={value};{enter}{clear}; el.focus(); el.value += text; el.dispatchEvent(new Event('input',{{bubbles:true}})); el.dispatchEvent(new Event('change',{{bubbles:true}})); {submit} return true"),
         )
         .await?;
         Ok(())

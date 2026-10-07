@@ -2931,6 +2931,7 @@ async fn settle_document(
     transport: &Arc<dyn BidiTransport>,
     context: &str,
     budget: Duration,
+    requested_url: &str,
 ) -> Option<(String, String)> {
     let deadline = Instant::now() + budget;
     loop {
@@ -2938,7 +2939,7 @@ async fn settle_document(
         if remaining.is_zero() {
             return None;
         }
-        let expression = navigation_settle_expression(remaining.as_millis().max(1));
+        let expression = navigation_settle_expression(remaining.as_millis().max(1), requested_url);
         // Firefox does not always reject a pending evaluation when a script
         // redirect replaces the document under it, so the probe races a watch
         // on the context's URL and restarts in the new document when it moves.
@@ -3489,15 +3490,16 @@ impl BrowserWorker for FirefoxCompanionWorker {
         // the page, and a redirect chain can still be running. Report the
         // URL and title read after the document has stopped changing.
         let settle_budget = Duration::from_millis(command.timeout_ms).min(NAVIGATION_SETTLE_CAP);
-        let (url, title) = match settle_document(&self.transport, &context, settle_budget).await {
-            Some(settled) => settled,
-            None => (
-                context_url(&self.transport, &context)
-                    .await
-                    .unwrap_or(response_url),
-                capture_context_title(&self.transport, &context).await?,
-            ),
-        };
+        let (url, title) =
+            match settle_document(&self.transport, &context, settle_budget, &command.url).await {
+                Some(settled) => settled,
+                None => (
+                    context_url(&self.transport, &context)
+                        .await
+                        .unwrap_or(response_url),
+                    capture_context_title(&self.transport, &context).await?,
+                ),
+            };
         Ok(vec![
             Evidence::Navigation { url, title },
             self.evidence(InteractionPath::EngineNative),

@@ -1415,7 +1415,7 @@ impl BrowserWorker for ChromiumWorker {
         // the page, and a redirect chain can still be running. Report the
         // URL and title read after the document has stopped changing.
         let budget = Duration::from_millis(command.timeout_ms).min(NAVIGATION_SETTLE_CAP);
-        if let Some((url, title)) = settle_document(&page, budget).await {
+        if let Some((url, title)) = settle_document(&page, budget, command.url.as_str()).await {
             return Ok(vec![Evidence::Navigation {
                 url,
                 title: redact_secret_material(title),
@@ -1794,9 +1794,26 @@ impl BrowserWorker for ChromiumWorker {
                     .type_text(&page, &command.value, command.clear_first)
                     .await?;
             }
-            (resolved.value(&page).await?.unwrap_or_default(), "text")
+            // Enter in the text submits the form; when the page navigates
+            // the control is gone and cannot be read back.
+            let submitted_with_enter = command.value.contains(['\n', '\r']);
+            let observed = match resolved.value(&page).await {
+                Ok(value) => value.unwrap_or_default(),
+                Err(_) if submitted_with_enter => command.value.replace(['\n', '\r'], ""),
+                Err(error) => return Err(error),
+            };
+            (observed, "text")
         };
-        let validity = resolved.form_control_validity(&page).await?;
+        let validity = match resolved.form_control_validity(&page).await {
+            Ok(validity) => validity,
+            Err(_) if command.value.contains(['\n', '\r']) => {
+                crate::targeting::FormControlValidity {
+                    valid: true,
+                    validation_message: String::new(),
+                }
+            }
+            Err(error) => return Err(error),
+        };
         let mut evidence = vec![
             Evidence::Element {
                 selector: command.selector.clone(),
@@ -3717,15 +3734,21 @@ fn redact_secret_material(value: String) -> String {
 /// `budget` runs out, and returns the URL and title read at that point. A
 /// redirect that replaces the document while the probe runs restarts it.
 /// `None` when no read succeeded within the budget.
-async fn settle_document(page: &Page, budget: Duration) -> Option<(String, String)> {
+async fn settle_document(
+    page: &Page,
+    budget: Duration,
+    requested_url: &str,
+) -> Option<(String, String)> {
     let deadline = Instant::now() + budget;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return None;
         }
-        let mut params =
-            EvaluateParams::new(navigation_settle_expression(remaining.as_millis().max(1)));
+        let mut params = EvaluateParams::new(navigation_settle_expression(
+            remaining.as_millis().max(1),
+            requested_url,
+        ));
         params.await_promise = Some(true);
         params.return_by_value = Some(true);
         let attempt =

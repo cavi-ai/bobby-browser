@@ -86,6 +86,20 @@ pub async fn j1_sign_in_redirect_then_app(rig: &Rig, _dirs: &Dirs) {
             },
         ),
         ("/signin", Route::Html(signin)),
+        (
+            "/slow-app",
+            Route::RedirectOnce {
+                to: "/slow-signin".into(),
+                then: page("Slow dashboard", "<main><h1>Slow dashboard</h1></main>"),
+            },
+        ),
+        (
+            "/slow-signin",
+            Route::Html(page(
+                "Sign in",
+                r#"<h1>Sign in</h1><script>setTimeout(() => location.replace("/slow-app"), 1200);</script>"#,
+            )),
+        ),
         ("/locked", Route::Redirect("/signin-static".into())),
         ("/signin-static", Route::Html(locked)),
     ])
@@ -113,6 +127,16 @@ pub async fn j1_sign_in_redirect_then_app(rig: &Rig, _dirs: &Dirs) {
     assert_node(&observed, "heading", Some("Orders dashboard"));
     assert_node(&observed, "button", Some("Export orders"));
     live.close().await;
+
+    let slow = Live::open(rig, &site.url("/slow-app")).await;
+    let urls = reported(&slow.started, "url");
+    assert!(
+        urls.iter().any(|url| url.ends_with("/slow-app"))
+            && !urls.iter().any(|url| url.contains("/slow-signin")),
+        "workflow_start reported the sign-in page of a 1200 ms bounce: {}",
+        slow.started
+    );
+    slow.close().await;
 
     let stuck = Live::open(rig, &site.url("/locked")).await;
     let urls = reported(&stuck.started, "url");
@@ -175,6 +199,35 @@ pub async fn j2_search_and_follow_result(rig: &Rig, _dirs: &Dirs) {
     ])
     .await;
     let live = Live::open(rig, &site.url("/search")).await;
+    let entered = live
+        .call(
+            "type_text",
+            json!({"target":{"role":"searchbox","accessibleName":"Search products"},
+                   "value":"widget\n","clearFirst":true}),
+        )
+        .await;
+    assert_completed(
+        &entered,
+        "type_text with Enter into the placeholder-named box",
+    );
+    assert_eq!(
+        site.hits("/results"),
+        1,
+        "Enter did not submit the search once"
+    );
+    assert!(
+        reported(&entered, "url")
+            .iter()
+            .any(|url| url.contains("/results")),
+        "type_text with Enter did not report the page it landed on: {entered}"
+    );
+    let back = live
+        .call(
+            "navigate",
+            json!({"url":site.url("/search"),"waitUntil":"interactive","timeoutMs":15000}),
+        )
+        .await;
+    assert_completed(&back, "navigate back to the search page");
     let typed = live
         .call(
             "type_text",
@@ -193,8 +246,8 @@ pub async fn j2_search_and_follow_result(rig: &Rig, _dirs: &Dirs) {
     assert_completed(&searched, "intent_follow on the Search button");
     assert_eq!(
         site.hits("/results"),
-        1,
-        "the search was not submitted once"
+        2,
+        "the Search button did not submit the search"
     );
     let observed = live.observe(json!({})).await;
     assert_node(&observed, "heading", Some("Results"));
@@ -393,6 +446,14 @@ pub async fn j4_upload_hidden_and_visible(rig: &Rig, dirs: &Dirs) {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     assert_eq!(posted, 2, "the server did not receive both uploads");
+    assert_eq!(
+        site.bodies("/upload"),
+        vec![
+            b"hidden-bytes-7731".to_vec(),
+            b"visible-bytes-4429".to_vec()
+        ],
+        "the server did not receive the uploaded bytes"
+    );
     let observed = live.observe(json!({})).await.to_string();
     for expected in [
         "hidden-file=hidden-bytes-7731",

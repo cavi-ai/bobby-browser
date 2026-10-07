@@ -1076,10 +1076,20 @@ impl PageRuntime {
                     combined.extend(verification);
                     return Ok(combined);
                 }
-                let verification = lease
+                // Enter in the typed text submits the form. The control holds
+                // the text without the line break, or no longer exists once
+                // the page has navigated; neither is a value mismatch.
+                let submitted_with_enter = command.value.contains(['\n', '\r']);
+                let typed_text = if submitted_with_enter {
+                    command.value.replace(['\n', '\r'], "")
+                } else {
+                    command.value.clone()
+                };
+                let page_id = page_id.expect("validated page id");
+                let inspected_control = lease
                     .worker()
                     .inspect(
-                        page_id.expect("validated page id"),
+                        page_id,
                         &InspectCommand {
                             selector: (!command.selector.is_empty())
                                 .then(|| command.selector.clone()),
@@ -1087,23 +1097,72 @@ impl PageRuntime {
                             include_html: false,
                         },
                     )
-                    .await?;
+                    .await;
+                let verification = match inspected_control {
+                    Ok(verification) => verification,
+                    Err(error)
+                        if submitted_with_enter
+                            && matches!(
+                                error.code,
+                                ErrorCode::TargetNotFound | ErrorCode::TargetAmbiguous
+                            ) =>
+                    {
+                        Vec::new()
+                    }
+                    Err(error) => return Err(error),
+                };
                 let inspected = verification.iter().find_map(|item| match item {
                     Evidence::Inspection { text, .. } => Some(text.as_str()),
                     _ => None,
                 });
-                let matches = inspected.is_some_and(|inspected| {
-                    typed_value_verified(
-                        &command.value,
-                        command.clear_first,
-                        inspected,
-                        observed,
-                        kind,
-                    )
-                });
+                let matches = if submitted_with_enter {
+                    inspected.is_none_or(|inspected| {
+                        typed_value_verified(
+                            &typed_text,
+                            command.clear_first,
+                            inspected,
+                            observed,
+                            kind,
+                        )
+                    })
+                } else {
+                    inspected.is_some_and(|inspected| {
+                        typed_value_verified(
+                            &command.value,
+                            command.clear_first,
+                            inspected,
+                            observed,
+                            kind,
+                        )
+                    })
+                };
                 if matches {
                     let mut combined = evidence;
                     combined.extend(verification);
+                    if submitted_with_enter {
+                        // Report where the submit landed: the page the agent
+                        // is on after the navigation, not the one it typed on.
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        let landed = lease
+                            .worker()
+                            .inspect(
+                                page_id,
+                                &InspectCommand {
+                                    selector: None,
+                                    target: None,
+                                    include_html: false,
+                                },
+                            )
+                            .await;
+                        if let Ok(landed) = landed {
+                            combined.extend(landed.into_iter().filter_map(|item| match item {
+                                Evidence::Inspection { url, title, .. } => {
+                                    Some(Evidence::Navigation { url, title })
+                                }
+                                _ => None,
+                            }));
+                        }
+                    }
                     Ok(combined)
                 } else {
                     Err(verification_error("typed value did not match page state"))
