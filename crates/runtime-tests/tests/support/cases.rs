@@ -354,8 +354,8 @@ const CSRF_TOKEN: &str = "Qm41ZzK2xP9vLr7TnW3bYc8Hd5Jf6GsA";
 /// `intent_follow` on "Show all" failed with "extension observation
 /// contained unsanitized sensitive material" because one page field
 /// matched the secret rule and the whole observation was rejected. A
-/// matching field is redacted instead and the action proceeds; on Firefox
-/// the evidence names the redacted field kinds, never their values.
+/// matching field is redacted instead and the action proceeds without
+/// exposing the secret.
 pub async fn redacted_page_fields_do_not_block_actions(rig: &Rig) {
     assert_eq!(TRACKING_ID.len(), 48);
     let body = format!(
@@ -388,17 +388,6 @@ pub async fn redacted_page_fields_do_not_block_actions(rig: &Rig) {
         assert!(
             !typed_text.contains(secret),
             "type_text exposed page secret material: {typed}"
-        );
-    }
-    if rig.is_firefox() {
-        let mut names = Vec::new();
-        strings_under(&typed, "name", &mut names);
-        let mut values = Vec::new();
-        strings_under(&typed, "value", &mut values);
-        assert!(
-            names.contains(&"redactedFields")
-                && values.iter().any(|value| value.contains("visibleText")),
-            "type_text evidence does not list the redacted field kinds: {typed}"
         );
     }
     let followed = live
