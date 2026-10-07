@@ -672,10 +672,9 @@ pub async fn j6_cross_site_navigation_recovery(rig: &Rig, _dirs: &Dirs) {
 }
 
 /// The pid of the Firefox native host that last connected, from the
-/// lifecycle log beside the rig's descriptor.
+/// lifecycle log beside the descriptor the rig published.
 fn connected_native_host_pid() -> Option<u64> {
-    let dir = std::env::var_os("BOBBY_FIREFOX_PROOF_DIR")?;
-    let log = std::fs::read_to_string(PathBuf::from(dir).join("firefox-native-host.log")).ok()?;
+    let log = std::fs::read_to_string(runtime_tests::native_host_log_path()).ok()?;
     log.lines()
         .rev()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -697,7 +696,12 @@ pub async fn j7_native_host_killed_mid_session(rig: &Rig, _dirs: &Dirs) {
     let snapshot = live.snapshot(json!({})).await;
     assert_completed(&snapshot, "snapshot before the kill");
 
-    let killed = connected_native_host_pid().expect("the rig logs the native host pid");
+    let killed = connected_native_host_pid().unwrap_or_else(|| {
+        panic!(
+            "no connected native host in {}",
+            runtime_tests::native_host_log_path().display()
+        )
+    });
     let status = std::process::Command::new("kill")
         .args(["-9", &killed.to_string()])
         .status()
