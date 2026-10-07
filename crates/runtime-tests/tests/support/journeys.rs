@@ -342,7 +342,7 @@ pub async fn j3_form_validation_then_success(rig: &Rig, _dirs: &Dirs) {
               {"name":"Name","purpose":"name",
                "value":{"kind":"setText","value":"Ada"}},
               {"name":"Company","purpose":"company",
-               "value":{"kind":"setText","value":"Acme"},"revealedBy":reveal},
+               "value":{"kind":"setText","value":"Acme"},"revealedBy":reveal,"hints":{"role":"textbox"}},
             ]}),
         )
         .await;
@@ -358,6 +358,13 @@ pub async fn j3_form_validation_then_success(rig: &Rig, _dirs: &Dirs) {
         "the first submit was not reported as rejected: {rejected}"
     );
     assert_eq!(site.hits("/submit"), 1);
+    // A role hint narrows the Company field; it must not retarget the
+    // visible Name textbox.
+    let first_body = String::from_utf8_lossy(&site.bodies("/submit")[0]).into_owned();
+    assert!(
+        first_body.contains("name=Ada") && first_body.contains("company=Acme"),
+        "the role-hinted Company field filled the wrong textbox: {first_body}"
+    );
 
     let fixed = live
         .call(

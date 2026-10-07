@@ -12,6 +12,10 @@ use workflow_journal::{JournalError, JournalRecord, PreparedResult};
 
 use crate::{PageRuntime, SessionGate, VisionGate};
 
+/// How long a typed Enter is given to start a navigation before the call
+/// returns without one.
+const ENTER_NAVIGATION_WINDOW: StdDuration = StdDuration::from_millis(1_000);
+
 #[derive(Debug, Error)]
 pub enum ExecutorError {
     #[error("journal failed: {0}")]
@@ -1142,25 +1146,68 @@ impl PageRuntime {
                     if submitted_with_enter {
                         // Report where the submit landed: the page the agent
                         // is on after the navigation, not the one it typed on.
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                        let landed = lease
-                            .worker()
-                            .inspect(
-                                page_id,
-                                &InspectCommand {
-                                    selector: None,
-                                    target: None,
-                                    include_html: false,
-                                },
-                            )
-                            .await;
-                        if let Ok(landed) = landed {
-                            combined.extend(landed.into_iter().filter_map(|item| match item {
-                                Evidence::Inspection { url, title, .. } => {
-                                    Some(Evidence::Navigation { url, title })
-                                }
+                        // The signal is the URL moving off the page the field
+                        // was typed on; when no navigation starts inside the
+                        // bounded window the Enter did not navigate and the
+                        // call returns at once.
+                        let page_inspect = InspectCommand {
+                            selector: None,
+                            target: None,
+                            include_html: false,
+                        };
+                        let read_page = |evidence: Vec<Evidence>| {
+                            evidence.into_iter().find_map(|item| match item {
+                                Evidence::Inspection { url, title, .. } => Some((url, title)),
                                 _ => None,
-                            }));
+                            })
+                        };
+                        let typed_on = combined.iter().find_map(|item| match item {
+                            Evidence::Inspection { url, .. } => Some(url.clone()),
+                            _ => None,
+                        });
+                        let window = tokio::time::Instant::now() + ENTER_NAVIGATION_WINDOW;
+                        let mut landed: Option<(String, String)>;
+                        let mut navigated: bool;
+                        loop {
+                            landed = lease
+                                .worker()
+                                .inspect(page_id, &page_inspect)
+                                .await
+                                .ok()
+                                .and_then(read_page);
+                            navigated = match (&landed, &typed_on) {
+                                (Some((url, _)), Some(typed_on)) => url != typed_on,
+                                (Some(_), None) => true,
+                                (None, _) => false,
+                            };
+                            if navigated || tokio::time::Instant::now() >= window {
+                                break;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                        if navigated {
+                            let _ = lease
+                                .worker()
+                                .wait_for(
+                                    page_id,
+                                    &WaitForCommand {
+                                        condition: WaitCondition::Document {
+                                            ready: types::WaitUntil::Interactive,
+                                        },
+                                        timeout_ms: 5_000,
+                                    },
+                                )
+                                .await;
+                            landed = lease
+                                .worker()
+                                .inspect(page_id, &page_inspect)
+                                .await
+                                .ok()
+                                .and_then(read_page)
+                                .or(landed);
+                        }
+                        if let Some((url, title)) = landed {
+                            combined.push(Evidence::Navigation { url, title });
                         }
                     }
                     Ok(combined)

@@ -4785,7 +4785,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
             actions
         });
 
-        let bidi_actions = self.behavioral_typing_to_bidi(&context, &typing_actions);
+        let bidi_actions = Self::behavioral_typing_to_bidi(&context, &typing_actions);
 
         self.transport
             .send("input.performActions", bidi_actions)
@@ -4797,7 +4797,15 @@ impl BrowserWorker for FirefoxCompanionWorker {
         {
             "[redacted]".to_owned()
         } else {
-            read_typed_control_value(&self.transport, &context, &selector_json).await?
+            // Enter in the text submits the form; once the page navigates
+            // the control is gone and cannot be read back.
+            match read_typed_control_value(&self.transport, &context, &selector_json).await {
+                Ok(value) => value,
+                Err(_) if command.value.contains(['\n', '\r']) => {
+                    command.value.replace(['\n', '\r'], "")
+                }
+                Err(error) => return Err(error),
+            }
         };
         let mut evidence = vec![
             Evidence::Element {
@@ -4819,9 +4827,11 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 synthesized_ms: behavioral_engine::synthesized_total_ms(&typing_actions),
             });
         }
-        evidence.extend(
-            form_control_validity_evidence(&self.transport, &context, &selector_json).await?,
-        );
+        match form_control_validity_evidence(&self.transport, &context, &selector_json).await {
+            Ok(validity) => evidence.extend(validity),
+            Err(_) if command.value.contains(['\n', '\r']) => {}
+            Err(error) => return Err(error),
+        }
         Ok(self.with_redaction_diagnostics(evidence))
     }
 
@@ -7212,8 +7222,9 @@ fn interaction_path_name(path: InteractionPath) -> &'static str {
 
 impl FirefoxCompanionWorker {
     /// Convert behavioral typing actions to BiDi keyboard actions.
+    /// BiDi `input.performActions` params for a typing sequence. A typed
+    /// line break becomes the Enter key.
     fn behavioral_typing_to_bidi(
-        &self,
         context: &str,
         actions: &[behavioral_engine::TypingAction],
     ) -> Value {
@@ -7306,6 +7317,16 @@ impl FirefoxCompanionWorker {
                         "type": "pause",
                         "duration": *duration_ms,
                     }));
+                }
+            }
+        }
+
+        // A typed line break is the Enter key: WebDriver key actions take the
+        // normalized Enter code point, not a raw "\n".
+        for action in &mut bidi_actions {
+            if let Some(value) = action.get_mut("value") {
+                if value == "\n" || value == "\r" {
+                    *value = json!("\u{e007}");
                 }
             }
         }
@@ -7555,5 +7576,34 @@ mod js_string_tests {
         assert_eq!(js_string("a;b\n"), "\"a;b\\n\"");
         assert_eq!(js_string("x\";alert(1);//"), "\"x\\\";alert(1);//\"");
         assert_eq!(js_string("back\\slash"), "\"back\\\\slash\"");
+    }
+}
+
+#[cfg(test)]
+mod enter_key_tests {
+    use super::FirefoxCompanionWorker;
+    use behavioral_engine::{SessionRandom, TextConfig, TypingSimulator};
+
+    #[test]
+    fn a_typed_line_break_is_dispatched_as_the_enter_key() {
+        let simulator = TypingSimulator::new(TextConfig::default());
+        let mut random = SessionRandom::new(7);
+        let actions = simulator.generate_with_clear(&mut random, "widget\n", true);
+        let params = FirefoxCompanionWorker::behavioral_typing_to_bidi("context-1", &actions);
+        let keys = params["actions"][0]["actions"]
+            .as_array()
+            .expect("key actions");
+        for kind in ["keyDown", "keyUp"] {
+            assert!(
+                keys.iter()
+                    .any(|action| action["type"] == kind && action["value"] == "\u{e007}"),
+                "no {kind} for Enter in {keys:?}"
+            );
+        }
+        assert!(
+            keys.iter()
+                .all(|action| action["value"] != "\n" && action["value"] != "\r"),
+            "a raw line break reached the BiDi key actions: {keys:?}"
+        );
     }
 }
