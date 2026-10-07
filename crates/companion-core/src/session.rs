@@ -23,6 +23,9 @@ const ABANDONED_COMMAND_RETENTION: Duration = Duration::from_secs(60);
 pub(crate) const MAX_PENDING_BINDINGS: usize = 64;
 const PAGE_BINDING_TTL: Duration = Duration::from_secs(10);
 const GRANT_PUBLICATION_TIMEOUT: Duration = Duration::from_millis(250);
+/// How long a command on a grant whose connection dropped waits for the
+/// companion to reconnect and the grant to be re-adopted.
+const RECONNECT_WAIT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum CompanionSessionError {
@@ -30,8 +33,10 @@ pub enum CompanionSessionError {
     ProfileUnavailable,
     #[error("paired profile has no browser target discovery")]
     DiscoveryUnavailable,
-    #[error("attachment grant is missing or expired")]
+    #[error("attachment grant is missing or expired; close this session and start a new one")]
     GrantUnavailable,
+    #[error("companion connection is reconnecting; this session's attachment returns with it")]
+    Reconnecting,
     #[error("attachment does not match the active grant")]
     AttachmentMismatch,
     #[error("page does not match the active attachment grant")]
@@ -100,6 +105,9 @@ struct SessionState {
     sessions: HashMap<ProfileId, ActiveSession>,
     discoveries: HashMap<ProfileId, DiscoveryRecord>,
     grants: HashMap<AttachmentId, GrantRecord>,
+    /// Grants of a closed connection, kept until they expire so the same
+    /// companion's next connection re-adopts them.
+    orphaned_grants: HashMap<AttachmentId, GrantRecord>,
     pending: HashMap<CommandId, PendingCommand>,
     bindings: HashMap<String, PendingBinding>,
 }
@@ -340,7 +348,7 @@ impl SessionCoordinator {
         outbound: mpsc::Sender<Message>,
     ) -> Uuid {
         let connection_id = Uuid::new_v4();
-        let previous = {
+        let (previous, readopted) = {
             let _grant_update = self.grant_updates.lock().await;
             let mut state = self.state.lock().await;
             let previous = state.sessions.insert(
@@ -348,17 +356,21 @@ impl SessionCoordinator {
                 ActiveSession {
                     connection_id,
                     companion_id: paired.companion_id.clone(),
-                    outbound,
+                    outbound: outbound.clone(),
                 },
             );
             if let Some(previous) = &previous {
                 self.retire_binding_releases(previous.connection_id);
                 Self::remove_connection_state(&mut state, previous.connection_id);
             }
-            previous
+            let readopted = Self::readopt_grants(&mut state, &paired, connection_id);
+            (previous, readopted)
         };
         if let Some(previous) = previous {
             let _ = previous.outbound.send(Message::Close(None)).await;
+        }
+        for grant in &readopted {
+            let _ = send_grant_request(&outbound, grant).await;
         }
         self.discovery_changed.notify_waiters();
         connection_id
@@ -400,6 +412,37 @@ impl SessionCoordinator {
         );
     }
 
+    /// Move this companion's unexpired orphaned grants onto its new
+    /// connection; the returned grants are re-sent to the extension.
+    fn readopt_grants(
+        state: &mut SessionState,
+        paired: &PairedCompanion,
+        connection_id: Uuid,
+    ) -> Vec<AttachmentGrant> {
+        let now = now_unix_ms();
+        state
+            .orphaned_grants
+            .retain(|_, record| record.grant.expires_at_unix_ms > now);
+        let adopted = state
+            .orphaned_grants
+            .iter()
+            .filter(|(_, record)| {
+                record.grant.profile_id == paired.profile_id
+                    && record.companion_id == paired.companion_id
+            })
+            .map(|(attachment_id, _)| attachment_id.clone())
+            .collect::<Vec<_>>();
+        let mut grants = Vec::with_capacity(adopted.len());
+        for attachment_id in adopted {
+            if let Some(mut record) = state.orphaned_grants.remove(&attachment_id) {
+                record.connection_id = connection_id;
+                grants.push(record.grant.clone());
+                state.grants.insert(attachment_id, record);
+            }
+        }
+        grants
+    }
+
     fn remove_connection_state(
         state: &mut SessionState,
         connection_id: Uuid,
@@ -407,9 +450,17 @@ impl SessionCoordinator {
         state
             .discoveries
             .retain(|_, discovery| discovery.connection_id != connection_id);
-        state
+        let closed = state
             .grants
-            .retain(|_, grant| grant.connection_id != connection_id);
+            .iter()
+            .filter(|(_, grant)| grant.connection_id == connection_id)
+            .map(|(attachment_id, _)| attachment_id.clone())
+            .collect::<Vec<_>>();
+        for attachment_id in closed {
+            if let Some(record) = state.grants.remove(&attachment_id) {
+                state.orphaned_grants.insert(attachment_id, record);
+            }
+        }
         let binding_nonces = state
             .bindings
             .iter()
@@ -729,6 +780,16 @@ impl SessionCoordinator {
                         Ok(())
                     };
                 };
+                // A release retired with its connection never acts on the
+                // connection that re-adopted the grant.
+                if lock_recovering(
+                    &release.connection_id,
+                    "session.page_binding_release_connection",
+                )
+                .is_some_and(|bound| bound != record.connection_id)
+                {
+                    return Err(CompanionSessionError::ConnectionClosed);
+                }
                 *lock_recovering(
                     &release.connection_id,
                     "session.page_binding_release_connection",
@@ -1131,6 +1192,35 @@ impl SessionCoordinator {
         Ok(renewed)
     }
 
+    /// A grant whose connection closed is waited for, up to `wait`, until the
+    /// companion reconnects and re-adopts it; past that the caller learns the
+    /// reconnect is still pending.
+    async fn wait_for_readopted_grant(
+        &self,
+        attachment_id: &AttachmentId,
+        wait: Duration,
+    ) -> Result<(), CompanionSessionError> {
+        let deadline = Instant::now() + wait;
+        loop {
+            let readopted = self.discovery_changed.notified();
+            if !self
+                .state
+                .lock()
+                .await
+                .orphaned_grants
+                .contains_key(attachment_id)
+            {
+                return Ok(());
+            }
+            if tokio::time::timeout_at(deadline.into(), readopted)
+                .await
+                .is_err()
+            {
+                return Err(CompanionSessionError::Reconnecting);
+            }
+        }
+    }
+
     pub(crate) async fn dispatch_action(
         &self,
         action: ActionRequest,
@@ -1145,6 +1235,8 @@ impl SessionCoordinator {
             .await?;
         let remaining_ms = u64::try_from(action.deadline_unix_ms.saturating_sub(now)).unwrap_or(0);
         let wait = Duration::from_millis(remaining_ms).min(MAX_COMMAND_WAIT);
+        self.wait_for_readopted_grant(&action.attachment_id, wait.min(RECONNECT_WAIT))
+            .await?;
         let expires_at = Instant::now() + wait;
         let (connection_id, outbound) = {
             let mut state = self.state.lock().await;
@@ -2639,6 +2731,11 @@ mod tests {
         .expect("retry must install its joined successor before reconnect proceeds");
         drop(grant_gate);
         let reconnected = reconnect.await.unwrap();
+        // The same companion's new connection re-adopts the prior grant.
+        let Some(Message::Text(readopted)) = requests.recv().await else {
+            panic!("reconnect must re-send the prior grant");
+        };
+        assert!(readopted.contains(&grant.attachment_id.0.to_string()));
         assert!(retry.await.unwrap().is_err());
         assert!(
             lock_recovering(

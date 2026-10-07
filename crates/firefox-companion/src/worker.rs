@@ -397,9 +397,16 @@ impl CompanionExtensionObserver {
         action.attachment_id = lease.attachment_id.clone();
         match self.server.dispatch_action(action.clone()).await {
             Err(CompanionSessionError::ConnectionClosed) => {
-                let refreshed = self.refresh_lease(&lease).await?;
-                action.attachment_id = refreshed.attachment_id;
-                self.server.dispatch_action(action).await
+                // The same attachment first: a reconnecting companion
+                // re-adopts its grant, and dispatch waits for that.
+                match self.server.dispatch_action(action.clone()).await {
+                    Err(CompanionSessionError::GrantUnavailable) => {
+                        let refreshed = self.refresh_lease(&lease).await?;
+                        action.attachment_id = refreshed.attachment_id;
+                        self.server.dispatch_action(action).await
+                    }
+                    result => result,
+                }
             }
             result => result,
         }
@@ -6943,7 +6950,9 @@ fn session_error(error: CompanionSessionError) -> CommandError {
         | CompanionSessionError::QueueClosed
         | CompanionSessionError::ProfileUnavailable
         | CompanionSessionError::DiscoveryUnavailable
-        | CompanionSessionError::GrantUnavailable => (ErrorCode::BrowserCommandFailed, true),
+        | CompanionSessionError::Reconnecting => (ErrorCode::BrowserCommandFailed, true),
+        // No reconnect is pending for this grant: retrying cannot restore it.
+        CompanionSessionError::GrantUnavailable => (ErrorCode::BrowserCommandFailed, false),
         CompanionSessionError::AttachmentMismatch | CompanionSessionError::ProfileMismatch => {
             (ErrorCode::PolicyDenied, false)
         }
@@ -7155,6 +7164,11 @@ mod session_error_tests {
             ),
             (
                 CompanionSessionError::GrantUnavailable,
+                ErrorCode::BrowserCommandFailed,
+                false,
+            ),
+            (
+                CompanionSessionError::Reconnecting,
                 ErrorCode::BrowserCommandFailed,
                 true,
             ),

@@ -1211,3 +1211,122 @@ async fn a_rejected_action_result_fails_its_command_and_keeps_the_relay() {
     drop(extension_stream);
     host.await.unwrap().unwrap();
 }
+
+async fn within<T>(step: &str, future: impl std::future::Future<Output = T>) -> T {
+    tokio::time::timeout(Duration::from_secs(20), future)
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {step}"))
+}
+
+/// The native host process dies mid-session. A command issued while it is
+/// gone waits; the respawned host reconnects with the reconnect credential,
+/// the server re-sends the same attachment grant, and the command completes
+/// on the original attachment without the session being recreated.
+#[tokio::test]
+async fn a_respawned_native_host_restores_the_attachment_grant() {
+    let server = CompanionServer::bind_loopback(CompanionServerConfig {
+        bind_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+        pairing_code_ttl: Duration::from_secs(60),
+        attachment_ttl: Duration::from_secs(300),
+    })
+    .await
+    .unwrap();
+    let pairing_code = server.registry().issue_pairing_code().await;
+    let config = NativeHostConfig::new(
+        format!("ws://{}/v1/companion", server.local_addr()),
+        pairing_code,
+    );
+    let connect_request = connect_request();
+    let profile_id = connect_request.profile_id.clone();
+    let connect = json!({"kind": "pair", "input": connect_request});
+    let (host_stream, mut first_extension) = duplex(2 * MAX_NATIVE_MESSAGE_BYTES);
+    let (host_reader, host_writer) = split(host_stream);
+    let first_host = tokio::spawn(run_native_host(host_reader, host_writer, config.clone()));
+    write_native_message(&mut first_extension, &connect)
+        .await
+        .unwrap();
+    let paired = read_native_message(&mut first_extension).await.unwrap();
+    assert_eq!(paired.unwrap()["kind"], "paired");
+    let discovery = CompanionEvent::TargetsDiscovered(TargetDiscovery {
+        protocol_version: PROTOCOL_VERSION,
+        profile_id: profile_id.clone(),
+        targets: vec![BrowserTarget {
+            target_id: "tab-1".into(),
+            kind: TargetKind::Page,
+        }],
+    });
+    write_native_message(
+        &mut first_extension,
+        &serde_json::to_value(&discovery).unwrap(),
+    )
+    .await
+    .unwrap();
+    server
+        .wait_for_discovery(&profile_id, Duration::from_secs(1))
+        .await
+        .unwrap();
+    let grant = server.grant_discovered_targets(&profile_id).await.unwrap();
+    read_native_message(&mut first_extension)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Kill the host process: its relay and socket end without a goodbye.
+    first_host.abort();
+    let _ = first_host.await;
+    drop(first_extension);
+    // A command racing the close is routed to the dying connection and ends
+    // `ConnectionClosed`; this one is issued once the server saw the close.
+    within("the server to see the close", async {
+        // Discovery belongs to a connection and is dropped with it.
+        while server
+            .wait_for_discovery(&profile_id, Duration::from_millis(10))
+            .await
+            .is_ok()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+
+    let command_id = CommandId::new();
+    let action = ActionRequest {
+        protocol_version: PROTOCOL_VERSION,
+        attachment_id: grant.attachment_id.clone(),
+        command_id: command_id.clone(),
+        page_id: grant.pages[0].page_id.clone(),
+        operation: "a11yTree".into(),
+        input: json!({}),
+        deadline_unix_ms: 4_102_444_800_000,
+    };
+    let completed = CompanionEvent::ActionCompleted(ActionResult {
+        command_id,
+        interaction_path: InteractionPath::ExtensionApi,
+        output: json!({"nodes": []}),
+    });
+    let reply = serde_json::to_value(&completed).unwrap();
+    let respawn = async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let (host_stream, mut extension) = duplex(2 * MAX_NATIVE_MESSAGE_BYTES);
+        let (host_reader, host_writer) = split(host_stream);
+        let host = tokio::spawn(run_native_host(host_reader, host_writer, config.clone()));
+        write_native_message(&mut extension, &connect)
+            .await
+            .unwrap();
+        let paired = within("paired", read_native_message(&mut extension)).await;
+        assert_eq!(paired.unwrap().unwrap()["kind"], "paired");
+        let regrant = within("re-sent grant", read_native_message(&mut extension)).await;
+        let regrant: CompanionRequest = serde_json::from_value(regrant.unwrap().unwrap()).unwrap();
+        assert_eq!(regrant, CompanionRequest::Grant(grant.clone()));
+        let request = within("action", read_native_message(&mut extension)).await;
+        assert_eq!(request.unwrap().unwrap()["kind"], "action");
+        write_native_message(&mut extension, &reply).await.unwrap();
+        (host, extension)
+    };
+    let (result, (host, extension)) =
+        tokio::join!(within("dispatch", server.dispatch_action(action)), respawn);
+    assert_eq!(result.unwrap(), completed);
+
+    drop(extension);
+    host.await.unwrap().unwrap();
+}
