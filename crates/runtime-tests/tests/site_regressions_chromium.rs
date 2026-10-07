@@ -23,6 +23,7 @@ chromium_case!(workflow_start_reports_the_settled_page);
 chromium_case!(observe_after_navigate_includes_late_content);
 chromium_case!(accessible_names_are_computed);
 chromium_case!(secret_words_are_not_secrets);
+chromium_case!(scheme_like_text_is_page_text);
 chromium_case!(disclosed_credentials_are_withheld);
 chromium_case!(large_dom_link_resolves_for_intent_follow);
 chromium_case!(redacted_page_fields_do_not_block_actions);

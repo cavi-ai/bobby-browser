@@ -17,14 +17,15 @@ const ORDINARY = [
   "Secret Santa sign-up",
   "API key management",
   "Credentials",
+  // Free text is never URL-parsed as a whole, on either side of the channel.
+  "Status:online",
+  "mailto:someone@example.test",
+  "Note:important",
 ];
 const BOUNDARY = [
   "Basic info and settings",
   "Bearer of bad news",
   "private key backup",
-  "Status:online",
-  "mailto:someone@example.test",
-  "Note:important",
   "wss://127.0.0.1:9876/session?token=abc",
   "ftp://example.test/file",
   "https://user:pw@example.test/",

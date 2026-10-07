@@ -478,6 +478,19 @@ pub fn validate_server_message(value: Value) -> Result<Value, NativeHostError> {
 }
 
 fn reject_extension_secrets(value: &Value, depth: usize) -> Result<(), NativeHostError> {
+    reject_secrets_in_field(value, None, depth)
+}
+
+/// URL rules apply to URL-typed fields (`href`, `src`, `*url`). Any other
+/// string is free text: it is checked for credentials and for the absolute
+/// URLs embedded in it, never URL-parsed as a whole (`note: read this` is not
+/// a URL with the scheme `note:`). The extension applies the same split; the
+/// shared cases live in `tests/fixtures/extension-url-security.json`.
+fn reject_secrets_in_field(
+    value: &Value,
+    field: Option<&str>,
+    depth: usize,
+) -> Result<(), NativeHostError> {
     if depth > 32 {
         return Err(NativeHostError::InvalidProtocol);
     }
@@ -502,33 +515,55 @@ fn reject_extension_secrets(value: &Value, depth: usize) -> Result<(), NativeHos
                 {
                     return Err(NativeHostError::InvalidProtocol);
                 }
-                reject_extension_secrets(item, depth + 1)?;
+                reject_secrets_in_field(item, Some(name), depth + 1)?;
             }
         }
         Value::Array(items) => {
             for item in items {
-                reject_extension_secrets(item, depth + 1)?;
+                reject_secrets_in_field(item, field, depth + 1)?;
             }
         }
-        Value::String(text) => reject_secret_string(text)?,
+        Value::String(text) if field.is_some_and(is_url_field) => reject_secret_url(text)?,
+        Value::String(text) => reject_secret_text(text)?,
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
     Ok(())
 }
 
-fn reject_secret_string(text: &str) -> Result<(), NativeHostError> {
+fn is_url_field(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name == "href" || name == "src" || name.ends_with("url")
+}
+
+fn reject_secret_text(text: &str) -> Result<(), NativeHostError> {
+    if contains_explicit_credential(text) {
+        return Err(NativeHostError::InvalidProtocol);
+    }
+    embedded_urls(text).try_for_each(reject_secret_url)
+}
+
+/// Each `scheme://…` run inside free text, without the punctuation that
+/// commonly closes it in prose.
+fn embedded_urls(text: &str) -> impl Iterator<Item = &str> {
+    text.split_whitespace().filter_map(|token| {
+        let separator = token.find("://")?;
+        let start = token[..separator]
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-')))
+            .map_or(0, |index| index + 1);
+        (start < separator).then(|| {
+            token[start..]
+                .trim_end_matches([')', ']', '}', ',', '.', ';', ':', '!', '?', '\'', '"', '>'])
+        })
+    })
+}
+
+fn reject_secret_url(text: &str) -> Result<(), NativeHostError> {
     if contains_explicit_credential(text) {
         return Err(NativeHostError::InvalidProtocol);
     }
     let Ok(url) = Url::parse(text) else {
         return Ok(());
     };
-    // The extension's bounded CSS paths can begin `main:nth-of-type(1)`.
-    // URL parsers treat `main:` as a scheme. Accept only the exact selector
-    // shape the extension generates, never arbitrary scheme-like strings.
-    if generated_css_path(text) {
-        return Ok(());
-    }
     if !matches!(url.scheme(), "http" | "https")
         || !url.username().is_empty()
         || url.password().is_some()
@@ -541,41 +576,6 @@ fn reject_secret_string(text: &str) -> Result<(), NativeHostError> {
         }
     }
     Ok(())
-}
-
-fn generated_css_path(text: &str) -> bool {
-    if text.len() > 2_048 || text.contains("://") {
-        return false;
-    }
-    let mut segments = text.split(" > ");
-    let Some(first) = segments.next() else {
-        return false;
-    };
-    if !generated_css_nth_segment(first) {
-        return false;
-    }
-    segments.all(|segment| generated_css_nth_segment(segment) || generated_css_tag(segment))
-}
-
-fn generated_css_nth_segment(segment: &str) -> bool {
-    let Some((tag, position)) = segment.split_once(":nth-of-type(") else {
-        return false;
-    };
-    let Some(position) = position.strip_suffix(')') else {
-        return false;
-    };
-    generated_css_tag(tag)
-        && position.parse::<u32>().is_ok_and(|position| position > 0)
-        && !position.starts_with('0')
-}
-
-fn generated_css_tag(tag: &str) -> bool {
-    tag.chars()
-        .next()
-        .is_some_and(|first| first.is_ascii_lowercase())
-        && tag.chars().all(|character| {
-            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
-        })
 }
 
 fn is_sensitive_url_query_key(name: &str) -> bool {

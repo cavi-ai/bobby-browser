@@ -231,6 +231,27 @@ pub async fn secret_words_are_not_secrets(rig: &Rig) {
     live.close().await;
 }
 
+/// Page text shaped like `word: more words` is free text, not a URL with the
+/// scheme `word:`: the snapshot reports it and the companion stays connected.
+pub async fn scheme_like_text_is_page_text(rig: &Rig) {
+    let body = "<main><h1>Notes</h1><p>note: read this</p><p>Status:online</p></main>";
+    let site = FixtureSite::spawn(vec![("/note", Route::Html(page("Note", body)))]).await;
+    let live = Live::open(rig, &site.url("/note")).await;
+    for attempt in ["first", "second"] {
+        let snapshot = live.snapshot(json!({})).await;
+        assert_eq!(
+            snapshot["status"], "completed",
+            "{attempt} snapshot: {snapshot}"
+        );
+        let text = snapshot.to_string();
+        assert!(
+            text.contains("note: read this") && text.contains("Status:online"),
+            "{attempt} snapshot lacks the page text: {snapshot}"
+        );
+    }
+    live.close().await;
+}
+
 const BEARER_TOKEN: &str = "Zx9Kq2Lm7Rt4Vw8Yb3Nc6Hd1Jf5Gs0Ae2PuXo7Ti";
 const PEM_BODY: &str = "MIIEowIBAAKCAQEAx7Qk2LmZr9VtW4YbNc6HdJf5GsAePuXo7TiKq";
 

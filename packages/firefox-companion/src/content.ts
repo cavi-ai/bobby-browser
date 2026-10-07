@@ -1,4 +1,4 @@
-import { isExtensionSafeString } from "./native-transport.js";
+import { isExtensionSafeString, isExtensionSafeUrl } from "./native-transport.js";
 import { containsSecretMaterial } from "./secret-material.js";
 import { MAX_COMPANION_PAYLOAD_BYTES } from "./protocol.js";
 
@@ -204,10 +204,16 @@ function observationUrl(value: string): string {
       path = decodeURIComponent(path);
     } catch {}
     if (containsSensitiveMaterial(path)) url.pathname = "/";
-    return observationString(url.href, MAX_URL_LENGTH) ?? "";
+    return observationUrlString(url.href);
   } catch {
-    return observationString(value, MAX_URL_LENGTH) ?? "";
+    return observationUrlString(value);
   }
+}
+
+// A URL-typed field meets the URL rules, not only the free-text ones.
+function observationUrlString(value: string): string {
+  const bounded = observationString(value, MAX_URL_LENGTH) ?? "";
+  return bounded && !isExtensionSafeUrl(bounded) ? REDACTED : bounded;
 }
 
 function isElementHidden(element: Element, budget?: WorkBudget): boolean {

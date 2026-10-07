@@ -35,6 +35,7 @@ async fn site_regressions_hold_on_firefox() {
         observe_after_navigate_includes_late_content,
         accessible_names_are_computed,
         secret_words_are_not_secrets,
+        scheme_like_text_is_page_text,
         disclosed_credentials_are_withheld,
         large_dom_link_resolves_for_intent_follow,
         oversized_page_reports_truncation_not_target_not_found,

@@ -25,9 +25,12 @@ use tokio::io::{duplex, split, AsyncRead, ReadBuf};
 use types::{CommandId, CompanionId, ProfileId};
 
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct UrlSecurityFixtures {
     benign: Vec<String>,
     secret: Vec<String>,
+    text_benign: Vec<String>,
+    text_secret: Vec<String>,
 }
 
 fn url_security_fixtures() -> UrlSecurityFixtures {
@@ -235,36 +238,32 @@ fn shared_url_security_fixtures_match_the_rust_extension_boundary() {
     }
 }
 
+/// Free text (page text, names, selectors) is not URL-parsed as a whole;
+/// only the absolute URLs embedded in it meet the URL rules.
 #[test]
-fn generated_css_paths_are_not_mistaken_for_url_schemes() {
-    for selector in [
-        "main:nth-of-type(1) > input:nth-of-type(2)",
-        "custom-field:nth-of-type(3)",
-    ] {
-        let event = json!({
+fn shared_free_text_fixtures_match_the_rust_extension_boundary() {
+    let fixtures = url_security_fixtures();
+    let event = |text: &str| {
+        json!({
             "kind": "actionCompleted",
             "output": {
                 "commandId": CommandId::new(),
                 "interactionPath": "extensionApi",
-                "output": {"selector": selector}
+                "output": {"nodes": [{"role": "StaticText", "name": text}], "selector": text}
             }
-        });
-        assert!(validate_extension_message(event).is_ok(), "{selector}");
+        })
+    };
+    for text in fixtures.text_benign {
+        assert!(
+            validate_extension_message(event(&text)).is_ok(),
+            "benign text was rejected: {text}"
+        );
     }
-    for unsafe_value in [
-        "javascript:alert(1)",
-        "main:nth-of-type(1) > javascript:alert(1)",
-        "https://example.test/?token=private-value",
-    ] {
-        let event = json!({
-            "kind": "actionCompleted",
-            "output": {
-                "commandId": CommandId::new(),
-                "interactionPath": "extensionApi",
-                "output": {"selector": unsafe_value}
-            }
-        });
-        assert!(validate_extension_message(event).is_err(), "{unsafe_value}");
+    for text in fixtures.text_secret {
+        assert!(
+            validate_extension_message(event(&text)).is_err(),
+            "secret text was accepted: {text}"
+        );
     }
 }
 
@@ -1107,9 +1106,9 @@ async fn endpoint_reassignment_interrupts_a_stalled_websocket_handshake() {
     host.await.unwrap().unwrap();
 }
 
-/// Page text such as `note: read this` parses as a URL with the scheme
-/// `note:`; the relay refuses to forward it. That fails the one command and
-/// keeps the connection: the next command on the same grant completes.
+/// A result the relay refuses to forward fails its one command and keeps the
+/// connection: the next command on the same grant completes, and free text
+/// such as `note: read this` is forwarded.
 #[tokio::test]
 async fn a_rejected_action_result_fails_its_command_and_keeps_the_relay() {
     let server = CompanionServer::bind_loopback(CompanionServerConfig {
@@ -1161,7 +1160,10 @@ async fn a_rejected_action_result_fails_its_command_and_keeps_the_relay() {
         .unwrap()
         .unwrap();
 
-    for (text, rejected) in [("note: read this", true), ("ready", false)] {
+    for (text, rejected) in [
+        ("see https://example.test/?token=private-value", true),
+        ("note: read this", false),
+    ] {
         let command_id = CommandId::new();
         let action = ActionRequest {
             protocol_version: PROTOCOL_VERSION,
