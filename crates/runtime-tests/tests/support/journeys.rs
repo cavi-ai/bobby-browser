@@ -677,9 +677,9 @@ fn connected_native_host_pid() -> Option<u64> {
     let dir = std::env::var_os("BOBBY_FIREFOX_PROOF_DIR")?;
     let log = std::fs::read_to_string(PathBuf::from(dir).join("firefox-native-host.log")).ok()?;
     log.lines()
+        .rev()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|event| event["event"] == "connected")
-        .last()
+        .find(|event| event["event"] == "connected")
         .and_then(|event| event["pid"].as_u64())
 }
 
