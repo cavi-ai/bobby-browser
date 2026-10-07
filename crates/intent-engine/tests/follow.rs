@@ -211,6 +211,49 @@ async fn follow_clicks_target_then_waits_for_destination_without_boundary() {
 }
 
 #[tokio::test]
+async fn follow_keeps_the_ordinal_for_a_candidate_without_a_css_identity() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let expected_destination = details_wait();
+    let semantic = |id: &str| Candidate {
+        css: None,
+        id: id.into(),
+        ..link("Widget Pro")
+    };
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![semantic("a"), semantic("b")]),
+        calls: Arc::clone(&calls),
+        click_evidence: Vec::new(),
+        wait_evidence: Vec::new(),
+        wait_error: None,
+    };
+    let command = IntentCommand::Follow(FollowIntent {
+        purpose: "Open the second Widget Pro".into(),
+        hints: IntentHints {
+            role: Some("link".into()),
+            accessible_name: Some("Widget Pro".into()),
+            ordinal: Some(1),
+            ..IntentHints::default()
+        },
+        expected_destination,
+        boundary: false,
+    });
+    let outcome = IntentEngine::execute(
+        &command,
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, IntentOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
+    let log = calls.lock().expect("call log");
+    assert_eq!(log.clicks[0].target.as_ref().unwrap().ordinal, Some(1));
+}
+
+#[tokio::test]
 async fn follow_forwards_boundary_true_verbatim_to_the_click_command() {
     let calls = Arc::new(Mutex::new(CallLog::default()));
     let expected_destination = WaitForCommand {

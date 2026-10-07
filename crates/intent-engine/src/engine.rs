@@ -1978,7 +1978,15 @@ fn action_target(candidate: &Candidate, intent_target: &TargetSpec) -> (String, 
     // Keep frame/shadow hops from the intent so iframe/shadow fills still land.
     // Do not copy ordinal: the candidate is already chosen; re-resolving with
     // ordinal against a narrowed (often length-1) set fails duplicate-name fills.
+    // A candidate with no CSS or test-ID identity is re-resolved by role and
+    // name over the whole page, so it keeps the ordinal that picked it.
+    let ordinal = if candidate.css.is_none() && candidate.test_id.is_none() {
+        intent_target.ordinal
+    } else {
+        None
+    };
     let target = TargetSpec {
+        ordinal,
         css: candidate.css.clone(),
         test_id: candidate.test_id.clone(),
         role: candidate.role.clone(),
