@@ -521,6 +521,47 @@ test("a11yTree builds a bounded, hidden-aware, redacting accessibility tree", ()
   assert.equal(bounded.truncated, true);
 });
 
+test("a11yTree reports visible page text as StaticText only when asked", () => {
+  const document = documentFor(`
+    <main>
+      <h1>Documents</h1>
+      <label for="hidden-file">Attach resume</label>
+      <input type="file" id="hidden-file" style="display:none">
+      <input type="file" id="visible-file" aria-label="Visible attachment">
+      <pre id="out">hidden-file=hidden-bytes-7731;</pre>
+      <ul><li>Post text</li></ul>
+      <button>Continue</button>
+      <span hidden>not visible</span>
+      <p>key sk_live_abcdefghijklmnop1234</p>
+      <pre>-----BEGIN RSA PRIVATE KEY-----
+MIIEowIBAAKCAQEAx7Qk2LmZr9VtW4YbNc6HdJf5GsAePuXo7TiKq
+-----END RSA PRIVATE KEY-----</pre>
+      <select><option>Option text</option></select>
+      <textarea>Draft text</textarea>
+      <script>const inline = "script text";</script>
+    </main>
+  `);
+  type Node = { role?: string; name?: string; children?: Node[] };
+  const flat = (nodes: Node[]): Node[] => nodes.flatMap((node) => [node, ...flat(node.children ?? [])]);
+  const tree = executeContentAction(document, "a11yTree", { maxNodes: 64, includeText: true }) as {
+    nodes: Node[];
+    truncated: boolean;
+  };
+  assert.equal(tree.truncated, false);
+  const texts = flat(tree.nodes)
+    .filter((node) => node.role === "StaticText")
+    .map((node) => node.name);
+  assert.deepEqual(texts, ["Attach resume", "hidden-file=hidden-bytes-7731;", "[redacted]", "[redacted]"]);
+  const main = tree.nodes[0]!;
+  assert.equal(main.role, "main");
+  assert.ok(main.children?.some((node) => node.role === "StaticText" && node.name === "hidden-file=hidden-bytes-7731;"));
+  assert.ok(flat(tree.nodes).some((node) => node.role === "listitem" && node.name === "Post text"));
+  assert.doesNotMatch(JSON.stringify(tree), /sk_live_|MIIEowIBAAKCAQEA|not visible|script text/);
+
+  const plain = executeContentAction(document, "a11yTree", { maxNodes: 64 }) as { nodes: Node[] };
+  assert.equal(flat(plain.nodes).filter((node) => node.role === "StaticText").length, 0);
+});
+
 test("a11yTree includes a same-origin iframe's controls with the frame hop in their targets", () => {
   const document = documentFor(
     '<button>Open</button><iframe title="Widget frame"></iframe><iframe title="Widget frame"></iframe>',

@@ -895,6 +895,9 @@ const A11Y_MAX_VALUES = 19_000;
 const A11Y_MAX_NODES = 2048;
 const A11Y_MAX_SCOPE_VISITS = 100_000;
 const A11Y_MAX_CHILDREN = 256;
+// Elements whose text is never page text: unrendered content, and form
+// controls whose text is their value.
+const A11Y_TEXT_EXCLUDED_TAGS = new Set(["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT", "IFRAME", "TEXTAREA", "SELECT"]);
 const A11Y_STRUCTURAL_ROLES = new Set([
   "banner",
   "navigation",
@@ -974,6 +977,7 @@ function a11yTree(
   maxNodesInput: unknown,
   targetInput?: unknown,
   locateOnly = false,
+  includeText = false,
 ): { nodes: A11yNode[]; truncated: boolean; located?: LocatedTarget } {
   let maxNodes = 256;
   if (typeof maxNodesInput === "number" && Number.isSafeInteger(maxNodesInput)) {
@@ -1209,7 +1213,7 @@ function a11yTree(
       state.truncated = true;
       return [];
     }
-    const inner = a11yTree(frameDocument, state.remaining);
+    const inner = a11yTree(frameDocument, state.remaining, undefined, false, includeText);
     if (inner.truncated) state.truncated = true;
     const count = (nodes: A11yNode[]): number =>
       nodes.reduce((total, node) => total + 1 + count(node.children ?? []), 0);
@@ -1229,7 +1233,24 @@ function a11yTree(
     return inner.nodes;
   };
 
-  const build = (element: Element, depth: number, level: number): A11yNode[] => {
+  // A visible text run outside any named node, reported as Chromium does.
+  const staticText = (parent: Element, text: Node, level: number): A11yNode[] => {
+    let name: string | undefined;
+    try {
+      name = isSensitiveTextContext(parent) ? REDACTED : observationString(text.nodeValue);
+    } catch {
+      return [];
+    }
+    if (!name) return [];
+    if (level > A11Y_MAX_NODE_LEVEL) {
+      state.truncated = true;
+      return [];
+    }
+    state.remaining -= 1;
+    return [{ role: "StaticText", name }];
+  };
+
+  const build = (element: Element, depth: number, level: number, covered: boolean): A11yNode[] => {
     let role: string | undefined;
     let name: string | undefined;
     let sensitive = false;
@@ -1261,16 +1282,28 @@ function a11yTree(
       }
       state.remaining -= 1;
     }
+    // Text a node's own name or value already carries is not repeated.
+    const textCovered =
+      covered ||
+      (role !== undefined && NAME_FROM_CONTENT_ROLES.has(role)) ||
+      A11Y_TEXT_EXCLUDED_TAGS.has(element.tagName);
+    const childLevel = role ? level + 1 : level;
     const children: A11yNode[] = [];
     if (depth < A11Y_MAX_DEPTH) {
-      const siblings = Array.from(element.children);
-      if (siblings.length > A11Y_MAX_CHILDREN) state.truncated = true;
-      for (const child of siblings.slice(0, A11Y_MAX_CHILDREN)) {
+      if (element.children.length > A11Y_MAX_CHILDREN) state.truncated = true;
+      let elements = 0;
+      for (const child of Array.from(element.childNodes)) {
         if (state.remaining <= 0) {
           state.truncated = true;
           break;
         }
-        children.push(...build(child, depth + 1, role ? level + 1 : level));
+        if (child.nodeType === 1) {
+          if (elements >= A11Y_MAX_CHILDREN) break;
+          elements += 1;
+          children.push(...build(child as Element, depth + 1, childLevel, textCovered));
+        } else if (child.nodeType === 3 && includeText && !textCovered) {
+          children.push(...staticText(element, child, childLevel));
+        }
       }
     }
     if (!role) return children;
@@ -1313,7 +1346,7 @@ function a11yTree(
     return [node];
   };
 
-  const nodes = build(scope, 0, 0);
+  const nodes = build(scope, 0, 0, false);
   const targetSeen = new Map<string, number>(scopeSeen ?? []);
   const sendBudget = { values: A11Y_MAX_VALUES, bytes: MAX_OBSERVATION_BYTES };
   const annotateTargets = (candidates: A11yNode[]): A11yNode[] => {
@@ -1370,7 +1403,7 @@ export function executeContentAction(
     return observeRoot(document, inspectionRoot(document, parsed), parsed.includeHtml as boolean);
   }
   if (operation === "a11yTree") {
-    return a11yTree(document, parsed.maxNodes, parsed.target);
+    return a11yTree(document, parsed.maxNodes, parsed.target, false, parsed.includeText === true);
   }
   if (operation === "locateTarget") {
     return a11yTree(document, 1, parsed.target, true).located;

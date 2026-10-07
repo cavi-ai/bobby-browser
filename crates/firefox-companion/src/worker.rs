@@ -249,16 +249,18 @@ pub trait ExtensionObserver: Send + Sync {
     ) -> Result<(), CommandError>;
 
     /// Capture a compact accessibility tree for the page, or for the subtree
-    /// rooted at `target` when one is given. Returns the tree and whether it
-    /// was truncated to the node bound.
+    /// rooted at `target` when one is given. With `include_text`, visible
+    /// text outside named nodes is reported as `StaticText` leaves. Returns
+    /// the tree and whether it was truncated to the node bound.
     async fn a11y_snapshot(
         &self,
         lease: &AttachmentLease,
         page_id: &PageId,
         max_nodes: u32,
         target: Option<&types::TargetSpec>,
+        include_text: bool,
     ) -> Result<(Vec<types::AccessibilityNode>, bool), CommandError> {
-        let _ = (lease, page_id, max_nodes, target);
+        let _ = (lease, page_id, max_nodes, target, include_text);
         Err(driver_error(
             ErrorCode::BrowserCommandFailed,
             "accessibility snapshot is not supported by this observer",
@@ -519,6 +521,7 @@ impl ExtensionObserver for CompanionExtensionObserver {
         page_id: &PageId,
         max_nodes: u32,
         target: Option<&types::TargetSpec>,
+        include_text: bool,
     ) -> Result<(Vec<types::AccessibilityNode>, bool), CommandError> {
         if lease.expires_at <= Instant::now() {
             return Err(lease_error());
@@ -534,7 +537,7 @@ impl ExtensionObserver for CompanionExtensionObserver {
             command_id: command_id.clone(),
             page_id: page_id.clone(),
             operation: "a11yTree".into(),
-            input: json!({"maxNodes": max_nodes, "target": scope}),
+            input: json!({"maxNodes": max_nodes, "target": scope, "includeText": include_text}),
             deadline_unix_ms: deadline_unix_ms(self.timeout),
         };
         match self
@@ -3375,7 +3378,13 @@ impl BrowserWorker for FirefoxCompanionWorker {
         }
         let (nodes, truncated) = self
             .observer
-            .a11y_snapshot(&self.current_lease(), page_id, CANDIDATE_MAX_NODES, None)
+            .a11y_snapshot(
+                &self.current_lease(),
+                page_id,
+                CANDIDATE_MAX_NODES,
+                None,
+                false,
+            )
             .await?;
         if truncated && !accessibility_tree_has_match(&nodes, target) {
             // The bounded snapshot never reached the target; a search that is
@@ -4994,7 +5003,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                     {
                         let (nodes, _) = self
                             .observer
-                            .a11y_snapshot(&self.current_lease(), page_id, 256, None)
+                            .a11y_snapshot(&self.current_lease(), page_id, 256, None, false)
                             .await?;
                         (accessibility_tree_contains(&nodes, target), None)
                     } else {
@@ -5523,6 +5532,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 page_id,
                 max_nodes,
                 command.target.as_ref(),
+                true,
             )
             .await?;
         worker_pool::annotate_accessibility_targets(&mut nodes);

@@ -427,7 +427,18 @@ impl ExtensionObserver for CandidateObserver {
         _page_id: &PageId,
         max_nodes: u32,
         _target: Option<&TargetSpec>,
+        include_text: bool,
     ) -> Result<(Vec<types::AccessibilityNode>, bool), CommandError> {
+        if include_text {
+            return Ok((
+                vec![types::AccessibilityNode {
+                    role: Some("StaticText".into()),
+                    name: Some("hidden-file=hidden-bytes-7731;".into()),
+                    ..types::AccessibilityNode::default()
+                }],
+                false,
+            ));
+        }
         assert_eq!(max_nodes, 1024);
         Ok((
             vec![types::AccessibilityNode {
@@ -820,6 +831,41 @@ async fn semantic_candidate_collection_uses_firefox_accessibility_snapshot() {
     assert!(candidates[1].state.attached);
     assert!(candidates[1].state.visible);
     assert!(candidates[1].state.enabled);
+}
+
+#[tokio::test]
+async fn accessibility_snapshot_asks_the_extension_for_page_text() {
+    let worker = FirefoxCompanionWorker::new(
+        WorkerId::new(),
+        PathBuf::from("/profiles/firefox"),
+        lease(),
+        FakeBidi::new(Vec::new()),
+        Arc::new(CandidateObserver),
+    )
+    .await
+    .unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+
+    let evidence = worker
+        .a11y_snapshot(
+            &page_id,
+            &types::AccessibilitySnapshotCommand {
+                max_nodes: None,
+                target: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let Some(Evidence::AccessibilitySnapshot { nodes, .. }) = evidence.first() else {
+        panic!("no accessibility snapshot: {evidence:?}");
+    };
+    assert_eq!(nodes[0].role.as_deref(), Some("StaticText"));
+    assert_eq!(
+        nodes[0].name.as_deref(),
+        Some("hidden-file=hidden-bytes-7731;")
+    );
 }
 
 #[tokio::test]
@@ -4604,6 +4650,7 @@ impl ExtensionObserver for LargePageObserver {
         _page_id: &PageId,
         _max_nodes: u32,
         _target: Option<&TargetSpec>,
+        _include_text: bool,
     ) -> Result<(Vec<types::AccessibilityNode>, bool), CommandError> {
         Ok((
             vec![types::AccessibilityNode {
