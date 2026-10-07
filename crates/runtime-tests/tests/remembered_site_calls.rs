@@ -1,6 +1,6 @@
 //! What remembering a site saves an agent, on managed Chromium.
 //!
-//! The agent fills the gauntlet onboarding identity form with the two MCP
+//! The agent fills an onboarding identity form with the two MCP
 //! calls a real driver made on this journey: `workflow_observe` with a goal,
 //! then `intent_complete_form`. It runs once against a cold context store and
 //! once more after a runtime restart over the same store. The browser profile
@@ -8,18 +8,14 @@
 //!
 //! Run with `--nocapture` to print the per-call table the docs reproduce.
 
-#[allow(dead_code)]
-#[path = "modern_gauntlet/mod.rs"]
-mod modern_gauntlet;
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use mcp_gateway::Server;
-use modern_gauntlet::scenario::{ScenarioConfig, ScenarioServer};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use serde_json::{json, Value};
+use test_site::{FixtureSite, Route};
 use types::{
     AttemptId, Capability, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest,
     NavigateCommand, OpenPageRequest, PrimitiveCommand, RuntimeCommand, WaitUntil, WorkflowId,
@@ -35,6 +31,14 @@ const CAPABILITIES: [Capability; 7] = [
     Capability::IntentExecute,
     Capability::ContextRead,
 ];
+
+const ONBOARDING: &str = r#"<!doctype html><title>New relationship</title><main>
+<h1>New relationship</h1>
+<form>
+<label for="full-name">Full name</label><input id="full-name" name="fullName">
+<label for="work-email">Work email</label><input id="work-email" name="workEmail" type="email">
+<button type="button">Next</button>
+</form></main>"#;
 
 fn chrome_executable() -> PathBuf {
     std::env::var("BOBBY_CHROME_EXECUTABLE")
@@ -135,7 +139,7 @@ async fn agent_run(root: &Path, url: &str) -> Vec<Call> {
         .await;
 
     // Setup, identical in both runs and not counted: open a page on the
-    // onboarding form behind the gauntlet's sign-in and MFA.
+    // onboarding form.
     let session = runtime
         .create_session(CreateSessionRequest {
             profile: "remembered-site".into(),
@@ -171,9 +175,6 @@ async fn agent_run(root: &Path, url: &str) -> Vec<Call> {
         matches!(navigated, CommandOutcome::Completed { .. }),
         "{navigated:?}"
     );
-    modern_gauntlet::unlock::unlock_northstar_session(&runtime, &session.id, &page.id)
-        .await
-        .unwrap();
 
     let ids = json!({"sessionId":session.id,"pageId":page.id});
     let mut calls = Vec::new();
@@ -224,10 +225,8 @@ async fn agent_run(root: &Path, url: &str) -> Vec<Call> {
 #[tokio::test]
 #[ignore = "requires installed Chromium"]
 async fn a_remembered_site_skips_the_snapshot_after_a_restart() {
-    let server = ScenarioServer::start(ScenarioConfig::seeded("remembered-site"))
-        .await
-        .unwrap();
-    let url = server.application_url("/onboarding");
+    let server = FixtureSite::spawn(vec![("/onboarding", Route::Html(ONBOARDING.into()))]).await;
+    let url = server.url("/onboarding");
     let root = tempfile::tempdir().unwrap();
 
     let cold = agent_run(root.path(), &url).await;

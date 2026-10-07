@@ -1793,20 +1793,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gauntlet-server"
-version = "0.19.1"
-dependencies = [
- "async-trait",
- "axum",
- "hex",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
-]
-
-[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2630,7 +2616,6 @@ dependencies = [
  "firefox-companion",
  "futures-util",
  "gateway-transport",
- "gauntlet-server",
  "hex",
  "interface-core",
  "jsonschema",
@@ -2645,6 +2630,7 @@ dependencies = [
  "sha2",
  "task-scheduler",
  "tempfile",
+ "test-site",
  "thiserror",
  "tokio",
  "tokio-tungstenite 0.30.0",
@@ -3542,7 +3528,6 @@ dependencies = [
  "fingerprinting",
  "firefox-companion",
  "futures-util",
- "gauntlet-server",
  "hex",
  "intent-engine",
  "interface-conformance",

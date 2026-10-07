@@ -1151,7 +1151,7 @@ async fn fill_rejects_activate_and_names_control_action_as_the_right_tool() {
 }
 
 /// A form whose second field ("Authentication code") is not in the DOM at
-/// all until the "Continue" button is clicked -- the gauntlet sign-in shape
+/// all until the "Continue" button is clicked -- the sign-in shape
 /// (email + password submitted, then an MFA code field appears).
 struct SubmitRevealingFormBrowser {
     submitted: AtomicBool,

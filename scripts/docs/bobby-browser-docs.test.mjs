@@ -179,7 +179,7 @@ test("verify fails when a Markdown page is omitted from navigation", async () =>
   });
 });
 
-test("generated docs publish the Bobby skill and gauntlet operator guides", async () => {
+test("generated docs publish the Bobby skill guide", async () => {
   await withSourceFixture(async (fixtureRoot) => {
     await buildBobbyBrowserDocs(fixtureRoot, RELEASE);
     const navigation = JSON.parse(
@@ -189,7 +189,6 @@ test("generated docs publish the Bobby skill and gauntlet operator guides", asyn
     .find((section) => section.title === "Guides")
     .pages.map((page) => page.path);
   assert.ok(guidePaths.includes("guides/skills.md"));
-  assert.ok(guidePaths.includes("guides/gauntlet.md"));
 
     const skills = await readFile(
       path.join(fixtureRoot, OUTPUT_REL, "guides/skills.md"),
@@ -199,14 +198,6 @@ test("generated docs publish the Bobby skill and gauntlet operator guides", asyn
   assert.match(skills, /\/zigzagzig run\|status\|stop/);
   assert.match(skills, /effectUncertain/);
 
-    const gauntlet = await readFile(
-      path.join(fixtureRoot, OUTPUT_REL, "guides/gauntlet.md"),
-      "utf8",
-    );
-    assert.match(gauntlet, /@cavi-ai\/bobby-gauntlet/);
-    assert.match(gauntlet, /--test modern_gauntlet_e2e/);
-    assert.match(gauntlet, /target\/modern-gauntlet-artifacts/);
-    assert.doesNotMatch(gauntlet, /--ignored|BOBBY_CHAMPIONSHIP_ENGINE/);
   });
 });
 

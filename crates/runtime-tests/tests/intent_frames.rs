@@ -6,17 +6,213 @@ use std::path::PathBuf;
 
 use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, ServerConfig, StorageConfig};
-use gauntlet_server::{ScenarioConfig, ScenarioServer};
 use sdk_core::RuntimeService;
+use test_site::{FixtureSite, Route};
 use types::{
     AttemptId, ClickCommand, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest,
     ElementState, FormControlKind, FormControlTarget, IntentCommand, IntentHints, NavigateCommand,
-    OpenPageRequest, PageId, PrimitiveCommand, RuntimeCommand, SessionId, TargetSpec,
-    UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil, WorkflowId,
+    OpenPageRequest, PrimitiveCommand, RuntimeCommand, TargetSpec, UploadFilesCommand,
+    WaitCondition, WaitForCommand, WaitUntil, WorkflowId,
 };
 
-#[path = "modern_gauntlet/unlock.rs"]
-mod northstar_unlock;
+const DOCUMENTS: &str = r##"<!doctype html><title>Documents</title><main>
+<header><h1>CUSTOMER RECORDS</h1><h2>Documents</h2></header>
+<form aria-label="Upload customer document">
+<div role="group" aria-label="Document dropzone">Drop a customer document here</div>
+<label>Customer document <input type="file" aria-label="Customer document"></label>
+<button type="submit">Upload document</button>
+</form>
+<div id="result"></div>
+<script>
+class StaticPreview extends HTMLElement {
+  connectedCallback() {
+    const root = this.attachShadow({ mode: "open" });
+    const frame = document.createElement("iframe");
+    frame.id = "document-preview";
+    frame.title = "Document preview";
+    frame.src = "/preview";
+    const confirm = document.createElement("button");
+    confirm.id = "confirm-preview";
+    confirm.type = "button";
+    confirm.setAttribute("aria-label", "Confirm document preview");
+    confirm.textContent = "Confirm document";
+    confirm.addEventListener("click", () => {
+      fetch("/api/documents/confirm", { method: "POST" }).then(() => {
+        confirm.disabled = true;
+      });
+    });
+    root.append(frame, confirm);
+  }
+}
+customElements.define("static-preview", StaticPreview);
+const form = document.querySelector("form");
+const input = form.querySelector("input");
+form.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (!input.files.length) return;
+  fetch("/api/documents", { method: "POST" }).then(() => {
+    const preview = document.createElement("static-preview");
+    preview.id = "document-preview-widget";
+    preview.setAttribute("role", "group");
+    preview.setAttribute("aria-label", "Document preview widget");
+    document.getElementById("result").append(preview);
+  });
+});
+</script></main>"##;
+
+const PREVIEW: &str =
+    "<!doctype html><title>Preview</title><p>Preview of the uploaded document</p>";
+
+const CUSTOMERS: &str = r##"<!doctype html><title>Customers</title><main>
+<h1>Customers</h1>
+<div aria-label="Search customers">
+<input aria-label="Search customers" type="search">
+<button type="button">Search</button>
+<ul role="listbox" aria-label="Search customers suggestions" hidden></ul>
+</div>
+<div id="found"></div>
+<script>
+const list = document.querySelector("ul");
+document.querySelector("div button").addEventListener("click", () => {
+  const option = document.createElement("li");
+  option.setAttribute("role", "option");
+  option.tabIndex = 0;
+  option.textContent = "Atlas Labs";
+  option.addEventListener("click", () => {
+    list.hidden = true;
+    const link = document.createElement("a");
+    link.href = "/customers/cus_atlas";
+    link.textContent = "Atlas Labs";
+    document.getElementById("found").append(link);
+  });
+  list.replaceChildren(option);
+  list.hidden = false;
+});
+</script></main>"##;
+
+const CUSTOMER_DETAIL: &str = r##"<!doctype html><title>Atlas Labs</title><main>
+<h1>Atlas Labs</h1>
+<button type="button" role="combobox" aria-label="Customer priority" aria-expanded="false" id="priority">Normal</button>
+<ul role="listbox" aria-label="Customer priority" hidden id="choices">
+<li role="option" tabindex="0" data-value="low">Low</li>
+<li role="option" tabindex="0" data-value="normal">Normal</li>
+<li role="option" tabindex="0" data-value="high">High</li>
+</ul>
+<button type="button" id="save">Save priority</button>
+<div id="saved"></div>
+<script>
+let value = "normal";
+const button = document.getElementById("priority");
+const choices = document.getElementById("choices");
+button.addEventListener("click", () => { choices.hidden = !choices.hidden; });
+for (const option of choices.querySelectorAll("li")) {
+  option.addEventListener("click", () => {
+    value = option.dataset.value;
+    button.textContent = option.textContent;
+    choices.hidden = true;
+  });
+}
+document.getElementById("save").addEventListener("click", () => {
+  fetch("/api/priority/" + value, { method: "POST" }).then(() => {
+    document.getElementById("saved").textContent = "Priority saved";
+  });
+});
+</script></main>"##;
+
+const ONBOARDING: &str = r##"<!doctype html><title>New relationship</title><main>
+<h1>New relationship</h1>
+<section id="step1">
+<label for="full-name">Full name</label><input id="full-name">
+<button type="button" id="next1">Next</button>
+</section>
+<section id="step2" hidden>
+<label for="company">Company name</label><input id="company">
+<button type="button" id="next2">Next</button>
+</section>
+<section id="step3" hidden>
+<label for="plan">Plan</label>
+<select id="plan"><option value="starter">Starter</option><option value="growth">Growth</option></select>
+<div id="cycle-row" hidden>
+<label for="cycle">Billing cycle</label>
+<select id="cycle"><option value="monthly">Monthly</option><option value="annual">Annual</option></select>
+</div>
+</section>
+<script>
+const show = (hide, reveal) => {
+  document.getElementById(hide).hidden = true;
+  document.getElementById(reveal).hidden = false;
+};
+document.getElementById("next1").addEventListener("click", () => show("step1", "step2"));
+document.getElementById("next2").addEventListener("click", () => show("step2", "step3"));
+document.getElementById("plan").addEventListener("change", (event) => {
+  document.getElementById("cycle-row").hidden = event.target.value !== "growth";
+});
+</script></main>"##;
+
+const REPORTS: &str = r##"<!doctype html><title>Reports</title><main>
+<h1>Reports</h1>
+<form aria-label="Generate report"><button type="submit">Generate report</button></form>
+<div id="out"></div>
+<script>
+document.querySelector("form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  fetch("/api/report", { method: "POST" }).then(() => {
+    const out = document.getElementById("out");
+    out.textContent = "Report ready ";
+    const link = document.createElement("a");
+    link.href = "/api/reports/rep_1/download";
+    link.textContent = "atlas-operations.csv";
+    out.append(link);
+  });
+});
+</script></main>"##;
+
+fn html(body: &str) -> Route {
+    Route::Html(body.into())
+}
+
+fn ok_json() -> Route {
+    Route::Raw {
+        content_type: "application/json",
+        body: "{}".into(),
+    }
+}
+
+async fn site() -> FixtureSite {
+    FixtureSite::spawn(vec![
+        ("/customers", html(CUSTOMERS)),
+        ("/customers/cus_atlas", html(CUSTOMER_DETAIL)),
+        ("/customers/cus_atlas/documents", html(DOCUMENTS)),
+        ("/preview", html(PREVIEW)),
+        ("/onboarding", html(ONBOARDING)),
+        ("/reports", html(REPORTS)),
+        ("/api/documents", ok_json()),
+        ("/api/documents/confirm", ok_json()),
+        ("/api/priority/high", ok_json()),
+        ("/api/report", ok_json()),
+        (
+            "/api/reports/rep_1/download",
+            Route::Raw {
+                content_type: "text/csv",
+                body: "a,b\n".into(),
+            },
+        ),
+    ])
+    .await
+}
+
+/// Waits for `path` to have been requested `count` times, then holds briefly
+/// so an extra request would be counted.
+async fn expect_hits(server: &FixtureSite, path: &str, count: usize) {
+    for _ in 0..100 {
+        if server.hits(path) >= count {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(server.hits(path), count, "requests to {path}");
+}
 
 fn chrome_executable() -> PathBuf {
     std::env::var("BOBBY_CHROME_EXECUTABLE")
@@ -24,12 +220,6 @@ fn chrome_executable() -> PathBuf {
         .unwrap_or_else(|_| {
             PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
         })
-}
-
-async fn unlock_session(runtime: &RuntimeService, session_id: &SessionId, page_id: &PageId) {
-    northstar_unlock::unlock_northstar_session(runtime, session_id, page_id)
-        .await
-        .unwrap();
 }
 
 fn preview_widget_target() -> TargetSpec {
@@ -69,9 +259,7 @@ fn target_spec(target: &FormControlTarget) -> TargetSpec {
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn intent_locate_resolves_inside_an_iframe_without_a_frame_path() {
-    let server = ScenarioServer::start(ScenarioConfig::seeded("intent-frames"))
-        .await
-        .unwrap();
+    let server = site().await;
     let root = tempfile::tempdir().unwrap();
     let fixture =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/approved-upload.txt");
@@ -143,7 +331,7 @@ async fn intent_locate_resolves_inside_an_iframe_without_a_frame_path() {
     };
 
     let outcome = submit_primitive(PrimitiveCommand::Navigate(NavigateCommand {
-        url: server.application_url("/customers/cus_atlas/documents"),
+        url: server.url("/customers/cus_atlas/documents"),
         wait_until: WaitUntil::Interactive,
         timeout_ms: 30_000,
     }))
@@ -152,7 +340,6 @@ async fn intent_locate_resolves_inside_an_iframe_without_a_frame_path() {
         matches!(outcome, CommandOutcome::Completed { .. }),
         "{outcome:?}"
     );
-    unlock_session(&runtime, &session.id, &page.id).await;
 
     let form_snapshot = runtime
         .form_snapshot(&session.id, &page.id, None)
@@ -251,9 +438,7 @@ async fn intent_locate_resolves_inside_an_iframe_without_a_frame_path() {
         matches!(outcome, CommandOutcome::Completed { .. }),
         "page died after the in-frame click: {outcome:?}"
     );
-    server.wait_for_preview_confirmation().await.unwrap();
-    let snapshot = server.snapshot().await;
-    assert_eq!(snapshot.preview_confirmations, 1);
+    expect_hits(&server, "/api/documents/confirm", 1).await;
 
     runtime.sessions.delete(&session.id).await.unwrap();
 }
@@ -372,9 +557,7 @@ async fn page_scoped_text_wait_matches_body_text() {
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn intent_submit_with_text_expected_state_observes_the_confirmation() {
-    let server = ScenarioServer::start(ScenarioConfig::seeded("text-expect"))
-        .await
-        .unwrap();
+    let server = site().await;
     let root = tempfile::tempdir().unwrap();
     let config = AppConfig {
         cdp: config::CdpConfig::default(),
@@ -444,7 +627,7 @@ async fn intent_submit_with_text_expected_state_observes_the_confirmation() {
 
     let outcome = submit(RuntimeCommand::Primitive(PrimitiveCommand::Navigate(
         NavigateCommand {
-            url: server.application_url("/customers"),
+            url: server.url("/customers"),
             wait_until: WaitUntil::Interactive,
             timeout_ms: 30_000,
         },
@@ -454,7 +637,6 @@ async fn intent_submit_with_text_expected_state_observes_the_confirmation() {
         matches!(outcome, CommandOutcome::Completed { .. }),
         "{outcome:?}"
     );
-    unlock_session(&runtime, &session.id, &page.id).await;
 
     // Search and open the customer, mirroring the journey.
     let outcome = submit(RuntimeCommand::Primitive(PrimitiveCommand::TypeText(
@@ -747,16 +929,15 @@ async fn intent_submit_with_text_expected_state_observes_the_confirmation() {
         matches!(outcome, CommandOutcome::Completed { .. }),
         "intent submit with text expectedState failed: {outcome:?}"
     );
-    let snapshot = server.snapshot().await;
-    assert_eq!(snapshot.atlas_priority, "high");
+    expect_hits(&server, "/api/priority/high", 1).await;
     runtime.sessions.delete(&session.id).await.unwrap();
 }
 
-/// Shared setup: seeded gauntlet server, headless installed-Chromium runtime,
+/// Shared setup: local fixture site, headless installed-Chromium runtime,
 /// documents page with the upload flow completed so the preview iframe is live.
 #[allow(dead_code)]
 struct DocumentsPageProbe {
-    server: ScenarioServer,
+    server: FixtureSite,
     runtime: RuntimeService,
     session_id: types::SessionId,
     page_id: types::PageId,
@@ -765,9 +946,7 @@ struct DocumentsPageProbe {
 
 #[allow(dead_code)]
 async fn documents_page_with_preview(seed: &str) -> DocumentsPageProbe {
-    let server = ScenarioServer::start(ScenarioConfig::seeded(seed))
-        .await
-        .unwrap();
+    let server = site().await;
     let root = tempfile::tempdir().unwrap();
     let fixture =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/approved-upload.txt");
@@ -837,7 +1016,7 @@ async fn documents_page_with_preview(seed: &str) -> DocumentsPageProbe {
         })
     };
     let outcome = submit(PrimitiveCommand::Navigate(NavigateCommand {
-        url: server.application_url("/customers/cus_atlas/documents"),
+        url: server.url("/customers/cus_atlas/documents"),
         wait_until: WaitUntil::Interactive,
         timeout_ms: 30_000,
     }))
@@ -846,7 +1025,6 @@ async fn documents_page_with_preview(seed: &str) -> DocumentsPageProbe {
         matches!(outcome, CommandOutcome::Completed { .. }),
         "{outcome:?}"
     );
-    unlock_session(&runtime, &session.id, &page.id).await;
     // The documents route renders its form from the SPA bundle, so `Interactive`
     // (DOMContentLoaded) can land before the file input exists. Snapshotting
     // straight after the navigate raced the render and failed this test in CI
@@ -925,9 +1103,7 @@ async fn documents_page_with_preview(seed: &str) -> DocumentsPageProbe {
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn control_action_reports_revealed_conditional_controls() {
-    let server = ScenarioServer::start(ScenarioConfig::seeded("revealed-controls"))
-        .await
-        .unwrap();
+    let server = site().await;
     let root = tempfile::tempdir().unwrap();
     let fixture =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/approved-upload.txt");
@@ -997,7 +1173,7 @@ async fn control_action_reports_revealed_conditional_controls() {
         })
     };
     let outcome = submit(PrimitiveCommand::Navigate(NavigateCommand {
-        url: server.application_url("/onboarding"),
+        url: server.url("/onboarding"),
         wait_until: WaitUntil::Interactive,
         timeout_ms: 30_000,
     }))
@@ -1006,7 +1182,6 @@ async fn control_action_reports_revealed_conditional_controls() {
         matches!(outcome, CommandOutcome::Completed { .. }),
         "{outcome:?}"
     );
-    unlock_session(&runtime, &session.id, &page.id).await;
 
     let click_named = |name: &str| {
         submit(PrimitiveCommand::Click(ClickCommand {
@@ -1094,9 +1269,7 @@ async fn control_action_reports_revealed_conditional_controls() {
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn a11y_snapshot_exposes_link_urls() {
-    let server = ScenarioServer::start(ScenarioConfig::seeded("a11y-link-urls"))
-        .await
-        .unwrap();
+    let server = site().await;
     let root = tempfile::tempdir().unwrap();
     let fixture =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/approved-upload.txt");
@@ -1166,7 +1339,7 @@ async fn a11y_snapshot_exposes_link_urls() {
         })
     };
     let outcome = submit(PrimitiveCommand::Navigate(NavigateCommand {
-        url: server.application_url("/reports"),
+        url: server.url("/reports"),
         wait_until: WaitUntil::Interactive,
         timeout_ms: 30_000,
     }))
@@ -1175,7 +1348,6 @@ async fn a11y_snapshot_exposes_link_urls() {
         matches!(outcome, CommandOutcome::Completed { .. }),
         "{outcome:?}"
     );
-    unlock_session(&runtime, &session.id, &page.id).await;
     let outcome = submit(PrimitiveCommand::Click(types::ClickCommand {
         selector: "form[aria-label='Generate report'] button".into(),
         target: None,
@@ -1451,11 +1623,7 @@ async fn a11y_snapshot_descends_into_iframes() {
         matches!(outcome, CommandOutcome::Completed { .. }),
         "control_action with the snapshot target failed: {outcome:?}"
     );
-    probe
-        .server
-        .wait_for_preview_confirmation()
-        .await
-        .expect("in-frame activation did not land");
+    expect_hits(&probe.server, "/api/documents/confirm", 1).await;
     probe
         .runtime
         .sessions

@@ -6,16 +6,34 @@ use std::path::PathBuf;
 
 use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, ServerConfig, StorageConfig};
-use gauntlet_server::{ScenarioConfig, ScenarioServer};
 use sdk_core::RuntimeService;
+use test_site::{FixtureSite, Route};
 use types::{
     AttemptId, ClickCommand, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest,
     EvaluateJavaScriptCommand, Evidence, ListPagesCommand, NavigateCommand, OpenPageRequest,
     PrimitiveCommand, RuntimeCommand, WaitUntil, WorkflowId,
 };
 
-#[path = "modern_gauntlet/unlock.rs"]
-mod northstar_unlock;
+async fn site() -> FixtureSite {
+    FixtureSite::spawn(vec![
+        (
+            "/integrations",
+            Route::Html(
+                r#"<!doctype html><title>Integrations</title><main>
+<button aria-label="Connect Ledger Cloud" id="connect">Connect</button>
+<script>document.getElementById("connect").addEventListener("click", () => {
+  window.open("/ledger/authorize", "_blank");
+});</script></main>"#
+                    .into(),
+            ),
+        ),
+        (
+            "/ledger/authorize",
+            Route::Html("<!doctype html><title>Authorize Ledger</title><p>Authorize</p>".into()),
+        ),
+    ])
+    .await
+}
 
 fn chrome_executable() -> PathBuf {
     std::env::var("BOBBY_CHROME_EXECUTABLE")
@@ -28,9 +46,7 @@ fn chrome_executable() -> PathBuf {
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn popup_opens_as_a_listed_page() {
-    let server = ScenarioServer::start(ScenarioConfig::seeded("popup-discovery"))
-        .await
-        .unwrap();
+    let server = site().await;
     let root = tempfile::tempdir().unwrap();
     let config = AppConfig {
         cdp: config::CdpConfig::default(),
@@ -100,7 +116,7 @@ async fn popup_opens_as_a_listed_page() {
     };
 
     let outcome = submit(PrimitiveCommand::Navigate(NavigateCommand {
-        url: server.application_url("/integrations"),
+        url: server.url("/integrations"),
         wait_until: WaitUntil::Interactive,
         timeout_ms: 30_000,
     }))
@@ -109,9 +125,6 @@ async fn popup_opens_as_a_listed_page() {
         matches!(outcome, CommandOutcome::Completed { .. }),
         "{outcome:?}"
     );
-    northstar_unlock::unlock_northstar_session(&runtime, &session.id, &page.id)
-        .await
-        .unwrap();
 
     let outcome = submit(PrimitiveCommand::Click(ClickCommand {
         selector: "button[aria-label='Connect Ledger Cloud']".into(),
@@ -154,9 +167,7 @@ async fn popup_opens_as_a_listed_page() {
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn popup_closed_from_inside_still_lists_the_opener() {
-    let server = ScenarioServer::start(ScenarioConfig::seeded("popup-discovery-close"))
-        .await
-        .unwrap();
+    let server = site().await;
     let root = tempfile::tempdir().unwrap();
     let config = AppConfig {
         cdp: config::CdpConfig::default(),
@@ -225,7 +236,7 @@ async fn popup_closed_from_inside_still_lists_the_opener() {
         })
     };
 
-    let opener_url = server.application_url("/integrations");
+    let opener_url = server.url("/integrations");
     let outcome = submit(
         opener.id.clone(),
         PrimitiveCommand::Navigate(NavigateCommand {
@@ -239,9 +250,6 @@ async fn popup_closed_from_inside_still_lists_the_opener() {
         matches!(outcome, CommandOutcome::Completed { .. }),
         "{outcome:?}"
     );
-    northstar_unlock::unlock_northstar_session(&runtime, &session.id, &opener.id)
-        .await
-        .unwrap();
 
     let outcome = submit(
         opener.id.clone(),

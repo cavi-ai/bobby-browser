@@ -68,17 +68,6 @@ runtime still has to:
   hints, not page text, but any text a host feeds back to a model should go
   through the same untrusted-input handling as `pageDerived` content.
 
-## Verification
-
-`crates/runtime-tests/tests/prompt_injection_canary.rs` runs the normal
-observe/extract loop over a canary page
-(`packages/bobby-gauntlet/src/pages/canary.ts`, route `/agent-canary`) whose
-visible text and a hidden, accessibility-tree-reachable element both read
-like instructions aimed at an agent. It asserts every result is marked
-`pageDerived`, and that a session missing `JavascriptEvaluate` /
-`VisionAssist` is refused `evaluate_javascript` and `extract_structured`
-regardless of what the page's text asks for.
-
 Related: [Security model](model.md) for the fail-closed and capability-token
 invariants this page relies on. [Capabilities](../concepts/capabilities.md)
 for the full capability matrix.

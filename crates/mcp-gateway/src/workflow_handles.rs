@@ -252,7 +252,7 @@ impl WorkflowHandles {
             .any(|key| object.contains_key(*key))
         {
             // `page_activate {workflowHandle, pageId}` is the
-            // gauntlet-observed "activate this page and rebind the handle"
+            // agent-observed "activate this page and rebind the handle"
             // call, not a conflict: same session required, the handle's
             // bound page moves to the named one. Every other tool keeps the
             // strict mixing refusal.
@@ -908,7 +908,7 @@ mod tests {
     }
 
     /// `page_activate {workflowHandle, pageId}` is "activate this page and
-    /// rebind the handle", the gauntlet-observed call that used to die as a
+    /// rebind the handle", the agent-observed call that used to die as a
     /// binding conflict and force the agent off the handle path. Same
     /// session required; the handle moves to the requested page.
     #[test]

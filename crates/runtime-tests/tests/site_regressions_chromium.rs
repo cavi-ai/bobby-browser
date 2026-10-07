@@ -1,0 +1,29 @@
+//! Regressions first observed on a real site, reproduced on minimal local
+//! pages against live Chromium. See `support/cases.rs` for each finding.
+
+mod support;
+
+use support::cases;
+use support::rig::Rig;
+
+macro_rules! chromium_case {
+    ($name:ident) => {
+        #[tokio::test]
+        #[ignore = "requires installed Chrome or Chromium"]
+        async fn $name() {
+            let rig = Rig::chromium().await;
+            cases::$name(&rig).await;
+        }
+    };
+}
+
+chromium_case!(hidden_subtrees_do_not_spend_the_node_budget);
+chromium_case!(snapshot_target_scopes_the_tree);
+chromium_case!(workflow_start_reports_the_settled_page);
+chromium_case!(observe_after_navigate_includes_late_content);
+chromium_case!(accessible_names_are_computed);
+chromium_case!(secret_words_are_not_secrets);
+chromium_case!(disclosed_credentials_are_withheld);
+chromium_case!(large_dom_link_resolves_for_intent_follow);
+// `oversized_page_reports_truncation_not_target_not_found` is Firefox-only:
+// the 1024-node candidate cap it exercises exists only in the Firefox companion.

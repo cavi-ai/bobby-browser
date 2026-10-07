@@ -3,13 +3,11 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets
 cargo build --workspace --locked
 pnpm install --frozen-lockfile
-pnpm --filter @cavi-ai/bobby-gauntlet build
 cargo test --workspace --locked
 python3 scripts/check-version-agreement.py
 python3 -m unittest discover -s scripts/vision-mlx/training -p test_evaluate_adapter.py
 scripts/dev/firefox-start.test.sh
 cargo test -p fingerprinting --test default_profile_golden --locked -- --ignored
-pnpm --filter @cavi-ai/bobby-gauntlet test
 pnpm --filter @cavi-ai/bobby-browser test
 pnpm --filter @cavi-ai/bobby-firefox-companion test
 pnpm --filter @cavi-ai/bobby-interface-conformance test:unit

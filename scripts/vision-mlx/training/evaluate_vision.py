@@ -7,7 +7,6 @@ Measures action accuracy, coordinate precision, and task completion rate.
 
 Usage:
     python evaluate_vision.py --model llava:7b --test-data data/test_data.jsonl
-    python evaluate_vision.py --model qwen2-vl:7b --gauntlet
 """
 
 import argparse
@@ -244,38 +243,6 @@ class VisionEvaluator:
 
 
 # ---------------------------------------------------------------------------
-# Gauntlet Integration
-# ---------------------------------------------------------------------------
-
-def run_gauntlet_evaluation():
-    """Run evaluation on Bobby's gauntlet."""
-    print("Running gauntlet evaluation...")
-    
-    # This would integrate with Bobby's runtime to:
-    # 1. Run all 5 gauntlet journeys
-    # 2. Capture vision proposals and outcomes
-    # 3. Compute metrics
-    
-    # For now, return placeholder metrics
-    evaluator = VisionEvaluator()
-    evaluator.metrics = EvaluationMetrics(
-        action_accuracy=0.75,
-        click_accuracy=0.80,
-        coord_mae=25.0,
-        coord_within_10px=0.40,
-        journey_success_rate=0.70,
-        per_journey={
-            "customer-update": 0.80,
-            "onboarding": 0.75,
-            "documents": 0.65,
-            "authorization": 0.70,
-            "report-recovery": 0.60,
-        },
-    )
-    evaluator.print_report()
-
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -283,15 +250,11 @@ def main():
     parser = argparse.ArgumentParser(description="Bobby Vision Model Evaluation")
     parser.add_argument("--model", default="llava:7b", help="Model name")
     parser.add_argument("--test-data", default="data/test_data.jsonl", help="Test data path")
-    parser.add_argument("--gauntlet", action="store_true", help="Run gauntlet evaluation")
     args = parser.parse_args()
-    
-    if args.gauntlet:
-        run_gauntlet_evaluation()
-    else:
-        evaluator = VisionEvaluator(args.model)
-        evaluator.evaluate_dataset(args.test_data)
-        evaluator.print_report()
+
+    evaluator = VisionEvaluator(args.model)
+    evaluator.evaluate_dataset(args.test_data)
+    evaluator.print_report()
 
 
 if __name__ == "__main__":

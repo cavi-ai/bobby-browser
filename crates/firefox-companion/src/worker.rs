@@ -169,6 +169,22 @@ pub struct ExtensionObservation {
     pub controls_truncated: bool,
 }
 
+/// The outcome of an unbounded-by-count search for one target.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TargetLocation {
+    pub found: bool,
+    pub ambiguous: bool,
+    #[serde(default)]
+    pub css_path: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub disabled: bool,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ExtensionAccessibilitySnapshot {
@@ -241,6 +257,23 @@ pub trait ExtensionObserver: Send + Sync {
         Err(driver_error(
             ErrorCode::BrowserCommandFailed,
             "accessibility snapshot is not supported by this observer",
+            false,
+        ))
+    }
+
+    /// Searches the whole page for the one control `target` names, past the
+    /// bounds that cap `observe` and `a11y_snapshot`. Observers that cannot
+    /// search report the bounded walks' truncation instead.
+    async fn locate_target(
+        &self,
+        lease: &AttachmentLease,
+        page_id: &PageId,
+        target: &types::TargetSpec,
+    ) -> Result<TargetLocation, CommandError> {
+        let _ = (lease, page_id, target);
+        Err(driver_error(
+            ErrorCode::BrowserCommandFailed,
+            "target location is not supported by this observer",
             false,
         ))
     }
@@ -542,6 +575,56 @@ impl ExtensionObserver for CompanionExtensionObserver {
             _ => Err(driver_error(
                 ErrorCode::BrowserCommandFailed,
                 "extension returned an unexpected accessibility snapshot event",
+                false,
+            )),
+        }
+    }
+
+    async fn locate_target(
+        &self,
+        lease: &AttachmentLease,
+        page_id: &PageId,
+        target: &types::TargetSpec,
+    ) -> Result<TargetLocation, CommandError> {
+        if lease.expires_at <= Instant::now() {
+            return Err(lease_error());
+        }
+        let scope = a11y_scope_input(target)?;
+        let command_id = CommandId::new();
+        let action = ActionRequest {
+            protocol_version: PROTOCOL_VERSION,
+            attachment_id: lease.attachment_id.clone(),
+            command_id: command_id.clone(),
+            page_id: page_id.clone(),
+            operation: "locateTarget".into(),
+            input: json!({"target": scope}),
+            deadline_unix_ms: deadline_unix_ms(self.timeout),
+        };
+        match self
+            .dispatch_with_refresh(action, lease)
+            .await
+            .map_err(session_error)?
+        {
+            CompanionEvent::ActionCompleted(result)
+                if result.command_id == command_id
+                    && result.interaction_path == InteractionPath::ExtensionApi =>
+            {
+                serde_json::from_value(result.output).map_err(|error| {
+                    driver_error(
+                        ErrorCode::BrowserCommandFailed,
+                        format!("invalid extension target location: {error}"),
+                        false,
+                    )
+                })
+            }
+            CompanionEvent::ActionFailed { code, message, .. } => Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                format!("extension target location failed ({code}): {message}"),
+                false,
+            )),
+            _ => Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "extension returned an unexpected target location event",
                 false,
             )),
         }
@@ -2017,7 +2100,29 @@ impl FirefoxCompanionWorker {
         let (candidates, truncated) = self
             .gather_candidates_for_context(page_id, top_context, &context)
             .await?;
-        match resolve_candidates(target, &candidates, &ResolutionPolicy::default()) {
+        let resolution = resolve_candidates(target, &candidates, &ResolutionPolicy::default());
+        if truncated && matches!(resolution, Ok(ResolutionDecision::NotFound)) {
+            // The bounded control walk stopped before the end of the page; a
+            // search that is not capped by the control budget finds the
+            // target if it exists.
+            if let Ok(location) = self
+                .observer
+                .locate_target(&self.current_lease(), page_id, target)
+                .await
+            {
+                if location.ambiguous {
+                    return Err(driver_error(
+                        ErrorCode::TargetAmbiguous,
+                        "Firefox semantic target is ambiguous",
+                        false,
+                    ));
+                }
+                if let (true, Some(css_path)) = (location.found, location.css_path) {
+                    return Ok((context, css_path));
+                }
+            }
+        }
+        match resolution {
             Ok(ResolutionDecision::Resolved { candidate, .. }) => candidate
                 .css
                 .map(|selector| (context, selector))
@@ -2778,13 +2883,12 @@ impl PageOpenOperation {
     }
 }
 
-/// Longest a navigation waits for the document to stop changing.
-const NAVIGATION_SETTLE_CAP: Duration = Duration::from_secs(5);
-/// Time without a DOM mutation that counts as settled.
-const NAVIGATION_QUIET_MS: u64 = 300;
+use worker_pool::navigation_settle::{
+    navigation_settle_expression, parse_settled, NAVIGATION_SETTLE_CAP,
+};
 
 /// Waits until the document in `context` has had no DOM mutation for
-/// [`NAVIGATION_QUIET_MS`], or `budget` runs out, and returns the URL and
+/// `NAVIGATION_QUIET_MS`, or `budget` runs out, and returns the URL and
 /// title read at that point. A redirect that replaces the document while the
 /// probe runs restarts it. `None` when no read succeeded within the budget.
 async fn settle_document(
@@ -2798,11 +2902,12 @@ async fn settle_document(
         if remaining.is_zero() {
             return None;
         }
-        let expression = format!(
-            "new Promise(resolve=>{{let timer;const read=()=>JSON.stringify({{url:location.href,title:document.title}});const finish=()=>{{observer.disconnect();clearTimeout(timer);clearTimeout(cap);resolve(read());}};const observer=new MutationObserver(()=>{{clearTimeout(timer);timer=setTimeout(finish,{NAVIGATION_QUIET_MS});}});observer.observe(document,{{subtree:true,childList:true,attributes:true,characterData:true}});timer=setTimeout(finish,{NAVIGATION_QUIET_MS});const cap=setTimeout(finish,{});}})",
-            remaining.as_millis().max(1)
-        );
-        let attempt = tokio::time::timeout(
+        let expression = navigation_settle_expression(remaining.as_millis().max(1));
+        // Firefox does not always reject a pending evaluation when a script
+        // redirect replaces the document under it, so the probe races a watch
+        // on the context's URL and restarts in the new document when it moves.
+        let started_at = context_url(transport, context).await;
+        let probe = tokio::time::timeout(
             remaining + Duration::from_secs(1),
             transport.send(
                 "script.evaluate",
@@ -2813,26 +2918,54 @@ async fn settle_document(
                     "resultOwnership": "none",
                 }),
             ),
-        )
-        .await;
+        );
+        let moved = async {
+            let Some(started_at) = started_at else {
+                return std::future::pending::<()>().await;
+            };
+            loop {
+                tokio::time::sleep(SETTLE_URL_WATCH_INTERVAL).await;
+                if context_url(transport, context)
+                    .await
+                    .is_some_and(|current| current != started_at)
+                {
+                    return;
+                }
+            }
+        };
+        let attempt = tokio::select! {
+            attempt = probe => attempt,
+            () = moved => continue,
+        };
         if let Ok(Ok(response)) = attempt {
             let settled = response
                 .pointer("/result/value")
                 .or_else(|| response.get("value"))
                 .and_then(Value::as_str)
-                .and_then(|encoded| serde_json::from_str::<Value>(encoded).ok())
-                .and_then(|value| {
-                    Some((
-                        value.get("url")?.as_str()?.to_owned(),
-                        value.get("title")?.as_str()?.to_owned(),
-                    ))
-                });
+                .and_then(parse_settled);
             if settled.is_some() {
                 return settled;
             }
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+const SETTLE_URL_WATCH_INTERVAL: Duration = Duration::from_millis(50);
+
+/// The URL the browser currently reports for `context`, `None` when the tree
+/// does not list it.
+async fn context_url(transport: &Arc<dyn BidiTransport>, context: &str) -> Option<String> {
+    let tree = transport
+        .send(
+            "browsingContext.getTree",
+            json!({"root": context, "maxDepth": 0}),
+        )
+        .await
+        .ok()?;
+    tree.pointer("/contexts/0/url")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 async fn capture_context_title(
@@ -3181,6 +3314,30 @@ impl BrowserWorker for FirefoxCompanionWorker {
             .a11y_snapshot(&self.current_lease(), page_id, CANDIDATE_MAX_NODES, None)
             .await?;
         if truncated && !accessibility_tree_has_match(&nodes, target) {
+            // The bounded snapshot never reached the target; a search that is
+            // not capped by the node budget decides whether it exists.
+            if let Ok(location) = self
+                .observer
+                .locate_target(&self.current_lease(), page_id, target)
+                .await
+            {
+                if location.ambiguous {
+                    return Err(driver_error(
+                        ErrorCode::TargetAmbiguous,
+                        "Firefox semantic target is ambiguous",
+                        false,
+                    ));
+                }
+                if let (true, 0, Some(css_path)) = (
+                    location.found,
+                    target.ordinal.unwrap_or(0),
+                    location.css_path.clone(),
+                ) {
+                    let mut candidates = accessibility_candidates(&nodes);
+                    candidates.push(located_candidate(&location, css_path));
+                    return Ok(candidates);
+                }
+            }
             return Err(driver_error(
                 ErrorCode::ResourceExhausted,
                 format!(
@@ -3299,7 +3456,9 @@ impl BrowserWorker for FirefoxCompanionWorker {
         let (url, title) = match settle_document(&self.transport, &context, settle_budget).await {
             Some(settled) => settled,
             None => (
-                response_url,
+                context_url(&self.transport, &context)
+                    .await
+                    .unwrap_or(response_url),
                 capture_context_title(&self.transport, &context).await?,
             ),
         };
@@ -5843,6 +6002,26 @@ fn accessibility_tree_has_match(nodes: &[types::AccessibilityNode], target: &Tar
     })
 }
 
+fn located_candidate(location: &TargetLocation, css_path: String) -> Candidate {
+    Candidate {
+        id: "firefox-located-target".into(),
+        css: Some(css_path),
+        tag: None,
+        test_id: None,
+        role: location.role.clone(),
+        name: location.name.clone(),
+        label: None,
+        text: location.name.clone().unwrap_or_default(),
+        attributes: Default::default(),
+        state: CandidateState {
+            attached: true,
+            visible: true,
+            enabled: !location.disabled,
+        },
+        frame_path: Vec::new(),
+    }
+}
+
 fn accessibility_candidates(nodes: &[types::AccessibilityNode]) -> Vec<Candidate> {
     fn collect(nodes: &[types::AccessibilityNode], candidates: &mut Vec<Candidate>) {
         for node in nodes {
@@ -6295,7 +6474,7 @@ fn validate_observation(observation: &ExtensionObservation) -> Result<(), Comman
 /// level by the content script.
 fn unsafe_observation_text(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
-    crate::secret_material::contains_secret_material(value)
+    worker_pool::secret_material::contains_secret_material(value)
         || ["<script", " onclick=", " onload="]
             .iter()
             .any(|marker| lower.contains(marker))

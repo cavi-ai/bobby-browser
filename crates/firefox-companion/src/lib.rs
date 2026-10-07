@@ -4,7 +4,6 @@ pub mod bidi;
 pub mod bidi_endpoint;
 mod fingerprint_host;
 mod network_quiet;
-mod secret_material;
 pub mod selection;
 mod worker;
 
@@ -13,7 +12,8 @@ pub use bidi_endpoint::{bidi_url_from_endpoint_file, read_bidi_url_from_profile_
 pub use fingerprint_host::FirefoxBidiHost;
 pub use worker::{
     CompanionExtensionObserver, ExtensionControl, ExtensionObservation, ExtensionObserver,
-    ExtensionPageBinding, FirefoxCompanionFactory, FirefoxCompanionWorker, MAX_TRACKED_PAGES,
+    ExtensionPageBinding, FirefoxCompanionFactory, FirefoxCompanionWorker, TargetLocation,
+    MAX_TRACKED_PAGES,
 };
 
 pub use behavioral_engine::{

@@ -8,7 +8,7 @@
 //!
 //! Run with the proxy up (v1 provider + adapter):
 //!
-//!   BOBBY_GAUNTLET_VISION_ENDPOINT=http://127.0.0.1:9200/vision \
+//!   BOBBY_VISION_COLLECT_ENDPOINT=http://127.0.0.1:9200/vision \
 //!   BOBBY_VISION_TOKEN=<bearer> \
 //!   BOBBY_REALSITE_CORPUS_DIR=/tmp/vision-realsites \
 //!   cargo test -p runtime-tests --test intent_vision_real_sites -- --ignored --nocapture --test-threads=1
@@ -107,7 +107,7 @@ fn base_config(root: &std::path::Path) -> AppConfig {
         interface: config::InterfaceConfig::default(),
         observability: config::ObservabilityConfig::default(),
         vision: config::VisionConfig {
-            endpoint_url: std::env::var("BOBBY_GAUNTLET_VISION_ENDPOINT").ok(),
+            endpoint_url: std::env::var("BOBBY_VISION_COLLECT_ENDPOINT").ok(),
             token_env: Some("BOBBY_VISION_TOKEN".into()),
             corpus_dir: std::env::var("BOBBY_REALSITE_CORPUS_DIR")
                 .ok()
@@ -214,14 +214,14 @@ async fn open_site(runtime: &RuntimeService, url: &str) -> TestResult<(SessionId
 #[ignore = "requires installed Chrome, a running vision-proxy, and network access"]
 async fn real_sites_pilot() -> TestResult<()> {
     assert!(
-        std::env::var("BOBBY_GAUNTLET_VISION_ENDPOINT")
+        std::env::var("BOBBY_VISION_COLLECT_ENDPOINT")
             .map(|v| !v.trim().is_empty())
             .unwrap_or(false),
-        "BOBBY_GAUNTLET_VISION_ENDPOINT unset; the pilot collects nothing without it"
+        "BOBBY_VISION_COLLECT_ENDPOINT unset; the pilot collects nothing without it"
     );
     let root = tempfile::tempdir()?;
     let config = base_config(root.path());
-    let endpoint = std::env::var("BOBBY_GAUNTLET_VISION_ENDPOINT").unwrap();
+    let endpoint = std::env::var("BOBBY_VISION_COLLECT_ENDPOINT").unwrap();
     let bearer = std::env::var("BOBBY_VISION_TOKEN")
         .ok()
         .filter(|token| !token.is_empty());

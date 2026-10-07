@@ -5,8 +5,8 @@
 //! context-graph promotion exactly the way an enrolled Firefox companion
 //! profile does (`EnginePreferenceConfig::durable_profile_id`).
 //!
-//! Two sessions on the same named Chromium profile against the gauntlet
-//! onboarding page: the second session's `context_ask` answers persisted for
+//! Two sessions on the same named Chromium profile against an onboarding
+//! page: the second session's `context_ask` answers persisted for
 //! a field the first session verified, before the second session takes any
 //! snapshot. A third session on a runtime with no context store attached
 //! answers `None` for the same field.
@@ -15,16 +15,12 @@
 //! and still remembers: its runtime promotes under the shared
 //! `managed-chromium` identity, and a restarted runtime answers from disk.
 
-#[allow(dead_code)]
-#[path = "modern_gauntlet/mod.rs"]
-mod modern_gauntlet;
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
-use modern_gauntlet::scenario::{ScenarioConfig, ScenarioServer};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
+use test_site::{FixtureSite, Route};
 use types::{
     AttemptId, Capability, CommandEnvelope, CommandId, CommandOutcome, ControlAction,
     CreateSessionRequest, FillIntent, IntentCommand, IntentHints, NavigateCommand, OpenPageRequest,
@@ -34,6 +30,17 @@ use worker_pool::ChromiumWorkerFactory;
 
 const FIELD_PURPOSE: &str = "Full name";
 const FIELD_VALUE: &str = "Maya Chen";
+
+const ONBOARDING: &str = r#"<!doctype html><title>New relationship</title><main>
+<h1>New relationship</h1>
+<form>
+<label for="full-name">Full name</label><input id="full-name" name="fullName">
+<label for="work-email">Work email</label><input id="work-email" name="workEmail" type="email">
+</form></main>"#;
+
+async fn onboarding_site() -> FixtureSite {
+    FixtureSite::spawn(vec![("/onboarding", Route::Html(ONBOARDING.into()))]).await
+}
 
 fn chrome_executable() -> PathBuf {
     std::env::var("BOBBY_CHROME_EXECUTABLE")
@@ -159,9 +166,6 @@ impl Session {
             },
         )))
         .await;
-        modern_gauntlet::unlock::unlock_northstar_session(&this.runtime, &this.session, &this.page)
-            .await
-            .unwrap();
         this
     }
 
@@ -222,10 +226,8 @@ impl Session {
 #[tokio::test]
 #[ignore = "requires installed Chromium"]
 async fn durable_chromium_profile_persists_context_across_sessions() {
-    let server = ScenarioServer::start(ScenarioConfig::seeded("chromium-durable-profile"))
-        .await
-        .unwrap();
-    let url = server.application_url("/onboarding");
+    let server = onboarding_site().await;
+    let url = server.url("/onboarding");
     let durable_profile_id = "chromium-durable-profile";
 
     // Sessions 1 and 2 share one runtime: the same ChromiumWorkerFactory
@@ -305,10 +307,8 @@ async fn durable_chromium_profile_persists_context_across_sessions() {
 #[tokio::test]
 #[ignore = "requires installed Chromium"]
 async fn managed_chromium_remembers_across_runtimes_with_a_disposable_profile() {
-    let server = ScenarioServer::start(ScenarioConfig::seeded("managed-chromium-memory"))
-        .await
-        .unwrap();
-    let url = server.application_url("/onboarding");
+    let server = onboarding_site().await;
+    let url = server.url("/onboarding");
     let profile_id = config::EnginePreferenceConfig::ManagedChromium
         .durable_profile_id()
         .expect("managed Chromium carries a memory identity");

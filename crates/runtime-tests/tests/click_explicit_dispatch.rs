@@ -9,16 +9,20 @@ use std::path::PathBuf;
 
 use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, ServerConfig, StorageConfig};
-use gauntlet_server::{ScenarioConfig, ScenarioServer};
 use sdk_core::RuntimeService;
+use test_site::{FixtureSite, Route};
 use types::{
     AttemptId, ClickCommand, CommandEnvelope, CommandId, CommandOutcome, CreateSessionRequest,
     NavigateCommand, OpenPageRequest, PrimitiveCommand, RuntimeCommand, TargetSpec, WaitUntil,
     WorkflowId,
 };
 
-#[path = "modern_gauntlet/unlock.rs"]
-mod northstar_unlock;
+const REPORTS: &str = r#"<!doctype html><title>Reports</title>
+<main><h1>Reports</h1>
+<button id="generate">Generate report</button>
+<script>document.getElementById("generate").addEventListener("click", () => {
+  fetch("/api/report", { method: "POST" });
+});</script></main>"#;
 
 fn chrome_executable() -> PathBuf {
     std::env::var("BOBBY_CHROME_EXECUTABLE")
@@ -31,9 +35,17 @@ fn chrome_executable() -> PathBuf {
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn plain_click_through_the_explicit_sequence_generates_one_report() {
-    let server = ScenarioServer::start(ScenarioConfig::seeded("plain-click-explicit-dispatch"))
-        .await
-        .unwrap();
+    let server = FixtureSite::spawn(vec![
+        ("/reports", Route::Html(REPORTS.into())),
+        (
+            "/api/report",
+            Route::Raw {
+                content_type: "application/json",
+                body: "{}".into(),
+            },
+        ),
+    ])
+    .await;
     let root = tempfile::tempdir().unwrap();
     let config = AppConfig {
         cdp: config::CdpConfig::default(),
@@ -103,7 +115,7 @@ async fn plain_click_through_the_explicit_sequence_generates_one_report() {
     };
 
     let outcome = submit(PrimitiveCommand::Navigate(NavigateCommand {
-        url: server.application_url("/reports"),
+        url: server.url("/reports"),
         wait_until: WaitUntil::Interactive,
         timeout_ms: 30_000,
     }))
@@ -112,10 +124,6 @@ async fn plain_click_through_the_explicit_sequence_generates_one_report() {
         matches!(outcome, CommandOutcome::Completed { .. }),
         "{outcome:?}"
     );
-    northstar_unlock::unlock_northstar_session(&runtime, &session.id, &page.id)
-        .await
-        .unwrap();
-
     // No modifiers and humanization is off by default: this is the exact
     // shape that used to route through `resolved.click(&page)` instead of
     // `dispatch_click`'s explicit move/press/release sequence.
@@ -136,14 +144,18 @@ async fn plain_click_through_the_explicit_sequence_generates_one_report() {
         "{outcome:?}"
     );
 
-    server
-        .wait_for_report_generation()
-        .await
-        .expect("report generation was not observed within 10 seconds");
-    let snapshot = server.snapshot().await;
+    for _ in 0..100 {
+        if server.hits("/api/report") > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    // Let a duplicate dispatch, if any, land before counting.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     assert_eq!(
-        snapshot.report_generations, 1,
-        "expected exactly one report generation from one click, got {snapshot:?}"
+        server.hits("/api/report"),
+        1,
+        "expected exactly one report generation from one click"
     );
 
     runtime.sessions.delete(&session.id).await.unwrap();

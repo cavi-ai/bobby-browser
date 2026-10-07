@@ -49,4 +49,3 @@ uuid.workspace = true
 workflow-journal.workspace = true
 worker-pool.workspace = true
 fingerprinting.workspace = true
-gauntlet-server.workspace = true

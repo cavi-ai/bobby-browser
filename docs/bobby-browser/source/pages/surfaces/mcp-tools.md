@@ -480,8 +480,7 @@ compare hand-bounded `kind` variant sets to schemars output from the
   intent resolution sources, context hit/miss, prefill, vision
   attempts/acceptances, verification, retries, reconciliation, and workflow
   calls — never prompts, values, or URLs. Ratified thresholds and release
-  gates read this snapshot, so an agent can attribute its own calls the
-  same way the gauntlet does.
+  gates read this snapshot, so an agent can attribute its own calls.
 - Token rotate / revoke → re-`initialize` on the MCP session for that principal
 - Stdio startup uses the four `AUTOMATION_RUNTIME_BOOTSTRAP_*` variables, not
   `AUTOMATION_RUNTIME_TOKEN` alone

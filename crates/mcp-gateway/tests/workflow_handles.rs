@@ -2,9 +2,6 @@
 
 mod common;
 
-#[path = "../../runtime-tests/tests/modern_gauntlet/unlock.rs"]
-mod northstar_unlock;
-
 use std::{sync::Arc, time::Duration as StdDuration};
 
 use chrono::{Duration, Utc};
@@ -956,7 +953,7 @@ async fn returned_handle_drives_primitives_intents_context_and_network_through_n
     );
 }
 
-/// The gauntlet-observed failure this closes: an agent calls a
+/// The agent-observed failure this closes: an agent calls a
 /// `WORKFLOW_SCOPE_TOOLS` tool right after `workflow_start` but forgets the
 /// handle entirely (no `workflowHandle`, no explicit ids). With exactly one
 /// live binding on the connection, the call defaults to it instead of
@@ -2114,11 +2111,26 @@ fn workflow_handle_chrome_executable() -> std::path::PathBuf {
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn workflow_handle_follows_a_popup_and_returns_to_the_opener_when_it_closes() {
-    let scenario = gauntlet_server::ScenarioServer::start(gauntlet_server::ScenarioConfig::seeded(
-        "workflow-handle-popup-follow",
-    ))
-    .await
-    .unwrap();
+    let site = test_site::FixtureSite::spawn(vec![
+        (
+            "/integrations",
+            test_site::Route::Html(
+                r#"<!doctype html><title>Integrations</title><main>
+<button aria-label="Connect Ledger Cloud" id="connect">Connect</button>
+<script>document.getElementById("connect").addEventListener("click", () => {
+  window.open("/ledger/authorize", "_blank");
+});</script></main>"#
+                    .into(),
+            ),
+        ),
+        (
+            "/ledger/authorize",
+            test_site::Route::Html(
+                "<!doctype html><title>Authorize Ledger</title><p>Authorize</p>".into(),
+            ),
+        ),
+    ])
+    .await;
     let root = tempfile::tempdir().unwrap();
     let config = config::AppConfig {
         cdp: config::CdpConfig::default(),
@@ -2189,7 +2201,7 @@ async fn workflow_handle_follows_a_popup_and_returns_to_the_opener_when_it_close
         "workflow_start",
         json!({
             "profile": "workflow-handle-popup-follow",
-            "url": scenario.application_url("/integrations"),
+            "url": site.url("/integrations"),
             // Only so the raw-runtime `window.close()` below (test setup,
             // not the behavior under test) is allowed to run.
             "executionPolicy": {"javascriptEvaluation": true},
@@ -2204,17 +2216,6 @@ async fn workflow_handle_follows_a_popup_and_returns_to_the_opener_when_it_close
         .as_str()
         .unwrap_or_else(|| panic!("workflow_start did not return a handle: {start}"))
         .to_owned();
-
-    // The current Northstar fixture gates integrations behind consent and
-    // operator authentication. Reuse the live journey setup before exercising
-    // MCP popup handle routing; no popup behavior is bypassed here.
-    northstar_unlock::unlock_northstar_session(
-        &raw_runtime,
-        &serde_json::from_value(start["result"]["structuredContent"]["sessionId"].clone()).unwrap(),
-        &serde_json::from_value(start["result"]["structuredContent"]["pageId"].clone()).unwrap(),
-    )
-    .await
-    .unwrap();
 
     let followed = call(
         &server,
@@ -2686,7 +2687,7 @@ async fn scope_less_workflow_observe_defaults_to_the_only_live_handle_and_report
 
 /// `page_activate {workflowHandle, pageId}` activates the named page and
 /// rebinds the handle to it (same session), instead of refusing the mix —
-/// the gauntlet agent left the handle path after two such conflicts.
+/// an agent left the handle path after two such conflicts.
 #[tokio::test]
 async fn page_activate_with_handle_and_page_id_activates_and_rebinds() {
     let live = live_with_capabilities(Capability::ALL.to_vec()).await;

@@ -3,7 +3,7 @@
 Bobby Vision Data Collector - Runtime Integration
 
 Integrates with Bobby's runtime to automatically collect training data
-during gauntlet runs and production use.
+during journey runs and production use.
 
 Usage:
     # As a library
@@ -54,7 +54,7 @@ class VisionTrainingExample:
     
     # Ground truth (did the action succeed?)
     success: bool = False
-    journey: str = ""  # Gauntlet journey name
+    journey: str = ""  # Journey name
     step: str = ""  # Step within journey
     error_message: str = ""  # If failed, why?
     
@@ -181,13 +181,13 @@ class VisionDataCollector:
         print(f"\nDataset saved to: {output_path}")
         return output_path
     
-    def collect_from_gauntlet_run(
+    def collect_from_journey_run(
         self,
         journey: str,
         steps: list,
     ):
         """
-        Collect training data from a single gauntlet journey run.
+        Collect training data from a single journey run.
         
         Args:
             journey: Journey name (e.g., "customer-update")
@@ -258,7 +258,7 @@ def integrate_with_bobby_vision_proxy():
                         stuck=request.get("stuck", "targetMissing"),
                         context=request.get("context"),
                         model_response=None,  # Will be set when response comes back
-                        success=False,  # Unknown until gauntlet completes
+                        success=False,  # Unknown until the journey completes
                         journey="unknown",
                         step="unknown",
                         screenshot_sanitized=bool(request.get("corpusScreenshotPng")),

@@ -1,22 +1,16 @@
-//! Spec C exit proof (T8): a cold session completes the Northstar onboarding
-//! station with discovery snapshots; a second session on the same durable
+//! Spec C exit proof (T8): a cold session completes a three-step onboarding
+//! flow with discovery snapshots; a second session on the same durable
 //! profile is answered by the persisted context graph before any snapshot
 //! and completes with strictly fewer runtime commands. Also measures
 //! fuzzy-match and store-open latency across 100 synthetic sites.
-
-// The exit test reuses only the scenario server; the driver's unused items
-// are live in modern_gauntlet_e2e.
-#[allow(dead_code)]
-#[path = "modern_gauntlet/mod.rs"]
-mod modern_gauntlet;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::{Duration, Utc};
-use modern_gauntlet::scenario::{ScenarioConfig, ScenarioServer};
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
+use test_site::{FixtureSite, Route};
 use types::{
     AttemptId, Capability, ClickCommand, CommandEnvelope, CommandId, CommandOutcome, ControlAction,
     CreateSessionRequest, ElementState, FillIntent, IntentCommand, IntentHints, NavigateCommand,
@@ -31,6 +25,33 @@ const FIELDS: [(&str, &str); 4] = [
     ("Company name", "Atlas Labs"),
     ("Postal code", "10001"),
 ];
+
+const ONBOARDING: &str = r#"<!doctype html><title>New relationship</title><main>
+<h1>New relationship</h1>
+<section id="step1">
+<label for="full-name">Full name</label><input id="full-name">
+<label for="work-email">Work email</label><input id="work-email" type="email">
+<button type="button" id="next1">Next</button>
+</section>
+<section id="step2" hidden>
+<label for="company">Company name</label><input id="company">
+<label for="postal">Postal code</label><input id="postal">
+<button type="button" id="next2">Next</button>
+</section>
+<section id="step3" hidden>
+<button type="button" id="create">Create customer</button>
+</section>
+<script>
+const show = (hide, reveal) => {
+  document.getElementById(hide).hidden = true;
+  document.getElementById(reveal).hidden = false;
+};
+document.getElementById("next1").addEventListener("click", () => show("step1", "step2"));
+document.getElementById("next2").addEventListener("click", () => show("step2", "step3"));
+document.getElementById("create").addEventListener("click", () => {
+  fetch("/api/customers", { method: "POST" });
+});
+</script></main>"#;
 
 fn chrome_executable() -> PathBuf {
     std::env::var("BOBBY_CHROME_EXECUTABLE")
@@ -96,7 +117,7 @@ impl Station {
     async fn open(runtime: &RuntimeService, authed: &AuthenticatedRuntime, url: &str) -> Self {
         let session = runtime
             .create_session(CreateSessionRequest {
-                profile: "northstar-profile".into(),
+                profile: "onboarding-profile".into(),
                 proxy: None,
                 execution_policy: Default::default(),
                 zigzagzig: false,
@@ -139,13 +160,6 @@ impl Station {
                 },
             )))
             .await;
-        modern_gauntlet::unlock::unlock_northstar_session(
-            &station.runtime,
-            &station.session,
-            &station.page,
-        )
-        .await
-        .unwrap();
         station
     }
 
@@ -255,15 +269,23 @@ impl Station {
 #[tokio::test]
 #[ignore = "requires installed Chromium"]
 async fn remembered_site_completes_onboarding_with_fewer_commands() {
-    let server = ScenarioServer::start(ScenarioConfig::seeded("context-exit"))
-        .await
-        .unwrap();
+    let server = FixtureSite::spawn(vec![
+        ("/onboarding", Route::Html(ONBOARDING.into())),
+        (
+            "/api/customers",
+            Route::Raw {
+                content_type: "application/json",
+                body: "{}".into(),
+            },
+        ),
+    ])
+    .await;
     let root = tempfile::tempdir().unwrap();
     let context_dir = root.path().join("context");
     let config = config(root.path(), &context_dir);
     let factory = Arc::new(ChromiumWorkerFactory::new(config.browser.clone()));
     let runtime =
-        RuntimeService::build_with_context_promotion(&config, factory, "northstar-profile")
+        RuntimeService::build_with_context_promotion(&config, factory, "onboarding-profile")
             .await
             .unwrap();
     let authority = interface_core::AuthorityStore::in_memory();
@@ -286,21 +308,12 @@ async fn remembered_site_completes_onboarding_with_fewer_commands() {
         .expose_once();
     let handle = authority.verify(&handle).await.unwrap();
     let authed = AuthenticatedRuntime::new(runtime.clone(), handle);
-    let url = server.application_url("/onboarding");
+    let url = server.url("/onboarding");
 
     // Session 1, cold: discovery snapshot, then the station.
     let mut cold = Station::open(&runtime, &authed, &url).await;
     let cold_gate = cold.commands;
-    // The sign-in gate overlays this same /onboarding route and verifies its
-    // own "Work email"/"Password"/"Authentication code" fields inside
-    // `Station::open` (packages/bobby-gauntlet/src/gate.ts), so those
-    // purposes are legitimately remembered already; skip them here and keep
-    // asserting cold for every other onboarding field.
-    const GATE_VERIFIED_PURPOSES: [&str; 3] = ["Work email", "Password", "Authentication code"];
     for (purpose, _) in FIELDS {
-        if GATE_VERIFIED_PURPOSES.contains(&purpose) {
-            continue;
-        }
         assert_eq!(
             cold.ask(purpose).await,
             None,
@@ -341,14 +354,17 @@ async fn remembered_site_completes_onboarding_with_fewer_commands() {
         warm_commands_before_station, cold_gate,
         "warm session must not snapshot before the station"
     );
-    modern_gauntlet::scorecard::enforce_remembered_site_reduction(
-        "onboarding",
-        cold_commands,
-        warm_commands,
-    )
-    .unwrap();
-    let snapshot = server.snapshot().await;
-    assert_eq!(snapshot.onboarding_records, 2);
+    assert!(
+        warm_commands < cold_commands,
+        "remembered-site call budget exceeded: rememberedCalls={warm_commands}, coldCalls={cold_commands}"
+    );
+    for _ in 0..50 {
+        if server.hits("/api/customers") >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(server.hits("/api/customers"), 2);
 }
 
 #[tokio::test]
@@ -425,14 +441,8 @@ async fn fuzzy_match_latency_across_100_sites() {
         "fuzzyAskMicros": fuzzy_us,
     });
     println!("context-graph measurements: {measurements}");
-    let benchmarks = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .unwrap()
-        .join("benchmarks");
-    std::fs::create_dir_all(&benchmarks).unwrap();
     std::fs::write(
-        benchmarks.join("context-graph.json"),
+        root.path().join("context-graph.json"),
         serde_json::to_string_pretty(&measurements).unwrap(),
     )
     .unwrap();

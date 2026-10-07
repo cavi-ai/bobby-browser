@@ -96,7 +96,7 @@ class VisionTrainingPipeline:
         print("=" * 60)
     
     def _collect_data(self):
-        """Collect training data from gauntlet runs."""
+        """Collect training data."""
         collector = VisionDataCollector(
             output_dir=self.config.data_output,
             model_name=self.config.model_name,

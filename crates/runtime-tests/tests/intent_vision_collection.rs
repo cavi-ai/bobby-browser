@@ -9,7 +9,7 @@
 //!
 //! Run with the proxy up (upstream mlx, ollama, or openai):
 //!
-//!   BOBBY_GAUNTLET_VISION_ENDPOINT=http://127.0.0.1:9100/vision \
+//!   BOBBY_VISION_COLLECT_ENDPOINT=http://127.0.0.1:9100/vision \
 //!   BOBBY_VISION_TOKEN=<bearer> \
 //!   cargo test -p runtime-tests --test intent_vision_collection -- --test-threads=1
 
@@ -34,7 +34,7 @@ fn chrome_executable() -> PathBuf {
 }
 
 fn vision_endpoint() -> Option<String> {
-    std::env::var("BOBBY_GAUNTLET_VISION_ENDPOINT")
+    std::env::var("BOBBY_VISION_COLLECT_ENDPOINT")
         .ok()
         .filter(|endpoint| !endpoint.trim().is_empty())
 }
@@ -255,7 +255,7 @@ async fn collect_stuck_form_proposals() {
     // zero rows collected. A collection run that produced nothing is a
     // failure, not a skip.
     let endpoint = vision_endpoint().unwrap_or_else(|| {
-        panic!("BOBBY_GAUNTLET_VISION_ENDPOINT unset; this harness collects nothing without it")
+        panic!("BOBBY_VISION_COLLECT_ENDPOINT unset; this harness collects nothing without it")
     });
     let _ = endpoint;
     let fixture = test_site::spawn().await;
@@ -294,7 +294,7 @@ async fn collect_stuck_form_proposals() {
 #[ignore = "requires installed Chrome and a running vision-proxy"]
 async fn collect_vague_locate_proposals() {
     if vision_endpoint().is_none() {
-        panic!("BOBBY_GAUNTLET_VISION_ENDPOINT unset; this harness collects nothing without it");
+        panic!("BOBBY_VISION_COLLECT_ENDPOINT unset; this harness collects nothing without it");
     }
     let fixture = test_site::spawn().await;
     let root = tempfile::tempdir().unwrap();
@@ -351,7 +351,7 @@ async fn collect_vague_locate_proposals() {
 #[ignore = "requires installed Chrome and a running vision-proxy"]
 async fn v1_positive_control_picks_the_matching_candidate() {
     if vision_endpoint().is_none() {
-        panic!("BOBBY_GAUNTLET_VISION_ENDPOINT unset; this harness collects nothing without it");
+        panic!("BOBBY_VISION_COLLECT_ENDPOINT unset; this harness collects nothing without it");
     }
     let fixture = test_site::spawn().await;
     let root = tempfile::tempdir().unwrap();

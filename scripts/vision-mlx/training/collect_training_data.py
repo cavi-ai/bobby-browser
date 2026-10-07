@@ -2,7 +2,7 @@
 """
 Bobby Vision Training Data Collector
 
-Collects training data from gauntlet runs: screenshots, context, outcomes.
+Collects training data from journey runs: screenshots, context, outcomes.
 Stores as JSONL for fine-tuning vision models.
 
 Usage:
@@ -45,7 +45,7 @@ class VisionTrainingExample:
     
     # Ground truth (did the action succeed?)
     success: bool = False
-    journey: str = ""  # Gauntlet journey name
+    journey: str = ""  # Journey name
     step: str = ""  # Step within journey
     error_message: str = ""  # If failed, why?
     
@@ -174,13 +174,13 @@ class VisionDataCollector:
         print(f"\nDataset saved to: {output_path}")
         return output_path
     
-    def collect_from_gauntlet_run(
+    def collect_from_journey_run(
         self,
         journey: str,
         steps: list,
     ) -> TrainingDataset:
         """
-        Collect training data from a single gauntlet journey run.
+        Collect training data from a single journey run.
         
         Args:
             journey: Journey name (e.g., "customer-update")
@@ -255,7 +255,7 @@ def integrate_with_bobby_runtime():
                         stuck=request.get("stuck", "targetMissing"),
                         context=request.get("context"),
                         model_response=None,  # Will be set when response comes back
-                        success=False,  # Unknown until gauntlet completes
+                        success=False,  # Unknown until the journey completes
                         journey="unknown",
                         step="unknown",
                         screenshot_sanitized=bool(request.get("corpusScreenshotPng")),
@@ -291,7 +291,7 @@ def main():
         print("Generating synthetic training data...")
         generate_synthetic_data(collector)
     else:
-        print("Waiting for gauntlet runs...")
+        print("Waiting for journey runs...")
         print("Use --simulate to generate synthetic data for testing.")
     
     collector.save_dataset()

@@ -41,8 +41,6 @@ roles, names, ordinals — never typed values or credentials. `context_ask` and
 `context_neighbors` answer from it, so a cold session can locate a control
 before its first snapshot. `bobby context list` and `bobby context forget
 <site>` manage it; a release gate scans the store to prove no values land there.
-After a runtime restart, `workflow_observe` on the gauntlet onboarding form
-answers from memory in 866 bytes instead of a 7,536-byte live snapshot.
 
 **It survives losing its place.** `recovery_status` takes a `workflowId`, or a
 `sessionId` when a compaction lost it, and lists that session's recoverable
@@ -291,7 +289,6 @@ These pages are also served at
 - [JavaScript evaluation](docs/bobby-browser/source/pages/guides/javascript-eval.md)
 - [Intents](docs/bobby-browser/source/pages/guides/intents.md)
 - [Bobby skills](docs/bobby-browser/source/pages/guides/skills.md)
-- [Browser gauntlet](docs/bobby-browser/source/pages/guides/gauntlet.md)
 - [Events and recovery](docs/bobby-browser/source/pages/guides/events-recovery.md)
 - [MCP over HTTP](docs/bobby-browser/source/pages/surfaces/mcp-http.md) ·
   [MCP over stdio](docs/bobby-browser/source/pages/surfaces/mcp-stdio.md) ·
@@ -308,6 +305,8 @@ make test             # workspace tests
 make lint             # clippy -D warnings + fmt check
 pnpm install && pnpm --filter @cavi-ai/bobby-browser test
 ```
+
+Which tests count as evidence: see [TESTING.md](TESTING.md).
 
 The CDP allowlist is published in
 [`docs/cdp-support.json`](docs/cdp-support.json). The same pages are built into

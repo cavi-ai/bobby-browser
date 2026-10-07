@@ -1,3 +1,7 @@
+mod static_site;
+
+pub use static_site::{FixtureSite, Route};
+
 use std::io::Write;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};

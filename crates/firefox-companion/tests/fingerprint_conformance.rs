@@ -6,4 +6,4 @@
 //!
 //! Live Firefox proof for companion enrollment + native input lives in
 //! `runtime-tests` (`tests/firefox_companion.rs`, `tests/behavioral_firefox.rs`)
-//! using `InstalledFirefoxConfig` / `BOBBY_FIREFOX_*` — same path as gauntlet.
+//! using `InstalledFirefoxConfig` / `BOBBY_FIREFOX_*` — same path.

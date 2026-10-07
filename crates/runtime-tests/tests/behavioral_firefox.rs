@@ -1,6 +1,6 @@
 //! Live Firefox behavioral dogfood (ignored without installed Firefox).
 //!
-//! Same env contract as `firefox_companion` / gauntlet:
+//! Same env contract as `firefox_companion`:
 //! `BOBBY_FIREFOX_BIN`, `BOBBY_FIREFOX_PROFILE`, `BOBBY_COMPANION_EXTENSION`.
 //!
 //! Run:

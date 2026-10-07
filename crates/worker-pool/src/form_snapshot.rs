@@ -538,7 +538,12 @@ pub fn control_action_evidence(
     node_replaced: bool,
     committed: Option<&[String]>,
 ) -> Result<ControlActionEvidence, CommandError> {
-    validate_control_action(control, action)?;
+    // The caller validated the action against the control before dispatching
+    // it. The control seen here is the post-action state, which the page may
+    // have legitimately changed (a button that disables itself on click).
+    action
+        .validate()
+        .map_err(|message| snapshot_error(ErrorCode::InvalidRequest, message))?;
     let matched = match (action, &control.state) {
         (
             ControlAction::SetText { value, clear_first },
@@ -630,7 +635,7 @@ const formElements=[];for(const {root} of roots)for(const form of root.querySele
 const formKeys=new Map(formElements.map((form,index)=>[form,`raw-form-${index+1}`]));
 const groupElements=[];for(const form of formElements)for(const group of form.querySelectorAll('fieldset'))if(groupElements.length<128)groupElements.push(group);else truncated=true;
 const groupKeys=new Map(groupElements.map((group,index)=>[group,`raw-group-${index+1}`]));
-const controlElements=[];for(const {root,framePath,shadowPath} of roots){for(const element of root.querySelectorAll('input,textarea,select,button,[contenteditable="true"],[role="switch"],[role="combobox"],[role="listbox"],[role="button"]')){if(controlElements.length>=LIMIT){truncated=true;break}if(!controlElements.some(item=>item.element===element))controlElements.push({element,framePath,shadowPath})}}
+const controlElements=[];for(const {root,framePath,shadowPath} of roots){for(const element of root.querySelectorAll('input,textarea,select,button,[contenteditable="true"],[role="switch"],[role="combobox"],[role="listbox"],[role="button"]')){if(controlElements.length>=LIMIT){truncated=true;break}if(element.getClientRects().length===0&&!(element.tagName==='INPUT'&&element.type==='file'))continue;if(!controlElements.some(item=>item.element===element))controlElements.push({element,framePath,shadowPath})}}
 const resolveRefs=(element,attribute)=>{const ids=(element.getAttribute(attribute)||'').trim().split(/\s+/).filter(Boolean).slice(0,512);return ids.map(id=>text(element.ownerDocument.getElementById(id)?.textContent)).filter(Boolean)};
 const label=(element)=>{const isButton=element.getAttribute('role')==='button'||element.tagName.toLowerCase()==='button';return text(element.getAttribute('aria-label'))||text(resolveRefs(element,'aria-labelledby').join(' '))||text(element.labels?.[0]?.textContent)||text(element.closest('label')?.textContent)||(isButton?text(element.textContent):null)||text(element.getAttribute('placeholder'))};
 const forms=formElements.map((form,index)=>{const scope=roots.find(item=>item.root===form.getRootNode())||{framePath:[],shadowPath:[]};return{key:formKeys.get(form),accessibleName:text(form.getAttribute('aria-label'))||text(resolveRefs(form,'aria-labelledby').join(' '))||text(form.getAttribute('name')),description:text(resolveRefs(form,'aria-describedby').join(' '))||text(form.getAttribute('aria-description')),framePath:scope.framePath,shadowPath:scope.shadowPath}});

@@ -58,8 +58,7 @@ MCP HTTP is bearer-only: no `x-interface-version`, `x-correlation-id`, or
   `AUTOMATION_RUNTIME_BROWSER_SELECTION` remains an override.
 - Chromium live work needs an installed Chromium. Set
   `BOBBY_CHROMIUM_EXECUTABLE` when not in a standard location.
-- Gauntlet / championship tests are often `--ignored` until a browser is present —
-  [Browser gauntlet](gauntlet.md).
+- Live browser tests are `--ignored` until a browser is present.
 
 ## Config and bootstrap paths
 
