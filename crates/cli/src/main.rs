@@ -19,7 +19,7 @@ mod vision_token;
 
 use anyhow::{Context, Result};
 use companion_core::{
-    run_native_host_with_enroll, EnrollFinalize, EnrollHostError, NativeConnectRequest,
+    run_native_host_logged, EnrollFinalize, EnrollHostError, LifecycleLog, NativeConnectRequest,
     NativeHostConfig, NativeHostEnroll,
 };
 use config::{ensure_loopback_vision_defaults, upsert_vision_platform, AppConfig};
@@ -2565,14 +2565,30 @@ async fn run_configured_native_host(descriptor_path: PathBuf) -> Result<()> {
         .parent()
         .ok_or_else(|| anyhow::anyhow!("firefox native-host descriptor path has no parent"))?
         .to_path_buf();
+    let log = LifecycleLog::open(&config_dir.join("firefox-native-host.log"));
+    log.record(
+        "start",
+        &format!(
+            "bobby {} {}",
+            env!("CARGO_PKG_VERSION"),
+            if config.is_some() {
+                "paired"
+            } else {
+                "enrolling"
+            }
+        ),
+    );
     let enroll = NativeHostFirefoxEnroll::new(config_dir, Duration::from_secs(120));
-    run_native_host_with_enroll(
+    let result = run_native_host_logged(
         tokio::io::stdin(),
         tokio::io::stdout(),
         config,
         Some(enroll),
+        &log,
     )
-    .await?;
+    .await;
+    log.record("exit", if result.is_ok() { "code 0" } else { "code 1" });
+    result?;
     Ok(())
 }
 

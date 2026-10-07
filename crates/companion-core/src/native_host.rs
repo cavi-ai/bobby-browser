@@ -26,6 +26,8 @@ use tokio_tungstenite::{
 use types::{CompanionId, ProfileId};
 use url::Url;
 
+use crate::lifecycle_log::LifecycleLog;
+
 pub const MAX_NATIVE_MESSAGE_BYTES: usize = 1024 * 1024;
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_millis(100);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(5);
@@ -666,8 +668,24 @@ fn public_paired(output: &InitialPairedOutput) -> Result<Value, NativeHostError>
 
 enum ConnectionResult {
     NativeClosed,
-    Reconnect,
+    Reconnect(&'static str),
     EndpointChanged,
+}
+
+fn connect_failure(error: &WebSocketError) -> String {
+    match error {
+        WebSocketError::Http(response) => format!("http {}", response.status().as_u16()),
+        WebSocketError::Io(error) => format!("io {:?}", error.kind()),
+        _ => "websocket handshake failed".to_owned(),
+    }
+}
+
+fn message_kind(value: &Value) -> &str {
+    value
+        .get("kind")
+        .and_then(Value::as_str)
+        .filter(|kind| kind.len() <= 32 && kind.chars().all(|c| c.is_ascii_alphabetic()))
+        .unwrap_or("unknown")
 }
 
 async fn wait_for_config_change(changes: &mut Option<watch::Receiver<u64>>) {
@@ -785,10 +803,54 @@ where
 }
 
 pub async fn run_native_host_with_enroll<R, W, E>(
+    native_reader: R,
+    native_writer: W,
+    config: Option<NativeHostConfig>,
+    enroll: Option<E>,
+) -> Result<(), NativeHostError>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin,
+    E: NativeHostEnroll,
+{
+    run_native_host_logged(
+        native_reader,
+        native_writer,
+        config,
+        enroll,
+        &LifecycleLog::disabled(),
+    )
+    .await
+}
+
+/// [`run_native_host_with_enroll`] that records connect, disconnect, rejected
+/// messages and the fatal error to `log`.
+pub async fn run_native_host_logged<R, W, E>(
+    native_reader: R,
+    native_writer: W,
+    config: Option<NativeHostConfig>,
+    enroll: Option<E>,
+    log: &LifecycleLog,
+) -> Result<(), NativeHostError>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin,
+    E: NativeHostEnroll,
+{
+    let result = relay_native_host(native_reader, native_writer, config, enroll, log).await;
+    match &result {
+        Ok(()) => log.record("relay_closed", "extension port closed"),
+        Err(error) => log.record("fatal", &error.to_string()),
+    }
+    result
+}
+
+async fn relay_native_host<R, W, E>(
     mut native_reader: R,
     mut native_writer: W,
     config: Option<NativeHostConfig>,
     enroll: Option<E>,
+    log: &LifecycleLog,
 ) -> Result<(), NativeHostError>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -885,15 +947,23 @@ where
                 write_terminal_auth_status(&mut native_writer).await;
                 break Err(NativeHostError::InvalidPairingMaterial)
             }
-            Err(_) if has_credential => {
+            Err(error) if has_credential => {
+                log.record("connect_failed", &connect_failure(&error));
                 let delay = backoff.next_delay();
                 if sleep_or_native_closed(delay, &mut native_closed_receiver).await {
                     break Ok(());
                 }
                 continue;
             }
-            Err(_) => break Err(NativeHostError::WebSocket),
+            Err(error) => {
+                log.record("connect_failed", &connect_failure(&error));
+                break Err(NativeHostError::WebSocket);
+            }
         };
+        log.record(
+            "connected",
+            if has_credential { "reconnect credential" } else { "pairing code" },
+        );
         backoff.reset();
         let (mut socket_writer, mut socket_reader) = socket.split();
         if !has_credential
@@ -914,19 +984,29 @@ where
                         break Ok(ConnectionResult::EndpointChanged);
                     }
                 }
-                _ = &mut liveness => break Ok(ConnectionResult::Reconnect),
+                _ = &mut liveness => break Ok(ConnectionResult::Reconnect("server liveness timeout")),
                 native = receiver.recv() => {
                     match native {
                         Some(Ok(Some(value))) => {
-                            let value = validate_extension_message(value)?;
+                            let kind = message_kind(&value).to_owned();
+                            let value = match validate_extension_message(value) {
+                                Ok(value) => value,
+                                Err(error) => {
+                                    log.record("rejected_extension_message", &format!("{kind}: {error}"));
+                                    break Err(error);
+                                }
+                            };
                             let body = serde_json::to_string(&value)
                                 .map_err(|_| NativeHostError::InvalidProtocol)?;
                             if socket_writer.send(Message::Text(body.into())).await.is_err() {
-                                break Ok(ConnectionResult::Reconnect);
+                                break Ok(ConnectionResult::Reconnect("server send failed"));
                             }
                         }
                         Some(Ok(None)) | None => break Ok(ConnectionResult::NativeClosed),
-                        Some(Err(error)) => break Err(error),
+                        Some(Err(error)) => {
+                            log.record("native_read_failed", &error.to_string());
+                            break Err(error);
+                        }
                     }
                 }
                 message = socket_reader.next() => {
@@ -948,7 +1028,14 @@ where
                                 config.store_reconnect_credential(initial.reconnect_credential.clone())?;
                                 public_paired(&initial)?
                             } else {
-                                let value = validate_server_message(value)?;
+                                let kind = message_kind(&value).to_owned();
+                                let value = match validate_server_message(value) {
+                                    Ok(value) => value,
+                                    Err(error) => {
+                                        log.record("rejected_server_message", &format!("{kind}: {error}"));
+                                        break Err(error);
+                                    }
+                                };
                                 if let Ok(CompanionEvent::Paired { companion_id, profile_id }) =
                                     serde_json::from_value::<CompanionEvent>(value.clone())
                                 {
@@ -997,12 +1084,15 @@ where
                         }
                         Some(Ok(Message::Ping(payload))) => {
                             if socket_writer.send(Message::Pong(payload)).await.is_err() {
-                                break Ok(ConnectionResult::Reconnect);
+                                break Ok(ConnectionResult::Reconnect("server pong failed"));
                             }
                         }
                         Some(Ok(Message::Pong(_))) => {}
-                        Some(Ok(Message::Close(_))) | None | Some(Err(_)) => {
-                            break Ok(ConnectionResult::Reconnect);
+                        Some(Ok(Message::Close(_))) => {
+                            break Ok(ConnectionResult::Reconnect("server closed"));
+                        }
+                        None | Some(Err(_)) => {
+                            break Ok(ConnectionResult::Reconnect("server connection lost"));
                         }
                         Some(Ok(Message::Binary(_))) | Some(Ok(Message::Frame(_))) => {
                             break Err(NativeHostError::WebSocket);
@@ -1014,14 +1104,21 @@ where
 
         match connection? {
             ConnectionResult::NativeClosed => break Ok(()),
-            ConnectionResult::EndpointChanged => backoff.reset(),
-            ConnectionResult::Reconnect if config.has_reconnect_credential()? => {
+            ConnectionResult::EndpointChanged => {
+                log.record("disconnected", "endpoint changed");
+                backoff.reset()
+            }
+            ConnectionResult::Reconnect(reason) if config.has_reconnect_credential()? => {
+                log.record("disconnected", reason);
                 let delay = backoff.next_delay();
                 if sleep_or_native_closed(delay, &mut native_closed_receiver).await {
                     break Ok(());
                 }
             }
-            ConnectionResult::Reconnect => break Err(NativeHostError::WebSocket),
+            ConnectionResult::Reconnect(reason) => {
+                log.record("disconnected", reason);
+                break Err(NativeHostError::WebSocket);
+            }
         }
         }
     }
