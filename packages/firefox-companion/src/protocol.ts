@@ -1,5 +1,59 @@
 export const PROTOCOL_VERSION = 1 as const;
 export const MAX_COMPANION_PAYLOAD_BYTES = 1024 * 1024;
+
+// Why a content action failed, sent as the actionFailed code. Each reason has
+// one fixed message: no page text and no caller-supplied value crosses.
+export const CONTENT_FAILURE_MESSAGES = {
+  targetNotFound: "the target was not found on the page",
+  targetAmbiguous: "the target matches more than one element; add an ordinal",
+  scopeUnresolvable: "the target cannot select an element: invalid or unbounded selector, or no role",
+  invalidInput: "the content action input was invalid",
+  budgetExhausted: "the page search stopped at its visit bound before reaching the target",
+  scriptException: "the content script threw",
+} as const;
+export type ContentFailureReason = keyof typeof CONTENT_FAILURE_MESSAGES;
+// The key of the content script's failure reply: { [key]: { reason, errorName? } }.
+export const CONTENT_FAILURE_KEY = "companionContentFailure";
+// Error names a scriptException may report; any other name is withheld.
+const SCRIPT_ERROR_NAMES = new Set([
+  "TypeError",
+  "RangeError",
+  "ReferenceError",
+  "SyntaxError",
+  "InternalError",
+  "SecurityError",
+  "InvalidStateError",
+  "NotSupportedError",
+  "NotAllowedError",
+]);
+
+// The actionFailed code and message for a content script's failure reply, or
+// undefined when `output` is not one.
+export function contentFailure(
+  output: unknown,
+): { code: ContentFailureReason; message: string } | undefined {
+  if (typeof output !== "object" || output === null || !(CONTENT_FAILURE_KEY in output)) {
+    return undefined;
+  }
+  const failure = (output as Record<string, unknown>)[CONTENT_FAILURE_KEY];
+  const reason =
+    typeof failure === "object" && failure !== null
+      ? (failure as Record<string, unknown>).reason
+      : undefined;
+  const code: ContentFailureReason =
+    typeof reason === "string" && Object.prototype.hasOwnProperty.call(CONTENT_FAILURE_MESSAGES, reason)
+      ? (reason as ContentFailureReason)
+      : "scriptException";
+  const errorName =
+    code === "scriptException" && typeof failure === "object" && failure !== null
+      ? (failure as Record<string, unknown>).errorName
+      : undefined;
+  const message =
+    typeof errorName === "string" && SCRIPT_ERROR_NAMES.has(errorName)
+      ? `${CONTENT_FAILURE_MESSAGES[code]} a ${errorName}`
+      : CONTENT_FAILURE_MESSAGES[code];
+  return { code, message };
+}
 const MAX_ID_BYTES = 256;
 const MAX_METADATA_BYTES = 256;
 const MAX_PAIRING_CODE_BYTES = 512;

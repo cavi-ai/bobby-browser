@@ -8,6 +8,7 @@ import {
   MAX_ELEMENT_TEXT_VISITED_NODES,
   MAX_VISIBLE_TEXT_LENGTH,
   MAX_VISIBLE_TEXT_VISITED_NODES,
+  contentActionReply,
   executeContentAction,
   observeDocument,
 } from "../src/content.js";
@@ -441,18 +442,18 @@ test("huge label sets use the bounded label index instead of a document query", 
   ).join("");
   const document = documentFor(`${noise}<label for="target">Target label</label><input id="target">`);
   const querySelector = document.querySelector.bind(document);
-  let documentQueries = 0;
+  let labelQueries = 0;
   Object.defineProperty(document, "querySelector", {
     configurable: true,
     value(selector: string) {
-      documentQueries += 1;
+      if (selector.includes("label")) labelQueries += 1;
       return querySelector(selector);
     },
   });
 
   const observed = observeDocument(document);
 
-  assert.equal(documentQueries, 0);
+  assert.equal(labelQueries, 0);
   assert.equal(observed.controls[0]?.label, "Target label");
 });
 
@@ -757,6 +758,63 @@ test("locateTarget finds a link past thousands of visible and hidden nodes", () 
   assert.equal(located.found, true);
   assert.equal(located.name, "Show all");
   assert.equal(document.querySelector(located.cssPath as string)?.textContent, "Show all");
+});
+
+test("a control's cssPath selects it, not an earlier hidden duplicate", () => {
+  const document = documentFor(
+    `<div style="display:none"><button id="save">Save</button><input name="q" placeholder="Find">` +
+      `<a href="/x" data-testid="more">More</a></div>` +
+      `<main><button id="save" data-id="v">Save</button><input name="q" placeholder="Find" data-id="v">` +
+      `<a href="/y" data-testid="more" data-id="v">More</a></main>`,
+  );
+  const observed = observeDocument(document);
+  assert.equal(observed.controls.length, 3);
+  for (const control of observed.controls) {
+    assert.equal(document.querySelector(control.cssPath)?.getAttribute("data-id"), "v", control.cssPath);
+  }
+  for (const [role, accessibleName] of [
+    ["button", "Save"],
+    ["textbox", "Find"],
+    ["link", "More"],
+  ] as const) {
+    const located = executeContentAction(document, "locateTarget", {
+      target: { role, accessibleName },
+    }) as { found: boolean; cssPath?: string };
+    assert.equal(located.found, true, accessibleName);
+    assert.equal(document.querySelector(located.cssPath as string)?.getAttribute("data-id"), "v");
+  }
+});
+
+test("a failed content action replies with its reason and no page or caller text", () => {
+  const document = documentFor(
+    `<main><a href="/a">Same</a><a href="/b">Same</a><ul aria-label="Secret Zx9Kq2Lm7Rt4"></ul></main>`,
+  );
+  const reason = (operation: string, input: unknown) =>
+    JSON.stringify(contentActionReply(document, operation, input));
+  const cases: Array<[string, unknown, string]> = [
+    ["a11yTree", { target: { role: "list", accessibleName: "caller-value-91" } }, "targetNotFound"],
+    ["a11yTree", { target: { role: "link", accessibleName: "Same" } }, "targetAmbiguous"],
+    ["a11yTree", { target: { css: "caller-value-91 >>> !" } }, "scopeUnresolvable"],
+    ["a11yTree", { target: { accessibleName: "caller-value-91" } }, "scopeUnresolvable"],
+    ["observe", { includeHtml: "caller-value-91" }, "invalidInput"],
+    ["caller-value-91", {}, "invalidInput"],
+  ];
+  for (const [operation, input, expected] of cases) {
+    assert.equal(
+      reason(operation, input),
+      JSON.stringify({ companionContentFailure: { reason: expected } }),
+      operation,
+    );
+  }
+  const hostile = {
+    get target(): unknown {
+      throw new TypeError("caller-value-91 Zx9Kq2Lm7Rt4");
+    },
+  };
+  assert.equal(
+    reason("a11yTree", hostile),
+    JSON.stringify({ companionContentFailure: { reason: "scriptException", errorName: "TypeError" } }),
+  );
 });
 
 test("locateTarget reports an absent target and an ambiguous one", () => {

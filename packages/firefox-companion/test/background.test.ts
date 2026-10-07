@@ -462,6 +462,65 @@ test("mutating content actions never retry an absent response", async () => {
   });
 });
 
+test("a content failure reply is sent as its reason with a fixed message", async () => {
+  const transport = new FakeTransport();
+  const replies: unknown[] = [
+    { companionContentFailure: { reason: "targetNotFound" } },
+    { companionContentFailure: { reason: "scriptException", errorName: "TypeError" } },
+    { companionContentFailure: { reason: "scriptException", errorName: "token=Zx9Kq2Lm7Rt4" } },
+    { companionContentFailure: { reason: "secret page text" } },
+  ];
+  let attempts = 0;
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [{ tabId: 9, frameId: 4 }],
+    createTargetId: (target) => targetId(target.tabId, target.frameId),
+    async sendTabMessage() {
+      attempts += 1;
+      return replies[attempts - 1];
+    },
+    async navigateTab() {},
+    now: () => 1_000,
+  });
+  background.connect(CONNECT_OPTIONS);
+  await pair(background);
+  await grant(background, [{ tabId: 9, frameId: 4 }]);
+
+  const failures = [];
+  for (const operation of ["observe", "click", "a11yTree", "a11yTree"]) {
+    await background.receive(action(9, 4, { operation, input: { includeHtml: false } }));
+    failures.push((transport.sent.at(-1) as { output: unknown }).output);
+  }
+
+  assert.equal(attempts, 4, "a failure reply is never retried");
+  assert.deepEqual(failures, [
+    {
+      commandId: "command-1",
+      code: "targetNotFound",
+      message: "the target was not found on the page",
+      effectUncertain: false,
+    },
+    {
+      commandId: "command-1",
+      code: "scriptException",
+      message: "the content script threw a TypeError",
+      effectUncertain: true,
+    },
+    {
+      commandId: "command-1",
+      code: "scriptException",
+      message: "the content script threw",
+      effectUncertain: false,
+    },
+    {
+      commandId: "command-1",
+      code: "scriptException",
+      message: "the content script threw",
+      effectUncertain: false,
+    },
+  ]);
+});
+
 test("a rejected completion is reported as a channel rejection, not a content failure", async () => {
   const transport = new FakeTransport();
   const send = transport.send.bind(transport);

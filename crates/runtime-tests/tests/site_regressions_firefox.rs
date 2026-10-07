@@ -42,6 +42,10 @@ async fn site_regressions_hold_on_firefox() {
         redacted_page_fields_do_not_block_actions,
         snapshot_budget_keeps_ancestors_of_kept_nodes,
         containers_are_not_named_from_content,
+        type_text_reaches_the_visible_duplicate,
+        intent_follow_clicks_the_visible_duplicate,
+        snapshot_scopes_to_a_named_list,
+        snapshot_targets_act_on_the_described_element,
     );
     for (name, case) in table {
         if AssertUnwindSafe(case(&rig)).catch_unwind().await.is_err() {

@@ -1,6 +1,21 @@
 import { isExtensionSafeString, isExtensionSafeUrl } from "./native-transport.js";
 import { containsSecretMaterial } from "./secret-material.js";
-import { MAX_COMPANION_PAYLOAD_BYTES } from "./protocol.js";
+import {
+  CONTENT_FAILURE_KEY,
+  MAX_COMPANION_PAYLOAD_BYTES,
+  type ContentFailureReason,
+} from "./protocol.js";
+
+// A content action failure whose reason crosses to the runtime; its message
+// stays in the page.
+export class ContentActionError extends Error {
+  constructor(
+    readonly reason: ContentFailureReason,
+    message: string,
+  ) {
+    super(message);
+  }
+}
 
 export const MAX_VISIBLE_TEXT_LENGTH = 64 * 1024;
 export const MAX_CONTROL_COUNT = 512;
@@ -305,6 +320,23 @@ function safeStableAttribute(element: Element): { name: string; value: string } 
   return undefined;
 }
 
+// The worker re-selects a resolved element with `document.querySelector`, which
+// returns the first match in document order: a selector that also matches an
+// earlier element (a hidden duplicate sharing an id, name or test id) hands
+// the action that other element.
+function selectsOnly(element: Element, selector: string): boolean {
+  try {
+    return element.ownerDocument.querySelector(selector) === element;
+  } catch {
+    return false;
+  }
+}
+
+// Positional parts past which a path unanchored by an id is first tried as is.
+const CSS_RELATIVE_PATH_PARTS = 8;
+
+// A selector whose first match in the document is `element`, or undefined
+// when no such selector fits the bound.
 function cssPath(
   element: Element,
   budget: WorkBudget,
@@ -319,13 +351,16 @@ function cssPath(
     !containsSensitiveMaterial(id)
   ) {
     const selector = `#${cssIdentifier(id)}`;
-    if (byteLength(selector) <= MAX_SELECTOR_LENGTH) return selector;
+    if (byteLength(selector) <= MAX_SELECTOR_LENGTH && selectsOnly(element, selector)) return selector;
   }
   const stable = allowStableMetadata ? safeStableAttribute(element) : undefined;
-  if (stable) return `[${stable.name}="${cssString(stable.value)}"]`;
+  if (stable) {
+    const selector = `[${stable.name}="${cssString(stable.value)}"]`;
+    if (selectsOnly(element, selector)) return selector;
+  }
 
   const parts: string[] = [];
-  for (let current: Element | null = element; current && parts.length < 8; current = current.parentElement) {
+  for (let current: Element | null = element; current; current = current.parentElement) {
     if (!takeWork(budget)) return undefined;
     const tag = current.tagName.toLowerCase();
     const parent: HTMLElement | null = current.parentElement;
@@ -355,17 +390,17 @@ function cssPath(
       byteLength(parentId) <= MAX_SELECTOR_LENGTH &&
       !containsSensitiveMaterial(parentId)
     ) {
-      const parentSelector = `#${cssIdentifier(parentId)}`;
-      const candidate = [parentSelector, ...parts].join(" > ");
-      if (byteLength(candidate) <= MAX_SELECTOR_LENGTH) {
-        parts.unshift(parentSelector);
-        break;
+      const candidate = [`#${cssIdentifier(parentId)}`, ...parts].join(" > ");
+      if (byteLength(candidate) <= MAX_SELECTOR_LENGTH && selectsOnly(element, candidate)) {
+        return candidate;
       }
     }
+    const relative = parts.join(" > ");
+    if (byteLength(relative) > MAX_SELECTOR_LENGTH) return undefined;
+    if (parts.length === CSS_RELATIVE_PATH_PARTS && selectsOnly(element, relative)) return relative;
   }
   const path = parts.join(" > ");
-  if (byteLength(path) <= MAX_SELECTOR_LENGTH) return path;
-  return parts.at(-1) ?? element.tagName.toLowerCase();
+  return byteLength(path) <= MAX_SELECTOR_LENGTH && selectsOnly(element, path) ? path : undefined;
 }
 
 function implicitRole(element: Element, allowExplicit = true): string | undefined {
@@ -826,15 +861,16 @@ export function observeDocument(document: Document): PageObservation {
 
 function actionInput(input: unknown): Record<string, unknown> {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
-    throw new Error("content action input must be an object");
+    throw new ContentActionError("invalidInput", "content action input must be an object");
   }
   return input as Record<string, unknown>;
 }
 
 function inspectionRoot(document: Document, input: Record<string, unknown>): Element {
   if (typeof input.includeHtml !== "boolean") {
-    throw new Error("observe requires includeHtml to be a boolean");
+    throw new ContentActionError("invalidInput", "observe requires includeHtml to be a boolean");
   }
+  const unresolvable = (message: string) => new ContentActionError("scopeUnresolvable", message);
   let selector: string | undefined;
   if (input.selector !== null && input.selector !== undefined) {
     if (
@@ -842,26 +878,26 @@ function inspectionRoot(document: Document, input: Record<string, unknown>): Ele
       input.selector.length === 0 ||
       byteLength(input.selector) > MAX_SELECTOR_LENGTH
     ) {
-      throw new Error("observe selector must be a bounded CSS selector");
+      throw unresolvable("observe selector must be a bounded CSS selector");
     }
     selector = input.selector;
   } else if (input.target !== null && input.target !== undefined) {
     if (typeof input.target !== "object" || Array.isArray(input.target)) {
-      throw new Error("observe target must be an object");
+      throw unresolvable("observe target must be an object");
     }
     const target = input.target as Record<string, unknown>;
     if (typeof target.css === "string" && target.css.length > 0) {
       if (byteLength(target.css) > MAX_SELECTOR_LENGTH) {
-        throw new Error("observe target CSS must be bounded");
+        throw unresolvable("observe target CSS must be bounded");
       }
       selector = target.css;
     } else if (typeof target.testId === "string" && target.testId.length > 0) {
       if (byteLength(target.testId) > MAX_CONTROL_FIELD_LENGTH) {
-        throw new Error("observe target test ID must be bounded");
+        throw unresolvable("observe target test ID must be bounded");
       }
       selector = `[data-testid="${cssString(target.testId)}"]`;
     } else {
-      throw new Error("observe target requires a CSS selector or test ID");
+      throw unresolvable("observe target requires a CSS selector or test ID");
     }
   }
   if (!selector) return document.body ?? document.documentElement;
@@ -869,9 +905,11 @@ function inspectionRoot(document: Document, input: Record<string, unknown>): Ele
   try {
     root = document.querySelector(selector);
   } catch {
-    throw new Error("observe selector is invalid");
+    throw unresolvable("observe selector is invalid");
   }
-  if (!root || isElementHidden(root)) throw new Error("observe target was not found");
+  if (!root || isElementHidden(root)) {
+    throw new ContentActionError("targetNotFound", "observe target was not found");
+  }
   return root;
 }
 
@@ -881,15 +919,17 @@ function target(document: Document, input: Record<string, unknown>): Element {
     input.cssPath.length === 0 ||
     byteLength(input.cssPath) > MAX_SELECTOR_LENGTH
   ) {
-    throw new Error("content action requires a bounded cssPath");
+    throw new ContentActionError("invalidInput", "content action requires a bounded cssPath");
   }
   let element: Element | null;
   try {
     element = document.querySelector(input.cssPath);
   } catch {
-    throw new Error("content action cssPath is invalid");
+    throw new ContentActionError("invalidInput", "content action cssPath is invalid");
   }
-  if (!element || isElementHidden(element)) throw new Error("content action target was not found");
+  if (!element || isElementHidden(element)) {
+    throw new ContentActionError("targetNotFound", "content action target was not found");
+  }
   return element;
 }
 
@@ -1043,9 +1083,11 @@ function a11yTree(
     return { role, name, sensitive };
   };
 
+  const unresolvable = (message: string) => new ContentActionError("scopeUnresolvable", message);
+  const notFound = () => new ContentActionError("targetNotFound", "a11y target was not found");
   const resolveScope = (spec: unknown): Element => {
     if (typeof spec !== "object" || spec === null || Array.isArray(spec)) {
-      throw new Error("a11y target must be an object");
+      throw unresolvable("a11y target must be an object");
     }
     const { css, testId, role, accessibleName, ordinal } = spec as Record<string, unknown>;
     let selector: string | undefined;
@@ -1055,28 +1097,28 @@ function a11yTree(
       selector = `[data-testid="${cssString(testId)}"]`;
     }
     if (selector !== undefined) {
-      if (byteLength(selector) > MAX_SELECTOR_LENGTH) throw new Error("a11y target selector must be bounded");
+      if (byteLength(selector) > MAX_SELECTOR_LENGTH) throw unresolvable("a11y target selector must be bounded");
       let found: Element | null;
       try {
         found = document.querySelector(selector);
       } catch {
-        throw new Error("a11y target selector is invalid");
+        throw unresolvable("a11y target selector is invalid");
       }
-      if (!found || isElementHidden(found)) throw new Error("a11y target was not found");
+      if (!found || isElementHidden(found)) throw notFound();
       return found;
     }
     if (typeof role !== "string" || role.length === 0) {
-      throw new Error("a11y target requires a role, CSS selector, or test ID");
+      throw unresolvable("a11y target requires a role, CSS selector, or test ID");
     }
     if (accessibleName !== null && accessibleName !== undefined && typeof accessibleName !== "string") {
-      throw new Error("a11y target accessibleName must be a string");
+      throw unresolvable("a11y target accessibleName must be a string");
     }
     if (
       ordinal !== null &&
       ordinal !== undefined &&
       !(typeof ordinal === "number" && Number.isSafeInteger(ordinal) && ordinal >= 0)
     ) {
-      throw new Error("a11y target ordinal must be a non-negative integer");
+      throw unresolvable("a11y target ordinal must be a non-negative integer");
     }
     const wanted = typeof ordinal === "number" ? ordinal : 0;
     const matches: Element[] = [];
@@ -1107,29 +1149,31 @@ function a11yTree(
       }
     };
     walk(root, 0);
+    const picked = matches[typeof ordinal === "number" ? wanted : 0];
+    if (!picked && visited > A11Y_MAX_SCOPE_VISITS) {
+      throw new ContentActionError("budgetExhausted", "a11y target search exceeded its visit bound");
+    }
     if (typeof ordinal === "number") {
-      const picked = matches[wanted];
-      if (!picked) throw new Error("a11y target was not found");
+      if (!picked) throw notFound();
       return picked;
     }
-    if (matches.length !== 1) {
-      throw new Error(matches.length === 0 ? "a11y target was not found" : "a11y target is ambiguous");
-    }
+    if (matches.length === 0) throw notFound();
+    if (matches.length > 1) throw new ContentActionError("targetAmbiguous", "a11y target is ambiguous");
     return matches[0]!;
   };
   if (locateOnly) {
     if (targetInput === null || targetInput === undefined) {
-      throw new Error("locateTarget requires a target");
+      throw new ContentActionError("invalidInput", "locateTarget requires a target");
     }
     let element: Element;
     try {
       element = resolveScope(targetInput);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "";
-      if (message === "a11y target is ambiguous") {
+      const reason = error instanceof ContentActionError ? error.reason : undefined;
+      if (reason === "targetAmbiguous") {
         return { nodes: [], truncated: false, located: { found: false, ambiguous: true } };
       }
-      if (message === "a11y target was not found") {
+      if (reason === "targetNotFound") {
         return { nodes: [], truncated: false, located: { found: false, ambiguous: false } };
       }
       throw error;
@@ -1141,7 +1185,7 @@ function a11yTree(
     const budget: WorkBudget = { remaining: A11Y_MAX_SCOPE_VISITS };
     for (
       let current: Element | null = element, depth = 0;
-      current?.parentElement && depth < 8;
+      current?.parentElement && depth < A11Y_MAX_DEPTH;
       current = current.parentElement, depth += 1
     ) {
       let position = 0;
@@ -1424,10 +1468,10 @@ export function executeContentAction(
       return { focused: true };
     case "type": {
       if (typeof parsed.text !== "string" || parsed.text.length > MAX_VISIBLE_TEXT_LENGTH) {
-        throw new Error("type requires bounded text");
+        throw new ContentActionError("invalidInput", "type requires bounded text");
       }
       if (!["INPUT", "TEXTAREA"].includes(element.tagName)) {
-        throw new Error("type target must accept text");
+        throw new ContentActionError("invalidInput", "type target must accept text");
       }
       (element as HTMLInputElement | HTMLTextAreaElement).value = parsed.text;
       const EventConstructor = document.defaultView?.Event;
@@ -1438,7 +1482,26 @@ export function executeContentAction(
       return { typed: true };
     }
     default:
-      throw new Error(`unsupported content operation: ${operation}`);
+      throw new ContentActionError("invalidInput", `unsupported content operation: ${operation}`);
+  }
+}
+
+// The reply to a content action: its output, or the reason it failed. Only
+// the reason and a thrown error's name leave the page, never its message.
+export function contentActionReply(document: Document, operation: string, input: unknown): unknown {
+  try {
+    return executeContentAction(document, operation, input);
+  } catch (error) {
+    if (error instanceof ContentActionError) {
+      return { [CONTENT_FAILURE_KEY]: { reason: error.reason } };
+    }
+    const errorName = error instanceof Error ? error.name : undefined;
+    return {
+      [CONTENT_FAILURE_KEY]: {
+        reason: "scriptException",
+        ...(typeof errorName === "string" ? { errorName: errorName.slice(0, 64) } : {}),
+      },
+    };
   }
 }
 
@@ -1471,6 +1534,6 @@ if (typeof browser !== "undefined") {
     ) {
       return undefined;
     }
-    return Promise.resolve(executeContentAction(document, message.operation, message.input));
+    return Promise.resolve(contentActionReply(document, message.operation, message.input));
   });
 }
