@@ -2968,66 +2968,15 @@ async fn a_popup_opened_by_the_page_can_be_closed_like_any_page() {
     );
 }
 
-#[tokio::test]
-async fn upload_dispatches_input_and_change_when_the_browser_skips_them() {
-    let root = tempfile::tempdir().unwrap();
-    let file = root.path().join("fixture.txt");
-    std::fs::write(&file, b"approved fixture").unwrap();
-    let bidi = FakeBidi::new(vec![
-        Ok(json!({"context": "context-1"})),
-        Ok(json!({"result": {"type": "string", "value": "valid"}})),
-        Ok(json!({"result": {"type": "node", "sharedId": "file-input"}})),
-        Ok(json!({})),
-        Ok(json!({"result": {"type": "number", "value": 1}})),
-    ]);
-    let worker = worker(bidi.clone(), FakeObserver::new(observation()))
-        .await
-        .with_upload_roots(vec![root.path().to_path_buf()]);
-    let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
-    worker
-        .upload_files(
-            &page,
-            &UploadFilesCommand {
-                selector: "#hidden-file".into(),
-                target: None,
-                paths: vec![file.to_string_lossy().into_owned()],
-            },
-        )
-        .await
-        .unwrap();
-
-    let calls = bidi.calls().await;
-    let probe = calls
-        .iter()
-        .find(|call| {
-            call.params["expression"]
-                .as_str()
-                .is_some_and(|e| e.contains("'non-file'"))
-        })
-        .unwrap();
-    assert!(probe.params["expression"]
-        .as_str()
-        .unwrap()
-        .contains("addEventListener(name"));
-    let settle = calls
-        .iter()
-        .rev()
-        .find(|call| call.method == "script.evaluate")
-        .unwrap();
-    assert_eq!(settle.params["awaitPromise"], true);
-    let expression = settle.params["expression"].as_str().unwrap();
-    assert!(expression.contains("dispatchEvent(new Event(name"));
-    assert!(expression.contains("files?.length"));
-}
-
 async fn hidden_upload(count: u64) -> (Result<Vec<Evidence>, CommandError>, Vec<BidiCall>) {
     let root = tempfile::tempdir().unwrap();
     let file = root.path().join("resume.txt");
     std::fs::write(&file, b"hidden-bytes-7731").unwrap();
     let bidi = FakeBidi::new(vec![
         Ok(json!({"context": "context-1"})),
-        Ok(json!({"result": {"type": "string", "value": "hidden"}})),
+        Ok(json!({"result": {"type": "string", "value": "valid"}})),
+        Ok(json!({"result": {"type": "node", "sharedId": "file-input"}})),
+        Ok(json!({})),
         Ok(json!({"result": {"type": "number", "value": count}})),
     ]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation()))
@@ -3049,19 +2998,36 @@ async fn hidden_upload(count: u64) -> (Result<Vec<Evidence>, CommandError>, Vec<
 }
 
 #[tokio::test]
-async fn hidden_file_input_receives_the_bytes_from_the_page_and_events_fire() {
+async fn hidden_file_input_is_filled_by_set_files_and_read_back_from_the_sandbox() {
     let (result, calls) = hidden_upload(1).await;
     result.unwrap();
-    assert!(!calls.iter().any(|call| call.method == "input.setFiles"));
-    let fill = calls.last().unwrap();
-    assert_eq!(fill.method, "script.evaluate");
-    assert_eq!(fill.params["awaitPromise"], true);
-    assert!(fill.params["target"].get("sandbox").is_none());
-    let expression = fill.params["expression"].as_str().unwrap();
-    assert!(expression.contains("DataTransfer"));
-    assert!(expression.contains("dispatchEvent(new Event(name"));
-    assert!(expression.contains("resume.txt"));
-    assert!(expression.contains("aGlkZGVuLWJ5dGVzLTc3MzE="));
+    let set_files = calls
+        .iter()
+        .position(|call| call.method == "input.setFiles")
+        .expect("input.setFiles was not sent");
+    assert_eq!(calls[set_files].params["element"]["sharedId"], "file-input");
+    assert!(calls[set_files].params["files"][0]
+        .as_str()
+        .unwrap()
+        .ends_with("resume.txt"));
+    for call in &calls {
+        let expression = call.params["expression"].as_str().unwrap_or_default();
+        assert!(
+            !expression.contains("DataTransfer") && !expression.contains("dispatchEvent"),
+            "the upload built or dispatched in a script: {expression}"
+        );
+    }
+    let verify = &calls[set_files + 1];
+    assert_eq!(verify.method, "script.evaluate");
+    assert_eq!(
+        verify.params["target"]["sandbox"],
+        "automation-runtime-companion"
+    );
+    assert!(verify.params["expression"]
+        .as_str()
+        .unwrap()
+        .contains("#hidden-file"));
+    assert_eq!(calls.len(), set_files + 2);
 }
 
 #[tokio::test]
