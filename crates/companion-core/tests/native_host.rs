@@ -1106,3 +1106,106 @@ async fn endpoint_reassignment_interrupts_a_stalled_websocket_handshake() {
     drop(extension);
     host.await.unwrap().unwrap();
 }
+
+/// Page text such as `note: read this` parses as a URL with the scheme
+/// `note:`; the relay refuses to forward it. That fails the one command and
+/// keeps the connection: the next command on the same grant completes.
+#[tokio::test]
+async fn a_rejected_action_result_fails_its_command_and_keeps_the_relay() {
+    let server = CompanionServer::bind_loopback(CompanionServerConfig {
+        bind_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+        pairing_code_ttl: Duration::from_secs(60),
+        attachment_ttl: Duration::from_secs(300),
+    })
+    .await
+    .unwrap();
+    let pairing_code = server.registry().issue_pairing_code().await;
+    let config = NativeHostConfig::new(
+        format!("ws://{}/v1/companion", server.local_addr()),
+        pairing_code,
+    );
+    let connect_request = connect_request();
+    let profile_id = connect_request.profile_id.clone();
+    let (host_stream, mut extension_stream) = duplex(2 * MAX_NATIVE_MESSAGE_BYTES);
+    let (host_reader, host_writer) = split(host_stream);
+    let host = tokio::spawn(run_native_host(host_reader, host_writer, config));
+    write_native_message(
+        &mut extension_stream,
+        &json!({"kind": "pair", "input": connect_request}),
+    )
+    .await
+    .unwrap();
+    let paired = read_native_message(&mut extension_stream).await.unwrap();
+    assert_eq!(paired.unwrap()["kind"], "paired");
+    let discovery = CompanionEvent::TargetsDiscovered(TargetDiscovery {
+        protocol_version: PROTOCOL_VERSION,
+        profile_id: profile_id.clone(),
+        targets: vec![BrowserTarget {
+            target_id: "tab-1".into(),
+            kind: TargetKind::Page,
+        }],
+    });
+    write_native_message(
+        &mut extension_stream,
+        &serde_json::to_value(discovery).unwrap(),
+    )
+    .await
+    .unwrap();
+    server
+        .wait_for_discovery(&profile_id, Duration::from_secs(1))
+        .await
+        .unwrap();
+    let grant = server.grant_discovered_targets(&profile_id).await.unwrap();
+    read_native_message(&mut extension_stream)
+        .await
+        .unwrap()
+        .unwrap();
+
+    for (text, rejected) in [("note: read this", true), ("ready", false)] {
+        let command_id = CommandId::new();
+        let action = ActionRequest {
+            protocol_version: PROTOCOL_VERSION,
+            attachment_id: grant.attachment_id.clone(),
+            command_id: command_id.clone(),
+            page_id: grant.pages[0].page_id.clone(),
+            operation: "a11yTree".into(),
+            input: json!({}),
+            deadline_unix_ms: 4_102_444_800_000,
+        };
+        let completed = CompanionEvent::ActionCompleted(ActionResult {
+            command_id: command_id.clone(),
+            interaction_path: InteractionPath::ExtensionApi,
+            output: json!({"nodes": [{"role": "StaticText", "name": text}]}),
+        });
+        let reply = serde_json::to_value(&completed).unwrap();
+        let extension = async {
+            read_native_message(&mut extension_stream)
+                .await
+                .unwrap()
+                .unwrap();
+            write_native_message(&mut extension_stream, &reply)
+                .await
+                .unwrap();
+        };
+        let (result, ()) = tokio::join!(server.dispatch_action(action), extension);
+        let result = result.unwrap();
+        if rejected {
+            let CompanionEvent::ActionFailed {
+                command_id: failed,
+                code,
+                effect_uncertain,
+                ..
+            } = result
+            else {
+                panic!("expected actionFailed, got {result:?}");
+            };
+            assert_eq!((failed, code.as_str()), (command_id, "outputRejected"));
+            assert!(effect_uncertain);
+        } else {
+            assert_eq!(result, completed);
+        }
+    }
+
+    drop(extension_stream);
+    host.await.unwrap().unwrap();
+}

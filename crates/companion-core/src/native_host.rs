@@ -680,6 +680,27 @@ fn connect_failure(error: &WebSocketError) -> String {
     }
 }
 
+const OUTPUT_REJECTED_CODE: &str = "outputRejected";
+
+/// The `actionFailed` the server receives in place of an action result the
+/// relay refused to forward, so the command ends with a clear error.
+fn rejected_action_failure(kind: &str, command_id: Option<String>) -> Option<Value> {
+    if !matches!(kind, "actionCompleted" | "actionFailed") {
+        return None;
+    }
+    let failure = serde_json::json!({
+        "kind": "actionFailed",
+        "output": {
+            "commandId": command_id?,
+            "code": OUTPUT_REJECTED_CODE,
+            "message": "the page result contains text the companion relay does not forward; \
+                        the connection is intact and the same call returns the same result",
+            "effectUncertain": kind == "actionCompleted",
+        }
+    });
+    validate_extension_message(failure).ok()
+}
+
 fn message_kind(value: &Value) -> &str {
     value
         .get("kind")
@@ -989,11 +1010,20 @@ where
                     match native {
                         Some(Ok(Some(value))) => {
                             let kind = message_kind(&value).to_owned();
+                            let command_id = value
+                                .pointer("/output/commandId")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned);
                             let value = match validate_extension_message(value) {
                                 Ok(value) => value,
                                 Err(error) => {
+                                    // One unforwardable message fails its own command;
+                                    // it never ends the relay and every other session.
                                     log.record("rejected_extension_message", &format!("{kind}: {error}"));
-                                    break Err(error);
+                                    match rejected_action_failure(&kind, command_id) {
+                                        Some(failure) => failure,
+                                        None => continue,
+                                    }
                                 }
                             };
                             let body = serde_json::to_string(&value)
