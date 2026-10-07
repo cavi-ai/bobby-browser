@@ -622,6 +622,24 @@ pub async fn snapshot_scopes_to_a_named_list(rig: &Rig) {
         find_node(&scoped, "navigation", None).is_none(),
         "the scoped snapshot leaked the page navigation: {scoped}"
     );
+    let missing = live
+        .snapshot(json!({"target":{"role":"list","accessibleName":"Missing List"}}))
+        .await;
+    assert_eq!(
+        missing["error"]["code"], "targetNotFound",
+        "a missing scope is not targetNotFound: {missing}"
+    );
+    if rig.is_firefox() {
+        let message = missing["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("(targetNotFound): the target was not found on the page"),
+            "the failure does not carry the content script's reason: {missing}"
+        );
+        assert!(
+            !message.contains("Missing List"),
+            "the failure echoed the caller's value: {missing}"
+        );
+    }
     live.close().await;
 }
 

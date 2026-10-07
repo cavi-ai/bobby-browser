@@ -506,11 +506,14 @@ impl ExtensionObserver for CompanionExtensionObserver {
                 Ok(observation)
             }
             CompanionEvent::ActionFailed { code, message, .. } => Err(driver_error(
-                if command.target.is_some() || command.selector.is_some() {
-                    ErrorCode::TargetNotFound
-                } else {
-                    ErrorCode::BrowserCommandFailed
-                },
+                content_failure_code(
+                    &code,
+                    if command.target.is_some() || command.selector.is_some() {
+                        ErrorCode::TargetNotFound
+                    } else {
+                        ErrorCode::BrowserCommandFailed
+                    },
+                ),
                 format!("extension observation failed ({code}): {message}"),
                 false,
             )),
@@ -579,11 +582,14 @@ impl ExtensionObserver for CompanionExtensionObserver {
                 false,
             )),
             CompanionEvent::ActionFailed { code, message, .. } => Err(driver_error(
-                if target.is_some() && code == "actionFailed" {
-                    ErrorCode::TargetNotFound
-                } else {
-                    ErrorCode::BrowserCommandFailed
-                },
+                content_failure_code(
+                    &code,
+                    if target.is_some() && code == "actionFailed" {
+                        ErrorCode::TargetNotFound
+                    } else {
+                        ErrorCode::BrowserCommandFailed
+                    },
+                ),
                 format!("extension accessibility snapshot failed ({code}): {message}"),
                 false,
             )),
@@ -633,7 +639,7 @@ impl ExtensionObserver for CompanionExtensionObserver {
                 })
             }
             CompanionEvent::ActionFailed { code, message, .. } => Err(driver_error(
-                ErrorCode::BrowserCommandFailed,
+                content_failure_code(&code, ErrorCode::BrowserCommandFailed),
                 format!("extension target location failed ({code}): {message}"),
                 false,
             )),
@@ -7030,6 +7036,19 @@ fn capability_error(capability: &str) -> CommandError {
     )
 }
 
+/// The error code for the reason a content action failed, as the extension
+/// reports it in the failure code; `fallback` for codes that name no reason.
+fn content_failure_code(code: &str, fallback: ErrorCode) -> ErrorCode {
+    match code {
+        "targetNotFound" => ErrorCode::TargetNotFound,
+        "targetAmbiguous" => ErrorCode::TargetAmbiguous,
+        "scopeUnresolvable" | "invalidInput" => ErrorCode::InvalidRequest,
+        "budgetExhausted" => ErrorCode::ResourceExhausted,
+        "scriptException" => ErrorCode::BrowserCommandFailed,
+        _ => fallback,
+    }
+}
+
 /// The scope the content script resolves for a scoped accessibility snapshot:
 /// a landmark such as `main` carries no CSS identity in the control candidates
 /// the click path resolves against, so the page-side walk that annotates
@@ -7132,6 +7151,31 @@ fn driver_error(code: ErrorCode, message: impl Into<String>, retryable: bool) ->
         message: message.into(),
         layer: ErrorLayer::Driver,
         retryable,
+    }
+}
+
+#[cfg(test)]
+mod content_failure_tests {
+    use super::*;
+
+    #[test]
+    fn content_failure_reasons_map_to_their_error_codes() {
+        for (code, expected) in [
+            ("targetNotFound", ErrorCode::TargetNotFound),
+            ("targetAmbiguous", ErrorCode::TargetAmbiguous),
+            ("scopeUnresolvable", ErrorCode::InvalidRequest),
+            ("invalidInput", ErrorCode::InvalidRequest),
+            ("budgetExhausted", ErrorCode::ResourceExhausted),
+            ("scriptException", ErrorCode::BrowserCommandFailed),
+            ("actionFailed", ErrorCode::FrameNotFound),
+            ("deadlineExceeded", ErrorCode::FrameNotFound),
+        ] {
+            assert_eq!(
+                content_failure_code(code, ErrorCode::FrameNotFound),
+                expected,
+                "{code}"
+            );
+        }
     }
 }
 

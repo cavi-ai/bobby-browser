@@ -8,6 +8,7 @@ import {
   MAX_ELEMENT_TEXT_VISITED_NODES,
   MAX_VISIBLE_TEXT_LENGTH,
   MAX_VISIBLE_TEXT_VISITED_NODES,
+  contentActionReply,
   executeContentAction,
   observeDocument,
 } from "../src/content.js";
@@ -782,6 +783,38 @@ test("a control's cssPath selects it, not an earlier hidden duplicate", () => {
     assert.equal(located.found, true, accessibleName);
     assert.equal(document.querySelector(located.cssPath as string)?.getAttribute("data-id"), "v");
   }
+});
+
+test("a failed content action replies with its reason and no page or caller text", () => {
+  const document = documentFor(
+    `<main><a href="/a">Same</a><a href="/b">Same</a><ul aria-label="Secret Zx9Kq2Lm7Rt4"></ul></main>`,
+  );
+  const reason = (operation: string, input: unknown) =>
+    JSON.stringify(contentActionReply(document, operation, input));
+  const cases: Array<[string, unknown, string]> = [
+    ["a11yTree", { target: { role: "list", accessibleName: "caller-value-91" } }, "targetNotFound"],
+    ["a11yTree", { target: { role: "link", accessibleName: "Same" } }, "targetAmbiguous"],
+    ["a11yTree", { target: { css: "caller-value-91 >>> !" } }, "scopeUnresolvable"],
+    ["a11yTree", { target: { accessibleName: "caller-value-91" } }, "scopeUnresolvable"],
+    ["observe", { includeHtml: "caller-value-91" }, "invalidInput"],
+    ["caller-value-91", {}, "invalidInput"],
+  ];
+  for (const [operation, input, expected] of cases) {
+    assert.equal(
+      reason(operation, input),
+      JSON.stringify({ companionContentFailure: { reason: expected } }),
+      operation,
+    );
+  }
+  const hostile = {
+    get target(): unknown {
+      throw new TypeError("caller-value-91 Zx9Kq2Lm7Rt4");
+    },
+  };
+  assert.equal(
+    reason("a11yTree", hostile),
+    JSON.stringify({ companionContentFailure: { reason: "scriptException", errorName: "TypeError" } }),
+  );
 });
 
 test("locateTarget reports an absent target and an ambiguous one", () => {
