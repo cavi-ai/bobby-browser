@@ -1464,6 +1464,12 @@ fn temporary_extension_install_command(
     ))
 }
 
+/// The lifecycle log of the native host serving the installed-Firefox rig:
+/// the host writes it beside the descriptor the rig publishes.
+pub fn native_host_log_path() -> PathBuf {
+    proof_state_dir().join(cli::FIREFOX_NATIVE_HOST_LOG)
+}
+
 /// `BOBBY_FIREFOX_PROOF_DIR` redirects the state directory (and the
 /// native-host descriptor in it) for a scoped local test install.
 fn proof_state_dir() -> PathBuf {

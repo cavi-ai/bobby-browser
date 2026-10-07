@@ -2545,6 +2545,9 @@ fn installed_file_mode(path: &Path, _fallback: u32) -> std::io::Result<u32> {
     }
 }
 
+/// The Firefox native host's lifecycle log, written beside its descriptor.
+pub const FIREFOX_NATIVE_HOST_LOG: &str = "firefox-native-host.log";
+
 async fn run_configured_native_host(descriptor_path: PathBuf) -> Result<()> {
     if !descriptor_path.is_absolute() {
         anyhow::bail!("firefox native-host descriptor path must be absolute");
@@ -2574,7 +2577,7 @@ async fn run_configured_native_host(descriptor_path: PathBuf) -> Result<()> {
         .parent()
         .ok_or_else(|| anyhow::anyhow!("firefox native-host descriptor path has no parent"))?
         .to_path_buf();
-    let log = LifecycleLog::open(&config_dir.join("firefox-native-host.log"));
+    let log = LifecycleLog::open(&config_dir.join(FIREFOX_NATIVE_HOST_LOG));
     log.record(
         "start",
         &format!(
