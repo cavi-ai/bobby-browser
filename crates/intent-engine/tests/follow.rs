@@ -254,6 +254,50 @@ async fn follow_keeps_the_ordinal_for_a_candidate_without_a_css_identity() {
 }
 
 #[tokio::test]
+async fn follow_never_treats_state_attributes_as_identity() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let mut candidate = link("Details");
+    candidate.css = None;
+    candidate.attributes = BTreeMap::from([
+        ("aria-invalid".to_owned(), "true".to_owned()),
+        ("aria-expanded".to_owned(), "false".to_owned()),
+        ("checked".to_owned(), "true".to_owned()),
+        ("disabled".to_owned(), "true".to_owned()),
+        ("value".to_owned(), "typed".to_owned()),
+        ("name".to_owned(), "details".to_owned()),
+    ]);
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![candidate]),
+        calls: Arc::clone(&calls),
+        click_evidence: Vec::new(),
+        wait_evidence: Vec::new(),
+        wait_error: None,
+    };
+    let outcome = IntentEngine::execute(
+        &follow("Details", Some("link"), details_wait(), false),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("expected Completed, got {outcome:?}");
+    };
+    let expected = BTreeMap::from([("name".to_owned(), "details".to_owned())]);
+    let log = calls.lock().expect("call log");
+    assert_eq!(log.clicks[0].target.as_ref().unwrap().attributes, expected);
+    let fingerprint = evidence
+        .iter()
+        .find_map(|item| match item {
+            Evidence::Resolution { fingerprint, .. } => Some(fingerprint),
+            _ => None,
+        })
+        .expect("resolution evidence");
+    assert_eq!(fingerprint.stable_attributes, expected);
+}
+
+#[tokio::test]
 async fn follow_forwards_boundary_true_verbatim_to_the_click_command() {
     let calls = Arc::new(Mutex::new(CallLog::default()));
     let expected_destination = WaitForCommand {

@@ -1992,7 +1992,7 @@ fn action_target(candidate: &Candidate, intent_target: &TargetSpec) -> (String, 
         role: candidate.role.clone(),
         accessible_name: candidate.name.clone(),
         label: candidate.label.clone(),
-        attributes: candidate.attributes.clone(),
+        attributes: identity_attributes(candidate),
         // An explicit frame path on the intent wins; otherwise use the one
         // the gather stamped when it found this candidate inside an iframe.
         frame_path: if intent_target.frame_path.is_empty() {
@@ -2006,13 +2006,37 @@ fn action_target(candidate: &Candidate, intent_target: &TargetSpec) -> (String, 
     (selector, target)
 }
 
+/// Attributes that change as the user or page acts on a control. They are
+/// state, never identity: a target carrying one stops matching once it flips.
+const STATE_ATTRIBUTES: &[&str] = &[
+    "aria-invalid",
+    "aria-expanded",
+    "aria-checked",
+    "aria-selected",
+    "aria-pressed",
+    "aria-disabled",
+    "checked",
+    "selected",
+    "disabled",
+    "value",
+];
+
+fn identity_attributes(candidate: &Candidate) -> std::collections::BTreeMap<String, String> {
+    candidate
+        .attributes
+        .iter()
+        .filter(|(name, _)| !STATE_ATTRIBUTES.contains(&name.as_str()))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+}
+
 fn fingerprint(page_id: &PageId, candidate: &Candidate) -> TargetFingerprint {
     TargetFingerprint {
         page_id: page_id.clone(),
         frame: None,
         role: candidate.role.clone(),
         name: candidate.name.clone(),
-        stable_attributes: candidate.attributes.clone(),
+        stable_attributes: identity_attributes(candidate),
     }
 }
 
