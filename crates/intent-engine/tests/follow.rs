@@ -211,6 +211,93 @@ async fn follow_clicks_target_then_waits_for_destination_without_boundary() {
 }
 
 #[tokio::test]
+async fn follow_keeps_the_ordinal_for_a_candidate_without_a_css_identity() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let expected_destination = details_wait();
+    let semantic = |id: &str| Candidate {
+        css: None,
+        id: id.into(),
+        ..link("Widget Pro")
+    };
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![semantic("a"), semantic("b")]),
+        calls: Arc::clone(&calls),
+        click_evidence: Vec::new(),
+        wait_evidence: Vec::new(),
+        wait_error: None,
+    };
+    let command = IntentCommand::Follow(FollowIntent {
+        purpose: "Open the second Widget Pro".into(),
+        hints: IntentHints {
+            role: Some("link".into()),
+            accessible_name: Some("Widget Pro".into()),
+            ordinal: Some(1),
+            ..IntentHints::default()
+        },
+        expected_destination,
+        boundary: false,
+    });
+    let outcome = IntentEngine::execute(
+        &command,
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, IntentOutcome::Completed { .. }),
+        "{outcome:?}"
+    );
+    let log = calls.lock().expect("call log");
+    assert_eq!(log.clicks[0].target.as_ref().unwrap().ordinal, Some(1));
+}
+
+#[tokio::test]
+async fn follow_never_treats_state_attributes_as_identity() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let mut candidate = link("Details");
+    candidate.css = None;
+    candidate.attributes = BTreeMap::from([
+        ("aria-invalid".to_owned(), "true".to_owned()),
+        ("aria-expanded".to_owned(), "false".to_owned()),
+        ("checked".to_owned(), "true".to_owned()),
+        ("disabled".to_owned(), "true".to_owned()),
+        ("value".to_owned(), "typed".to_owned()),
+        ("name".to_owned(), "details".to_owned()),
+    ]);
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![candidate]),
+        calls: Arc::clone(&calls),
+        click_evidence: Vec::new(),
+        wait_evidence: Vec::new(),
+        wait_error: None,
+    };
+    let outcome = IntentEngine::execute(
+        &follow("Details", Some("link"), details_wait(), false),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("expected Completed, got {outcome:?}");
+    };
+    let expected = BTreeMap::from([("name".to_owned(), "details".to_owned())]);
+    let log = calls.lock().expect("call log");
+    assert_eq!(log.clicks[0].target.as_ref().unwrap().attributes, expected);
+    let fingerprint = evidence
+        .iter()
+        .find_map(|item| match item {
+            Evidence::Resolution { fingerprint, .. } => Some(fingerprint),
+            _ => None,
+        })
+        .expect("resolution evidence");
+    assert_eq!(fingerprint.stable_attributes, expected);
+}
+
+#[tokio::test]
 async fn follow_forwards_boundary_true_verbatim_to_the_click_command() {
     let calls = Arc::new(Mutex::new(CallLog::default()));
     let expected_destination = WaitForCommand {

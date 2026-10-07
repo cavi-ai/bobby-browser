@@ -21,7 +21,7 @@ pub struct Rig {
     _firefox: Option<InstalledFirefoxRuntime>,
 }
 
-fn config(root: &std::path::Path) -> AppConfig {
+fn config(root: &std::path::Path, upload_roots: Vec<std::path::PathBuf>) -> AppConfig {
     AppConfig {
         http: config::HttpConfig {
             allow_loopback: true,
@@ -37,7 +37,7 @@ fn config(root: &std::path::Path) -> AppConfig {
             profiles_dir: root.join("profiles"),
             headless: true,
             max_active: 1,
-            upload_roots: vec![],
+            upload_roots,
             downloads_dir: root.join("downloads"),
             artifacts_dir: root.join("artifacts"),
             max_artifact_bytes: 8 * 1024 * 1024,
@@ -67,8 +67,12 @@ impl Rig {
     }
 
     pub async fn chromium() -> Self {
+        Self::chromium_with_upload_roots(vec![]).await
+    }
+
+    pub async fn chromium_with_upload_roots(upload_roots: Vec<std::path::PathBuf>) -> Self {
         let root = tempfile::tempdir().expect("create rig root");
-        let mut config = config(root.path());
+        let mut config = config(root.path(), upload_roots);
         if let Some(executable) = std::env::var_os("BOBBY_CHROME_EXECUTABLE") {
             config.browser.executable = Some(executable.into());
         }
@@ -79,10 +83,14 @@ impl Rig {
     }
 
     pub async fn firefox() -> Self {
+        Self::firefox_with_upload_roots(vec![]).await
+    }
+
+    pub async fn firefox_with_upload_roots(upload_roots: Vec<std::path::PathBuf>) -> Self {
         let installed = InstalledFirefoxConfig::from_env()
             .unwrap_or_else(|name| panic!("{name} must be set to run the Firefox suite"));
         let root = tempfile::tempdir().expect("create rig root");
-        let config = config(root.path());
+        let config = config(root.path(), upload_roots);
         let firefox =
             runtime_tests::launch_installed_firefox_runtime(installed, &config, "about:blank")
                 .await

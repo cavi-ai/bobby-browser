@@ -12,6 +12,10 @@ use workflow_journal::{JournalError, JournalRecord, PreparedResult};
 
 use crate::{PageRuntime, SessionGate, VisionGate};
 
+/// How long a typed Enter is given to start a navigation before the call
+/// returns without one.
+const ENTER_NAVIGATION_WINDOW: StdDuration = StdDuration::from_millis(1_000);
+
 #[derive(Debug, Error)]
 pub enum ExecutorError {
     #[error("journal failed: {0}")]
@@ -1076,10 +1080,20 @@ impl PageRuntime {
                     combined.extend(verification);
                     return Ok(combined);
                 }
-                let verification = lease
+                // Enter in the typed text submits the form. The control holds
+                // the text without the line break, or no longer exists once
+                // the page has navigated; neither is a value mismatch.
+                let submitted_with_enter = command.value.contains(['\n', '\r']);
+                let typed_text = if submitted_with_enter {
+                    command.value.replace(['\n', '\r'], "")
+                } else {
+                    command.value.clone()
+                };
+                let page_id = page_id.expect("validated page id");
+                let inspected_control = lease
                     .worker()
                     .inspect(
-                        page_id.expect("validated page id"),
+                        page_id,
                         &InspectCommand {
                             selector: (!command.selector.is_empty())
                                 .then(|| command.selector.clone()),
@@ -1087,23 +1101,115 @@ impl PageRuntime {
                             include_html: false,
                         },
                     )
-                    .await?;
+                    .await;
+                let verification = match inspected_control {
+                    Ok(verification) => verification,
+                    Err(error)
+                        if submitted_with_enter
+                            && matches!(
+                                error.code,
+                                ErrorCode::TargetNotFound | ErrorCode::TargetAmbiguous
+                            ) =>
+                    {
+                        Vec::new()
+                    }
+                    Err(error) => return Err(error),
+                };
                 let inspected = verification.iter().find_map(|item| match item {
                     Evidence::Inspection { text, .. } => Some(text.as_str()),
                     _ => None,
                 });
-                let matches = inspected.is_some_and(|inspected| {
-                    typed_value_verified(
-                        &command.value,
-                        command.clear_first,
-                        inspected,
-                        observed,
-                        kind,
-                    )
-                });
+                let matches = if submitted_with_enter {
+                    inspected.is_none_or(|inspected| {
+                        typed_value_verified(
+                            &typed_text,
+                            command.clear_first,
+                            inspected,
+                            observed,
+                            kind,
+                        )
+                    })
+                } else {
+                    inspected.is_some_and(|inspected| {
+                        typed_value_verified(
+                            &command.value,
+                            command.clear_first,
+                            inspected,
+                            observed,
+                            kind,
+                        )
+                    })
+                };
                 if matches {
                     let mut combined = evidence;
                     combined.extend(verification);
+                    if submitted_with_enter {
+                        // Report where the submit landed: the page the agent
+                        // is on after the navigation, not the one it typed on.
+                        // The signal is the URL moving off the page the field
+                        // was typed on; when no navigation starts inside the
+                        // bounded window the Enter did not navigate and the
+                        // call returns at once.
+                        let page_inspect = InspectCommand {
+                            selector: None,
+                            target: None,
+                            include_html: false,
+                        };
+                        let read_page = |evidence: Vec<Evidence>| {
+                            evidence.into_iter().find_map(|item| match item {
+                                Evidence::Inspection { url, title, .. } => Some((url, title)),
+                                _ => None,
+                            })
+                        };
+                        let typed_on = combined.iter().find_map(|item| match item {
+                            Evidence::Inspection { url, .. } => Some(url.clone()),
+                            _ => None,
+                        });
+                        let window = tokio::time::Instant::now() + ENTER_NAVIGATION_WINDOW;
+                        let mut landed: Option<(String, String)>;
+                        let mut navigated: bool;
+                        loop {
+                            landed = lease
+                                .worker()
+                                .inspect(page_id, &page_inspect)
+                                .await
+                                .ok()
+                                .and_then(read_page);
+                            navigated = match (&landed, &typed_on) {
+                                (Some((url, _)), Some(typed_on)) => url != typed_on,
+                                (Some(_), None) => true,
+                                (None, _) => false,
+                            };
+                            if navigated || tokio::time::Instant::now() >= window {
+                                break;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                        if navigated {
+                            let _ = lease
+                                .worker()
+                                .wait_for(
+                                    page_id,
+                                    &WaitForCommand {
+                                        condition: WaitCondition::Document {
+                                            ready: types::WaitUntil::Interactive,
+                                        },
+                                        timeout_ms: 5_000,
+                                    },
+                                )
+                                .await;
+                            landed = lease
+                                .worker()
+                                .inspect(page_id, &page_inspect)
+                                .await
+                                .ok()
+                                .and_then(read_page)
+                                .or(landed);
+                        }
+                        if let Some((url, title)) = landed {
+                            combined.push(Evidence::Navigation { url, title });
+                        }
+                    }
                     Ok(combined)
                 } else {
                     Err(verification_error("typed value did not match page state"))

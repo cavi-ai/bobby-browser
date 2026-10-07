@@ -127,16 +127,14 @@ pub fn compile_intent(command: &IntentCommand) -> Result<IntentPlan, CompileErro
                     return Err(CompileError::DuplicateFieldName(field.name.clone()));
                 }
                 let purpose = validate_purpose(&field.purpose)?;
-                let fallback_hints;
-                let hints = if targeting_hints_are_empty(&field.hints) {
-                    fallback_hints = IntentHints {
-                        accessible_name: Some(field.name.trim().to_owned()),
-                        ..IntentHints::default()
-                    };
-                    &fallback_hints
-                } else {
-                    &field.hints
-                };
+                // Hints narrow the field named by `name`; they never replace
+                // it. Only a hint that names the control itself
+                // (`accessibleName` or `nearText`) supersedes the field name.
+                let mut hints = field.hints.clone();
+                if hints.accessible_name.is_none() && hints.near_text.is_none() {
+                    hints.accessible_name = Some(field.name.trim().to_owned());
+                }
+                let hints = &hints;
                 let revealed_by = match &field.revealed_by {
                     Some(reveal_hints) => {
                         let mut reveal_hints = reveal_hints.clone();
@@ -293,14 +291,4 @@ fn compile_target_with_purpose_fallback(
     }
 
     Ok(target)
-}
-
-fn targeting_hints_are_empty(hints: &IntentHints) -> bool {
-    hints.role.is_none()
-        && hints.near_text.is_none()
-        && hints.accessible_name.is_none()
-        && hints.ordinal.is_none()
-        && hints.frame_path.is_empty()
-        && hints.shadow_path.is_empty()
-        && !hints.allow_best_match
 }

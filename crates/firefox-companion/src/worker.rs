@@ -52,6 +52,7 @@ use crate::generate_session_seed;
 use crate::network_quiet::FirefoxNetworkQuiet;
 
 const COMPANION_SANDBOX: &str = "automation-runtime-companion";
+
 /// Accessibility nodes read to build intent candidates.
 const CANDIDATE_MAX_NODES: u32 = 1024;
 const FRAME_CANDIDATES_SCRIPT: &str = r#"(()=>{
@@ -248,16 +249,18 @@ pub trait ExtensionObserver: Send + Sync {
     ) -> Result<(), CommandError>;
 
     /// Capture a compact accessibility tree for the page, or for the subtree
-    /// rooted at `target` when one is given. Returns the tree and whether it
-    /// was truncated to the node bound.
+    /// rooted at `target` when one is given. With `include_text`, visible
+    /// text outside named nodes is reported as `StaticText` leaves. Returns
+    /// the tree and whether it was truncated to the node bound.
     async fn a11y_snapshot(
         &self,
         lease: &AttachmentLease,
         page_id: &PageId,
         max_nodes: u32,
         target: Option<&types::TargetSpec>,
+        include_text: bool,
     ) -> Result<(Vec<types::AccessibilityNode>, bool), CommandError> {
-        let _ = (lease, page_id, max_nodes, target);
+        let _ = (lease, page_id, max_nodes, target, include_text);
         Err(driver_error(
             ErrorCode::BrowserCommandFailed,
             "accessibility snapshot is not supported by this observer",
@@ -518,6 +521,7 @@ impl ExtensionObserver for CompanionExtensionObserver {
         page_id: &PageId,
         max_nodes: u32,
         target: Option<&types::TargetSpec>,
+        include_text: bool,
     ) -> Result<(Vec<types::AccessibilityNode>, bool), CommandError> {
         if lease.expires_at <= Instant::now() {
             return Err(lease_error());
@@ -533,7 +537,7 @@ impl ExtensionObserver for CompanionExtensionObserver {
             command_id: command_id.clone(),
             page_id: page_id.clone(),
             operation: "a11yTree".into(),
-            input: json!({"maxNodes": max_nodes, "target": scope}),
+            input: json!({"maxNodes": max_nodes, "target": scope, "includeText": include_text}),
             deadline_unix_ms: deadline_unix_ms(self.timeout),
         };
         match self
@@ -2776,6 +2780,28 @@ impl FirefoxCompanionWorker {
                 false,
             ));
         }
+        let cleanup = OpenPageCleanup::new(
+            PageOpenResources {
+                lease: self.current_lease(),
+                transport: Arc::clone(&self.transport),
+                observer: Arc::clone(&self.observer),
+                pages: Arc::clone(&self.pages),
+                page_cleanups: Arc::downgrade(&self.page_cleanups),
+                cleanup_timeout: self.observer.operation_timeout(),
+            },
+            page_id.clone(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        *cleanup
+            .details
+            .lock()
+            .expect("open-page cleanup details mutex poisoned") = OpenPageCleanupDetails {
+            context: Some(context.to_owned()),
+            original_title: Some(original_title.clone()),
+            binding_started: true,
+            exposed: true,
+            opening_settled: true,
+        };
         pages.insert(
             page_id.clone(),
             PageContext::Ready {
@@ -2783,6 +2809,10 @@ impl FirefoxCompanionWorker {
                 title: original_title.clone(),
             },
         );
+        self.page_cleanups
+            .write()
+            .await
+            .insert(page_id.clone(), cleanup);
         Ok((page_id, original_title))
     }
 }
@@ -2931,6 +2961,7 @@ async fn settle_document(
     transport: &Arc<dyn BidiTransport>,
     context: &str,
     budget: Duration,
+    requested_url: &str,
 ) -> Option<(String, String)> {
     let deadline = Instant::now() + budget;
     loop {
@@ -2938,7 +2969,7 @@ async fn settle_document(
         if remaining.is_zero() {
             return None;
         }
-        let expression = navigation_settle_expression(remaining.as_millis().max(1));
+        let expression = navigation_settle_expression(remaining.as_millis().max(1), requested_url);
         // Firefox does not always reject a pending evaluation when a script
         // redirect replaces the document under it, so the probe races a watch
         // on the context's URL and restarts in the new document when it moves.
@@ -3347,7 +3378,13 @@ impl BrowserWorker for FirefoxCompanionWorker {
         }
         let (nodes, truncated) = self
             .observer
-            .a11y_snapshot(&self.current_lease(), page_id, CANDIDATE_MAX_NODES, None)
+            .a11y_snapshot(
+                &self.current_lease(),
+                page_id,
+                CANDIDATE_MAX_NODES,
+                None,
+                false,
+            )
             .await?;
         if truncated && !accessibility_tree_has_match(&nodes, target) {
             // The bounded snapshot never reached the target; a search that is
@@ -3489,15 +3526,16 @@ impl BrowserWorker for FirefoxCompanionWorker {
         // the page, and a redirect chain can still be running. Report the
         // URL and title read after the document has stopped changing.
         let settle_budget = Duration::from_millis(command.timeout_ms).min(NAVIGATION_SETTLE_CAP);
-        let (url, title) = match settle_document(&self.transport, &context, settle_budget).await {
-            Some(settled) => settled,
-            None => (
-                context_url(&self.transport, &context)
-                    .await
-                    .unwrap_or(response_url),
-                capture_context_title(&self.transport, &context).await?,
-            ),
-        };
+        let (url, title) =
+            match settle_document(&self.transport, &context, settle_budget, &command.url).await {
+                Some(settled) => settled,
+                None => (
+                    context_url(&self.transport, &context)
+                        .await
+                        .unwrap_or(response_url),
+                    capture_context_title(&self.transport, &context).await?,
+                ),
+            };
         Ok(vec![
             Evidence::Navigation { url, title },
             self.evidence(InteractionPath::EngineNative),
@@ -4358,6 +4396,8 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 ))
             }
         }
+        // `input.setFiles` selects the files and fires trusted `input` and
+        // `change` events whether or not the input is rendered.
         let shared_id = self.resolve_element(&context, &selector, true).await?;
         let files = paths
             .iter()
@@ -4373,12 +4413,18 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 }),
             )
             .await?;
-        let verified = self.transport.send("script.evaluate", json!({
-            "expression": format!("document.querySelector({selector_json})?.files?.length ?? -1"),
-            "target": {"context": context, "sandbox": COMPANION_SANDBOX},
-            "awaitPromise": false,
-            "resultOwnership": "none",
-        })).await?;
+        let verified = self
+            .transport
+            .send(
+                "script.evaluate",
+                json!({
+                    "expression": format!("document.querySelector({selector_json})?.files?.length ?? -1"),
+                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                    "awaitPromise": false,
+                    "resultOwnership": "none",
+                }),
+            )
+            .await?;
         if verified.pointer("/result/value").and_then(Value::as_u64) != Some(paths.len() as u64) {
             return Err(driver_error(
                 ErrorCode::VerificationFailed,
@@ -4783,7 +4829,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
             actions
         });
 
-        let bidi_actions = self.behavioral_typing_to_bidi(&context, &typing_actions);
+        let bidi_actions = Self::behavioral_typing_to_bidi(&context, &typing_actions);
 
         self.transport
             .send("input.performActions", bidi_actions)
@@ -4795,7 +4841,15 @@ impl BrowserWorker for FirefoxCompanionWorker {
         {
             "[redacted]".to_owned()
         } else {
-            read_typed_control_value(&self.transport, &context, &selector_json).await?
+            // Enter in the text submits the form; once the page navigates
+            // the control is gone and cannot be read back.
+            match read_typed_control_value(&self.transport, &context, &selector_json).await {
+                Ok(value) => value,
+                Err(_) if command.value.contains(['\n', '\r']) => {
+                    command.value.replace(['\n', '\r'], "")
+                }
+                Err(error) => return Err(error),
+            }
         };
         let mut evidence = vec![
             Evidence::Element {
@@ -4817,9 +4871,11 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 synthesized_ms: behavioral_engine::synthesized_total_ms(&typing_actions),
             });
         }
-        evidence.extend(
-            form_control_validity_evidence(&self.transport, &context, &selector_json).await?,
-        );
+        match form_control_validity_evidence(&self.transport, &context, &selector_json).await {
+            Ok(validity) => evidence.extend(validity),
+            Err(_) if command.value.contains(['\n', '\r']) => {}
+            Err(error) => return Err(error),
+        }
         Ok(self.with_redaction_diagnostics(evidence))
     }
 
@@ -4947,7 +5003,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                     {
                         let (nodes, _) = self
                             .observer
-                            .a11y_snapshot(&self.current_lease(), page_id, 256, None)
+                            .a11y_snapshot(&self.current_lease(), page_id, 256, None, false)
                             .await?;
                         (accessibility_tree_contains(&nodes, target), None)
                     } else {
@@ -5476,6 +5532,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 page_id,
                 max_nodes,
                 command.target.as_ref(),
+                true,
             )
             .await?;
         worker_pool::annotate_accessibility_targets(&mut nodes);
@@ -7210,8 +7267,9 @@ fn interaction_path_name(path: InteractionPath) -> &'static str {
 
 impl FirefoxCompanionWorker {
     /// Convert behavioral typing actions to BiDi keyboard actions.
+    /// BiDi `input.performActions` params for a typing sequence. A typed
+    /// line break becomes the Enter key.
     fn behavioral_typing_to_bidi(
-        &self,
         context: &str,
         actions: &[behavioral_engine::TypingAction],
     ) -> Value {
@@ -7304,6 +7362,16 @@ impl FirefoxCompanionWorker {
                         "type": "pause",
                         "duration": *duration_ms,
                     }));
+                }
+            }
+        }
+
+        // A typed line break is the Enter key: WebDriver key actions take the
+        // normalized Enter code point, not a raw "\n".
+        for action in &mut bidi_actions {
+            if let Some(value) = action.get_mut("value") {
+                if value == "\n" || value == "\r" {
+                    *value = json!("\u{e007}");
                 }
             }
         }
@@ -7553,5 +7621,34 @@ mod js_string_tests {
         assert_eq!(js_string("a;b\n"), "\"a;b\\n\"");
         assert_eq!(js_string("x\";alert(1);//"), "\"x\\\";alert(1);//\"");
         assert_eq!(js_string("back\\slash"), "\"back\\\\slash\"");
+    }
+}
+
+#[cfg(test)]
+mod enter_key_tests {
+    use super::FirefoxCompanionWorker;
+    use behavioral_engine::{SessionRandom, TextConfig, TypingSimulator};
+
+    #[test]
+    fn a_typed_line_break_is_dispatched_as_the_enter_key() {
+        let simulator = TypingSimulator::new(TextConfig::default());
+        let mut random = SessionRandom::new(7);
+        let actions = simulator.generate_with_clear(&mut random, "widget\n", true);
+        let params = FirefoxCompanionWorker::behavioral_typing_to_bidi("context-1", &actions);
+        let keys = params["actions"][0]["actions"]
+            .as_array()
+            .expect("key actions");
+        for kind in ["keyDown", "keyUp"] {
+            assert!(
+                keys.iter()
+                    .any(|action| action["type"] == kind && action["value"] == "\u{e007}"),
+                "no {kind} for Enter in {keys:?}"
+            );
+        }
+        assert!(
+            keys.iter()
+                .all(|action| action["value"] != "\n" && action["value"] != "\r"),
+            "a raw line break reached the BiDi key actions: {keys:?}"
+        );
     }
 }

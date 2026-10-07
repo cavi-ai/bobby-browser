@@ -161,8 +161,26 @@ test("file picker observations never expose the browser's local path", () => {
 
   const observed = observeDocument(document);
   assert.equal(observed.controls[0]?.name, "Customer document");
-  assert.equal(observed.controls[0]?.value, "[redacted]");
+  assert.equal(observed.controls[0]?.value, undefined);
   assert.equal(JSON.stringify(observed).includes("fakepath"), false);
+});
+
+test("search inputs observe as searchbox and file inputs as button with their selected names", () => {
+  const document = documentFor(
+    '<input id="q" type="search" placeholder="Search products"><label for="upload">Customer document</label><input id="upload" type="file">',
+  );
+  const upload = document.querySelector<HTMLInputElement>("#upload")!;
+  Object.defineProperty(upload, "files", {
+    value: [{ name: "resume.txt" }],
+  });
+
+  const observed = observeDocument(document);
+  const search = observed.controls.find((control) => control.cssPath === "#q");
+  const file = observed.controls.find((control) => control.cssPath === "#upload");
+  assert.equal(search?.role, "searchbox");
+  assert.equal(search?.name, "Search products");
+  assert.equal(file?.role, "button");
+  assert.equal(file?.value, "resume.txt");
 });
 
 test("invalid required fields retain the accessibility invalid state for resolution", () => {
@@ -501,6 +519,89 @@ test("a11yTree builds a bounded, hidden-aware, redacting accessibility tree", ()
     truncated: boolean;
   };
   assert.equal(bounded.truncated, true);
+});
+
+test("a11yTree reports visible page text as StaticText only when asked", () => {
+  const document = documentFor(`
+    <main>
+      <h1>Documents</h1>
+      <label for="hidden-file">Attach resume</label>
+      <input type="file" id="hidden-file" style="display:none">
+      <input type="file" id="visible-file" aria-label="Visible attachment">
+      <pre id="out">hidden-file=hidden-bytes-7731;</pre>
+      <ul><li>Post text</li></ul>
+      <button>Continue</button>
+      <span hidden>not visible</span>
+      <p>key sk_live_abcdefghijklmnop1234</p>
+      <pre>-----BEGIN RSA PRIVATE KEY-----
+MIIEowIBAAKCAQEAx7Qk2LmZr9VtW4YbNc6HdJf5GsAePuXo7TiKq
+-----END RSA PRIVATE KEY-----</pre>
+      <select><option>Option text</option></select>
+      <textarea>Draft text</textarea>
+      <script>const inline = "script text";</script>
+    </main>
+  `);
+  type Node = { role?: string; name?: string; children?: Node[] };
+  const flat = (nodes: Node[]): Node[] => nodes.flatMap((node) => [node, ...flat(node.children ?? [])]);
+  const tree = executeContentAction(document, "a11yTree", { maxNodes: 64, includeText: true }) as {
+    nodes: Node[];
+    truncated: boolean;
+  };
+  assert.equal(tree.truncated, false);
+  const texts = flat(tree.nodes)
+    .filter((node) => node.role === "StaticText")
+    .map((node) => node.name);
+  assert.deepEqual(texts, ["Attach resume", "hidden-file=hidden-bytes-7731;", "[redacted]", "[redacted]"]);
+  const main = tree.nodes[0]!;
+  assert.equal(main.role, "main");
+  assert.ok(main.children?.some((node) => node.role === "StaticText" && node.name === "hidden-file=hidden-bytes-7731;"));
+  assert.ok(flat(tree.nodes).some((node) => node.role === "listitem" && node.name === "Post text"));
+  assert.doesNotMatch(JSON.stringify(tree), /sk_live_|MIIEowIBAAKCAQEA|not visible|script text/);
+
+  const plain = executeContentAction(document, "a11yTree", { maxNodes: 64 }) as { nodes: Node[] };
+  assert.equal(flat(plain.nodes).filter((node) => node.role === "StaticText").length, 0);
+});
+
+test("a11yTree includes a same-origin iframe's controls with the frame hop in their targets", () => {
+  const document = documentFor(
+    '<button>Open</button><iframe title="Widget frame"></iframe><iframe title="Widget frame"></iframe>',
+  );
+  const frames = document.querySelectorAll("iframe");
+  frames[0]!.contentDocument!.body.innerHTML = "<button>Frame action</button>";
+  frames[1]!.contentDocument!.body.innerHTML = "<button>Frame action</button>";
+  type Node = {
+    role?: string;
+    name?: string;
+    target?: { ordinal?: number; framePath?: Array<{ role: string; accessibleName: string; ordinal?: number }> };
+    children?: Node[];
+  };
+  const tree = executeContentAction(document, "a11yTree", { maxNodes: 32 }) as { nodes: Node[] };
+  const flat = (nodes: Node[]): Node[] => nodes.flatMap((node) => [node, ...flat(node.children ?? [])]);
+  const inFrame = flat(tree.nodes).filter((node) => node.name === "Frame action");
+  assert.equal(inFrame.length, 2);
+  assert.deepEqual(inFrame[0]!.target?.framePath, [
+    { role: "iframe", accessibleName: "Widget frame", ordinal: 0 },
+  ]);
+  assert.deepEqual(inFrame[1]!.target?.framePath, [
+    { role: "iframe", accessibleName: "Widget frame", ordinal: 1 },
+  ]);
+  assert.equal(inFrame[0]!.target?.ordinal, undefined);
+  const open = flat(tree.nodes).find((node) => node.name === "Open");
+  assert.equal(open?.target?.framePath, undefined);
+});
+
+test("a11yTree marks a control invalid when the page flags it aria-invalid", () => {
+  const document = documentFor(
+    '<label>Name <input name="name" aria-invalid="true"></label><label>City <input name="city"></label>',
+  );
+  const tree = executeContentAction(document, "a11yTree", { maxNodes: 32 }) as {
+    nodes: Array<{ role?: string; name?: string; invalid?: boolean }>;
+  };
+  const flat = (nodes: typeof tree.nodes): typeof tree.nodes =>
+    nodes.flatMap((node) => [node, ...flat((node as { children?: typeof tree.nodes }).children ?? [])]);
+  const byName = (name: string) => flat(tree.nodes).find((node) => node.name === name);
+  assert.equal(byName("Name")?.invalid, true);
+  assert.equal(byName("City")?.invalid, false);
 });
 
 test("a11yTree exposes bounded form state without leaking sensitive values", () => {

@@ -4,8 +4,9 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{header, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
@@ -26,15 +27,19 @@ pub enum Route {
     },
 }
 
+type Bodies = Arc<Mutex<Vec<Vec<u8>>>>;
+
 struct Entry {
     route: Route,
     hits: Arc<AtomicUsize>,
+    bodies: Bodies,
 }
 
 pub struct FixtureSite {
     address: SocketAddr,
     task: JoinHandle<()>,
     hits: HashMap<String, Arc<AtomicUsize>>,
+    bodies: HashMap<String, Bodies>,
 }
 
 impl FixtureSite {
@@ -43,15 +48,21 @@ impl FixtureSite {
             .iter()
             .map(|(path, _)| ((*path).to_owned(), Arc::new(AtomicUsize::new(0))))
             .collect();
+        let bodies: HashMap<String, Bodies> = routes
+            .iter()
+            .map(|(path, _)| ((*path).to_owned(), Bodies::default()))
+            .collect();
         let table: HashMap<String, Entry> = routes
             .into_iter()
             .map(|(path, route)| {
                 let counter = Arc::clone(&hits[path]);
+                let captured = Arc::clone(&bodies[path]);
                 (
                     path.to_owned(),
                     Entry {
                         route,
                         hits: counter,
+                        bodies: captured,
                     },
                 )
             })
@@ -70,7 +81,17 @@ impl FixtureSite {
             address,
             task,
             hits,
+            bodies,
         }
+    }
+
+    /// Request bodies the route at `path` has received, in arrival order
+    /// (an empty body is recorded too, so the count matches `hits`).
+    pub fn bodies(&self, path: &str) -> Vec<Vec<u8>> {
+        self.bodies
+            .get(path)
+            .map(|bodies| bodies.lock().expect("fixture bodies lock").clone())
+            .unwrap_or_default()
     }
 
     pub fn url(&self, path: &str) -> String {
@@ -95,10 +116,19 @@ fn redirect(to: &str) -> Response {
     (StatusCode::FOUND, [(header::LOCATION, to.to_owned())]).into_response()
 }
 
-async fn serve(State(table): State<Arc<HashMap<String, Entry>>>, uri: Uri) -> Response {
+async fn serve(
+    State(table): State<Arc<HashMap<String, Entry>>>,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
     let Some(entry) = table.get(uri.path()) else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    entry
+        .bodies
+        .lock()
+        .expect("fixture bodies lock")
+        .push(body.to_vec());
     let hit = entry.hits.fetch_add(1, Ordering::SeqCst);
     match &entry.route {
         Route::Html(body) => Html(body.clone()).into_response(),

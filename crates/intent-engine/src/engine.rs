@@ -10,10 +10,10 @@ use observability::{
 };
 use types::{
     CaptureScreenshotCommand, ClickCommand, CommandError, ControlAction, ControlActionCommand,
-    ElementState, ErrorCode, ErrorLayer, Evidence, ExecutionRecord, ExtractValueKind,
-    FormControlTarget, IntentCommand, IntentResolutionPath, PageId, ScreenshotMode,
-    SemanticTargetSegment, TargetFingerprint, TargetSpec, TypeTextCommand, UploadFilesCommand,
-    WaitCondition, WaitForCommand,
+    ErrorCode, ErrorLayer, Evidence, ExecutionRecord, ExtractValueKind, FormControlTarget,
+    IntentCommand, IntentResolutionPath, PageId, ScreenshotMode, SemanticTargetSegment,
+    TargetFingerprint, TargetSpec, TypeTextCommand, UploadFilesCommand, WaitCondition,
+    WaitForCommand,
 };
 
 use crate::compiler::{compile_intent, CompleteFormFieldPlan, ExtractFieldPlan, IntentPlan};
@@ -293,6 +293,7 @@ async fn execute_complete_form(
                 &field.purpose,
                 reveal_target,
                 &field.target,
+                &field.value,
             )
             .await
             {
@@ -356,6 +357,7 @@ async fn reveal_field(
     purpose: &str,
     reveal_target: &TargetSpec,
     revealed_field_target: &TargetSpec,
+    revealed_field_value: &ControlAction,
 ) -> IntentOutcome {
     let plan_summary = format!("reveal {}", summarize_target(reveal_target));
     let candidates = match browser.collect_candidates(page_id, reveal_target).await {
@@ -478,14 +480,14 @@ async fn reveal_field(
         }
     };
 
-    let wait = WaitForCommand {
-        condition: WaitCondition::Element {
-            target: Box::new(revealed_field_target.clone()),
-            state: ElementState::Visible,
-        },
-        timeout_ms: REVEAL_WAIT_TIMEOUT_MS,
-    };
-    match browser.wait_for(page_id, &wait).await {
+    match wait_for_revealed_field(
+        page_id,
+        browser,
+        revealed_field_target,
+        revealed_field_value,
+    )
+    .await
+    {
         Ok(mut wait_evidence) => {
             click_evidence.append(&mut wait_evidence);
             click_evidence.push(intent_evidence(execution_record(
@@ -518,6 +520,50 @@ async fn reveal_field(
                 evidence: click_evidence,
             }
         }
+    }
+}
+
+/// Waits until the revealed field resolves to exactly one rendered form
+/// control through the same candidate collection the fill step uses. The
+/// generic element wait matches a wrapping `<label>` with the same name as
+/// the control and reports the pair as ambiguous; a label is never the
+/// target of a fill, so the wait must not see it either.
+async fn wait_for_revealed_field(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    field_target: &TargetSpec,
+    field_value: &ControlAction,
+) -> Result<Vec<Evidence>, CommandError> {
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_millis(REVEAL_WAIT_TIMEOUT_MS);
+    loop {
+        let gathered = browser.collect_candidates(page_id, field_target).await?;
+        let compatible_candidates = gathered
+            .iter()
+            .filter(|candidate| compatible(field_value, candidate))
+            .cloned()
+            .collect::<Vec<_>>();
+        let candidates = if compatible_candidates.is_empty() {
+            gathered
+        } else {
+            compatible_candidates
+        };
+        if let Ok(ResolutionDecision::Resolved { .. }) =
+            resolve_candidates(field_target, &candidates, &ResolutionPolicy::default())
+        {
+            return Ok(Vec::new());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(CommandError {
+                code: ErrorCode::WaitConditionTimedOut,
+                message: format!(
+                    "wait condition was not satisfied within {REVEAL_WAIT_TIMEOUT_MS}ms"
+                ),
+                layer: ErrorLayer::Driver,
+                retryable: false,
+            });
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
 
@@ -1932,13 +1978,21 @@ fn action_target(candidate: &Candidate, intent_target: &TargetSpec) -> (String, 
     // Keep frame/shadow hops from the intent so iframe/shadow fills still land.
     // Do not copy ordinal: the candidate is already chosen; re-resolving with
     // ordinal against a narrowed (often length-1) set fails duplicate-name fills.
+    // A candidate with no CSS or test-ID identity is re-resolved by role and
+    // name over the whole page, so it keeps the ordinal that picked it.
+    let ordinal = if candidate.css.is_none() && candidate.test_id.is_none() {
+        intent_target.ordinal
+    } else {
+        None
+    };
     let target = TargetSpec {
+        ordinal,
         css: candidate.css.clone(),
         test_id: candidate.test_id.clone(),
         role: candidate.role.clone(),
         accessible_name: candidate.name.clone(),
         label: candidate.label.clone(),
-        attributes: candidate.attributes.clone(),
+        attributes: identity_attributes(candidate),
         // An explicit frame path on the intent wins; otherwise use the one
         // the gather stamped when it found this candidate inside an iframe.
         frame_path: if intent_target.frame_path.is_empty() {
@@ -1952,13 +2006,37 @@ fn action_target(candidate: &Candidate, intent_target: &TargetSpec) -> (String, 
     (selector, target)
 }
 
+/// Attributes that change as the user or page acts on a control. They are
+/// state, never identity: a target carrying one stops matching once it flips.
+const STATE_ATTRIBUTES: &[&str] = &[
+    "aria-invalid",
+    "aria-expanded",
+    "aria-checked",
+    "aria-selected",
+    "aria-pressed",
+    "aria-disabled",
+    "checked",
+    "selected",
+    "disabled",
+    "value",
+];
+
+fn identity_attributes(candidate: &Candidate) -> std::collections::BTreeMap<String, String> {
+    candidate
+        .attributes
+        .iter()
+        .filter(|(name, _)| !STATE_ATTRIBUTES.contains(&name.as_str()))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+}
+
 fn fingerprint(page_id: &PageId, candidate: &Candidate) -> TargetFingerprint {
     TargetFingerprint {
         page_id: page_id.clone(),
         frame: None,
         role: candidate.role.clone(),
         name: candidate.name.clone(),
-        stable_attributes: candidate.attributes.clone(),
+        stable_attributes: identity_attributes(candidate),
     }
 }
 

@@ -427,7 +427,18 @@ impl ExtensionObserver for CandidateObserver {
         _page_id: &PageId,
         max_nodes: u32,
         _target: Option<&TargetSpec>,
+        include_text: bool,
     ) -> Result<(Vec<types::AccessibilityNode>, bool), CommandError> {
+        if include_text {
+            return Ok((
+                vec![types::AccessibilityNode {
+                    role: Some("StaticText".into()),
+                    name: Some("hidden-file=hidden-bytes-7731;".into()),
+                    ..types::AccessibilityNode::default()
+                }],
+                false,
+            ));
+        }
         assert_eq!(max_nodes, 1024);
         Ok((
             vec![types::AccessibilityNode {
@@ -820,6 +831,41 @@ async fn semantic_candidate_collection_uses_firefox_accessibility_snapshot() {
     assert!(candidates[1].state.attached);
     assert!(candidates[1].state.visible);
     assert!(candidates[1].state.enabled);
+}
+
+#[tokio::test]
+async fn accessibility_snapshot_asks_the_extension_for_page_text() {
+    let worker = FirefoxCompanionWorker::new(
+        WorkerId::new(),
+        PathBuf::from("/profiles/firefox"),
+        lease(),
+        FakeBidi::new(Vec::new()),
+        Arc::new(CandidateObserver),
+    )
+    .await
+    .unwrap();
+    let page_id = PageId::new();
+    worker.open_page(page_id.clone()).await.unwrap();
+
+    let evidence = worker
+        .a11y_snapshot(
+            &page_id,
+            &types::AccessibilitySnapshotCommand {
+                max_nodes: None,
+                target: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let Some(Evidence::AccessibilitySnapshot { nodes, .. }) = evidence.first() else {
+        panic!("no accessibility snapshot: {evidence:?}");
+    };
+    assert_eq!(nodes[0].role.as_deref(), Some("StaticText"));
+    assert_eq!(
+        nodes[0].name.as_deref(),
+        Some("hidden-file=hidden-bytes-7731;")
+    );
 }
 
 #[tokio::test]
@@ -2900,6 +2946,143 @@ async fn popup_capture_ignores_unrelated_contexts_and_handles_event_during_click
 }
 
 #[tokio::test]
+async fn a_popup_opened_by_the_page_can_be_closed_like_any_page() {
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "node", "sharedId": "popup-button"}})),
+        Ok(json!({})),
+    ]);
+    let click = bidi.block_once("input.performActions", None).await;
+    let worker = Arc::new(worker(bidi.clone(), FakeObserver::new(observation())).await);
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+    let operation = {
+        let worker = Arc::clone(&worker);
+        let page = page.clone();
+        tokio::spawn(async move {
+            worker
+                .click_and_wait_for_popup(
+                    &page,
+                    &ClickAndWaitForPopupCommand {
+                        selector: String::new(),
+                        target: Some(types::TargetSpec {
+                            test_id: Some("popup-open".into()),
+                            ..Default::default()
+                        }),
+                        timeout_ms: 1_000,
+                    },
+                )
+                .await
+        })
+    };
+    click.started.notified().await;
+    bidi.emit(
+        "browsingContext.contextCreated",
+        json!({
+            "context": "popup-context",
+            "url": "https://example.test/popup",
+            "originalOpener": "context-1"
+        }),
+    );
+    click.release.notify_one();
+    let evidence = operation.await.unwrap().unwrap();
+    let popup_page = evidence
+        .iter()
+        .find_map(|item| match item {
+            Evidence::Popup { page_id, .. } => Some(page_id.clone()),
+            _ => None,
+        })
+        .unwrap();
+
+    worker
+        .close_page_command(&ClosePageCommand {
+            page_id: popup_page.clone(),
+        })
+        .await
+        .unwrap();
+
+    assert!(bidi.calls().await.iter().any(|call| {
+        call.method == "browsingContext.close" && call.params["context"] == "popup-context"
+    }));
+    assert_eq!(
+        worker
+            .inspect(&popup_page, &InspectCommand::default())
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::NotFound
+    );
+}
+
+async fn hidden_upload(count: u64) -> (Result<Vec<Evidence>, CommandError>, Vec<BidiCall>) {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("resume.txt");
+    std::fs::write(&file, b"hidden-bytes-7731").unwrap();
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "string", "value": "valid"}})),
+        Ok(json!({"result": {"type": "node", "sharedId": "file-input"}})),
+        Ok(json!({})),
+        Ok(json!({"result": {"type": "number", "value": count}})),
+    ]);
+    let worker = worker(bidi.clone(), FakeObserver::new(observation()))
+        .await
+        .with_upload_roots(vec![root.path().to_path_buf()]);
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+    let result = worker
+        .upload_files(
+            &page,
+            &UploadFilesCommand {
+                selector: "#hidden-file".into(),
+                target: None,
+                paths: vec![file.to_string_lossy().into_owned()],
+            },
+        )
+        .await;
+    (result, bidi.calls().await)
+}
+
+#[tokio::test]
+async fn hidden_file_input_is_filled_by_set_files_and_read_back_from_the_sandbox() {
+    let (result, calls) = hidden_upload(1).await;
+    result.unwrap();
+    let set_files = calls
+        .iter()
+        .position(|call| call.method == "input.setFiles")
+        .expect("input.setFiles was not sent");
+    assert_eq!(calls[set_files].params["element"]["sharedId"], "file-input");
+    assert!(calls[set_files].params["files"][0]
+        .as_str()
+        .unwrap()
+        .ends_with("resume.txt"));
+    for call in &calls {
+        let expression = call.params["expression"].as_str().unwrap_or_default();
+        assert!(
+            !expression.contains("DataTransfer") && !expression.contains("dispatchEvent"),
+            "the upload built or dispatched in a script: {expression}"
+        );
+    }
+    let verify = &calls[set_files + 1];
+    assert_eq!(verify.method, "script.evaluate");
+    assert_eq!(
+        verify.params["target"]["sandbox"],
+        "automation-runtime-companion"
+    );
+    assert!(verify.params["expression"]
+        .as_str()
+        .unwrap()
+        .contains("#hidden-file"));
+    assert_eq!(calls.len(), set_files + 2);
+}
+
+#[tokio::test]
+async fn hidden_file_input_fails_when_the_page_reports_no_files() {
+    let (result, _) = hidden_upload(0).await;
+    assert_eq!(result.unwrap_err().code, ErrorCode::VerificationFailed);
+}
+
+#[tokio::test]
 async fn upload_uses_bidi_set_files_and_returns_only_opaque_evidence() {
     let root = tempfile::tempdir().unwrap();
     let file = root.path().join("fixture.txt");
@@ -4467,6 +4650,7 @@ impl ExtensionObserver for LargePageObserver {
         _page_id: &PageId,
         _max_nodes: u32,
         _target: Option<&TargetSpec>,
+        _include_text: bool,
     ) -> Result<(Vec<types::AccessibilityNode>, bool), CommandError> {
         Ok((
             vec![types::AccessibilityNode {

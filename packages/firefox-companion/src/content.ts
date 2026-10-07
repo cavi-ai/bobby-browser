@@ -375,7 +375,8 @@ function implicitRole(element: Element, allowExplicit = true): string | undefine
   if (tag === "iframe") return "iframe";
   if (tag === "input") {
     const type = (element.getAttribute("type") ?? "text").toLowerCase();
-    if (["button", "submit", "reset", "image"].includes(type)) return "button";
+    if (["button", "submit", "reset", "image", "file"].includes(type)) return "button";
+    if (type === "search") return "searchbox";
     if (type === "checkbox") return "checkbox";
     if (type === "radio") return "radio";
     if (type === "range") return "slider";
@@ -571,10 +572,12 @@ function isSensitiveControl(element: Element, budget?: WorkBudget): boolean {
 
 function controlValue(element: Element, sensitive = isSensitiveControl(element)): string | undefined {
   if (!["INPUT", "SELECT", "TEXTAREA"].includes(element.tagName)) return undefined;
-  // File inputs expose a browser-supplied local path through `value`. The
-  // selected filename is not needed for target discovery or observation.
-  if (sensitive || (element.tagName === "INPUT" && (element as HTMLInputElement).type === "file")) {
-    return REDACTED;
+  if (sensitive) return REDACTED;
+  // File inputs expose a browser-supplied local path through `value`; only
+  // the selected file names are reported.
+  if (element.tagName === "INPUT" && (element as HTMLInputElement).type === "file") {
+    const names = Array.from((element as HTMLInputElement).files ?? [], (file) => file.name);
+    return observationString(names.join(", "));
   }
   const value = (element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement).value;
   return observationString(value);
@@ -892,6 +895,9 @@ const A11Y_MAX_VALUES = 19_000;
 const A11Y_MAX_NODES = 2048;
 const A11Y_MAX_SCOPE_VISITS = 100_000;
 const A11Y_MAX_CHILDREN = 256;
+// Elements whose text is never page text: unrendered content, and form
+// controls whose text is their value.
+const A11Y_TEXT_EXCLUDED_TAGS = new Set(["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT", "IFRAME", "TEXTAREA", "SELECT"]);
 const A11Y_STRUCTURAL_ROLES = new Set([
   "banner",
   "navigation",
@@ -927,10 +933,17 @@ export type LocatedTarget = {
   disabled?: boolean;
 };
 
+type A11yTarget = {
+  role: string;
+  accessibleName: string;
+  ordinal?: number;
+  framePath?: Array<{ role: string; accessibleName: string; ordinal?: number }>;
+};
+
 type A11yNode = {
   role?: string;
   name?: string;
-  target?: { role: string; accessibleName: string; ordinal?: number };
+  target?: A11yTarget;
   value?: string;
   description?: string;
   required?: boolean;
@@ -964,6 +977,7 @@ function a11yTree(
   maxNodesInput: unknown,
   targetInput?: unknown,
   locateOnly = false,
+  includeText = false,
 ): { nodes: A11yNode[]; truncated: boolean; located?: LocatedTarget } {
   let maxNodes = 256;
   if (typeof maxNodesInput === "number" && Number.isSafeInteger(maxNodesInput)) {
@@ -1180,7 +1194,63 @@ function a11yTree(
   };
   countTargets(root, 0);
 
-  const build = (element: Element, depth: number, level: number): A11yNode[] => {
+  // A same-origin frame's tree is built from its own document; each target in
+  // it carries the hop that re-resolves the iframe element, so it passes to
+  // the click path verbatim. Cross-origin frames stay a leaf.
+  const frameSeen = new Map<string, number>();
+  const frameNodes = (frame: HTMLIFrameElement, name: string): A11yNode[] => {
+    const key = targetKey("iframe", name);
+    const seen = frameSeen.get(key) ?? 0;
+    frameSeen.set(key, seen + 1);
+    let frameDocument: Document | null = null;
+    try {
+      frameDocument = frame.contentDocument;
+    } catch {
+      return [];
+    }
+    if (!frameDocument?.documentElement) return [];
+    if (state.remaining <= 0) {
+      state.truncated = true;
+      return [];
+    }
+    const inner = a11yTree(frameDocument, state.remaining, undefined, false, includeText);
+    if (inner.truncated) state.truncated = true;
+    const count = (nodes: A11yNode[]): number =>
+      nodes.reduce((total, node) => total + 1 + count(node.children ?? []), 0);
+    state.remaining = Math.max(0, state.remaining - count(inner.nodes));
+    const hop = {
+      role: "iframe",
+      accessibleName: name,
+      ...(targetTotals.get(key)! > 1 ? { ordinal: seen } : {}),
+    };
+    const stamp = (nodes: A11yNode[]): void => {
+      for (const node of nodes) {
+        if (node.target) node.target.framePath = [hop, ...(node.target.framePath ?? [])];
+        stamp(node.children ?? []);
+      }
+    };
+    stamp(inner.nodes);
+    return inner.nodes;
+  };
+
+  // A visible text run outside any named node, reported as Chromium does.
+  const staticText = (parent: Element, text: Node, level: number): A11yNode[] => {
+    let name: string | undefined;
+    try {
+      name = isSensitiveTextContext(parent) ? REDACTED : observationString(text.nodeValue);
+    } catch {
+      return [];
+    }
+    if (!name) return [];
+    if (level > A11Y_MAX_NODE_LEVEL) {
+      state.truncated = true;
+      return [];
+    }
+    state.remaining -= 1;
+    return [{ role: "StaticText", name }];
+  };
+
+  const build = (element: Element, depth: number, level: number, covered: boolean): A11yNode[] => {
     let role: string | undefined;
     let name: string | undefined;
     let sensitive = false;
@@ -1212,19 +1282,34 @@ function a11yTree(
       }
       state.remaining -= 1;
     }
+    // Text a node's own name or value already carries is not repeated.
+    const textCovered =
+      covered ||
+      (role !== undefined && NAME_FROM_CONTENT_ROLES.has(role)) ||
+      A11Y_TEXT_EXCLUDED_TAGS.has(element.tagName);
+    const childLevel = role ? level + 1 : level;
     const children: A11yNode[] = [];
     if (depth < A11Y_MAX_DEPTH) {
-      const siblings = Array.from(element.children);
-      if (siblings.length > A11Y_MAX_CHILDREN) state.truncated = true;
-      for (const child of siblings.slice(0, A11Y_MAX_CHILDREN)) {
+      if (element.children.length > A11Y_MAX_CHILDREN) state.truncated = true;
+      let elements = 0;
+      for (const child of Array.from(element.childNodes)) {
         if (state.remaining <= 0) {
           state.truncated = true;
           break;
         }
-        children.push(...build(child, depth + 1, role ? level + 1 : level));
+        if (child.nodeType === 1) {
+          if (elements >= A11Y_MAX_CHILDREN) break;
+          elements += 1;
+          children.push(...build(child as Element, depth + 1, childLevel, textCovered));
+        } else if (child.nodeType === 3 && includeText && !textCovered) {
+          children.push(...staticText(element, child, childLevel));
+        }
       }
     }
     if (!role) return children;
+    if (element.tagName === "IFRAME" && name && name !== REDACTED) {
+      children.push(...frameNodes(element as HTMLIFrameElement, name));
+    }
     const node: A11yNode = { role };
     if (name) node.name = name;
     if (["INPUT", "SELECT", "TEXTAREA"].includes(element.tagName)) {
@@ -1254,17 +1339,26 @@ function a11yTree(
         // the extras, never the node.
       }
     }
+    if (["true", "grammar", "spelling"].includes(element.getAttribute("aria-invalid")?.trim().toLowerCase() ?? "")) {
+      node.invalid = true;
+    }
     if (children.length) node.children = children;
     return [node];
   };
 
-  const nodes = build(scope, 0, 0);
+  const nodes = build(scope, 0, 0, false);
   const targetSeen = new Map<string, number>(scopeSeen ?? []);
   const sendBudget = { values: A11Y_MAX_VALUES, bytes: MAX_OBSERVATION_BYTES };
   const annotateTargets = (candidates: A11yNode[]): A11yNode[] => {
     const kept: A11yNode[] = [];
     for (const node of candidates) {
-      if (node.role && node.name && node.name !== REDACTED && A11Y_ACTIONABLE_ROLES.has(node.role)) {
+      if (
+        !node.target &&
+        node.role &&
+        node.name &&
+        node.name !== REDACTED &&
+        A11Y_ACTIONABLE_ROLES.has(node.role)
+      ) {
         const key = targetKey(node.role, node.name);
         const ordinal = targetSeen.get(key) ?? 0;
         node.target = {
@@ -1309,7 +1403,7 @@ export function executeContentAction(
     return observeRoot(document, inspectionRoot(document, parsed), parsed.includeHtml as boolean);
   }
   if (operation === "a11yTree") {
-    return a11yTree(document, parsed.maxNodes, parsed.target);
+    return a11yTree(document, parsed.maxNodes, parsed.target, false, parsed.includeText === true);
   }
   if (operation === "locateTarget") {
     return a11yTree(document, 1, parsed.target, true).located;
