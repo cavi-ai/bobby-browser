@@ -9,6 +9,7 @@ use std::{
     fmt,
     future::Future,
     net::IpAddr,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -105,8 +106,20 @@ pub struct NativeHostConfig {
     pairing_code: String,
     ownership_id: Option<String>,
     reconnect_credential: Arc<Mutex<Option<ReconnectCredential>>>,
+    credential_store: Option<PathBuf>,
     config_refresh: Option<Arc<dyn Fn() -> Option<NativeHostConfig> + Send + Sync>>,
     config_changes: Option<watch::Receiver<u64>>,
+}
+
+/// The reconnect credential a native host persists so its successor process
+/// reconnects without a freshly published descriptor. Bound to the endpoint
+/// and owner it was issued for; the server stays the authority.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoredCredential {
+    endpoint: String,
+    ownership_id: Option<String>,
+    reconnect_credential: String,
 }
 
 impl NativeHostConfig {
@@ -116,9 +129,65 @@ impl NativeHostConfig {
             pairing_code: pairing_code.into(),
             ownership_id: None,
             reconnect_credential: Arc::new(Mutex::new(None)),
+            credential_store: None,
             config_refresh: None,
             config_changes: None,
         }
+    }
+
+    /// Persist the reconnect credential at `path` (mode 0600), and reuse a
+    /// stored one issued for this endpoint and owner.
+    pub fn with_credential_store(self, path: PathBuf) -> Self {
+        let stored = read_stored_credential(&path).filter(|stored| {
+            stored.endpoint == self.endpoint && stored.ownership_id == self.ownership_id
+        });
+        let config = Self {
+            credential_store: Some(path),
+            ..self
+        };
+        if let Some(stored) = stored {
+            if let Ok(mut credential) = config.reconnect_credential.lock() {
+                *credential = Some(ReconnectCredential(stored.reconnect_credential));
+            }
+        }
+        config
+    }
+
+    /// A config from the stored credential alone, for a host started after
+    /// the descriptor was unpublished.
+    pub fn from_credential_store(path: PathBuf) -> Option<Self> {
+        let stored = read_stored_credential(&path)?;
+        let config = Self {
+            ownership_id: stored.ownership_id.clone(),
+            ..Self::new(stored.endpoint.clone(), String::new())
+        };
+        Some(config.with_credential_store(path))
+    }
+
+    fn validate_connect(&self, request: &NativeConnectRequest) -> Result<(), NativeHostError> {
+        if request.protocol_version != PROTOCOL_VERSION {
+            return Err(NativeHostError::UnsupportedProtocolVersion);
+        }
+        validate_native_connect(request)?;
+        if !self.has_reconnect_credential()? {
+            validate_secret(&self.pairing_code)?;
+        }
+        Ok(())
+    }
+
+    fn has_pairing_code(&self) -> bool {
+        validate_secret(&self.pairing_code).is_ok()
+    }
+
+    fn forget_reconnect_credential(&self) -> Result<(), NativeHostError> {
+        *self
+            .reconnect_credential
+            .lock()
+            .map_err(|_| NativeHostError::InvalidPairingMaterial)? = None;
+        if let Some(path) = &self.credential_store {
+            let _ = std::fs::remove_file(path);
+        }
+        Ok(())
     }
 
     /// Identify the listener's publication generation independently of its port.
@@ -153,6 +222,11 @@ impl NativeHostConfig {
         }
         next.config_refresh = self.config_refresh.clone();
         next.config_changes = self.config_changes.clone();
+        // A new endpoint or owner never inherits the old credential.
+        if let Some(path) = self.credential_store.take() {
+            let _ = std::fs::remove_file(&path);
+            next.credential_store = Some(path);
+        }
         *self = next;
         true
     }
@@ -199,6 +273,18 @@ impl NativeHostConfig {
 
     fn store_reconnect_credential(&self, credential: String) -> Result<(), NativeHostError> {
         validate_secret(&credential)?;
+        if let Some(path) = &self.credential_store {
+            // Rotated on every pairing; a write failure leaves the process
+            // credential in memory only.
+            let _ = write_stored_credential(
+                path,
+                &StoredCredential {
+                    endpoint: self.endpoint.clone(),
+                    ownership_id: self.ownership_id.clone(),
+                    reconnect_credential: credential.clone(),
+                },
+            );
+        }
         *self
             .reconnect_credential
             .lock()
@@ -245,6 +331,35 @@ impl fmt::Debug for NativeHostConfig {
             .field("reconnect_credential", &"[redacted]")
             .finish()
     }
+}
+
+fn read_stored_credential(path: &Path) -> Option<StoredCredential> {
+    let stored: StoredCredential = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    validate_secret(&stored.reconnect_credential).ok()?;
+    Some(stored)
+}
+
+fn write_stored_credential(path: &Path, stored: &StoredCredential) -> std::io::Result<()> {
+    let mut pending = path.as_os_str().to_owned();
+    pending.push(format!(".pending-{}", std::process::id()));
+    let pending = PathBuf::from(pending);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| {
+        let mut file = options.open(&pending)?;
+        std::io::Write::write_all(&mut file, &serde_json::to_vec(stored)?)?;
+        file.sync_all()?;
+        std::fs::rename(&pending, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&pending);
+    }
+    result
 }
 
 fn validate_secret(secret: &str) -> Result<(), NativeHostError> {
@@ -913,7 +1028,7 @@ where
 
     let expected_companion_id = connect.companion_id.clone();
     let expected_profile_id = connect.profile_id.clone();
-    config.pair_request(connect.clone())?;
+    config.validate_connect(&connect)?;
     let mut config_changes = config.config_changes.clone();
 
     let (native_messages, mut receiver) = mpsc::channel(32);
@@ -932,9 +1047,15 @@ where
             break Ok(());
         }
         config.refresh_endpoint();
-        let pair = config.pair_request(connect.clone())?;
-        let pair = serde_json::to_string(&pair).map_err(|_| NativeHostError::InvalidProtocol)?;
         let has_credential = config.has_reconnect_credential()?;
+        // A host started from a stored credential has no pairing code; the
+        // pair request is built only when pairing.
+        let pair = if has_credential {
+            String::new()
+        } else {
+            let pair = config.pair_request(connect.clone())?;
+            serde_json::to_string(&pair).map_err(|_| NativeHostError::InvalidProtocol)?
+        };
         let token = config.authentication_token()?;
         let request = config.authenticated_request(&token)?;
         let attempt = connect_async(request);
@@ -964,6 +1085,15 @@ where
                 if config.refresh_endpoint() {
                     backoff.reset();
                     continue;
+                }
+                // The server is the authority: a refused stored credential is
+                // deleted, and pairing falls back to the descriptor's code.
+                if has_credential {
+                    log.record("credential_refused", "stored reconnect credential deleted");
+                    config.forget_reconnect_credential()?;
+                    if config.has_pairing_code() {
+                        continue;
+                    }
                 }
                 write_terminal_auth_status(&mut native_writer).await;
                 break Err(NativeHostError::InvalidPairingMaterial)

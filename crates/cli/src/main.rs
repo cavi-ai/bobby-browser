@@ -2549,16 +2549,25 @@ async fn run_configured_native_host(descriptor_path: PathBuf) -> Result<()> {
     if !descriptor_path.is_absolute() {
         anyhow::bail!("firefox native-host descriptor path must be absolute");
     }
+    // Beside the descriptor, mode 0600: lets a respawned host reconnect after
+    // the descriptor was unpublished. Rotated on every pairing, deleted when
+    // refused or when the endpoint owner changes.
+    let credential_path = descriptor_path.with_file_name("firefox-native-host-credential.json");
     let config = match std::fs::read(&descriptor_path) {
         Ok(bytes) => {
             let descriptor: NativeHostDescriptor = serde_json::from_slice(&bytes)?;
             Some(follow_native_host_descriptor(
                 NativeHostConfig::new(descriptor.endpoint, descriptor.pairing_code)
-                    .with_ownership_id(descriptor.ownership_id),
+                    .with_ownership_id(descriptor.ownership_id)
+                    .with_credential_store(credential_path),
                 descriptor_path.clone(),
             )?)
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            NativeHostConfig::from_credential_store(credential_path)
+                .map(|config| follow_native_host_descriptor(config, descriptor_path.clone()))
+                .transpose()?
+        }
         Err(error) => return Err(error.into()),
     };
     let config_dir = descriptor_path

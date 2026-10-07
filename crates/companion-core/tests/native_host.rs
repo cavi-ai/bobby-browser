@@ -561,10 +561,14 @@ async fn revoked_reconnect_credential_stops_the_native_host() {
     .await
     .unwrap();
     let pairing_code = server.registry().issue_pairing_code().await;
+    let store_dir = std::env::temp_dir().join(format!("native-host-store-{}", CommandId::new().0));
+    std::fs::create_dir_all(&store_dir).unwrap();
+    let store = store_dir.join("firefox-native-host-credential.json");
     let config = NativeHostConfig::new(
         format!("ws://{}/v1/companion", server.local_addr()),
         pairing_code,
-    );
+    )
+    .with_credential_store(store.clone());
     let request = connect_request();
     let companion_id = request.companion_id.clone();
     let connect = json!({"kind": "pair", "input": request});
@@ -581,6 +585,7 @@ async fn revoked_reconnect_credential_stops_the_native_host() {
         .unwrap()
         .unwrap();
     assert_eq!(paired["kind"], "paired");
+    assert!(store.exists(), "pairing stores the reconnect credential");
 
     server.registry().revoke(&companion_id).await.unwrap();
     server.disconnect_clients();
@@ -606,6 +611,7 @@ async fn revoked_reconnect_credential_stops_the_native_host() {
         result,
         Err(NativeHostError::InvalidPairingMaterial)
     ));
+    assert!(!store.exists(), "a refused credential is deleted");
 }
 
 #[tokio::test]
@@ -1232,10 +1238,14 @@ async fn a_respawned_native_host_restores_the_attachment_grant() {
     .await
     .unwrap();
     let pairing_code = server.registry().issue_pairing_code().await;
+    let store_dir = std::env::temp_dir().join(format!("native-host-store-{}", CommandId::new().0));
+    std::fs::create_dir_all(&store_dir).unwrap();
+    let store = store_dir.join("firefox-native-host-credential.json");
     let config = NativeHostConfig::new(
         format!("ws://{}/v1/companion", server.local_addr()),
         pairing_code,
-    );
+    )
+    .with_credential_store(store.clone());
     let connect_request = connect_request();
     let profile_id = connect_request.profile_id.clone();
     let connect = json!({"kind": "pair", "input": connect_request});
@@ -1271,6 +1281,12 @@ async fn a_respawned_native_host_restores_the_attachment_grant() {
         .unwrap()
         .unwrap();
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&store).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
     // Kill the host process: its relay and socket end without a goodbye.
     first_host.abort();
     let _ = first_host.await;
@@ -1307,9 +1323,13 @@ async fn a_respawned_native_host_restores_the_attachment_grant() {
     let reply = serde_json::to_value(&completed).unwrap();
     let respawn = async {
         tokio::time::sleep(Duration::from_millis(300)).await;
+        // A new process: nothing shared with the first host but the store;
+        // the descriptor is gone.
+        let respawned = NativeHostConfig::from_credential_store(store.clone())
+            .expect("the first host stored its reconnect credential");
         let (host_stream, mut extension) = duplex(2 * MAX_NATIVE_MESSAGE_BYTES);
         let (host_reader, host_writer) = split(host_stream);
-        let host = tokio::spawn(run_native_host(host_reader, host_writer, config.clone()));
+        let host = tokio::spawn(run_native_host(host_reader, host_writer, respawned));
         write_native_message(&mut extension, &connect)
             .await
             .unwrap();
