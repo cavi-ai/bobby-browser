@@ -3021,6 +3021,55 @@ async fn upload_dispatches_input_and_change_when_the_browser_skips_them() {
     assert!(expression.contains("files?.length"));
 }
 
+async fn hidden_upload(count: u64) -> (Result<Vec<Evidence>, CommandError>, Vec<BidiCall>) {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("resume.txt");
+    std::fs::write(&file, b"hidden-bytes-7731").unwrap();
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "string", "value": "hidden"}})),
+        Ok(json!({"result": {"type": "number", "value": count}})),
+    ]);
+    let worker = worker(bidi.clone(), FakeObserver::new(observation()))
+        .await
+        .with_upload_roots(vec![root.path().to_path_buf()]);
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+    let result = worker
+        .upload_files(
+            &page,
+            &UploadFilesCommand {
+                selector: "#hidden-file".into(),
+                target: None,
+                paths: vec![file.to_string_lossy().into_owned()],
+            },
+        )
+        .await;
+    (result, bidi.calls().await)
+}
+
+#[tokio::test]
+async fn hidden_file_input_receives_the_bytes_from_the_page_and_events_fire() {
+    let (result, calls) = hidden_upload(1).await;
+    result.unwrap();
+    assert!(!calls.iter().any(|call| call.method == "input.setFiles"));
+    let fill = calls.last().unwrap();
+    assert_eq!(fill.method, "script.evaluate");
+    assert_eq!(fill.params["awaitPromise"], true);
+    assert!(fill.params["target"].get("sandbox").is_none());
+    let expression = fill.params["expression"].as_str().unwrap();
+    assert!(expression.contains("DataTransfer"));
+    assert!(expression.contains("dispatchEvent(new Event(name"));
+    assert!(expression.contains("resume.txt"));
+    assert!(expression.contains("aGlkZGVuLWJ5dGVzLTc3MzE="));
+}
+
+#[tokio::test]
+async fn hidden_file_input_fails_when_the_page_reports_no_files() {
+    let (result, _) = hidden_upload(0).await;
+    assert_eq!(result.unwrap_err().code, ErrorCode::VerificationFailed);
+}
+
 #[tokio::test]
 async fn upload_uses_bidi_set_files_and_returns_only_opaque_evidence() {
     let root = tempfile::tempdir().unwrap();

@@ -162,6 +162,9 @@ fn form_control_target_spec(target: &FormControlTarget) -> TargetSpec {
 }
 const MAX_UPLOAD_FILES: usize = 32;
 const MAX_UPLOAD_BYTES: u64 = 256 * 1024 * 1024;
+/// Largest total a hidden input receives through the page; bigger selections
+/// use `input.setFiles`.
+const HIDDEN_UPLOAD_INLINE_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -4358,14 +4361,17 @@ impl BrowserWorker for FirefoxCompanionWorker {
             .await?;
         let selector_json = serde_json::to_string(&selector)
             .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
+        let inline_hidden = total_bytes <= HIDDEN_UPLOAD_INLINE_MAX_BYTES;
         let probe = self.transport.send("script.evaluate", json!({
-            "expression": format!("(()=>{{const matches=[...document.querySelectorAll({selector_json})];if(matches.length===0)return 'missing';if(matches.length!==1)return 'ambiguous';const input=matches[0];if(!(input instanceof HTMLInputElement)||input.type!=='file')return 'non-file';if(input.disabled)return 'disabled';{UPLOAD_EVENT_WATCH}return 'valid';}})()"),
+            "expression": format!("(()=>{{const matches=[...document.querySelectorAll({selector_json})];if(matches.length===0)return 'missing';if(matches.length!==1)return 'ambiguous';const input=matches[0];if(!(input instanceof HTMLInputElement)||input.type!=='file')return 'non-file';if(input.disabled)return 'disabled';{UPLOAD_EVENT_WATCH}return {inline_hidden}&&input.getClientRects().length===0?'hidden':'valid';}})()"),
             "target": {"context": context, "sandbox": COMPANION_SANDBOX},
             "awaitPromise": false,
             "resultOwnership": "none",
         })).await?;
+        let mut hidden = false;
         match probe.pointer("/result/value").and_then(Value::as_str) {
             Some("valid") => {}
+            Some("hidden") => hidden = true,
             Some("ambiguous") => {
                 return Err(driver_error(
                     ErrorCode::TargetAmbiguous,
@@ -4395,27 +4401,57 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 ))
             }
         }
-        let shared_id = self.resolve_element(&context, &selector, true).await?;
-        let files = paths
-            .iter()
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        self.transport
-            .send(
-                "input.setFiles",
-                json!({
-                    "context": context,
-                    "element": {"sharedId": shared_id},
-                    "files": files,
-                }),
-            )
-            .await?;
-        let verified = self.transport.send("script.evaluate", json!({
-            "expression": format!("(async()=>{{const input=document.querySelector({selector_json});{UPLOAD_EVENT_SETTLE}return input?.files?.length ?? -1;}})()"),
-            "target": {"context": context, "sandbox": COMPANION_SANDBOX},
-            "awaitPromise": true,
-            "resultOwnership": "none",
-        })).await?;
+        let verified = if hidden {
+            // A file input that is not rendered does not deliver a selection
+            // made through `input.setFiles` to the page, so the bytes are
+            // handed to the page's own input through a DataTransfer.
+            let mut inline = Vec::with_capacity(paths.len());
+            for path in &paths {
+                let bytes = std::fs::read(path).map_err(|_| {
+                    driver_error(
+                        ErrorCode::PolicyDenied,
+                        "approved upload file is unavailable",
+                        false,
+                    )
+                })?;
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                inline.push(json!({"name": name, "data": BASE64.encode(bytes)}));
+            }
+            let files_json = serde_json::to_string(&inline).map_err(|error| {
+                driver_error(ErrorCode::InvalidRequest, error.to_string(), false)
+            })?;
+            self.transport.send("script.evaluate", json!({
+                "expression": format!("(async()=>{{const input=document.querySelector({selector_json});if(!(input instanceof HTMLInputElement)||input.type!=='file')return -1;const transfer=new DataTransfer();for(const item of {files_json}){{const bytes=Uint8Array.from(atob(item.data),character=>character.charCodeAt(0));transfer.items.add(new File([bytes],item.name));}}input.files=transfer.files;for(const name of ['input','change'])input.dispatchEvent(new Event(name,{{bubbles:true}}));return input.files.length;}})()"),
+                "target": {"context": context},
+                "awaitPromise": true,
+                "resultOwnership": "none",
+            })).await?
+        } else {
+            let shared_id = self.resolve_element(&context, &selector, true).await?;
+            let files = paths
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            self.transport
+                .send(
+                    "input.setFiles",
+                    json!({
+                        "context": context,
+                        "element": {"sharedId": shared_id},
+                        "files": files,
+                    }),
+                )
+                .await?;
+            self.transport.send("script.evaluate", json!({
+                "expression": format!("(async()=>{{const input=document.querySelector({selector_json});{UPLOAD_EVENT_SETTLE}return input?.files?.length ?? -1;}})()"),
+                "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                "awaitPromise": true,
+                "resultOwnership": "none",
+            })).await?
+        };
         if verified.pointer("/result/value").and_then(Value::as_u64) != Some(paths.len() as u64) {
             return Err(driver_error(
                 ErrorCode::VerificationFailed,
