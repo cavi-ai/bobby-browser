@@ -1159,11 +1159,11 @@ impl Server {
         } else if file_control {
             Some(crate::repair::file_control_repair())
         } else {
-            value
-                .get("error")
-                .and_then(|error| error.get("code"))
-                .and_then(Value::as_str)
-                .and_then(crate::repair::repair_for_code)
+            value.get("error").and_then(|error| {
+                let code = error.get("code").and_then(Value::as_str)?;
+                let retryable = error.get("retryable").and_then(Value::as_bool);
+                crate::repair::repair_for_failure(code, retryable)
+            })
         };
         if let (Some(repair), Some(error)) = (repair, value.get_mut("error")) {
             if error.is_object() {
