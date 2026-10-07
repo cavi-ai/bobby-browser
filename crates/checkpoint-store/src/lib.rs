@@ -79,13 +79,40 @@ impl LockedCheckpointSnapshot {
 pub struct CheckpointStore {
     root: Arc<PathBuf>,
     workflow_locks: Arc<Mutex<HashMap<WorkflowId, Arc<Mutex<()>>>>>,
-    session_cache: Arc<Mutex<HashMap<types::SessionId, CachedSession>>>,
+    session_index: Arc<Mutex<SessionIndex>>,
 }
 
-type CachedSession = (Vec<WorkflowCheckpoint>, SystemTime);
+/// Rebuildable hints only: listing always reads and validates selected files.
+/// Retaining identities rather than checkpoint bodies keeps hot listings cheap
+/// even for sessions exceeding the former 256-checkpoint cache limit.
+#[derive(Default)]
+struct SessionIndex {
+    modified: Option<SystemTime>,
+    sessions: HashMap<types::SessionId, Vec<CheckpointRef>>,
+}
 
-const HOT_SESSION_LIMIT: usize = 64;
-const HOT_CHECKPOINT_LIMIT: usize = 256;
+#[derive(Clone)]
+struct CheckpointRef {
+    workflow_id: WorkflowId,
+    created_at: chrono::DateTime<chrono::Utc>,
+    path: PathBuf,
+}
+
+impl SessionIndex {
+    fn update(&mut self, checkpoint: &WorkflowCheckpoint, path: PathBuf) {
+        let entries = self
+            .sessions
+            .entry(checkpoint.session_id.clone())
+            .or_default();
+        entries.retain(|entry| entry.workflow_id != checkpoint.workflow_id);
+        entries.push(CheckpointRef {
+            workflow_id: checkpoint.workflow_id.clone(),
+            created_at: checkpoint.created_at,
+            path,
+        });
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.created_at));
+    }
+}
 
 impl CheckpointStore {
     pub async fn open(root: impl AsRef<Path>) -> Result<Self, CheckpointStoreError> {
@@ -94,7 +121,7 @@ impl CheckpointStore {
         Ok(Self {
             root: Arc::new(root),
             workflow_locks: Arc::default(),
-            session_cache: Arc::default(),
+            session_index: Arc::default(),
         })
     }
 
@@ -138,6 +165,7 @@ impl CheckpointStore {
         &self,
         checkpoint: &WorkflowCheckpoint,
     ) -> Result<(), CheckpointStoreError> {
+        let before = tokio::fs::metadata(self.root.as_path()).await?.modified()?;
         let destination = self.path(&checkpoint.workflow_id);
         let temporary = self.root.join(format!(
             ".{}.{}.tmp",
@@ -164,7 +192,13 @@ impl CheckpointStore {
             let _ = tokio::fs::remove_file(&temporary).await;
         }
         if result.is_ok() {
-            self.session_cache.lock().await.clear();
+            let mut index = self.session_index.lock().await;
+            if index.modified == Some(before) {
+                index.update(checkpoint, self.path(&checkpoint.workflow_id));
+                index.modified = Some(tokio::fs::metadata(self.root.as_path()).await?.modified()?);
+            } else {
+                index.modified = None;
+            }
             tracing::info!(workflow_id = %checkpoint.workflow_id.0, "checkpoint.established");
         }
         result
@@ -198,42 +232,70 @@ impl CheckpointStore {
         session_id: &types::SessionId,
         limit: usize,
     ) -> Result<Vec<WorkflowCheckpoint>, CheckpointStoreError> {
-        let before = tokio::fs::metadata(self.root.as_path()).await?.modified()?;
-        if let Some((cached, modified)) = self.session_cache.lock().await.get(session_id) {
-            if *modified == before {
-                return Ok(cached.iter().take(limit).cloned().collect());
-            }
+        if limit == 0 {
+            return Ok(Vec::new());
         }
-        let mut entries = tokio::fs::read_dir(self.root.as_path()).await?;
-        let mut found: Vec<WorkflowCheckpoint> = Vec::new();
-        while let Some(entry) = entries.next_entry().await? {
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else { continue };
-            // `<workflow>.skill-issuance.json` shares the directory.
-            if !name.ends_with(".json") || name.ends_with(".skill-issuance.json") {
-                continue;
+        let before = tokio::fs::metadata(self.root.as_path()).await?.modified()?;
+        let candidates = {
+            let mut index = self.session_index.lock().await;
+            if index.modified != Some(before) {
+                let mut rebuilt = SessionIndex::default();
+                let mut entries = tokio::fs::read_dir(self.root.as_path()).await?;
+                while let Some(entry) = entries.next_entry().await? {
+                    let name = entry.file_name();
+                    let Some(name) = name.to_str() else {
+                        continue;
+                    };
+                    if !name.ends_with(".json") || name.ends_with(".skill-issuance.json") {
+                        continue;
+                    }
+                    let Ok(bytes) = tokio::fs::read(entry.path()).await else {
+                        continue;
+                    };
+                    let Ok(checkpoint) = serde_json::from_slice::<WorkflowCheckpoint>(&bytes)
+                    else {
+                        continue;
+                    };
+                    if self.validate_schema(&checkpoint).is_ok() {
+                        rebuilt
+                            .sessions
+                            .entry(checkpoint.session_id)
+                            .or_default()
+                            .push(CheckpointRef {
+                                workflow_id: checkpoint.workflow_id,
+                                created_at: checkpoint.created_at,
+                                path: entry.path(),
+                            });
+                    }
+                }
+                for entries in rebuilt.sessions.values_mut() {
+                    entries.sort_by_key(|entry| std::cmp::Reverse(entry.created_at));
+                }
+                let after = tokio::fs::metadata(self.root.as_path()).await?.modified()?;
+                rebuilt.modified = (before == after).then_some(after);
+                *index = rebuilt;
             }
-            let Ok(bytes) = tokio::fs::read(entry.path()).await else {
+            index.sessions.get(session_id).cloned().unwrap_or_default()
+        };
+        let mut found = Vec::new();
+        for candidate in candidates {
+            let Ok(bytes) = tokio::fs::read(&candidate.path).await else {
                 continue;
             };
             let Ok(checkpoint) = serde_json::from_slice::<WorkflowCheckpoint>(&bytes) else {
                 continue;
             };
-            if checkpoint.session_id != *session_id || self.validate_schema(&checkpoint).is_err() {
-                continue;
+            if checkpoint.session_id == *session_id
+                && checkpoint.workflow_id == candidate.workflow_id
+                && self.validate_schema(&checkpoint).is_ok()
+            {
+                found.push(checkpoint);
+                if found.len() == limit {
+                    break;
+                }
             }
-            found.push(checkpoint);
         }
         found.sort_by_key(|entry| std::cmp::Reverse(entry.created_at));
-        let after = tokio::fs::metadata(self.root.as_path()).await?.modified()?;
-        if before == after && found.len() <= HOT_CHECKPOINT_LIMIT {
-            let mut cache = self.session_cache.lock().await;
-            if cache.len() >= HOT_SESSION_LIMIT && !cache.contains_key(session_id) {
-                cache.clear();
-            }
-            cache.insert(session_id.clone(), (found.clone(), after));
-        }
-        found.truncate(limit);
         Ok(found)
     }
 
@@ -249,10 +311,21 @@ impl CheckpointStore {
     pub async fn remove(&self, workflow_id: &WorkflowId) -> Result<(), CheckpointStoreError> {
         let lock = self.workflow_lock(workflow_id).await;
         let _guard = lock.lock().await;
+        let before = tokio::fs::metadata(self.root.as_path()).await?.modified()?;
         match tokio::fs::remove_file(self.path(workflow_id)).await {
             Ok(()) => {
                 File::open(self.root.as_ref()).await?.sync_all().await?;
-                self.session_cache.lock().await.clear();
+                let mut index = self.session_index.lock().await;
+                if index.modified == Some(before) {
+                    for entries in index.sessions.values_mut() {
+                        entries.retain(|entry| &entry.workflow_id != workflow_id);
+                    }
+                    index.sessions.retain(|_, entries| !entries.is_empty());
+                    index.modified =
+                        Some(tokio::fs::metadata(self.root.as_path()).await?.modified()?);
+                } else {
+                    index.modified = None;
+                }
                 Ok(())
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),

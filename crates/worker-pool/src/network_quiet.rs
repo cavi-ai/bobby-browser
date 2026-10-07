@@ -21,6 +21,10 @@ use types::NetworkResourceType;
 
 /// Requests open at least this long are treated as long-lived (long-poll /
 /// streaming stand-ins) when `ignore_long_lived` is set.
+pub const MAX_TRACKED_REQUESTS: usize = 4096;
+const MAX_REQUEST_ID_BYTES: usize = 1024;
+const MAX_REQUEST_URL_BYTES: usize = 16 * 1024;
+
 pub const LONG_LIVED_OPEN_THRESHOLD: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
@@ -44,6 +48,7 @@ pub struct NetworkQuietState {
     /// Request IDs whose finish/fail arrived before `requestWillBeSent` was
     /// applied (listener tasks can reorder CDP events).
     completed_before_start: HashSet<String>,
+    tracking_lost: bool,
 }
 
 impl NetworkQuietState {
@@ -68,6 +73,13 @@ impl NetworkQuietState {
         if self.completed_before_start.remove(&id) {
             return;
         }
+        if id.len() > MAX_REQUEST_ID_BYTES
+            || url.len() > MAX_REQUEST_URL_BYTES
+            || (self.requests.len() >= MAX_TRACKED_REQUESTS && !self.requests.contains_key(&id))
+        {
+            self.mark_tracking_lost();
+            return;
+        }
         let is_websocket = matches!(
             resource_type,
             NetworkResourceType::WebSocket | NetworkResourceType::EventSource
@@ -89,8 +101,21 @@ impl NetworkQuietState {
 
     pub fn remove_id(&mut self, id: &str) {
         if self.requests.remove(id).is_none() {
-            self.completed_before_start.insert(id.to_owned());
+            if id.len() > MAX_REQUEST_ID_BYTES
+                || self.completed_before_start.len() >= MAX_TRACKED_REQUESTS
+            {
+                self.mark_tracking_lost();
+            } else {
+                self.completed_before_start.insert(id.to_owned());
+            }
         }
+    }
+
+    pub fn mark_tracking_lost(&mut self) {
+        if !self.tracking_lost {
+            tracing::warn!("network event tracking lost; network quiet can no longer be certified for this tracker");
+        }
+        self.tracking_lost = true;
     }
 
     pub fn requests(&self) -> impl Iterator<Item = &InFlightRequest> {
@@ -106,7 +131,10 @@ pub fn counted_in_flight(
     now: Instant,
 ) -> (usize, Vec<String>) {
     let mut excluded = BTreeSet::new();
-    let mut count = 0;
+    let mut count = usize::from(state.tracking_lost);
+    if state.tracking_lost {
+        excluded.insert("trackingLost".to_string());
+    }
     for request in state.requests() {
         if let Some(class) = exclusion_class(request, filters, now) {
             excluded.insert(class);
@@ -184,14 +212,13 @@ fn map_resource_type(value: Option<&ResourceType>) -> NetworkResourceType {
 /// Page-scoped tracker that listens to CDP Network events until dropped.
 pub struct NetworkQuietTracker {
     state: Arc<Mutex<NetworkQuietState>>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl NetworkQuietTracker {
     pub async fn start(page: &Page) -> Result<Arc<Self>, chromiumoxide::error::CdpError> {
         let state = Arc::new(Mutex::new(NetworkQuietState::default()));
-        let tracker = Arc::new(Self {
-            state: Arc::clone(&state),
-        });
+        let mut tasks = Vec::new();
 
         let mut will_be_sent = page.event_listener::<EventRequestWillBeSent>().await?;
         let mut finished = page.event_listener::<EventLoadingFinished>().await?;
@@ -200,7 +227,7 @@ impl NetworkQuietTracker {
         let mut ws_closed = page.event_listener::<EventWebSocketClosed>().await?;
 
         let state_will = Arc::clone(&state);
-        tokio::spawn(async move {
+        tasks.push(tokio::spawn(async move {
             while let Some(event) = will_be_sent.next().await {
                 let url = event.request.url.clone();
                 let resource_type = map_resource_type(event.r#type.as_ref());
@@ -209,45 +236,58 @@ impl NetworkQuietTracker {
                     .await
                     .upsert_http(&event.request_id, url, resource_type);
             }
-        });
+            state_will.lock().await.mark_tracking_lost();
+        }));
 
         let state_finished = Arc::clone(&state);
-        tokio::spawn(async move {
+        tasks.push(tokio::spawn(async move {
             while let Some(event) = finished.next().await {
                 state_finished.lock().await.remove(&event.request_id);
             }
-        });
+            state_finished.lock().await.mark_tracking_lost();
+        }));
 
         let state_failed = Arc::clone(&state);
-        tokio::spawn(async move {
+        tasks.push(tokio::spawn(async move {
             while let Some(event) = failed.next().await {
                 state_failed.lock().await.remove(&event.request_id);
             }
-        });
+            state_failed.lock().await.mark_tracking_lost();
+        }));
 
         let state_ws_created = Arc::clone(&state);
-        tokio::spawn(async move {
+        tasks.push(tokio::spawn(async move {
             while let Some(event) = ws_created.next().await {
                 state_ws_created
                     .lock()
                     .await
                     .upsert_websocket(&event.request_id, event.url.clone());
             }
-        });
+            state_ws_created.lock().await.mark_tracking_lost();
+        }));
 
         let state_ws_closed = Arc::clone(&state);
-        tokio::spawn(async move {
+        tasks.push(tokio::spawn(async move {
             while let Some(event) = ws_closed.next().await {
                 state_ws_closed.lock().await.remove(&event.request_id);
             }
-        });
+            state_ws_closed.lock().await.mark_tracking_lost();
+        }));
 
-        Ok(tracker)
+        Ok(Arc::new(Self { state, tasks }))
     }
 
     pub async fn snapshot(&self, filters: &NetworkQuietFilters<'_>) -> (usize, Vec<String>) {
         let state = self.state.lock().await;
         counted_in_flight(&state, filters, Instant::now())
+    }
+}
+
+impl Drop for NetworkQuietTracker {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
     }
 }
 
@@ -451,5 +491,38 @@ mod tests {
             map_bidi_network_type(Some("unknown"), None),
             NetworkResourceType::Other
         );
+    }
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    #[test]
+    fn unmatched_finishes_are_bounded_and_lost_tracking_cannot_claim_quiet() {
+        let mut state = NetworkQuietState::default();
+        for index in 0..10_000 {
+            state.remove_id(&format!("missing-{index}"));
+        }
+        assert!(state.completed_before_start.len() <= 4096);
+        let (count, _) = counted_in_flight(&state, &NetworkQuietFilters::default(), Instant::now());
+        assert!(count > 0, "lost events cannot certify network quiet");
+    }
+    #[test]
+    fn never_finishing_requests_are_bounded_even_when_filters_ignore_everything() {
+        let mut state = NetworkQuietState::default();
+        for index in 0..10_000 {
+            state.upsert_id(
+                format!("request-{index}"),
+                "https://example.test".into(),
+                NetworkResourceType::Fetch,
+            );
+        }
+        assert!(state.requests.len() <= 4096);
+        let ignored = vec![NetworkResourceType::Fetch];
+        let filters = NetworkQuietFilters {
+            ignore_resource_types: &ignored,
+            ..NetworkQuietFilters::default()
+        };
+        assert!(counted_in_flight(&state, &filters, Instant::now()).0 > 0);
     }
 }

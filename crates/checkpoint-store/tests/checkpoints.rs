@@ -354,3 +354,30 @@ async fn a_corrupt_entry_is_skipped_rather_than_failing_the_listing() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].workflow_id, good.workflow_id);
 }
+
+#[tokio::test]
+async fn listing_reads_current_files_even_when_directory_timestamp_is_unchanged() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let entry = checkpoint(WorkflowId::new(), "https://example.test/one");
+    store.save(&entry).await.unwrap();
+    assert_eq!(
+        store
+            .list_for_session(&entry.session_id, 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    tokio::fs::write(
+        root.path().join(format!("{}.json", entry.workflow_id.0)),
+        b"damaged",
+    )
+    .await
+    .unwrap();
+    assert!(store
+        .list_for_session(&entry.session_id, 10)
+        .await
+        .unwrap()
+        .is_empty());
+}

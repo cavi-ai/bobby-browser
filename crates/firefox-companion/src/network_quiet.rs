@@ -59,6 +59,10 @@ impl FirefoxNetworkQuiet {
         (scoped_count + unscoped_count, excluded)
     }
 
+    pub fn mark_tracking_lost(&mut self) {
+        self.unscoped.mark_tracking_lost();
+    }
+
     fn observe_start(&mut self, params: &Value) {
         let Some(id) = request_id(params) else {
             return;
@@ -81,6 +85,17 @@ impl FirefoxNetworkQuiet {
             .and_then(Value::as_str)
             .filter(|value| !value.is_empty())
             .map(str::to_owned);
+        if (self.owners.len() >= 4096 && !self.owners.contains_key(&id))
+            || id.len() > 1024
+            || url.len() > 16 * 1024
+            || (context
+                .as_ref()
+                .is_some_and(|context| !self.by_context.contains_key(context))
+                && self.by_context.len() >= 256)
+        {
+            self.mark_tracking_lost();
+            return;
+        }
         self.owners.insert(id.clone(), context.clone());
         match context {
             Some(context) => {
@@ -101,12 +116,10 @@ impl FirefoxNetworkQuiet {
                 }
             }
             Some(None) => self.unscoped.remove_id(id),
-            None => {
-                self.unscoped.remove_id(id);
-                for state in self.by_context.values_mut() {
-                    state.remove_id(id);
-                }
-            }
+            // BiDi delivers a single ordered stream. A duplicate or late
+            // finish for a destroyed context must not create tombstones in
+            // every live context.
+            None => {}
         }
     }
 }
@@ -178,5 +191,46 @@ mod tests {
             map_bidi_network_type(Some("script"), None),
             NetworkResourceType::Script
         );
+    }
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn unknown_finishes_do_not_populate_every_context_and_destroy_releases_ownership() {
+        let mut quiet = FirefoxNetworkQuiet::default();
+        quiet.observe_event(
+            "network.beforeRequestSent",
+            &json!({"context":"tab", "request":{"request":"r1","url":"https://example.test"}}),
+        );
+        for index in 0..10_000 {
+            quiet.observe_event(
+                "network.responseCompleted",
+                &json!({"request":{"request":format!("unknown-{index}")}}),
+            );
+        }
+        assert_eq!(quiet.snapshot("tab", &NetworkQuietFilters::default()).0, 1);
+        quiet.drop_context("tab");
+        assert!(quiet.owners.is_empty());
+        assert!(quiet.by_context.is_empty());
+        assert_eq!(quiet.snapshot("tab", &NetworkQuietFilters::default()).0, 0);
+    }
+    #[test]
+    fn event_loss_cannot_report_quiet_for_an_empty_or_new_context() {
+        let mut quiet = FirefoxNetworkQuiet::default();
+        quiet.mark_tracking_lost();
+        assert!(quiet.snapshot("tab", &NetworkQuietFilters::default()).0 > 0);
+    }
+    #[test]
+    fn global_request_ownership_is_bounded() {
+        let mut quiet = FirefoxNetworkQuiet::default();
+        for index in 0..10_000 {
+            quiet.observe_event("network.beforeRequestSent", &json!({"context":"tab", "request":{"request":format!("r{index}"),"url":"https://example.test"}}));
+        }
+        assert!(quiet.owners.len() <= 4096);
+        quiet.drop_context("tab");
+        assert!(quiet.snapshot("new", &NetworkQuietFilters::default()).0 > 0);
     }
 }

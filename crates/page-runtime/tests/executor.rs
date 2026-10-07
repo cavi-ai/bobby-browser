@@ -3656,3 +3656,91 @@ async fn control_action_clear_completes_with_typed_empty_evidence() {
                 && action.state == FormControlState::Empty
     )));
 }
+
+#[tokio::test]
+async fn archived_history_never_authorizes_recovery_evidence_or_session_ownership() {
+    for (damage, completed) in [
+        (b"damaged executing transition\n".as_slice(), false),
+        (b"unfinished".as_slice(), false),
+        (b"damaged terminal transition\n".as_slice(), true),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("commands.jsonl");
+        let command = envelope(
+            SessionId::new(),
+            PageId::new(),
+            PrimitiveCommand::Navigate(NavigateCommand {
+                url: "https://example.test".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 1000,
+            }),
+        );
+        let id = command.command_id.clone();
+        let journal = JsonlJournal::open(&path).await.unwrap();
+        journal
+            .append(JournalRecord {
+                sequence: 0,
+                recorded_at: Utc::now(),
+                command_id: id.clone(),
+                phase: if completed {
+                    CommandPhase::Completed
+                } else {
+                    CommandPhase::Accepted
+                },
+                envelope: Some(command),
+                outcome: completed.then(|| CommandOutcome::Completed {
+                    command_id: id.clone(),
+                    evidence: vec![],
+                }),
+                prepared_result: None,
+            })
+            .await
+            .unwrap();
+        drop(journal);
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(damage)
+            .unwrap();
+        let journal = Arc::new(JsonlJournal::open(&path).await.unwrap());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let workers = Arc::new(WorkerPool::new(
+            1,
+            Arc::new(FakeFactory {
+                events: events.clone(),
+                mode: DriverMode::Succeed,
+                launches: Default::default(),
+            }),
+        ));
+        let runtime = page_runtime::PageRuntime::new(journal.clone(), workers);
+        assert!(matches!(
+            runtime.recover_command(id.clone()).await,
+            CommandOutcome::NeedsReconciliation { .. }
+        ));
+        assert!(runtime.command_session(&id).await.is_err());
+        assert!(runtime.evidence_for_command(id).await.is_err());
+        assert!(
+            events.lock().await.is_empty(),
+            "uncertain history must not dispatch a browser command"
+        );
+        let fresh = CommandId::new();
+        journal
+            .append(JournalRecord {
+                sequence: 0,
+                recorded_at: Utc::now(),
+                command_id: fresh.clone(),
+                phase: CommandPhase::Accepted,
+                envelope: None,
+                outcome: None,
+                prepared_result: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            journal.history(fresh).await.unwrap().incompatible_records,
+            0
+        );
+    }
+}

@@ -179,6 +179,9 @@ impl PageRuntime {
             .history(command_id.clone())
             .await
             .map_err(|_| RecoveryError::CommandOutcomeMissing(command_id.clone()))?;
+        if scan.torn_tail || scan.incompatible_records > 0 {
+            return Err(RecoveryError::CommandOutcomeMissing(command_id.clone()));
+        }
         scan.records
             .into_iter()
             .rev()
@@ -210,6 +213,9 @@ impl PageRuntime {
             .history(command_id.clone())
             .await
             .map_err(|_| RecoveryError::CommandOutcomeMissing(command_id.clone()))?;
+        if scan.torn_tail || scan.incompatible_records > 0 {
+            return Err(RecoveryError::CommandOutcomeMissing(command_id.clone()));
+        }
         scan.records
             .iter()
             .find_map(|record| {
