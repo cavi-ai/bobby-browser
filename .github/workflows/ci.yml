@@ -207,6 +207,7 @@ jobs:
           --test recovery_demo
           --test remembered_site_calls
           --test site_regressions_chromium
+          --test journeys_chromium
           -- --ignored --test-threads=1
           --skip stuck_locate_records_a_real_local_vision_proposal
 
@@ -305,6 +306,7 @@ jobs:
             --test behavioral_firefox \
             --test fingerprint_firefox \
             --test site_regressions_firefox \
+            --test journeys_firefox \
             -- --ignored --test-threads=1
 
   node:

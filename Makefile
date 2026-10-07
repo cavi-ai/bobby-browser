@@ -11,7 +11,7 @@ RESTART_FLAGS := $(if $(filter 1,$(FORCE)),--force)$(if $(filter 1,$(DISCONNECT_
 	build install firefox cli \
 	firefox-start firefox-stop \
 	restart start stop reload verify status \
-	fmt lint test \
+	fmt lint test test-browsers-setup test-browsers \
 	fingerprint-dogfood fingerprint-collectors fingerprint-collectors-headed fingerprint-collectors-firefox \
 	behavioral-benchmark behavioral-e2e behavioral-dogfood
 
@@ -44,6 +44,8 @@ help:
 	@echo "  fmt        cargo fmt --all"
 	@echo "  lint       cargo clippy --workspace --all-targets -- -D warnings"
 	@echo "  test       cargo test --workspace"
+	@echo "  test-browsers-setup  one-time scoped Firefox test profile + test native host (never the live host)"
+	@echo "  test-browsers        headless Chromium and Firefox suites on local fixture pages"
 	@echo
 	@echo "Fingerprint dogfood"
 	@echo "  fingerprint-dogfood              live Chromium collector probe (needs Chrome)"
@@ -155,6 +157,35 @@ lint:
 
 test:
 	cargo test --manifest-path $(REPO_ROOT)Cargo.toml --workspace
+
+# Real-browser suites on local fixture pages, headless, against a scoped test
+# profile and test native host only (never the live bobby setup). Run
+# test-browsers-setup once; it installs only the test host manifest.
+TEST_BROWSERS_DIR := $(REPO_ROOT).tmp/test-browsers
+TEST_BROWSERS_HOST := com.bobby_browser.companion.scope_7465737462726f77
+ifeq ($(shell uname -s),Darwin)
+TEST_BROWSERS_MANIFEST := $(HOME)/Library/Application Support/Mozilla/NativeMessagingHosts/$(TEST_BROWSERS_HOST).json
+TEST_BROWSERS_FIREFOX := /Applications/Firefox Developer Edition.app/Contents/MacOS/firefox
+else
+TEST_BROWSERS_MANIFEST := $(HOME)/.mozilla/native-messaging-hosts/$(TEST_BROWSERS_HOST).json
+TEST_BROWSERS_FIREFOX := $(shell command -v firefox)
+endif
+
+test-browsers-setup:
+	@$(REPO_ROOT)scripts/dev/test-browsers-setup.sh
+
+test-browsers:
+	cargo test --manifest-path $(REPO_ROOT)Cargo.toml -p runtime-tests --locked \
+		--test site_regressions_chromium --test journeys_chromium \
+		-- --ignored --test-threads=1
+	@[ -f "$(TEST_BROWSERS_MANIFEST)" ] || { echo "test native host missing: run make test-browsers-setup"; exit 1; }
+	BOBBY_FIREFOX_HEADLESS=1 BOBBY_FIREFOX_BIN="$(TEST_BROWSERS_FIREFOX)" \
+		BOBBY_FIREFOX_PROFILE="$(TEST_BROWSERS_DIR)/firefox-profile" \
+		BOBBY_COMPANION_EXTENSION="$(TEST_BROWSERS_DIR)/extension" \
+		BOBBY_FIREFOX_PROOF_DIR="$(TEST_BROWSERS_DIR)" \
+		cargo test --manifest-path $(REPO_ROOT)Cargo.toml -p runtime-tests --locked \
+		--test site_regressions_firefox --test journeys_firefox \
+		-- --ignored --test-threads=1
 
 # ---------------------------------------------------------------------------
 # Dogfood

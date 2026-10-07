@@ -1464,7 +1464,12 @@ fn temporary_extension_install_command(
     ))
 }
 
+/// `BOBBY_FIREFOX_PROOF_DIR` redirects the state directory (and the
+/// native-host descriptor in it) for a scoped local test install.
 fn proof_state_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("BOBBY_FIREFOX_PROOF_DIR").filter(|dir| !dir.is_empty()) {
+        return PathBuf::from(dir);
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("target/firefox-companion-proof")
@@ -1539,12 +1544,17 @@ async fn launch_firefox(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(io_error(error)),
     }
-    let mut child = Command::new(&config.firefox_bin)
+    let mut command = Command::new(&config.firefox_bin);
+    command
         .arg("--no-remote")
         .arg("--foreground")
         .arg("--profile")
         .arg(&config.profile)
-        .arg("--remote-debugging-port=0")
+        .arg("--remote-debugging-port=0");
+    if std::env::var_os("BOBBY_FIREFOX_HEADLESS").is_some_and(|value| value == "1") {
+        command.arg("--headless");
+    }
+    let mut child = command
         .arg(startup_url)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
