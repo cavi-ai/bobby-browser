@@ -75,6 +75,108 @@ pub(crate) struct DoctorFixReport {
     pub(crate) post_fix: DoctorReport,
 }
 
+fn idempotency_ledgers(config: &AppConfig) -> [(&'static str, PathBuf); 3] {
+    [
+        (
+            "idempotency-commands",
+            config
+                .storage
+                .journal_path
+                .with_extension("idempotency.json"),
+        ),
+        (
+            "idempotency-lifecycle",
+            config
+                .storage
+                .journal_path
+                .with_extension("lifecycle-idempotency.json"),
+        ),
+        (
+            "idempotency-jobs",
+            config
+                .storage
+                .scheduler_journal_path
+                .with_extension("idempotency.json"),
+        ),
+    ]
+}
+
+pub(crate) fn run_idempotency_downgrade(options: DoctorFixOptions) -> Result<DoctorFixReport> {
+    let config_path = resolve_config_path(options.config);
+    let config = AppConfig::load(&config_path)?;
+    let mut actions = Vec::new();
+    for (name, path) in idempotency_ledgers(&config) {
+        let target = path.clone();
+        let result =
+            block_on_inspect(
+                async move { interface_core::downgrade_idempotency_ledger(target).await },
+            );
+        let (status, detail) = match result {
+            Ok(Some(backup)) => (
+                DoctorFixStatus::Fixed,
+                format!(
+                    "converted {} to v1; source preserved at {}",
+                    path.display(),
+                    backup.display()
+                ),
+            ),
+            Ok(None) => (
+                DoctorFixStatus::Noop,
+                format!("{} is missing or already v1", path.display()),
+            ),
+            Err(error) => (
+                DoctorFixStatus::Failed,
+                format!(
+                    "{}: {error}; preserve the ledger and any .v2.backup for inspection",
+                    path.display()
+                ),
+            ),
+        };
+        actions.push(DoctorFixAction {
+            status,
+            name: name.into(),
+            detail,
+        });
+    }
+    // Rollback checks only the converted ledgers; it must not launch gateways
+    // or change credentials, models, or host configuration.
+    let mut post_fix = DoctorReport::default();
+    record_idempotency_ledgers(&mut post_fix, &config);
+    Ok(DoctorFixReport { actions, post_fix })
+}
+
+fn record_idempotency_ledgers(report: &mut DoctorReport, config: &AppConfig) {
+    for (name, path) in idempotency_ledgers(config) {
+        let target = path.clone();
+        match block_on_inspect(
+            async move { interface_core::inspect_idempotency_ledger(target).await },
+        ) {
+            Ok(health) if !health.exists => report.ok(name, "no ledger yet".into()),
+            Ok(health) if health.integrity_issue.is_some() => report.fail(
+                name,
+                format!(
+                    "{} requires repair; preserve the ledger and its reservations",
+                    path.display()
+                ),
+            ),
+            Ok(health) => report.ok(
+                name,
+                format!(
+                    "{} · v{} · {} keys",
+                    path.display(),
+                    health.format.unwrap_or(0),
+                    health.entries
+                ),
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => report.warn(
+                name,
+                "ledger in use; stop Bobby for offline inspection or downgrade".into(),
+            ),
+            Err(error) => report.fail(name, format!("{}: {error}", path.display())),
+        }
+    }
+}
+
 fn record_host_config_checks(report: &mut DoctorReport, project_root: &Path) {
     match onboarding::configured_host_statuses(project_root) {
         Ok(statuses) => {
@@ -1974,6 +2076,7 @@ pub(crate) fn run_doctor_with_profile(
         }
         record_command_journal(&mut report, &config.storage.journal_path);
         record_scheduler_journal(&mut report, &config.storage.scheduler_journal_path);
+        record_idempotency_ledgers(&mut report, config);
         if let Some(dir) = &config.vision.corpus_dir {
             record_vision_corpus(&mut report, &dir.join("vision-corpus.jsonl"));
         }

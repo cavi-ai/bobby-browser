@@ -569,6 +569,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "intent-engine",
+ "interface-core",
  "libc",
  "mcp-gateway",
  "node-registry",

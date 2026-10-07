@@ -168,6 +168,15 @@ make firefox-start    # Bobby profile + --remote-debugging-port=9222; then Pair
 Doctor uses green/yellow/red status labels in a terminal and stable plain text
 when piped or when `NO_COLOR` is set. Add `--download-model` to `doctor --fix`
 only when you explicitly want Bobby to fetch the already-selected MLX model.
+
+New writes migrate existing idempotency ledgers to a versioned append log.
+Before rolling back to an older Bobby binary, stop all Bobby runtimes and run
+`bobby doctor --fix --downgrade-idempotency` with the newer binary and the same
+configuration. It converts healthy ledgers to the older format, preserves a
+backup, and retains unresolved reservations. It refuses ledgers that are in use
+or damaged. Normal `doctor` and `doctor --fix` do not downgrade; newer runtime
+writes can migrate a converted ledger again.
+
 To configure and load-check a selected MLX model directly, run
 `bobby vision connect --yes --provider mlx --model <id> --activate`; add
 `--download-model` only when the CLI may fetch a missing cache.

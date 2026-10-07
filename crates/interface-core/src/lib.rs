@@ -30,7 +30,8 @@ pub use events::{
     MAX_EVENT_PAYLOAD_NODES,
 };
 pub use idempotency::{
-    canonical_sha256, command_identity_sha256, IdempotencyPermit, IdempotencyReservation,
+    canonical_sha256, command_identity_sha256, downgrade_idempotency_ledger,
+    inspect_idempotency_ledger, IdempotencyLedgerHealth, IdempotencyPermit, IdempotencyReservation,
     IdempotencyStore, RetainedOutcome, SessionCheckpointOutcome,
 };
 pub use session_ownership::{
