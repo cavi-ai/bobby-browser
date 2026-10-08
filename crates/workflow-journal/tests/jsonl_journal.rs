@@ -214,6 +214,35 @@ async fn inspect_missing_file_is_empty_health() {
 }
 
 #[tokio::test]
+async fn inspection_counts_decodable_records_without_hiding_integrity_damage() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("commands.jsonl");
+    let id = CommandId::new();
+    let mut entry = record(&id, CommandPhase::Accepted);
+    let mut bytes = b"\n \t\r\n".to_vec();
+    // Both decodable records count, even though their sequence is duplicated.
+    for _ in 0..2 {
+        serde_json::to_writer(&mut bytes, &entry).unwrap();
+        bytes.push(b'\n');
+    }
+    entry.sequence = 1;
+    serde_json::to_writer(&mut bytes, &entry).unwrap();
+    bytes.extend_from_slice(b"\n\xff\n");
+    bytes.extend_from_slice(v1_navigate_line(2, &id).as_bytes());
+    bytes.extend_from_slice(b"\n{\"sequence\":3");
+    tokio::fs::write(&path, &bytes).await.unwrap();
+
+    let health = JsonlJournal::inspect(&path).await.unwrap();
+    assert!(health.exists);
+    assert_eq!(health.records, 3);
+    assert_eq!(health.incompatible_records, 3);
+    assert!(health.torn_tail);
+    assert_eq!(health.bytes, bytes.len() as u64);
+    assert_eq!(tokio::fs::read(&path).await.unwrap(), bytes);
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+}
+
+#[tokio::test]
 async fn serializes_concurrent_appends_with_unique_sequences() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("commands.jsonl");
