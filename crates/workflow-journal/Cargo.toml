@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
+same-file.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
