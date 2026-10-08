@@ -44,6 +44,376 @@ fn reconciliation(command_id: CommandId) -> CommandOutcome {
 }
 
 #[tokio::test]
+async fn durable_mutations_append_without_rewriting_unrelated_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("idempotency.json");
+    let entries: Vec<_> = (0..512)
+        .map(|index| {
+            serde_json::json!({
+                "principalId": principal(if index < 256 {
+                    "10000000-0000-0000-0000-000000000001"
+                } else { "10000000-0000-0000-0000-000000000002" }),
+                "key": format!("old-{index}"), "operation": InterfaceOperation::SubmitCommand,
+                "canonicalSha256": vec![0; 32], "expiresAt": Utc::now() + Duration::hours(1),
+                "lastUsed": index + 1, "state": {"kind": "retained", "value": CommandId::new()}
+            })
+        })
+        .collect();
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&serde_json::json!({"schemaVersion":1, "entries":entries})).unwrap(),
+    )
+    .unwrap();
+    let store = IdempotencyStore::open_durable(&path, |value| async move {
+        Ok(Some(completed(
+            serde_json::from_value(value).map_err(std::io::Error::other)?,
+        )))
+    })
+    .await
+    .unwrap();
+    let principal = principal("10000000-0000-0000-0000-000000000003");
+    let IdempotencyReservation::Acquired(permit) =
+        reserve(&store, principal, key("new"), [0; 32], CorrelationId::new())
+            .await
+            .unwrap()
+    else {
+        panic!("new key");
+    };
+    let reserved = std::fs::read(&path).unwrap();
+    let first: serde_json::Value =
+        serde_json::from_slice(reserved.split(|b| *b == b'\n').next().unwrap()).unwrap();
+    assert_eq!(
+        first["schemaVersion"], 2,
+        "new writes use the versioned log"
+    );
+    store
+        .finish(permit, completed(CommandId::new()), Utc::now())
+        .await
+        .unwrap();
+    let finished = std::fs::read(&path).unwrap();
+    assert!(
+        finished.starts_with(&reserved),
+        "finish must append, not rewrite unrelated keys"
+    );
+    assert!(
+        finished.len() - reserved.len() < 2048,
+        "one small outcome must not write the whole ledger"
+    );
+}
+
+#[tokio::test]
+async fn doctor_downgrade_preserves_current_keys_and_source_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("idempotency.json");
+    let owner = principal("10000000-0000-0000-0000-000000000001");
+    let lookup = |value| async move {
+        Ok(Some(completed(
+            serde_json::from_value(value).map_err(std::io::Error::other)?,
+        )))
+    };
+    let store = IdempotencyStore::open_durable(&path, lookup).await.unwrap();
+    let IdempotencyReservation::Acquired(done) = reserve(
+        &store,
+        owner.clone(),
+        key("done"),
+        [1; 32],
+        CorrelationId::new(),
+    )
+    .await
+    .unwrap() else {
+        panic!("acquire");
+    };
+    let command_id = CommandId::new();
+    store
+        .finish(done, completed(command_id.clone()), Utc::now())
+        .await
+        .unwrap();
+    let IdempotencyReservation::Acquired(pending) = reserve(
+        &store,
+        owner.clone(),
+        key("pending"),
+        [2; 32],
+        CorrelationId::new(),
+    )
+    .await
+    .unwrap() else {
+        panic!("acquire");
+    };
+    let original = std::fs::read(&path).unwrap();
+    assert!(
+        interface_core::downgrade_idempotency_ledger(&path)
+            .await
+            .is_err(),
+        "running owner must prevent conversion"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    drop(pending);
+    drop(store);
+    let backup = interface_core::downgrade_idempotency_ledger(&path)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(std::fs::read(&backup).unwrap(), original);
+    let legacy: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(legacy["schemaVersion"], 1);
+    assert_eq!(legacy["entries"].as_array().unwrap().len(), 2);
+    assert!(legacy["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["key"] == "pending"
+            && e["state"]["kind"] == "unresolved"
+            && e["expiresAt"].is_null()));
+    assert!(
+        interface_core::downgrade_idempotency_ledger(&path)
+            .await
+            .unwrap()
+            .is_none(),
+        "already legacy is idempotent"
+    );
+    let reopened = IdempotencyStore::open_durable(&path, lookup).await.unwrap();
+    assert!(
+        matches!(reserve(&reopened, owner.clone(), key("done"), [1;32], CorrelationId::new()).await.unwrap(), IdempotencyReservation::Replay(CommandOutcome::Completed {command_id:id,..}) if id == command_id)
+    );
+    assert!(
+        reserve(
+            &reopened,
+            owner,
+            key("pending"),
+            [2; 32],
+            CorrelationId::new()
+        )
+        .await
+        .unwrap_err()
+        .reconciliation_required
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[tokio::test]
+async fn log_damage_is_preserved_and_never_downgraded_or_replayed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("idempotency.json");
+    let owner = principal("10000000-0000-0000-0000-000000000001");
+    let lookup = |value| async move {
+        Ok(Some(completed(
+            serde_json::from_value(value).map_err(std::io::Error::other)?,
+        )))
+    };
+    let store = IdempotencyStore::open_durable(&path, lookup).await.unwrap();
+    let IdempotencyReservation::Acquired(permit) = reserve(
+        &store,
+        owner.clone(),
+        key("done"),
+        [1; 32],
+        CorrelationId::new(),
+    )
+    .await
+    .unwrap() else {
+        panic!("acquire");
+    };
+    store
+        .finish(permit, completed(CommandId::new()), Utc::now())
+        .await
+        .unwrap();
+    drop(store);
+    let original = std::fs::read(&path).unwrap();
+    let mut checksum_damage = original.clone();
+    let at = checksum_damage
+        .windows(4)
+        .position(|part| part == b"done")
+        .unwrap();
+    checksum_damage[at] = b'x';
+    let lines: Vec<_> = original.split_inclusive(|b| *b == b'\n').collect();
+    let mut missing_checkpoint = original.clone();
+    missing_checkpoint.drain(..lines[0].len());
+    let mut duplicate = original.clone();
+    duplicate.extend_from_slice(lines.last().unwrap());
+    for bytes in [
+        original[..original.len() - 2].to_vec(),
+        checksum_damage,
+        missing_checkpoint,
+        duplicate,
+    ] {
+        std::fs::write(&path, &bytes).unwrap();
+        let health = interface_core::inspect_idempotency_ledger(&path)
+            .await
+            .unwrap();
+        assert!(health.integrity_issue.is_some());
+        let reopened = IdempotencyStore::open_durable(&path, lookup).await.unwrap();
+        assert!(
+            reserve(
+                &reopened,
+                owner.clone(),
+                key("done"),
+                [1; 32],
+                CorrelationId::new()
+            )
+            .await
+            .unwrap_err()
+            .reconciliation_required
+        );
+        drop(reopened);
+        assert!(interface_core::downgrade_idempotency_ledger(&path)
+            .await
+            .is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+}
+
+#[tokio::test]
+async fn unresolved_restoration_never_expires_or_admits_a_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("idempotency.json");
+    let owner = principal("10000000-0000-0000-0000-000000000001");
+    let original = serde_json::json!({"schemaVersion":1,"entries":[{
+        "principalId":owner, "key":"lost-authority", "operation":InterfaceOperation::SubmitCommand,
+        "canonicalSha256":vec![0;32], "expiresAt":Utc::now()+Duration::minutes(1),
+        "lastUsed":1, "state":{"kind":"retained","value":CommandId::new()}
+    }]});
+    std::fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+    let store = IdempotencyStore::open_durable(&path, |_| async {
+        Ok::<Option<CommandOutcome>, std::io::Error>(None)
+    })
+    .await
+    .unwrap();
+    let durable: serde_json::Value = serde_json::from_slice(
+        std::fs::read(&path)
+            .unwrap()
+            .split(|b| *b == b'\n')
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(durable["entries"][0]["state"]["kind"], "unresolved");
+    assert!(
+        durable["entries"][0]["expiresAt"].is_null(),
+        "unknown authority must be durably protected before open returns"
+    );
+    let error = store
+        .reserve(
+            owner,
+            key("lost-authority"),
+            InterfaceOperation::SubmitCommand,
+            [0; 32],
+            Utc::now() + Duration::hours(1),
+            Utc::now() + Duration::hours(2),
+            CorrelationId::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.reconciliation_required,
+        "missing outcome authority must not age into a fresh reservation"
+    );
+}
+
+#[tokio::test]
+async fn ledger_inspection_and_missing_downgrade_are_read_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("missing.json");
+    assert!(
+        !interface_core::inspect_idempotency_ledger(&path)
+            .await
+            .unwrap()
+            .exists
+    );
+    assert!(interface_core::downgrade_idempotency_ledger(&path)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn online_compaction_keeps_uncertain_keys_and_the_published_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("idempotency.json");
+    let owner = principal("10000000-0000-0000-0000-000000000001");
+    let lookup = |value| async move {
+        Ok(Some(completed(
+            serde_json::from_value(value).map_err(std::io::Error::other)?,
+        )))
+    };
+    let store = IdempotencyStore::open_durable(&path, lookup).await.unwrap();
+    let IdempotencyReservation::Acquired(protected) = reserve(
+        &store,
+        owner.clone(),
+        key("protected"),
+        [1; 32],
+        CorrelationId::new(),
+    )
+    .await
+    .unwrap() else {
+        panic!("acquire");
+    };
+    for _ in 0..2050 {
+        let IdempotencyReservation::Acquired(permit) = reserve(
+            &store,
+            owner.clone(),
+            key("temporary"),
+            [2; 32],
+            CorrelationId::new(),
+        )
+        .await
+        .unwrap() else {
+            panic!("release was not durable");
+        };
+        store.abandon(permit).await;
+    }
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(
+        bytes.iter().filter(|b| **b == b'\n').count() < 20,
+        "the online journal should compact"
+    );
+    drop(protected);
+    let IdempotencyReservation::Acquired(permit) = reserve(
+        &store,
+        owner.clone(),
+        key("after-compaction"),
+        [3; 32],
+        CorrelationId::new(),
+    )
+    .await
+    .unwrap() else {
+        panic!("acquire");
+    };
+    let id = CommandId::new();
+    store
+        .finish(permit, completed(id.clone()), Utc::now())
+        .await
+        .unwrap();
+    drop(store);
+    let reopened = IdempotencyStore::open_durable(&path, lookup).await.unwrap();
+    assert!(
+        reserve(
+            &reopened,
+            owner.clone(),
+            key("protected"),
+            [1; 32],
+            CorrelationId::new()
+        )
+        .await
+        .unwrap_err()
+        .reconciliation_required
+    );
+    assert!(
+        matches!(reserve(&reopened, owner, key("after-compaction"), [3;32], CorrelationId::new()).await.unwrap(), IdempotencyReservation::Replay(CommandOutcome::Completed {command_id,..}) if command_id == id)
+    );
+}
+
+#[tokio::test]
 async fn unreadable_durable_ledger_preserves_bytes_and_refuses_new_reservations() {
     for bytes in [
         b"not json".as_slice(),

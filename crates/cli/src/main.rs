@@ -303,6 +303,9 @@ enum CliCommand {
         /// Allow --fix to download the already-selected local MLX model
         #[arg(long, requires = "fix")]
         download_model: bool,
+        /// Convert healthy offline idempotency ledgers for use by older binaries
+        #[arg(long, requires = "fix", conflicts_with = "download_model")]
+        downgrade_idempotency: bool,
         /// Print the report as JSON on stdout
         #[arg(long)]
         json: bool,
@@ -946,17 +949,23 @@ pub async fn run() -> Result<()> {
             skip_health,
             fix,
             download_model,
+            downgrade_idempotency,
             json,
             profile,
         } => {
             if fix {
-                let report = doctor::run_doctor_fix(doctor::DoctorFixOptions {
+                let options = doctor::DoctorFixOptions {
                     config,
                     bootstrap_env,
                     check_health: !skip_health,
                     download_model,
                     profile,
-                })?;
+                };
+                let report = if downgrade_idempotency {
+                    doctor::run_idempotency_downgrade(options)?
+                } else {
+                    doctor::run_doctor_fix(options)?
+                };
                 if json {
                     report.render_actions();
                     report
@@ -965,7 +974,12 @@ pub async fn run() -> Result<()> {
                 } else {
                     report.render();
                 }
-                if report.post_fix.failures() > 0 {
+                if report.post_fix.failures() > 0
+                    || report
+                        .actions
+                        .iter()
+                        .any(|action| action.status == doctor::DoctorFixStatus::Failed)
+                {
                     std::process::exit(1);
                 }
             } else {
@@ -2966,6 +2980,14 @@ mod tests {
     #[test]
     fn doctor_cli_rejects_model_download_without_fix() {
         assert!(Cli::try_parse_from(["bobby", "doctor", "--download-model"]).is_err());
+    }
+
+    #[test]
+    fn doctor_cli_requires_explicit_fix_for_idempotency_downgrade() {
+        assert!(
+            Cli::try_parse_from(["bobby", "doctor", "--fix", "--downgrade-idempotency"]).is_ok()
+        );
+        assert!(Cli::try_parse_from(["bobby", "doctor", "--downgrade-idempotency"]).is_err());
     }
 
     #[test]

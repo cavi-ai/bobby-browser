@@ -36,6 +36,7 @@ sha2.workspace = true
 tar.workspace = true
 artifact-store.workspace = true
 checkpoint-store.workspace = true
+interface-core.workspace = true
 auth-broker.workspace = true
 context-store.workspace = true
 async-trait.workspace = true
