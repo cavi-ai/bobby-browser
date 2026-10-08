@@ -98,23 +98,7 @@ impl OllamaUpstream {
             .await
             .map_err(|e| UpstreamError::Transport(e.to_string()))?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let code = status.as_u16();
-            let class = if matches!(code, 401 | 403) {
-                "authentication failed"
-            } else {
-                "request rejected"
-            };
-            return Err(UpstreamError::Rejected(format!(
-                "Ollama upstream {class}; status={code}"
-            )));
-        }
-
-        let completion: ChatCompletion = response
-            .json()
-            .await
-            .map_err(|e| UpstreamError::Invalid(format!("Ollama response parse failed: {e}")))?;
+        let completion: ChatCompletion = crate::response::read_json(response, "Ollama").await?;
 
         let content = completion
             .choices

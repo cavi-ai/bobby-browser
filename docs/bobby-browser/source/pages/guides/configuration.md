@@ -212,6 +212,13 @@ Each `[vision.providers.<name>]` profile:
 Request / response shapes and confidence floor: [Intent commands](intents.md#vision-provider).
 Capability + session gates: [Capabilities](../concepts/capabilities.md).
 
+The vision proxy caps successful OpenAI-compatible, Ollama, and MLX upstream
+response bodies at 1 MiB before JSON decoding. The limit counts decompressed
+bytes and applies even without `Content-Length`. Oversized replies fail as
+invalid upstream payloads; the existing 64 KiB extracted-value limit still
+applies. Rejected requests report the provider and HTTP status without reading
+or exposing the upstream error body.
+
 Granting `vision:assist` and creating a session with
 `executionPolicy.visionAssist = true` is **not** enough for functional vision
 assist — the runtime must also reach a live provider at `[vision].endpoint_url`.
