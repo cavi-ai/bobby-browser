@@ -763,7 +763,58 @@ pub async fn type_text_enter_reports_the_settled_page(rig: &Rig) {
             && item["title"] == "Search results"),
         "type_text did not report the settled page {expected_url} titled \"Search results\": {typed}"
     );
+    // One call reports one page: every page field in the evidence is the
+    // page `page_list` shows.
+    let (listed_url, listed_title) = listed_page(&live).await;
+    for (key, listed) in [("url", &listed_url), ("title", &listed_title)] {
+        let mut reported = Vec::new();
+        strings_under(&typed["evidence"], key, &mut reported);
+        for value in reported.into_iter().filter(|value| !value.is_empty()) {
+            assert_eq!(
+                value,
+                listed.as_str(),
+                "type_text evidence {key} is not the page page_list shows: {typed}"
+            );
+        }
+    }
     live.close().await;
+}
+
+/// The URL and title `page_list` reports for the live page.
+async fn listed_page(live: &Live<'_>) -> (String, String) {
+    let listed = live
+        .rig
+        .tool("page_list", json!({"sessionId":live.session_id}))
+        .await;
+    let mut pages = Vec::new();
+    objects_with_page_id(&listed, &live.page_id, &mut pages);
+    let page = pages
+        .into_iter()
+        .find(|page| page.get("url").is_some())
+        .unwrap_or_else(|| panic!("page_list does not list the page: {listed}"));
+    (
+        page["url"].as_str().unwrap_or_default().to_owned(),
+        page["title"].as_str().unwrap_or_default().to_owned(),
+    )
+}
+
+fn objects_with_page_id<'a>(value: &'a Value, page_id: &Value, out: &mut Vec<&'a Value>) {
+    match value {
+        Value::Object(map) => {
+            if map.get("pageId") == Some(page_id) {
+                out.push(value);
+            }
+            for child in map.values() {
+                objects_with_page_id(child, page_id, out);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                objects_with_page_id(item, page_id, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// L8, linkedin.com/jobs: `intent_follow` whose link pushes the new URL
@@ -868,6 +919,25 @@ pub async fn actions_wait_for_a_late_target(rig: &Rig) {
                 }
             }),
         ),
+        (
+            "intent_complete_form",
+            json!({"purpose":"Fill the late field",
+                   "fields":[{"name":"Late field","purpose":"late field",
+                              "value":{"kind":"setText","value":"late text"},
+                              "hints":{"role":"textbox"}}]}),
+        ),
+        (
+            "intent_submit_and_verify",
+            json!({
+                "purpose":"Press the late button",
+                "hints":{"role":"button","accessibleName":"Late button"},
+                "expectedState":{
+                    "condition":{"kind":"text","target":{"css":"#status"},
+                                 "matcher":{"kind":"contains","value":"clicked"}},
+                    "timeoutMs":5000
+                }
+            }),
+        ),
     ];
     let mut failures = Vec::new();
     for (tool, arguments) in actions {
@@ -883,6 +953,184 @@ pub async fn actions_wait_for_a_late_target(rig: &Rig) {
     assert!(
         failures.is_empty(),
         "actions did not wait for their late target: {failures:#?}"
+    );
+    live.close().await;
+}
+
+/// The one wait for a target that never appears: each action fails with
+/// targetNotFound after the 5 s target wait, not sooner and not after
+/// stacked per-tool retries.
+pub async fn actions_fail_a_missing_target_within_one_bound(rig: &Rig) {
+    let site = FixtureSite::spawn(vec![(
+        "/empty",
+        Route::Html(page("Empty", "<main><h1>Nothing here</h1></main>")),
+    )])
+    .await;
+    let live = Live::open(rig, &site.url("/empty")).await;
+    let actions = [
+        (
+            "click",
+            json!({"target":{"role":"button","accessibleName":"Never"}}),
+        ),
+        (
+            "type_text",
+            json!({"target":{"role":"textbox","accessibleName":"Never"},"value":"x"}),
+        ),
+        (
+            "control_action",
+            json!({"target":{"role":"checkbox","accessibleName":"Never"},
+                   "action":{"kind":"setChecked","checked":true}}),
+        ),
+        (
+            "intent_follow",
+            json!({
+                "purpose":"Open the missing link",
+                "hints":{"role":"link","accessibleName":"Never"},
+                "expectedState":{
+                    "condition":{"kind":"url","matcher":{"kind":"contains","value":"/never"}},
+                    "timeoutMs":5000
+                }
+            }),
+        ),
+        (
+            "intent_complete_form",
+            json!({"purpose":"Fill the missing field",
+                   "fields":[{"name":"Never","purpose":"missing field",
+                              "value":{"kind":"setText","value":"x"},
+                              "hints":{"role":"textbox"}}]}),
+        ),
+        (
+            "intent_submit_and_verify",
+            json!({
+                "purpose":"Press the missing button",
+                "hints":{"role":"button","accessibleName":"Never"},
+                "expectedState":{
+                    "condition":{"kind":"url","matcher":{"kind":"contains","value":"/never"}},
+                    "timeoutMs":5000
+                }
+            }),
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (tool, arguments) in actions {
+        let started = std::time::Instant::now();
+        let acted = live.call(tool, arguments).await;
+        let elapsed = started.elapsed();
+        if acted["error"]["code"] != "targetNotFound" {
+            failures.push(format!("{tool} did not fail targetNotFound: {acted}"));
+        } else if elapsed < std::time::Duration::from_millis(4_500)
+            || elapsed > std::time::Duration::from_millis(8_000)
+        {
+            failures.push(format!("{tool} failed after {elapsed:?}, not one 5 s wait"));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+    live.close().await;
+}
+
+/// F5, linkedin.com/feed, Firefox after a restart: `workflow_start`
+/// returned before the app's scripts ran, and an immediate `type_text` with
+/// Enter submitted the server-rendered search form natively. Here the
+/// handler comes from a script loaded after the page's load event, behind a
+/// slow script that holds the load event back.
+pub async fn navigate_waits_for_late_scripts(rig: &Rig) {
+    let search = page(
+        "Search",
+        r#"<main><form action="/native" method="get"><input aria-label="Search" name="q"></form>
+        <p role="status" id="status">waiting</p></main>
+        <script async src="/slow-analytics.js"></script>
+        <script>
+            window.addEventListener("load", () => {
+              const app = document.createElement("script");
+              app.src = "/app.js";
+              document.head.appendChild(app);
+            });
+        </script>"#,
+    );
+    let app = r#"document.querySelector("form").addEventListener("submit", (event) => {
+          event.preventDefault();
+          document.getElementById("status").textContent =
+            "handled " + new FormData(event.target).get("q");
+        });"#;
+    let site = FixtureSite::spawn(vec![
+        ("/search", Route::Html(search)),
+        (
+            "/native",
+            Route::Html(page("Native", "<p>native submit</p>")),
+        ),
+        (
+            "/slow-analytics.js",
+            Route::Delayed {
+                delay: std::time::Duration::from_millis(1_000),
+                content_type: "text/javascript",
+                body: String::new(),
+            },
+        ),
+        (
+            "/app.js",
+            Route::Delayed {
+                delay: std::time::Duration::from_millis(1_500),
+                content_type: "text/javascript",
+                body: app.to_owned(),
+            },
+        ),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/search")).await;
+    let typed = live
+        .call(
+            "type_text",
+            json!({"target":{"role":"textbox","accessibleName":"Search"},
+                   "value":"rust engineer\n","clearFirst":true}),
+        )
+        .await;
+    assert_eq!(typed["status"], "completed", "type_text: {typed}");
+    assert_eq!(
+        site.hits("/native"),
+        0,
+        "Enter submitted the form natively before the app's handler was attached: {typed}"
+    );
+    let snapshot = live.snapshot(json!({})).await;
+    assert_node(&snapshot, "status", Some("handled rust engineer"));
+    live.close().await;
+}
+
+/// A page title that discloses a credential is withheld the same way on
+/// `navigate` and `page_list`, on both engines.
+pub async fn page_titles_withhold_disclosed_credentials(rig: &Rig) {
+    let leaky = format!(
+        "<!doctype html><html><head><meta charset=utf-8><title>Authorization: Bearer {BEARER_TOKEN}</title></head><body><p>Leaky title</p></body></html>"
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/blank", Route::Html(page("Blank", "<p>Blank</p>"))),
+        ("/leak", Route::Html(leaky)),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/blank")).await;
+    let navigated = live
+        .call("navigate", json!({"url":site.url("/leak")}))
+        .await;
+    assert_eq!(navigated["status"], "completed", "navigate: {navigated}");
+    let listed = live
+        .rig
+        .tool("page_list", json!({"sessionId":live.session_id}))
+        .await;
+    for (what, result) in [("navigate", &navigated), ("page_list", &listed)] {
+        assert!(
+            !result.to_string().contains(BEARER_TOKEN),
+            "{what} exposed the title's bearer token: {result}"
+        );
+    }
+    let mut titles = Vec::new();
+    strings_under(&navigated["evidence"], "title", &mut titles);
+    assert!(
+        titles.contains(&"[redacted]"),
+        "navigate did not report the withheld title: {navigated}"
+    );
+    assert_eq!(
+        listed_page(&live).await.1,
+        "[redacted]",
+        "page_list: {listed}"
     );
     live.close().await;
 }

@@ -370,6 +370,7 @@ async fn reveal_field(
     revealed_field_value: &ControlAction,
 ) -> IntentOutcome {
     let plan_summary = format!("reveal {}", summarize_target(reveal_target));
+    browser.await_target(page_id, reveal_target).await;
     let candidates = match browser.collect_candidates(page_id, reveal_target).await {
         Ok(candidates) => candidates,
         Err(error) => {
@@ -925,6 +926,7 @@ async fn execute_locate(
         _ => (None, false),
     };
     let plan_summary = summarize_target(&target);
+    browser.await_target(page_id, &target).await;
     let candidates = match browser.collect_candidates(page_id, &target).await {
         Ok(candidates) => candidates,
         Err(error) => {
@@ -1622,6 +1624,7 @@ async fn execute_fill(
             action: value.clone(),
         }),
     };
+    browser.await_target(page_id, &target).await;
     let candidates = match browser.collect_candidates(page_id, &target).await {
         Ok(candidates) => candidates,
         Err(error) => {
@@ -2084,6 +2087,7 @@ async fn execute_submit_and_verify(
         summarize_target(&target),
         wait_condition_kind(&expected_state.condition)
     );
+    browser.await_target(page_id, &target).await;
     let candidates = match browser.collect_candidates(page_id, &target).await {
         Ok(candidates) => candidates,
         Err(error) => {
@@ -2701,6 +2705,7 @@ async fn execute_dismiss_obstruction(
         _ => None,
     };
     let plan_summary = format!("{} timeout_ms={timeout_ms}", summarize_target(&target));
+    browser.await_target(page_id, &target).await;
     let candidates = match browser.collect_candidates(page_id, &target).await {
         Ok(candidates) => candidates,
         Err(error) => {

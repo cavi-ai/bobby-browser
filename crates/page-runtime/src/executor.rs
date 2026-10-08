@@ -1232,6 +1232,20 @@ impl PageRuntime {
                             None => {}
                         }
                         if let Some((url, title)) = landed {
+                            // One call reports one page. The control read-back
+                            // was taken before the submit settled, so it keeps
+                            // its typed value and drops its page fields.
+                            for item in &mut combined {
+                                if let Evidence::Inspection {
+                                    url: read_url,
+                                    title: read_title,
+                                    ..
+                                } = item
+                                {
+                                    read_url.clear();
+                                    read_title.clear();
+                                }
+                            }
                             combined.push(Evidence::Navigation { url, title });
                         }
                     }

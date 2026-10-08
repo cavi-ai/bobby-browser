@@ -5,8 +5,9 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::navigation_settle::{
-    navigation_settle_expression, parse_settled, NAVIGATION_SETTLE_CAP,
+    navigation_settle_expression, parse_settled, NAVIGATION_SETTLE_CAP, SCRIPT_POLL,
 };
+use crate::secret_material::page_title_evidence;
 use artifact_store::ArtifactStore;
 use async_trait::async_trait;
 use behavioral_engine::{
@@ -1408,6 +1409,9 @@ const PLAIN_CLICK_TARGET_DRIFT_DELAY: Duration = Duration::from_millis(25);
 /// future is still pending.
 const DIALOG_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// A read of an already resolved element that reports it gone (the page
+/// re-rendered it after resolution) re-resolves a plain click, before any
+/// input. A target that never resolved is not retried here.
 fn should_retry_plain_click_target_drift(
     boundary: bool,
     attempt: usize,
@@ -1511,10 +1515,13 @@ impl BrowserWorker for ChromiumWorker {
         // the page, and a redirect chain can still be running. Report the
         // URL and title read after the document has stopped changing.
         let budget = Duration::from_millis(command.timeout_ms).min(NAVIGATION_SETTLE_CAP);
-        if let Some((url, title)) = settle_document(&page, budget, command.url.as_str()).await {
+        let tracker = self.network_trackers.lock().await.get(page_id).cloned();
+        if let Some((url, title)) =
+            settle_document(&page, budget, command.url.as_str(), tracker.as_deref()).await
+        {
             return Ok(vec![Evidence::Navigation {
                 url,
-                title: redact_secret_material(title),
+                title: page_title_evidence(title),
             }]);
         }
         let url = page
@@ -1529,7 +1536,7 @@ impl BrowserWorker for ChromiumWorker {
             .unwrap_or_default();
         Ok(vec![Evidence::Navigation {
             url,
-            title: redact_secret_material(title),
+            title: page_title_evidence(title),
         }])
     }
 
@@ -1540,9 +1547,15 @@ impl BrowserWorker for ChromiumWorker {
         requested_url: Option<&str>,
     ) -> Option<(String, String)> {
         let page = self.page_handle(page_id).await.ok()?;
-        let (url, title) =
-            settle_document(&page, budget, requested_url.unwrap_or_default()).await?;
-        Some((url, redact_secret_material(title)))
+        let tracker = self.network_trackers.lock().await.get(page_id).cloned();
+        let (url, title) = settle_document(
+            &page,
+            budget,
+            requested_url.unwrap_or_default(),
+            tracker.as_deref(),
+        )
+        .await?;
+        Some((url, page_title_evidence(title)))
     }
 
     async fn inspect(
@@ -1611,7 +1624,7 @@ impl BrowserWorker for ChromiumWorker {
         let mut evidence = vec![Evidence::Inspection {
             selector: command.selector.clone(),
             url,
-            title: redact_secret_material(title),
+            title: page_title_evidence(title),
             text: redact_secret_material(text),
             html: html.map(redact_secret_material),
         }];
@@ -1650,18 +1663,14 @@ impl BrowserWorker for ChromiumWorker {
         // it would be reachable. `loop` has no such fallthrough to guard.
         let mut attempt: usize = 0;
         loop {
+            // A target that is not on the page yet is the runtime's wait,
+            // before this call; only a target lost after resolution below
+            // re-resolves.
             let resolved = match self
                 .resolve_target(page_id, &page, &command.selector, command.target.as_ref())
                 .await
             {
                 Ok(resolved) => resolved,
-                Err(error)
-                    if should_retry_plain_click_target_drift(command.boundary, attempt, &error) =>
-                {
-                    attempt += 1;
-                    tokio::time::sleep(PLAIN_CLICK_TARGET_DRIFT_DELAY).await;
-                    continue;
-                }
                 Err(error) if should_retry_click_target_detach(detach_retried, &error) => {
                     detach_retried = true;
                     continue;
@@ -3798,7 +3807,8 @@ fn redact_secret_material(value: String) -> String {
     }
 }
 
-/// Waits until the document has had no DOM mutation for the quiet window, or
+/// Waits until the document has loaded, `tracker` reports no script fetch in
+/// flight, and the document has had no DOM mutation for the quiet window, or
 /// `budget` runs out, and returns the URL and title read at that point. A
 /// redirect that replaces the document while the probe runs restarts it.
 /// `None` when no read succeeded within the budget.
@@ -3806,12 +3816,14 @@ async fn settle_document(
     page: &Page,
     budget: Duration,
     requested_url: &str,
+    tracker: Option<&crate::network_quiet::NetworkQuietTracker>,
 ) -> Option<(String, String)> {
     let deadline = Instant::now() + budget;
+    let mut settled = None;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return None;
+            return settled;
         }
         let mut params = EvaluateParams::new(navigation_settle_expression(
             remaining.as_millis().max(1),
@@ -3822,12 +3834,27 @@ async fn settle_document(
         let attempt =
             tokio::time::timeout(remaining + Duration::from_secs(1), page.evaluate(params)).await;
         if let Ok(Ok(result)) = attempt {
-            if let Some(settled) = result
+            if let Some(read) = result
                 .into_value::<String>()
                 .ok()
                 .and_then(|encoded| parse_settled(&encoded))
             {
-                return Some(settled);
+                settled = Some(read);
+                // A script still being fetched attaches its handlers once it
+                // runs: wait for it, then for the document to go quiet again.
+                let Some(tracker) = tracker else {
+                    return settled;
+                };
+                if tracker.pending_scripts().await == 0 {
+                    return settled;
+                }
+                while tracker.pending_scripts().await > 0 {
+                    if Instant::now() >= deadline {
+                        return settled;
+                    }
+                    tokio::time::sleep(SCRIPT_POLL).await;
+                }
+                continue;
             }
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -3890,11 +3917,12 @@ async fn page_evidence(page_id: PageId, page: &Page) -> Result<PageEvidence, Com
             .await
             .map_err(command_failed)?
             .unwrap_or_default(),
-        title: page
-            .get_title()
-            .await
-            .map_err(command_failed)?
-            .unwrap_or_default(),
+        title: page_title_evidence(
+            page.get_title()
+                .await
+                .map_err(command_failed)?
+                .unwrap_or_default(),
+        ),
     })
 }
 

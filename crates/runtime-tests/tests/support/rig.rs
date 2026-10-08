@@ -179,7 +179,7 @@ impl Rig {
 
 /// One open session and page.
 pub struct Live<'a> {
-    rig: &'a Rig,
+    pub rig: &'a Rig,
     pub session_id: Value,
     pub page_id: Value,
     pub started: Value,
