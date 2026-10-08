@@ -1,4 +1,7 @@
-use std::time::Duration;
+use std::{
+    future::Future,
+    time::{Duration, Instant},
+};
 
 use axum::{routing::get, Router};
 use broker::{serve_listener, serve_listener_with_rejection_limit, RejectionWorkerStats};
@@ -12,6 +15,27 @@ async fn request(stream: &mut TcpStream) {
         .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .await
         .unwrap();
+}
+
+async fn with_frozen_time<F: Future>(future: F) -> F::Output {
+    tokio::time::pause();
+    // Paused Tokio time auto-advances when the runtime is idle, including while
+    // waiting for native TCP I/O. Keep a task runnable and bound the phase using
+    // real time so rejection timers stay frozen without hiding a socket hang.
+    let mut wall_timeout = tokio::spawn(async {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            tokio::task::yield_now().await;
+        }
+    });
+    let result = tokio::select! {
+        result = future => result,
+        _ = &mut wall_timeout => panic!("native socket phase exceeded its wall-clock deadline"),
+    };
+    wall_timeout.abort();
+    let _ = wall_timeout.await;
+    tokio::time::resume();
+    result
 }
 
 #[tokio::test]
@@ -42,41 +66,41 @@ async fn overflow_flood_uses_a_bounded_rejection_worker_pool() {
         admitted.push(stream);
     }
 
-    let mut slow_rejections = Vec::with_capacity(REJECTORS);
-    for _ in 0..REJECTORS {
-        slow_rejections.push(TcpStream::connect(address).await.unwrap());
-    }
-    tokio::time::timeout(Duration::from_secs(1), async {
+    let slow_rejections = with_frozen_time(async {
+        let mut slow_rejections = Vec::with_capacity(REJECTORS);
+        for _ in 0..REJECTORS {
+            slow_rejections.push(TcpStream::connect(address).await.unwrap());
+        }
         while stats.active() < REJECTORS {
             tokio::task::yield_now().await;
         }
-    })
-    .await
-    .expect("rejection workers should reach their configured bound");
 
-    let mut flood = Vec::with_capacity(FLOOD);
-    for _ in 0..FLOOD {
-        flood.push(TcpStream::connect(address).await.unwrap());
-    }
-    // Closing is the property; `peak` below proves no worker was spawned for
-    // these, so the bound only has to outlast a loaded test machine.
-    let mut reads = tokio::task::JoinSet::new();
-    for mut stream in flood {
-        reads.spawn(async move {
-            let mut byte = [0_u8; 1];
-            tokio::time::timeout(Duration::from_secs(30), stream.read(&mut byte))
-                .await
-                .is_ok_and(|result| result.is_ok_and(|count| count == 0))
-        });
-    }
-    let mut promptly_closed = 0;
-    while let Some(closed) = reads.join_next().await {
-        promptly_closed += usize::from(closed.unwrap());
-    }
-    assert_eq!(
-        promptly_closed, FLOOD,
-        "every excess socket must close without spawning work"
-    );
+        // Model a loaded runner being descheduled beyond the rejection idle timeout.
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(stats.active(), REJECTORS);
+
+        let mut flood = Vec::with_capacity(FLOOD);
+        for _ in 0..FLOOD {
+            flood.push(TcpStream::connect(address).await.unwrap());
+        }
+        let mut reads = tokio::task::JoinSet::new();
+        for mut stream in flood {
+            reads.spawn(async move {
+                let mut byte = [0_u8; 1];
+                stream.read(&mut byte).await.is_ok_and(|count| count == 0)
+            });
+        }
+        let mut promptly_closed = 0;
+        while let Some(closed) = reads.join_next().await {
+            promptly_closed += usize::from(closed.unwrap());
+        }
+        assert_eq!(
+            promptly_closed, FLOOD,
+            "every excess socket must close without spawning work"
+        );
+        slow_rejections
+    })
+    .await;
 
     for mut stream in slow_rejections {
         let response = tokio::time::timeout(Duration::from_secs(1), response_headers(&mut stream))
@@ -101,18 +125,18 @@ async fn overflow_flood_uses_a_bounded_rejection_worker_pool() {
         .await
         .starts_with(b"HTTP/1.1 200"));
 
-    let mut shutdown_rejections = Vec::with_capacity(REJECTORS);
-    for _ in 0..REJECTORS {
-        shutdown_rejections.push(TcpStream::connect(address).await.unwrap());
-    }
-    tokio::time::timeout(Duration::from_secs(1), async {
+    let shutdown_rejections = with_frozen_time(async {
+        let mut shutdown_rejections = Vec::with_capacity(REJECTORS);
+        for _ in 0..REJECTORS {
+            shutdown_rejections.push(TcpStream::connect(address).await.unwrap());
+        }
         while stats.active() < REJECTORS {
             tokio::task::yield_now().await;
         }
+        server.abort();
+        shutdown_rejections
     })
-    .await
-    .expect("shutdown should observe bounded active rejection workers");
-    server.abort();
+    .await;
     tokio::time::timeout(Duration::from_secs(1), async {
         while stats.active() != 0 {
             tokio::task::yield_now().await;
