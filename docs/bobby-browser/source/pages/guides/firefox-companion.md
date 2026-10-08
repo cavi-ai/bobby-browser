@@ -75,8 +75,8 @@ reports `[native code]` (required for CreepJS `webDriverIsOn` / lieProps).
 Do not expect a preference alone to clear webdriver under an active BiDi session.
 
 You do **not** need `about:debugging` → Load Temporary Add-on for the normal
-path. Re-run `make firefox` after rebuilding to refresh the sideload (Firefox
-picks it up on restart).
+path. Re-run `make firefox` after rebuilding to refresh the sideload; the next
+session start brings the running Firefox to it (see Operations).
 
 #### Manual / CI sideload (optional)
 
@@ -220,8 +220,14 @@ backoff, so restarts of either side self-heal).
   `browserExecution` evidence with `engine: "firefox"` and
   `interactionPath: "engineNative"`.
 - After rebuilding the extension, re-run `make firefox` (or
-  `bobby install --companion`) so the profile sideload refreshes; Firefox
-  picks it up on restart.
+  `bobby install --companion`) so the profile sideload refreshes. Each build
+  carries a content-derived id (`build-id.json` beside the bundle, and the
+  id the extension reports when it connects). The next session start compares
+  the running build with the unpacked sideload in the profile: a build that
+  reports an id is asked to reload itself, an older build that reports none
+  gets the enrolled Firefox restarted. One attempt per installed build; if
+  the old build still runs, the session fails with a non-retryable error
+  naming both ids. A signed `.xpi` install is not compared.
 
 ### Operator popup
 
@@ -257,6 +263,7 @@ Companion failures reach the caller as typed command errors:
 | Pending command or page-binding capacity exhausted | `resourceExhausted` | yes |
 | Pairing code invalid or expired, profile mismatch, companion revoked, attachment lease expired, or credential invalid | `policyDenied` | no |
 | Paired profile not found | `notFound` | no |
+| The running companion build still differs from the installed one after one reload or Firefox restart | `browserLaunchFailed` | no |
 
 ## Limitations
 
