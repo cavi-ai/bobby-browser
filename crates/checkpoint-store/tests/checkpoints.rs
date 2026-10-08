@@ -377,3 +377,59 @@ async fn listing_reads_current_files_even_when_directory_timestamp_is_unchanged(
         .unwrap()
         .is_empty());
 }
+
+#[tokio::test]
+async fn listing_refreshes_changed_files_before_applying_the_limit() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let session = SessionId::new();
+    let mut older = checkpoint(WorkflowId::new(), "https://example.test/older");
+    older.session_id = session.clone();
+    older.created_at = "2026-01-01T00:00:00Z".parse().unwrap();
+    let mut newer = checkpoint(WorkflowId::new(), "https://example.test/newer");
+    newer.session_id = session.clone();
+    newer.created_at = "2026-01-02T00:00:00Z".parse().unwrap();
+    store.save(&older).await.unwrap();
+    store.save(&newer).await.unwrap();
+    assert_eq!(
+        store.list_for_session(&session, 1).await.unwrap()[0].workflow_id,
+        newer.workflow_id
+    );
+
+    let directory_stamp = std::fs::metadata(root.path()).unwrap().modified().unwrap();
+    let path = root.path().join(format!("{}.json", older.workflow_id.0));
+    let metadata = std::fs::metadata(&path).unwrap();
+    older.created_at = newer.created_at + Duration::hours(1);
+    let bytes = serde_json::to_vec(&older).unwrap();
+    assert_eq!(bytes.len() as u64, metadata.len());
+    tokio::fs::write(&path, &bytes).await.unwrap();
+    let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    file.set_times(
+        std::fs::FileTimes::new()
+            .set_modified(metadata.modified().unwrap() + std::time::Duration::from_secs(1)),
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::metadata(root.path()).unwrap().modified().unwrap(),
+        directory_stamp,
+        "an in-place write does not invalidate the directory index"
+    );
+    let listed = store.list_for_session(&session, 1).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].workflow_id, older.workflow_id);
+    assert_eq!(listed[0].current_url, older.current_url);
+
+    // Size changes also invalidate hints on filesystems with coarse timestamps.
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    older.created_at = newer.created_at - Duration::hours(1);
+    older.current_url = "https://example.test/updated-checkpoint-with-a-longer-url".into();
+    tokio::fs::write(&path, serde_json::to_vec(&older).unwrap())
+        .await
+        .unwrap();
+    file.set_times(std::fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    assert_eq!(
+        store.list_for_session(&session, 1).await.unwrap()[0].workflow_id,
+        newer.workflow_id
+    );
+}
