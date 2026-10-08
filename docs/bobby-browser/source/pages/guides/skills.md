@@ -29,10 +29,8 @@ The way to use them is a ZigZagZig session. Set `zigzagzig: true` on `POST /v1/s
 
 The skill router also accepts these commands:
 
-| Command | Effect |
-|---|---|
-| `/ghost on\|off\|status` | Negotiate a coherent browser profile before launch, report the engine and the capabilities it supports, and freeze the profile for the session. Required capabilities fail closed; optional ones may degrade and stay visible in status. After `off`, a running browser may report `restartRequired` until the next safe launch |
-| `/zigzagzig run\|status\|stop` | Apply the recovery ladder to the original postcondition |
+- `/ghost on|off|status` negotiates a coherent browser profile before launch, reports the engine and the capabilities it supports, and freezes the profile for the session. Required capabilities fail closed. Optional ones may degrade and stay visible in status. After `off`, a running browser may report `restartRequired` until the next safe launch.
+- `/zigzagzig run|status|stop` applies the recovery ladder to the original postcondition.
 
 Ghost reports what the selected engine supports. It does not present one engine as another.
 

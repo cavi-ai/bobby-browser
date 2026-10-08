@@ -91,5 +91,5 @@ An idempotency key is written to a durable ledger before the browser acts, so it
 ## Next
 
 - [HTTP API](../surfaces/http-api.md)
-- [TypeScript SDK](../surfaces/typescript-sdk.md), [Python SDK](../surfaces/python-sdk.md), [Rust SDK](../surfaces/rust-sdk.md)
+- [TypeScript SDK](../surfaces/typescript-sdk.md), [Python SDK](../surfaces/python-sdk.md), [Rust SDK](../rust/index.md)
 - [MCP over HTTP](../surfaces/mcp-http.md)
