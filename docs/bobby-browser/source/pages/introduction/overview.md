@@ -4,30 +4,26 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 # Overview
 
-bobby-browser is a browser automation runtime with authenticated,
-capability-scoped control surfaces. All adapters share capability, idempotency,
-evidence, checkpoint, and event contracts. Authentication fails closed;
-credentials are never accepted in URLs or query strings.
+bobby-browser is a browser automation runtime for AI agents and applications. It drives a real browser (Firefox by default, Chromium when selected) and exposes it through MCP tools, an HTTP API, SDKs for TypeScript, Python and Rust, and an authenticated CDP endpoint.
 
-> **Alpha.** Interfaces are stable enough to build against, but may still change
-> before 1.0. See the [security model](../security/model.md) before exposing any
-> deployment. Interface version: **`{{INTERFACE_VERSION}}`**.
+Every surface runs the same command pipeline. Each call is authenticated, checked against the caller's capabilities, journaled with evidence, and recoverable after a crash. One runtime serves many callers, each with its own scoped bearer token.
 
-## Which surface?
+Interface version: `{{INTERFACE_VERSION}}`.
 
-| Goal | Start here |
+## Choose a path
+
+| You are | Start with |
 |---|---|
-| Install / run the CLI | [Installation](installation.md) · [CLI reference](../guides/cli.md) |
-| First successful navigate | [First browser session](first-session.md) |
-| Application code in Node/TS | [TypeScript SDK](../surfaces/typescript-sdk.md) |
-| Application code in Python | [Python SDK](../surfaces/python-sdk.md) |
-| Application code in Rust (HTTP) | [bobby-browser-client](../rust/bobby-browser-client.md) |
-| Embed in Rust | [Rust crate book](../rust/index.md) · [Rust SDK](../surfaces/rust-sdk.md) |
-| Raw HTTP / curl | [HTTP API](../surfaces/http-api.md) + [Authentication](../guides/auth.md) |
-| Agent host (Claude, Cursor, …) | [MCP tools](../surfaces/mcp-tools.md) via [stdio](../surfaces/mcp-stdio.md) or [HTTP](../surfaces/mcp-http.md) |
-| NVIDIA OpenShell sandbox | [OpenShell host](../guides/openshell.md) |
-| Playwright / Puppeteer | [Authenticated CDP](../surfaces/cdp.md) (primitives only) |
+| Connecting an agent host (Claude Code, VS Code, Zed, any MCP client) | [Installation](installation.md), then [Quickstart](quickstart.md) |
+| Writing an application in TypeScript, Python or Rust | [First session from code](first-session.md), then the [TypeScript](../surfaces/typescript-sdk.md), [Python](../surfaces/python-sdk.md) or [Rust](../surfaces/rust-sdk.md) SDK page |
+| Calling HTTP directly | [HTTP API](../surfaces/http-api.md) and [Authentication](../guides/auth.md) |
+| Driving Playwright or Puppeteer scripts | [Authenticated CDP](../surfaces/cdp.md) |
+| Running agents in an NVIDIA OpenShell sandbox | [OpenShell host](../guides/openshell.md) |
+| Operating a deployment | [CLI reference](../guides/cli.md), [Configuration](../guides/configuration.md), [Security model](../security/model.md) |
 
-Default browser engine preference is **Firefox** (with Chromium available when
-selected). The runtime is **multi-principal**: one instance serves many tenants,
-each with a capability-scoped bearer.
+## What you get
+
+- **Task-level tools.** Intent tools such as `intent_complete_form` and `intent_submit_and_verify` find controls by role and name, act, and verify the result. See [Intent commands](../guides/intents.md).
+- **Evidence.** Each command returns structured evidence you can inspect, checkpoint and export. See [Evidence and checkpoints](../concepts/evidence-checkpoints.md).
+- **Recovery.** Calls with side effects carry idempotency keys, and workflows resume from verified checkpoints. See [Events and recovery](../guides/events-recovery.md).
+- **Scoped access.** Capabilities limit what each caller can do. See [Capabilities](../concepts/capabilities.md).

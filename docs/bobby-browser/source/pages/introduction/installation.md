@@ -4,189 +4,126 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 # Installation
 
-## Prerequisites
+Install the `bobby` command, then run `bobby install` to wire it to your agent host.
 
-- Rust toolchain matching `rust-toolchain.toml`
-- Node.js 22+ and pnpm for TypeScript packages (SDK / docs)
-- Python 3.10+ for the Python SDK
-- Firefox (default engine) and/or Chromium when running live browser workflows
+## Install the CLI
 
-## Build from source (always works)
+Pick one.
+
+**Install script (Linux and macOS).** Installs `bobby`, `mcp-gateway` and `acp-gateway`.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cavi-ai/bobby-browser/main/scripts/install.sh | bash
+```
+
+Set `BOBBY_VERSION` (for example `{{PRODUCT_VERSION}}`, no leading `v`) to pin a version and `INSTALL_DIR` to change the destination (default `~/.local/bin`). Rerun the script to upgrade. Files outside the managed binaries are kept.
+
+**PowerShell (Windows x64).**
+
+```powershell
+irm https://raw.githubusercontent.com/cavi-ai/bobby-browser/main/scripts/install.ps1 | iex
+```
+
+**Homebrew.**
+
+```bash
+brew tap cavi-ai/tap
+brew install cavi-ai/tap/bobby-browser
+```
+
+**Release archive.** Download `bobby-browser-<version>-<os>-<arch>.tar.gz` (`.zip` on Windows) from the GitHub Releases page, with `<os>` one of `linux`, `macos`, `windows` and `<arch>` one of `x64`, `arm64`. Each archive holds `bobby`, `mcp-gateway` and `acp-gateway`. Put them on your `PATH`.
+
+**Source.** Requires the Rust toolchain pinned in `rust-toolchain.toml`.
 
 ```bash
 git clone https://github.com/cavi-ai/bobby-browser.git
 cd bobby-browser
-cargo build -p bobby-browser --release
-./target/release/bobby doctor
-./target/release/bobby --help
+cargo build --release -p bobby-browser
+./target/release/bobby install --cli
 ```
 
-Package name: `bobby-browser`. Binary name: `bobby`.
-
-After the binary is available, run the dependency-aware installer:
+## Wire up your host
 
 ```bash
 bobby install
 bobby doctor
 ```
 
-For a non-interactive host-specific install:
+`bobby install` is an interactive checklist. It creates the bootstrap credential, writes the host configuration, and installs the agent skill. To skip the prompts, name the host:
 
 ```bash
 bobby install --host claude --yes
 ```
 
-A running runtime owner keeps serving the build it started with. When the
-installed `bobby` changed, `bobby install` prints the owner pid; add
-`--restart-runtime` to stop that owner after the install, so the next agent
-connection starts the new build (attached agents disconnect).
-
-Supported host contracts:
-
-| Host | Protocol | Config |
+| `--host` | Protocol | Configuration written |
 |---|---|---|
-| Claude Code | MCP stdio | project `.mcp.json` |
-| VS Code | MCP stdio | project `.vscode/mcp.json` |
-| Zed | MCP stdio | user `zed/settings.json` |
-| ACP host | ACP stdio | project `.acp.json` |
-| NVIDIA OpenShell | MCP streamable HTTP | project `openshell/mcp.json` |
+| `claude` | MCP stdio | project `.mcp.json` |
+| `vscode` | MCP stdio | project `.vscode/mcp.json` |
+| `zed` | MCP stdio | `~/.config/zed/settings.json` |
+| `acp` | ACP stdio | project `.acp.json` |
+| `openshell` | MCP streamable HTTP | project `openshell/` pack |
 
-Host entries launch Bobby without embedding credentials. Run `bobby doctor`
-to detect stale entries and `bobby doctor --fix` to update them. Unhealthy
-`bobby doctor` output leads with `next: bobby doctor --fix` and each
-auto-repairable fail names that flag.
+Host entries launch `bobby mcp-stdio` or `bobby acp-stdio` and carry no credentials. `bobby doctor` reports stale entries and `bobby doctor --fix` repairs them.
+
+Useful `bobby install` flags:
+
+| Flag | Effect |
+|---|---|
+| `--companion` | Install the [Firefox companion](../guides/firefox-companion.md) |
+| `--cli` | Copy `bobby`, `mcp-gateway` and `acp-gateway` onto `PATH` |
+| `--skill`, `--skill-claude`, `--skill-openclaw`, `--skill-hermes` | Install the agent skill for the named agent |
+| `--vision`, `--vision-provider <name>` | Enable [vision assist](../guides/configuration.md#vision) |
+| `--force` | Regenerate the bootstrap credential |
+| `--restart-runtime` | Stop the running runtime so the next agent connection starts the new build. Add `--disconnect-agents` to skip the prompt when agents are attached |
+
+A running runtime keeps serving the build it started with until you restart it.
 
 ## Where files go
 
-`make install` / `bobby install` writes two trees. `bobby doctor` prints the
-resolved paths.
+`bobby doctor` prints the resolved paths.
 
 | What | Where |
 |---|---|
-| Runtime config (vision, ports, storage) | `config.toml` in the scope directory, the OS config dir `bobby-browser/` for the personal scope (`--config` / `BOBBY_BROWSER_CONFIG` override). Relative paths inside it resolve next to the file. |
-| Bootstrap + vision credentials | OS config dir `bobby-browser/` (`~/Library/Application Support/bobby-browser/` on macOS) |
-| CLI + gateways | `~/.cargo/bin` when that dir is on PATH, else `~/.local/bin` |
-| Claude MCP | project `.mcp.json` |
-| VS Code MCP | project `.vscode/mcp.json` |
-| ACP | project `.acp.json` |
-| Agent skills | `~/.agents/skills/bobby-browser/` (and `~/.claude/skills/` when selected) |
-| OpenClaw skill | `$OPENCLAW_STATE_DIR/skills/bobby-browser/` when set, else `~/.openclaw/skills/` |
-| Hermes skill (Python SDK) | `$HERMES_HOME/skills/bobby-browser/` when set, else `~/.hermes/skills/` |
-| Firefox companion | OS config dir + Mozilla native-host path; profile under the same config dir |
+| `config.toml` | OS config directory under `bobby-browser/`. `--config` or `BOBBY_BROWSER_CONFIG` overrides it |
+| Bootstrap credential | `bootstrap.env` in the same directory (`~/Library/Application Support/bobby-browser/` on macOS) |
+| CLI binaries | `~/.cargo/bin` if it is on `PATH`, else `~/.local/bin` |
+| Agent skill | `~/.agents/skills/bobby-browser/`, plus `~/.claude/skills/` for Claude Code |
+| OpenClaw skill | `$OPENCLAW_STATE_DIR/skills/bobby-browser/`, else `~/.openclaw/skills/` |
+| Hermes skill | `$HERMES_HOME/skills/bobby-browser/`, else `~/.hermes/skills/` |
 
-A Homebrew `bobby` earlier on PATH than the install dir does not change where
-hosts launch. Hosts use the installed CLI. `bobby doctor` warns when PATH
-resolves a different binary.
+Credentials are never printed during `bobby install` or `bobby doctor`.
 
-Selecting an agent host generates a missing agent bootstrap credential.
-Vision setup generates a separate owner-only local vision credential. Bobby
-does not print either secret during routine install or doctor output.
+## Teams and projects
 
-## Install the SDKs from registries
+Add `--team <name>` and `--project <name>` before the subcommand to give a team or project its own profile and shared runtime:
 
 ```bash
-# TypeScript SDK
+bobby --team engineering --project checkout install --host claude --yes
+bobby --team engineering --project checkout runtime status
+```
+
+## SDK packages
+
+```bash
 npm install @cavi-ai/bobby-browser
-
-# Python SDK
 pip install bobby-browser
-
-# Rust HTTP client
 cargo add bobby-browser-client
 ```
 
-Each `v*` tag publishes all three. A registry can trail the tag by a few
-minutes; `npm view`, `pip index versions`, or `cargo search` shows the version
-it serves. The CLI is not on crates.io: install it from a release binary,
-Homebrew, or source.
+The CLI is not published on crates.io.
 
-## Install a GitHub Release binary
+## Create a credential by hand
 
-One-liner (Linux / macOS) — installs `bobby`, `mcp-gateway`, and `acp-gateway`
-into `INSTALL_DIR` (default `~/.local/bin`):
+`bobby install` creates the credential for you. To rotate it or write it elsewhere:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/cavi-ai/bobby-browser/main/scripts/install.sh | bash
+bobby init --force
+bobby init --path ./bootstrap.env
 ```
 
-Optional: `BOBBY_VERSION={{PRODUCT_VERSION}}` (no leading `v`) and `INSTALL_DIR=~/.local/bin`.
-
-PowerShell (Windows x64):
-
-```powershell
-irm https://raw.githubusercontent.com/cavi-ai/bobby-browser/main/scripts/install.ps1 | iex
-```
-
-Set `BOBBY_VERSION` and `INSTALL_DIR` to pin the version or destination. Rerun
-the same installer to upgrade. Managed binaries, vision files, and Firefox
-companion files are replaced; files outside those managed paths are preserved.
-
-### Homebrew (macOS / Linuxbrew)
-
-Not on [homebrew-core](https://github.com/Homebrew/homebrew-core) yet. From a
-checkout of this repo:
-
-```bash
-brew tap cavi-ai/tap
-brew install cavi-ai/tap/bobby-browser
-```
-
-From the tap, once it is published:
-
-```bash
-brew tap cavi-ai/tap
-brew install cavi-ai/tap/bobby-browser
-```
-
-The tap repository is `cavi-ai/homebrew-tap`; brew strips the `homebrew-`
-prefix and addresses it as `cavi-ai/tap`, so the formula is reached as
-`cavi-ai/tap/bobby-browser` rather than repeating the project name.
-
-The formula downloads the matching GitHub Release tarball and installs the
-same three binaries.
-
-When submitting to homebrew-core later: formula `bobby-browser`; bottle
-`bobby` / `mcp-gateway` / `acp-gateway`; livecheck on GitHub Releases; CI that
-builds all three; pass `brew audit --strict`.
-
-### Manual download
-
-Assets are named
-`bobby-browser-<version>-{linux|macos|windows}-{x64|arm64}.tar.gz` (`.zip` on
-Windows). Each archive contains `bobby`, `mcp-gateway`, and `acp-gateway`.
-Example for the latest macOS arm64 release:
-
-```bash
-TAG="$(curl -fsSL https://api.github.com/repos/cavi-ai/bobby-browser/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')"
-VERSION="${TAG#v}"
-curl -fsSL -o bobby.tgz \
-  "https://github.com/cavi-ai/bobby-browser/releases/download/${TAG}/bobby-browser-${VERSION}-macos-arm64.tar.gz"
-tar -xzf bobby.tgz
-STAGE="bobby-browser-${VERSION}-macos-arm64"
-install -m 755 "$STAGE/bobby" "$STAGE/mcp-gateway" "$STAGE/acp-gateway" ~/.local/bin/
-bobby doctor
-```
-
-Pick `linux-x64`, `linux-arm64`, `macos-x64`, or `windows-x64` to match your
-host. Release archives are stripped on Unix; see the repository Releases page
-for every asset.
-
-## Manual bootstrap credential
-
-```bash
-./target/release/bobby init
-# or: bobby init --path ./bootstrap.env
-```
-
-Writes a dotenv with `AUTOMATION_RUNTIME_BOOTSTRAP_*` under the OS config dir
-(or `--path`). Prints the plaintext bearer once — map it to
-`AUTOMATION_RUNTIME_TOKEN` for clients. Never commit secrets into `config.toml`.
-
-`bobby install` and `bobby doctor --fix` normally create this file when needed;
-manual `bobby init` is intended for explicit credential rotation or custom paths.
+`bobby init` prints the bearer once. See [Authentication](../guides/auth.md).
 
 ## Next
 
-- [CLI reference](../guides/cli.md)
 - [Quickstart](quickstart.md)
-- [First browser session](first-session.md)
+- [CLI reference](../guides/cli.md)
