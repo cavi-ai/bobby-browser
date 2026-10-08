@@ -1570,6 +1570,7 @@ dependencies = [
  "url",
  "uuid",
  "worker-pool",
+ "zip",
 ]
 
 [[package]]
@@ -3524,6 +3525,7 @@ dependencies = [
  "cdp-gateway",
  "checkpoint-store",
  "chrono",
+ "companion-core",
  "companion-protocol",
  "config",
  "context-store",
@@ -3556,6 +3558,7 @@ dependencies = [
  "uuid",
  "worker-pool",
  "workflow-journal",
+ "zip",
 ]
 
 [[package]]

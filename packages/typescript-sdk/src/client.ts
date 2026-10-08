@@ -67,6 +67,9 @@ export interface BrowserRuntimeClientOptions {
    * Must be a positive safe integer ≤ 256 MiB. Defaults to 64 MiB.
    */
   maxArtifactBytes?: number;
+  /** Maximum JSON response body bytes before parsing, including errors and
+   * event batches. Positive safe integer ≤ 256 MiB; defaults to 64 MiB. */
+  maxJsonResponseBytes?: number;
 }
 
 /**
@@ -82,6 +85,7 @@ export class BrowserRuntimeClient {
   readonly #bearerToken: string;
   readonly #fetch: typeof fetch;
   readonly #maxArtifactBytes: number;
+  readonly #maxJsonResponseBytes: number;
   readonly #redact: RuntimeErrorRedactor;
 
   constructor(options: BrowserRuntimeClientOptions) {
@@ -92,6 +96,8 @@ export class BrowserRuntimeClient {
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#maxArtifactBytes = options.maxArtifactBytes ?? DEFAULT_MAX_ARTIFACT_BYTES;
     if (!Number.isSafeInteger(this.#maxArtifactBytes) || this.#maxArtifactBytes <= 0 || this.#maxArtifactBytes > MAX_SDK_ARTIFACT_BYTES) throw this.#protocol("maxArtifactBytes must be a positive safe integer within the SDK allocation cap");
+    this.#maxJsonResponseBytes = options.maxJsonResponseBytes ?? DEFAULT_MAX_ARTIFACT_BYTES;
+    if (!Number.isSafeInteger(this.#maxJsonResponseBytes) || this.#maxJsonResponseBytes <= 0 || this.#maxJsonResponseBytes > MAX_SDK_ARTIFACT_BYTES) throw this.#protocol("maxJsonResponseBytes must be a positive safe integer within the SDK allocation cap");
   }
 
   /** Node inspect helper — never prints the bearer token. */
@@ -310,8 +316,52 @@ export class BrowserRuntimeClient {
   }
 
   async #readJson(response: Response, scope: RequestScope): Promise<unknown> {
-    if (!JSON_CONTENT_TYPE.test(response.headers.get("content-type") ?? "")) throw this.#protocol("response content type must be application/json", response.status);
-    try { const value = await response.json(); if (scope.signal.aborted) throw scopeError(scope); return value; } catch (error) { if (scope.signal.aborted) throw scopeError(scope); throw this.#protocol("response body is not valid JSON", response.status); }
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let complete = false;
+    try {
+      assertScopeActive(scope);
+      if (!JSON_CONTENT_TYPE.test(response.headers.get("content-type") ?? "")) throw this.#protocol("response content type must be application/json", response.status);
+      const length = response.headers.get("content-length");
+      if (length !== null && !/^\d+$/.test(length)) throw this.#protocol("response content length is invalid", response.status);
+      if (length !== null && Number(length) > this.#maxJsonResponseBytes) throw this.#protocol("JSON response exceeds the client byte limit", response.status);
+      if (!response.body) throw this.#protocol("response body is not valid JSON", response.status);
+      reader = response.body.getReader();
+      let buffer = new Uint8Array(0);
+      let used = 0;
+      while (true) {
+        assertScopeActive(scope);
+        const next = await raceWithScope(reader.read(), scope);
+        if (next.done) break;
+        const needed = used + next.value.byteLength;
+        if (needed > this.#maxJsonResponseBytes) throw this.#protocol("JSON response exceeds the client byte limit", response.status);
+        if (needed > buffer.byteLength) {
+          const capacity = Math.min(this.#maxJsonResponseBytes, Math.max(needed, buffer.byteLength * 2, 4096));
+          const grown = new Uint8Array(capacity);
+          grown.set(buffer.subarray(0, used));
+          buffer = grown;
+        }
+        // Copy into bounded owned storage; retaining chunk views could retain
+        // arbitrarily large backing buffers from a custom fetch implementation.
+        buffer.set(next.value, used);
+        used = needed;
+      }
+      const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, used)));
+      assertScopeActive(scope);
+      complete = true;
+      return value;
+    } catch (error) {
+      assertScopeActive(scope);
+      if (error instanceof RuntimeClientError) throw error;
+      throw this.#protocol("response body is not valid JSON", response.status);
+    } finally {
+      if (!complete) {
+        // Cancellation cleanup must not extend the request deadline if a
+        // custom stream's cancellation hook never settles.
+        const cancellation = reader ? reader.cancel() : response.body?.cancel();
+        void cancellation?.catch(() => {});
+      }
+      reader?.releaseLock();
+    }
   }
 
   #responseError(status: number, payload: unknown): RuntimeClientError {
@@ -396,6 +446,11 @@ function delay(ms: number, scope: RequestScope): Promise<void> {
 function scopeError(scope: RequestScope): RuntimeClientError {
   const deadlineAbort = scope.signal.reason instanceof Error && scope.signal.reason.message === "deadline";
   return new RuntimeClientError({ kind: deadlineAbort ? "deadline" : "aborted", message: deadlineAbort ? "Request deadline exceeded" : "Request was aborted", redactor: scope.redact });
+}
+
+function assertScopeActive(scope: RequestScope): void {
+  if (scope.signal.aborted) throw scopeError(scope);
+  if (scope.deadline.getTime() <= Date.now()) throw new RuntimeClientError({ kind: "deadline", message: "Request deadline exceeded", redactor: scope.redact });
 }
 
 function artifactProtocolError(scope: RequestScope): RuntimeClientError {

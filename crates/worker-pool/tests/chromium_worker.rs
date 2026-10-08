@@ -3049,6 +3049,69 @@ async fn resolves_ambient_and_explicit_closed_shadow_roots() {
     worker.close().await.unwrap();
 }
 
+#[cfg(unix)]
+async fn shuts_down_a_stopped_owned_browser(terminate: bool) {
+    let root = tempfile::tempdir().unwrap();
+    let registry = root.path().join("registry");
+    let factory = ChromiumWorkerFactory::with_pid_registry_dir(
+        BrowserConfig {
+            executable: Some(chrome_executable()),
+            profiles_dir: root.path().join("profiles"),
+            downloads_dir: root.path().join("downloads"),
+            artifacts_dir: root.path().join("artifacts"),
+            headless: true,
+            ..BrowserConfig::default()
+        },
+        registry.clone(),
+    );
+    let session_id = SessionId::new();
+    let worker = factory.launch(&session_id).await.unwrap();
+    worker.open_page(PageId::new()).await.unwrap();
+    let registration = registry.join(format!("{}.pid", worker.worker_id().0));
+    let pid = worker_pool::process_registry::read_registered_pid(&registration).unwrap();
+    let pid = i32::try_from(pid).unwrap();
+    // The PID comes from this fixture's private registration of its own child.
+    // SIGSTOP makes the CDP peer unresponsive without crashing its connection.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        if terminate {
+            worker.terminate().await
+        } else {
+            worker.close().await
+        }
+    })
+    .await
+    .expect("shutdown must not wait indefinitely for a stopped CDP peer");
+    result.unwrap();
+    assert!(
+        !registration.exists(),
+        "confirmed shutdown must unregister the child"
+    );
+    assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH)
+    );
+    // Forced shutdown must release the profile, not just return to the caller.
+    let replacement = factory.launch(&session_id).await.unwrap();
+    replacement.open_page(PageId::new()).await.unwrap();
+    replacement.close().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn close_kills_and_reaps_an_unresponsive_owned_browser() {
+    shuts_down_a_stopped_owned_browser(false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn terminate_kills_and_reaps_an_unresponsive_owned_browser() {
+    shuts_down_a_stopped_owned_browser(true).await;
+}
+
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn evaluates_javascript_bounds_the_result_and_classifies_errors() {
@@ -3066,9 +3129,12 @@ async fn evaluates_javascript_bounds_the_result_and_classifies_errors() {
         max_js_result_bytes: 16,
         max_js_timeout_ms: 30_000,
     });
+    eprintln!("javascript evaluation fixture: launch");
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
+    eprintln!("javascript evaluation fixture: open page");
     worker.open_page(page_id.clone()).await.unwrap();
+    eprintln!("javascript evaluation fixture: navigate");
     worker
         .navigate(
             &page_id,
@@ -3082,6 +3148,7 @@ async fn evaluates_javascript_bounds_the_result_and_classifies_errors() {
         .unwrap();
 
     // A small result passes through untouched.
+    eprintln!("javascript evaluation fixture: small result");
     let evidence = worker
         .evaluate_javascript(
             &page_id,
@@ -3102,6 +3169,7 @@ async fn evaluates_javascript_bounds_the_result_and_classifies_errors() {
     }
 
     // A result larger than `max_js_result_bytes` (16 above) is truncated and flagged.
+    eprintln!("javascript evaluation fixture: bounded result");
     let evidence = worker
         .evaluate_javascript(
             &page_id,
@@ -3122,6 +3190,7 @@ async fn evaluates_javascript_bounds_the_result_and_classifies_errors() {
     }
 
     // await_promise=true resolves an awaited promise's value.
+    eprintln!("javascript evaluation fixture: resolved promise");
     let evidence = worker
         .evaluate_javascript(
             &page_id,
@@ -3142,6 +3211,7 @@ async fn evaluates_javascript_bounds_the_result_and_classifies_errors() {
     }
 
     // A JS exception surfaces as a failed (non-panicking) CommandError, not a panic.
+    eprintln!("javascript evaluation fixture: exception");
     let error = worker
         .evaluate_javascript(
             &page_id,
@@ -3156,6 +3226,7 @@ async fn evaluates_javascript_bounds_the_result_and_classifies_errors() {
     assert_eq!(error.code, ErrorCode::BrowserCommandFailed);
 
     // A near-zero timeout classifies as a deadline-exceeded, retryable error.
+    eprintln!("javascript evaluation fixture: unresolved promise deadline");
     let error = worker
         .evaluate_javascript(
             &page_id,
@@ -3170,7 +3241,9 @@ async fn evaluates_javascript_bounds_the_result_and_classifies_errors() {
     assert_eq!(error.code, ErrorCode::DeadlineExceeded);
     assert!(error.retryable);
 
+    eprintln!("javascript evaluation fixture: close");
     worker.close().await.unwrap();
+    eprintln!("javascript evaluation fixture: closed");
 }
 
 #[tokio::test]

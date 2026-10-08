@@ -83,6 +83,7 @@ fn connect_request() -> NativeConnectRequest {
             frames: true,
             native_dialogs: false,
         },
+        extension_build_id: None,
     }
 }
 
@@ -423,6 +424,68 @@ async fn a_descriptor_notice_without_a_new_owner_keeps_the_pairing_attempt() {
     assert_eq!(message["kind"], "paired", "{message}");
     drop(extension_stream);
     host.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn the_native_host_forwards_the_extension_build_and_relays_reload() {
+    const BUILD: &str = "0123456789abcdef0123456789abcdef";
+    let server = CompanionServer::bind_loopback(CompanionServerConfig {
+        bind_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+        pairing_code_ttl: Duration::from_secs(60),
+        attachment_ttl: Duration::from_secs(300),
+    })
+    .await
+    .unwrap();
+    let config = NativeHostConfig::new(
+        format!("ws://{}/v1/companion", server.local_addr()),
+        server.registry().issue_pairing_code().await,
+    );
+    let mut connect_request = connect_request();
+    connect_request.extension_build_id = Some(BUILD.into());
+    let profile_id = connect_request.profile_id.clone();
+    let (host_stream, mut extension_stream) = duplex(2 * MAX_NATIVE_MESSAGE_BYTES);
+    let (host_reader, host_writer) = split(host_stream);
+    let host = tokio::spawn(run_native_host(host_reader, host_writer, config));
+    write_native_message(
+        &mut extension_stream,
+        &json!({"kind": "pair", "input": connect_request}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        read_native_message(&mut extension_stream)
+            .await
+            .unwrap()
+            .unwrap()["kind"],
+        "paired"
+    );
+
+    let connection = server.extension_connection(&profile_id).await.unwrap();
+    assert_eq!(connection.build_id(), Some(BUILD));
+    server
+        .send_request(&profile_id, CompanionRequest::Reload)
+        .await
+        .unwrap();
+    assert_eq!(
+        read_native_message(&mut extension_stream)
+            .await
+            .unwrap()
+            .unwrap(),
+        json!({"kind": "reload"})
+    );
+
+    drop(extension_stream);
+    host.await.unwrap().unwrap();
+}
+
+#[test]
+fn a_malformed_extension_build_is_refused_by_the_native_host() {
+    let config = NativeHostConfig::new("ws://127.0.0.1:9/v1/companion".into(), "a".repeat(32));
+    let mut request = connect_request();
+    request.extension_build_id = Some("@@BOBBY_EXTENSION_BUILD_ID@@".into());
+    assert!(config.pair_request(request.clone()).is_err());
+    request.extension_build_id = Some("0123456789abcdef0123456789abcdef".into());
+    assert!(config.pair_request(request).is_ok());
 }
 
 #[tokio::test]

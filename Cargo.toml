@@ -104,6 +104,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 url = "2"
 uuid = { version = "1", features = ["serde", "v4", "macro-diagnostics"] }
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 # Internal workspace crates
 acp-client = { path = "crates/acp-client" }

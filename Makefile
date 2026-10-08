@@ -175,7 +175,7 @@ endif
 # suite keeps a fresh one), and headless (0 under xvfb).
 TEST_BROWSERS_PROFILE ?= $(TEST_BROWSERS_DIR)/firefox-profile
 TEST_BROWSERS_HEADLESS ?= 1
-TEST_BROWSERS_FIREFOX_SUITES ?= --test site_regressions_firefox --test journeys_firefox
+TEST_BROWSERS_FIREFOX_SUITES ?= --test site_regressions_firefox --test journeys_firefox --test firefox_extension_lifecycle
 
 test-browsers-setup:
 	@$(REPO_ROOT)scripts/dev/test-browsers-setup.sh

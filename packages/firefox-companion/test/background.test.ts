@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -2019,4 +2021,95 @@ test("a frame snapshot prunes the subframes of a bound tab but not the bound pag
   await background.reconcileTab(34);
 
   assert.deepEqual(discoveredTargetIds(transport), [targetId(34, 0)]);
+});
+
+test("the pair request reports the extension build id only when stamped", () => {
+  const buildId = "fedcba9876543210fedcba9876543210";
+  const stamped = new FakeTransport();
+  new CompanionBackground({
+    transport: stamped,
+    async sendTabMessage() {
+      return {};
+    },
+    async navigateTab() {},
+  }).connect({ ...CONNECT_OPTIONS, extensionBuildId: buildId });
+  const unstamped = new FakeTransport();
+  new CompanionBackground({
+    transport: unstamped,
+    async sendTabMessage() {
+      return {};
+    },
+    async navigateTab() {},
+  }).connect(CONNECT_OPTIONS);
+
+  const input = (transport: FakeTransport) =>
+    (transport.sent[0] as { kind: string; input: Record<string, unknown> }).input;
+  assert.equal(input(stamped).extensionBuildId, buildId);
+  assert.equal("extensionBuildId" in input(unstamped), false);
+  assert.throws(
+    () =>
+      new CompanionBackground({
+        transport: new FakeTransport(),
+        async sendTabMessage() {
+          return {};
+        },
+        async navigateTab() {},
+      }).connect({ ...CONNECT_OPTIONS, extensionBuildId: "@@BOBBY_EXTENSION_BUILD_ID@@" }),
+    /connect options are invalid/,
+  );
+});
+
+test("a reload request restarts the extension only once paired", async () => {
+  const transport = new FakeTransport();
+  let reloads = 0;
+  const background = new CompanionBackground({
+    transport,
+    async sendTabMessage() {
+      return {};
+    },
+    async navigateTab() {},
+    reloadExtension: () => {
+      reloads += 1;
+    },
+    now: () => 1_000,
+  });
+  background.connect(CONNECT_OPTIONS);
+
+  await background.receive({ kind: "reload" });
+  assert.equal(reloads, 0);
+
+  await pair(background);
+  await background.receive({ kind: "reload" });
+  assert.equal(reloads, 1);
+});
+
+test("the build id follows the bundle contents and is stamped into background.js", async () => {
+  const stamp = fileURLToPath(new URL("../stamp-build-id.mjs", import.meta.url));
+  const build = async (content: string, scope: string): Promise<string> => {
+    const dist = await mkdtemp(join(tmpdir(), "bobby-stamp-"));
+    try {
+      await writeFile(join(dist, "background.js"), 'const id = "@@BOBBY_EXTENSION_BUILD_ID@@";\n');
+      await writeFile(join(dist, "content.js"), content);
+      await writeFile(join(dist, "bobby-scope.json"), scope);
+      execFileSync(process.execPath, [stamp, dist]);
+      const { buildId } = JSON.parse(await readFile(join(dist, "build-id.json"), "utf8")) as {
+        buildId: string;
+      };
+      assert.match(buildId, /^[0-9a-f]{32}$/);
+      assert.equal(
+        await readFile(join(dist, "background.js"), "utf8"),
+        `const id = "${buildId}";\n`,
+      );
+      return buildId;
+    } finally {
+      await rm(dist, { recursive: true, force: true });
+    }
+  };
+
+  const first = await build("one", '{"nativeHostName":"com.bobby_browser.companion"}');
+  assert.equal(
+    await build("one", '{"nativeHostName":"com.bobby_browser.companion.scope_0123456789abcdef"}'),
+    first,
+  );
+  assert.notEqual(await build("two", '{"nativeHostName":"com.bobby_browser.companion"}'), first);
 });
