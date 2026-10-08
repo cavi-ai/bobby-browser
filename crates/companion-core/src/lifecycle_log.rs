@@ -11,6 +11,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// A log past this size moves to `<path>.1` when the next host starts.
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
 
+/// Move a log past `MAX_LOG_BYTES` to `<path>.1`, replacing the previous one.
+pub fn rotate_oversized_log(path: &Path) {
+    if std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > MAX_LOG_BYTES) {
+        let mut rotated = path.as_os_str().to_owned();
+        rotated.push(".1");
+        let _ = std::fs::rename(path, rotated);
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct LifecycleLog {
     file: Option<Mutex<File>>,
@@ -23,11 +32,7 @@ impl LifecycleLog {
 
     /// A log that cannot be opened is disabled: logging never stops the host.
     pub fn open(path: &Path) -> Self {
-        if std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > MAX_LOG_BYTES) {
-            let mut rotated = path.as_os_str().to_owned();
-            rotated.push(".1");
-            let _ = std::fs::rename(path, rotated);
-        }
+        rotate_oversized_log(path);
         let mut options = OpenOptions::new();
         options.create(true).append(true);
         #[cfg(unix)]
