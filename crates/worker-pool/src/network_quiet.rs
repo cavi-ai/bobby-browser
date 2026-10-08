@@ -145,15 +145,20 @@ pub fn counted_in_flight(
     (count, excluded.into_iter().collect())
 }
 
-/// Script fetches still in flight that have not reached the long-lived
-/// threshold. A page's handlers are not attached until its scripts run, so a
-/// settled page has none. Lost tracking is not counted: it names no script.
-pub fn pending_scripts(state: &NetworkQuietState, now: Instant) -> usize {
+/// Scripts in flight under the long-lived threshold, and fetch/XHR open for
+/// less than the settle cap; a longer fetch is a stream or a poll.
+pub fn pending_page_loads(state: &NetworkQuietState, now: Instant) -> usize {
     state
         .requests()
         .filter(|request| {
-            request.resource_type == NetworkResourceType::Script
-                && now.duration_since(request.started_at) < LONG_LIVED_OPEN_THRESHOLD
+            let open = now.duration_since(request.started_at);
+            match request.resource_type {
+                NetworkResourceType::Script => open < LONG_LIVED_OPEN_THRESHOLD,
+                NetworkResourceType::Fetch | NetworkResourceType::Xhr => {
+                    open < crate::navigation_settle::NAVIGATION_SETTLE_CAP
+                }
+                _ => false,
+            }
         })
         .count()
 }
@@ -295,8 +300,8 @@ impl NetworkQuietTracker {
         counted_in_flight(&state, filters, Instant::now())
     }
 
-    pub async fn pending_scripts(&self) -> usize {
-        pending_scripts(&*self.state.lock().await, Instant::now())
+    pub async fn pending_page_loads(&self) -> usize {
+        pending_page_loads(&*self.state.lock().await, Instant::now())
     }
 }
 
@@ -434,6 +439,31 @@ mod tests {
         let (count, excluded) = counted_in_flight(&state, &filters, now);
         assert_eq!(count, 1);
         assert_eq!(excluded, vec!["resourceType:Image".to_owned()]);
+    }
+
+    #[test]
+    fn page_loads_count_scripts_and_recent_fetches_only() {
+        let now = Instant::now();
+        let stream = now - crate::navigation_settle::NAVIGATION_SETTLE_CAP;
+        let state = state_with(vec![
+            request(
+                "https://a/app.js",
+                NetworkResourceType::Script,
+                stream,
+                false,
+            ),
+            request("https://a/data", NetworkResourceType::Fetch, now, false),
+            request("https://a/list", NetworkResourceType::Xhr, now, false),
+            request(
+                "https://a/stream",
+                NetworkResourceType::Fetch,
+                stream,
+                false,
+            ),
+            request("https://a/img.png", NetworkResourceType::Image, now, false),
+            request("wss://a/socket", NetworkResourceType::WebSocket, now, true),
+        ]);
+        assert_eq!(pending_page_loads(&state, now), 3);
     }
 
     #[test]
