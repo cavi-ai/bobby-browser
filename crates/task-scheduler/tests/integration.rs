@@ -1422,6 +1422,39 @@ fn inspect_missing_scheduler_journal_is_empty_health() {
 }
 
 #[test]
+fn inspection_preserves_large_records_blank_lines_and_damaged_tail() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("jobs.jsonl");
+    let job = Job::new(
+        "large".into(),
+        serde_json::json!({ "text": "x".repeat(20_000) }),
+        JobPriority::Normal,
+    );
+    let mut record = task_scheduler::JournalRecord {
+        schema_version: 1,
+        sequence: 0,
+        recorded_at: chrono::Utc::now(),
+        event: JobEvent::Submitted,
+        job,
+    };
+    let mut bytes = b"\n\n".to_vec();
+    serde_json::to_writer(&mut bytes, &record).unwrap();
+    bytes.extend_from_slice(b"\n\n");
+    record.schema_version = u16::MAX;
+    serde_json::to_writer(&mut bytes, &record).unwrap();
+    bytes.extend_from_slice(b"\n\xff\n{\"schemaVersion\":1");
+    std::fs::write(&path, &bytes).unwrap();
+
+    let health = runtime().block_on(JournalJobStore::inspect(&path)).unwrap();
+    assert!(health.exists);
+    assert_eq!(health.bytes, bytes.len() as u64);
+    assert_eq!(health.records, 3);
+    assert_eq!(health.incompatible_records, 2);
+    assert!(health.torn_tail);
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
+
+#[test]
 fn cancel_before_handler_first_poll_releases_active_slot() {
     use std::future::Future;
     use std::task::Poll;
