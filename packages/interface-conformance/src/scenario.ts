@@ -64,7 +64,7 @@ export async function runCanonicalScenario(
   if (recovery.checkpointId !== checkpoint.checkpointId || recovery.boundary !== checkpoint.boundary)
     throw new Error("recovery checkpoint lineage differs from the persisted checkpoint");
   const eventBatch = await driver.readEvents();
-  // Persistent benchmark fixtures intentionally accumulate earlier runs. The
+  // Persistent fixtures intentionally accumulate earlier runs. The
   // proof for this invocation is the most recent complete canonical suffix.
   const currentEvents = eventBatch.events.slice(-CANONICAL_EVENT_ORDER.length);
   const eventOrdering = currentEvents.map(event => event.kind);

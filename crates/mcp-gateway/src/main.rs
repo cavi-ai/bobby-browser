@@ -175,7 +175,7 @@ async fn run() -> anyhow::Result<()> {
 /// `BOBBY_METRICS_SNAPSHOT_PATH` asks the gateway to dump the operational
 /// metrics snapshot to a file when the host closes the stdio session. The
 /// snapshot is counters and histograms only — never prompts, values, or
-/// URLs — so benchmark harnesses and operators can read it safely. A dump
+/// URLs — so operators and tooling can read it safely. A dump
 /// failure is logged and never fails the shutdown.
 fn write_metrics_snapshot_if_configured(metrics: &observability::OperationalMetrics) {
     let Some(path) = std::env::var_os("BOBBY_METRICS_SNAPSHOT_PATH") else {

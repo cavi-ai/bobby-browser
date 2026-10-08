@@ -953,17 +953,12 @@ async fn returned_handle_drives_primitives_intents_context_and_network_through_n
     );
 }
 
-/// The agent-observed failure this closes: an agent calls a
-/// `WORKFLOW_SCOPE_TOOLS` tool right after `workflow_start` but forgets the
-/// handle entirely (no `workflowHandle`, no explicit ids). With exactly one
-/// live binding on the connection, the call defaults to it instead of
-/// bouncing off a schema rejection -- dispatched all the way to the fake
-/// runtime, which fails this specific call on its own terms (no real target
-/// named "Email" exists on the fresh page `workflow_start` opened, so
-/// resolution reports `targetNotFound`). That failure is the proof: the
-/// call was never rejected for a missing scope, and the outcome -- whatever
-/// its status -- names the handle defaulting used, so the agent can see
-/// what happened without reading `error.data`.
+/// A `WORKFLOW_SCOPE_TOOLS` call with no `workflowHandle` and no explicit ids
+/// defaults to the connection's only live binding instead of bouncing off a
+/// schema rejection. It dispatches to the fake runtime, which fails it with
+/// `targetNotFound` (no target named "Email" exists on the fresh page): the
+/// call was never rejected for a missing scope, and the outcome names the
+/// handle defaulting used.
 #[tokio::test]
 async fn scope_less_intent_complete_form_defaults_to_the_only_live_handle_and_reports_it() {
     let live = live_with_capabilities(Capability::ALL.to_vec()).await;
@@ -2737,13 +2732,10 @@ async fn page_activate_with_handle_and_page_id_activates_and_rebinds() {
     assert_eq!(page_id, start_outcome["pageId"], "{page_id}");
 }
 
-/// C3 (`fix/invalid-params-shapes`): the six `Invalid params` rejections in
-/// the paid-for benchmark transcripts were `intent_follow` calls with
-/// `purpose` + `hints` and no `expectedDestination`/`expectedState` at all
-/// (dismissing a notification, accepting a cookie banner). CHANGELOG 0.15.0
-/// documents the contract as "exactly one of the two is required", so this
-/// is refused, not defaulted -- with the fix named verbatim in
-/// `error.message` rather than the generic `malformedArguments` text.
+/// `intent_follow` with `purpose` + `hints` and neither
+/// `expectedDestination` nor `expectedState` is refused, not defaulted, with
+/// the fix named in `error.message` rather than the generic
+/// `malformedArguments` text.
 #[tokio::test]
 async fn intent_follow_without_expected_state_names_the_fix() {
     let live = live_with_capabilities(vec![

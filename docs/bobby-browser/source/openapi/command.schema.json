@@ -1952,7 +1952,7 @@
           "default": null
         },
         "accessibleName": {
-          "description": "Accessible name of the control, matched exactly. Accepts an\n`a11y_snapshot` node's `target` verbatim, which carries\n`{role, accessibleName, ordinal}` -- before this existed the field was\ndropped silently and the intent resolved on role and ordinal alone.\nEquivalent to `near_text: Exact`; setting both to different values is\nrefused rather than resolved.",
+          "description": "Accessible name of the control, matched exactly. Accepts an\n`a11y_snapshot` node's `target` verbatim, which carries\n`{role, accessibleName, ordinal}`.\nEquivalent to `near_text: Exact`; setting both to different values is\nrefused rather than resolved.",
           "type": [
             "string",
             "null"

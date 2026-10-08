@@ -20,12 +20,9 @@ fn chrome_config(root: &std::path::Path) -> config::BrowserConfig {
     }
 }
 
-/// Regression for the CreepJS screen/media-query leak: the browser's native
-/// metrics (screen.width, device-width media queries, inner/outer window
-/// bounds) must agree with the spoofed fingerprint profile. A default 800x600
-/// headless window against a 1920x1080 spoofed screen was flagged as
-/// "like headless"; the profile must also keep innerWidth != screen.width
-/// (hasVvpScreenRes), pdfViewerEnabled true, and navigator.share present.
+/// The browser's native metrics (screen.width, device-width media queries,
+/// inner/outer window bounds) agree with the spoofed fingerprint profile, with
+/// innerWidth != screen.width, pdfViewerEnabled true, and navigator.share present.
 #[tokio::test]
 #[ignore = "requires Chrome; no network needed"]
 async fn fingerprint_screen_metrics_are_consistent_across_channels() {

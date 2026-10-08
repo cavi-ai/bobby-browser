@@ -385,8 +385,8 @@ async fn per_entity_urls_share_one_page_pattern() {
 
 #[tokio::test]
 async fn a_runtime_without_durable_profile_has_no_promotion_sink() {
-    // C0-5: Chromium sessions are built without a promotion handle, so the
-    // executor's promote hook is a no-op for them by construction.
+    // Chromium sessions are built without a promotion handle, so the
+    // executor's promote hook is a no-op for them.
     let runtime = page_runtime::PageRuntime::default();
     assert!(runtime.context_promotion().is_none());
     let temp = tempfile::tempdir().unwrap();

@@ -53,7 +53,7 @@ fn reported(result: &Value, key: &str) -> Vec<String> {
     found.into_iter().map(str::to_owned).collect()
 }
 
-/// J1: a protected page redirects to sign-in, sign-in script-redirects back
+/// A protected page redirects to sign-in, sign-in script-redirects back
 /// after a delay, and the app renders its content late. The agent is told
 /// about the app, not the sign-in page, and sees the late content. A page
 /// that stays on sign-in is reported as sign-in and offers no app controls.
@@ -162,7 +162,7 @@ pub async fn j1_sign_in_redirect_then_app(rig: &Rig, _dirs: &Dirs) {
     stuck.close().await;
 }
 
-/// J2: type into a placeholder-named search box, submit with Enter, follow
+/// Type into a placeholder-named search box, submit with Enter, follow
 /// one of two identically titled results by ordinal, with "password" in
 /// the page text. An ambiguous follow is refused instead of guessed.
 pub async fn j2_search_and_follow_result(rig: &Rig, _dirs: &Dirs) {
@@ -315,7 +315,7 @@ fn order_form(error: bool) -> String {
     )
 }
 
-/// J3: a form with a conditional field behind a button, a submit button
+/// A form with a conditional field behind a button, a submit button
 /// that disables itself, and a server-side rejection on the first submit.
 /// The agent is told the submit was rejected, corrects the field and the
 /// second submit succeeds.
@@ -389,7 +389,7 @@ pub async fn j3_form_validation_then_success(rig: &Rig, _dirs: &Dirs) {
     live.close().await;
 }
 
-/// J4: files go into a hidden input behind a styled button and into a
+/// Files go into a hidden input behind a styled button and into a
 /// visible one; the page reads the bytes and posts them. A path outside
 /// the configured upload roots is refused as `policyDenied` with a repair.
 pub async fn j4_upload_hidden_and_visible(rig: &Rig, dirs: &Dirs) {
@@ -503,7 +503,7 @@ pub async fn j4_upload_hidden_and_visible(rig: &Rig, dirs: &Dirs) {
     live.close().await;
 }
 
-/// J5: a window.open popup is listed, acted in and closed, then the agent
+/// A window.open popup is listed, acted in and closed, then the agent
 /// returns to the opener and targets a control inside a same-origin iframe
 /// from the snapshot. Acting on the closed popup fails instead of landing
 /// on the opener.
@@ -605,7 +605,7 @@ pub async fn j5_popup_and_frame(rig: &Rig, _dirs: &Dirs) {
     live.close().await;
 }
 
-/// J6: hop between two origins by link and by navigate, with a snapshot
+/// Hop between two origins by link and by navigate, with a snapshot
 /// after every hop, then close the session and start a new one.
 pub async fn j6_cross_site_navigation_recovery(rig: &Rig, _dirs: &Dirs) {
     let b = FixtureSite::spawn(vec![(
@@ -682,7 +682,7 @@ fn connected_native_host_pid() -> Option<u64> {
         .and_then(|event| event["pid"].as_u64())
 }
 
-/// J7 (Firefox): the native host process is killed mid-session. Firefox
+/// Firefox: the native host process is killed mid-session. Firefox
 /// respawns it, it reconnects with the stored credential, and the same
 /// session's next snapshot succeeds without the agent recreating anything;
 /// a new session also starts.

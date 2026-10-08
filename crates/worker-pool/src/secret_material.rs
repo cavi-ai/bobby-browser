@@ -253,9 +253,34 @@ pub fn contains_secret_material(value: &str) -> bool {
         || (!is_http_url(value) && has_long_credential_run(&chars))
 }
 
+/// A page title as evidence reports it, on every engine and path: a title
+/// that discloses a credential is withheld whole.
+pub fn page_title_evidence(title: String) -> String {
+    if contains_secret_material(&title) {
+        "[redacted]".to_owned()
+    } else {
+        title
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_title_evidence_withholds_only_disclosing_titles() {
+        assert_eq!(
+            page_title_evidence("Search results".to_owned()),
+            "Search results"
+        );
+        assert_eq!(
+            page_title_evidence("Reset your password | Example".to_owned()),
+            "Reset your password | Example"
+        );
+        for value in fixture().secret {
+            assert_eq!(page_title_evidence(value.clone()), "[redacted]", "{value}");
+        }
+    }
 
     #[derive(serde::Deserialize)]
     struct Fixture {

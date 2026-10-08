@@ -718,20 +718,19 @@ fn objects_of_kind<'a>(value: &'a Value, kind: &str, out: &mut Vec<&'a Value>) {
     }
 }
 
-/// L7, linkedin.com/feed: `type_text` with "rust engineer\n" into the
-/// header search box reported a navigation to the results path without its
-/// query and with the previous page's title. Enter pushes a URL with a query
-/// and the page keeps changing until the results and the new title land.
+/// Enter in a single-line input that pushState-navigates to a URL with a
+/// query and renders later: type_text evidence reports only the settled URL
+/// and title, the ones page_list shows.
 pub async fn type_text_enter_reports_the_settled_page(rig: &Rig) {
     let home = page(
         "Home",
-        r#"<header><input id="q" aria-label="Search"></header><main id="main"><h1>Home feed</h1></main>
+        r#"<header><input id="q" aria-label="Search"></header><main id="main"><h1>Home</h1></main>
         <script>
             document.getElementById("q").addEventListener("keydown", (event) => {
               if (event.key !== "Enter") return;
               event.preventDefault();
               const value = event.target.value;
-              history.pushState({}, "", "/search/results/?keywords=" + encodeURIComponent(value) + "&origin=HEADER");
+              history.pushState({}, "", "/results?q=" + encodeURIComponent(value) + "&from=header");
               const main = document.getElementById("main");
               main.innerHTML = "<p id='tick'>loading</p>";
               let ticks = 0;
@@ -739,7 +738,7 @@ pub async fn type_text_enter_reports_the_settled_page(rig: &Rig) {
                 document.getElementById("tick").textContent = "loading " + ++ticks;
                 if (ticks < 25) return;
                 clearInterval(loader);
-                document.title = "Search results";
+                document.title = "Results";
                 main.innerHTML = "<h1>Results</h1>";
               }, 100);
             });
@@ -751,32 +750,83 @@ pub async fn type_text_enter_reports_the_settled_page(rig: &Rig) {
         .call(
             "type_text",
             json!({"target":{"role":"textbox","accessibleName":"Search"},
-                   "value":"rust engineer\n","clearFirst":true}),
+                   "value":"query terms\n","clearFirst":true}),
         )
         .await;
     assert_eq!(typed["status"], "completed", "type_text: {typed}");
     let mut navigations = Vec::new();
     objects_of_kind(&typed, "navigation", &mut navigations);
-    let expected_url = site.url("/search/results/?keywords=rust%20engineer&origin=HEADER");
+    let expected_url = site.url("/results?q=query%20terms&from=header");
     assert!(
-        navigations.iter().any(|item| item["url"] == expected_url.as_str()
-            && item["title"] == "Search results"),
-        "type_text did not report the settled page {expected_url} titled \"Search results\": {typed}"
+        navigations
+            .iter()
+            .any(|item| item["url"] == expected_url.as_str() && item["title"] == "Results"),
+        "type_text did not report the settled page {expected_url} titled \"Results\": {typed}"
     );
+    // One call reports one page: every page field in the evidence is the
+    // page `page_list` shows.
+    let (listed_url, listed_title) = listed_page(&live).await;
+    for (key, listed) in [("url", &listed_url), ("title", &listed_title)] {
+        let mut reported = Vec::new();
+        strings_under(&typed["evidence"], key, &mut reported);
+        for value in reported.into_iter().filter(|value| !value.is_empty()) {
+            assert_eq!(
+                value,
+                listed.as_str(),
+                "type_text evidence {key} is not the page page_list shows: {typed}"
+            );
+        }
+    }
     live.close().await;
 }
 
-/// L8, linkedin.com/jobs: `intent_follow` whose link pushes the new URL
-/// and renders the page later completed as soon as the URL matched, and its
-/// `postState` was the loading skeleton.
+/// The URL and title `page_list` reports for the live page.
+async fn listed_page(live: &Live<'_>) -> (String, String) {
+    let listed = live
+        .rig
+        .tool("page_list", json!({"sessionId":live.session_id}))
+        .await;
+    let mut pages = Vec::new();
+    objects_with_page_id(&listed, &live.page_id, &mut pages);
+    let page = pages
+        .into_iter()
+        .find(|page| page.get("url").is_some())
+        .unwrap_or_else(|| panic!("page_list does not list the page: {listed}"));
+    (
+        page["url"].as_str().unwrap_or_default().to_owned(),
+        page["title"].as_str().unwrap_or_default().to_owned(),
+    )
+}
+
+fn objects_with_page_id<'a>(value: &'a Value, page_id: &Value, out: &mut Vec<&'a Value>) {
+    match value {
+        Value::Object(map) => {
+            if map.get("pageId") == Some(page_id) {
+                out.push(value);
+            }
+            for child in map.values() {
+                objects_with_page_id(child, page_id, out);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                objects_with_page_id(item, page_id, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A link that pushState-navigates and renders its content in later ticks:
+/// intent_follow completes once the page settles, so postState is rendered.
 pub async fn intent_follow_post_state_shows_the_settled_page(rig: &Rig) {
-    let jobs = page(
-        "Jobs",
-        r#"<main id="main"><a id="go" href="/jobs/collections/recommended">Recommended jobs</a></main>
+    let start = page(
+        "Start",
+        r#"<main id="main"><a id="go" href="/items/list">Item list</a></main>
         <script>
             document.getElementById("go").addEventListener("click", (event) => {
               event.preventDefault();
-              history.pushState({}, "", "/jobs/collections/recommended");
+              history.pushState({}, "", "/items/list");
               const main = document.getElementById("main");
               main.innerHTML = "<div role='presentation'></div>".repeat(19);
               let ticks = 0;
@@ -784,22 +834,22 @@ pub async fn intent_follow_post_state_shows_the_settled_page(rig: &Rig) {
                 main.firstChild.setAttribute("data-tick", String(++ticks));
                 if (ticks < 15) return;
                 clearInterval(loader);
-                document.title = "Recommended";
-                main.innerHTML = "<h1>Recommended jobs</h1><ul><li><a href='/jobs/view/1'>Rust Engineer</a></li></ul>";
+                document.title = "Item list";
+                main.innerHTML = "<h1>Item list</h1><ul><li><a href='/items/1'>Item 1</a></li></ul>";
               }, 100);
             });
         </script>"#,
     );
-    let site = FixtureSite::spawn(vec![("/jobs", Route::Html(jobs))]).await;
-    let live = Live::open(rig, &site.url("/jobs")).await;
+    let site = FixtureSite::spawn(vec![("/start", Route::Html(start))]).await;
+    let live = Live::open(rig, &site.url("/start")).await;
     let followed = live
         .call(
             "intent_follow",
             json!({
-                "purpose":"Open the recommended jobs",
-                "hints":{"role":"link","accessibleName":"Recommended jobs"},
+                "purpose":"Open the item list",
+                "hints":{"role":"link","accessibleName":"Item list"},
                 "expectedState":{
-                    "condition":{"kind":"url","matcher":{"kind":"contains","value":"/jobs/"}},
+                    "condition":{"kind":"url","matcher":{"kind":"contains","value":"/items/"}},
                     "timeoutMs":15000
                 }
             }),
@@ -807,15 +857,14 @@ pub async fn intent_follow_post_state_shows_the_settled_page(rig: &Rig) {
         .await;
     assert_eq!(followed["status"], "completed", "intent_follow: {followed}");
     assert!(
-        find_node(&followed["postState"], "heading", Some("Recommended jobs")).is_some(),
+        find_node(&followed["postState"], "heading", Some("Item list")).is_some(),
         "intent_follow postState is not the rendered page: {followed}"
     );
     live.close().await;
 }
 
-/// L9, linkedin.com/search: `intent_follow` on "Show all" right after the
-/// results started loading failed with targetNotFound at once; the same
-/// target clicked seconds later. Each action waits for its target to appear.
+/// Controls rendered a few seconds after load: every action and intent waits
+/// for its target to appear instead of failing targetNotFound at once.
 pub async fn actions_wait_for_a_late_target(rig: &Rig) {
     let late = page(
         "Late",
@@ -826,7 +875,7 @@ pub async fn actions_wait_for_a_late_target(rig: &Rig) {
                 "<button id='late-button'>Late button</button>" +
                 "<input aria-label='Late field'>" +
                 "<label><input type='checkbox'> Late option</label>" +
-                "<a href='/jobs/all'>Show all</a>";
+                "<a href='/more'>More results</a>";
               document.getElementById("late-button").addEventListener("click", () => {
                 document.getElementById("status").textContent = "clicked";
               });
@@ -836,12 +885,12 @@ pub async fn actions_wait_for_a_late_target(rig: &Rig) {
     let site = FixtureSite::spawn(vec![
         ("/late", Route::Html(late)),
         (
-            "/jobs/all",
-            Route::Html(page("All jobs", "<main><h1>All jobs</h1></main>")),
+            "/more",
+            Route::Html(page("More", "<main><h1>More results</h1></main>")),
         ),
     ])
     .await;
-    let live = Live::open(rig, &site.url("/jobs/all")).await;
+    let live = Live::open(rig, &site.url("/more")).await;
     let actions = [
         (
             "click",
@@ -860,11 +909,30 @@ pub async fn actions_wait_for_a_late_target(rig: &Rig) {
         (
             "intent_follow",
             json!({
-                "purpose":"Show every job",
-                "hints":{"role":"link","accessibleName":"Show all"},
+                "purpose":"Show more results",
+                "hints":{"role":"link","accessibleName":"More results"},
                 "expectedState":{
-                    "condition":{"kind":"url","matcher":{"kind":"contains","value":"/jobs/all"}},
+                    "condition":{"kind":"url","matcher":{"kind":"contains","value":"/more"}},
                     "timeoutMs":15000
+                }
+            }),
+        ),
+        (
+            "intent_complete_form",
+            json!({"purpose":"Fill the late field",
+                   "fields":[{"name":"Late field","purpose":"late field",
+                              "value":{"kind":"setText","value":"late text"},
+                              "hints":{"role":"textbox"}}]}),
+        ),
+        (
+            "intent_submit_and_verify",
+            json!({
+                "purpose":"Press the late button",
+                "hints":{"role":"button","accessibleName":"Late button"},
+                "expectedState":{
+                    "condition":{"kind":"text","target":{"css":"#status"},
+                                 "matcher":{"kind":"contains","value":"clicked"}},
+                    "timeoutMs":5000
                 }
             }),
         ),
@@ -883,6 +951,192 @@ pub async fn actions_wait_for_a_late_target(rig: &Rig) {
     assert!(
         failures.is_empty(),
         "actions did not wait for their late target: {failures:#?}"
+    );
+    live.close().await;
+}
+
+/// The one wait for a target that never appears: each action fails with
+/// targetNotFound after the 5 s target wait, not sooner and not after
+/// stacked per-tool retries.
+pub async fn actions_fail_a_missing_target_within_one_bound(rig: &Rig) {
+    let site = FixtureSite::spawn(vec![(
+        "/empty",
+        Route::Html(page("Empty", "<main><h1>Nothing here</h1></main>")),
+    )])
+    .await;
+    let live = Live::open(rig, &site.url("/empty")).await;
+    let actions = [
+        (
+            "click",
+            json!({"target":{"role":"button","accessibleName":"Never"}}),
+        ),
+        (
+            "type_text",
+            json!({"target":{"role":"textbox","accessibleName":"Never"},"value":"x"}),
+        ),
+        (
+            "control_action",
+            json!({"target":{"role":"checkbox","accessibleName":"Never"},
+                   "action":{"kind":"setChecked","checked":true}}),
+        ),
+        (
+            "intent_follow",
+            json!({
+                "purpose":"Open the missing link",
+                "hints":{"role":"link","accessibleName":"Never"},
+                "expectedState":{
+                    "condition":{"kind":"url","matcher":{"kind":"contains","value":"/never"}},
+                    "timeoutMs":5000
+                }
+            }),
+        ),
+        (
+            "intent_complete_form",
+            json!({"purpose":"Fill the missing field",
+                   "fields":[{"name":"Never","purpose":"missing field",
+                              "value":{"kind":"setText","value":"x"},
+                              "hints":{"role":"textbox"}}]}),
+        ),
+        (
+            "intent_submit_and_verify",
+            json!({
+                "purpose":"Press the missing button",
+                "hints":{"role":"button","accessibleName":"Never"},
+                "expectedState":{
+                    "condition":{"kind":"url","matcher":{"kind":"contains","value":"/never"}},
+                    "timeoutMs":5000
+                }
+            }),
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (tool, arguments) in actions {
+        let started = std::time::Instant::now();
+        let acted = live.call(tool, arguments).await;
+        let elapsed = started.elapsed();
+        if acted["error"]["code"] != "targetNotFound" {
+            failures.push(format!("{tool} did not fail targetNotFound: {acted}"));
+        } else if elapsed < std::time::Duration::from_millis(4_500)
+            || elapsed > std::time::Duration::from_millis(8_000)
+        {
+            failures.push(format!("{tool} failed after {elapsed:?}, not one 5 s wait"));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+    live.close().await;
+}
+
+/// A form whose submit handler comes from a script fetched after the load
+/// event (which a slow script holds back): navigate returns once that script
+/// has run, so an immediate Enter hits the handler, not a native submit.
+pub async fn navigate_waits_for_late_scripts(rig: &Rig) {
+    let search = page(
+        "Search",
+        r#"<main><form action="/native" method="get"><input aria-label="Search" name="q"></form>
+        <p role="status" id="status">waiting</p></main>
+        <script async src="/slow-analytics.js"></script>
+        <script>
+            window.addEventListener("load", () => {
+              const app = document.createElement("script");
+              app.src = "/app.js";
+              document.head.appendChild(app);
+            });
+        </script>"#,
+    );
+    let app = r#"document.querySelector("form").addEventListener("submit", (event) => {
+          event.preventDefault();
+          document.getElementById("status").textContent =
+            "handled " + new FormData(event.target).get("q");
+        });"#;
+    let site = FixtureSite::spawn(vec![
+        ("/search", Route::Html(search)),
+        (
+            "/native",
+            Route::Html(page("Native", "<p>native submit</p>")),
+        ),
+        ("/blank", Route::Html(page("Blank", "<p>Blank</p>"))),
+        (
+            "/slow-analytics.js",
+            Route::Delayed {
+                delay: std::time::Duration::from_millis(1_000),
+                content_type: "text/javascript",
+                body: String::new(),
+            },
+        ),
+        (
+            "/app.js",
+            Route::Delayed {
+                delay: std::time::Duration::from_millis(3_200),
+                content_type: "text/javascript",
+                body: app.to_owned(),
+            },
+        ),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/blank")).await;
+    let navigated = live
+        .call("navigate", json!({"url":site.url("/search")}))
+        .await;
+    assert_eq!(navigated["status"], "completed", "navigate: {navigated}");
+    let typed = live
+        .call(
+            "type_text",
+            json!({"target":{"role":"textbox","accessibleName":"Search"},
+                   "value":"query\n","clearFirst":true}),
+        )
+        .await;
+    assert_eq!(typed["status"], "completed", "type_text: {typed}");
+    assert_eq!(
+        site.hits("/native"),
+        0,
+        "Enter submitted the form natively before the app's handler was attached: {typed}"
+    );
+    let snapshot = live.snapshot(json!({})).await;
+    let mut names = Vec::new();
+    strings_under(&snapshot, "name", &mut names);
+    assert!(
+        names.contains(&"handled query"),
+        "the app's submit handler did not run: {snapshot}"
+    );
+    live.close().await;
+}
+
+/// A page title that discloses a credential is withheld the same way on
+/// `navigate` and `page_list`, on both engines.
+pub async fn page_titles_withhold_disclosed_credentials(rig: &Rig) {
+    let leaky = format!(
+        "<!doctype html><html><head><meta charset=utf-8><title>Authorization: Bearer {BEARER_TOKEN}</title></head><body><p>Leaky title</p></body></html>"
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/blank", Route::Html(page("Blank", "<p>Blank</p>"))),
+        ("/leak", Route::Html(leaky)),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/blank")).await;
+    let navigated = live
+        .call("navigate", json!({"url":site.url("/leak")}))
+        .await;
+    assert_eq!(navigated["status"], "completed", "navigate: {navigated}");
+    let listed = live
+        .rig
+        .tool("page_list", json!({"sessionId":live.session_id}))
+        .await;
+    for (what, result) in [("navigate", &navigated), ("page_list", &listed)] {
+        assert!(
+            !result.to_string().contains(BEARER_TOKEN),
+            "{what} exposed the title's bearer token: {result}"
+        );
+    }
+    let mut titles = Vec::new();
+    strings_under(&navigated["evidence"], "title", &mut titles);
+    assert!(
+        titles.contains(&"[redacted]"),
+        "navigate did not report the withheld title: {navigated}"
+    );
+    assert_eq!(
+        listed_page(&live).await.1,
+        "[redacted]",
+        "page_list: {listed}"
     );
     live.close().await;
 }

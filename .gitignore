@@ -4,73 +4,23 @@ node_modules/
 /packages/interface-conformance/dist
 /packages/firefox-companion/dist
 /data
-/benchmarks/raw/
-**/*.bench.json
-**/*.benchmark.jsonl
-**/*.heapprofile
-**/*.cpuprofile
 .DS_Store
 .env
 bootstrap.env
 **/.bobby-browser/
-.worktrees/
-worktrees/
-.mcp.json
-.acp.json
-AGENTS.md
-# Added by code-review-graph
-.code-review-graph/
-.codebuddy/
-.vscode/
-
-.claude/
-.gemini/
-.kiro/
-.qoder/
-.cursor/
-.codebuddy/
-
-# Agent plans/specs — local only
-docs/plans/
-docs/plans/**
-docs/superpowers/
-docs/superpowers/**
-.superpowers/
-.superpowers/**
-.remember/
-docs/brainstorms/
-docs/brainstorms/**
-docs/specs/
-docs/specs/**
-plans/
-plans/**
+config.toml
 
 # Built docs artifact, regenerated from docs/bobby-browser/source by `pnpm docs:build`.
 /docs/bobby-browser/v*/
 
-QODER.md
-AGENTS.md
-CODEBUDDY.md
-GEMINI.md
-KIRO.md
-CLAUDE.md
-.bobby-browser/
-opencode.jsonc
-.acp.json
-
 # Test-run artifacts: the scheduler journal a broker fixture opens on start.
 crates/interface-conformance/data/
 crates/cli/data/
-/benchmarks/results/
 
 # Python test/import caches, and packages/python-sdk's `pip install -e` metadata.
 __pycache__/
 *.py[cod]
 *.egg-info/
 
-
-models/
 scripts/vision-mlx/data/
 scripts/vision-mlx/promoted/
-.worktrees/
-config.toml

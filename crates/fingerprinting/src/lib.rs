@@ -506,7 +506,7 @@ pub struct ScreenResolution {
     pub pixel_ratio: f64,
     /// The browser window's own size: smaller than the available area for a
     /// realistic non-maximized profile. `innerWidth == screen.width` is a
-    /// CreepJS `hasVvpScreenRes` tell, so the window must not fill the screen.
+    /// detectable tell, so the window must not fill the screen.
     #[serde(default)]
     pub window_width: Option<u32>,
     #[serde(default)]

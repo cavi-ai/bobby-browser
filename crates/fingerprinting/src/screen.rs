@@ -102,7 +102,7 @@ impl ScreenMasker {
         let available_height = self.config.height.saturating_sub(self.config.taskbar_inset);
         // A real desktop window does not fill the screen: default to a
         // non-maximized window slightly smaller than the available area so
-        // `innerWidth != screen.width` (CreepJS hasVvpScreenRes stays false).
+        // `innerWidth != screen.width`.
         let window_width = self
             .config
             .window_width

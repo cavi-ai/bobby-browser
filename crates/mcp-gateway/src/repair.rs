@@ -257,9 +257,8 @@ pub(crate) fn repair_for_code(code: &str) -> Option<Value> {
 }
 
 /// Migration mapping appended to a schema-violation repair when the rejected
-/// payload still carries a pre-0.11.0 `FillValue` marker: the wire vocabulary
-/// unified onto `ControlAction`'s `kind`+field spelling (`crates/types/tests/
-/// contracts.rs`, "L3 unification contract").
+/// payload still carries a pre-0.11.0 `FillValue` marker; the wire vocabulary is
+/// `ControlAction`'s `kind`+field spelling.
 const LEGACY_FILL_SHAPE_MIGRATION: &str = "The payload also still uses the legacy fill shape, \
     changed in 0.11.0: kind \"text\" (field \"text\") is now kind \"setText\" (field \"value\"); \
     kind \"select\" (field \"option\") is now kind \"selectOne\" (field \"value\"); \

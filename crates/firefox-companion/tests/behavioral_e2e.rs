@@ -1,8 +1,7 @@
 //! Behavioral BiDi wiring e2e (FakeBidi).
 //!
 //! Asserts Firefox companion emits human-like `input.performActions` streams
-//! for click / type / scroll — the contract we iterate against when hardening
-//! the companion bridge.
+//! for click / type / scroll.
 //!
 //! Run:
 //! ```text

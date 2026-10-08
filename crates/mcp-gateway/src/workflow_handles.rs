@@ -251,11 +251,10 @@ impl WorkflowHandles {
             .iter()
             .any(|key| object.contains_key(*key))
         {
-            // `page_activate {workflowHandle, pageId}` is the
-            // agent-observed "activate this page and rebind the handle"
-            // call, not a conflict: same session required, the handle's
-            // bound page moves to the named one. Every other tool keeps the
-            // strict mixing refusal.
+            // `page_activate {workflowHandle, pageId}` activates the page and
+            // rebinds the handle, not a conflict: same session required, the
+            // handle's bound page moves to the named one. Every other tool
+            // keeps the strict mixing refusal.
             if tool == "page_activate" {
                 let handle = handle.as_str().ok_or(WorkflowHandleError::Unknown)?;
                 let binding = self.resolve(handle)?;
@@ -907,10 +906,8 @@ mod tests {
         );
     }
 
-    /// `page_activate {workflowHandle, pageId}` is "activate this page and
-    /// rebind the handle", the agent-observed call that used to die as a
-    /// binding conflict and force the agent off the handle path. Same
-    /// session required; the handle moves to the requested page.
+    /// `page_activate {workflowHandle, pageId}` activates the page and rebinds
+    /// the handle. Same session required; the handle moves to the requested page.
     #[test]
     fn page_activate_handle_plus_page_id_activates_and_rebinds() {
         let registry = registry();

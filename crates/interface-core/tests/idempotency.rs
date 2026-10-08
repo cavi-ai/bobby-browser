@@ -1434,8 +1434,7 @@ async fn a_dropped_permit_releases_its_reservation_instead_of_wedging_the_key() 
     drop(permit);
 
     // The retry must not park on the wedged reservation: the same key
-    // reserves again promptly (previously it waited for a release that never
-    // came and failed DeadlineExceeded at the request deadline).
+    // reserves again promptly instead of waiting for a release that never comes.
     let reservation = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         reserve(&store, principal, key, digest, CorrelationId::new()),

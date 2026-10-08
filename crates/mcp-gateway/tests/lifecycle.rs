@@ -169,8 +169,8 @@ async fn stdio_initialized_then_next_request_does_not_race_to_not_initialized() 
         let mut reader = BufReader::new(client_read);
 
         let driver = async {
-            // One write keeps initialized + tools/list adjacent on the wire —
-            // the race the concurrent pending dispatch used to lose.
+            // One write keeps initialized + tools/list adjacent on the wire,
+            // so the concurrent pending dispatch must not reorder them.
             client_write
                 .write_all(
                     concat!(

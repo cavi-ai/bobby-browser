@@ -147,7 +147,7 @@ bobby context forget --profile <profile-id> <site>
 | `start` | Run the vision service in the foreground |
 | `detect` | Classify a challenge without acting |
 | `solve` | Run the solve loop on a challenge |
-| `collect` | Collect training data from gauntlet runs |
+| `collect` | Collect vision training data |
 
 ```bash
 bobby vision connect --yes --provider mlx

@@ -2994,10 +2994,12 @@ impl PageOpenOperation {
 }
 
 use worker_pool::navigation_settle::{
-    navigation_settle_expression, parse_settled, NAVIGATION_SETTLE_CAP,
+    navigation_settle_expression, parse_settled, NAVIGATION_SETTLE_CAP, SCRIPT_POLL,
 };
+use worker_pool::secret_material::page_title_evidence;
 
-/// Waits until the document in `context` has had no DOM mutation for
+/// Waits until the document in `context` has loaded, `network` reports no
+/// script fetch in flight for it, and it has had no DOM mutation for
 /// `NAVIGATION_QUIET_MS`, or `budget` runs out, and returns the URL and
 /// title read at that point. A redirect that replaces the document while the
 /// probe runs restarts it. `None` when no read succeeded within the budget.
@@ -3006,12 +3008,14 @@ async fn settle_document(
     context: &str,
     budget: Duration,
     requested_url: &str,
+    network: &AsyncMutex<FirefoxNetworkQuiet>,
 ) -> Option<(String, String)> {
     let deadline = Instant::now() + budget;
+    let mut settled = None;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return None;
+            return settled;
         }
         let expression = navigation_settle_expression(remaining.as_millis().max(1), requested_url);
         // Firefox does not always reject a pending evaluation when a script
@@ -3049,13 +3053,25 @@ async fn settle_document(
             () = moved => continue,
         };
         if let Ok(Ok(response)) = attempt {
-            let settled = response
+            let read = response
                 .pointer("/result/value")
                 .or_else(|| response.get("value"))
                 .and_then(Value::as_str)
                 .and_then(parse_settled);
-            if settled.is_some() {
-                return settled;
+            if read.is_some() {
+                settled = read;
+                // A script still being fetched attaches its handlers once it
+                // runs: wait for it, then for the document to go quiet again.
+                if network.lock().await.pending_scripts(context) == 0 {
+                    return settled;
+                }
+                while network.lock().await.pending_scripts(context) > 0 {
+                    if Instant::now() >= deadline {
+                        return settled;
+                    }
+                    tokio::time::sleep(SCRIPT_POLL).await;
+                }
+                continue;
             }
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -3570,18 +3586,28 @@ impl BrowserWorker for FirefoxCompanionWorker {
         // the page, and a redirect chain can still be running. Report the
         // URL and title read after the document has stopped changing.
         let settle_budget = Duration::from_millis(command.timeout_ms).min(NAVIGATION_SETTLE_CAP);
-        let (url, title) =
-            match settle_document(&self.transport, &context, settle_budget, &command.url).await {
-                Some(settled) => settled,
-                None => (
-                    context_url(&self.transport, &context)
-                        .await
-                        .unwrap_or(response_url),
-                    capture_context_title(&self.transport, &context).await?,
-                ),
-            };
+        let settled = settle_document(
+            &self.transport,
+            &context,
+            settle_budget,
+            &command.url,
+            &self.network_quiet,
+        )
+        .await;
+        let (url, title) = match settled {
+            Some(settled) => settled,
+            None => (
+                context_url(&self.transport, &context)
+                    .await
+                    .unwrap_or(response_url),
+                capture_context_title(&self.transport, &context).await?,
+            ),
+        };
         Ok(vec![
-            Evidence::Navigation { url, title },
+            Evidence::Navigation {
+                url,
+                title: page_title_evidence(title),
+            },
             self.evidence(InteractionPath::EngineNative),
         ])
     }
@@ -3601,16 +3627,10 @@ impl BrowserWorker for FirefoxCompanionWorker {
             &context,
             budget,
             requested_url.unwrap_or_default(),
+            &self.network_quiet,
         )
         .await?;
-        // The extension observation this replaces never returned a title
-        // that discloses a credential; neither does the settled read.
-        let title = if worker_pool::secret_material::contains_secret_material(&title) {
-            "[redacted]".to_owned()
-        } else {
-            title
-        };
-        Some((url, title))
+        Some((url, page_title_evidence(title)))
     }
 
     async fn form_snapshot(
@@ -4297,7 +4317,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
             opener_page_id: page_id.clone(),
             page_id: popup_page_id,
             url: popup_url,
-            title,
+            title: page_title_evidence(title),
         }];
         evidence.extend(click_evidence);
         Ok(evidence)
@@ -5535,7 +5555,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
             listed.push(PageEvidence {
                 page_id,
                 url,
-                title,
+                title: page_title_evidence(title),
             });
         }
         listed.sort_by_key(|page| page.page_id.0);

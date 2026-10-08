@@ -257,11 +257,7 @@ intent_args!(IntentWaitForStateArgs {
 
 // `expectedDestination`/`expectedState` is `Option` here only so the dispatch
 // arm can tell "absent" apart from "malformed" and reject the former with a
-// message naming the exact fix -- CHANGELOG 0.15.0: "exactly one of the two
-// is required". It used to fail `bounded_parse` outright (schema's
-// `required` list never named it -- see `schema.rs`'s `"intent_follow"`
-// arm -- so `validate_tool_arguments` passed and the rejection came from a
-// bound this struct alone enforced, with a message that did not say why).
+// message naming the exact fix: exactly one of the two is required.
 // Do not add a default here or in the dispatch arm: a follow with neither is
 // an unverified click, and defaulting a wait silently would misreport one as
 // verified.
@@ -436,11 +432,9 @@ pub(crate) struct FormSnapshotArgs {
     pub(crate) page_id: types::PageId,
     #[serde(default)]
     pub(crate) max_controls: Option<u32>,
-    /// Accepted and advertised, but not yet threaded anywhere:
-    /// `RuntimeInterface::form_snapshot` takes no workflow, so the dispatcher
-    /// has nowhere to pass it. Kept deserializable so a caller that sends it is
-    /// not rejected by `deny_unknown_fields`, which is the only reason this is
-    /// not simply removed.
+    /// Accepted and ignored: `RuntimeInterface::form_snapshot` takes no
+    /// workflow. Kept deserializable so a caller that sends it is not rejected
+    /// by `deny_unknown_fields`.
     #[allow(dead_code)]
     #[serde(default)]
     pub(crate) workflow_id: Option<types::WorkflowId>,

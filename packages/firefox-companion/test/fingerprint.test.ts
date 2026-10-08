@@ -110,8 +110,7 @@ test("buildInitScript minifies and injects worker bootstrap without placeholders
   assert.ok(!script.includes(WORKER_PROFILE_PLACEHOLDER));
   assert.ok(script.includes("getWorkerBootstrap"));
   assert.ok(script.includes("bobby.fp.worker"));
-  // Budget raised 40k -> 42k for the Notification.permission /
-  // pdfViewerEnabled / Web Share surfaces (CreepJS like-headless flags).
+  // Budget covers the Notification.permission / pdfViewerEnabled / Web Share surfaces.
   assert.ok(script.length < 42_000, `script grew to ${script.length} bytes (budget 42k)`);
   // Anti-detect contracts mirrored from Rust template.
   assert.ok(script.includes("BarcodeDetector"));
