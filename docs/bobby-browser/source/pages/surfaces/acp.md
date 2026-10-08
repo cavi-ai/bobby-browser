@@ -4,95 +4,55 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 # ACP (Agent Client Protocol)
 
-`acp-gateway` lets an ACP-speaking editor drive the runtime over stdio. It is
-the fourth adapter, held to the same capability, idempotency, evidence,
-checkpoint, and event contracts as [HTTP](http-api.md),
-[MCP stdio](mcp-stdio.md), and [CDP](cdp.md) by
-`crates/interface-conformance`.
+`bobby acp-stdio` lets an ACP editor, such as Zed, drive bobby over stdio. It follows the same capability, idempotency, evidence, checkpoint and event rules as the HTTP and MCP surfaces. For editor setup, see [Zed over ACP](../guides/acp-zed.md).
 
-## Build and start
+## Connect
 
 ```bash
-cargo build -p acp-gateway --release
-# binary: ./target/release/acp-gateway
+bobby install --host acp --yes
 ```
 
-Or install the host fragment with the CLI (copies `acp-gateway` when built
-alongside `bobby`, writes project `.acp.json` pointing at `bobby acp-stdio`):
+This writes a project `.acp.json` that launches `bobby acp-stdio`. The command loads the bootstrap credential and attaches to the scope's shared runtime, so the host configuration holds no secrets. The `acp-gateway` binary reads the four `AUTOMATION_RUNTIME_BOOTSTRAP_*` variables directly if you launch it yourself. Add `--team` and `--project` for a scoped runtime.
 
-```bash
-bobby install --host acp --cli --yes
-```
+The protocol is ACP schema version 1.
 
-`bobby acp-stdio` loads the bootstrap credential the same way `bobby mcp-stdio`
-does, then execs `acp-gateway`. No bootstrap env vars belong in the host
-config file.
+## Methods
 
-Startup takes the same four `AUTOMATION_RUNTIME_BOOTSTRAP_*` variables as
-`bobby init` writes; missing or invalid input fails closed. Protocol version
-pinned: ACP schema v1 (`agent-client-protocol` 2.x).
-
-## Wire scope (v1)
-
-| ACP | Runtime mapping |
+| ACP method | Behavior |
 |---|---|
-| `initialize` | Protocol handshake; advertises agent capabilities |
-| `session/new` | Runtime session (the ACP session id *is* the runtime session id) |
-| `session/prompt` | One structured automation, context, checkpoint, or recovery request |
-| `session/cancel` | Cancels the in-flight prompt step |
-| `session/close` | Cancels active work, deletes the runtime session, and releases browser capacity |
-| `session/request_permission` (agent → client) | Vision-escalation approval only |
+| `initialize` | Handshake and agent capabilities |
+| `session/new` | Creates a runtime session. The ACP session ID is the runtime session ID |
+| `session/prompt` | Runs one structured request |
+| `session/cancel` | Interrupts the running prompt, including permission waits |
+| `session/close` | Cancels active work, deletes the session and frees its browser |
 
-## Structured prompts
+Only one prompt runs per session at a time. If the editor disconnects, the gateway closes its sessions. ACP sessions count against `browser.max_active`.
 
-A prompt is a single text block of JSON. Automation requests accept an optional
-`url`, an optional stable `workflowId`, and one intent in the exact shape
-`command_execute` accepts. There is no planner and no freeform natural language:
+## Prompts
+
+A prompt is one text block of JSON. There is no planner and no natural-language parsing.
+
+To run a command, send an optional `url`, an optional `workflowId`, and one intent in the shape `command_execute` accepts:
 
 ```json
 {"url": "https://example.com/form", "intent": {"kind": "locate", "input": {"purpose": "the submit button"}}}
 ```
 
-The same channel accepts these explicit operations:
+The first `url` opens a page and later URLs navigate that page, so cookies and state persist. The reply has `operation: "execute"`, the IDs, and the full command outcome with evidence. The turn ends with `endTurn` (completed), `refusal` (failed, denied or needs reconciliation) or `cancelled`.
 
-| `operation` | Fields | Runtime mapping |
+Other operations:
+
+| `operation` | Fields | Does |
 |---|---|---|
-| `contextAsk` | `description` | Current-page retained target lookup |
-| `contextNeighbors` | `description` | Current-page retained form neighborhood |
-| `contextSite` | `siteKey` | Retained site structure |
-| `checkpointSave` | `checkpoint`, `evidenceRefs` | Resolve owned command evidence, then save |
-| `recoveryStatus` | optional `workflowId`, optional `limit` | Read one workflow or list the current session's workflows |
-| `workflowRecover` | `workflowId` | Recover an owned workflow |
+| `contextAsk` | `description` | Look up a control in retained context |
+| `contextNeighbors` | `description` | Read the remembered form around a control |
+| `contextSite` | `siteKey` | Read remembered structure for a site |
+| `checkpointSave` | `checkpoint`, `evidenceRefs` | Save a checkpoint from evidence the runtime already holds |
+| `recoveryStatus` | optional `workflowId`, `limit` | Read one workflow, or list the session's workflows |
+| `workflowRecover` | `workflowId` | Recover a workflow |
 
-Successful operations emit one JSON `session/update` text chunk with
-`operation` and `result`. `contextAsk` and `contextNeighbors` results use the
-MCP and HTTP shape: `{"answer":…,"hit":true,"pageDerived":true}`, or on a miss
-`{"answer":null,"hit":false,"reason":"notRemembered","nextStep":"a11y_snapshot","pageDerived":true}`
-(`neighbors` in place of `answer`). The [Zed walkthrough](../guides/acp-zed.md)
-runs every operation on a real page. Automation replies contain `operation: "execute"`,
-`sessionId`, `pageId`, the stable `workflowId`, `attemptId`, and the complete
-`CommandOutcome`, including evidence.
+Each returns one JSON `session/update` chunk with `operation` and `result`. Context results match MCP and HTTP: `{"answer": ..., "hit": true, "pageDerived": true}`, or on a miss `hit: false`, `reason: "notRemembered"`, `nextStep: "a11y_snapshot"`.
 
-The first `url` opens a page; later URLs navigate that same page so cookies,
-storage, and live page state remain in one browser context without accumulating
-orphan pages. Outcomes stream back as `session/update` agent-message chunks;
-the turn ends with `endTurn` (completed), `refusal` (failed,
-needs-reconciliation, or denied), or `cancelled`.
+## Permission prompts
 
-Only one prompt turn may run per session. `session/cancel` interrupts browser
-work, permission waits, and post-approval retries. `session/close` waits for
-that cancellation to settle before deleting the runtime session. If the editor
-disconnects without closing its sessions, the gateway performs the same cleanup.
-ACP sessions share the runtime-wide `browser.max_active` capacity bound; close
-or disconnect cleanup releases both the browser worker and ownership slot.
-
-## Permission prompts cannot mint authority
-
-`session/request_permission` fires only for vision escalation, and only when
-the principal already holds `vision:assist` while the session's
-`executionPolicy.visionAssist` is off — the exact double gate the other
-surfaces enforce. Approval applies only to that command's retry on the existing
-page; it neither changes the stored session policy nor returns a reusable
-vision-enabled session. The capability was the principal's all along. A
-principal without `vision:assist` is denied without any prompt: there is no
-button a human can click that creates authority the token never carried.
+`session/request_permission` is sent only for vision escalation, when the caller holds `vision:assist` but the session's `executionPolicy.visionAssist` is off. Approval covers that command's retry on the existing page and does not change the session. A caller without `vision:assist` is denied without a prompt.
