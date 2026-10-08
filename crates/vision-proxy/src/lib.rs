@@ -3,6 +3,7 @@ pub mod data_collector;
 pub mod mlx;
 pub mod ollama;
 pub mod openai;
+mod response;
 pub mod server;
 pub mod upstream;
 pub mod validate;
