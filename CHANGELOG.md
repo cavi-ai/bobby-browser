@@ -4,1508 +4,742 @@
 
 ### Fixed
 
-- `type_text` ending in Enter reports the page it landed on with its full URL,
-  query included, and the title read once the document stops changing; it
-  reported the URL without its query (Firefox) and the previous page's title.
-- `intent_follow` completes once the destination page stops changing, so its
-  `postState` shows the rendered page instead of the loading skeleton left
-  when a pushed URL matched the expected state.
-- `click`, `type_text`, `control_action` and `intent_follow` wait for a target
-  that is not on the page yet, for up to 10 s and at most half the time left
-  in the call, before failing with `targetNotFound`.
-- Firefox companion: a session start brings the enrolled Firefox to the companion
-  build installed in its profile (unpacked sideload or signed `.xpi`). Each
-  extension build carries a content-derived
-  id; when the running build differs, the runtime asks the extension to reload,
-  or restarts the enrolled Firefox for a build that reports no id. A mismatch that
-  survives one attempt fails with a non-retryable error naming both builds.
-- Firefox companion: a page opened or bound by the runtime keeps its lease when a
-  frame snapshot lands while the tab is still blank or frame discovery fails.
-- Firefox companion: an accessibility snapshot is sanitized and depth- and
-  size-bounded so its result is never rejected by the extension channel; a
-  rejected result reports its reason with code `resultRejected` instead of
-  "the content action failed".
-- Firefox companion: page text is hidden only when it contains secret material or
-  the extension channel would reject it; words such as "password" or "token" in
-  ordinary labels are no longer hidden; fields named for an author are no longer
-  treated as credential fields.
-- A shared-runtime gateway connection ends within 5 s of its peer leaving. It
-  held a per-principal permit until the protocol server finished on its own,
-  and a server with 64 requests pending stops reading frames, so it never saw
-  the peer leave.
-- An attached MCP or ACP gateway connection no longer holds a per-principal
-  in-flight permit: agents that share one credential are bounded by
-  `interface.max_connections` (default 64) instead of 8, and that principal's
-  HTTP requests are no longer refused while 8 agents are attached.
-- A gateway refused by the shared runtime with a retryable error retries the
-  connection after the runtime's `retryAfterMs`, for up to 10 s, instead of
-  exiting on the first refusal.
-- A gateway still refused after that answers the host's `initialize` request
-  on stdout with a JSON-RPC error (same `id`, the runtime's reason) before
-  exiting 1; the host saw only a closed pipe.
-- `session_close` removes the session from the registry even when its browser is
-  dead or refuses to close, and waits at most 10 s on browser teardown; it
-  returned `internal` and kept the session listed.
-- A form snapshot or page open on a session whose browser is gone returns
-  `engineUnreachable` telling the caller to create a new session; it returned
-  `internal`.
-- A command on a Firefox session whose worker is closed fails with a message
-  telling the caller to create a new session, instead of "Firefox companion
-  worker is closed".
-- MCP: a wrongly shaped `kind` union (wait conditions, form field values) is rejected with the allowed kinds and the chosen kind's required properties; `intent_follow` without a wait shows a valid example.
-- An MCP connection that ends closes the sessions it opened and had not closed,
-  as ACP connections do; they stayed registered, held browser capacity, and made
-  `bobby runtime stop` and `restart` report them as attached.
+- `type_text` ending in Enter reports the landed page's full URL, query included, and its settled title.
+- `intent_follow` completes once the destination page stops changing, so `postState` shows the rendered page.
+- Actions wait up to 5 s, and at most half the time left in the call, for a target that is not on the page yet before failing with `targetNotFound`.
+- `navigate` and `workflow_start` return once the document has loaded, its scripts have run, and the page has stopped changing.
+- A page title that discloses a credential is withheld in `navigate`, `page_list`, popups and settled-page evidence on both engines.
+- A session start brings the enrolled Firefox to the companion build installed in its profile, and fails with a non-retryable error naming both builds when the mismatch survives one attempt.
+- A page opened or bound by the runtime keeps its Firefox companion lease while the tab is blank or frame discovery fails.
+- Firefox accessibility snapshots are sanitized and size-bounded; a rejected result reports `resultRejected` with its reason.
+- Firefox page text is hidden only when it contains secret material or would be rejected by the extension channel.
+- A shared-runtime gateway connection ends within 5 s of its peer leaving.
+- An attached MCP or ACP gateway connection holds no per-principal in-flight permit; agents sharing one credential are bounded by `interface.max_connections` (default 64).
+- A gateway refused by the shared runtime with a retryable error retries for up to 10 s, honoring `retryAfterMs`.
+- A gateway still refused answers the host's `initialize` request with a JSON-RPC error carrying the runtime's reason before exiting 1.
+- `session_close` removes the session from the registry even when its browser is dead, waiting at most 10 s on teardown.
+- A form snapshot or page open on a session whose browser is gone returns `engineUnreachable` telling the caller to create a new session.
+- A command on a Firefox session whose worker is closed tells the caller to create a new session.
+- A wrongly shaped `kind` union is rejected with the allowed kinds and the chosen kind's required properties; `intent_follow` without a wait shows a valid example.
+- An MCP connection that ends closes the sessions it opened and had not closed.
 
 ### Added
 
-- `bobby install --restart-runtime` stops this scope's running runtime owner after
-  the install. When the install replaced the PATH `bobby` with different contents
-  and the owner is running, `bobby install` ends with one line naming the owner
-  pid, saying it still runs the previous build, and giving `bobby runtime restart`
-  or `make install RESTART=1`. The stop applies the same guard as `runtime
-  restart`: with agents attached and no terminal it refuses (the install still
-  succeeds) unless `--disconnect-agents` is given (`DISCONNECT_AGENTS=1` for make).
-- `bobby runtime restart [--force]` and `make restart` stop this scope's runtime
-  owner and start a new one. An owner that does not stop gracefully, or any owner
-  with `--force`, is terminated after its process is verified as this scope's
-  `runtime-owner`. `bobby runtime status` names `runtime restart` for a pending
-  configuration change. It shows what is attached and asks before disconnecting
-  agents, refuses without a terminal unless `--disconnect-agents` is given, and
-  saves the impact report under `runtime/restart-snapshots/`.
+- `bobby install --restart-runtime` stops this scope's running runtime owner after the install; `bobby install` ends with one line naming a still-running owner when it replaced the PATH `bobby`.
+- `bobby runtime restart [--force]` and `make restart` stop this scope's runtime owner and start a new one, showing what is attached, asking before disconnecting agents, and saving the impact report under `runtime/restart-snapshots/`.
 
 ### Changed
 
-- `bobby runtime stop` applies the same guard as `runtime restart`: it shows what is
-  attached and asks before disconnecting agents, refuses without a terminal unless
-  `--disconnect-agents` is given, and saves the impact report first.
-- `make install` runs `bobby install --yes` when stdin or stdout is not a
-  terminal; with a terminal it still runs the checklist. `make install RESTART=1`
-  passes `--restart-runtime`.
+- `bobby runtime stop` shows what is attached, asks before disconnecting agents, refuses without a terminal unless `--disconnect-agents` is given, and saves the impact report first.
+- `make install` runs `bobby install --yes` when stdin or stdout is not a terminal; `make install RESTART=1` passes `--restart-runtime`.
 - `Formula/bobby-browser.rb` carries the v0.19.1 asset digests.
-
-### Removed
-
-- Gauntlet test suites, fixtures and the gauntlet server crate.
 
 ## 0.19.1 - 2026-10-02
 
 ### Fixed
 
-- `bobby mcp-stdio` starts on a machine with no paired Firefox profile: an
-  unenrolled Firefox preference runs on managed Chromium. It exited with
-  "this scope has no enrolled Firefox profile" before the agent's first
-  request.
-- The working directory no longer selects the config or the storage. An
-  agent started in a directory holding a `config.toml` (a checkout of this
-  repository) was refused with "this scope is running with different
-  configuration", and an owner started from a read-only directory failed
-  every journal write. The CLI and both gateways load the scope's
-  `config.toml`, relative paths in it resolve next to the file, and the owner
-  runs in the scope directory.
-- A running owner always takes the agent after the scope's files change;
-  `bobby runtime status` reports the pending change and `bobby runtime stop`
-  applies it. Agents were refused until someone stopped the runtime.
-- `mcp-gateway` and `acp-gateway` launched directly with the scope's
-  bootstrap credential (host entries written before `bobby mcp-stdio`)
-  attach to the scope's running owner instead of opening its store a second
-  time, which failed with "command idempotency ledger: operation would
-  block". A gateway with its own credential stays a standalone runtime.
-- Unreadable data in a durable store no longer stops the runtime from
-  starting. The command and job journals skip lines this build cannot decode
-  (a record shape from another build, a torn write, damage) and `bobby
-  doctor` counts them; an idempotency ledger this build cannot read is moved
-  aside to `*.unreadable-<time>` and the runtime starts with an empty one; a
-  repeated key keeps its first entry, entries past capacity are skipped, and
-  a retained outcome that cannot be resolved becomes unresolved, so a retry
-  reconciles instead of re-running. A single such line made every start fail
-  with "journal line N is corrupt".
-- The Firefox companion binds a port the OS picks at every start and the
-  native-host descriptor publishes it; a configured `companionBind` port is
-  never bound, enrollment writes `127.0.0.1:0` and never fails on a taken
-  port, and publication removes `.pending-*` descriptor files left by killed
-  or failed starts.
-- `bobby mcp-stdio` and `bobby acp-stdio` report why the shared runtime
-  refused a connection (for example `resourceExhausted: principal in-flight
-  capacity exhausted (retry after 1000 ms)`) instead of "could not
-  authenticate or connect to the shared runtime".
-- Remembered site structure is written to disk when each outcome is
-  verified. It was written only when a client closed its session, so an
-  agent that never called `session_close` lost it at the next runtime
-  restart.
-- A completed `intent_complete_form` or `intent_extract` remembers every
-  field it resolved; only the first was recorded. A failed one counts the
-  failure against the field that failed instead of the first field.
-- Two context flushes of one site at once could leave the older snapshot on
-  disk; flushes now run one at a time.
-- Each runtime starts its own vision proxy on a loopback port the OS picks
-  and sends vision there; the proxy exits when its runtime exits. A runtime
-  no longer adopts whatever answers on the configured `endpoint_url` port,
-  and a proxy left by a killed runtime no longer holds that port.
-- `bobby doctor` reports no `engine-satisfiability` failure when the scope's
-  own running runtime holds the enrolled Firefox profile, and no
-  `vision-service` warning for the configured port when the runtime runs its
-  own proxy. A loopback vision URL with no selected provider and nothing
-  listening is a `vision-service` warning; it was reported ok with "Bobby
-  starts the vision service on demand", which nothing did.
-- `make install`, `make cli`, and `bobby install --cli` install `bobby`,
-  `mcp-gateway`, and `acp-gateway` from one build, and refuse a build missing
-  either gateway. A gateway left from an older release made `bobby doctor`
-  fail `sidecar-version`.
-- The repository no longer carries a generated `openshell/` pack, which made
-  `bobby doctor` run inside a checkout report three OpenShell warnings.
-  `bobby openshell install` writes the pack into a project.
-- The vision docs name the `vision-service` doctor check; they named a
-  `vision-endpoint` check that does not exist.
-- The Firefox companion's native-host wrapper runs the installed `bobby` (the
-  one the same `bobby install` put on PATH, else one already in the bin dir),
-  the binary host MCP entries launch. It ran the binary that ran the install,
-  so after `make install` a rebuild of the checkout replaced the host binary
-  and `cargo clean` broke pairing.
-- The Firefox companion's native host no longer stops with `invalidAuth` when
-  the descriptor file changes during pairing without naming a new endpoint
-  or owner. It abandoned the connection and retried with the pairing code
-  the server had already accepted.
-
-### Added
-
-- `agent_first_contact` suite: real `bobby mcp-stdio` sessions from a fresh
-  scope, two working directories (one holding its own `config.toml`), a
-  read-only working directory, a config edited under a running owner, a
-  killed owner, a directly launched gateway, and a taken pinned companion
-  port with 40 orphaned descriptor files, and journals and ledgers holding
-  unreadable data. Each must initialize, list tools, and answer
-  `runtime_info` with nothing on stderr.
-- `bobby vision-proxy --managed`: prints `listening <address>` once bound and
-  exits when its stdin closes.
-- `shared_runtime_load` live test: 1, 4, and 8 agents on one runtime owner
-  with managed Chromium complete every journey with no request lost; the
-  ninth connection of one principal is refused with `resourceExhausted`. The
-  MCP stdio page carries the latencies.
-- `remembered_site_calls` live test: after a runtime restart on managed
-  Chromium, `workflow_observe` on the gauntlet onboarding form answers from
-  memory in 866 bytes instead of a 7,536-byte live snapshot, with the same
-  two calls.
+- `bobby mcp-stdio` starts on a machine with no paired Firefox profile and runs on managed Chromium.
+- The working directory does not select the config or the storage; the CLI and both gateways load the scope's `config.toml`, resolve its relative paths next to it, and the owner runs in the scope directory.
+- A running owner takes the agent after the scope's files change; `bobby runtime status` reports the pending change and `bobby runtime stop` applies it.
+- `mcp-gateway` and `acp-gateway` launched with the scope's bootstrap credential attach to the scope's running owner; a gateway with its own credential stays a standalone runtime.
+- Unreadable data in a durable store does not stop the runtime from starting; skipped journal lines are counted by `bobby doctor` and an unreadable idempotency ledger is moved aside to `*.unreadable-<time>`.
+- The Firefox companion binds an OS-picked port at every start and publishes it in the native-host descriptor; enrollment never fails on a taken port and stale `.pending-*` descriptor files are removed.
+- `bobby mcp-stdio` and `bobby acp-stdio` report why the shared runtime refused a connection.
+- Remembered site structure is written to disk when each outcome is verified.
+- A completed `intent_complete_form` or `intent_extract` remembers every field it resolved, and a failed one counts the failure against the field that failed.
+- Context flushes of one site run one at a time.
+- Each runtime starts its own vision proxy on an OS-picked loopback port, which exits with the runtime.
+- `bobby doctor` reports no `engine-satisfiability` failure when the scope's own runtime holds the enrolled Firefox profile, and no `vision-service` warning when the runtime runs its own proxy.
+- `bobby doctor` warns `vision-service` for a loopback vision URL with no selected provider and nothing listening.
+- `make install`, `make cli`, and `bobby install --cli` install `bobby`, `mcp-gateway`, and `acp-gateway` from one build and refuse a build missing either gateway.
+- The repository carries no generated `openshell/` pack; `bobby openshell install` writes it into a project.
+- The vision docs name the `vision-service` doctor check.
+- The Firefox companion's native-host wrapper runs the installed `bobby`, so rebuilding the checkout does not affect pairing.
+- The Firefox companion's native host keeps its pairing when the descriptor file changes without naming a new endpoint or owner.
 
 ### Changed
 
 - `Formula/bobby-browser.rb` carries the v0.19.0 asset digests.
-- The release version check accepts a Homebrew formula at an earlier release
-  of the current or previous minor line, so a patch release passes before its
-  formula is updated.
-- `bobby doctor` `companion-port` reports that the runtime binds a free
-  loopback port at every start instead of probing the configured port.
+- The release version check accepts a Homebrew formula at an earlier release of the current or previous minor line.
+- `bobby doctor` `companion-port` reports that the runtime binds a free loopback port at every start.
 
 ## 0.19.0 - 2026-10-01
 
 ### Fixed
 
-- `intent_submit_and_verify` and a boundary `intent_follow` honor their
-  `idempotencyKey` under `autoCheckpoint`, the default for Boundary commands.
-  The auto-checkpoint path skipped the idempotency ledger, so a retry under
-  the same key ran the command again; it now replays the first outcome. A replayed call saves no checkpoint and
-  omits `checkpointId`, `workflowId`, and `attemptId`.
-- A request under an idempotency key whose earlier outcome is unknown (the
-  runtime stopped mid-command, or the retained outcome is
-  `needsReconciliation`) is refused as unresolved with
-  `reconciliationRequired: true`, even when it arrives from a new session.
-  Previously a different session made it a plain conflict.
-- MCP errors with `reconciliationRequired: true` carry a repair that says not
-  to retry or mint a new key and to check for the effect first. The
-  `idempotencyConflict` repair ("mint a fresh idempotency key") no longer
-  applies to them.
-- ACP `contextAsk` and `contextNeighbors` answered a bare `null` on a miss and
-  the raw record on a hit; they now return the MCP and HTTP shape with `hit`,
-  `reason`, `nextStep`, and `pageDerived`. MCP `context_ask` and
-  `context_neighbors` hits now carry `hit: true`, as HTTP's always did.
-- Docs list the Python SDK (`bobby-browser` on PyPI) beside the TypeScript and
-  Rust clients. Install docs no longer offer `cargo install bobby-browser`:
-  only `bobby-browser-client` is on crates.io.
+- `intent_submit_and_verify` and a boundary `intent_follow` honor their `idempotencyKey` under `autoCheckpoint`; a retry replays the first outcome and saves no checkpoint.
+- A request under an idempotency key whose earlier outcome is unknown is refused as unresolved with `reconciliationRequired: true`, including from a new session.
+- MCP errors with `reconciliationRequired: true` carry a repair saying not to retry or mint a new key and to check for the effect first.
+- ACP `contextAsk` and `contextNeighbors` return the MCP and HTTP shape with `hit`, `reason`, `nextStep`, and `pageDerived`; MCP `context_ask` and `context_neighbors` hits carry `hit: true`.
+- Docs list the Python SDK (`bobby-browser` on PyPI) beside the TypeScript and Rust clients; only `bobby-browser-client` is on crates.io.
 
 ### Added
 
-- Zed over ACP guide: `agent_servers` setup for `bobby acp-stdio` and a
-  transcript of the `acp_walkthrough` live test (fill, `contextAsk`,
-  `checkpointSave`, `recoveryStatus`, `workflowRecover`, close), which asserts
-  MCP `context_ask` and `recovery_status` answer the same on the same runtime.
-- `bobby audit export --workflow <id>` writes a tar of one workflow's journal
-  lines (byte for byte), checkpoint, and stored artifacts with a manifest of
-  SHA-256 digests signed by a local Ed25519 key. `bobby audit verify` checks
-  every digest and the signature, optionally pinned with `--public-key`;
-  `bobby audit key` prints the public key.
-- `bobby audit replay <bundle>` verifies a bundle and writes a self-contained
-  HTML replay: each command with its phases, outcome, evidence, and embedded
-  screenshots. The docs ship a sample from a real Chromium run.
-- `bobby init --preset claude`, `codex`, and `openshell` mint host
-  credentials. `claude` and `codex` hold what the shipped agent skill uses:
-  the agent floor without `javascript:evaluate`, `browser:fingerprint`, and
-  `browser:humanize`. `openshell` is the sandbox floor `bobby openshell` already
-  used. Heal never widens past the chosen floor, and `bobby doctor` warns when
-  a credential holds a capability outside its preset.
-- The capabilities page carries a generated preset matrix: every preset
-  against every capability, and what each preset cannot do, with the
-  operations and `executionPolicy` opt-ins each withheld capability closes.
-- `recovery_demo` live test: an MCP gateway killed mid-submit on real
-  Chromium, restarted on the same data directory, places one order, not two.
-  The transcript is on the first-session page.
-
-- Release builds sign the Firefox companion through addons.mozilla.org
-  (unlisted) on each release tag and ship it as
-  `firefox-companion/bobby-firefox-companion.xpi` in every platform archive and
-  as a release asset. Signing runs when the `AMO_JWT_ISSUER` and
-  `AMO_JWT_SECRET` repository secrets are set; without them the release ships
-  unsigned as before.
-- `bobby install --companion` installs the signed build as
-  `firefox-companion@bobby-browser.local.xpi` for the default scope, so release
-  Firefox accepts the companion. Team and project scopes, and builds from a
-  checkout, keep the unpacked sideload, which needs Firefox Developer Edition,
-  Nightly, or ESR.
+- Zed over ACP guide covering `agent_servers` setup for `bobby acp-stdio`.
+- `bobby audit export --workflow <id>` writes a tar of one workflow's journal lines, checkpoint, and artifacts with a manifest of SHA-256 digests signed by a local Ed25519 key.
+- `bobby audit verify` checks every digest and the signature, optionally pinned with `--public-key`; `bobby audit key` prints the public key.
+- `bobby audit replay <bundle>` verifies a bundle and writes a self-contained HTML replay of each command with its phases, outcome, evidence, and screenshots.
+- `bobby init --preset claude`, `codex`, and `openshell` mint host credentials at the preset's capability floor; `bobby doctor` warns when a credential holds a capability outside its preset.
+- The capabilities page carries a generated preset matrix of every preset against every capability.
+- Release builds sign the Firefox companion through addons.mozilla.org and ship it as `firefox-companion/bobby-firefox-companion.xpi` in every platform archive and as a release asset.
+- `bobby install --companion` installs the signed build for the default scope; team and project scopes and checkout builds keep the unpacked sideload, which needs Firefox Developer Edition, Nightly, or ESR.
 
 ### Changed
 
-- `tools/list` is smaller: `explore` from 32,740 to 26,776 bytes and `full`
-  from 77,053 to 66,380. Advertised schemas inline single-use definitions,
-  fold `{"oneOf":[X,{"type":"null"}]}` into `"type":[T,"null"]`, and drop the
-  draft URL; these rewrites accept exactly the same instances. `workflow_start`
-  advertises `session` and `navigationOutcome`, and `workflow_observe`
-  advertises `observationOutcome`, as opaque objects, like every command
-  outcome. Annotations omit hints equal to the MCP default `false`.
-  `tools/call` still validates against the full schemas. The catalog ceilings
-  are 28 KiB (`explore`) and 68 KiB (`full`).
-- The companion manifest declares `data_collection_permissions` (required:
-  `websiteContent`, `browsingActivity`) for the page content and tab URLs it
-  passes to the local runtime.
-
-- Managed Chromium remembers site structure across sessions and runtime
-  restarts without a named profile. A `managedChromium` selection, or an exact
-  Chromium selection without `profileId`, promotes verified intent outcomes
-  into the context store under the shared `managed-chromium` identity; each
-  session's browser profile stays disposable. Previously only a Firefox
-  enrollment or a named Chromium profile remembered anything. `bobby context
-  list --profile managed-chromium` shows the sites.
-- Docker image: the context store lives at `/var/lib/bobby/data/context` on
-  the data volume.
+- `tools/list` is smaller: `explore` is 26,776 bytes and `full` is 66,380, with ceilings of 28 KiB and 68 KiB; `tools/call` still validates against the full schemas.
+- The companion manifest declares `data_collection_permissions` (`websiteContent`, `browsingActivity`).
+- Managed Chromium remembers site structure across sessions and runtime restarts under the shared `managed-chromium` identity; `bobby context list --profile managed-chromium` shows the sites.
+- Docker image: the context store lives at `/var/lib/bobby/data/context` on the data volume.
 - `Formula/bobby-browser.rb` carries the v0.18.0 asset digests.
 
 ## 0.18.0 - 2026-09-30
 
 ### Added
 
-- Local team and project scopes with one shared runtime owner for MCP and ACP
-  clients. Scoped installation, Firefox pairing, profiles, credentials, context,
-  storage, jobs, and existing broker interfaces use the same scope.
-- `bobby --team <name> --project <name> runtime start`, `status`, and `stop`,
-  plus `bobby runtime list` to organize local runtimes. Either scope flag can be
-  used independently. `bobby firefox-start` opens the selected installed profile
-  on an automatically assigned BiDi port for first-run pairing.
+- Local team and project scopes with one shared runtime owner for MCP and ACP clients, covering installation, Firefox pairing, profiles, credentials, context, storage, and jobs.
+- `bobby --team <name> --project <name> runtime start`, `status`, and `stop`, plus `bobby runtime list`.
+- `bobby firefox-start` opens the selected installed profile on an automatically assigned BiDi port for first-run pairing.
 
 ### Fixed
 
-- Concurrent agent startup reuses the scope owner instead of replacing a live
-  Firefox companion. Each gateway connection keeps independent protocol state;
-  disconnecting one client leaves the runtime available to others.
-- Owner shutdown closes active gateway connections, drains their sessions, and
-  releases ownership leases before the CLI reports stopped. Gateway processes
-  also exit cleanly when an agent host keeps stdin open during owner shutdown.
-- Firefox recovery rejects missing or inaccessible profiles before launching,
-  follows the profile's current BiDi endpoint, and only terminates processes
-  that own the enrolled profile. Profile leases prevent competing runtimes
-  from taking it over.
-- Firefox companion startup and enrollment automatically select a free loopback
-  port when the configured port is occupied. Discovery publishes the actual
-  endpoint; replaced runtimes cannot overwrite it during pairing-code refresh
-  or remove it during cleanup. The native relay follows descriptor file changes
-  automatically, without restarting Firefox or pairing again. Regressions cover
-  port collisions and the complete relay handoff.
+- Concurrent agent startup reuses the scope owner; disconnecting one client leaves the runtime available to others.
+- Owner shutdown closes active gateway connections, drains their sessions, and releases ownership leases before the CLI reports stopped.
+- Firefox recovery rejects missing or inaccessible profiles before launching, follows the profile's current BiDi endpoint, and terminates only processes that own the enrolled profile.
+- Firefox companion startup and enrollment select a free loopback port when the configured port is occupied, and the native relay follows descriptor changes without restarting Firefox or pairing again.
 
 ## 0.17.0 - 2026-09-28
 
 ### Fixed
 
-- Interrupted scheduler jobs now require reconciliation instead of being
-  replayed after restart, and durable idempotency reservations survive runtime
-  replacement so an uncertain operation cannot be submitted twice.
-- A dropped durable idempotency store explicitly releases its writer lock even
-  if a forked child briefly holds a copy of the file descriptor.
-- Homebrew formula license metadata now matches the repository's MIT license.
-- Firefox workflow targeting and recovery handle detached controls, frame
-  targeting, and companion reconnects more consistently. Workflow setup and
-  observation share a typed core across adapters.
-- Vision readiness honors the configured proxy for remote providers and
-  recognizes Ollama's full `/v1/chat/completions` base URL.
-- MCP stdio no longer drops a request whose line arrives in more than one
-  read: when a response or notification write finished while a request was
-  half-read, the gateway discarded the bytes already read, answered
-  `Parse error` (-32700) with a null id, and never ran the request. The
-  partial frame now survives until its newline arrives, and a frame already
-  over the size limit stays rejected as `frameTooLarge`.
-- Vision proxy, Ollama upstream: a `base_url` ending in `/v1` or
-  `/v1/chat/completions` no longer doubles the path (`/v1/v1/...`); host-only,
-  `/v1`, and full-endpoint forms all reach `<host>/v1/chat/completions`. The
-  `ollama` preset now writes the host-only `http://127.0.0.1:11434`. Requests
-  ask for `response_format: {"type": "json_object"}`, and a reply that wraps
-  its JSON object in commentary is still parsed.
-- `bobby install` no longer fails the whole run when Ollama (or another
-  selected vision backend) is not reachable; it writes config, prints
-  `locations:`, and tells `bobby doctor` to re-check.
-- Host MCP/ACP entries follow the `bobby install --cli` binary, not whichever
-  `bobby` happens to be first on PATH. `bobby doctor --fix` no longer rewrites
-  those entries to an older Homebrew copy.
-- Ollama vision readiness probed `{base}/models`, which 404s on a host-only
-  `http://127.0.0.1:11434` base. It now hits `/v1/models` (and `/api/tags`),
-  treats `llava` as present when `llava:7b` is installed, and `bobby doctor --fix`
-  starts `ollama serve` when the loopback port is down.
-- `bobby doctor` now reports `vision-readiness` on the regular run, not only
-  under `--fix`.
+- Interrupted scheduler jobs require reconciliation after restart, and durable idempotency reservations survive runtime replacement.
+- A dropped durable idempotency store releases its writer lock.
+- Homebrew formula license metadata matches the repository's MIT license.
+- Firefox workflow targeting and recovery handle detached controls, frame targeting, and companion reconnects.
+- Vision readiness honors the configured proxy for remote providers and recognizes Ollama's full `/v1/chat/completions` base URL.
+- MCP stdio handles a request line that arrives in more than one read.
+- Vision proxy Ollama upstream accepts a host-only, `/v1`, or full-endpoint `base_url`, and the `ollama` preset writes `http://127.0.0.1:11434`.
+- The vision proxy parses a JSON reply wrapped in commentary.
+- `bobby install` completes when the selected vision backend is not reachable, printing `locations:` and pointing at `bobby doctor`.
+- Host MCP/ACP entries follow the `bobby install --cli` binary, and `bobby doctor --fix` does not rewrite them to an older Homebrew copy.
+- Ollama vision readiness probes `/v1/models` and `/api/tags`, accepts `llava` when `llava:7b` is installed, and `bobby doctor --fix` starts `ollama serve` when the loopback port is down.
+- `bobby doctor` reports `vision-readiness` on the regular run.
+- A fixed companion port that is already taken fails the Firefox launch with `browserLaunchFailed` naming the port and leaves the descriptor file untouched; port 0 binds an ephemeral port.
 
 ### Changed
 
-- `bobby doctor` prints `next: bobby doctor --fix` first when anything is
-  wrong, and auto-repairable fail lines include ` · fix: …`.
-- `bobby install` prints a `locations:` block (config, credentials, CLI, host
-  files, OpenClaw/Hermes skill dirs). `bobby doctor` warns when PATH `bobby`
-  is not that CLI.
-- `bobby install --skill-openclaw` writes `$OPENCLAW_STATE_DIR/skills/` when
-  that env is set, else `~/.openclaw/skills/`.
-- `bobby install --skill-hermes` installs the Python SDK skill
-  (`skill/hermes/SKILL.md`) into `$HERMES_HOME/skills/` when set, else
-  `~/.hermes/skills/`.
-- Python SDK publishes to PyPI as `bobby-browser` from each release tag
-  (`.github/workflows/publish-python.yml`, trusted publishing, no stored
-  token); `workflow_dispatch` publishes an existing tag. Install docs, the
-  package README, and the Hermes skill now say `pip install bobby-browser`.
-- MCP: every JSON-RPC error `message` now ends with its repair action
-  (`<message>; repair: <action>`), and `error.data.repair` carries the same
-  `{action, doc}`. Previously `-32700`, `-32600`, `-32601`, `-32002`,
-  `-32800`, `-32603`, bare `-32602`, and the `-32000` rejections for
-  `eventGap`, missing or oversized artifacts, and job errors reached hosts
-  that render only `message` with no repair. `controlIdNotFound` and
-  `exactlyOneOfWorkflowIdOrSessionId` gained their own repairs; a `-32602`
-  reason with none falls back to the general one. The duplicate-request-id
-  rejection's `data.repair` is now the `{action, doc}` object instead of a
-  bare string.
-- Vision proxy error responses are a structured object,
-  `{"error": {"code", "kind", "message", "retryable"}}` (codes
-  `visionAuthRejected`, `visionInvalidRequest`, `visionUpstreamTransport`,
-  `visionUpstreamRejected`, `visionInvalidModelReply`), with `message` capped
-  at 512 characters; a 401 now carries this body too. An upstream rejection
-  reports only its status class and code, never the upstream response body,
-  and an unparseable model reply is reported with a fixed message.
-
-- Firefox companion: a fixed (nonzero) companion port that is already taken
-  now fails the launch with `browserLaunchFailed` naming the port, and the
-  descriptor file is left untouched. This replaces the 0.16.0 fallback to a
-  dynamic loopback port, which could publish a second endpoint over the
-  configured owner's descriptor. Port 0 still binds an ephemeral port.
+- `bobby doctor` prints `next: bobby doctor --fix` first when anything is wrong, and auto-repairable fail lines include the fix.
+- `bobby install` prints a `locations:` block, and `bobby doctor` warns when PATH `bobby` is not that CLI.
+- `bobby install --skill-openclaw` writes `$OPENCLAW_STATE_DIR/skills/` when set, else `~/.openclaw/skills/`.
+- `bobby install --skill-hermes` installs the Python SDK skill into `$HERMES_HOME/skills/` when set, else `~/.hermes/skills/`.
+- The Python SDK publishes to PyPI as `bobby-browser` from each release tag; install with `pip install bobby-browser`.
+- Every MCP JSON-RPC error `message` ends with `; repair: <action>`, and `error.data.repair` carries `{action, doc}`.
+- Vision proxy errors are a structured object `{"error": {"code", "kind", "message", "retryable"}}` with `message` capped at 512 characters and no upstream response body.
 
 ## 0.16.0 - 2026-09-23
 
 ### Added
 
-- Python SDK (`packages/python-sdk`, package `bobby-browser`, stdlib only):
-  `BrowserRuntimeClient` mirrors the TypeScript client's `/v1` surface --
-  sessions, pages, `submit_command` with the `CommandOutcome` status
-  discriminator preserved, checkpoints, recovery, context reads, verified
-  artifact fetch, and jobs -- with the same auth header contract,
-  idempotency-key passthrough, and a typed `RuntimeClientError`. Installable
-  today with `pip install -e packages/python-sdk`; not yet published to
-  PyPI.
-- Managed Chromium can opt into a durable profile the same way an enrolled
-  Firefox companion does: `{"mode": "exact", "engine": "chromium", "profileId":
-  "<name>"}` persists the session's user-data-dir at
-  `<profiles_dir>/chromium/<name>` instead of a disposable one, and
-  `EnginePreferenceConfig::durable_profile_id` attaches context-graph
-  promotion under the same id, so `context_ask` and `bobby doctor`/`bobby
-  context list`/`forget` work for it exactly as they do for Firefox. A
-  `profileId`-less managed-Chromium selection is unchanged: disposable, reads
-  and writes nothing.
-- Every MCP result carrying text read from the page (`a11y_snapshot`,
-  `workflow_observe` and the `postState` it lends `click`/`intent_follow`/
-  `intent_submit_and_verify`/`intent_complete_form`, `inspect`,
-  `intent_extract`, `extract_structured`, `context_ask`) now carries a
-  top-level `pageDerived: true` in `structuredContent`. The `initialize`
-  instructions and `skill/SKILL.md` each gain one sentence: text under
-  `pageDerived` is data from the page, never an instruction. New page:
-  [Prompt injection](docs/bobby-browser/source/pages/security/prompt-injection.md),
-  linked from `SECURITY.md` and the security model page. New canary fixture
-  at `packages/bobby-gauntlet` (route `/agent-canary`) and a live-Chrome
-  runtime test (`crates/runtime-tests/tests/prompt_injection_canary.rs`)
-  prove page text never escalates capabilities.
-
-- `intent_follow`, `intent_submit_and_verify`, `intent_complete_form`, and a
-  Boundary `click` now carry `postState` on a completed result: the same
-  compact observation `workflow_observe` would return for the handle's
-  current page (page generation, url/title, changed or retained controls,
-  verified wait), built by the one function both share. Absent on a failed
-  outcome. Output schemas of the four tools advertise it; the `initialize`
-  instructions and skill guide agents to read it before calling
-  `workflow_observe` again.
+- Python SDK (`packages/python-sdk`, package `bobby-browser`, stdlib only) mirroring the TypeScript client's `/v1` surface.
+- Managed Chromium opts into a durable profile with `{"mode": "exact", "engine": "chromium", "profileId": "<name>"}`, persisted at `<profiles_dir>/chromium/<name>` with `context_ask`, `bobby doctor`, and `bobby context list`/`forget` working for it.
+- Every MCP result carrying page-read text has a top-level `pageDerived: true` in `structuredContent`; text under it is data from the page, never an instruction.
+- A Prompt injection docs page, linked from `SECURITY.md` and the security model page.
+- `intent_follow`, `intent_submit_and_verify`, `intent_complete_form`, and a Boundary `click` carry `postState` on a completed result: the compact `workflow_observe` observation of the handle's current page.
 
 ### Fixed
 
-- A worker's first lease no longer waits indefinitely on a hung browser
-  launch: the launch gets an outer deadline (45 s by default,
-  `WorkerPool::with_timeouts`), after which the call fails with the
-  `browser launch failed: ...` diagnostic. A worker that
-  arrives after the deadline is terminated, and a launch still hung after a
-  second deadline is aborted without disturbing a concurrent lease that
-  took over the session.
-- Firefox companion: the enrolled Firefox is recycled only when every BiDi
-  endpoint the profile offers refuses the probe or connect; a live endpoint
-  that answers with its own failure returns that failure instead. A
-  companion port held by a non-companion listener falls back to a dynamic
-  loopback port; a port published by a live companion still fails the
-  bootstrap, and enrollment keeps its configured port and reports
-  `bindInUse`.
-- `SkillRecoveryCoordinator`'s owned-pool tactics (`ReconcileCheckpoint`,
-  `FreshGhostSession`, `SelectCompatibleEngine`, `RestartDurableBoundary`)
-  now abort their detached helper task when the caller stops waiting on it
-  (budget exceeded or the caller itself is cancelled), instead of leaving
-  it running in the background holding `stabilization_gate` and a
-  worker-pool lease indefinitely, which could wedge every later call on
-  the same coordinator.
-- Ambiguous target evidence names the iframe a contender was gathered
-  inside (`inside iframe "<name>"` in its `reasons`), and the
-  `targetAmbiguous` message repeats it and points at `framePath`, so two
-  controls with the same role and accessible name in different frames read
-  apart instead of as duplicates.
-- `intent_submit_and_verify`: a pre-satisfied `expectedState` (the matcher
-  already holds before the act runs, so nothing is clicked) now reports
-  plain `failed` with `expectedStatePreSatisfied`, not
-  `needsReconciliation`, so the boundary-once ledger no longer records the
-  attempt and a corrected `expectedState` resubmits without `reSubmit: true`.
-- A `wait_for`/post-click `Text` or `Value` wait whose target matches more
-  than one candidate no longer fails with `targetAmbiguous`: the matcher
-  now runs against every ranked candidate's live text/value, and the wait
-  is satisfied when any of them matches (Chromium and Firefox).
-- That same ambiguous-candidates wait no longer fails the whole poll with
-  `browserCommandFailed`/"target detached" when one ranked candidate
-  detaches (or the page re-renders it away) between ranking and its
-  text/value read: the failing candidate is skipped and the remaining
-  candidates decide, and a poll where every candidate fails to read is
-  treated as not-yet-satisfied instead of an error (Chromium and Firefox).
-- `intent_follow`: a post-click wait error caused only by targeting trouble
-  (`targetAmbiguous`, `targetNotFound`, `invalidRequest`) is now reported as
-  `verificationFailed` ("activation landed; expectedState could not be
-  verified: ...") instead of the raw error, so the click's own evidence is
-  visible and the repair does not read as an invitation to re-click.
-- `intent_follow`, `intent_submit_and_verify`, and every other deterministic
-  `intent_*` tool now report the stuck kind's own error code
-  (`targetNotFound`, `targetAmbiguous`, `obstructionSuspected`) when the
-  target is stuck and vision assist is off, denied, or unavailable, instead
-  of `visionAssistDenied`; the message still names both the stuck reason and
-  the closed vision gate. `visionAssistDenied` now reports only from
-  `extract_structured`, `intent_solve_challenge`, and
-  `intent_detect_challenge`, where vision is the operation itself.
-- `intent_follow` called with neither `expectedDestination` nor
-  `expectedState` still fails `Invalid params (malformedArguments)` (per the
-  0.15.0 contract, exactly one is required), but `error.message` now names
-  the fix verbatim instead of the generic bound-outside-the-schema text:
-  "intent_follow needs exactly one of expectedState or expectedDestination
-  (a WaitForCommand: {condition, timeoutMs})".
+- A worker's first lease fails with the `browser launch failed: ...` diagnostic after a 45 s launch deadline.
+- The enrolled Firefox is recycled only when every BiDi endpoint the profile offers refuses the probe or connect.
+- Recovery tactics stop their background work when the caller stops waiting.
+- Ambiguous target evidence names the iframe a contender was found inside, and `targetAmbiguous` points at `framePath`.
+- `intent_submit_and_verify` with a pre-satisfied `expectedState` reports `failed` with `expectedStatePreSatisfied`, and a corrected `expectedState` resubmits without `reSubmit: true`.
+- A `wait_for` or post-click `Text` or `Value` wait on a target matching several candidates is satisfied when any candidate matches, on Chromium and Firefox.
+- That wait skips a candidate that detaches mid-read, and a poll where every candidate fails to read counts as not yet satisfied.
+- `intent_follow` reports a post-click wait error caused only by targeting trouble as `verificationFailed`, with the click's evidence visible.
+- Deterministic `intent_*` tools report the stuck kind's own error code (`targetNotFound`, `targetAmbiguous`, `obstructionSuspected`) when vision assist is off, denied, or unavailable.
+- `visionAssistDenied` reports only from `extract_structured`, `intent_solve_challenge`, and `intent_detect_challenge`.
+- `intent_follow` without `expectedDestination` or `expectedState` fails with a message naming the fix.
 
 ### Changed
 
-- MCP catalog diet: the default `explore` `tools/list` payload dropped from
-  75,648 to under 32,768 bytes and `full` from 115,089 to under 81,920 bytes
-  (`cargo test -p mcp-gateway --test toolsets
-  explore_and_full_catalogs_stay_under_the_diet_ceilings`). Duplicated
-  workflow-scope branches in every advertised schema now declare business
-  properties once instead of cloning them into both `oneOf` branches;
-  `WaitCondition`, `WaitForCommand`, `ControlActionKind`, `ControlTarget`,
-  and `FillValue` advertise as opaque objects (full shape still enforced at
-  `tools/call`); `cookie_get`, `dialog`, `download_url`, `screenshot`,
-  `form_snapshot`, `inspect`, `wait_for`, `network_log`,
-  `click_and_wait_for_download`, `context_ask`, `context_neighbors`, and
-  `intent_detect_challenge` moved out of the default `explore` phase into
-  the `act`/`intent`/`verify` phases they already advertised in (still
-  callable from `explore`; phases narrow advertisement only, never
-  capability); every tool description is now one to two sentences.
-- `intent_complete_form` fields accept a new optional `revealedBy` hints
-  object naming a control to click before that field is resolved, for a
-  field that does not exist until the fields filled so far are submitted
-  (an MFA code shown after email and password are submitted). The engine
-  clicks the named control and waits for the field to become visible before
-  filling it, so a cookie-banner-then-credentials-then-MFA sign-in gate now
-  completes in three calls (`intent_follow`, one `intent_complete_form`, one
-  `intent_submit_and_verify`) instead of seven.
-- `intent_complete_form`'s advertised MCP tool schema now names `revealedBy`
-  on each field (reusing the shared `IntentHints` `$def`), so an agent can
-  discover the hint without reading source; bought back with shorter
-  `intent_complete_form`/`workflow_start` tool descriptions to stay under
-  the `explore` `tools/list` byte ceiling.
+- The default `explore` `tools/list` payload is under 32,768 bytes and `full` under 81,920; `cookie_get`, `dialog`, `download_url`, `screenshot`, `form_snapshot`, `inspect`, `wait_for`, `network_log`, `click_and_wait_for_download`, `context_ask`, `context_neighbors`, and `intent_detect_challenge` advertise in the `act`/`intent`/`verify` phases but stay callable from `explore`.
+- Every tool description is one to two sentences.
+- `intent_complete_form` fields accept an optional `revealedBy` hint naming a control to click before the field is resolved, so a sign-in gate with a revealed MFA field completes in three calls.
+- `intent_complete_form`'s advertised schema names `revealedBy` on each field.
 
 ## 0.15.0 - 2026-09-19
 
 ### Added
 
-- Provider health enforcement on the operational metrics: every vision
-  propose round-trip updates per-mode success/failure, consecutive-failure,
-  and latency-budget counters. `[vision].health_failure_threshold` (default
-  3) classifies a provider `unhealthy` (consecutive failures) or `degraded`
-  (consecutive `propose_budget_ms` violations). `/v1/runtime` reports
-  `providerHealth` when a vision provider is configured, and the MCP
-  `runtime_info` output schema advertises it. Report-only: escalation
-  behavior is unchanged.
-- `bobby doctor` evaluates operator-facing SLOs from `/v1/runtime`:
-  `provider-health` (fails on `unhealthy`, warns on `degraded`),
-  `slo-vision-latency-budget` (warns on any propose-budget violation), and
-  the new `[observability.slo]` objectives `vision_max_failure_rate` and
-  `vision_min_acceptance_rate` (fail when breached; unset objectives are
-  not evaluated).
-- MCP `click_and_wait_for_download`: clicks, waits for the download that
-  click starts, and returns digest-verified artifact evidence. Requires
-  `browser:mutate` + `file:download`, accepts `workflowHandle`, takes an
-  auto-checkpoint boundary by default, and is advertised in the `explore`
-  and `act` toolsets.
-- A tool result that admits a text-like download (`csv`, `htm`, `html`,
-  `json`, `md`, `text`, `tsv`, `txt`, `xml`) carries `downloadPreviews`:
-  `{filename, text, truncated}` per file, with `text` capped at 4 KiB.
-- Screenshot evidence is also returned as an MCP `image` content block
-  (up to 768 KiB base64) next to its `artifact://` resource link.
-- `intent_follow` accepts `expectedState` as an alias of
-  `expectedDestination`; exactly one of the two is required.
-- `Evidence::PageGeneration { pageId, generation }`: page-scoped commands
-  report the retained page-context generation after bookkeeping.
-- ACP `session/prompt` accepts explicit operations next to automation
-  requests: `contextAsk`, `contextNeighbors`, `contextSite`,
-  `checkpointSave`, `recoveryStatus`, and `workflowRecover`. Automation
-  requests accept an optional stable `workflowId`. The capabilities matrix
-  lists ACP for `readContext`, `createCheckpoint`, `readCheckpoint`, and
-  `recoverWorkflow`.
-- Vision escalation executes candidate-grounded `selectOne`, `selectMany`,
-  `setChecked`, and `clear` control actions, and rejects a candidate whose
-  role cannot take the action before any mutation. `spinbutton` and
-  `listbox` join the vision candidate roles.
-- A file fill whose input does not resolve escalates to vision: a
-  vision-selected `button` candidate receives the files through the
-  runtime's `upload_files` path, and upload failure detail is replaced with
-  a fixed message before it reaches vision records.
-- Vision escalation orders a stuck step's candidates with retained page
-  context before the provider sees the first 5: the near-miss list grows
-  from 5 to 10 candidates, the verified candidate with the best record
-  moves to the front, a tie for best leaves the order unchanged, and a
-  retained match with no verification day is not used.
-- `contextRankedVision` operational metrics (value-free counters and
-  histograms for context source, lookup outcome, ranking latency, provider
-  escalation, confidence, and verification result) in
-  `runtime_info.operationalMetrics` and the Rust client's
-  `OperationalMetricsSnapshot`. Snapshots without the group read as zero.
-- The CDP gateway pins Playwright 1.63's injected bootstrap by length and
-  digest.
-- `InterfaceOperation::ALL` and `InterfaceOperation::as_str()` in
-  `bobby-browser-client`. The capabilities page's operation-support and
-  execution-policy tables are generated from interface metadata.
+- Provider health enforcement: `[vision].health_failure_threshold` (default 3) classifies a provider `unhealthy` or `degraded`, and `/v1/runtime` and `runtime_info` report `providerHealth`.
+- `bobby doctor` evaluates `provider-health`, `slo-vision-latency-budget`, and the `[observability.slo]` objectives `vision_max_failure_rate` and `vision_min_acceptance_rate`.
+- MCP `click_and_wait_for_download` clicks, waits for the download, and returns digest-verified artifact evidence; it needs `browser:mutate` and `file:download` and is advertised in `explore` and `act`.
+- A tool result admitting a text-like download carries `downloadPreviews` with `{filename, text, truncated}` per file, `text` capped at 4 KiB.
+- Screenshot evidence is also returned as an MCP `image` content block of up to 768 KiB base64.
+- `intent_follow` accepts `expectedState` as an alias of `expectedDestination`; exactly one is required.
+- Page-scoped commands report `Evidence::PageGeneration { pageId, generation }`.
+- ACP `session/prompt` accepts `contextAsk`, `contextNeighbors`, `contextSite`, `checkpointSave`, `recoveryStatus`, and `workflowRecover`, and automation requests accept an optional stable `workflowId`.
+- Vision escalation executes candidate-grounded `selectOne`, `selectMany`, `setChecked`, and `clear` control actions, and `spinbutton` and `listbox` are vision candidate roles.
+- A file fill whose input does not resolve escalates to vision and uploads through `upload_files`.
+- Vision escalation shows up to 10 near-miss candidates ordered by retained page context.
+- `contextRankedVision` operational metrics appear in `runtime_info.operationalMetrics`.
+- `InterfaceOperation::ALL` and `InterfaceOperation::as_str()` in `bobby-browser-client`.
 
 ### Changed
 
-- Successful `intent_follow` and `intent_submit_and_verify` results default
-  to compact evidence (`evidenceDetail: "compact"`), keeping
-  `pageGeneration`, `wait`, `screenshot`, `pdfArtifact`, `harArtifact`,
-  `download`, `submitSettlement`, and `formValidation`. Pass
-  `evidenceDetail: "full"` for everything; failures are never compacted.
-  Compact `intent_complete_form` results also keep `pageGeneration` and
-  artifact evidence.
-- ACP automation replies are one JSON `session/update` chunk with
-  `operation: "execute"`, `sessionId`, `pageId`, `workflowId`, `attemptId`,
-  and the full `CommandOutcome`, replacing the one-line text summary.
-- `bobby openshell install` takes `--agent codex|claude`, default `codex`
-  (allowlist `/usr/bin/codex`, `/usr/local/bin/codex`,
-  `/usr/lib/node_modules/@openai/**`). `--agent-binary` is now optional and
-  replaces the preset; the previous default was `/usr/local/bin/claude`.
+- Successful `intent_follow`, `intent_submit_and_verify`, and `intent_complete_form` results default to compact evidence; `evidenceDetail: "full"` returns everything and failures are never compacted.
+- ACP automation replies are one JSON `session/update` chunk with `operation`, `sessionId`, `pageId`, `workflowId`, `attemptId`, and the full `CommandOutcome`.
+- `bobby openshell install` takes `--agent codex|claude` (default `codex`), and `--agent-binary` is optional and replaces the preset.
 - `intent_follow` is advertised in the default `explore` toolset.
-- `screenshot`'s advertised `mode` is the real `oneOf` of viewport,
-  full-page, element, and clip shapes instead of an opaque object.
-- MCP `initialize` instructions and the `intent_follow` description route
-  verified link and control activation through `intent_follow` with
-  `expectedState`.
-- The HTTP vision backend, the vision proxy's OpenAI and Ollama adapters,
-  ACP profiles, and the Python providers read one candidate-action table
-  (`scripts/vision-mlx/candidate_action_contract.json`). The HTTP backend
-  now rejects a `clickCandidate` for `fill`, `type`, and `extract` intents.
-- TypeScript SDK contracts match runtime outcomes: error codes
-  `targetObscured` and `targetOutOfBounds`, execution reason `pageMutated`,
-  resolution path `visionPrefill`, and evidence kinds `pageGeneration`,
-  `structuredExtraction`, `challengeDetection`, `cookieState`,
-  `pdfArtifact`, `dialog`, `emulation`, and `harArtifact`.
-  `FormControlValidity.willValidate` is required.
-- Firefox companion and registry failures map to distinct error codes:
-  attachment, profile, pairing-code, revoked, expired-attachment, and
-  credential failures are non-retryable `policyDenied`; an unknown profile
-  is `notFound`; missing target discovery or attachment grant is retryable
-  `browserCommandFailed`; an invalid companion event is non-retryable
-  `browserCommandFailed`.
-- Dependency bump that reaches consumers: `dirs` 6 to 7.
+- `screenshot`'s advertised `mode` is the `oneOf` of viewport, full-page, element, and clip shapes.
+- MCP `initialize` instructions route verified link and control activation through `intent_follow` with `expectedState`.
+- The HTTP vision backend rejects a `clickCandidate` for `fill`, `type`, and `extract` intents.
+- TypeScript SDK contracts match runtime outcomes, including error codes `targetObscured` and `targetOutOfBounds`, reason `pageMutated`, and the newer evidence kinds.
+- Firefox companion and registry failures map to distinct error codes: attachment, profile, pairing-code, revoked, expired-attachment, and credential failures are non-retryable `policyDenied`, and an unknown profile is `notFound`.
 
 ### Fixed
 
-- TypeScript SDK: `isRuntimeInfo` accepts the `visionProposeBudgetMs`,
-  `operationalMetrics`, and `providerHealth` fields the runtime already
-  sends; the exact-keys validator previously rejected live `/v1/runtime`
-  payloads.
-- `workflow_observe` with `includeForms` reads forms from the handle's
-  current page, so after a followed popup closes it reports and reads the
-  opener instead of the closed popup.
-- `recovery_status` and `workflow_recover` return `notFound` for a missing
-  or unowned workflow instead of `internal`.
-- The MCP and CDP gateways revalidate connection authorization before
-  resolving a method, so a revoked connection cannot probe which methods
-  exist.
+- TypeScript SDK `isRuntimeInfo` accepts `visionProposeBudgetMs`, `operationalMetrics`, and `providerHealth`.
+- `workflow_observe` with `includeForms` reads the handle's current page, so it reads the opener after a followed popup closes.
+- `recovery_status` and `workflow_recover` return `notFound` for a missing or unowned workflow.
+- The MCP and CDP gateways revalidate connection authorization before resolving a method.
 
 ## 0.14.0 - 2026-09-10
 
 ### Added
 
-- Docker image (`Dockerfile`, `docker-compose.yml`) and `deploy/docker/`
-  config running `bobby serve` with managed headless Chromium. Non-root
-  runtime user, `deploy/docker/entrypoint.sh` generates the bootstrap
-  credential on first run, `scripts/docker/smoke.sh` proves a real MCP
-  streamable HTTP session end to end.
-
-- `bobby mcp-stdio` promotes verified intent outcomes into the shared
-  context store when the engine selection carries a durable Firefox profile
-  identity (exact Firefox + `profileId`), mirroring `bobby serve`. Agents
-  run over stdio, so the remembered-site path was previously serve-only.
-  The durable-profile rule now lives on
-  `EnginePreferenceConfig::durable_profile_id`, shared by both entry points.
-
-- `[vision].propose_budget_ms`: an operator-set health budget for one vision
-  propose round-trip. `bobby doctor`'s vision probe warns when the measured
-  round-trip exceeds it (naming both numbers and the setting), and
-  `/v1/runtime` advertises it as `visionProposeBudgetMs`, so a caller can
-  judge the metrics latency histogram against the configured budget without
-  config access. Unset means no budget gate — `timeout_ms` stays the only
-  bound.
-
-- `bobby mcp-stdio` dumps the operational metrics snapshot to
-  `BOBBY_METRICS_SNAPSHOT_PATH` when the host closes the session, when that
-  env var is set. The snapshot is counters and histograms only — never
-  prompts, values, or URLs. A dump failure is logged and never fails the
-  shutdown.
-- Direct contract tests pin every gate in the CDP dispatch chokepoint
-  (`CdpConnection::dispatch` → `dispatch_reserved`): request validation,
-  unknown-method refusal, non-object params, missing-capability fail-closed,
-  and the exact-shape `enable` / user-agent no-op handlers. The gateway's
-  highest-degree node previously had only indirect coverage.
-- A successful `click_and_wait_for_popup` through a `workflowHandle` rebinds
-  that handle onto the popup and remembers the opener. Once the popup is no
-  longer open, a handle-resolved call that would otherwise fail `notFound`
-  falls back to the opener instead: a read-only call replays there once and
-  reports `Evidence::PopupClosed`; a mutating call still fails, carrying the
-  same evidence and a repair naming the opener page. `page_close
-  {workflowHandle}` on the followed popup returns the handle to the opener
-  the same way, instead of evicting it. `form_snapshot` through the handle
-  replays on the opener the same way; the `controlId` lookup inside
-  `upload_files` fails with the same evidence and repair.
-- `runtime_info`'s output schema advertises `operationalMetrics` (the
-  counters/histograms snapshot, opaque object) and `visionProposeBudgetMs`,
-  matching the wire payload the runtime already returns — a caller can see
-  the observation window and resolution-source counters before calling.
-- `workflow_observe` joins the handle-capable scope tools: it takes the
-  `workflowHandle` (with the single-live-handle default and
-  `workflowHandleDefaulted` evidence) or the explicit id set, so the
-  canonical loop tool follows the same repair path as every other scope
-  tool when a handle dies.
-- `page_activate {workflowHandle, pageId}` activates the named page and
-  rebinds the handle to it (same session; the prior page is recorded as the
-  opener), replacing the `workflowBindingConflict` refusal that forced the
-  gauntlet agent off the handle path. Cross-session activates stay refused.
-- `context_ask` / `context_neighbors` spell out a miss: the outcome carries
-  `hit: false`, `reason: "notRemembered"`, and `nextStep: "a11y_snapshot"`
-  next to the `null` answer (HTTP `/v1/context/ask` too, with `hit: true`
-  added on the hit path), so an agent can tell "unknown" from "located"
-  without parsing null and gets the snapshot repair.
-- An `intent_extract` field hinted at an accessibility-tree-only role the
-  element resolver can never match (`StaticText`, `LabelText`,
-  `MenuListPopup`, ...) misses with an `a11yOnlyRole` configuration marker
-  instead of a bare `targetNotFound` — and runs no vision escalation, which
-  cannot resolve a text node either. (The marker first shipped with a guard
-  that checked the wrong resolver shape and never fired; it now runs on
-  every non-resolved decision, pinned by tests.)
-- A `targetAmbiguous` rejection names its contenders the way the outcome's
-  resolution evidence does (`button "Submit" score=80`) and ends with the
-  narrowing repair, replacing the previous Rust `Debug` dump
-  (`role=Some("button"),score=0`).
-- A schema violation on a choice keyword (`oneOf`/`anyOf`/`enum`/`const`)
-  extends the repair with the variant-list fix — the value must match one
-  variant of the schema's list, each variant's `kind` discriminator
-  included — so a rejected `FillValue` names the discriminator in the
-  message the agent actually reads.
+- Docker image (`Dockerfile`, `docker-compose.yml`) and `deploy/docker/` config running `bobby serve` with managed headless Chromium as a non-root user, generating the bootstrap credential on first run.
+- `bobby mcp-stdio` promotes verified intent outcomes into the shared context store when the engine selection carries a durable Firefox profile.
+- `[vision].propose_budget_ms` sets a budget for one vision round-trip; `bobby doctor` warns when exceeded and `/v1/runtime` advertises `visionProposeBudgetMs`.
+- `bobby mcp-stdio` dumps the operational metrics snapshot (counters and histograms only) to `BOBBY_METRICS_SNAPSHOT_PATH` when the host closes the session.
+- A successful `click_and_wait_for_popup` through a `workflowHandle` rebinds the handle onto the popup; once it closes, a read-only call replays on the opener with `Evidence::PopupClosed` and a mutating call fails with that evidence and a repair naming the opener.
+- `page_close {workflowHandle}` on the followed popup returns the handle to the opener.
+- `runtime_info`'s output schema advertises `operationalMetrics` and `visionProposeBudgetMs`.
+- `workflow_observe` takes `workflowHandle`, with the single-live-handle default and `workflowHandleDefaulted` evidence.
+- `page_activate {workflowHandle, pageId}` activates the named page in the same session and rebinds the handle to it.
+- `context_ask` and `context_neighbors` report a miss as `hit: false`, `reason: "notRemembered"`, `nextStep: "a11y_snapshot"`, on MCP and HTTP `/v1/context/ask`.
+- An `intent_extract` field hinted at an accessibility-tree-only role misses with an `a11yOnlyRole` configuration marker and runs no vision escalation.
+- A `targetAmbiguous` rejection names its contenders like `button "Submit" score=80` and ends with the narrowing repair.
+- A schema violation on `oneOf`/`anyOf`/`enum`/`const` extends the repair with the variant-list fix.
+- `intent_complete_form`'s field `name` and `intent_fill`'s `accessibleName` accept a `controlId` from `workflow_observe` (`includeForms: true`) or `form_snapshot`.
+- `intent_complete_form` accepts a top-level `hints` when `fields` has exactly one entry with empty hints; otherwise it is rejected with `hintsPerField`.
+- A handle-capable call naming no `workflowHandle` or scope ID resolves against the connection's one live handle, with `workflowHandleDefaulted` evidence; zero or several live handles get no default.
 
 ### Changed
 
-- Dependency bumps that reach consumers: `agent-client-protocol` 2.0 to
-  2.1, `base64` 0.22 to 0.23, `jsonschema` 0.52 to 0.53, `brotli` 8 to 9,
-  `windows-registry` 0.6 to 0.100.
-- The captcha implementation plan is no longer shipped under `docs/`; the
-  shipped captcha path is documented by `bobby://intents` and the intents guide.
-- Public agent skill: pass `workflowHandle` on later calls; explicit ids are
-  the repair path when the handle dies. `workflowId` stays on
-  `checkpoint_save` / `workflow_recover` only.
-- Explore-loop tool descriptions (`click`, `intent_complete_form`,
-  `intent_submit_and_verify`) name `workflowHandle` as the call scope.
-- `intent_complete_form`'s field `name` and `intent_fill`'s `accessibleName`
-  hint accept a `controlId` from `workflow_observe` (`includeForms: true`)
-  or `form_snapshot` as an alternative to a real accessible name: when every
-  other hint is empty, the gateway resolves the id against a form snapshot
-  and fills in the control's own target before compiling the intent.
-- `intent_complete_form` accepts a top-level `hints` (`intent_fill`'s shape)
-  when `fields` has exactly one entry and that field's own hints are empty,
-  folding it into the field. A top-level `hints` with more than one field,
-  or when the field already has hints, is rejected with `hintsPerField`.
-- A handle-capable call that names no `workflowHandle` and no explicit scope
-  ID at all now resolves against this connection's one live workflow handle
-  when exactly one is bound, the same substitution an explicit
-  `workflowHandle` would have produced; the outcome's evidence carries a
-  `workflowHandleDefaulted` configuration item naming the handle it used.
-  Zero or two-or-more live handles get no default.
+- The public agent skill passes `workflowHandle` on later calls, with explicit ids as the repair path when the handle dies.
+- Explore-loop tool descriptions name `workflowHandle` as the call scope.
 
 ### Fixed
 
-- `intent_extract`'s advertised schema no longer offers a top-level `hints`
-  property: `IntentExtractArgs` never accepted one (each `fields` entry
-  carries its own), so a call that set it validated and then failed to
-  parse with `malformedArguments`. A new test asserts every intent tool's
-  schema properties round-trip through its own parser.
-- `corpus_lint.py` no longer requires `target_index`: the engine omits the
-  key entirely on abstentions, so a valid abstain row failed lint as a
-  missing field. The positive:negative balance band is now scale-aware —
-  below 60 negatives the 2:1–8:1 band stays a hard error; at or above that
-  mass a breach relaxes to a warning past 12:1, since positive volume
-  scales with steps × runs while negative volume does not.
-- A page that closes while a command is in flight (a followed popup the
-  site closes, most commonly) now fails `notFound` immediately instead of a
-  retryable transport-reset failure: after reconnecting to the live browser
-  process the runtime checks the worker's page listing, and a missing page
-  fails permanently for Replayable and mutating commands alike.
-- A closed-session-shaped CDP error on a page command is probed before it is
-  treated as browser death: `list_pages` on the current lease, no reconnect.
-  Browser and page present: a Replayable command retries once on the same
-  lease; a mutating command fails `targetDetached` (`retryable: true`) with
-  a `transientTargetLoss` evidence item carrying the original diagnostic.
-  Page absent: permanent failure. Probe failure: the existing reattach /
-  revive path.
-- Chromium clicks use one explicit press/release sequence; a closed-session-
-  shaped error before the press is acknowledged, with the page still listed,
-  retries the click once from target resolution. An error after the press
-  stays a failure.
-- A click resolved inside an iframe or a shadow root now lands at the right
-  point: `clickable_point` used a JS `getBoundingClientRect()`, which is
-  frame-local, so a coordinate-based click missed once the frame or shadow
-  host was offset within its parent. It now reads the backend node id's
-  content quads instead, the same mechanism a same-frame element's native
-  click already used. The target is also scrolled into view before that
-  point is read.
-- JSON-RPC `-32602` responses now carry the rejection reason and repair
-  action in `error.message`, not only in `error.data`: MCP hosts commonly
-  render `error.message` alone, so a bare "Invalid params" repeated with no
-  visible repair. `error.data.reason` / `error.data.repair` are unchanged.
-- `intent_fill` / `intent_complete_form` on a file control (`<input
-  type="file">`) now fails with a typed, deterministic `intentActionMismatch`
-  naming `upload_files` as the repair, instead of a `targetNotFound` that
-  escalated to a vision fallback and came back `visionAssistDenied`. File
-  inputs accept paths only through `upload_files` (or `control_action`).
-- The four distinct reasons `reconnect_live_process` can fail to reattach
-  (no browser handle, browser process exited, no debug websocket url, CDP
-  connect failed) used to collapse into the same generic "browser worker is
-  closed", discarded to `tracing::warn!` under `mcp-stdio`. Each now returns
-  its own static-prefix message, and a browser revive that could not
-  reattach attaches a `browserRevived` `Configuration` evidence item naming
-  the pre-revive probe result, the reattach failure, and the original
-  command's error, so the reason survives redaction into `commands.jsonl`.
-  The revive failure message itself no longer claims the browser process
-  was killed (unproven); it says the transport was lost and could not be
-  reattached.
-- `reap_orphaned_processes` (worker-pool) now records each registry entry's
-  owner PID and only kills its Chrome once that owner is confirmed dead. It
-  used to SIGKILL any registered Chrome process on every new launch
-  regardless of whether the bobby instance that registered it was still
-  running, so one bobby process starting up could kill a browser a
-  different, live bobby process was still driving mid-task (`browserRevived`
-  evidence: `reattach failed: browser process exited (signal: 9 (SIGKILL))`).
-  A live owner's entry, including one this process itself just registered,
-  is now left in place untouched; a pre-ownership one-line entry (from a
-  binary predating this change) is removed but never killed, since it names
-  no owner to verify against.
-- A `schemaViolation` `-32602` rejection now names the pointer and
-  constraint in `error.message` itself (`schemaViolation at /sessionId:
-  required`), not only in `error.data`, since MCP hosts commonly render
-  `error.message` alone. A scope-less call to a handle-capable tool that the
-  single-live-handle default above could not resolve (zero, or more than
-  one, live handle) gets a targeted repair action naming the live count and
-  pointing at `workflow_start`.
+- `intent_extract`'s advertised schema offers no top-level `hints` property.
+- A page that closes while a command is in flight fails `notFound` immediately.
+- A closed-session-shaped CDP error on a page command is probed first: a Replayable command retries once on the same lease, a mutating command fails `targetDetached` (retryable) with `transientTargetLoss` evidence, and an absent page fails permanently.
+- Chromium clicks use one press/release sequence and retry once from target resolution when the error precedes the press acknowledgement.
+- A click resolved inside an iframe or shadow root lands at the right point, with the target scrolled into view first.
+- JSON-RPC `-32602` responses carry the rejection reason, pointer, constraint, and repair action in `error.message`.
+- `intent_fill` and `intent_complete_form` on a file control fail with `intentActionMismatch` naming `upload_files` as the repair.
+- A browser revive that could not reattach states that the transport was lost, and attaches `browserRevived` evidence naming the probe result, the reattach failure, and the original error.
+- Starting a bobby instance reaps only browsers whose registered owner is confirmed dead, leaving a live bobby's browser untouched.
+- A scope-less call to a handle-capable tool with zero or several live handles gets a repair naming the live count and pointing at `workflow_start`.
 
 ## 0.13.0 - 2026-09-04
 
 ### Added
 
-- `bobby doctor` command: read-only health checks with `--json` structured
-  output and a `next-action` recommendation. Inspects command journal,
-  scheduler journal, corpus, sidecar version, and store health.
+- `bobby doctor` runs read-only health checks with `--json` output and a `next-action` recommendation over the command journal, scheduler journal, sidecar version, and store health.
 - `bobby doctor --fix` rotates an expired bootstrap token.
-- Firefox `wait_for` implements `networkQuiet` from the BiDi
-  `network.beforeRequestSent` / `responseCompleted` / `fetchError` stream
-  already used for HAR, with the same idle / max-in-flight / ignore filters
-  as Chromium.
-- Firefox live-process reattach reconnects the BiDi websocket without
-  `session.new`, so typed values survive a transport drop the same way a
-  Chromium CDP reattach does.
-- Rust SDK: intent envelope builders (`locate_envelope`,
-  `fill_envelope`, `submit_and_verify_envelope`, etc.) mirror the
-  TypeScript SDK one-to-one, with purpose validation and unique-name
-  enforcement.
-- Rust SDK: client methods for the remaining `/v1` surface —
-  `form_snapshot`, `checkpoint`, `recovery_status`, `recover`, and
-  `artifact` with full reference verification (media-type, Content-Length,
-  byte cap, SHA-256 digest).
-- MCP `boundary-once` guard refuses a second `intent_submit_and_verify`
-  against a workflow whose Boundary submit already completed, keyed on
-  `(workflow, control identity)`. `reSubmit: true` is the explicit
-  acknowledgment path.
-- Agent benchmark gate enforces per-task token and call budgets from
-  `baseline.json` and aggregates multi-run batches (every run must pass;
-  mean wall/tokens face thresholds).
-- Vision corpus: harvest wrong-pick validation and split abstain recall
-  floors between production negatives (floor 1.0) and singleton research
-  classes (floor 0.5).
-- Real-sites probe harness with wall-discrimination pairs (LinkedIn,
-  Reddit) and expanded purpose table.
+- Firefox `wait_for` supports `networkQuiet` with the same idle, max-in-flight, and ignore filters as Chromium.
+- Firefox live-process reattach reconnects the BiDi websocket without a new session, so typed values survive a transport drop.
+- Rust SDK intent envelope builders (`locate_envelope`, `fill_envelope`, `submit_and_verify_envelope`, and others) mirror the TypeScript SDK.
+- Rust SDK client methods `form_snapshot`, `checkpoint`, `recovery_status`, `recover`, and `artifact`, with artifact verification of media type, Content-Length, byte cap, and SHA-256 digest.
+- MCP `boundary-once` guard refuses a second `intent_submit_and_verify` against a workflow whose Boundary submit already completed; `reSubmit: true` acknowledges it.
 
 ### Changed
 
-- `RuntimeService::navigate` reports the command error message, not `Debug`
-  of the whole outcome.
-- `element_at_point` defaults to unsupported (`browserCommandFailed`), not
-  `Ok(None)`.
-- MCP `extract` default value and handle examples are derived and formatted
-  correctly in tool schemas.
-- Advertised command-outcome schemas are no longer opaque — field-level
-  detail is visible in the schema.
-- MCP workflow handles are initialized before the first tool dispatch,
-  fixing the handle-first loop.
+- `RuntimeService::navigate` reports the command error message.
+- `element_at_point` defaults to unsupported (`browserCommandFailed`).
+- MCP `extract` default value and handle examples are formatted correctly in tool schemas.
+- Advertised command-outcome schemas show field-level detail.
+- MCP workflow handles are initialized before the first tool dispatch.
 
 ### Fixed
 
-- `ExpectedStatePreSatisfied` pre-check widens to 2s (from 750ms),
-  outliving the SPA render race under concurrent browser instances.
-- `boundary-once` ledger keys per control identity, not per workflow — a
-  workflow with two distinct Boundary submits (search + save) no longer
-  false-positives.
-- Hints-less boundary submits are truly fail-open: no key, no ledger
-  entry, no collision between unnamed controls.
-- Candidate census survives exotic elements that serve non-string
-  `innerText`/`value`.
-- Real-sites purpose expansion and singleton recall split landed (missed
-  in prior branch switch).
-- Rust SDK `artifact()` verifies bodies against references with typed
-  protocol validation — the verification delta that missed #414 is landed.
-- Firefox: leaked BiDi session is recycled when `session.new` hits
-  "Maximum number of active sessions"; the factory detects the slot,
-  recycles the enrolled profile, and retries.
-- Firefox: typed-value evidence returns correct evidence and click bounds
-  are validated.
-- Firefox: CDP `inspect` with a text-only target resolves via page text
-  matching instead of failing.
-- Firefox: companion attach without `targetsDiscovered` — tab selection
-  falls back when the event is absent.
-- Firefox: companion attach without Pair-less host leak — native transport
-  cleans up on disconnect.
-- Firefox: document title is read correctly after the MCP handle-first
-  loop fix.
-- CDP: same-document hash-link click dispatches correctly instead of
-  waiting for a cross-document navigation.
-- CDP: `/json/list` provisions an auto-session when the gateway has none,
-  so Playwright and other clients that discover targets before connecting
-  find a usable target.
-- CDP: page title updates after navigate instead of returning the
-  pre-navigation value.
-- CDP: `Runtime.evaluate` is refused after navigate when the execution
-  context is stale, instead of hanging.
-- CDP: `Target.createBrowserContext` is honestly refused as unsupported
-  instead of silently failing.
-- SDK: deterministic deadline in elapsed-deadline waiter test — context
-  deadline widened to 2s so a loaded runner cannot stretch past it.
-- `Formula/bobby-browser.rb` sha256 digests updated for v0.12.0 release
-  assets.
+- The `ExpectedStatePreSatisfied` pre-check allows 2 s.
+- The `boundary-once` ledger keys per control identity, so a workflow with two distinct Boundary submits works.
+- Hints-less boundary submits are fail-open with no ledger entry.
+- Candidate census handles elements serving non-string `innerText` or `value`.
+- Firefox recycles a leaked BiDi session when `session.new` hits "Maximum number of active sessions" and retries.
+- Firefox returns correct typed-value evidence and validates click bounds.
+- Firefox CDP `inspect` with a text-only target resolves by page text.
+- Firefox companion attach falls back for tab selection when `targetsDiscovered` is absent.
+- Firefox native transport cleans up on disconnect.
+- Firefox reads the document title correctly.
+- CDP same-document hash-link clicks dispatch without waiting for a cross-document navigation.
+- CDP `/json/list` provisions an auto-session when the gateway has none.
+- CDP page title updates after navigate.
+- CDP `Runtime.evaluate` is refused after navigate when the execution context is stale.
+- CDP `Target.createBrowserContext` is refused as unsupported.
+- `Formula/bobby-browser.rb` carries the v0.12.0 asset digests.
 
 ## 0.12.0 - 2026-08-31
 
 ### Added
 
-- Captcha and human-verification challenges are reachable over MCP: two new
-  tools, `intent_detect_challenge` (Replayable, read-only, advertised in
-  `explore` so a stuck agent can name its blocker without a phase switch) and
-  `intent_solve_challenge` (Reconciliable, drives the vision solve loop until
-  cleared or `timeoutMs`). Both gate on `browser:mutate` + `intent:execute` +
-  `vision:assist` up front, so a principal without vision is refused at the
-  gate rather than the engine. `bobby://intents` now documents ten intents,
-  including the captcha path.
-- `DetectChallenge` intent (Replayable): classifies a challenge without acting
-  on the page, returning a typed `challengeDetection` — type, confidence,
-  blocking, optional region — or a provably clean page as a first-class answer.
-  A known prior kind enriches the prompt and is reported for transparency
-  without blending into the answer. CLI: `bobby vision detect`.
-- `SolveChallenge` tactic at rung 4 of the ZigZagZig recovery ladder, after the
-  read-only tactics and before any checkpoint-bearing or session-replacing one.
-  It runs the vision solve loop in place with the session's proven gate, then
-  re-checks the original postcondition, so a solve that did not move the page
-  counts as a climb, not a success. A session without vision assist declines
-  the rung fail-closed.
-- `zigzagzig` (godmode) sessions: `session_create` and `workflow_start` accept
-  `zigzagzig: true`, forcing fingerprint and humanize server-side and routing
-  page-bound commands through the recovery ladder. The creation gate stands in
-  for `browser:fingerprint` + `browser:humanize`, refusing a principal missing
-  either before any session materializes, and the flag is hidden from clients
-  that lack them.
-- The ladder's solve rung runs detection first: a provably clean page skips the
-  solve budget, and a typed detection narrows the solve prompt and feeds its
-  region into the hints. `detect_challenge` now appears in metrics snapshots.
-- TypeScript SDK: `detectChallengeRuntimeCommand` /
-  `solveChallengeRuntimeCommand` and the `detectChallengeEnvelope` /
-  `solveChallengeEnvelope` helpers emit the canonical wire shape, with
-  `DetectChallengeIntent` / `SolveChallengeIntent` / `SolveChallengeHints`
-  contracts and the `DEFAULT_DETECT_CHALLENGE_TIMEOUT_MS` (15s) /
-  `DEFAULT_SOLVE_CHALLENGE_TIMEOUT_MS` (30s) constants.
-- A worker reattaches to a live browser process when the CDP transport dies,
-  preserving page state — typed values, scroll, cookies — instead of a
-  destructive relaunch; the executor tries transport-reattach before relaunch.
-- `intent_submit_and_verify` with a `networkQuiet` postcondition returns a
-  `submitSettlement` classification and value-free `formValidation` repair
-  evidence, so callers can distinguish a settled submission from client-side
-  rejection without repeating the boundary click.
-- The agent benchmark records separate Bobby, host, discovery, bookkeeping,
-  and shell call counts together with reproducibility fingerprints for the
-  source tree, task set, runner set, binary, CLI, and requested model.
+- MCP `intent_detect_challenge` (read-only, advertised in `explore`) classifies a challenge without acting, and `intent_solve_challenge` drives the vision solve loop until cleared or `timeoutMs`; both require `browser:mutate`, `intent:execute`, and `vision:assist`.
+- `bobby://intents` documents ten intents, including the captcha path.
+- The `DetectChallenge` intent returns a typed `challengeDetection` with type, confidence, blocking, and optional region, or a clean-page answer; `bobby vision detect` runs it.
+- A `SolveChallenge` tactic at rung 4 of the recovery ladder runs the vision solve loop in place and re-checks the original postcondition; a session without vision assist declines the rung.
+- `session_create` and `workflow_start` accept `zigzagzig: true`, forcing fingerprint and humanize and routing page-bound commands through the recovery ladder; it requires `browser:fingerprint` and `browser:humanize`.
+- The solve rung runs detection first, skipping the solve budget on a clean page and narrowing the prompt with a typed detection.
+- TypeScript SDK `detectChallengeRuntimeCommand`, `solveChallengeRuntimeCommand`, `detectChallengeEnvelope`, `solveChallengeEnvelope`, and their intent contracts and default timeouts (15 s and 30 s).
+- A worker reattaches to a live browser process when the CDP transport dies, preserving typed values, scroll, and cookies.
+- `intent_submit_and_verify` with a `networkQuiet` postcondition returns a `submitSettlement` classification and value-free `formValidation` evidence.
 
 ### Changed
 
-- The bundled `config.toml` sets the MLX vision provider to
-  `mlx-community/Qwen3.5-27B-4bit`, matching the default already shipped for
-  `bobby install` / `bobby vision connect` in 0.11.0 (the file still pinned the
-  superseded `Qwen2.5-VL-3B`), and adds a commented `[vision.providers.ollama]`
-  example.
-- `form_snapshot` output omits default-valued fields: an untouched control
-  drops from 741 to 422 bytes, and `workflow_observe(includeForms)` no longer
-  re-sends redundant defaults on every observation. The change is output-only —
-  old payloads still deserialize, the `form_control` output schema requires
-  only `id`, `controlKind`, `state`, `validity`, and `supportedOperations`, and
-  TypeScript SDK contracts make the slimmed fields optional.
-- The `targetDetached` failure taxonomy separates whole-browser transport loss
-  (reattach preserves state, relaunch wipes it) from a stale element, and
-  `notFound` documents the "browser page is not open" shape.
-- The default MCP `explore` phase includes `intent_complete_form` and
-  `intent_submit_and_verify`. Initialization guidance tells deferred-schema
-  clients to load those tools with `workflow_start` and `workflow_observe` for
-  the standard form loop.
-- `Evidence::ExecutionPath.path` names the strategy, not an engine: `chromium`
-  and `chromiumFallback` are now `browser` and `browserFallback`. The old names
-  still deserialize so recorded journals replay unchanged.
-- Successful `intent_complete_form` responses default to compact evidence;
-  pass `evidenceDetail: "full"` to retain the complete per-field success
-  evidence. Failure evidence and newly revealed conditional controls remain
-  available in compact mode.
-- Download `savedTo` evidence echoes the exact caller-supplied destination
-  after downloads-root policy validation. An invalid `maxBytes` request is now
-  rejected as `invalidRequest` with the configured range.
-- The agent benchmark gate requires a complete, internally consistent latest
-  batch and rejects missing or mismatched transcript-derived model identity.
+- The bundled `config.toml` sets the MLX vision provider to `mlx-community/Qwen3.5-27B-4bit` and includes a commented `[vision.providers.ollama]` example.
+- `form_snapshot` output omits default-valued fields.
+- `targetDetached` separates whole-browser transport loss from a stale element, and `notFound` documents the "browser page is not open" shape.
+- The default MCP `explore` phase includes `intent_complete_form` and `intent_submit_and_verify`.
+- `Evidence::ExecutionPath.path` names the strategy, `browser` or `browserFallback`.
+- Successful `intent_complete_form` responses default to compact evidence; `evidenceDetail: "full"` returns the full per-field evidence.
+- Download `savedTo` evidence echoes the caller-supplied destination, and an invalid `maxBytes` is rejected as `invalidRequest` with the configured range.
 
 ### Fixed
 
-- A successful reattach replay no longer falls through to the failure path: a
-  transport reset that reattached and replayed used to still report the
-  original dead-browser error. A reattach never relaunches the browser.
-- `submit_and_verify` with a descriptive `purpose` and no explicit targeting
-  hints resolves the submit control by purpose — disambiguating among
-  actionable candidates and, failing that, a unique submit-typed control —
-  instead of requiring the accessible name to equal the purpose string. An
-  unresolved purpose stays ambiguous rather than firing on a guess.
-- A `fill` intent that cannot find its target escalates with a real candidate
-  window and abstains cleanly — recorded, below floor — instead of erroring at
-  the vision proxy with a 502; an act-time incompatible pick still fails closed.
-- `completeForm` resolves every ordered field against current page state, so a
-  field placed after its revealer can be completed in the same intent.
-- A visible `aria-invalid="true"` control rejects network-quiet settlement even
-  when its accessible name is absent or it falls outside the bounded form
-  snapshot; the exactly-once submit is never misreported as settled.
-- A Firefox profile relaunched on a different BiDi port is reachable again: the
-  enrolled endpoint is a snapshot, so a refused connection now retries against
-  the profile's own `WebDriverBiDiServer.json`.
-- The stdio gateway ends the shared Firefox BiDi session on exit, preventing a
-  stale session from blocking later launches with `Maximum number of active sessions`.
-- Browser-launch failures expose their allowlisted cause with an environment-shaped
-  repair even when the runtime prefixes the diagnostic.
-- `scripts/dev/firefox-start.sh` accepts pretty-printed endpoint files and a
-  macOS-relaunched Firefox whose listening process has a different pid.
+- A transport reset that reattached and replayed reports success.
+- `submit_and_verify` with a descriptive `purpose` and no hints resolves the submit control by purpose, and an unresolved purpose stays ambiguous.
+- A `fill` intent that cannot find its target escalates with a real candidate window and abstains cleanly.
+- `completeForm` resolves every ordered field against current page state, so a field placed after its revealer completes in the same intent.
+- A visible `aria-invalid="true"` control rejects network-quiet settlement.
+- A Firefox profile relaunched on a different BiDi port is reachable again.
+- The stdio gateway ends the shared Firefox BiDi session on exit.
+- Browser-launch failures expose their allowlisted cause with an environment-shaped repair.
+- `scripts/dev/firefox-start.sh` accepts pretty-printed endpoint files and a macOS-relaunched Firefox with a different pid.
 - `Formula/bobby-browser.rb` carries the v0.11.1 asset digests.
 
 ## 0.11.1 - 2026-08-22
 
 ### Fixed
 
-- Product documentation navigation includes every shipped page, and producer verification now rejects pages omitted from navigation.
+- Product documentation navigation includes every shipped page.
 - `Formula/bobby-browser.rb` carries the v0.11.0 asset digests.
 
 ## 0.11.0 - 2026-08-20
 
 ### Breaking
 
-- **Unified control action vocabulary**: `FillValue` is removed. `fill` and `completeForm` intents now use a single `ControlAction` enum shared with the `control_action` MCP tool. Old fill vocabulary replaced with new unified kinds:
-
-| old (fill) | new |
-|---|---|
-| `{"kind":"text","text":X,"clearFirst":false}` | `{"kind":"setText","value":X,"clearFirst":false}` (clearFirst now defaults true = replace; pass false to append) |
-| `{"kind":"select","option":X}` | `{"kind":"selectOne","value":X}` |
-| `{"kind":"checked","checked":X}` | `{"kind":"setChecked","checked":X}` |
-| `{"kind":"files","paths":X}` | `{"kind":"setFiles","paths":X}` |
-
-- New operations available in fill: `selectMany` (multi-select), `clear` (clear field).
-- `activate` is rejected in fill; it remains control_action-only.
-- `control_action` `setText` accepts `clearFirst` (default true, replace behavior; unchanged from prior hard-coded behavior in worker-pool and firefox-companion).
-- `type_text` remains unchanged; its `clearFirst` still defaults false.
-- Interface version bumped to `2026-08-19`; HTTP clients must send the new `x-interface-version`.
+- `FillValue` is removed; `fill` and `completeForm` intents use the `ControlAction` enum shared with `control_action`.
+- Fill kinds are `setText` (`value`, `clearFirst` default true), `selectOne` (`value`), `setChecked` (`checked`), and `setFiles` (`paths`), plus new `selectMany` and `clear`.
+- `activate` is rejected in fill and stays `control_action`-only.
+- `control_action` `setText` accepts `clearFirst` (default true); `type_text` `clearFirst` defaults false.
+- Interface version is `2026-08-19`; HTTP clients send the new `x-interface-version`.
 
 ### Added
 
-- Qwen3.5-27B-4bit (`mlx-community/Qwen3.5-27B-4bit`) is the MLX vision default in `vision-proxy`, `bobby vision connect`, and the `bobby install` model list, where it is the recommended first choice. The previous Qwen2.5-VL-3B default could not drive the solve loop.
-- `VISION_COORD_SPACE=normalized|absolute` overrides the mlx-vlm provider's per-model coordinate-space detection.
-- `network_log` reports `networkRecordingStarted` on the call that attaches the collector, and its description states that recording begins at the first call on a page. A first call previously returned an empty HAR with nothing naming the cause.
-- `bobby doctor`'s companion-port check names the listening process's pid and command, read from `lsof` under a 2s cap on unix. It is omitted rather than blocking on any lookup failure or non-unix platform.
-- `click` carries `dialogOpened` evidence when `alert`/`confirm`/`prompt` opens during the click.
-- `type_text` carries `typedControlKind` evidence, which verification uses to accept a checkable's or a select's post-state.
-- `form_snapshot` collects `[role=button]` elements and names a button from its own text when it carries no label, so buttons are targetable straight from the snapshot.
-- The DOM candidate collector maps implicit roles for headings, lists, list items, images, tables, rows, and cells, so those elements resolve by role with no explicit `role` attribute.
+- Qwen3.5-27B-4bit (`mlx-community/Qwen3.5-27B-4bit`) is the MLX vision default in `vision-proxy`, `bobby vision connect`, and the `bobby install` model list.
+- `VISION_COORD_SPACE=normalized|absolute` overrides the mlx-vlm provider's coordinate-space detection.
+- `network_log` reports `networkRecordingStarted` on the call that attaches the collector, and its description states that recording begins at the first call on a page.
+- `bobby doctor`'s companion-port check names the listening process's pid and command on unix.
+- `click` carries `dialogOpened` evidence when `alert`, `confirm`, or `prompt` opens during the click.
+- `type_text` carries `typedControlKind` evidence.
+- `form_snapshot` collects `[role=button]` elements and names a button from its own text.
+- The DOM candidate collector maps implicit roles for headings, lists, list items, images, tables, rows, and cells.
 
 ### Changed
 
-- Interface error messages carry the allowlisted diagnostic and the repair action, capped at 1024 bytes with the diagnostic truncated first so the repair action survives intact. A non-allowlisted raw message is still never included.
-- The candidate limit applies to the matching set after filtering instead of every gathered candidate, and an explicit `ordinal` skips the bound because it picks one match deterministically. A large page no longer fails a target that matches once.
-- `type_text` splits its value into runs the US keyboard layout can key-press and runs that need a caret-level `Input.insertText`, so Unicode outside that layout and newlines are typed rather than key-pressed.
-- The browser-launch repair and the `engineUnreachable` diagnostic name the Firefox companion bind (default `127.0.0.1:9876`) and the other runtime that may hold it, alongside the BiDi endpoint.
-- `visionAssistDenied` leads with the deterministic stuck reason (`targetNotFound`, `targetAmbiguous`, `obstructionSuspected`) and then names the closed gate. The code is unchanged; the message read as a policy wall to an agent that never asked for vision.
-- A duplicate in-flight JSON-RPC request id is rejected with a diagnostic and a repair instead of a bare `Invalid Request`.
-- The advertised `executionPath.reason` enum carries a description: `ineligibleCommand` means the command class runs in the browser and is not a failure.
+- Interface error messages carry the allowlisted diagnostic and the repair action, capped at 1024 bytes with the diagnostic truncated first.
+- The candidate limit applies to the matching set after filtering, and an explicit `ordinal` skips the bound.
+- `type_text` keys what the US keyboard layout can press and inserts the rest at the caret, so Unicode and newlines are typed.
+- The browser-launch repair and `engineUnreachable` diagnostic name the Firefox companion bind (default `127.0.0.1:9876`) and the other runtime that may hold it.
+- `visionAssistDenied` leads with the deterministic stuck reason and then names the closed gate.
+- A duplicate in-flight JSON-RPC request id is rejected with a diagnostic and a repair.
+- The advertised `executionPath.reason` enum carries a description.
 - Every failing command outcome is logged at WARN with command, session, page, outcome, code, retryable, and message.
-- The `targetNotFound` re-collect loop backs off 25, 50, 100, 200, 400 ms, capped at 500 ms, instead of re-scanning a large page every 25 ms for the whole deadline.
-- A page opened by `page_open` or an agent workflow reports its navigated URL and an `interactive` ready state, and is listed on its session, instead of the pre-navigation blank state.
+- The `targetNotFound` re-collect loop backs off from 25 ms to a 500 ms cap.
+- A page opened by `page_open` or an agent workflow reports its navigated URL and an `interactive` ready state and is listed on its session.
 
 ### Fixed
 
-- A `click` that opens `alert`/`confirm`/`prompt` returns instead of hanging. The renderer blocks while the dialog is up, so the click's own CDP round trip may never answer; the click races a per-page dialog listener and reports `dialogOpened`. `dialog` consumes a dialog that opened before it was called rather than waiting on a future event that already fired.
-- `click` and keyboard dispatch bring the target page to front first. On a background target in headless Chrome the click path never resolved. A failed raise is logged and the dispatch proceeds.
-- `type_text` against a non-editable target — disabled, readonly, a `fieldset[disabled]` ancestor, a non-typeable input type, or a non-form element — fails with `invalidRequest` instead of dispatching key events, which pinned headless Chrome at 100% CPU on macOS.
-- A screenshot clip is bounded before it reaches CDP: a negative origin, a non-finite value, or a dimension over `max_screenshot_dimension` is refused with `invalidRequest`. An unbounded clip could kill the browser process.
-- `a11y_snapshot` reserves a node's budget slot before descending into its children, so a deep subtree of leaves cannot consume the whole budget and return zero nodes.
-- Page operations clone a browser handle and release the worker mutex instead of holding it across a CDP await, so one page's slow or hung call no longer serializes or stalls every other page in the session.
-- A dead browser target rewritten by the targeting layer triggers the same revive path as a raw CDP receiver-is-gone error, instead of wedging the page.
-- A navigation the browser aborted (`net::ERR_ABORTED` — a download response or a cancelled navigation) fails as non-retryable and points at `download_url` and `click_and_wait_for_download`, instead of advising a retry that repeats the abort. The frame's navigation slot is freed.
-- Driver failures are retryable by code: a malformed request, a target that is not there, and a policy refusal are not retried; transport, launch, internal, and timeout codes are.
-- `httpResponseTooLarge` is a plain `failed` rather than `needsReconciliation`. The body is dropped mid-stream with nothing written, so no effect can have landed.
-- An iframe hop resolves by DOM identity — `DOM.getFrameOwner`'s backend node id against the candidate's own — instead of name and `src`, so unnamed sibling iframes are told apart. An unnamed hop's stamped target validates and resolves, so a snapshot target passes back verbatim.
-- Role matching treats `img` and `image` as one role. Chrome's a11y tree emits `image` while the DOM collector emits `img`, so a snapshot role fed back as a target resolves either way.
-- Accessible names are trimmed on both sides of the comparison, so a name carrying surrounding whitespace matches.
-- `type_text` verification accepts an append (`clearFirst: false`), a checkable's checked state, and a select's committed option, instead of requiring the post-action read to equal the typed value exactly.
-- The mlx-vlm provider rescales normalized `[0, 1000)` click coordinates onto the screenshot frame for the families that emit them (Qwen3-VL, Qwen3.5), and unwraps list-typed coordinates such as `{"x": [566]}` and `{"coordinate": [[x, y]]}`.
-- The mlx-vlm provider builds a system+user chat template when the processor supports it. The single-message template made Qwen3.5 emit a click with no `y` key.
+- A `click` that opens `alert`, `confirm`, or `prompt` returns with `dialogOpened`, and `dialog` consumes a dialog that opened before it was called.
+- `click` and keyboard dispatch bring the target page to front first.
+- `type_text` against a non-editable target fails with `invalidRequest`.
+- A screenshot clip with a negative origin, a non-finite value, or a dimension over `max_screenshot_dimension` is refused with `invalidRequest`.
+- `a11y_snapshot` on a deep subtree returns nodes within its budget.
+- One page's slow or hung call does not stall other pages in the session.
+- A dead browser target triggers the revive path.
+- A browser-aborted navigation (`net::ERR_ABORTED`) fails non-retryable and points at `download_url` and `click_and_wait_for_download`.
+- Driver failures are retryable by code: malformed requests, missing targets, and policy refusals are not; transport, launch, internal, and timeout codes are.
+- `httpResponseTooLarge` is a plain `failed`.
+- An iframe hop resolves by DOM identity, so unnamed sibling iframes are told apart and a snapshot target passes back verbatim.
+- Role matching treats `img` and `image` as one role.
+- Accessible names are trimmed before comparison.
+- `type_text` verification accepts an append, a checkable's checked state, and a select's committed option.
+- The mlx-vlm provider rescales normalized `[0, 1000)` click coordinates onto the screenshot frame and unwraps list-typed coordinates.
+- The mlx-vlm provider builds a system+user chat template when the processor supports it.
 - `Formula/bobby-browser.rb` carries the v0.10.0 asset digests.
 
 ## 0.10.0 - 2026-08-18
 
 ### Added
 
-- `Emulation.setDeviceMetricsOverride` and `Emulation.setTouchEmulationEnabled` are allowlisted, so a Puppeteer client's default viewport applies through the runtime's own emulation instead of failing the connect. A scale factor other than 1, a non-portrait orientation, and `hasTouch` are refused with the reason rather than silently ignored.
-- `[cdp].auto_session` (default true): a connecting CDP client holding `session:write` and `page:write` with no session open gets one, with a blank page, so `contexts()[0].pages()[0]` resolves on connect. CDP cannot create a session itself, so a connected client previously had nothing to drive.
+- `Emulation.setDeviceMetricsOverride` and `Emulation.setTouchEmulationEnabled` are allowlisted over CDP; a scale factor other than 1, a non-portrait orientation, and `hasTouch` are refused with the reason.
+- `[cdp].auto_session` (default true) gives a connecting CDP client with `session:write` and `page:write` and no session a session with a blank page.
 - `[cdp]` section in the sample `config.toml`.
-- `bobby doctor` reports a `cdp-port` check: whether the configured CDP address is serving authenticated discovery, is free, or is already owned by another process. The default 9222 is also Firefox's default remote-debugging port, so the collision is named before `bobby cdp` fails on it.
-- `cdp.listener.ready` startup log carrying the CDP discovery endpoint and WebSocket base.
-- `bobby token` prints the enrolled bootstrap bearer. It refuses a redirected stdout without `--stdout`.
-- `engineUnreachable` interface error code (HTTP 503): the configured browser engine did not answer, so no session opened. Carries the browser-launch repair instead of the "fix the named argument" hint that `invalidRequest` implies, and reaches MCP clients as `error.repair`.
-- `bobby doctor` reports `firefox-bidi-port-mismatch` as a failure when the CDP port is held by another service while an enrolled BiDi endpoint accepts nothing — the shape a companion launched on the CDP port produces, previously two unrelated warnings.
-- Playwright 1.62.1's injected-script bootstrap is pinned. The gateway matches that bundle by length and digest, and only 1.61 and 1.62.0 were pinned, so every page a 1.62.1 client opened failed closed on its first locator call.
-- `cdp.runtime.bootstrap_rejected` debug log carries the length and digest of an unpinned bootstrap, which is what a new pin is cut from. No caller JavaScript is logged.
-- CI runs `test:playwright` and `test:puppeteer` on the chromium job. They were the only automated proof a real client can drive a page over CDP and ran nowhere.
-
-- `click.modifiers`: an optional array holding at most one each of `shift`, `ctrl`, `alt`, and `meta`. Chromium dispatches the native pointer click with the matching modifier bits; the Firefox companion drives a tick-aligned key source that presses before the pointer sequence and releases after it. A duplicate modifier is refused with `click modifiers must be unique`, and a modified click that enters automatic download capture fails with `invalidRequest` rather than dropping the modifiers silently. Reaches MCP `click`, the `CommandEnvelope`, and the TypeScript SDK's `ClickCommand`.
-- `SolveChallenge` intent, opt-in: the engine loops screenshot, vision proposal, act, reassess on a 750ms poll until the model returns the new `challengeSolved` action or the hint deadline elapses. It fails closed on provider error, below-floor confidence, a disallowed action, and a closed vision gate (`VisionAssistDenied`). `challengeSolved` is carried across the vision wire, validation, and the collector, and `command_execute`'s schema union now covers nine command kinds.
-- `bobby vision solve` submits a `SolveChallenge` over `/v1`: it creates a vision-enabled session or reuses `--session`/`--page`, optionally navigates, then runs the solve loop under a caller-sized budget. `--zigzagzig` layers humanized input timing and fingerprint spoofing onto that session.
-- Per-site challenge priors: a solve outcome promotes to `SiteContext.challenges` — success and failure counters with a day-precision stamp — instead of the control schema, which has no resolved control for a solve to promote.
-- `BrowserFlavor` fingerprint axis (Chrome default, Firefox). The companion's BiDi `emulation.setUserAgentOverride` sends a Gecko UA on a Gecko engine instead of a Chrome UA, and session validation gates the Chrome-only checks behind the axis.
-- `ScreenResolution` carries `window_width` and `window_height`, so a profile presents a non-maximized window sized under the available area.
-- Level 2 of the modern gauntlet drives the solve loop against a live reCAPTCHA v2 widget. It is environment-gated and outside the five release tests.
-
-- `bobby doctor` reports a `companion-port` check: whether the enrolled profile's `companionBind` is free, already serving the Firefox companion, or held by another service. Every runtime binds its own companion server on that address, so a second `bobby serve` / `bobby cdp` / `bobby mcp-stdio` on one profile cannot bind it and every Firefox session it opens fails with `engineUnreachable`. Doctor checked only that the address parsed, so that collision reported as an all-green run against a browser that would not start.
+- `bobby doctor` reports a `cdp-port` check: serving authenticated discovery, free, or owned by another process.
+- `cdp.listener.ready` startup log carries the CDP discovery endpoint and WebSocket base.
+- `bobby token` prints the enrolled bootstrap bearer and refuses a redirected stdout without `--stdout`.
+- `engineUnreachable` interface error code (HTTP 503) means the configured browser engine did not answer; it carries the browser-launch repair.
+- `bobby doctor` reports `firefox-bidi-port-mismatch` as a failure when the CDP port is held by another service while an enrolled BiDi endpoint accepts nothing.
+- Playwright 1.62.1 clients are supported over CDP.
+- `click.modifiers` is an optional array of at most one each of `shift`, `ctrl`, `alt`, and `meta`, on Chromium and the Firefox companion; a duplicate modifier is refused, and a modified click that enters automatic download capture fails with `invalidRequest`.
+- `SolveChallenge` intent, opt-in: it loops screenshot, vision proposal, act, reassess on a 750 ms poll until the model returns `challengeSolved` or the hint deadline elapses, failing closed on provider error, below-floor confidence, a disallowed action, and a closed vision gate.
+- `bobby vision solve` submits a `SolveChallenge` over `/v1` in a vision-enabled session or `--session`/`--page`, with `--zigzagzig` adding humanized input timing and fingerprint spoofing.
+- A solve outcome promotes to `SiteContext.challenges` as success and failure counters.
+- `BrowserFlavor` fingerprint axis (Chrome default, Firefox); the companion sends a Gecko user agent on a Gecko engine.
+- `ScreenResolution` carries `window_width` and `window_height`, so a profile presents a window smaller than the screen.
+- `bobby doctor` reports a `companion-port` check: whether the enrolled profile's `companionBind` is free, serving the Firefox companion, or held by another service.
 
 ### Changed
 
-- `scripts/dev/firefox-start.sh` puts the companion profile's remote-debugging endpoint on 9224. It defaulted to 9222, the port authenticated CDP binds, so whichever of the two started second failed to bind. `BOBBY_FIREFOX_DEBUG_PORT` still overrides it.
-- CDP bind failures name the address, the Firefox 9222 overlap, and `--cdp-port`, instead of a bare `Address already in use`.
-- `Target.createTarget` with no runtime session states that CDP attaches to sessions rather than creating them, and names the routes that open one (`POST /v1/sessions`, `POST /v1/pages`, MCP `session_create`/`page_open`, SDK).
+- `scripts/dev/firefox-start.sh` puts the companion profile's remote-debugging endpoint on 9224; `BOBBY_FIREFOX_DEBUG_PORT` overrides it.
+- CDP bind failures name the address, the Firefox 9222 overlap, and `--cdp-port`.
+- `Target.createTarget` with no runtime session names the routes that open one (`POST /v1/sessions`, `POST /v1/pages`, MCP `session_create`/`page_open`, SDK).
 - `bobby doctor` reports `cdp-listen` when CDP is disabled, naming the address `bobby cdp` would bind.
-- The authenticated-CDP guide documents the session-and-page prerequisite, managed Chromium as the pairing-free engine, and that pages are opened through the runtime rather than by the client.
-- The authenticated-CDP guide states the surface's scope: a pinned client shim with no DOM domain and no JavaScript execution, plus a per-client operation table. It also drops the `/devtools/page/:id` socket it advertised, which was never implemented.
-- `/json/list` reports the URL and title the gateway last verified for each page. Every entry read `about:blank` / `Automation Runtime`, so a client could not tell one target from another.
-- A rejected JSON request body names the offending field and position from serde instead of one fixed sentence. Request values are never included.
-- `bobby doctor` distinguishes a refused BiDi connection from a live socket speaking another protocol; a refused connection reported "another service may own the port" when nothing was listening.
-
-- `v1_request_with_limits` lets a caller raise the `/v1` request timeout. The 10s default cannot outlive a single local-model propose round, let alone a multi-round solve.
-- `propose` prompts spell out the exact action JSON shapes and the `solveChallenge` guidance; models were guessing the schema and returning bare strings.
+- The authenticated-CDP guide documents the session-and-page prerequisite, managed Chromium as the pairing-free engine, the surface's scope, and a per-client operation table.
+- `/json/list` reports the URL and title the gateway last verified for each page.
+- A rejected JSON request body names the offending field and position, never request values.
+- `bobby doctor` distinguishes a refused BiDi connection from a live socket speaking another protocol.
+- `v1_request_with_limits` lets a caller raise the `/v1` request timeout.
+- `propose` prompts spell out the exact action JSON shapes and the `solveChallenge` guidance.
 
 ### Fixed
 
-- CreepJS screen and media-query leak: Chrome launches with `--window-size` matching the spoofed screen, and each page applies `Emulation.setDeviceMetricsOverride` with the viewport at window size and the screen at full size, so `hasVvpScreenRes` stays false. The init script also reports `pdfViewerEnabled`, a minimal `navigator.share`/`canShare`, and `Notification.permission` `default`, each of which headless gets wrong. Like-headless drops 25% to 19%, with headless and stealth both at 0%; the init-script budget moves 40k to 42k.
-- A transient vision failure — an unparseable reply or below-floor confidence — costs one solve attempt instead of the whole budget, and the loop reassesses. Only the deadline is terminal for it, and the deadline error reports the last transient failure. A disallowed action and an act failure stay terminal.
-- `solveChallenge` is click-only. A vision `typeText` carries no resolved target, so its empty selector errored at the driver; the prompts now state the never-type constraint.
-- The Python vision adapter drops chatty non-action response fields, such as `reasoning` and sibling text, at the edge instead of failing closed, which preserves the no-echo guarantee. snake_case action kinds (`type_text`, `challenge_solved`) canonicalize to the wire spelling. `ProposeResponse` drops `deny_unknown_fields` at the upstream edge while the action variants keep it.
-- `SolveChallengeHints::default()` no longer drops the 30s timeout.
-- The five release binary builds: `release-binaries` no longer pins a pnpm version, which `pnpm/action-setup@v6` refuses when `packageManager` declares one as well. The Firefox companion's static files stage from `copy-static.mjs` instead of shell, because pnpm runs package scripts through `cmd.exe` on Windows, which has neither `cp` nor `mkdir -p`.
+- Chrome launches with `--window-size` matching the spoofed screen and each page applies a matching device-metrics override; the init script reports `pdfViewerEnabled`, `navigator.share`/`canShare`, and `Notification.permission` `default`.
+- A transient vision failure costs one solve attempt, only the deadline is terminal, and the deadline error reports the last transient failure.
+- `solveChallenge` is click-only.
+- The Python vision adapter drops non-action response fields and canonicalizes snake_case action kinds.
+- `SolveChallengeHints::default()` keeps the 30 s timeout.
+- Release binary builds work with `pnpm/action-setup@v6` and on Windows.
+- `scripts/dev/firefox-start.sh` compares the endpoint's `ws_port` after stripping whitespace.
+- A companion-server bind failure names the address and the operating system error.
+- A solve screenshot that fails while the page is alive costs one attempt; a dead page fails every attempt and the deadline reports it.
 - `Formula/bobby-browser.rb` carries the v0.9.0 asset digests.
-- `scripts/dev/firefox-start.sh` compares the endpoint's `ws_port` after stripping whitespace, so a reformatted endpoint file no longer reads as stale.
-- `a11y_snapshot_descends_into_iframes` waits for `input[type=file]` to attach before snapshotting. The documents route builds its form in the SPA bundle, so `DOMContentLoaded` can precede the input.
-- A companion-server bind failure names the address and the operating system error. The caller flattens the error through `to_string()`, so the operator saw `failed to bind companion server` with neither the port nor `Address already in use`.
-- A solve screenshot that fails while the page is still alive costs one attempt instead of ending the solve. A renderer crash-and-recover surfaced as a terminal capture failure mid-solve; a genuinely dead page still fails every attempt and the deadline reports it.
+
 ## 0.9.0 - 2026-08-12
 
 ### Added
 
-- Runtime operational metrics on `runtime_info`: bounded intent-resolution, context-lookup, prefill, vision-provider, verification, retry, reconciliation, and admitted MCP-call counters, carrying no request content and no typed values. `instrument_vision_assist` wraps a provider so the vision boundary reports its own counters and provider mode.
-- `control_action` returns the controls a form revealed. An action that changes the form diffs the before/after form snapshots and reports each newly appeared control's kind, accessible name, and a verbatim-passable target on the action evidence, on managed Chromium and the Firefox companion both.
-- `intent_submit_and_verify` refuses a pre-satisfied `expectedState`. A text, element, or value condition that already holds before the boundary click fails with `expectedStatePreSatisfied` and never clicks; url, document, and `networkQuiet` conditions legitimately pre-hold and skip the check. The code is wired through the contract test, the advertised enum, the failure taxonomy, and the repair hint.
-- Candidate-grounded fill and extraction actions are index-only: typed values remain inside the runtime, and extraction reads the value from the selected DOM candidate.
-- `Evidence::Download` carries `savedTo`, the file's name below the configured downloads root, across the direct-HTTP, Chromium, and Firefox paths. Journaled and durable-prepared records strip it, so the no-absolute-paths rule for durable state holds.
-- `HINT: role=<role>` row in `BOBBY-VISION/1` prompts, emitted from the role `LocateIntent.hints` already carries. Thinking is suppressed at serve for v1 so the instruct template's empty `<think>` wrapper does not wrap the bare index, and `_parse_index` tolerates that wrapper for adapters trained on thinking-enabled templates.
-- Response prefill in the mlx-vlm provider: `propose` prefills the JSON skeleton onto the assistant turn so completions carry coordinates instead of fenced blocks or a bare action name. Abstain kinds normalize to a zero-coordinate click, whose low confidence fails the runtime floor.
-- `clickCandidate` action and v1 adapter serving, trap-mode corpus growth, and an out-of-sample corpus split for adapter-vs-base generalization evals.
-- Validation weighting in persisted context recall. `ask()` breaks match-ladder ties by a control's validation record — ln-diminished success boost, failure drag, 30-day half-life recency with a half-weight floor. The name-match ladder is untouched, so a fuzzy match can never outrank an exact one.
-- `bobby doctor` reports the configured vision timeout. Modern-gauntlet scorecards carry provider, model, and source dimensions, action counts, fixed failure categories, and engine/provider-separated output.
+- `runtime_info` reports operational metrics: bounded intent-resolution, context-lookup, prefill, vision-provider, verification, retry, reconciliation, and admitted MCP-call counters with no request content or typed values.
+- `control_action` reports the controls a form revealed, with kind, accessible name, and a verbatim-passable target, on managed Chromium and the Firefox companion.
+- `intent_submit_and_verify` refuses a pre-satisfied text, element, or value `expectedState` with `expectedStatePreSatisfied` before clicking; url, document, and `networkQuiet` conditions skip the check.
+- Candidate-grounded fill and extraction actions are index-only: typed values stay inside the runtime.
+- `Evidence::Download` carries `savedTo`, the file's name below the configured downloads root, on the direct-HTTP, Chromium, and Firefox paths.
+- `BOBBY-VISION/1` prompts carry a `HINT: role=<role>` row.
+- The mlx-vlm provider prefills the JSON skeleton so completions carry coordinates.
+- Persisted context recall breaks match-ladder ties by a control's validation record; an exact name match always outranks a fuzzy one.
+- `bobby doctor` reports the configured vision timeout.
 
 ### Changed
 
-- `initialize` negotiates the MCP protocol revision instead of requiring the newest. The gateway answers with the client's revision when it speaks it — 2025-11-25, 2025-06-18, 2025-03-26, 2024-11-05 — and otherwise with the newest. A non-matching revision no longer fails with `-32602`, which made the gateway unreachable from any host pinned to an older revision.
-- The Firefox companion server binds and publishes its descriptor at `bobby serve` startup, so a paired extension discovers it whenever it polls rather than only inside a per-session 30s window. Serve shutdown ends the shared BiDi connection.
-- `workflow_observe` accepts a target, forwarded to the underlying snapshot, so an observation reads one region instead of the whole page's chrome on every call.
-- The DOM candidate collector roles `ARTICLE` elements, so `a11y_snapshot` target scoping resolves article subtrees.
+- `initialize` negotiates the MCP protocol revision (2025-11-25, 2025-06-18, 2025-03-26, 2024-11-05), answering with the newest when the client's is unknown.
+- The Firefox companion server binds and publishes its descriptor at `bobby serve` startup, and serve shutdown ends the shared BiDi connection.
+- `workflow_observe` accepts a target, so an observation reads one region.
+- The DOM candidate collector roles `ARTICLE` elements, so `a11y_snapshot` scoping resolves article subtrees.
 - Runtime error detail reaches the operator interface.
 
 ### Fixed
 
-- `a11y_snapshot` scoped to an iframe element returns the frame's content. It detects the frame owner through `DOM.describeNode` and returns the content frame's tree with hop-stamped targets, instead of the empty main-frame iframe node.
-- A command that fails because the browser process died revives once instead of wedging the session at a permanent `browser page is not open`: the dead worker retires, a fresh browser launches, the page reopens at its last URL, replayable commands retry transparently, and mutating commands fail with an explicit revival note. The CDP event stream's end is logged with session, worker, and transport detail.
-- `RUST_LOG` output from the stdio gateway goes to stderr, leaving stdout as the protocol channel; `mcp-stdio` previously emitted no logs at all.
-- The a11y tree walk in the Firefox companion catches per node, so a hostile DOM node is skipped instead of failing the whole snapshot with `content action failed`.
+- `a11y_snapshot` scoped to an iframe element returns the frame's content with hop-stamped targets.
+- A command that fails because the browser process died revives once: a fresh browser launches, the page reopens at its last URL, replayable commands retry, and mutating commands fail with a revival note.
+- `RUST_LOG` output from the stdio gateway goes to stderr.
+- The Firefox companion's accessibility walk skips a hostile DOM node.
 - Vision abstention fails closed.
-- `record_escalation` skips empty-candidate escalations, which mislabelled gather failure as model judgment. The collection harness fails when `BOBBY_GAUNTLET_VISION_ENDPOINT` is unset rather than passing green with zero rows, and the vague-locate sweep reopens a dead page so every purpose reaches the model.
-- Onboarding regression checks are hardened, and the release gates compile on Windows.
 - Firefox install finishes before vision readiness is reported.
 
 ## 0.8.0 - 2026-08-10
 
 ### Added
 
-- Vision assist. `bobby install` configures a vision provider during onboarding, and `bobby vision connect --provider {openai,ollama,mlx}` writes the provider config. `vision-proxy` takes `--upstream {openai,ollama,mlx}`, a single `--vision-base-url` with per-upstream defaults, an optional `--model`, and `--spawn-server` to run the local vision server as a managed kill-on-drop child (`--server-script` or `BOBBY_VISION_SERVER_SCRIPT`, else auto-detected).
-- `BOBBY-VISION/1` wire contract for `propose` and `extract`, with a canonical provider interface and local mlx-vlm, Ollama, and LM Studio backends. Responses are normalized across `{x,y}`, coordinate arrays, position objects, and bare action names, degrading to a valid click rather than failing.
-- Vision escalation corpus collection behind `[vision] corpusDir`: a JSONL sink recording raw action kinds, target index, and the outcome stage (`visionFallback`, `visionRejectionFloor`, `visionActFailed`) at each terminal escalation branch. `element_at_point` on managed Chromium reads the internal DOM channel, never the policy-gated `evaluate_javascript` path.
-- NVIDIA OpenShell host. `bobby install --host openshell` / `bobby openshell install` writes an `openshell/` pack (MCP Streamable HTTP client config, `protocol: mcp` policy sample, merge-only `policy-network.yaml`, skill, README). `bobby openshell provision|revoke --sandbox <id>` mints or revokes one agent-scoped principal per sandbox and writes a 0600 injection env under the OS config dir. `bobby init --emit openshell` prints the MCP fragment.
-- `bobby openshell list|status|rotate`, with non-secret `.status.json` sidecars. `bobby doctor` reports `openshell-pack` and checks `openshell-admin`, `openshell-companion`, `openshell-mcp-url`, and `openshell-sandboxes` when a pack is present; it warns on ≥2 local sandboxes sharing one Firefox companion, on a non-loopback cleartext MCP URL or `server.host`, and when an older pack lacks the deny rules. Secrets root overridable via `BOBBY_OPENSHELL_SECRETS_DIR`.
-- `a11y_snapshot` accepts an optional target and returns just that subtree instead of the whole page, resolving through frame hops and reading the owning frame's AX tree. The DOM candidate collector roles forms, dialogs, `main`, `nav`, and labelled regions, so containers are resolvable as scope roots.
-- Firefox companion `wait_for` supports Text, Value, and Document conditions, matching Chromium. `networkQuiet` remains unsupported on Firefox.
+- Vision assist: `bobby install` configures a vision provider, `bobby vision connect --provider {openai,ollama,mlx}` writes the provider config, and `vision-proxy` takes `--upstream`, `--vision-base-url`, `--model`, and `--spawn-server`.
+- `BOBBY-VISION/1` wire contract for `propose` and `extract` with local mlx-vlm, Ollama, and LM Studio backends, normalizing responses across coordinate shapes and degrading to a valid click.
+- Vision escalation corpus collection behind `[vision] corpusDir`.
+- `element_at_point` on managed Chromium reads the internal DOM channel, not the policy-gated `evaluate_javascript` path.
+- NVIDIA OpenShell host: `bobby install --host openshell` and `bobby openshell install` write an `openshell/` pack with MCP client config, a policy sample, `policy-network.yaml`, a skill, and a README.
+- `bobby openshell provision|revoke --sandbox <id>` mints or revokes one agent-scoped principal per sandbox and writes a 0600 injection env.
+- `bobby init --emit openshell` prints the MCP fragment.
+- `bobby openshell list|status|rotate` with non-secret `.status.json` sidecars.
+- `bobby doctor` reports `openshell-pack`, `openshell-admin`, `openshell-companion`, `openshell-mcp-url`, and `openshell-sandboxes`, and warns on two or more sandboxes sharing one Firefox companion or a non-loopback cleartext MCP URL.
+- `BOBBY_OPENSHELL_SECRETS_DIR` overrides the OpenShell secrets root.
+- `a11y_snapshot` accepts an optional target and returns just that subtree, resolving through frame hops.
+- The DOM candidate collector roles forms, dialogs, `main`, `nav`, and labelled regions as scope roots.
+- Firefox companion `wait_for` supports Text, Value, and Document conditions.
 
 ### Changed
 
-- The default `explore` phase advertises the standard working loop — `click`, `click_and_wait_for_popup`, `type_text`, `control_action`, `upload_files`, `dialog`, `download_url` — with full schemas, so a client pays no `toolset_select` and schema-discovery round trip before its first action. `command_execute`, `evaluate_javascript`, `emulate`, niche mutations, and the intent family stay phase-gated.
-- `control_action` targets require only `role` and `accessibleName`; `ordinal`, `framePath`, and `shadowPath` default, so an a11y or form snapshot target passes verbatim instead of being hand-expanded. Target role matching is case-insensitive on both engines, and an explicit `ordinal: 0` matches an omitted ordinal.
-- `control_action` `selectOne`/`selectMany` and select fills accept an option's visible label as well as its value (trimmed, case-insensitive fallback on both engines). Snapshots surface labels; verification compares the committed option values.
-- Intent resolution and `a11y_snapshot` descend one level into same-process iframes on managed Chromium: a main-frame target inside a frame resolves and acts, with each in-frame candidate stamped with a re-resolvable frame hop used when no explicit `framePath` was named. Capped at 8 frames per gather under a shared node budget; frames with no stable address (no id, test id, or `src`) are skipped.
-- Whole-page `inspect` after a mutating command reads the live DOM instead of refetching the URL over HTTP. Any non-read-only command taints the page and navigation clears it, so post-submit SPA state is visible rather than the app shell. Evidence carries `executionPath.reason: pageMutated` on the live read.
-- Page-scoped text waits (`role: main|RootWebArea|…` or `css: body|html|:root`) read live `document.body.innerText` via evaluate, with empty optional fields treated as absent, so async confirmations match what a whole-page `inspect` sees.
-- `click_and_wait_for_popup` defaults `autoCheckpoint=true` and accepts pinned `commandId`/`attemptId`, matching boundary `click` and `intent_submit_and_verify`. It registers `window.open` targets, and `page_list` syncs untracked page targets into the session (one browser per session), excluding `chrome://` browser chrome, so authorization popups are drivable.
-- A plain `click` on an anchor with a `download` attribute routes through the armed download capture on managed Chromium: the file lands in the session's downloads with `Download` evidence instead of completing with nothing materialized.
-- `workflow_start` failures carry `detail` with the error code and message instead of a bare reason.
-- The advertised `WaitCondition` schema names every `kind` tag, required field, and enum instead of presenting an opaque object.
-- `a11y_snapshot` drops `InlineTextBox` leaves, which duplicated their `StaticText` parents' text and dominated the payload. Its description points at `toolset_select` for the phases hidden by the default `explore` phase.
-- OpenShell `provision` revokes any prior principal for the sandbox id before minting, uses a unique idempotency key per attempt, and rolls back the minted principal if writing the injection env fails. The default capability floor is the narrow `openshell` preset (`--capabilities-preset agent` for the full agent floor). The sample policy denies `evaluate_javascript` and `job_*` at the OpenShell proxy and raises MCP `max_body_bytes` to 262 KiB.
+- The default `explore` phase advertises `click`, `click_and_wait_for_popup`, `type_text`, `control_action`, `upload_files`, `dialog`, and `download_url` with full schemas.
+- `control_action` targets require only `role` and `accessibleName`; role matching is case-insensitive and `ordinal: 0` matches an omitted ordinal.
+- `control_action` `selectOne`/`selectMany` and select fills accept an option's visible label as well as its value.
+- Intent resolution and `a11y_snapshot` descend one level into same-process iframes on managed Chromium, up to 8 frames per gather.
+- Whole-page `inspect` after a mutating command reads the live DOM, with `executionPath.reason: pageMutated`.
+- Page-scoped text waits read live `document.body.innerText`.
+- `click_and_wait_for_popup` defaults `autoCheckpoint=true`, accepts pinned `commandId`/`attemptId`, and registers `window.open` targets; `page_list` syncs untracked page targets into the session.
+- A plain `click` on an anchor with a `download` attribute routes through download capture on managed Chromium and returns `Download` evidence.
+- `workflow_start` failures carry `detail` with the error code and message.
+- The advertised `WaitCondition` schema names every `kind` tag, required field, and enum.
+- `a11y_snapshot` omits `InlineTextBox` leaves, and its description points at `toolset_select`.
+- OpenShell `provision` revokes any prior principal for the sandbox id, rolls back on a failed env write, and defaults to the narrow `openshell` capability floor (`--capabilities-preset agent` for the full agent floor).
+- The OpenShell sample policy denies `evaluate_javascript` and `job_*` and raises MCP `max_body_bytes` to 262 KiB.
 - `bobby://intents` documents the `framePath` step shape with an example and the Firefox exact-CSS/test-id hop requirement.
-- The OpenShell and jobs CLI paths share one blocking `/v1` HTTP client for bearer and interface headers.
 
 ### Fixed
 
-- `page_open` on a session whose browser died invalidates that specific dead worker and retries once on a fresh one, instead of returning an opaque `internal` on every call. Concurrent recovery cannot discard another caller's healthy replacement, and a failed replacement launch no longer leaves a phantom registered page.
-- `session_close` no longer wedges on a dead browser: managed-Chromium teardown treats an already-gone browser (closed channel, canceled oneshot) as closed instead of failing the release, which previously left the session listed forever with every retry failing `internal`. Browser termination against an already-dead process is likewise tolerated.
-- Managed Chromium re-attaches dead page handles: after a renderer crash or target hiccup closes the handle's channel, the next command on that page re-attaches to the live target. A truly destroyed target unregisters the page so callers get a clean `notFound` instead of a dead handle. Page lifecycle state stays consistent across dispatch, and a wait whose target detaches mid-flight is accepted rather than surfaced as a driver error.
-- CDP `oneshot canceled` and dead-target loss map to `targetDetached` (retryable). Stale CDP node ids after a re-render map to `targetNotFound` with fresh-snapshot repair instead of a raw `browserCommandFailed`.
-- Boundary commands that fail with `waitConditionTimedOut` or `verificationFailed` stay `failed` for inspect-then-adjust instead of never-retry `needsReconciliation`. A command that fails before reaching the browser, on argument or target-resolution errors, reports a plain `failed`; reconciliation is reserved for effects that may have landed.
-- An intent post-state wait that times out after the boundary click landed is reported as a non-retryable `verificationFailed` stating the click landed, instead of a bare `waitConditionTimedOut` that invited a duplicate submit.
-- `intent_submit_and_verify` with a `networkQuiet`-only wait fails when `[aria-invalid=true]` markers remain, instead of reporting `completed` on a soft settle after a rejected submit.
-- `intent` `action_target` preserves `framePath` and `shadowPath` from the intent target, so iframe submits no longer discard the frame hop. Document targeting falls back without losing a named intent target, and `locate` `NotFound` attaches the near-miss candidate set to the stuck report instead of an empty list.
-- Whole-page `inspect` over direct HTTP treats an empty-`<body>` SPA shell (title/meta chrome plus scripts) as `javascriptRequired` and falls back to the live browser instead of returning shell HTML. The shell probe no longer races client-side URL rewrites.
-- `inspect` denied by network policy (loopback page, non-http URL) degrades to the browser that already has the page open instead of failing a DOM read with `networkPolicyDenied`. `download_url` keeps the hard denial.
-- `[http]` accepts partial overrides: missing fields fall back to defaults instead of failing TOML parse, so a host that sets only `allow_loopback` no longer bricks MCP startup.
-- `bobby doctor` passes `BOBBY_BROWSER_CONFIG` into the MCP handshake child, so `[mcp] startup_toolset` and the rest of that file apply to `tools/list`.
-- `networkPolicyDenied` guidance names the loopback and private-destination cause and the `http.allow_loopback` / `http.allow_private_network` operator switches across the repair hint, the taxonomy, and the `download_url` description; for page-offered files it points at clicking the link.
-- `upload_files` policy errors name the resolved absolute roots and the gateway working directory that relative roots resolve against.
-- Empty-string target fields (`css`, `role`, `accessibleName`, …) are rejected as `invalidRequest` at resolution time on both engines, instead of polling unmatchable until a wait deadline.
-- Protocol-layer `-32602` rejections carry `error.data.repair` like every other failure.
+- `page_open` on a session whose browser died invalidates the dead worker and retries once on a fresh one.
+- `session_close` completes on a dead browser.
+- Managed Chromium re-attaches a dead page handle on the next command, and a destroyed target unregisters the page so callers get `notFound`.
+- CDP `oneshot canceled` and dead-target loss map to retryable `targetDetached`, and stale node ids map to `targetNotFound` with a fresh-snapshot repair.
+- Boundary commands failing with `waitConditionTimedOut` or `verificationFailed`, or before reaching the browser, report `failed`; `needsReconciliation` is reserved for effects that may have landed.
+- An intent post-state wait that times out after the boundary click landed reports a non-retryable `verificationFailed` stating the click landed.
+- `intent_submit_and_verify` with a `networkQuiet`-only wait fails when `[aria-invalid=true]` markers remain.
+- Intent `action_target` preserves `framePath` and `shadowPath`, and `locate` `NotFound` attaches the near-miss candidate set.
+- Whole-page `inspect` over direct HTTP treats an empty-`<body>` SPA shell as `javascriptRequired` and falls back to the live browser.
+- `inspect` denied by network policy degrades to the browser that has the page open; `download_url` keeps the hard denial.
+- `[http]` accepts partial overrides.
+- `bobby doctor` passes `BOBBY_BROWSER_CONFIG` into the MCP handshake child.
+- `networkPolicyDenied` guidance names the loopback and private-destination cause and the `http.allow_loopback` / `http.allow_private_network` switches.
+- `upload_files` policy errors name the resolved absolute roots and the gateway working directory.
+- Empty-string target fields are rejected as `invalidRequest` on both engines.
+- Protocol-layer `-32602` rejections carry `error.data.repair`.
 - `scripts/dev/firefox-start.sh` launches Firefox directly and verifies it owns the process it started.
-
 
 ## 0.7.0 - 2026-08-07
 
-- **Breaking (MCP surface):** `tools/list` now defaults to the `explore` phase instead of the full surface. An existing client that connects and does not call `toolset_select` sees the read/snapshot/navigate lifecycle only — no mutation, intent, checkpoint, or `command_execute` tools. `[mcp] startup_toolset`, overridden by `BOBBY_MCP_TOOLSET`, selects the phase at connect: `explore` (default), `act`, `intent`, `verify`, `full`. The first `tools/list` is ~42 KiB on `explore` against 128 KiB on `full`. Capability gates are unchanged and remain the only enforcement boundary; hidden tools stay callable.
-- **Breaking (bootstrap):** default `bobby init` / `bobby install` / loopback auto-init mint the **agent** preset (no `authority:admin`). Use `--preset unrestricted` for the operator floor. Marker-less existing `bootstrap.env` files still heal as unrestricted. `bobby doctor` reports `bootstrap-preset`.
-- MCP adds `workflow_start` and `workflow_observe` in every toolset phase, with `checkpoint_save` also advertised in Intent. Handles substitute only the documented page-work scope, remain capability-checked, and expire on accepted reinitialize/server-generation change; explicit IDs remain compatible for lifecycle and recovery.
-- Workflow handle state is bounded to 64 committed LRU bindings plus 64 concurrent reservations. Starts reconcile sessions closed through other interfaces; successful close calls reclaim local bindings, while externally closed pages return ordinary `notFound` until LRU reclamation.
-- Streamable HTTP logical clients using the same authenticated principal share one cached MCP server lifecycle and generation. An accepted initialize resets their shared handles and requires a fresh initialized notification; distinct principals remain isolated.
-- MCP `initialize` returns short `instructions`: explore startup phase, `toolset_select` + re-list, `error.repair`, `autoCheckpoint` default, `bobby://` recovery docs.
-- `tools/list` advertise-only output collapse for `recovery_status`, `page_open`, `session_create`, `session_list`, and `checkpoint_save` (opaque / top-level keys; validation schemas unchanged). Full catalog ~80.9 KiB / 128 KiB (~49 KiB headroom); explore ~25.2 KiB.
-- MCP failures carry a machine-readable repair hint: command-layer failures set `error.repair`, RPC-layer rejections set `error.data.repair`, each `{action, doc}` pointing into `bobby://failure-taxonomy`. A `needsReconciliation` outcome always carries the never-retry repair, whatever its error code.
-- `http_wait` accepts optional `contains` (and `maxBodyBytes`): each attempt becomes `http_fetch` and succeeds only when the truncated body includes the substring — for readiness gates that return 200 before they are ready.
-- `runtime_info`'s `capabilities` list reports vision wiring: `vision-assist` and `vision-provider` appear only when configured, so an agent can tell an unconfigured provider apart from a transient vision failure without shell access.
-- `tools/list` advertise-only trim: the constant `$schema` URL is dropped from advertised input and output schemas, and `workflow_recover`'s `RecoveryDecision` is advertised as a status-tag projection (the same treatment `Evidence` already had). Validation schemas and `tools/call` are unchanged.
-- The `tool_schema_sizes` example prints the per-tool composition (description / input / output / annotations / examples), so future growth is attributable at a glance.
-- The Northstar scenario server is extracted from `runtime-tests` into a reusable `gauntlet-server` crate. It serves `GET /__gauntlet/snapshot` and `GET /__gauntlet/request-log` (the same state the in-process `snapshot()` / `request_log()` expose), and ships a `gauntlet-server` binary (`--seed`, `--level`) so out-of-process drivers can run and verify journeys over HTTP. The five release-gate journeys are unchanged.
-- MCP `job_submit` / `job_status` / `job_cancel` mirror HTTP `/v1/jobs` (same caps). Advertised in `full`, `act`, and `verify` when a job port is attached (`bobby mcp-stdio` and `bobby serve` MCP HTTP). Built-in handlers: `echo`, `sleep`, `http_probe`, `http_wait`, and `http_fetch` (SSRF-safe; `http_fetch` returns a truncated GET body so agents need not open a browser for health/API JSON); `bobby://job-handlers` documents payloads; `bobby doctor` reports them under `job-handlers`.
-- Ollama joins the direct vision backends. `bobby vision-proxy --ollama --ollama-base-url` and `bobby vision connect --provider ollama` normalize a local model's output to the `VisionProposal` schema, and a provider on port 11434 is detected from config. No credentials leave the machine.
-- `bobby vision collect` gathers gauntlet vision proposals as JSONL training data, creating and validating the output directory up front. The collector API is staged ahead of the runner that will drive it.
-- `bobby context forget` no longer fails against a store it just released. Claiming the lockfile retries briefly, because the command opens, drops, and reopens the store in one process and that hand-off lost the race on Linux. A lockfile that is unusable for a reason other than contention now says so instead of telling the operator to stop a bobby that is not running.
-- Dependency bumps that reach `bobby-browser-client` consumers: `sha2` 0.10 to 0.11, `reqwest` 0.12 to 0.13, `toml_edit` 0.22 to 0.25, `dialoguer` 0.11 to 0.12. Digest output is unchanged -- the same lowercase hex, now produced with `hex::encode` because sha2 0.11 returns a type that no longer formats with `{:x}`.
-- `tools/list` advertise-only schema trim: opaque deep nests for `WaitCondition` / `IntentHints` / `TargetSpec` / `ScreenshotMode` and a collapsed `form_snapshot` outputSchema. Validation schemas and `tools/call` are unchanged. Frees catalog headroom: `full` is 116,204 bytes of the 131,072 budget, so `job_*` fit with 14,868 spare.
-- README / install docs: not on homebrew-core yet; checklist for a future core submission (formula name, three binaries, bottles, audit).
-- Unix release binaries are `strip`ped before packaging. Installation docs cover curl download of GitHub Release assets. `scripts/install.sh` is the one-liner installer (`BOBBY_VERSION`, `INSTALL_DIR`).
-- Docs: public agent skill (`bobby install --skill`) vs internal Ghost / ZigZagZig recovery (Rust: `SkillGhost` / `SkillZigZagZig`) — navigation title "Internal skill runtime (Ghost / ZigZagZig)".
+- **Breaking (MCP surface):** `tools/list` defaults to the `explore` phase; `[mcp] startup_toolset` or `BOBBY_MCP_TOOLSET` selects `explore`, `act`, `intent`, `verify`, or `full` at connect, and hidden tools stay callable.
+- **Breaking (bootstrap):** `bobby init`, `bobby install`, and loopback auto-init mint the agent preset without `authority:admin`; `--preset unrestricted` mints the operator floor.
+- `bobby doctor` reports `bootstrap-preset`.
+- MCP adds `workflow_start` and `workflow_observe` in every toolset phase, and `checkpoint_save` in Intent.
+- Workflow handles are bounded to 64 bindings plus 64 concurrent reservations and expire on reinitialize or server-generation change.
+- Streamable HTTP clients with the same authenticated principal share one MCP server lifecycle; distinct principals stay isolated.
+- MCP `initialize` returns short `instructions` covering the explore phase, `toolset_select`, `error.repair`, `autoCheckpoint`, and `bobby://` recovery docs.
+- MCP failures carry a machine-readable repair `{action, doc}` pointing into `bobby://failure-taxonomy`, and `needsReconciliation` always carries the never-retry repair.
+- `http_wait` accepts `contains` and `maxBodyBytes`.
+- `runtime_info`'s `capabilities` list reports `vision-assist` and `vision-provider` when configured.
+- MCP `job_submit`, `job_status`, and `job_cancel` mirror HTTP `/v1/jobs`, with built-in handlers `echo`, `sleep`, `http_probe`, `http_wait`, and `http_fetch`; `bobby://job-handlers` documents payloads and `bobby doctor` reports `job-handlers`.
+- Ollama joins the direct vision backends through `bobby vision-proxy --ollama --ollama-base-url` and `bobby vision connect --provider ollama`.
+- `bobby vision collect` gathers vision proposals as JSONL training data.
+- `bobby context forget` works against a store it just released, and an unusable lockfile reports its real cause.
+- README and install docs state the Homebrew-core status; Unix release binaries are stripped, installation docs cover curl download of release assets, and `scripts/install.sh` is the one-liner installer (`BOBBY_VERSION`, `INSTALL_DIR`).
+- Docs distinguish the public agent skill (`bobby install --skill`) from the internal Ghost / ZigZagZig recovery runtime.
 - `context_ask` falls back to the persisted per-profile store, with `source` of `observed`, `persisted`, or `visionPromoted` on every answer.
 - `context_neighbors` returns remembered form structure around a control.
-- `context:read` capability, over MCP and `/v1`. Bootstrap heal floors (unrestricted and `agent`) include `context:read` so agents are not stranded without it after init.
-- `bobby context list` and `bobby context forget <site>`; `bobby doctor` reports store size; retention sweeps on open.
-- Release-gate canary asserts no typed values or credentials reach the context store.
-- `IntentHints.accessibleName`: an `a11y_snapshot` node's `target` passes into any `intent_*` tool verbatim. Equivalent to an exact `nearText`; both set to different values is refused as `intentCompileFailed`.
-- The `tools/list` byte-budget gate measures all 21 capabilities, not the 15 it had listed. `Capability::ALL` is the single source.
-- Idempotent retry works over MCP. The digest covered the whole `CommandEnvelope`, including `deadline` and the per-attempt `commandId`/`attemptId`/`workflowId`, all of which the gateway mints fresh on every dispatch with no caller override — so a retry never matched its own first try and every retry answered `idempotencyConflict` on a command that may already have landed. Identity is now the command: schema version, session, page, the command itself, and the one-shot vision consent. Same key with a different command still conflicts. A replayed outcome no longer has the current call's `workflowId`/`attemptId` stamped onto it, because that pair never ran.
-- `Evidence::Wait` carries `observed`, the value the condition matched on: the element text or value, the URL, or the document ready state. The poll already read it to decide whether it was satisfied and then discarded it, so verifying a submit cost a second round trip to learn what had just been confirmed. Bounded at 512 characters on a character boundary. Chromium reports it for text, value, URL, and document conditions; Firefox for URL. Absent on element and network-quiet conditions, which match on presence and counts rather than a value.
-- `recovery_status` accepts `sessionId` instead of `workflowId` and answers with that session's recoverable workflows, newest first, capped at 32. `recovery_status` and `workflow_recover` were keyed by `workflowId` alone and the checkpoint store had no index, so an agent that was compacted or restarted could not name — and therefore could not reach — its own in-flight workflow. Exactly one of the two keys is required. Ownership is enforced against the session-ownership registry, and a corrupt entry is skipped rather than failing the listing.
-- The context-store privacy canary scans the store instead of a directory that cannot exist. It read `<context dir>/<profile>` literally, but the store hex-encodes the profile component, so the scan found nothing and the test failed on its own precondition — the property it exists to prove was never actually checked. It now walks every `.json` under the store root at any depth.
-- `intent_submit_and_verify`, `intent_follow`, and boundary `click` accept `autoCheckpoint`, which **defaults to `true`**. A Boundary command took three calls — pin `commandId`/`attemptId`, `checkpoint_save` naming those exact ids, then submit — because a `WorkflowCheckpoint` needs `restartUrl` and `currentUrl` and nothing on the runtime interface exposes live page state. The runtime now mints it and returns its `checkpointId`. Pass `autoCheckpoint: false` only to author `invariants` or `replayableInputs`. `Executor::validate` is unchanged and still matches on all five fields; a checkpoint that fails to save fails the submit.
-- `bobby install --host acp` and `bobby acp-stdio` mirror the MCP stdio entrypoint for ACP hosts (credential load + exec of `acp-gateway`).
-- Release packages and `Formula/bobby-browser.rb` ship the gateway trio (`bobby`, `mcp-gateway`, `acp-gateway`). `bobby doctor` checks sibling gateway presence on PATH. README documents `brew install --formula ./Formula/bobby-browser.rb` and the three-binary / Explore size tip.
-- `bobby init --preset agent` mints a bootstrap without `authority:admin`; heal respects the preset marker and never widens an agent floor to unrestricted. (Superseded for the default floor by the Unreleased breaking bootstrap note above.) `bobby doctor` reports `bootstrap-preset`.
-- `bobby doctor` reminds that `vision:assist` still needs session `executionPolicy.visionAssist=true`, and that `javascript:evaluate` still needs `executionPolicy.javascriptEvaluation=true` (cap alone is not enough).
-- Vision HTTP endpoints resolve only through `NodeRegistry` (sdk-core extract + vision child spawn). `bobby doctor` warns when both `[nodes]` and `[vision].endpoint_url` are set (`[nodes]` wins).
-- `bobby vision connect` (direct) writes the loopback HTTP endpoint under `[nodes.vision]` (`kind = "vision"`) and keeps provider profiles under `[vision.providers.*]`. It no longer persists a dual-truth `[vision].endpoint_url`.
-- ACP `session/prompt` freeform-text parse errors include a concrete structured JSON example in the error data. MCP prompt list descriptions carry one-line recovery tips.
-- MCP gateway `tools/call` argument structs and capability/operation/description tables live in `tool_args` / `tool_meta`; the name-matched dispatch match lives in `server/tool_dispatch.rs` (behavior unchanged).
+- `context:read` capability over MCP and `/v1`, included in the bootstrap floors.
+- `bobby context list` and `bobby context forget <site>`; `bobby doctor` reports store size and retention sweeps run on open.
+- `IntentHints.accessibleName` takes an `a11y_snapshot` node's `target` verbatim in any `intent_*` tool; conflicting `nearText` is refused as `intentCompileFailed`.
+- Idempotent retry works over MCP: identity is the command (schema version, session, page, command, vision consent), same key with a different command conflicts, and a replayed outcome carries no stamped `workflowId`/`attemptId`.
+- `Evidence::Wait` carries `observed`, the value the condition matched on, bounded at 512 characters, for text, value, URL, and document conditions on Chromium and URL on Firefox.
+- `recovery_status` accepts `sessionId` and answers with that session's recoverable workflows, newest first, capped at 32; exactly one of `workflowId` and `sessionId` is required.
+- `intent_submit_and_verify`, `intent_follow`, and boundary `click` accept `autoCheckpoint`, default `true`, returning the minted `checkpointId`; pass `false` to author `invariants` or `replayableInputs`.
+- `bobby install --host acp` and `bobby acp-stdio` mirror the MCP stdio entrypoint for ACP hosts.
+- Release packages and `Formula/bobby-browser.rb` ship `bobby`, `mcp-gateway`, and `acp-gateway`, and `bobby doctor` checks sibling gateway presence on PATH.
+- `bobby init --preset agent` mints a bootstrap without `authority:admin`, and heal never widens it.
+- `bobby doctor` reminds that `vision:assist` needs `executionPolicy.visionAssist=true` and `javascript:evaluate` needs `executionPolicy.javascriptEvaluation=true`.
+- Vision HTTP endpoints resolve through the node registry, and `bobby doctor` warns when both `[nodes]` and `[vision].endpoint_url` are set (`[nodes]` wins).
+- `bobby vision connect` writes the loopback endpoint under `[nodes.vision]` and provider profiles under `[vision.providers.*]`.
+- ACP `session/prompt` freeform-text parse errors include a structured JSON example, and MCP prompt descriptions carry one-line recovery tips.
 
 ## 0.6.0 - 2026-08-05
-- Add outbound ACP vision delegation: a workflow harness performs the vision work over ACP and bobby stores no provider credentials. Bounded packet and result validation, isolated child-session lifecycle, image capability negotiation, and harness-advertised authentication. `bobby vision connect --backend acp` writes the config and `bobby doctor` covers it; direct providers are unchanged.
-- An isolated ACP vision harness that requests interactive permission fails closed — the request is cancelled and the child session closed, so it cannot produce an accepted result after asking for authority the parent session did not grant.
-- The optional session `visionNode` selector is exposed through the MCP `session_create` input/output schemas and the TypeScript SDK contract validator. MCP agents could configure ACP vision but `session_create` rejected the selector, leaving the configured route unreachable through that interface. The versioned Rust session contract is unchanged.
-- A rejected advertised ACP authentication is classified as `AcpClientError::Authentication` and fails before the isolated child session is created, instead of surfacing as transport loss.
-- Firefox executes vision-assisted intents: bounded accessibility snapshots become semantic intent candidates, and vision-selected coordinates execute through native BiDi pointer actions. Unsupported candidate scopes are rejected.
-- The Firefox companion popup pairs and re-pairs the profile through the native host's `enrollProfile` control path, so the credential never leaves the host. First-time enroll bootstraps the companion; a day-2 enroll reuses the live `bobby serve` descriptor. The install persists `browser-selection.json` and the enroll defaults, sharing one selection builder with the CLI. Adds the toolbar icons. The guide prefers popup Pair; `bobby enroll-firefox-profile` remains for CI.
-- `bobby install --companion` and `make firefox` upgrade a bobby-managed native host instead of failing with `native-host installation destination already exists` whenever the installed wrapper or manifest differed by bytes — JSON key order, or a different `bobby` path. Operator-owned files still refuse. Manifest keys serialize alphabetically so a repeat install is idempotent.
-- `scripts/check-version-agreement.py` covers `packages/firefox-companion/manifest.json`. It had drifted to 0.3.1, which is the version `about:addons` showed.
-- The Chromium worker never holds the `pages` mutex across browser I/O. The guard was held across every CDP round trip — navigate (up to 300s), inspect, click, humanized typing, screenshot, HAR dump — so one hung page call serialized every other page on the session, and close/terminate blocked on the same mutex, making a single stuck call unrecoverable. All 30 lookup sites clone the Arc-backed page handle under the lock and drop the guard before I/O; the remaining guard uses are map mutations.
-- The envelope deadline is enforced mid-flight, not only at admission. `inspect`, `click`, `screenshot`, and the cookie operations carry no timeout of their own, so a hung call stalled its command forever. Execution now races the deadline at the single dispatch site and fails retryable `DeadlineExceeded`; callers declare the budget via `timeoutMs`, clamped to the 300s ceiling. An aborted call may still execute browser-side, as with any timeout.
-- `cookie_set` and `cookie_delete` held the `pages` mutex across a recursive `get_cookies` acquisition of the same non-reentrant lock. Every cookie command hung its session permanently.
-- `download_url` is advertised, required, parsed, and threaded through the MCP gateway. The gateway always sent `pageId: None` while the executor requires one, so every call failed `invalidRequest`.
-- Firefox `page_close` returns `Evidence::Page` captured before teardown. Without it the executor recorded every successful close as a retryable failure, so agents retried a destructive operation.
-- Extraction and the Firefox JavaScript-result path truncate on a character boundary. Byte-index truncation panicked inside a multi-byte codepoint, so any non-ASCII page could kill the command.
-- Two check-then-act races are single-flighted: concurrent leases on one session launched two browsers against one profile directory (`SingletonLock`), and concurrent `network_log` calls spawned duplicate HAR collectors that split entries into a flaky `verificationFailed`.
-- **Security:** `get_job` and `cancel_job` checked the capability but never ownership, so any principal holding `job:read` could read another principal's job payload and result, and `job:cancel` could cancel their work. Jobs record their submitting owner (serde-compatible with pre-ownership journals; a `None` owner stays readable) and cross-principal access answers as absence.
-- **Security:** the `cookie_get` URL filter matched by substring, so `example.com` matched `notexample.com` and `path=/` matched every URL — agents received other origins' cookies as correct results and re-injected them with `cookie_set`. Matching is now dot-boundary host suffix plus real path prefix.
-- **Security:** an idempotency permit dropped between reserve and finish — a cancel or panic mid-request — wedged its key until deadline for every retry, and enough wedges exhausted the principal's capacity. Permits abandon on `Drop`, disarmed by finish or explicit abandon.
-- **Security:** companion reconnect credentials are stored as a SHA-256 digest and compared in constant time. They were stored in plaintext and compared with an early-exit `!=`.
-- **Security:** a live MCP SSE stream re-evaluates its `SubscribeEvents` guard on every poll, so a token rotation pauses event delivery instead of the stream running on the capability set it opened with. Revoked or expired principals still close the channel.
-- **Security:** the SSRF deny path covers IPv4-compatible IPv6 (`::127.0.0.1`), the 6to4 and Teredo prefixes, IPv4 broadcast, and CGNAT `100.64.0.0/10`.
-- **Security:** vision endpoint responses check `Content-Length` up front and enforce the size bound while reading chunked, instead of buffering the whole body before the check.
-- `vision-proxy`'s `validate_extract` enforces a 64 KiB serialized bound. It was a no-op stub, so unbounded upstream extraction JSON reached the runtime unchecked.
-- Checkpoint files are written 0600 on Unix; they previously took the process umask.
-- `authority.json` syncs the file and its directory before the rename — `flush()` is userspace-only, so a crash could leave a torn file — and an unparsable file is quarantined to `<path>.corrupt` instead of failing boot with every token stranded.
-- A corrupt artifact-ownership record is quarantined instead of permanently rejecting all future registrations.
-- `ArtifactStore` construction sweeps crash-orphaned staging directories, which each leaked up to `max_bytes` for the life of the installation.
-- The session manager releases the worker before unregistering the session. The old order dropped the API handle first, so a failed release leaked the browser with nothing left to retry through; on failure the session now stays registered.
-- `events_read` no longer journals a receipt per poll into the 64-event ring, where its own traffic evicted real events and poisoned resume cursors.
-- `Page.getFrameTree` awaits the page lock instead of fabricating an `about:blank` frame tree from a `try_lock` fallback under contention.
-- The task scheduler re-checks terminal state when inserting an abort handle; a job that finished faster than the insert left the handle in place forever.
-- `bobby doctor`'s 15s MCP handshake deadline applies to the read. The blocking `read_line` ignored it, so a mute gateway hung; the read runs on a thread with `recv_timeout`.
-- The checkpoint store prunes uncontended entries from its per-workflow lock map, which otherwise held one `Arc<Mutex>` per workflow id for the life of the process.
-- The page registry URL update after navigate (a stale `page_list`) and the expected-URL settle wait before click verification are logged instead of silently discarded.
-- The Firefox companion removes pending prompts when their context is destroyed, and serializes cookie names and values as JSON into the `document.cookie` statement — the hand-rolled escape let a `;` or newline break out of or inject into it.
-- A `bootstrap.env` parse error reports the line number instead of the offending line, which is the bearer token.
-- The MCP stdio read loop shares the 64-deep in-flight bound the notification branch already had. A client pipelining thousands of `tools/call` frames without reading responses could exhaust memory and browser processes.
-- `replace_session`'s timeout error states its contract: the timeout reports while the owned cleanup finishes in the background, and the swap lands exactly once afterwards.
-- The MCP gateway tests run against a real `RuntimeService` — journal, worker pool, recovery coordinator — over an evidence-producing fake worker, and assert terminal outcomes: `intentKind`, `resolutionPath`, candidates, verification evidence, and the resolved evidence inside a checkpoint read back through a real `RecoveryCoordinator`. The `RuntimeService::default()` fixture behind ~50 of them had no journal, workers, or recovery, so every dispatched command failed downstream and the assertions (`assert_ne!(code, -32602)`, dispatch counts) passed under total downstream failure.
-- Twelve of the fourteen security release cases run without a browser. They prove auth, framing, quota, store, and lifecycle boundaries and never lease a worker, but ran only behind the installed-Chromium ignore gate, so CI proved none of them. The release matrix still runs all fourteen; canary leakage and principal isolation open real pages and stay Chrome-gated.
-- `page-runtime` pins that a typed value which never lands fails `verificationFailed`. The positive `type_text` test passed whether or not the post-type comparison ran, because the fake echoed the expected value after any write.
-- The default fingerprint profile and the behavioral benchmark are pinned to reviewed literals — UA, platform, locale, timezone, WebGL vendor and renderer, screen and client-hint fields, plus the seeded overall, category, and 19 per-dimension scores — in addition to matching generated output. Both previously compared against values the code under test produced, so regeneration blessed any drift.
+- Outbound ACP vision delegation: a workflow harness performs the vision work over ACP and bobby stores no provider credentials; `bobby vision connect --backend acp` writes the config and `bobby doctor` covers it.
+- An isolated ACP vision harness that requests interactive permission fails closed.
+- The session `visionNode` selector is accepted by MCP `session_create` and the TypeScript SDK validator.
+- A rejected ACP authentication fails before the isolated child session is created.
+- Firefox executes vision-assisted intents, with vision-selected coordinates executed through native BiDi pointer actions.
+- The Firefox companion popup pairs and re-pairs the profile through the native host without the credential leaving the host; `bobby enroll-firefox-profile` remains for CI.
+- `bobby install --companion` and `make firefox` upgrade a bobby-managed native host; operator-owned files still refuse.
+- Version agreement checks cover `packages/firefox-companion/manifest.json`.
+- One hung page call does not serialize other pages on a Chromium session or block close and terminate.
+- The envelope deadline is enforced mid-flight; a hung call fails retryable `DeadlineExceeded`, with `timeoutMs` clamped to 300 s.
+- `cookie_set` and `cookie_delete` complete without blocking the session.
+- `download_url` works through the MCP gateway.
+- Firefox `page_close` returns page evidence, so a successful close is not retried.
+- Extraction and Firefox JavaScript-result truncation respect multi-byte characters.
+- Concurrent leases on one session launch one browser, and concurrent `network_log` calls share one HAR collector.
+- **Security:** `get_job` and `cancel_job` enforce job ownership; cross-principal access answers as absence.
+- **Security:** `cookie_get` URL filtering matches on dot-boundary host suffix and real path prefix.
+- **Security:** an abandoned idempotency permit releases its key.
+- **Security:** companion reconnect credentials are stored as a SHA-256 digest and compared in constant time.
+- **Security:** a live MCP SSE stream re-evaluates its `SubscribeEvents` guard on every poll, so a token rotation pauses event delivery.
+- **Security:** the SSRF deny path covers IPv4-compatible IPv6, 6to4 and Teredo prefixes, IPv4 broadcast, and CGNAT `100.64.0.0/10`.
+- **Security:** vision endpoint responses are size-checked up front and while streaming.
+- `vision-proxy` bounds extraction JSON at 64 KiB.
+- Checkpoint files are written 0600 on Unix.
+- `authority.json` is synced before rename and an unparsable file is quarantined to `<path>.corrupt`.
+- A corrupt artifact-ownership record is quarantined.
+- `ArtifactStore` construction sweeps crash-orphaned staging directories.
+- The session manager releases the worker before unregistering the session, and a failed release leaves the session registered.
+- `events_read` does not journal a receipt per poll.
+- `Page.getFrameTree` waits for the page lock.
+- A job that finishes quickly leaves no abort handle behind.
+- `bobby doctor`'s 15 s MCP handshake deadline applies to the read.
+- The checkpoint store prunes uncontended per-workflow locks.
+- The Firefox companion removes pending prompts when their context is destroyed and serializes cookie names and values safely.
+- A `bootstrap.env` parse error reports the line number.
+- The MCP stdio read loop bounds in-flight requests at 64.
+- `replace_session`'s timeout error states that cleanup finishes in the background and the swap lands once.
 
 ## 0.5.1 - 2026-08-04
-- **Breaking (MCP):** a command whose outcome status is not `completed` now returns `isError: true`. Failed commands previously reported `isError: false`, so hosts checking `isError` treated every failure as success. `restarted`/`resumed` recovery decisions remain success.
-- Boundary commands are usable over the flat MCP tools: `intent_*` tools and `click` accept optional `commandId`/`attemptId` (threaded through unchanged), and every outcome echoes `attemptId` alongside `workflowId`/`commandId`. The Boundary gate requires a pre-saved checkpoint naming those exact ids, but the server minted them internally and never surfaced them, so `intent_submit_and_verify` and boundary `click` could never pass it over MCP. The `fill_and_submit_form` prompt is rewritten to the only working order (snapshot, fill, pin ids, checkpoint, submit) and states the exact `CompleteFormField`/`ExtractField` shapes it previously omitted.
-- The static `bobby://` resources (capabilities, failure-taxonomy, intents, primitives) are readable by any authenticated principal; only live `artifact://` entries require `artifact:read`. An agent that hit `missingCapability` could not read the repair documentation for it. Revoked/expired principals are still denied.
-- `bobby://failure-taxonomy` documents the RPC-layer `InterfaceErrorCode` vocabulary (14 codes, each with a repair action), and the advertised `errorCode` enum adds `targetObscured`/`targetOutOfBounds` (29/29 variants, pinned by a schemars parity test).
-- Tool annotations corrected: `readOnlyHint` on `wait_for`, `intent_locate`, `intent_wait_for_state`, `intent_extract`; `openWorldHint` on `page_open`, `click`, `intent_follow`, `intent_submit_and_verify`. `network_log`'s description names both real failure codes.
-- `tools/list` advertises shared `Id` schemas by `$ref`, keeping the full surface at ~125 KB with ~5.8 KB of headroom inside the 128 KiB connect budget after the new `commandId`/`attemptId` fields.
-- A tag publishes every artifact. `release-binaries` creates the GitHub Release before uploading assets — nothing created it, so `gh release upload` answered "release not found" and v0.5.0 built five binaries and shipped none. The body is the CHANGELOG section for the version via `scripts/changelog-section.py`, so a version with no section fails the tag instead of publishing empty notes.
-- `release-binaries` calls `publish-docs` directly, and `publish-docs` gains a `workflow_call` trigger. A release created with `GITHUB_TOKEN` does not fire `on: release`, so the documentation artifact never built.
-- npm publishes through the OIDC trusted publisher instead of a stored token: the account requires 2FA on publish, so a token fails with `EOTP` and CI cannot hold a one-time password. `publish-npm.yml` is renamed `publish.yml` and the job runs in the `production` environment, matching the org, repository, workflow filename, and environment the trusted publisher matches against.
+- **Breaking (MCP):** a command whose outcome status is not `completed` returns `isError: true`; `restarted` and `resumed` recovery decisions remain success.
+- Boundary commands work over the flat MCP tools: `intent_*` tools and `click` accept optional `commandId`/`attemptId`, and every outcome echoes `attemptId`.
+- The `fill_and_submit_form` prompt states the working order (snapshot, fill, pin ids, checkpoint, submit) and the exact `CompleteFormField`/`ExtractField` shapes.
+- The static `bobby://` resources are readable by any authenticated principal; only live `artifact://` entries require `artifact:read`.
+- `bobby://failure-taxonomy` documents the RPC-layer `InterfaceErrorCode` vocabulary, and the `errorCode` enum includes `targetObscured` and `targetOutOfBounds`.
+- Tool annotations: `readOnlyHint` on `wait_for`, `intent_locate`, `intent_wait_for_state`, `intent_extract`; `openWorldHint` on `page_open`, `click`, `intent_follow`, `intent_submit_and_verify`.
+- `tools/list` advertises shared `Id` schemas by `$ref`.
+- A tag creates the GitHub Release before uploading assets, with the CHANGELOG section as its body; a version with no section fails the tag.
+- `release-binaries` builds the documentation artifact on each release.
+- npm publishes through the OIDC trusted publisher from `publish.yml` in the `production` environment.
 
 ## 0.5.0 - 2026-08-04
-- `bobby install` can put `bobby` (+ sibling `mcp-gateway`) on PATH (`~/.cargo/bin` when already on PATH, else `~/.local/bin`). On by default in the interactive checklist and via `--cli` / `make cli`.
-- `make` help lists every target in sections (Setup / Service / Quality / dogfood); `install` was missing from the menu. `make firefox` builds and installs the Firefox companion only. `bobby install --companion` no longer also wires Claude or regenerates the bootstrap credential.
-- `bobby install` interactive checklist uses ↑/↓ + space (esc quits) instead of number-key toggles, so arrow keys actually select options.
-- **Breaking (MCP):** `session_list` `structuredContent` is `{"sessions": [...]}`, was a bare array. MCP types `structuredContent` as an object; a conforming client rejects the entire `tools/list` on a non-object `outputSchema`, so all 43 tools failed to load. `outputSchema` is object-shaped to match and the `ARRAY_SHAPED_OUTPUT` exception is removed. `GET /v1/sessions` is unchanged.
-- Add `bobby vision-proxy`: loopback adapter that speaks bobby’s propose/extract HTTP contract and forwards to an OpenAI-compatible chat/completions upstream (no model SDK in the runtime).
-- Add named `[vision.providers.<name>]` profiles plus `[vision].provider` selection (OpenAI / Ollama / LM Studio presets; any OpenAI-compatible custom `base_url`). Secrets stay in env via `token_env` / `api_key_env` — never in TOML.
-- Add `bobby vision connect` to write loopback `[vision]` + a provider profile (interactive or `--yes`).
-- `bobby serve` and `bobby mcp-stdio` gain `--vision` / `--no-vision`: when the resolved vision endpoint is loopback and a provider is selected, the parent auto-spawns `vision-proxy` and tears it down on exit; non-loopback never spawns. `mcp-stdio` sets `BOBBY_BROWSER_CONFIG` and stays resident when holding the sidecar.
-- `bobby doctor` warns on missing `vision.provider` profile and missing upstream `api_key_env` (skipped for local profiles without a key), and distinguishes loopback vs external `vision-endpoint` hints.
-- Docs: configuration / troubleshooting / intents cover connect → `--vision`, LM Studio (MLX), and custom OpenAI-compatible providers.
-- Browser selection resolves through one function for `bobby serve`, the stdio gateway, and `bobby doctor`: `AUTOMATION_RUNTIME_BROWSER_SELECTION`, then the persisted enrollment at `<config-dir>/bobby-browser/browser-selection.json`, then the built-in default; a present-but-malformed source fails closed. The gateway composed its factory eagerly, so an install with no env var hit the fail-closed Firefox default and exited at startup, which every MCP host reported as a dead server. `bobby enroll-firefox-profile` persists the selection atomically (0600 on Unix) instead of instructing an env export, and `doctor` reports which source resolved.
-- `run_doctor` is a structured `DoctorReport` with bootstrap-expiry and handshake-error classification extracted as pure functions, covered by tests for malformed config, malformed selection, and the satisfiable path.
-- The stdio gateway loads `AppConfig` (`BOBBY_BROWSER_CONFIG` or `./config.toml`) and composes its worker factory the way `bobby serve` does. It ran on `AppConfig::default()` with a hardcoded Chromium factory, so MCP sessions ignored `headless = false` and enrolled Firefox profiles while `serve` and `doctor` validated a different path. Factory composition moved from `cli` into `firefox-companion::selection`; `cli` re-exports it unchanged.
-- `POST /v1/commands` emits `Retry-After` on a 503 `retryableFailure` (1s when the outcome carries no explicit backoff), matching `resourceExhausted`.
-- Publish the `/v1` OpenAPI description in the docs artifact, stamped with the product and interface versions. Nullable schemas use OpenAPI 3.1 type arrays instead of the 3.0 `nullable` keyword, and `OpenPageRequest` drops `additionalProperties: false`.
-- The MCP stdio server serializes handshake frames and all traffic before `Ready`. Back-to-back `notifications/initialized` + `tools/call` could observe `AwaitingInitializedNotification` and return `-32002`, which surfaced as a missing `structuredContent.id` on `session_create`.
-- Add the Firefox companion operator popup: connection state, session policy (fingerprint owner, humanize), and a fingerprint toggle rendered checked and disabled when the host owns the setting.
-- `skill/SKILL.md` documents the runtime wiring an agent needs: that the gateway loads `config.toml`, the engine resolution order, `doctor`'s source reporting, and that Chromium profiles are disposable while the Firefox companion attaches to a real profile where logins persist.
-- `bobby` builds on Windows. `exec_mcp_stdio` was `#[cfg(unix)]` but called unconditionally, `GATEWAY_COMMAND` never matched `mcp-gateway.exe`, and the Unix-only artifact boundary in `interface-core` failed `-D warnings` as dead code. CI gains a windows-latest job building the crate the release ships; the break first appeared in `release-binaries` on the `v0.4.0` tag.
-- The npm publish step sets `NODE_AUTH_TOKEN` from `NPM_TOKEN`. Without it the token was empty and npm answered 404 on PUT, so publish had never succeeded.
-- Land the pending Dependabot bumps across Rust, JS, and Actions, with the `rand` 0.10 fixes (`RngExt`, and `SessionRandom` cloned from its seed after `StdRng` lost `Clone`).
-- Comments across 54 files are compressed to facts — invariants, units, bounds, safety constraints — dropping build-history narration and references to internal planning documents. `docs/superpowers/` is removed from the published tree.
+- `bobby install` can put `bobby` and sibling `mcp-gateway` on PATH (`~/.cargo/bin` when on PATH, else `~/.local/bin`), via the checklist, `--cli`, or `make cli`.
+- `make` help lists every target in sections; `make firefox` builds and installs the Firefox companion only, and `bobby install --companion` neither wires Claude nor regenerates the bootstrap credential.
+- The `bobby install` checklist uses up/down arrows and space.
+- **Breaking (MCP):** `session_list` `structuredContent` is `{"sessions": [...]}`; `GET /v1/sessions` is unchanged.
+- `bobby vision-proxy` is a loopback adapter that forwards to an OpenAI-compatible chat/completions upstream.
+- Named `[vision.providers.<name>]` profiles and `[vision].provider` selection with OpenAI, Ollama, and LM Studio presets and custom OpenAI-compatible `base_url`; secrets stay in env via `token_env` / `api_key_env`.
+- `bobby vision connect` writes loopback `[vision]` and a provider profile, interactively or with `--yes`.
+- `bobby serve` and `bobby mcp-stdio` accept `--vision` / `--no-vision`, auto-spawning `vision-proxy` for a loopback endpoint with a selected provider and tearing it down on exit.
+- `bobby doctor` warns on a missing `vision.provider` profile or upstream `api_key_env` and distinguishes loopback from external `vision-endpoint` hints.
+- Docs cover connect, `--vision`, LM Studio (MLX), and custom OpenAI-compatible providers.
+- Browser selection resolves through one function for `bobby serve`, the stdio gateway, and `bobby doctor`: `AUTOMATION_RUNTIME_BROWSER_SELECTION`, then the persisted enrollment, then the built-in default; a malformed source fails closed and `doctor` reports which resolved.
+- `bobby enroll-firefox-profile` persists the selection atomically (0600 on Unix).
+- `run_doctor` returns a structured `DoctorReport`.
+- The stdio gateway loads `BOBBY_BROWSER_CONFIG` or `./config.toml` and composes its worker factory like `bobby serve`.
+- `POST /v1/commands` emits `Retry-After` on a 503 `retryableFailure`.
+- The `/v1` OpenAPI description is published in the docs artifact, stamped with the product and interface versions.
+- The MCP stdio server handles `notifications/initialized` immediately followed by `tools/call`.
+- Firefox companion operator popup: connection state, session policy, and a fingerprint toggle shown checked and disabled when the host owns the setting.
+- `skill/SKILL.md` documents the gateway's config loading, engine resolution order, `doctor` source reporting, and that Chromium profiles are disposable while the Firefox companion attaches to a real profile.
+- `bobby` builds on Windows.
+- The npm publish step sets `NODE_AUTH_TOKEN` from `NPM_TOKEN`.
+- Dependabot bumps across Rust, JS, and Actions are landed.
 
 ## 0.4.0 - 2026-08-03
-- **Naming:** one scope, one prefix, one tag. Internal npm packages move off the unowned `@bobby-browser` scope to `@cavi-ai/bobby-gauntlet`, `@cavi-ai/bobby-firefox-companion`, `@cavi-ai/bobby-interface-conformance`; `@cavi-ai/bobby-browser` is unchanged, so nothing published breaks. 25 internal crates are `publish = false` — only `bobby-browser-client` and `bobby-browser` are products, and names like `types`, `config`, and `broker` are not claimed on crates.io. `sdk-v*` and `crate-v*` collapse into `v*`: one tag ships binaries, npm, and the crate.
-- `publish-crates.yml` publishes. It was named "Publish crates (dry-run)" and only ever ran `cargo publish --dry-run`, which is why crates.io is empty. The dry run stays as a pre-flight on every trigger; the real publish is gated on a `v*` tag, so `workflow_dispatch` remains a safe rehearsal.
-- Add `scripts/check-version-agreement.py`, run in CI: every crate, every `package.json`, and every path-dependency pin must carry the workspace version, npm packages must be under `@cavi-ai`, and only the two product crates may publish. npm reached 0.3.1 while the last `sdk-v*` tag was 0.3.0 because nothing checked.
-- Dogfooding the Chromium humanized stream caught three cadence bugs a detector would flag: paste bursts went out as sub-millisecond key storms (now `Input.insertText`, which is how a real paste presents), and clear-first backspaces fired at CDP speed (now paced 30–90ms apart). A biometrics dogfood test pools four typing rounds and asserts detector-relevant invariants: no sub-10ms key intervals, human variance in cadence, and a non-collinear mouse approach.
-- Remove the collector probe's `chromeRuntime` check. It failed whenever `window.chrome` existed without `chrome.runtime` — the state of stock Chrome on an ordinary page, and the state the injection deliberately produces, since CreepJS's `hasBadChromeRuntime` fingerprints the TypeError shape of a faked `chrome.runtime.sendMessage`. The probe asserted the opposite of the design it was probing. The real invariant is locked as a unit test instead, and all six `fingerprint_conformance` tests now run unskipped in CI.
-- `executionPolicy.humanize` now works on Chromium, not just Firefox: the Chromium worker synthesizes typing and pointer input through `behavioral-engine` (paced key events, curved approach paths, hover dwell) and emits `Evidence::Humanization` with action count and synthesized milliseconds, matching the Firefox contract. Two engine quirks are handled explicitly: headless pages get an activation before input so clicks can focus, and clear-first backspaces over the field instead of chording Ctrl/Cmd+A, which loops Chrome's command pipeline.
-- Capability parsing is now a single `FromStr` table on `types::Capability`, replacing five hand-maintained per-binary parse tables that drifted twice in a week (a gateway rejected `job:*`, then bootstrap rejected `browser:*` — both times against credentials `bobby init` itself wrote). A round-trip test fails if a new variant misses the table.
-- `bobby install` gains a Browser companions item: installs the Firefox companion (extension copied into the bobby config dir, native-host wrapper + manifest into Mozilla's per-platform directory) and prints the one remaining step (start Firefox with `--remote-debugging-port`, run `bobby enroll-firefox-profile`). On by default when a Firefox binary is found; `--companion`/`--extension` for non-interactive use. `make install` builds the extension first.
-- Add `bobby mcp-stdio`: the MCP entrypoint agent hosts point at — it loads the bootstrap credential from `bootstrap.env` itself and execs the stdio gateway, so host configs carry no secrets and no env wiring.
-- Add `bobby install` (and `make install`): one-command agent setup — bootstrap credential, MCP config merge into Claude Code / Zed / VS Code (preserving existing entries), and agent-skill installation. Interactive checklist with toggles by default; `--host`/`--skill`/`--yes` for non-interactive use.
-- `adaptive_http_capacity` no longer asserts wall-clock latency. The envelope deadline the runtime already enforces is the real bound, so a `Completed` outcome proves the work fit inside it; the second, tighter assertion added no coverage and failed whenever the suite ran alongside other test binaries. Capacity and routing assertions are unchanged.
-- Add the two mixed rows of the vision double gate to `crates/intent-engine/tests/vision_escalation.rs`: an open session policy does not substitute for `vision:assist`, and holding `vision:assist` does not substitute for the session grant. Both assert by provider call count, so "never consulted" is a fact rather than an inference from an error code.
-- The context graph records which command ids produced evidence against a page (`record_command`, `commands_for`), bounded at 64 per page. It stores ids, not evidence, so the journal stays the one authority on what happened. History survives target invalidation and is dropped on session close.
-- CI runs four previously-uncovered ignored suites: `default_profile_golden` in the browser-free job, and `mcp_live`, `fingerprint_conformance`, `orphan_reap` in the chromium job.
-- `fingerprint_conformance` resolves Chrome from `BOBBY_CHROME_EXECUTABLE` before `CHROME_PATH`. It read only `CHROME_PATH`, which CI does not set, so it launched nothing.
-- Add `acp-gateway`, the fourth adapter: ACP schema v1 over stdio (`initialize`, `session/new`, `session/prompt`, `session/cancel`, `session/update`, `session/request_permission`). Prompts are structured (optional `url` plus one `types::IntentCommand` in the `command_execute` wire shape) — no planner, no freeform text. Permission prompts cover vision escalation only and can lift a session gate, never mint a capability.
-- Set `[profile.dev]` and `[profile.test]` to `debug = "line-tables-only"` and `incremental = false`. A clean workspace build drops from 16 GB to 9.0 GB and from 24,138 to 2,479 files in `target/debug/deps`, the 6.2 GB per-build incremental cache goes away, and the build runs in 117s instead of 202s. Backtraces keep file, line, and column. `incremental = false` is also what lets `sccache` work at all — it does not cache incrementally-compiled crates, so it sat at a 0% hit rate before and reaches 2,158 hits of 2,808 on a rebuild after this. Use `RUSTFLAGS="-C debuginfo=2"` for a session that needs full DWARF.
-- **Breaking (idempotency digests):** `canonical_sha256` sorts JSON object keys recursively before hashing. It previously inherited ordering from `serde_json`'s default `BTreeMap` backend, so any dependency enabling `serde_json/preserve_order` switched the whole workspace to insertion order and two equivalent requests hashed differently — a retry would execute instead of replaying the retained result. Array order is preserved, since it carries meaning. Digests change once; in-flight idempotency records will not match across the upgrade.
-- Add the node-locality proof test: a session naming a loopback node sends its escalation traffic only to that node; a second listener standing in for a remote provider records zero hits.
-- **Breaking (Rust):** the `/v1` wire types moved from the `types` crate into `bobby-browser-client`, which is now the single published Rust crate (`cargo publish` dry-run verified; `types` remains in the workspace as a `publish = false` re-export shim over the moved modules). crates.io publishing is now the one `bobby-browser-client` crate instead of the 25-crate ordered closure.
-- TypeScript SDK source now carries JSDoc on the public surface (client, contracts, errors, events, intents, validators).
-- Add `bobby init --emit <claude|zed|vscode|json>`: prints the MCP client config fragment for the host with `${VAR}` credential placeholders, never the secret. Add `skill/SKILL.md`, the agent skill package for driving the runtime.
-- `bobby doctor` now runs a live MCP handshake (`initialize` + `tools/list`) against the stdio gateway and reports tool count and catalog bytes against the 128 KiB budget; a missing gateway is a warning, a failed handshake a failure.
-- Fix `mcp-gateway` startup rejecting bootstrap credentials that carry `job:*` capabilities (the parse table predated the jobs API, so the stdio gateway could not start with a current `bobby init` file).
-- Add MCP `toolset_select`: narrows `tools/list` to `explore`, `act`, `intent`, `verify`, or `full`. Default stays `full`, byte-for-byte the previous surface.
-- Narrow phases cut the connect payload from ~130 KB to 42–74 KB; selecting a phase emits `notifications/tools/list_changed`.
-- A phase changes what is advertised, never what is permitted: a hidden tool stays callable and capability gates remain the only authority.
-- Add MCP `context_ask` (`page:read`): asks the retained page context where a described control is, returning a bound target and confidence, or nothing.
-- **Breaking (idempotency digests):** `canonical_sha256` now sorts JSON object keys recursively before hashing, so a digest no longer depends on the order a client serialized keys in. It previously inherited ordering from `serde_json`'s default `BTreeMap` backend; any dependency enabling `serde_json/preserve_order` switched that to insertion order workspace-wide and two equivalent requests hashed differently, so a retry executed instead of replaying. Digests change once; in-flight idempotency records will not match across the upgrade.
-- Add `crates/acp-gateway` with the ACP permission-escalation gate: a `session/request_permission` prompt is only sent for a capability the principal already holds but session policy gates, and approval never mints a capability.
-- Add `crates/interface-conformance/tests/acp_permission.rs`, joining ACP to the conformance suite as a fourth adapter.
-- **Breaking:** `executionPolicy.fingerprint` and `executionPolicy.humanize` now require the new `browser:fingerprint` and `browser:humanize` capabilities at session creation; a principal without them gets `missingCapability` and no session is created. `bobby init` bootstrap credentials include both, matching the `vision:assist` double-gate precedent.
-- Document the MCP surface depth shipped in v0.3.1: per-tool `outputSchema`, `title` + `annotations`, the four `bobby://` resources, `artifact://` capture resources, the three working-loop prompts, and `notifications/bobby/event` + `notifications/tools/list_changed` push channels. Document `job:*` capabilities and the `browser:fingerprint` / `browser:humanize` gates in the capabilities concept page.
-- Add a per-session context graph: `a11y_snapshot` results are retained per page and answer "where is the control described as X" with a bound target plus a confidence score.
-- The graph invalidates on any command not on an explicit read-only allowlist, including `navigate` and `emulate`, which are `CommandClass::Replayable` yet change the page.
-- A failed non-read-only command invalidates too, since a command that failed is not a command that did nothing.
-- Truncated accessibility snapshots are not recorded, so the graph never reports a control absent when it was cut off.
-- Ambiguous, partial, and below-floor matches answer nothing rather than guessing.
-- Retained page context is dropped when its session is deleted, and bounded at 256 pages so an unclosed page cannot leak page text for the life of the process.
-- Add a `[nodes.<name>]` config table: named, separately addressable nodes with `kind` (`vision`), `endpoint_url`, optional `token_env`, and `timeout_ms`. An unknown kind fails config load.
-- Add `executionPolicy.visionNode`, naming which registered node a session escalates to.
-- A named node that is not configured declines the escalation and never falls back to another node or to a process-wide provider.
-- A `[vision]` endpoint with no `[nodes]` table is reachable as a node named `vision`; when both are set `[nodes]` wins and `[vision]` is ignored.
-- Node locality is derived from the node's address, so a session bound to a loopback node keeps page material on the machine.
-- **Breaking (HTTP):** `POST /v1/checkpoints` takes `evidenceRefs` (command ids, max 128) instead of `evidence`. The runtime resolves each id against its own journal and checks session ownership, so a caller can no longer author evidence for work it did not perform. Matches the MCP `checkpoint_save` contract. TypeScript SDK `CheckpointRequest.evidence` is replaced by `CheckpointRequest.evidenceRefs`.
-- Add `crates/interface-conformance/tests/checkpoint_evidence.rs`: asserts no adapter accepts caller-authored checkpoint evidence, and that `evidenceRefs` is accepted on each.
-- Add `executionPolicy.fingerprint` and `executionPolicy.humanize`, both deny-by-default. Fingerprint spoofing was a process-wide worker-factory setting; it is now per session. Humanized input timing was unconditional on the Firefox path; it is now per session.
-- `PageRuntime` writes both flags to the worker on every lease, so a pooled worker never carries one session's opt-in into another's.
-- Add `Evidence::Humanization` (`engine`, `actions`, `synthesizedMs`), emitted only when the session opted into `humanize`.
-- Add `crates/mcp-gateway/tests/crate_boundary.rs`: fails if a schema names a type from `behavioral-engine`, `fingerprinting`, or `task-scheduler`, none of which carry `JsonSchema` derives.
-- Add `networkLog` (MCP `network_log`): always-on bounded per-page network capture (512 entries) on Chromium (CDP Network events) and Firefox (BiDi network events), dumped as a HAR 1.2 artifact.
-- Add broker job API `POST|GET|DELETE /v1/jobs` (`job:submit|read|cancel`) with in-process scheduler + optional `scheduler_journal_path`, and CLI `bobby jobs submit|status|cancel`. New bootstrap credentials include `job:*`; `bobby doctor` ensures the scheduler journal dir and warns when bootstrap lacks `job:submit`. Builtin handlers: `echo`, `sleep`.
-
+- Internal npm packages move to the `@cavi-ai` scope (`@cavi-ai/bobby-firefox-companion`, `@cavi-ai/bobby-interface-conformance`); `@cavi-ai/bobby-browser` is unchanged.
+- Only `bobby-browser-client` and `bobby-browser` are published crates, and one `v*` tag ships binaries, npm, and the crate.
+- `publish-crates.yml` publishes on a `v*` tag, with a dry run as a pre-flight on every trigger.
+- `scripts/check-version-agreement.py` runs in CI, requiring every crate, `package.json`, and path-dependency pin to carry the workspace version.
+- Chromium humanized typing pastes through `Input.insertText` and paces clear-first backspaces 30 to 90 ms apart.
+- `executionPolicy.humanize` works on Chromium: typing and pointer input are synthesized with paced key events, curved approach paths, and hover dwell, with `Evidence::Humanization` reporting action count and synthesized milliseconds.
+- Capability parsing is one `FromStr` table on `types::Capability`.
+- `bobby install` gains a Browser companions item that installs the Firefox companion and native-host wrapper and prints the remaining step; `--companion` and `--extension` are the non-interactive flags.
+- `bobby mcp-stdio` is the MCP entrypoint agent hosts point at, loading the bootstrap credential itself so host configs carry no secrets.
+- `bobby install` and `make install` set up an agent in one command: bootstrap credential, MCP config merge into Claude Code, Zed, and VS Code, and agent-skill installation, with `--host`, `--skill`, and `--yes` for non-interactive use.
+- A session policy does not substitute for `vision:assist`, and `vision:assist` does not substitute for the session grant.
+- The context graph records, per page, the command ids that produced evidence (bounded at 64), dropped on session close.
+- `fingerprint_conformance` resolves Chrome from `BOBBY_CHROME_EXECUTABLE` before `CHROME_PATH`.
+- `acp-gateway` speaks ACP schema v1 over stdio (`initialize`, `session/new`, `session/prompt`, `session/cancel`, `session/update`, `session/request_permission`) with structured prompts and permission prompts covering vision escalation only.
+- **Breaking (idempotency digests):** `canonical_sha256` sorts JSON object keys recursively; digests change once and in-flight idempotency records do not match across the upgrade.
+- **Breaking (Rust):** the `/v1` wire types live in `bobby-browser-client`, the single published Rust crate.
+- TypeScript SDK source carries JSDoc on the public surface.
+- `bobby init --emit <claude|zed|vscode|json>` prints the MCP client config fragment with `${VAR}` credential placeholders, and `skill/SKILL.md` is the agent skill package.
+- `bobby doctor` runs a live MCP handshake against the stdio gateway and reports tool count and catalog bytes against the 128 KiB budget.
+- `mcp-gateway` starts with bootstrap credentials carrying `job:*` capabilities.
+- MCP `toolset_select` narrows `tools/list` to `explore`, `act`, `intent`, `verify`, or `full`, emitting `notifications/tools/list_changed`; narrow phases cut the connect payload from about 130 KB to 42 to 74 KB.
+- A phase changes what is advertised, never what is permitted.
+- MCP `context_ask` (`page:read`) asks the retained page context where a described control is and returns a bound target and confidence, or nothing.
+- `crates/acp-gateway` sends a `session/request_permission` prompt only for a capability the principal holds but session policy gates, and approval never mints a capability.
+- **Breaking:** `executionPolicy.fingerprint` and `executionPolicy.humanize` require the `browser:fingerprint` and `browser:humanize` capabilities at session creation; `bobby init` credentials include both.
+- A per-session context graph retains `a11y_snapshot` results per page and answers "where is the control described as X" with a bound target and confidence.
+- The graph invalidates on any command outside a read-only allowlist, including `navigate`, `emulate`, and failed commands.
+- Truncated accessibility snapshots are not recorded.
+- Ambiguous, partial, and below-floor matches answer nothing.
+- Retained page context is dropped when its session is deleted and bounded at 256 pages.
+- A `[nodes.<name>]` config table defines named nodes with `kind` (`vision`), `endpoint_url`, optional `token_env`, and `timeout_ms`; an unknown kind fails config load.
+- `executionPolicy.visionNode` names the registered node a session escalates to; a node that is not configured declines the escalation without falling back.
+- A `[vision]` endpoint with no `[nodes]` table is a node named `vision`, and `[nodes]` wins when both are set.
+- A session bound to a loopback node keeps page material on the machine.
+- **Breaking (HTTP):** `POST /v1/checkpoints` takes `evidenceRefs` (command ids, max 128) resolved against the runtime's journal with session ownership checked; TypeScript SDK `CheckpointRequest.evidence` is replaced by `CheckpointRequest.evidenceRefs`.
+- `executionPolicy.fingerprint` and `executionPolicy.humanize` are per session and deny-by-default, and a pooled worker never carries one session's opt-in into another.
+- `Evidence::Humanization` (`engine`, `actions`, `synthesizedMs`) is emitted when the session opted into `humanize`.
+- MCP `network_log` captures bounded per-page network activity (512 entries) on Chromium and Firefox and dumps it as a HAR 1.2 artifact.
+- Broker job API `POST|GET|DELETE /v1/jobs` (`job:submit|read|cancel`) with an in-process scheduler and optional `scheduler_journal_path`, and CLI `bobby jobs submit|status|cancel`; new bootstrap credentials include `job:*`, `bobby doctor` warns when bootstrap lacks `job:submit`, and built-in handlers are `echo` and `sleep`.
 
 ## 0.3.1 - 2026-08-01
 ### Documentation
-- Publish a new immutable docs artifact that names `@cavi-ai/bobby-browser`
-  throughout (the `v0.3.0` release asset still referenced `@bobby-browser/sdk`).
-- Carry forward post-`0.3.0` doc coverage already on main (`recovery_status`,
-  MCP agent-surface catalog fixes, truncation ordinal notes) into `v0.3.1`.
+- A new docs artifact names `@cavi-ai/bobby-browser` throughout.
+- Docs cover `recovery_status`, MCP agent-surface catalog fixes, and truncation ordinal notes.
 ### Browser primitives
-- Add cookie primitives (`getCookies`, `setCookies`, `deleteCookies`) on Chromium (CDP Network) and Firefox (BiDi storage), exposed as MCP `cookie_get`/`cookie_set`/`cookie_delete` with `cookieState` evidence.
-- Add `printToPdf` (MCP `pdf`) on Chromium (CDP `Page.printToPDF`) and Firefox (BiDi `browsingContext.print`), producing a verified `application/pdf` artifact.
-- Add `handleDialog` (MCP `dialog`): waits for a JavaScript dialog with a bounded timeout and accepts or dismisses it, returning dialog type/message/action evidence. Chromium via CDP dialog events, Firefox via BiDi user prompts.
-- Add `emulate` (MCP `emulate`): viewport size and geolocation overrides. Chromium via CDP Emulation, Firefox via BiDi viewport and geolocation override.
+- Cookie primitives (`getCookies`, `setCookies`, `deleteCookies`) on Chromium and Firefox, exposed as MCP `cookie_get`/`cookie_set`/`cookie_delete` with `cookieState` evidence.
+- `printToPdf` (MCP `pdf`) on Chromium and Firefox produces a verified `application/pdf` artifact.
+- `handleDialog` (MCP `dialog`) waits for a JavaScript dialog with a bounded timeout and accepts or dismisses it, returning type, message, and action evidence.
+- `emulate` (MCP `emulate`) overrides viewport size and geolocation.
 
 ## 0.3.0 - 2026-08-01
 
 ### MCP surface
 
-- Emit only the `$defs` each tool's arguments can reach. A principal holding the default `bobby init` capability set previously produced a `tools/list` past the 1 MiB frame cap, so the gateway answered `resultTooLarge` and no client could enumerate the surface.
-- Expose one MCP tool per intent (`intent_locate`, `intent_fill`, `intent_complete_form`, `intent_submit_and_verify`, `intent_wait_for_state`, `intent_follow`, `intent_dismiss_obstruction`, `intent_extract`), each building its own command envelope. `command_execute` still accepts nested intent envelopes.
-- Accept an optional `workflowId` on every envelope-minting tool and return it on the outcome, so `checkpoint_save` and `workflow_recover` are reachable without hand-built envelopes.
-- Report rejected arguments as `data.pointer` (JSON Pointer) plus `data.constraint`, or as `malformedArguments` / `deadlineOutOfRange` / `invalidIdempotencyKey`, instead of an indistinguishable `"Invalid params"`.
-- Add `credentialExpiresAt` to `runtime_info` and a `bootstrap-expiry` check to `bobby doctor` that warns under 7 days and fails once expired.
-- Allow MCP `click`, `type_text`, and `upload_files` to consume accessibility-snapshot targets without also requiring a legacy CSS selector.
-- Add MCP `recovery_status` (`recovery:read`) alongside `checkpoint_save` / `workflow_recover`.
-- Guard MCP schema parity with schemars: `JsonSchema` derives on the wire types and tests that fail when the hand-bounded MCP tool schemas drift from the Rust command/evidence variants.
+- `tools/list` emits only the `$defs` each tool's arguments can reach, so the default `bobby init` capability set fits the 1 MiB frame cap.
+- One MCP tool per intent: `intent_locate`, `intent_fill`, `intent_complete_form`, `intent_submit_and_verify`, `intent_wait_for_state`, `intent_follow`, `intent_dismiss_obstruction`, `intent_extract`; `command_execute` still accepts nested intent envelopes.
+- Every envelope-minting tool accepts an optional `workflowId` and returns it on the outcome.
+- Rejected arguments report `data.pointer` (JSON Pointer) and `data.constraint`, or `malformedArguments`, `deadlineOutOfRange`, or `invalidIdempotencyKey`.
+- `runtime_info` reports `credentialExpiresAt`, and `bobby doctor` has a `bootstrap-expiry` check that warns under 7 days and fails once expired.
+- MCP `click`, `type_text`, and `upload_files` accept accessibility-snapshot targets without a CSS selector.
+- MCP `recovery_status` (`recovery:read`) sits beside `checkpoint_save` and `workflow_recover`.
 
 ### Sessions, pages, and events
 
-- Add `DELETE /v1/sessions/{id}`, MCP `session_close`, and TypeScript SDK `deleteSession` for session teardown.
-- Add the `activatePage` primitive (MCP `page_activate`) to bring a page to the front on Chromium and Firefox.
-- Add `GET /v1/events?stream=1` server-sent-event streaming with cursor frame ids and terminal gap frames.
-- `GET /v1/mcp` now opens the streamable-HTTP SSE channel (keep-alive) instead of 405.
-- Add `GET /v1/recovery/{workflow}`, MCP `recovery_status`, and TypeScript SDK `recoveryStatus` to inspect a workflow checkpoint and recovery receipts (`recovery:read`).
-- Honor idempotency keys on session creation and checkpoint save, replaying retained results.
-- Scope CDP-originated interface events to the authenticated principal.
-- Report real uptime and in-flight command counts in runtime info.
-- Add `listSessions` to the TypeScript SDK and stop rejecting checkpoints with recovery receipts.
+- `DELETE /v1/sessions/{id}`, MCP `session_close`, and TypeScript SDK `deleteSession` tear down a session.
+- `activatePage` (MCP `page_activate`) brings a page to the front on Chromium and Firefox.
+- `GET /v1/events?stream=1` streams server-sent events with cursor frame ids and terminal gap frames.
+- `GET /v1/mcp` opens the streamable-HTTP SSE channel.
+- `GET /v1/recovery/{workflow}`, MCP `recovery_status`, and TypeScript SDK `recoveryStatus` inspect a workflow checkpoint and recovery receipts (`recovery:read`).
+- Session creation and checkpoint save honor idempotency keys and replay retained results.
+- CDP-originated interface events are scoped to the authenticated principal.
+- Runtime info reports real uptime and in-flight command counts.
+- TypeScript SDK `listSessions`, and checkpoints with recovery receipts are accepted.
 
 ### Packages
 
-- Publish the TypeScript SDK as `@cavi-ai/bobby-browser` (replacing `@bobby-browser/sdk`).
+- The TypeScript SDK publishes as `@cavi-ai/bobby-browser`.
 
 ### Semantic automation
 
-- Add the `accessibilitySnapshot` primitive (MCP `a11y_snapshot`): a compact tree capped at 2048 nodes, from Chrome's full AX tree on Chromium and the companion extension's DOM walker on Firefox. Form controls include current value, description, required/disabled/read-only/invalid/checked state, autocomplete, and numeric bounds; sensitive values are redacted.
-- Add command-ready semantic targets to actionable accessibility-snapshot nodes; duplicate role/name pairs receive deterministic tree-order ordinals without exposing DOM or browser IDs. Duplicate ordinals are computed on the full accessibility tree before `maxNodes` truncation, so retained targets keep globally correct ordinals.
-- Carry snapshot targets into intents via `IntentHints.ordinal` and `intentHintsFromAccessibilityTarget`.
-- Add verified `completeForm` intent (ordered uniquely named fill fields; no implicit submit).
-- Add `FillValue` kind `checked` for reliable checkbox/radio semantic fills on Chromium and Firefox.
-- Fill / completeForm verification fails closed on native HTML constraint validity (`required`, `pattern`, length, range, …) and retains the browser validation message in evidence.
-- Add `expectedUrl` to `typeText` (all surfaces): typing fails before mutation when the page URL does not match, so agents cannot type into the wrong page.
+- `accessibilitySnapshot` (MCP `a11y_snapshot`) returns a compact tree capped at 2048 nodes with form control value, description, and state; sensitive values are redacted.
+- Actionable snapshot nodes carry command-ready targets, with deterministic tree-order ordinals for duplicate role/name pairs computed before truncation.
+- Snapshot targets carry into intents via `IntentHints.ordinal` and `intentHintsFromAccessibilityTarget`.
+- `completeForm` intent fills ordered, uniquely named fields with no implicit submit.
+- `FillValue` kind `checked` fills checkboxes and radios on Chromium and Firefox.
+- Fill and completeForm verification fails closed on native HTML constraint validity and retains the browser validation message.
+- `expectedUrl` on `typeText` fails the command before mutation when the page URL does not match.
 
 ### Extraction and vision
 
-- Add the `extractStructured` primitive (MCP `extract_structured`): bounded page text plus the caller's JSON schema go to the configured provider, and the result is schema-validated and size-bounded before becoming `structuredExtraction` evidence. Gated on `browser:mutate`, `vision:assist`, session policy, and a configured provider.
-- Plumb real screenshot bytes into vision escalation (`screenshot_bytes` on Chromium and Firefox workers); empty frames no longer reach providers.
-- Add an HTTP vision-assist provider (`[vision]` config: https or loopback endpoint, bearer via env var) with response validation and fail-closed escalation.
+- `extractStructured` (MCP `extract_structured`) sends bounded page text and the caller's JSON schema to the configured provider and returns schema-validated, size-bounded `structuredExtraction` evidence; it needs `browser:mutate`, `vision:assist`, session policy, and a configured provider.
+- Vision escalation receives real screenshot bytes on Chromium and Firefox; empty frames never reach providers.
+- An HTTP vision-assist provider (`[vision]` config with an https or loopback endpoint and a bearer from an env var) validates responses and fails closed.
 
 ### Firefox companion
 
-- The Firefox native host treats a companion server silent for 45s as dead and reconnects, recovering from half-open connections left by killed processes.
-- Recover stale Firefox companion attachments: a cycled companion connection now re-grants and retries once instead of failing every later action with `ConnectionClosed`; lease renewal re-grants dead attachments.
-- Share one BiDi connection across runtime sessions on a Firefox profile (Firefox RemoteAgent accepts a single WebDriver session per browser).
-- Keep prior attachment grants when issuing new ones, and renew attachment leases before expiry so sessions outlive the attachment TTL.
-- Companion extension: merge attachment grants instead of replacing them, and retry terminal native-auth states after a bounded cooldown instead of stopping until a browser restart.
-- Recover native-host descriptor publication from descriptor files leaked by killed processes.
-- Log Firefox companion launch, pairing, and discovery failures as warnings.
-- Add `bobby enroll-firefox-profile` for one-time Firefox companion pairing and selection output.
-- Document Firefox companion setup and operations.
+- The Firefox native host treats a companion server silent for 45 s as dead and reconnects.
+- A cycled companion connection re-grants and retries once, and lease renewal re-grants dead attachments.
+- Runtime sessions on a Firefox profile share one BiDi connection.
+- Attachment grants are kept when new ones are issued and renewed before expiry.
+- The companion extension merges attachment grants and retries terminal native-auth states after a bounded cooldown.
+- The native host recovers descriptor publication from files leaked by killed processes.
+- Firefox companion launch, pairing, and discovery failures are logged as warnings.
+- `bobby enroll-firefox-profile` performs one-time Firefox companion pairing and prints the selection.
+- Firefox companion setup and operations are documented.
 
 ### CLI and startup
 
-- Add `bobby doctor` setup checks and clap-based CLI help.
-- Fail startup when the configured engine preference has no satisfiable worker registration.
+- `bobby doctor` setup checks and clap-based CLI help.
+- Startup fails when the configured engine preference has no satisfiable worker registration.
 
 ## 0.2.1 - 2026-07-30
 
-- Scope command outcome events to the authenticated principal across HTTP and MCP transports.
-- Require session ownership for checkpoint creation and workflow recovery.
-- Prevent workflow checkpoints from being rebound to a different session.
-- Revalidate checkpoint session identity while holding the recovery lock.
-- Default browser selection to exact Firefox without Chromium fallback.
-- Bootstrap installed Firefox and its companion for championship runs.
-- Support Playwright 1.62 bootstraps and repeated warmed client conformance runs.
+- Command outcome events are scoped to the authenticated principal across HTTP and MCP.
+- Checkpoint creation and workflow recovery require session ownership.
+- Workflow checkpoints cannot be rebound to a different session.
+- Checkpoint session identity is revalidated while holding the recovery lock.
+- Browser selection defaults to exact Firefox without Chromium fallback.
+- Installed Firefox and its companion are bootstrapped.
+- Playwright 1.62 bootstraps are supported.

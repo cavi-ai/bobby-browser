@@ -669,11 +669,18 @@ async fn upload_and_confirm_returns_upload_and_confirmation_evidence() {
         .iter()
         .position(|event| event == "browser:upload_files")
         .unwrap();
-    let wait = observed
+    // The first wait is for the upload target to be on the page; the
+    // confirmation wait is the last one and follows the upload.
+    let target_wait = observed
         .iter()
         .position(|event| event == "browser:wait_for")
         .unwrap();
-    assert!(upload < wait);
+    let confirmation_wait = observed
+        .iter()
+        .rposition(|event| event == "browser:wait_for")
+        .unwrap();
+    assert!(target_wait < upload);
+    assert!(upload < confirmation_wait);
 }
 
 async fn adaptive_runtime(
