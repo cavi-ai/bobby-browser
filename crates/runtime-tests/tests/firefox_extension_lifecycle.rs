@@ -42,6 +42,8 @@ struct Env {
 
 impl Env {
     fn load() -> Self {
+        // `RUST_LOG` prints the runtime's own events, such as each Firefox restart.
+        std::mem::forget(observability::init_stdio());
         let required = |name: &str| {
             std::env::var_os(name)
                 .filter(|value| !value.is_empty())
@@ -75,7 +77,8 @@ fn build_id_file(extension: &Path) -> Option<String> {
     value["buildId"].as_str().map(str::to_owned)
 }
 
-/// A profile that accepts the unsigned companion as a profile sideload.
+/// A profile with the add-on prefs `bobby install` writes: it accepts the
+/// unsigned companion as a profile sideload and scans it at startup.
 fn new_profile(env: &Env) -> tempfile::TempDir {
     let profile = tempfile::Builder::new()
         .prefix("lifecycle-profile-")
@@ -86,6 +89,7 @@ fn new_profile(env: &Env) -> tempfile::TempDir {
         [
             r#"user_pref("xpinstall.signatures.required", false);"#,
             r#"user_pref("extensions.autoDisableScopes", 14);"#,
+            r#"user_pref("extensions.startupScanScopes", 1);"#,
             r#"user_pref("privacy.resistFingerprinting", false);"#,
             r#"user_pref("browser.shell.checkDefaultBrowser", false);"#,
             r#"user_pref("browser.aboutwelcome.enabled", false);"#,
@@ -367,19 +371,62 @@ async fn page_site() -> FixtureSite {
     FixtureSite::spawn(vec![(
         "/ready",
         Route::Html(
-            "<!doctype html><html><head><title>Ready</title></head><body><main><h1>Ready</h1><button>Go</button></main></body></html>"
+            "<!doctype html><html><head><title>Ready</title></head><body><main><h1>Ready</h1><input aria-label=\"Name\"><button>Go</button></main></body></html>"
                 .into(),
         ),
     )])
     .await
 }
 
-/// `workflow_start` completes on the page and its snapshot is served.
+/// `workflow_start` completes on the page, then its snapshot, typing, and a
+/// click are served in the same session.
 async fn serve_session(rig: &Rig, site: &FixtureSite) {
     let live = Live::open(rig, &site.url("/ready")).await;
     let snapshot = live.snapshot(serde_json::json!({})).await;
     support::rig::assert_node(&snapshot, "button", Some("Go"));
+    let typed = live
+        .call(
+            "type_text",
+            serde_json::json!({"target":{"role":"textbox","accessibleName":"Name"},
+                               "value":"bobby","clearFirst":true}),
+        )
+        .await;
+    assert_eq!(typed["status"], "completed", "type_text: {typed}");
+    let clicked = live
+        .call(
+            "click",
+            serde_json::json!({"target":{"role":"button","accessibleName":"Go"}}),
+        )
+        .await;
+    assert_eq!(clicked["status"], "completed", "click: {clicked}");
     live.close().await;
+}
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after the epoch")
+        .as_millis() as u64
+}
+
+/// How often the companion started since `since`: each start spawns one
+/// scoped test native host, which logs `start` next to the descriptor.
+fn companion_starts_since(env: &Env, since: u64) -> usize {
+    let log = env.proof_dir.join(cli::FIREFOX_NATIVE_HOST_LOG);
+    let mut rotated = log.clone().into_os_string();
+    rotated.push(".1");
+    [PathBuf::from(rotated), log]
+        .iter()
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .flat_map(|text| {
+            text.lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .collect::<Vec<_>>()
+        })
+        .filter(|event| {
+            event["event"] == "start" && event["unixMs"].as_u64().is_some_and(|at| at >= since)
+        })
+        .count()
 }
 
 async fn connected_build(server: &CompanionServerHandle, profile: &ProfileId) -> Option<String> {
@@ -410,7 +457,12 @@ async fn stale_build_is_replaced(layout: Layout, old: Option<&str>) {
     install_extension(&env, profile.path(), layout, None);
     let rig = Rig::firefox_composed(runtime(&env, profile.path(), enrolled, &bidi_url)).await;
     let site = page_site().await;
+    // The session that triggers the heal and a later one both run on the one
+    // companion start the heal made.
+    let healing = unix_ms();
     serve_session(&rig, &site).await;
+    serve_session(&rig, &site).await;
+    assert_eq!(companion_starts_since(&env, healing), 1);
 
     assert_eq!(
         connected_build(&server, &profile_id).await.as_deref(),

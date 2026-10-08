@@ -43,25 +43,45 @@ impl Drop for ObservabilityGuard {
 pub fn init(
     config: &config::ObservabilityConfig,
 ) -> Result<ObservabilityGuard, ObservabilityError> {
+    match config.sink {
+        config::LogSink::Stdout => init_with_writer(config, std::io::stdout),
+    }
+}
+
+/// `init` for a detached process whose stdout is discarded: events go to
+/// stderr, which its spawner points at a log file.
+pub fn init_stderr(
+    config: &config::ObservabilityConfig,
+) -> Result<ObservabilityGuard, ObservabilityError> {
+    init_with_writer(config, std::io::stderr)
+}
+
+fn init_with_writer<W>(
+    config: &config::ObservabilityConfig,
+    writer: W,
+) -> Result<ObservabilityGuard, ObservabilityError>
+where
+    W: for<'writer> fmt::MakeWriter<'writer> + Send + Sync + 'static,
+{
     let directive = std::env::var("RUST_LOG").unwrap_or_else(|_| config.level.clone());
     let filter = EnvFilter::try_new(&directive)
         .map_err(|_| ObservabilityError::InvalidLevel(directive.clone()))?;
     let registry = tracing_subscriber::registry().with(filter);
-    match (config.format, config.sink) {
-        (config::LogFormat::Json, config::LogSink::Stdout) => {
+    match config.format {
+        config::LogFormat::Json => {
             registry
                 .with(
                     fmt::layer()
                         .json()
                         .with_current_span(true)
                         .with_span_list(true)
-                        .with_writer(std::io::stdout),
+                        .with_writer(writer),
                 )
                 .init();
         }
-        (config::LogFormat::Pretty, config::LogSink::Stdout) => {
+        config::LogFormat::Pretty => {
             registry
-                .with(fmt::layer().pretty().with_writer(std::io::stdout))
+                .with(fmt::layer().pretty().with_writer(writer))
                 .init();
         }
     }

@@ -2770,6 +2770,9 @@ const SIGNED_COMPANION_XPI: &str = "bobby-firefox-companion.xpi";
 const FIREFOX_PROFILE_PREFS: &[(&str, &str)] = &[
     ("xpinstall.signatures.required", "false"),
     ("extensions.autoDisableScopes", "14"),
+    // Reconcile profile add-ons at startup, before they run, so a companion
+    // replaced on disk starts once per Firefox start.
+    ("extensions.startupScanScopes", "1"),
     ("privacy.resistFingerprinting", "false"),
     ("ui.systemUsesDarkTheme", "1"),
 ];

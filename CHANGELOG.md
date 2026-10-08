@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Runtime owner logs to `owner.log`, rotated past 1 MiB.
+- A session keeps its pages when Firefox restarts onto a new companion build.
 - `type_text` ending in Enter reports the landed page's full URL, query included, and its settled title.
 - `intent_follow` completes once the destination page stops changing, so `postState` shows the rendered page.
 - Actions wait up to 5 s, and at most half the time left in the call, for a target that is not on the page yet before failing with `targetNotFound`.

@@ -3539,6 +3539,7 @@ dependencies = [
  "libc",
  "mcp-gateway",
  "network-engine",
+ "observability",
  "page-runtime",
  "release-gates",
  "reqwest",

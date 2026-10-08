@@ -473,10 +473,16 @@ async fn ensure_owner_locked(
             }
             _ => {}
         }
-        let log = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join("owner.log"))?;
+        let log_path = dir.join("owner.log");
+        companion_core::rotate_oversized_log(&log_path);
+        let mut log = OpenOptions::new();
+        log.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            log.mode(0o600);
+        }
+        let log = log.open(log_path)?;
         command
             .current_dir(root)
             .stdin(Stdio::null())
@@ -527,7 +533,18 @@ pub(crate) async fn owner(
     bootstrap: PathBuf,
     policy: crate::VisionSpawnPolicy,
 ) -> Result<()> {
-    owner_inner(state_dir, config, bootstrap, policy, false, None).await
+    owner_inner(state_dir, config, bootstrap, policy, false, None, false).await
+}
+
+/// The owner `ensure_owner` spawns. Its stdout is discarded, so its events go
+/// to stderr, which the spawner points at `owner.log`.
+pub(crate) async fn detached_owner(
+    state_dir: PathBuf,
+    config: PathBuf,
+    bootstrap: PathBuf,
+    policy: crate::VisionSpawnPolicy,
+) -> Result<()> {
+    owner_inner(state_dir, config, bootstrap, policy, false, None, true).await
 }
 
 pub(crate) async fn owner_with_cdp(
@@ -537,7 +554,7 @@ pub(crate) async fn owner_with_cdp(
     policy: crate::VisionSpawnPolicy,
     port: Option<u16>,
 ) -> Result<()> {
-    owner_inner(state_dir, config, bootstrap, policy, true, port).await
+    owner_inner(state_dir, config, bootstrap, policy, true, port, false).await
 }
 
 async fn owner_inner(
@@ -547,6 +564,7 @@ async fn owner_inner(
     policy: crate::VisionSpawnPolicy,
     force_cdp: bool,
     cdp_port: Option<u16>,
+    detached: bool,
 ) -> Result<()> {
     let config = absolute(config)?;
     let bootstrap = absolute(bootstrap)?;
@@ -565,7 +583,11 @@ async fn owner_inner(
             loaded.cdp.port = port;
         }
     }
-    let _telemetry = observability::init(&loaded.observability)?;
+    let _telemetry = if detached {
+        observability::init_stderr(&loaded.observability)?
+    } else {
+        observability::init(&loaded.observability)?
+    };
     let startup = match crate::bootstrap_local::resolve_startup_credential_with(
         "127.0.0.1",
         &bootstrap,

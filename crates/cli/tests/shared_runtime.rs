@@ -830,3 +830,33 @@ fn stop_without_an_owner_prints_stopped_and_writes_nothing() {
     );
     assert!(!path.join("runtime/restart-snapshots").exists());
 }
+
+#[test]
+fn the_spawned_owner_writes_its_events_to_a_bounded_owner_log() {
+    let scope = Cleanup(tempfile::tempdir().unwrap());
+    let path = scope.0.path();
+    let log = path.join("runtime/owner.log");
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    std::fs::write(&log, vec![b'x'; 1024 * 1024 + 1]).unwrap();
+    let run = |args: &[&str]| {
+        checked(
+            command(path)
+                .env_remove("RUST_LOG")
+                .args(args)
+                .output()
+                .unwrap(),
+        )
+    };
+    run(&["runtime", "start"]);
+    run(&["runtime", "stop"]);
+    // A log past its cap moved aside before the owner started.
+    assert!(path.join("runtime/owner.log.1").is_file());
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        text.lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .any(|event| event["fields"]["message"] == "runtime.shutdown"),
+        "{text}"
+    );
+    assert!(!text.contains(&bearer(path)));
+}

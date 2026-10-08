@@ -778,7 +778,7 @@ pub async fn run() -> Result<()> {
             vision,
             no_vision,
         } => {
-            runtime_scopes::owner(
+            runtime_scopes::detached_owner(
                 state_dir,
                 config,
                 bootstrap_env,

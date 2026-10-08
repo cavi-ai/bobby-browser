@@ -4,7 +4,7 @@ mod registry;
 mod server;
 mod session;
 
-pub use lifecycle_log::LifecycleLog;
+pub use lifecycle_log::{rotate_oversized_log, LifecycleLog};
 pub use native_host::{
     decode_native_request, encode_native_message, read_native_message, run_native_host,
     run_native_host_logged, run_native_host_with_enroll, validate_extension_message,
