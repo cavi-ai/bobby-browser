@@ -26,7 +26,7 @@
 - A command on a Firefox session whose worker is closed tells the caller to create a new session.
 - A wrongly shaped `kind` union is rejected with the allowed kinds and the chosen kind's required properties; `intent_follow` without a wait shows a valid example.
 - An MCP connection that ends closes the sessions it opened and had not closed.
-- `a11y_snapshot`, `workflow_observe` and `postState` carry each page text once: a node with a `target` drops its repeated `name`, containers and text runs drop text their descendants or parent already carry, and bullet list markers are omitted.
+- `a11y_snapshot`, `workflow_observe` and `postState` carry each page text once.
 
 ### Added
 
