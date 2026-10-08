@@ -33,14 +33,16 @@ brew install cavi-ai/tap/bobby-browser
 
 **Release archive.** Download `bobby-browser-<version>-<os>-<arch>.tar.gz` (`.zip` on Windows) from the GitHub Releases page, with `<os>` one of `linux`, `macos`, `windows` and `<arch>` one of `x64`, `arm64`. Each archive holds `bobby`, `mcp-gateway` and `acp-gateway`. Put them on your `PATH`.
 
-**Source.** Requires the Rust toolchain pinned in `rust-toolchain.toml`.
+**Source.** Requires the Rust toolchain pinned in `rust-toolchain.toml`, plus Node 22 and pnpm for the Firefox companion.
 
 ```bash
 git clone https://github.com/cavi-ai/bobby-browser.git
 cd bobby-browser
-cargo build --release -p bobby-browser
-./target/release/bobby install --cli
+pnpm install
+make install
 ```
+
+`make install` builds `bobby`, `mcp-gateway` and `acp-gateway` in release mode, builds the companion extension, and runs `bobby install`. That puts the binaries on `PATH`, installs the companion, wires your agent host and creates a credential if none exists. It shows the checklist in a terminal and runs `bobby install --yes` without one. `make install RESTART=1` also stops the running runtime. `make cli` installs only the three binaries, and `make firefox` installs only the companion.
 
 ## Wire up your host
 

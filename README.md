@@ -18,12 +18,13 @@ brew install cavi-ai/tap/bobby-browser
 # Install script (Linux and macOS)
 curl -fsSL https://raw.githubusercontent.com/cavi-ai/bobby-browser/main/scripts/install.sh | bash
 
-# From source
-cargo build --release -p bobby-browser
-./target/release/bobby install --cli
+# From source (needs the Rust toolchain, Node and pnpm)
+git clone https://github.com/cavi-ai/bobby-browser.git
+cd bobby-browser
+make install
 ```
 
-Each installs `bobby`, `mcp-gateway` and `acp-gateway`. Windows and release archives are covered in [Installation](docs/bobby-browser/source/pages/introduction/installation.md).
+Homebrew and the install script put `bobby`, `mcp-gateway` and `acp-gateway` on your `PATH`. `make install` builds those three binaries in release mode and builds the Firefox companion extension. It then runs `bobby install`, which puts the binaries on `PATH`, installs the companion, wires your agent host and creates a credential if none exists. It shows the checklist in a terminal and runs unattended without one. `make cli` installs only the binaries. Windows and release archives are covered in [Installation](docs/bobby-browser/source/pages/introduction/installation.md).
 
 ## First session
 
@@ -34,7 +35,7 @@ bobby install
 bobby doctor
 ```
 
-`bobby install` creates a credential, writes the MCP entry for Claude Code, VS Code, Zed or an ACP host, and installs the agent skill. For Firefox, run `bobby install --companion`, then `bobby firefox-start` and click **Pair** in the Bobby Companion toolbar popup.
+`bobby install` creates a credential and writes the MCP entry for Claude Code, VS Code, Zed, an ACP host or OpenShell. Add `--skill` to install the agent skill. For Firefox, run `bobby install --companion`, then `bobby firefox-start` and click **Pair** in the Bobby Companion toolbar popup. After `make install`, the companion is already installed.
 
 Restart your agent host. The agent then calls `workflow_start` with `{"profile": "default", "url": "https://example.com"}`, `workflow_observe` with the returned handle, and `click`, `type_text` or an `intent_*` tool to act. See the [Quickstart](docs/bobby-browser/source/pages/introduction/quickstart.md).
 
