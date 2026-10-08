@@ -89,6 +89,40 @@ escalations by transport (`providerEscalations`, `providerHttp`,
 - The store is single-writer: only the runtime process holds it. CLI and
   doctor access is read-only or refused while the runtime runs.
 
+## Resource limits
+
+The resident cache keeps at most 256 sites and 64 MiB of conservatively
+accounted owned memory per profile. Clean sites can leave RAM and reload from
+their saved files. Eviction does not delete remembered sites. Dirty updates
+are flushed before eviction; if persistence fails, accepted updates remain
+buffered and new admissions can be refused with a warning.
+
+Site files are limited to 2 MiB and 16,384 structural records (pages, forms,
+controls, intent counters, and challenge counters combined). Oversized or
+unreadable files are reported and preserved. The runtime continues with live
+context. `bobby doctor` inspects files within the same limits without claiming
+the writer lock; runtime warnings identify rejected updates and skipped files.
+
+Configure compatible larger or smaller budgets in your runtime config:
+
+```toml
+[context.limits]
+max_file_bytes = 2097152
+max_site_records = 16384
+max_resident_sites = 256
+max_resident_bytes = 67108864
+```
+
+All limits must be positive. Memory accounting includes collection capacities
+and conservative B-tree allocation allowances. It is a cache admission budget,
+not a process RSS limit: bounded decoding buffers and caller-owned copies are
+additional transient memory. TTL and explicit erasure still apply to sites
+that have left the cache. The persisted schema remains v1.
+
+Use `bobby context --config <runtime-config> list --profile <id>` to inspect
+the same configured store and limits. `--dir` still overrides the store root;
+the config option also applies to `context forget`.
+
 ## Reading
 
 - MCP `context_ask` (requires `page:read`) — live first, persisted fallback.

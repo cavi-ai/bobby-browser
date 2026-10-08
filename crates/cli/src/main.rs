@@ -341,6 +341,9 @@ enum CliCommand {
     },
     /// Inspect or erase remembered site context (durable context graph)
     Context {
+        /// Runtime configuration, including context path and resource limits
+        #[arg(long, global = true)]
+        config: Option<PathBuf>,
         #[command(subcommand)]
         command: ContextCommands,
     },
@@ -1002,7 +1005,7 @@ pub async fn run() -> Result<()> {
         } => run_token(bootstrap_env, stdout)?,
         CliCommand::Jobs { command } => run_jobs(command)?,
         CliCommand::Openshell { command } => run_openshell(command)?,
-        CliCommand::Context { command } => run_context(command).await?,
+        CliCommand::Context { command, config } => run_context(command, config).await?,
         CliCommand::Audit { command } => run_audit(command)?,
         CliCommand::Vision { command } => match command {
             VisionCommands::Connect(args) => vision_connect::connect(args.into())?,
@@ -1686,29 +1689,38 @@ fn run_audit(command: AuditCommands) -> Result<()> {
     Ok(())
 }
 
-async fn run_context(command: ContextCommands) -> Result<()> {
+async fn run_context(command: ContextCommands, config_path: Option<PathBuf>) -> Result<()> {
+    let config = config::AppConfig::load(&resolve_config_path(config_path))?;
+    let limits = config.context.limits;
     match command {
         ContextCommands::List { profile, dir } => {
-            let dir = match dir {
+            let dir = match dir.or_else(|| config.context.dir.clone()) {
                 Some(dir) => dir,
                 None => default_context_dir()?,
             };
-            let (store, report) = context_store::ContextStore::open(&dir, &profile)
-                .await
-                .map_err(|error| match error {
-                    context_store::ContextStoreError::AlreadyLocked => anyhow::anyhow!(
-                        "context store is held by a running bobby process; stop it first"
-                    ),
-                    context_store::ContextStoreError::LockUnusable(reason) => {
-                        anyhow::anyhow!("context store lockfile is unusable: {reason}")
-                    }
-                    other => anyhow::anyhow!("{other}"),
-                })?;
+            let (store, report) =
+                context_store::ContextStore::open_with_limits(&dir, &profile, limits)
+                    .await
+                    .map_err(|error| match error {
+                        context_store::ContextStoreError::AlreadyLocked => anyhow::anyhow!(
+                            "context store is held by a running bobby process; stop it first"
+                        ),
+                        context_store::ContextStoreError::LockUnusable(reason) => {
+                            anyhow::anyhow!("context store lockfile is unusable: {reason}")
+                        }
+                        other => anyhow::anyhow!("{other}"),
+                    })?;
             for skipped in &report.skipped {
                 eprintln!(
                     "skipped unreadable site file {} ({})",
                     skipped.file.display(),
                     skipped.reason
+                );
+            }
+            if report.skipped_total > report.skipped.len() {
+                eprintln!(
+                    "{} additional site files skipped",
+                    report.skipped_total - report.skipped.len()
                 );
             }
             let sites = store.list_sites().await;
@@ -1741,11 +1753,11 @@ async fn run_context(command: ContextCommands) -> Result<()> {
             }
         }
         ContextCommands::Forget { site, profile, dir } => {
-            let dir = match dir {
+            let dir = match dir.or_else(|| config.context.dir.clone()) {
                 Some(dir) => dir,
                 None => default_context_dir()?,
             };
-            let (store, _) = context_store::ContextStore::open(&dir, &profile)
+            let (store, _) = context_store::ContextStore::open_with_limits(&dir, &profile, limits)
                 .await
                 .map_err(|error| match error {
                     context_store::ContextStoreError::AlreadyLocked => anyhow::anyhow!(
@@ -1758,7 +1770,8 @@ async fn run_context(command: ContextCommands) -> Result<()> {
                 })?;
             store.forget(&site).await?;
             drop(store);
-            let (reopened, _) = context_store::ContextStore::open(&dir, &profile).await?;
+            let (reopened, _) =
+                context_store::ContextStore::open_with_limits(&dir, &profile, limits).await?;
             anyhow::ensure!(
                 reopened.site(&site).await.is_none(),
                 "forget of {site} did not take"
@@ -4004,6 +4017,7 @@ model = "mlx-community/example-selected"
         .unwrap();
         match parsed.command {
             Some(CliCommand::Context {
+                config: None,
                 command:
                     ContextCommands::Forget {
                         site,
@@ -4061,11 +4075,14 @@ model = "mlx-community/example-selected"
         assert!(store.flush().await.is_empty());
         drop(store);
 
-        run_context(ContextCommands::Forget {
-            site: "https://example.com".to_string(),
-            profile: "profile-a".to_string(),
-            dir: Some(root.path().to_path_buf()),
-        })
+        run_context(
+            ContextCommands::Forget {
+                site: "https://example.com".to_string(),
+                profile: "profile-a".to_string(),
+                dir: Some(root.path().to_path_buf()),
+            },
+            Some(root.path().join("missing-config.toml")),
+        )
         .await
         .unwrap();
 
@@ -4309,7 +4326,11 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
         .unwrap();
         let profile = root.path().join("context").join("profile-a");
         std::fs::create_dir_all(&profile).unwrap();
-        std::fs::write(profile.join("https___example.com.json"), b"{}").unwrap();
+        std::fs::write(
+            profile.join("https___example.com.json"),
+            br#"{"schema":1,"site_key":"https://example.com","site":{"pages":{}}}"#,
+        )
+        .unwrap();
         std::fs::write(profile.join(".context-store.lock"), b"1\n").unwrap();
 
         let report = run_doctor(Some(config), None, false).unwrap();
@@ -5225,5 +5246,38 @@ port = 9333
         let check = report.check("context-store").expect("context-store");
         assert_eq!(check.status, DoctorStatus::Fail);
         assert!(check.detail.contains("invalid JSON"), "{check:?}");
+    }
+
+    #[test]
+    fn doctor_reports_oversized_context_without_claiming_the_store_lock() {
+        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
+        let env = DoctorEnvGuard::clear();
+        env.set(
+            "AUTOMATION_RUNTIME_BROWSER_SELECTION",
+            r#"{"preference":{"mode":"managedChromium"}}"#,
+        );
+        let root = tempfile::tempdir().unwrap();
+        let config = doctor_config_fixture(root.path());
+        std::fs::write(
+            &config,
+            format!(
+                "{}\n[context]\ndir = \"{}\"\n",
+                std::fs::read_to_string(&config).unwrap(),
+                root.path().join("context").display()
+            ),
+        )
+        .unwrap();
+        let profile = root.path().join("context/profile-a");
+        std::fs::create_dir_all(&profile).unwrap();
+        let mut bytes = br#"{"schema":1,"site_key":"site","site":{"pages":{}}}"#.to_vec();
+        bytes.extend(vec![b' '; 2 * 1024 * 1024]);
+        let path = profile.join("site.json");
+        std::fs::write(&path, &bytes).unwrap();
+        let report = run_doctor(Some(config), None, false).unwrap();
+        let check = report.check("context-store").unwrap();
+        assert_eq!(check.status, DoctorStatus::Warn);
+        assert!(check.detail.contains("limit"), "{check:?}");
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        assert!(!profile.join(".context-store.lock").exists());
     }
 }

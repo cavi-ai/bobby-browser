@@ -198,10 +198,32 @@ pub struct ContextConfig {
     /// Days a control record is kept without a successful verification.
     #[serde(default = "default_context_ttl_days")]
     pub ttl_days: u32,
+    /// Bounded site decoding and resident structural-memory cache.
+    #[serde(default)]
+    pub limits: context_store::ContextLimits,
 }
 
 const fn default_context_ttl_days() -> u32 {
     90
+}
+
+#[cfg(test)]
+mod context_limit_tests {
+    #[test]
+    fn invalid_context_limits_are_rejected_before_runtime_start() {
+        for field in [
+            "max_file_bytes",
+            "max_site_records",
+            "max_resident_sites",
+            "max_resident_bytes",
+        ] {
+            let document = format!("[context.limits]\n{field} = 0\n");
+            assert!(
+                super::AppConfig::from_toml_str(&document).is_err(),
+                "{field}"
+            );
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -343,6 +365,7 @@ impl std::error::Error for ConfigLoadError {
 impl AppConfig {
     pub fn validate(&self) -> Result<(), &'static str> {
         self.interface.validate()?;
+        self.context.limits.validate()?;
         if self.cdp.enabled {
             let loopback = self.cdp.host == "localhost"
                 || self
