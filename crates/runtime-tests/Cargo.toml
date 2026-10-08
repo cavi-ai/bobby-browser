@@ -30,6 +30,7 @@ libc = "0.2"
 bobby-browser.workspace = true
 mcp-gateway.workspace = true
 network-engine.workspace = true
+observability.workspace = true
 sdk-core.workspace = true
 session-manager.workspace = true
 skill-runtime = { workspace = true, features = ["test-support"] }

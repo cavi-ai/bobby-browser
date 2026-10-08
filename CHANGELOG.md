@@ -5,6 +5,7 @@
 ### Fixed
 
 - The shared runtime owner writes its log events to `owner.log` in the scope's runtime directory, rotated past 1 MiB.
+- Firefox companion: `bobby install` sets `extensions.startupScanScopes`, so a session that restarts Firefox onto a new companion build keeps its pages.
 - `type_text` ending in Enter reports the page it landed on with its full URL,
   query included, and the title read once the document stops changing; it
   reported the URL without its query (Firefox) and the previous page's title.
