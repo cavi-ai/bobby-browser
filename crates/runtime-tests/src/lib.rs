@@ -22,8 +22,8 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use types::{
-    ClickCommand, CommandError, ErrorCode, ErrorLayer, Evidence,
-    InspectCommand, NavigateCommand, PageId, SessionId, TypeTextCommand, WaitUntil,
+    ClickCommand, CommandError, ErrorCode, ErrorLayer, Evidence, InspectCommand, NavigateCommand,
+    PageId, SessionId, TypeTextCommand, WaitUntil,
 };
 use url::Url;
 use worker_pool::BrowserWorker;
