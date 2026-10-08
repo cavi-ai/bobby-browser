@@ -65,6 +65,43 @@ use crate::{
     BrowserWorker, WorkerFactory,
 };
 
+const CHROME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Finish graceful shutdown or kill/reap the child this handle exclusively owns.
+/// A dropped CDP future does not cancel work inside Chrome, so the shutdown
+/// channel itself must have a deadline independent of the command handler.
+async fn shutdown_browser(browser: &mut Browser) -> Result<(), CommandError> {
+    let graceful = tokio::time::timeout(CHROME_SHUTDOWN_TIMEOUT, browser.close()).await;
+    let closed = matches!(&graceful, Ok(Ok(_)))
+        || matches!(&graceful, Ok(Err(error)) if is_closed_page_message(&error.to_string()));
+    if browser.get_mut_child().is_none() {
+        // A connection-only handle owns no OS child: never kill by a guessed PID.
+        return match graceful {
+            _ if closed => Ok(()),
+            Ok(Err(error)) => Err(command_failed(error)),
+            _ => Err(timeout_error(CHROME_SHUTDOWN_TIMEOUT.as_millis() as u64)),
+        };
+    }
+    if closed
+        && matches!(
+            tokio::time::timeout(CHROME_SHUTDOWN_TIMEOUT, browser.wait()).await,
+            Ok(Ok(_))
+        )
+    {
+        return Ok(());
+    }
+    tracing::warn!("Chrome graceful shutdown failed or stalled; killing the owned child");
+    match tokio::time::timeout(CHROME_SHUTDOWN_TIMEOUT, browser.kill()).await {
+        Ok(Some(Ok(()))) => Ok(()),
+        Ok(Some(Err(error))) => Err(driver_error(ErrorCode::BrowserCommandFailed, error)),
+        Ok(None) => Err(driver_error(
+            ErrorCode::BrowserCommandFailed,
+            "Chrome shutdown lost its owned child handle",
+        )),
+        Err(_) => Err(timeout_error(CHROME_SHUTDOWN_TIMEOUT.as_millis() as u64)),
+    }
+}
+
 #[derive(Clone)]
 pub struct ChromiumWorkerFactory {
     config: BrowserConfig,
@@ -408,6 +445,42 @@ fn should_retry_transient_click_loss(
 }
 
 impl ChromiumWorker {
+    async fn shutdown(&self) -> Result<(), CommandError> {
+        self.pages.lock().await.clear();
+        self.network_trackers.lock().await.clear();
+        for (_, task) in self.har_tasks.lock().await.drain() {
+            task.abort();
+        }
+        for (_, task) in self.dialog_tasks.lock().await.drain() {
+            task.abort();
+        }
+        self.har_recorders.lock().await.clear();
+        self.pending_dialogs.lock().await.clear();
+        let result = {
+            // Serialize close/terminate and retain ownership if reaping fails.
+            let mut owned = self.browser.lock().await;
+            let result = if let Some(browser) = owned.as_mut() {
+                shutdown_browser(browser).await
+            } else {
+                Ok(())
+            };
+            if result.is_ok() {
+                owned.take();
+            }
+            result
+        };
+        // Cleanup must also run when graceful close or child reaping failed.
+        if let Some(task) = self.handler_task.lock().await.take() {
+            task.abort();
+        }
+        if result.is_ok() {
+            if let Some(path) = &self.pid_registry_path {
+                unregister_chrome_pid(path);
+            }
+        }
+        result
+    }
+
     /// Clone the Arc-backed page handle and drop the pages guard
     /// immediately. Every command path goes through this instead of holding
     /// the mutex across CDP I/O: one hung or slow page call used to
@@ -2957,27 +3030,28 @@ impl BrowserWorker for ChromiumWorker {
         page_id: &PageId,
         command: &EvaluateJavaScriptCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let page = self.page_handle(page_id).await?;
-
-        let mut params = EvaluateParams::new(command.expression.clone());
-        params.await_promise = Some(command.await_promise);
-        params.return_by_value = Some(true);
-
         // DoS clamp: a caller-supplied `timeout_ms` is otherwise unbounded and could
         // pin a worker lease open arbitrarily long. Clamp to the configured ceiling
         // rather than rejecting, so the command still runs under the common bound.
         let timeout_ms = clamp_js_timeout_ms(command.timeout_ms, self.max_js_timeout_ms);
 
-        let value: serde_json::Value =
-            tokio::time::timeout(Duration::from_millis(timeout_ms), page.evaluate(params))
+        tokio::time::timeout(Duration::from_millis(timeout_ms), async {
+            // Page lookup can reattach through CDP; it belongs to the same budget.
+            let page = self.page_handle(page_id).await?;
+            let mut params = EvaluateParams::new(command.expression.clone());
+            params.await_promise = Some(command.await_promise);
+            params.return_by_value = Some(true);
+            let value: serde_json::Value = page
+                .evaluate(params)
                 .await
-                .map_err(|_| timeout_error(timeout_ms))?
                 .map_err(command_failed)?
                 .into_value()
                 .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
-
-        let (value, truncated) = js_engine::bound_result(value, self.max_js_result_bytes);
-        Ok(vec![Evidence::JavaScriptResult { value, truncated }])
+            let (value, truncated) = js_engine::bound_result(value, self.max_js_result_bytes);
+            Ok(vec![Evidence::JavaScriptResult { value, truncated }])
+        })
+        .await
+        .map_err(|_| timeout_error(timeout_ms))?
     }
 
     async fn element_at_point(
@@ -3122,66 +3196,11 @@ return [role, name.slice(0, 200)];
     }
 
     async fn close(&self) -> Result<(), CommandError> {
-        self.pages.lock().await.clear();
-        self.network_trackers.lock().await.clear();
-        for (_, task) in self.har_tasks.lock().await.drain() {
-            task.abort();
-        }
-        for (_, task) in self.dialog_tasks.lock().await.drain() {
-            task.abort();
-        }
-        self.har_recorders.lock().await.clear();
-        if let Some(mut browser) = self.browser.lock().await.take() {
-            // Teardown must not fail because the browser is already dead:
-            // an uncloseable-but-gone browser would wedge the session in the
-            // registry forever (every session_close retry failing the same
-            // way, pages stuck listed).
-            if let Err(error) = browser.close().await {
-                let message = error.to_string();
-                if !is_closed_page_message(&message) {
-                    return Err(command_failed(error));
-                }
-                tracing::info!("browser already gone during close: {message}");
-            }
-        }
-        if let Some(task) = self.handler_task.lock().await.take() {
-            task.abort();
-        }
-        if let Some(path) = &self.pid_registry_path {
-            unregister_chrome_pid(path);
-        }
-        Ok(())
+        self.shutdown().await
     }
 
     async fn terminate(&self) -> Result<(), CommandError> {
-        self.pages.lock().await.clear();
-        self.network_trackers.lock().await.clear();
-        for (_, task) in self.har_tasks.lock().await.drain() {
-            task.abort();
-        }
-        for (_, task) in self.dialog_tasks.lock().await.drain() {
-            task.abort();
-        }
-        self.har_recorders.lock().await.clear();
-        let close_result = if let Some(mut browser) = self.browser.lock().await.take() {
-            match browser.close().await {
-                Ok(_) => Ok(()),
-                Err(error) if is_closed_page_message(&error.to_string()) => {
-                    tracing::info!("browser already gone during termination: {error}");
-                    Ok(())
-                }
-                Err(error) => Err(command_failed(error)),
-            }
-        } else {
-            Ok(())
-        };
-        if let Some(task) = self.handler_task.lock().await.take() {
-            task.abort();
-        }
-        if let Some(path) = &self.pid_registry_path {
-            unregister_chrome_pid(path);
-        }
-        close_result
+        self.shutdown().await
     }
 
     async fn reconnect_live_process(&self) -> Result<Vec<Evidence>, CommandError> {
@@ -4909,6 +4928,32 @@ mod tests {
         dialog_abort.abort();
         assert!(matches!(har_result, Ok(Err(_))));
         assert!(matches!(dialog_result, Ok(Err(_))));
+    }
+
+    #[tokio::test]
+    async fn javascript_deadline_includes_waiting_for_the_page_handle() {
+        let root = tempfile::tempdir().unwrap();
+        let worker = chromium_worker_without_browser(root.path());
+        let held_pages = worker.pages.lock().await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            crate::BrowserWorker::evaluate_javascript(
+                &worker,
+                &PageId::new(),
+                &types::EvaluateJavaScriptCommand {
+                    expression: "1 + 1".into(),
+                    timeout_ms: 10,
+                    await_promise: false,
+                },
+            ),
+        )
+        .await;
+        drop(held_pages);
+        let error = result
+            .expect("the command deadline must cover page lookup")
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::DeadlineExceeded);
+        assert!(error.retryable);
     }
 
     fn chromium_worker_without_browser(root: &std::path::Path) -> ChromiumWorker {
