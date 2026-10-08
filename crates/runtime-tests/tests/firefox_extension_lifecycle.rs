@@ -3,6 +3,10 @@
 //! restarted, and a Firefox that is not running is started. Each test uses
 //! its own profile with the companion sideloaded the way `bobby install`
 //! does, and the scoped test native host.
+//!
+//! Unix only: restarting the enrolled Firefox and the test's own process
+//! cleanup go through `ps`, `lsof`, and signals.
+#![cfg(unix)]
 
 mod support;
 
@@ -98,33 +102,97 @@ fn new_profile(env: &Env) -> tempfile::TempDir {
 /// Install the test extension into the profile the way `bobby install`
 /// sideloads it. `build` restamps it as another build (`None`: a build from
 /// before the stamp, which reports no id). Returns the id it reports.
-fn install_extension(env: &Env, profile: &Path, build: Option<Option<&str>>) -> Option<String> {
-    let target = profile.join("extensions").join(EXTENSION_ID);
-    if target.exists() {
-        std::fs::remove_dir_all(&target).expect("remove the installed companion");
-    }
-    copy_dir(&env.extension, &target);
+fn install_extension(
+    env: &Env,
+    profile: &Path,
+    layout: Layout,
+    build: Option<Option<&str>>,
+) -> Option<String> {
+    let staging = tempfile::Builder::new()
+        .prefix("lifecycle-extension-")
+        .tempdir_in(&env.proof_dir)
+        .expect("create extension staging dir");
+    let staged = staging.path().join("extension");
+    copy_dir(&env.extension, &staged);
     let stamped = env.installed_build();
-    let Some(build) = build else {
-        return Some(stamped);
+    let reported = match build {
+        None => Some(stamped),
+        Some(build) => {
+            let background = staged.join("background.js");
+            let source = std::fs::read_to_string(&background).expect("read background.js");
+            assert_eq!(source.matches(&stamped).count(), 1, "one stamped build id");
+            std::fs::write(
+                &background,
+                source.replace(&stamped, build.unwrap_or(PLACEHOLDER)),
+            )
+            .expect("restamp background.js");
+            match build {
+                Some(build) => std::fs::write(
+                    staged.join("build-id.json"),
+                    format!(r#"{{"buildId":"{build}"}}"#),
+                )
+                .expect("restamp build-id.json"),
+                None => std::fs::remove_file(staged.join("build-id.json")).expect("unstamp"),
+            }
+            build.map(str::to_owned)
+        }
     };
-    let background = target.join("background.js");
-    let source = std::fs::read_to_string(&background).expect("read background.js");
-    assert_eq!(source.matches(&stamped).count(), 1, "one stamped build id");
-    std::fs::write(
-        &background,
-        source.replace(&stamped, build.unwrap_or(PLACEHOLDER)),
-    )
-    .expect("restamp background.js");
-    match build {
-        Some(build) => std::fs::write(
-            target.join("build-id.json"),
-            format!(r#"{{"buildId":"{build}"}}"#),
-        )
-        .expect("restamp build-id.json"),
-        None => std::fs::remove_file(target.join("build-id.json")).expect("unstamp"),
+    let extensions = profile.join("extensions");
+    let unpacked = extensions.join(EXTENSION_ID);
+    if unpacked.exists() {
+        std::fs::remove_dir_all(&unpacked).expect("remove the unpacked companion");
     }
-    build.map(str::to_owned)
+    match layout {
+        Layout::Unpacked => copy_dir(&staged, &unpacked),
+        Layout::Packed => {
+            let xpi = staging.path().join("extension.xpi");
+            pack_xpi(&staged, &xpi);
+            std::fs::create_dir_all(&extensions).expect("create extensions dir");
+            // `bobby install` copies the signed build over the installed file.
+            std::fs::copy(&xpi, extensions.join(format!("{EXTENSION_ID}.xpi")))
+                .expect("install the packed companion");
+        }
+    }
+    reported
+}
+
+/// The two ways `bobby install` places the companion in the profile.
+#[derive(Clone, Copy)]
+enum Layout {
+    /// `extensions/<id>/`, the unsigned sideload.
+    Unpacked,
+    /// `extensions/<id>.xpi`, the signed release build.
+    Packed,
+}
+
+fn pack_xpi(source: &Path, xpi: &Path) {
+    fn add(writer: &mut zip::ZipWriter<std::fs::File>, root: &Path, dir: &Path) {
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .expect("read extension dir")
+            .map(|entry| entry.expect("extension entry").path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                add(writer, root, &path);
+                continue;
+            }
+            let name = path
+                .strip_prefix(root)
+                .expect("entry under the extension")
+                .to_str()
+                .expect("UTF-8 entry name")
+                .replace(std::path::MAIN_SEPARATOR, "/");
+            writer.start_file(name, options).expect("start xpi entry");
+            std::io::Write::write_all(writer, &std::fs::read(&path).expect("read entry"))
+                .expect("write xpi entry");
+        }
+    }
+    let mut writer = zip::ZipWriter::new(std::fs::File::create(xpi).expect("create xpi"));
+    add(&mut writer, source, source);
+    writer.finish().expect("finish xpi");
 }
 
 fn copy_dir(source: &Path, dest: &Path) {
@@ -327,11 +395,11 @@ async fn connected_build(server: &CompanionServerHandle, profile: &ProfileId) ->
     .expect("the companion is connected")
 }
 
-async fn stale_build_is_replaced(old: Option<&str>) {
+async fn stale_build_is_replaced(layout: Layout, old: Option<&str>) {
     let env = Env::load();
     let installed = env.installed_build();
     let profile = new_profile(&env);
-    let running = install_extension(&env, profile.path(), Some(old));
+    let running = install_extension(&env, profile.path(), layout, Some(old));
     assert_ne!(running.as_deref(), Some(installed.as_str()));
     let (browser, enrolled, bidi_url) = enroll(&env, profile.path()).await;
     let profile_id = enrolled.profile_id().clone();
@@ -339,7 +407,7 @@ async fn stale_build_is_replaced(old: Option<&str>) {
     assert_eq!(connected_build(&server, &profile_id).await, running);
 
     // An install replaces the companion on disk while Firefox runs the old one.
-    install_extension(&env, profile.path(), None);
+    install_extension(&env, profile.path(), layout, None);
     let rig = Rig::firefox_composed(runtime(&env, profile.path(), enrolled, &bidi_url)).await;
     let site = page_site().await;
     serve_session(&rig, &site).await;
@@ -355,13 +423,19 @@ async fn stale_build_is_replaced(old: Option<&str>) {
 #[tokio::test]
 #[ignore = "requires installed Firefox and the scoped test native host"]
 async fn a_stale_companion_is_reloaded_to_the_installed_build() {
-    stale_build_is_replaced(Some(OLD_BUILD)).await;
+    stale_build_is_replaced(Layout::Unpacked, Some(OLD_BUILD)).await;
 }
 
 #[tokio::test]
 #[ignore = "requires installed Firefox and the scoped test native host"]
 async fn a_companion_without_a_build_id_is_replaced_by_restarting_firefox() {
-    stale_build_is_replaced(None).await;
+    stale_build_is_replaced(Layout::Unpacked, None).await;
+}
+
+#[tokio::test]
+#[ignore = "requires installed Firefox and the scoped test native host"]
+async fn a_stale_packed_companion_is_replaced_by_the_installed_xpi() {
+    stale_build_is_replaced(Layout::Packed, Some(OLD_BUILD)).await;
 }
 
 #[tokio::test]
@@ -370,7 +444,7 @@ async fn workflow_start_starts_the_enrolled_firefox_when_it_is_not_running() {
     let env = Env::load();
     let installed = env.installed_build();
     let profile = new_profile(&env);
-    install_extension(&env, profile.path(), None);
+    install_extension(&env, profile.path(), Layout::Unpacked, None);
     let (mut browser, enrolled, bidi_url) = enroll(&env, profile.path()).await;
     let profile_id = enrolled.profile_id().clone();
     let server = enrolled.companion_server();

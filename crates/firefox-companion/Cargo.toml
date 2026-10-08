@@ -31,6 +31,7 @@ types.workspace = true
 url.workspace = true
 uuid.workspace = true
 worker-pool.workspace = true
+zip.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

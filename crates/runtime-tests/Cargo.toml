@@ -49,4 +49,5 @@ url.workspace = true
 uuid.workspace = true
 workflow-journal.workspace = true
 worker-pool.workspace = true
+zip.workspace = true
 fingerprinting.workspace = true

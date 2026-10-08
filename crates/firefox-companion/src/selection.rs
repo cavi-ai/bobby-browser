@@ -87,24 +87,54 @@ fn extension_heal(installed: &str, connected: Option<&str>, attempted: bool) -> 
     }
 }
 
-/// The build id of the companion installed unpacked in the profile, read
-/// from the `build-id.json` its build writes. `None` when no unpacked
-/// companion with a valid id is installed there.
+/// The build id of the companion installed in the profile, read from the
+/// `build-id.json` its build writes: in the unpacked sideload directory, or
+/// inside the signed `.xpi`. Install leaves exactly one of the two; the
+/// unpacked directory wins if both exist. `None` when the installed
+/// companion carries no valid id.
 fn installed_extension_build(profile_dir: &Path) -> Option<String> {
+    let extensions = profile_dir.join("extensions");
+    let unpacked = extensions.join(COMPANION_GECKO_ID);
+    if unpacked.is_dir() {
+        let path = unpacked.join("build-id.json");
+        let metadata = std::fs::metadata(&path).ok()?;
+        if !metadata.is_file() || metadata.len() > MAX_BUILD_ID_FILE_BYTES {
+            return None;
+        }
+        return parse_build_id(&std::fs::read(path).ok()?);
+    }
+    packed_extension_build(&extensions.join(format!("{COMPANION_GECKO_ID}.xpi")))
+}
+
+fn packed_extension_build(xpi: &Path) -> Option<String> {
+    use std::io::Read;
+    let file = std::fs::File::open(xpi).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    let entry = archive.by_name("build-id.json").ok()?;
+    if !entry.is_file() || entry.size() > MAX_BUILD_ID_FILE_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    entry
+        .take(MAX_BUILD_ID_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_BUILD_ID_FILE_BYTES {
+        return None;
+    }
+    parse_build_id(&bytes)
+}
+
+fn parse_build_id(bytes: &[u8]) -> Option<String> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct BuildIdFile {
         build_id: String,
     }
-    let path = profile_dir
-        .join("extensions")
-        .join(COMPANION_GECKO_ID)
-        .join("build-id.json");
-    let metadata = std::fs::metadata(&path).ok()?;
-    if !metadata.is_file() || metadata.len() > MAX_BUILD_ID_FILE_BYTES {
-        return None;
-    }
-    let file: BuildIdFile = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    let file: BuildIdFile = serde_json::from_slice(bytes).ok()?;
     is_extension_build_id(&file.build_id).then_some(file.build_id)
 }
 
@@ -2028,6 +2058,67 @@ mod tests {
             assert_eq!(installed_extension_build(profile.path()), None, "{invalid}");
         }
         std::fs::write(&file, vec![b' '; 8 * 1024]).unwrap();
+        assert_eq!(installed_extension_build(profile.path()), None);
+    }
+
+    fn write_xpi(path: &Path, entries: &[(&str, &[u8])]) {
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for (name, contents) in entries {
+            writer.start_file(*name, options).unwrap();
+            std::io::Write::write_all(&mut writer, contents).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+
+    #[test]
+    fn the_installed_build_is_read_from_the_signed_xpi() {
+        let profile = tempfile::tempdir().unwrap();
+        let extensions = profile.path().join("extensions");
+        std::fs::create_dir_all(&extensions).unwrap();
+        let xpi = extensions.join(format!("{COMPANION_GECKO_ID}.xpi"));
+        let build_a = format!(r#"{{"buildId":"{BUILD_A}"}}"#);
+        write_xpi(
+            &xpi,
+            &[
+                ("manifest.json", b"{}"),
+                ("build-id.json", build_a.as_bytes()),
+            ],
+        );
+        assert_eq!(
+            installed_extension_build(profile.path()).as_deref(),
+            Some(BUILD_A)
+        );
+
+        // An unpacked sideload wins over a leftover xpi.
+        let unpacked = extensions.join(COMPANION_GECKO_ID);
+        std::fs::create_dir_all(&unpacked).unwrap();
+        std::fs::write(
+            unpacked.join("build-id.json"),
+            format!(r#"{{"buildId":"{BUILD_B}"}}"#),
+        )
+        .unwrap();
+        assert_eq!(
+            installed_extension_build(profile.path()).as_deref(),
+            Some(BUILD_B)
+        );
+        std::fs::remove_dir_all(&unpacked).unwrap();
+
+        let oversized = format!(r#"{{"buildId":"{BUILD_A}"}}{}"#, " ".repeat(8 * 1024));
+        write_xpi(&xpi, &[("build-id.json", oversized.as_bytes())]);
+        assert_eq!(installed_extension_build(profile.path()), None);
+        write_xpi(&xpi, &[("manifest.json", b"{}")]);
+        assert_eq!(installed_extension_build(profile.path()), None);
+        write_xpi(
+            &xpi,
+            &[(
+                "build-id.json",
+                br#"{"buildId":"@@BOBBY_EXTENSION_BUILD_ID@@"}"#,
+            )],
+        );
+        assert_eq!(installed_extension_build(profile.path()), None);
+        std::fs::write(&xpi, b"not a zip archive").unwrap();
         assert_eq!(installed_extension_build(profile.path()), None);
     }
 

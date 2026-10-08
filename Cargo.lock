@@ -1570,6 +1570,7 @@ dependencies = [
  "url",
  "uuid",
  "worker-pool",
+ "zip",
 ]
 
 [[package]]
@@ -3557,6 +3558,7 @@ dependencies = [
  "uuid",
  "worker-pool",
  "workflow-journal",
+ "zip",
 ]
 
 [[package]]

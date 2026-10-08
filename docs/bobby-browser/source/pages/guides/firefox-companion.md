@@ -223,11 +223,11 @@ backoff, so restarts of either side self-heal).
   `bobby install --companion`) so the profile sideload refreshes. Each build
   carries a content-derived id (`build-id.json` beside the bundle, and the
   id the extension reports when it connects). The next session start compares
-  the running build with the unpacked sideload in the profile: a build that
-  reports an id is asked to reload itself, an older build that reports none
-  gets the enrolled Firefox restarted. One attempt per installed build; if
-  the old build still runs, the session fails with a non-retryable error
-  naming both ids. A signed `.xpi` install is not compared.
+  the running build with the one installed in the profile (the unpacked
+  sideload or the signed `.xpi`): a build that reports an id is asked to
+  reload itself, an older build that reports none gets the enrolled Firefox
+  restarted. One attempt per installed build; if the old build still runs,
+  the session fails with a non-retryable error naming both ids.
 
 ### Operator popup
 
