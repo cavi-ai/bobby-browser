@@ -118,6 +118,21 @@ pub enum CompanionRequest {
     Grant(AttachmentGrant),
     Action(ActionRequest),
     Ping,
+    /// Restart the extension from the build installed in the profile.
+    Reload,
+}
+
+/// The upgrade-request header a native host sets to the build id the
+/// connecting extension reported.
+pub const EXTENSION_BUILD_HEADER: &str = "x-bobby-extension-build";
+
+/// An extension build id: 32 lowercase hex characters derived from the
+/// built bundle contents.
+pub fn is_extension_build_id(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

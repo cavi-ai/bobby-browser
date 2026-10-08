@@ -127,6 +127,7 @@ jobs:
     name: chromium · live browser tests
     if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       BOBBY_CHROME_NO_SANDBOX: "1"
     steps:
@@ -179,7 +180,8 @@ jobs:
           ldd "$BOBBY_CHROME_EXECUTABLE" | grep "not found" || true
 
       - name: Worker live tests
-        run: cargo test -p worker-pool --test chromium_worker --locked -- --ignored --test-threads=1
+        timeout-minutes: 10
+        run: cargo test -p worker-pool --test chromium_worker --locked -- --ignored --nocapture --test-threads=1
 
       - name: Runtime live tests
         run: >-
@@ -292,6 +294,18 @@ jobs:
 
           xvfb-run -a make test-browsers-firefox TEST_BROWSERS_HEADLESS=0 \
             TEST_BROWSERS_FIREFOX_SUITES="--test firefox_companion --test behavioral_firefox --test fingerprint_firefox --test site_regressions_firefox --test journeys_firefox"
+
+      # The lifecycle suite sideloads the unsigned companion into its own
+      # profiles, which only Developer Edition, Nightly, or ESR accept.
+      - name: Install Firefox Developer Edition
+        uses: browser-actions/setup-firefox@latest
+        with:
+          firefox-version: latest-devedition
+
+      - name: Firefox companion lifecycle tests
+        run: |
+          xvfb-run -a make test-browsers-firefox TEST_BROWSERS_HEADLESS=0 \
+            TEST_BROWSERS_FIREFOX_SUITES="--test firefox_extension_lifecycle"
 
   node:
     name: node · typescript · docs

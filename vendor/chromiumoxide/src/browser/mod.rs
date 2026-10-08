@@ -166,8 +166,8 @@ impl Browser {
             config: &BrowserConfig,
             child: &mut Child,
         ) -> Result<(String, Connection<CdpEventMessage>)> {
-            let dur = config.launch_timeout;
-            let timeout_fut = Box::pin(tokio::time::sleep(dur));
+            let deadline = tokio::time::Instant::now() + config.launch_timeout;
+            let timeout_fut = Box::pin(tokio::time::sleep_until(deadline));
 
             // extract the ws:
             let debug_ws_url = ws_url_from_output(child, timeout_fut).await?;
@@ -179,7 +179,14 @@ impl Browser {
             if let Some(stderr) = child.stderr.take() {
                 spawn_stderr_drainer(stderr);
             }
-            let conn = Connection::<CdpEventMessage>::connect(&debug_ws_url).await?;
+            // Discovering the URL is only the first half of launch. A stalled
+            // HTTP upgrade must not outlive the same absolute launch deadline.
+            let conn = tokio::time::timeout_at(
+                deadline,
+                Connection::<CdpEventMessage>::connect(&debug_ws_url),
+            )
+            .await
+            .map_err(|_| CdpError::LaunchTimeout(BrowserStderr::new(Vec::new())))??;
             tracing::info!(target: "chromiumoxide", "browser devtools endpoint: {debug_ws_url}");
             Ok((debug_ws_url, conn))
         }

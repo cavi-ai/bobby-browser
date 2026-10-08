@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import test from "node:test";
 import { inspect } from "node:util";
+import { gzipSync } from "node:zlib";
 
 import { BrowserRuntimeClient, INTERFACE_VERSION, RuntimeClientError, type Capability, type CommandEnvelope, type EventOptions, type InterfaceErrorCode } from "../src/index.js";
 
@@ -36,6 +37,123 @@ function writeJson(response: ServerResponse, status: number, body: unknown): voi
   response.writeHead(status, { "content-type": "application/json", "x-interface-version": INTERFACE_VERSION });
   response.end(JSON.stringify(body));
 }
+
+test("rejects JSON that exceeds the configured limit without Content-Length", async () => {
+  await withServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.write("[]");
+    response.end(" ".repeat(31));
+  }, async (baseUrl) => {
+    const options = { baseUrl, bearerToken: TOKEN, maxJsonResponseBytes: 32 };
+    const client = new BrowserRuntimeClient(options);
+    await assert.rejects(client.listSessions(), (error: unknown) => error instanceof RuntimeClientError && error.kind === "protocol" && error.status === 200);
+  });
+});
+
+test("rejects invalid JSON response limits before transport", () => {
+  for (const maximum of [0, -1, 1.5, NaN, Infinity, 256 * 1024 * 1024 + 1]) {
+    const options = { baseUrl: "https://runtime.invalid", bearerToken: TOKEN, maxJsonResponseBytes: maximum };
+    assert.throws(() => new BrowserRuntimeClient(options), (error: unknown) => error instanceof RuntimeClientError && error.kind === "protocol");
+  }
+});
+
+test("accepts an exact JSON byte budget", async () => {
+  await withServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.write("[");
+    response.end("]");
+  }, async (baseUrl) => {
+    assert.deepEqual(await new BrowserRuntimeClient({ baseUrl, bearerToken: TOKEN, maxJsonResponseBytes: 2 }).listSessions(), []);
+  });
+});
+
+test("counts decompressed JSON bytes rather than trusting the compressed Content-Length", async () => {
+  const compressed = gzipSync("[]" + " ".repeat(4096));
+  assert.ok(compressed.byteLength < 64);
+  await withServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json", "content-encoding": "gzip", "content-length": String(compressed.byteLength) });
+    response.end(compressed);
+  }, async (baseUrl) => {
+    const client = new BrowserRuntimeClient({ baseUrl, bearerToken: TOKEN, maxJsonResponseBytes: 64 });
+    await assert.rejects(client.listSessions(), (error: unknown) => error instanceof RuntimeClientError && error.kind === "protocol" && /byte limit/.test(error.message));
+  });
+});
+
+test("oversized declared responses cancel without pulling their bodies", async () => {
+  let cancelled = false;
+  let pulls = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) { pulls += 1; controller.enqueue(new TextEncoder().encode("[]")); },
+    cancel() { cancelled = true; },
+  }, { highWaterMark: 0 });
+  const client = new BrowserRuntimeClient({
+    baseUrl: "https://runtime.invalid", bearerToken: TOKEN, maxJsonResponseBytes: 2,
+    fetch: async () => new Response(body, { headers: { "content-type": "application/json", "content-length": "3" } }),
+  });
+  await assert.rejects(client.listSessions(), (error: unknown) => error instanceof RuntimeClientError && error.kind === "protocol");
+  assert.equal(pulls, 0);
+  assert.equal(cancelled, true);
+});
+
+test("oversized error JSON is bounded and does not expose its payload", async () => {
+  await withServer((_request, response) => {
+    response.writeHead(503, { "content-type": "application/json" });
+    response.write(JSON.stringify({ error: { message: TOKEN } }));
+    response.end(" ".repeat(32));
+  }, async (baseUrl) => {
+    const client = new BrowserRuntimeClient({ baseUrl, bearerToken: TOKEN, maxJsonResponseBytes: 32 });
+    await assert.rejects(client.listSessions(), (error: unknown) => {
+      assert.ok(error instanceof RuntimeClientError);
+      assert.equal(error.kind, "protocol");
+      assert.equal(error.status, 503);
+      assert.match(error.message, /byte limit/);
+      assert.doesNotMatch(String(error), new RegExp(TOKEN));
+      return true;
+    });
+  });
+});
+
+test("caller abort and deadline cancel stalled JSON without waiting for cancellation hooks", async () => {
+  for (const kind of ["aborted", "deadline"] as const) {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array([91])); },
+      cancel() { cancelled = true; return new Promise<void>(() => {}); },
+    });
+    const tracked = trackedAbortController();
+    const client = new BrowserRuntimeClient({
+      baseUrl: "https://runtime.invalid", bearerToken: TOKEN,
+      fetch: async () => new Response(body, { headers: { "content-type": "application/json" } }),
+    });
+    const result = client.listSessions({ timeoutMs: kind === "deadline" ? 20 : 10_000, signal: tracked.controller.signal });
+    const timer = kind === "aborted" ? setTimeout(() => tracked.controller.abort(), 10) : undefined;
+    try {
+      await rejectsPromptly(result, (error) => error instanceof RuntimeClientError && error.kind === kind);
+      assert.equal(cancelled, true);
+      assert.equal(tracked.counts().added, tracked.counts().removed);
+    } finally { if (timer !== undefined) clearTimeout(timer); }
+  }
+});
+
+test("JSON consumption checks elapsed deadlines before timer callbacks can run", async () => {
+  const originalNow = Date.now;
+  let now = originalNow();
+  Date.now = () => now;
+  try {
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        now += 101;
+        controller.enqueue(new Uint8Array([91, 93]));
+        controller.close();
+      },
+    }, { highWaterMark: 0 });
+    const client = new BrowserRuntimeClient({
+      baseUrl: "https://runtime.invalid", bearerToken: TOKEN,
+      fetch: async () => new Response(body, { headers: { "content-type": "application/json" } }),
+    });
+    await assert.rejects(client.listSessions({ timeoutMs: 100 }), (error: unknown) => error instanceof RuntimeClientError && error.kind === "deadline");
+  } finally { Date.now = originalNow; }
+});
 
 test("formSnapshot performs a bounded direct page read and validates the canonical response", async () => {
   await withServer((request, response) => {

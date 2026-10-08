@@ -1,3 +1,4 @@
+import { isExtensionBuildId } from "./build-id.js";
 import {
   MAX_COMPANION_PAYLOAD_BYTES,
   PROTOCOL_VERSION,
@@ -23,6 +24,8 @@ export type NativePairRequest = {
     profileId: string;
     identity: BrowserIdentity;
     capabilities: CompanionCapabilities;
+    /** Absent on an unstamped build; the runtime then treats it as stale. */
+    extensionBuildId?: string;
   };
 };
 
@@ -292,9 +295,12 @@ function isNativePairRequest(message: unknown): message is NativePairRequest {
     return false;
   }
   const input = message.input;
+  const keys = ["protocolVersion", "companionId", "profileId", "identity", "capabilities"];
+  const stamped = "extensionBuildId" in input;
   return (
     exactKeys(message, ["kind", "input"]) &&
-    exactKeys(input, ["protocolVersion", "companionId", "profileId", "identity", "capabilities"]) &&
+    exactKeys(input, stamped ? [...keys, "extensionBuildId"] : keys) &&
+    (!stamped || isExtensionBuildId(input.extensionBuildId)) &&
     input.protocolVersion === PROTOCOL_VERSION &&
     boundedString(input.companionId) &&
     boundedString(input.profileId) &&

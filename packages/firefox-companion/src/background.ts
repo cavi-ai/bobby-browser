@@ -17,6 +17,7 @@ import {
   type CompanionCapabilities,
   type CompanionEvent,
 } from "./protocol.js";
+import { isExtensionBuildId, stampedExtensionBuildId } from "./build-id.js";
 import { syncFingerprintRegistration } from "./fingerprint-registration.js";
 import {
   claimFingerprintHostOwnership,
@@ -48,6 +49,7 @@ export type BackgroundConnectOptions = {
   profileId: string;
   identity: BrowserIdentity;
   capabilities: CompanionCapabilities;
+  extensionBuildId?: string;
 };
 
 export type DiscoveredTarget = {
@@ -108,6 +110,8 @@ export type BackgroundDependencies = {
   enrollTimeoutMs?: number;
   scheduleTimeout?: (callback: () => void, delayMs: number) => unknown;
   cancelTimeout?: (handle: unknown) => void;
+  /** Restart this extension from the files installed on disk. */
+  reloadExtension?: () => void;
   /** When true, Bobby worker owns fingerprint apply; extension registration clears. */
   setFingerprintManagedByHost?: (
     managed: boolean,
@@ -152,9 +156,12 @@ function object(value: unknown): value is Record<string, unknown> {
 }
 
 function assertConnectOptions(options: BackgroundConnectOptions): void {
+  const keys = ["companionId", "profileId", "identity", "capabilities"];
+  const stamped = object(options) && "extensionBuildId" in options;
   if (
     !object(options) ||
-    !exactKeys(options, ["companionId", "profileId", "identity", "capabilities"]) ||
+    !exactKeys(options, stamped ? [...keys, "extensionBuildId"] : keys) ||
+    (stamped && !isExtensionBuildId(options.extensionBuildId)) ||
     !boundedNonempty(options.companionId) ||
     !boundedNonempty(options.profileId) ||
     !object(options.identity) ||
@@ -258,6 +265,9 @@ export class CompanionBackground {
         profileId: options.profileId,
         identity: options.identity,
         capabilities: options.capabilities,
+        ...(options.extensionBuildId === undefined
+          ? {}
+          : { extensionBuildId: options.extensionBuildId }),
       },
     };
     this.#dependencies.transport.send(request);
@@ -493,6 +503,12 @@ export class CompanionBackground {
     }
     if (incoming.kind === "ping") {
       this.#dependencies.transport.send({ kind: "pong" });
+      return;
+    }
+    if (incoming.kind === "reload") {
+      // The runtime asks only a paired companion whose build differs from
+      // the one installed on disk.
+      if (this.#paired) this.#dependencies.reloadExtension?.();
       return;
     }
     if (incoming.kind === "grant") {
@@ -904,6 +920,7 @@ export type ProductionBrowserApi = {
     };
     getBrowserInfo(): Promise<{ name: string; version: string }>;
     getPlatformInfo(): Promise<{ os: string }>;
+    reload(): void;
   };
   storage: {
     local: {
@@ -1045,6 +1062,7 @@ export async function startProductionBackground(
     navigateTab: async (tabId, url) => {
       await browserApi.tabs.update(tabId, { url });
     },
+    reloadExtension: () => browserApi.runtime.reload(),
     setFingerprintManagedByHost: async (managed, profile) => {
       if (managed) {
         await claimFingerprintHostOwnership(browserApi.storage, profile);
@@ -1098,7 +1116,9 @@ export async function startProductionBackground(
     return undefined;
   });
   void syncFingerprintRegistration(browserApi).catch(() => undefined);
+  const extensionBuildId = stampedExtensionBuildId();
   background.connect({
+    ...(extensionBuildId === undefined ? {} : { extensionBuildId }),
     companionId: String(stored.companionId),
     profileId: String(stored.profileId),
     identity: {

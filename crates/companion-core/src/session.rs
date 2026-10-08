@@ -68,6 +68,21 @@ struct ActiveSession {
     connection_id: Uuid,
     companion_id: CompanionId,
     outbound: mpsc::Sender<Message>,
+    extension_build: Option<String>,
+}
+
+/// The extension connection serving a profile and the build id it reported
+/// when it connected; `None` is a build that reports no id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionConnection {
+    connection_id: Uuid,
+    build_id: Option<String>,
+}
+
+impl ExtensionConnection {
+    pub fn build_id(&self) -> Option<&str> {
+        self.build_id.as_deref()
+    }
 }
 
 #[derive(Clone)]
@@ -346,6 +361,7 @@ impl SessionCoordinator {
         &self,
         paired: PairedCompanion,
         outbound: mpsc::Sender<Message>,
+        extension_build: Option<String>,
     ) -> Uuid {
         let connection_id = Uuid::new_v4();
         let (previous, readopted) = {
@@ -357,6 +373,7 @@ impl SessionCoordinator {
                     connection_id,
                     companion_id: paired.companion_id.clone(),
                     outbound: outbound.clone(),
+                    extension_build,
                 },
             );
             if let Some(previous) = &previous {
@@ -992,7 +1009,7 @@ impl SessionCoordinator {
         profile_id: &ProfileId,
         request: CompanionRequest,
     ) -> Result<(), CompanionSessionError> {
-        if !matches!(request, CompanionRequest::Ping) {
+        if !matches!(request, CompanionRequest::Ping | CompanionRequest::Reload) {
             return Err(CompanionSessionError::InvalidEvent);
         }
         let outbound = self.outbound_for(profile_id).await?;
@@ -1010,6 +1027,44 @@ impl SessionCoordinator {
             .get(profile_id)
             .map(|session| session.outbound.clone())
             .ok_or(CompanionSessionError::ProfileUnavailable)
+    }
+
+    pub(crate) async fn extension_connection(
+        &self,
+        profile_id: &ProfileId,
+    ) -> Option<ExtensionConnection> {
+        self.state
+            .lock()
+            .await
+            .sessions
+            .get(profile_id)
+            .map(|session| ExtensionConnection {
+                connection_id: session.connection_id,
+                build_id: session.extension_build.clone(),
+            })
+    }
+
+    /// Wait for a connection other than `previous` to serve the profile.
+    pub(crate) async fn wait_for_extension_reconnect(
+        &self,
+        profile_id: &ProfileId,
+        previous: &ExtensionConnection,
+        timeout: Duration,
+    ) -> Result<ExtensionConnection, CompanionSessionError> {
+        let wait = async {
+            loop {
+                let notified = self.discovery_changed.notified();
+                if let Some(connection) = self.extension_connection(profile_id).await {
+                    if connection.connection_id != previous.connection_id {
+                        return connection;
+                    }
+                }
+                notified.await;
+            }
+        };
+        tokio::time::timeout(timeout, wait)
+            .await
+            .map_err(|_| CompanionSessionError::ProfileUnavailable)
     }
 
     pub(crate) async fn wait_for_discovery(
@@ -1424,7 +1479,7 @@ mod tests {
         let paired = registry.pair(input).await.unwrap();
         let coordinator = Arc::new(SessionCoordinator::new(registry));
         let (outbound, mut requests) = mpsc::channel(outbound_capacity);
-        let connection_id = coordinator.register(paired, outbound).await;
+        let connection_id = coordinator.register(paired, outbound, None).await;
         coordinator
             .consume_event(
                 &profile_id,
@@ -1530,7 +1585,7 @@ mod tests {
         let paired = registry.pair(input).await.unwrap();
         let coordinator = Arc::new(SessionCoordinator::new(registry));
         let (outbound, mut requests) = mpsc::channel(4);
-        let connection_id = coordinator.register(paired, outbound).await;
+        let connection_id = coordinator.register(paired, outbound, None).await;
         coordinator
             .consume_event(
                 &profile_id,
@@ -2696,7 +2751,7 @@ mod tests {
         let grant_gate = coordinator.grant_updates.lock().await;
         let reconnect = tokio::spawn({
             let coordinator = Arc::clone(&coordinator);
-            async move { coordinator.register(paired, outbound).await }
+            async move { coordinator.register(paired, outbound, None).await }
         });
         tokio::task::yield_now().await;
         let retry = tokio::spawn({
