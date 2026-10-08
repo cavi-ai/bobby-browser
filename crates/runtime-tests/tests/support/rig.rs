@@ -232,13 +232,17 @@ impl<'a> Live<'a> {
     }
 }
 
-/// The first object with this `role` (and `name`, when given).
+/// The first object with this `role` (and `name`, when given). A node whose
+/// target carries its name has no `name` of its own.
 pub fn find_node<'a>(value: &'a Value, role: &str, name: Option<&str>) -> Option<&'a Value> {
     match value {
         Value::Object(map) => {
             let role_matches = map.get("role").and_then(Value::as_str) == Some(role);
-            let name_matches = name
-                .is_none_or(|expected| map.get("name").and_then(Value::as_str) == Some(expected));
+            let own_name = map
+                .get("name")
+                .or_else(|| map.get("target")?.get("accessibleName"))
+                .and_then(Value::as_str);
+            let name_matches = name.is_none_or(|expected| own_name == Some(expected));
             if role_matches && name_matches {
                 return Some(value);
             }

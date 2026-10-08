@@ -1100,6 +1100,7 @@ impl Server {
 
     async fn tool_success(&self, id: Value, mut value: Value) -> Value {
         crate::resources::redact_mcp_download_paths(&mut value);
+        crate::observation_text::dedupe_snapshot_text(&mut value);
         // Attach a machine-readable repair hint to failures before the value
         // is frozen into `content` text, so both representations carry it.
         // `needsReconciliation` always overrides the code's general repair:

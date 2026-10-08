@@ -38,6 +38,8 @@ Each node is `{role, name, children?}`. Form controls add optional state:
 
 Repeated role and name pairs get zero-based `ordinal` values in tree order. Ordinals count every matching control on the page, even ones cut by `maxNodes`. A node whose name is redacted has no `target`.
 
+MCP results carry each text once. A node with a `target` has no `name`; read `target.accessibleName`. A list item, row, cell or heading whose descendants carry its text has no `name`. `StaticText` children that repeat their parent's name are omitted, as are bullet `ListMarker` nodes.
+
 ## Use a target
 
 Pass it unchanged:

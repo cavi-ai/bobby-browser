@@ -54,6 +54,7 @@ async fn site_regressions_hold_on_firefox() {
         actions_fail_a_missing_target_within_one_bound,
         navigate_waits_for_late_scripts,
         page_titles_withhold_disclosed_credentials,
+        observation_carries_each_text_once,
     );
     for (name, case) in table {
         if AssertUnwindSafe(case(&rig)).catch_unwind().await.is_err() {
