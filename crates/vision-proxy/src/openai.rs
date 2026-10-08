@@ -93,18 +93,7 @@ impl OpenAiUpstream {
             .await
             .map_err(|e| UpstreamError::Transport(e.to_string()))?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(UpstreamError::Rejected(format!(
-                "OpenAI returned {status}: {text}"
-            )));
-        }
-
-        let completion: ChatCompletion = response
-            .json()
-            .await
-            .map_err(|e| UpstreamError::Invalid(format!("OpenAI response parse failed: {e}")))?;
+        let completion: ChatCompletion = crate::response::read_json(response, "OpenAI").await?;
 
         let content = completion
             .choices

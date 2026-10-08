@@ -53,18 +53,7 @@ impl MlxUpstream {
             .await
             .map_err(|e| UpstreamError::Transport(e.to_string()))?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(UpstreamError::Rejected(format!(
-                "mlx server returned {status}: {text}"
-            )));
-        }
-
-        response
-            .json()
-            .await
-            .map_err(|e| UpstreamError::Invalid(format!("mlx server response parse failed: {e}")))
+        crate::response::read_json(response, "mlx server").await
     }
 }
 
