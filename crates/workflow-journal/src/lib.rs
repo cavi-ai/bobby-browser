@@ -87,6 +87,8 @@ struct RecordProbe {
 
 struct Scan {
     scan: JournalScan,
+    /// Decodable complete records, including records with invalid sequence order.
+    records: usize,
     /// Highest sequence in the file, including skipped lines, so appends stay monotonic.
     max_sequence: Option<u64>,
 }
@@ -178,11 +180,11 @@ impl JsonlJournal {
             }
             Err(error) => return Err(error.into()),
         };
-        let Scan { scan, .. } = scan_path(path, None, true).await?;
+        let Scan { scan, records, .. } = scan_path(path).await?;
         Ok(JournalHealth {
             exists: true,
             bytes: metadata.len(),
-            records: scan.records.len(),
+            records,
             torn_tail: scan.torn_tail,
             incompatible_records: scan.incompatible_records,
         })
@@ -202,7 +204,7 @@ impl JsonlJournal {
 }
 
 async fn open_writer(path: &Path) -> Result<WriterState, JournalError> {
-    let scan = scan_path(path, None, false).await?;
+    let scan = scan_path(path).await?;
     if scan.scan.torn_tail
         || scan.scan.incompatible_records > 0
         || scan.max_sequence == Some(u64::MAX)
@@ -374,16 +376,13 @@ impl CommandJournal for JsonlJournal {
     }
 }
 
-async fn scan_path(
-    path: &Path,
-    filter: Option<&CommandId>,
-    collect: bool,
-) -> Result<Scan, JournalError> {
+async fn scan_path(path: &Path) -> Result<Scan, JournalError> {
     let file = match File::open(path).await {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(Scan {
                 scan: JournalScan::default(),
+                records: 0,
                 max_sequence: None,
             })
         }
@@ -391,6 +390,7 @@ async fn scan_path(
     };
     let mut reader = BufReader::new(file);
     let mut scan = JournalScan::default();
+    let mut records = 0usize;
     let mut max_sequence = None;
     let mut line = Vec::new();
     while reader.read_until(b'\n', &mut line).await? > 0 {
@@ -401,13 +401,11 @@ async fn scan_path(
         if !line.iter().all(u8::is_ascii_whitespace) {
             match serde_json::from_slice::<JournalRecord>(&line) {
                 Ok(record) => {
+                    records += 1;
                     if max_sequence.is_some_and(|sequence| record.sequence <= sequence) {
                         scan.incompatible_records += 1;
                     }
                     max_sequence = max_sequence.max(Some(record.sequence));
-                    if collect && filter.is_none_or(|id| &record.command_id == id) {
-                        scan.records.push(record);
-                    }
                 }
                 Err(_) => {
                     if let Ok(probe) = serde_json::from_slice::<RecordProbe>(&line) {
@@ -419,5 +417,9 @@ async fn scan_path(
         }
         line.clear();
     }
-    Ok(Scan { scan, max_sequence })
+    Ok(Scan {
+        scan,
+        records,
+        max_sequence,
+    })
 }

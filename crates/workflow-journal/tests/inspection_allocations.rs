@@ -1,0 +1,91 @@
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+use types::{CommandId, CommandPhase};
+use workflow_journal::{JournalRecord, JsonlJournal};
+
+// One test in this binary isolates measurements from other tests, including
+// allocations made by Tokio's filesystem workers.
+struct AllocationTracker;
+static TRACKING: AtomicBool = AtomicBool::new(false);
+static LARGEST_ALLOCATION: AtomicUsize = AtomicUsize::new(0);
+
+fn record_allocation(size: usize) {
+    if TRACKING.load(Ordering::Relaxed) {
+        LARGEST_ALLOCATION.fetch_max(size, Ordering::Relaxed);
+    }
+}
+
+unsafe impl GlobalAlloc for AllocationTracker {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        record_allocation(layout.size());
+        // SAFETY: forward the unchanged layout to the system allocator.
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        record_allocation(layout.size());
+        // SAFETY: forward the unchanged layout to the system allocator.
+        unsafe { System.alloc_zeroed(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: all allocations above are owned by the system allocator.
+        unsafe { System.dealloc(ptr, layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        record_allocation(new_size);
+        // SAFETY: forward the original allocation and requested size unchanged.
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: AllocationTracker = AllocationTracker;
+
+#[test]
+fn inspection_counts_history_without_retaining_decoded_records() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("commands.jsonl");
+    let command_id = CommandId::new();
+    let mut file = std::fs::File::create(&path).unwrap();
+    for sequence in 0..2048 {
+        serde_json::to_writer(
+            &mut file,
+            &JournalRecord {
+                sequence,
+                recorded_at: chrono::Utc::now(),
+                command_id: command_id.clone(),
+                phase: CommandPhase::Accepted,
+                envelope: None,
+                outcome: None,
+                prepared_result: None,
+            },
+        )
+        .unwrap();
+        file.write_all(b"\n").unwrap();
+    }
+    drop(file);
+    let bytes = std::fs::metadata(&path).unwrap().len();
+
+    TRACKING.store(true, Ordering::Relaxed);
+    let health = runtime.block_on(JsonlJournal::inspect(&path)).unwrap();
+    TRACKING.store(false, Ordering::Relaxed);
+    let largest = LARGEST_ALLOCATION.load(Ordering::Relaxed);
+
+    assert_eq!(health.records, 2048);
+    assert_eq!(health.bytes, bytes);
+    assert_eq!(health.incompatible_records, 0);
+    assert!(!health.torn_tail);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), bytes);
+    assert!(
+        largest < 128 * 1024,
+        "inspection allocated {largest} bytes at once"
+    );
+}
