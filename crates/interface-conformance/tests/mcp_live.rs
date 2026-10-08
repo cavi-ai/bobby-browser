@@ -315,7 +315,12 @@ fn actionable_nodes_named<'a>(
         output: &mut Vec<&'a AccessibilityNode>,
     ) {
         for node in nodes {
-            if node.name.as_deref() == Some(name) && node.target.is_some() {
+            // An MCP result carries an actionable node's name in its target.
+            if node
+                .target
+                .as_ref()
+                .is_some_and(|target| target.accessible_name == name)
+            {
                 output.push(node);
             }
             collect(&node.children, name, output);
