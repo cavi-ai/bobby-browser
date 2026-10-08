@@ -2994,15 +2994,16 @@ impl PageOpenOperation {
 }
 
 use worker_pool::navigation_settle::{
-    navigation_settle_expression, parse_settled, NAVIGATION_SETTLE_CAP, SCRIPT_POLL,
+    navigation_settle_expression, parse_settled, LOAD_POLL, NAVIGATION_SETTLE_CAP,
 };
 use worker_pool::secret_material::page_title_evidence;
 
 /// Waits until the document in `context` has loaded, `network` reports no
-/// script fetch in flight for it, and it has had no DOM mutation for
-/// `NAVIGATION_QUIET_MS`, or `budget` runs out, and returns the URL and
-/// title read at that point. A redirect that replaces the document while the
-/// probe runs restarts it. `None` when no read succeeded within the budget.
+/// script or fetch/XHR load in flight for it, and it has had no DOM mutation
+/// for `NAVIGATION_QUIET_MS`, and returns the URL and title read at that
+/// point. A redirect that replaces the document while the probe runs restarts
+/// it. When `budget` runs out first, returns the URL and title the context
+/// shows then; `None` only when the context cannot be read.
 async fn settle_document(
     transport: &Arc<dyn BidiTransport>,
     context: &str,
@@ -3015,7 +3016,7 @@ async fn settle_document(
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return settled;
+            return current_page(transport, context).await.or(settled);
         }
         let expression = navigation_settle_expression(remaining.as_millis().max(1), requested_url);
         // Firefox does not always reject a pending evaluation when a script
@@ -3060,22 +3061,31 @@ async fn settle_document(
                 .and_then(parse_settled);
             if read.is_some() {
                 settled = read;
-                // A script still being fetched attaches its handlers once it
-                // runs: wait for it, then for the document to go quiet again.
-                if network.lock().await.pending_scripts(context) == 0 {
+                // A script or fetch still loading changes the page once it
+                // lands: wait for it, then for the document to go quiet again.
+                if network.lock().await.pending_page_loads(context) == 0 {
                     return settled;
                 }
-                while network.lock().await.pending_scripts(context) > 0 {
-                    if Instant::now() >= deadline {
-                        return settled;
-                    }
-                    tokio::time::sleep(SCRIPT_POLL).await;
+                while network.lock().await.pending_page_loads(context) > 0
+                    && Instant::now() < deadline
+                {
+                    tokio::time::sleep(LOAD_POLL).await;
                 }
                 continue;
             }
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// The URL and title `context` shows now, `None` when it cannot be read.
+async fn current_page(
+    transport: &Arc<dyn BidiTransport>,
+    context: &str,
+) -> Option<(String, String)> {
+    let url = context_url(transport, context).await?;
+    let title = capture_context_title(transport, context).await.ok()?;
+    Some((url, title))
 }
 
 const SETTLE_URL_WATCH_INTERVAL: Duration = Duration::from_millis(50);

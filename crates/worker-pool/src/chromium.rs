@@ -5,7 +5,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::navigation_settle::{
-    navigation_settle_expression, parse_settled, NAVIGATION_SETTLE_CAP, SCRIPT_POLL,
+    navigation_settle_expression, parse_settled, LOAD_POLL, NAVIGATION_SETTLE_CAP,
 };
 use crate::secret_material::page_title_evidence;
 use artifact_store::ArtifactStore;
@@ -3807,11 +3807,12 @@ fn redact_secret_material(value: String) -> String {
     }
 }
 
-/// Waits until the document has loaded, `tracker` reports no script fetch in
-/// flight, and the document has had no DOM mutation for the quiet window, or
-/// `budget` runs out, and returns the URL and title read at that point. A
-/// redirect that replaces the document while the probe runs restarts it.
-/// `None` when no read succeeded within the budget.
+/// Waits until the document has loaded, `tracker` reports no script or
+/// fetch/XHR load in flight, and the document has had no DOM mutation for the
+/// quiet window, and returns the URL and title read at that point. A redirect
+/// that replaces the document while the probe runs restarts it. When `budget`
+/// runs out first, returns the URL and title the page shows then; `None` only
+/// when the page cannot be read.
 async fn settle_document(
     page: &Page,
     budget: Duration,
@@ -3823,7 +3824,7 @@ async fn settle_document(
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return settled;
+            return current_page(page).await.or(settled);
         }
         let mut params = EvaluateParams::new(navigation_settle_expression(
             remaining.as_millis().max(1),
@@ -3840,25 +3841,29 @@ async fn settle_document(
                 .and_then(|encoded| parse_settled(&encoded))
             {
                 settled = Some(read);
-                // A script still being fetched attaches its handlers once it
-                // runs: wait for it, then for the document to go quiet again.
+                // A script or fetch still loading changes the page once it
+                // lands: wait for it, then for the document to go quiet again.
                 let Some(tracker) = tracker else {
                     return settled;
                 };
-                if tracker.pending_scripts().await == 0 {
+                if tracker.pending_page_loads().await == 0 {
                     return settled;
                 }
-                while tracker.pending_scripts().await > 0 {
-                    if Instant::now() >= deadline {
-                        return settled;
-                    }
-                    tokio::time::sleep(SCRIPT_POLL).await;
+                while tracker.pending_page_loads().await > 0 && Instant::now() < deadline {
+                    tokio::time::sleep(LOAD_POLL).await;
                 }
                 continue;
             }
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// The URL and title `page` shows now, `None` when it cannot be read.
+async fn current_page(page: &Page) -> Option<(String, String)> {
+    let url = page.url().await.ok()??;
+    let title = page.get_title().await.ok()?.unwrap_or_default();
+    Some((url, title))
 }
 
 async fn read_page_body_text(page: &Page) -> Result<String, CommandError> {

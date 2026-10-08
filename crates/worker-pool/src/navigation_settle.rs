@@ -11,17 +11,17 @@ pub const NAVIGATION_QUIET_MS: u64 = 300;
 /// so the shorter window cannot tell a settled sign-in page from a pending
 /// bounce. Only redirected navigations pay for it.
 pub const REDIRECTED_QUIET_MS: u64 = 1_800;
-/// How often a settle re-checks the page's script fetches.
-pub const SCRIPT_POLL: Duration = Duration::from_millis(50);
+/// How often a settle re-checks the page's in-flight script and fetch/XHR loads.
+pub const LOAD_POLL: Duration = Duration::from_millis(50);
 
 /// A promise that resolves to a JSON string `{url, title}` once the document
 /// has loaded (`readyState` is `complete`, so every script it parsed has run)
 /// and then had no DOM mutation for the quiet window, or after `cap_ms`. The
 /// window is [`REDIRECTED_QUIET_MS`] when the document was reached through a
 /// server redirect (`performance` navigation timing) or sits on a URL other
-/// than `requested_url`, and [`NAVIGATION_QUIET_MS`] otherwise. Scripts the
-/// page fetches after its load are the caller's to wait for: each engine
-/// sees them in its network tracker and runs the probe again.
+/// than `requested_url`, and [`NAVIGATION_QUIET_MS`] otherwise. Scripts and
+/// fetch/XHR the page loads after its load are the caller's to wait for: each
+/// engine sees them in its network tracker and runs the probe again.
 pub fn navigation_settle_expression(cap_ms: u128, requested_url: &str) -> String {
     let requested = serde_json::to_string(requested_url).unwrap_or_else(|_| "\"\"".into());
     format!(

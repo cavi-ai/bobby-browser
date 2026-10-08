@@ -863,6 +863,117 @@ pub async fn intent_follow_post_state_shows_the_settled_page(rig: &Rig) {
     live.close().await;
 }
 
+/// Enter pushState-navigates to a URL with a query, replaceState adds a
+/// parameter once the results render, the DOM never stops changing, and the
+/// page is busy past the settle cap: type_text reports the rewritten URL and
+/// the rendered title.
+pub async fn type_text_enter_reports_the_rewritten_url(rig: &Rig) {
+    let home = page(
+        "Home",
+        r#"<header><input id="q" aria-label="Search"></header><main id="main"><h1>Home</h1></main>
+        <script>
+            document.getElementById("q").addEventListener("keydown", (event) => {
+              if (event.key !== "Enter") return;
+              event.preventDefault();
+              const path = "/results/all/?q=" + encodeURIComponent(event.target.value) + "&from=header";
+              history.pushState({}, "", path);
+              const main = document.getElementById("main");
+              main.innerHTML = "<p id='clock'>0</p>";
+              let ticks = 0;
+              setInterval(() => {
+                document.getElementById("clock").textContent = String(++ticks);
+              }, 100);
+              setTimeout(() => {
+                history.replaceState({}, "", path + "&ref=a1");
+                document.title = "Results";
+                main.insertAdjacentHTML("beforeend", "<h1>Results</h1>");
+              }, 1500);
+              setTimeout(() => {
+                const end = Date.now() + 4000;
+                while (Date.now() < end) {}
+              }, 4500);
+            });
+        </script>"#,
+    );
+    let site = FixtureSite::spawn(vec![("/home", Route::Html(home))]).await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let typed = live
+        .call(
+            "type_text",
+            json!({"target":{"role":"textbox","accessibleName":"Search"},
+                   "value":"query terms\n","clearFirst":true}),
+        )
+        .await;
+    assert_eq!(typed["status"], "completed", "type_text: {typed}");
+    let mut navigations = Vec::new();
+    objects_of_kind(&typed, "navigation", &mut navigations);
+    let expected_url = site.url("/results/all/?q=query%20terms&from=header&ref=a1");
+    assert!(
+        navigations
+            .iter()
+            .any(|item| item["url"] == expected_url.as_str() && item["title"] == "Results"),
+        "type_text did not report {expected_url} titled \"Results\": {typed}"
+    );
+    live.close().await;
+}
+
+/// A link pushState-navigates, renders an empty skeleton, and fills it from a
+/// fetch that outlasts the quiet window: intent_follow's postState shows the
+/// fetched content.
+pub async fn intent_follow_post_state_waits_for_fetched_content(rig: &Rig) {
+    let start = page(
+        "Start",
+        r#"<main id="main"><a id="go" href="/listings/search?kw=all">Open listings</a></main>
+        <script>
+            document.getElementById("go").addEventListener("click", (event) => {
+              event.preventDefault();
+              history.pushState({}, "", "/listings/search?kw=all&from=nav");
+              const main = document.getElementById("main");
+              main.innerHTML = "<div role='presentation'></div>".repeat(19);
+              fetch("/api/listings")
+                .then((response) => response.json())
+                .then((names) => {
+                  document.title = "Listings";
+                  main.innerHTML = "<h1>Listings</h1><ul>" +
+                    names.map((name) => "<li>" + name + "</li>").join("") + "</ul>";
+                });
+            });
+        </script>"#,
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/start", Route::Html(start)),
+        (
+            "/api/listings",
+            Route::Delayed {
+                delay: std::time::Duration::from_millis(1_500),
+                content_type: "application/json",
+                body: r#"["First listing","Second listing"]"#.to_owned(),
+            },
+        ),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/start")).await;
+    let followed = live
+        .call(
+            "intent_follow",
+            json!({
+                "purpose":"Open the listings",
+                "hints":{"role":"link","accessibleName":"Open listings"},
+                "expectedState":{
+                    "condition":{"kind":"url","matcher":{"kind":"contains","value":"/listings/"}},
+                    "timeoutMs":15000
+                }
+            }),
+        )
+        .await;
+    assert_eq!(followed["status"], "completed", "intent_follow: {followed}");
+    assert!(
+        find_node(&followed["postState"], "heading", Some("Listings")).is_some(),
+        "intent_follow postState is not the fetched page: {followed}"
+    );
+    live.close().await;
+}
+
 /// Controls rendered a few seconds after load: every action and intent waits
 /// for its target to appear instead of failing targetNotFound at once.
 pub async fn actions_wait_for_a_late_target(rig: &Rig) {

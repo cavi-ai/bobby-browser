@@ -48,7 +48,7 @@ pub use form_snapshot::{
 };
 pub use har::{har_document, HarEntry, HarRecorder};
 pub use network_quiet::{
-    counted_in_flight, map_bidi_network_type, pending_scripts, NetworkQuietFilters,
+    counted_in_flight, map_bidi_network_type, pending_page_loads, NetworkQuietFilters,
     NetworkQuietState,
 };
 pub use selection::{
@@ -405,9 +405,10 @@ pub trait BrowserWorker: Send + Sync {
     }
 
     /// The page's URL and title once its document has stopped changing,
-    /// read by the probe `navigate` settles with and bounded by `budget`.
-    /// `requested_url` is the URL the caller expects, when it has one. `None`
-    /// when the worker cannot settle a page or no read succeeded in time.
+    /// read by the probe `navigate` settles with and bounded by `budget`; at
+    /// the budget, the URL and title the page shows then. `requested_url` is
+    /// the URL the caller expects, when it has one. `None` when the worker
+    /// cannot settle a page or the page cannot be read.
     async fn settle_page(
         &self,
         _page_id: &PageId,

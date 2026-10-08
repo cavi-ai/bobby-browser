@@ -48,6 +48,8 @@ async fn site_regressions_hold_on_firefox() {
         snapshot_targets_act_on_the_described_element,
         type_text_enter_reports_the_settled_page,
         intent_follow_post_state_shows_the_settled_page,
+        type_text_enter_reports_the_rewritten_url,
+        intent_follow_post_state_waits_for_fetched_content,
         actions_wait_for_a_late_target,
         actions_fail_a_missing_target_within_one_bound,
         navigate_waits_for_late_scripts,

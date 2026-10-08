@@ -8,6 +8,8 @@
 - A session keeps its pages when Firefox restarts onto a new companion build.
 - `type_text` ending in Enter reports the landed page's full URL, query included, and its settled title.
 - `intent_follow` completes once the destination page stops changing, so `postState` shows the rendered page.
+- Settling after a navigation waits for the page's in-flight fetch and XHR requests, so `intent_follow` `postState` shows content the page fetches.
+- A page that does not settle within 5 s reports the URL, query included, and title it shows at that point.
 - Actions wait up to 5 s, and at most half the time left in the call, for a target that is not on the page yet before failing with `targetNotFound`.
 - `navigate` and `workflow_start` return once the document has loaded, its scripts have run, and the page has stopped changing.
 - A page title that discloses a credential is withheld in `navigate`, `page_list`, popups and settled-page evidence on both engines.
