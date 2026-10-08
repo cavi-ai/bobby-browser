@@ -145,6 +145,19 @@ pub fn counted_in_flight(
     (count, excluded.into_iter().collect())
 }
 
+/// Script fetches still in flight that have not reached the long-lived
+/// threshold. A page's handlers are not attached until its scripts run, so a
+/// settled page has none. Lost tracking is not counted: it names no script.
+pub fn pending_scripts(state: &NetworkQuietState, now: Instant) -> usize {
+    state
+        .requests()
+        .filter(|request| {
+            request.resource_type == NetworkResourceType::Script
+                && now.duration_since(request.started_at) < LONG_LIVED_OPEN_THRESHOLD
+        })
+        .count()
+}
+
 fn exclusion_class(
     request: &InFlightRequest,
     filters: &NetworkQuietFilters<'_>,
@@ -280,6 +293,10 @@ impl NetworkQuietTracker {
     pub async fn snapshot(&self, filters: &NetworkQuietFilters<'_>) -> (usize, Vec<String>) {
         let state = self.state.lock().await;
         counted_in_flight(&state, filters, Instant::now())
+    }
+
+    pub async fn pending_scripts(&self) -> usize {
+        pending_scripts(&*self.state.lock().await, Instant::now())
     }
 }
 

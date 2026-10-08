@@ -989,28 +989,17 @@ pub async fn resolve_target_with_visibility(
 
     let scope = open_target_scope(page, target, browser).await?;
     let base_scope = scope.locator_scope();
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let mut attempt = 0u32;
-    let (candidate, evidence, best_match_authorized, owner) = loop {
-        let (raw, owners) = collect_candidates_merged(
-            &scope.execution_page,
-            &base_scope,
-            &scope.shadow_hosts,
-            scope.scope_id,
-        )
-        .await?;
-        match choose(target, raw, require_visible) {
-            Ok((candidate, evidence, best_match_authorized)) => {
-                let owner = owners.get(&candidate.id).cloned();
-                break (candidate, evidence, best_match_authorized, owner);
-            }
-            Err(error) if error.code == ErrorCode::TargetNotFound && Instant::now() < deadline => {
-                tokio::time::sleep(retry_backoff(attempt)).await;
-                attempt += 1;
-            }
-            Err(error) => return Err(error),
-        }
-    };
+    // One read: a target that is not on the page yet fails at once. Waiting
+    // for it is the caller's (`wait_for`, or the runtime before an action).
+    let (raw, owners) = collect_candidates_merged(
+        &scope.execution_page,
+        &base_scope,
+        &scope.shadow_hosts,
+        scope.scope_id,
+    )
+    .await?;
+    let (candidate, evidence, best_match_authorized) = choose(target, raw, require_visible)?;
+    let owner = owners.get(&candidate.id).cloned();
     // A candidate gathered from a closed shadow root must be located relative
     // to that root's own element handle, not the outer document/frame context.
     let (locator_scope, locator_shadow_hosts) = match &owner {
@@ -1137,14 +1126,6 @@ pub async fn resolve_ambiguous_wait_values(
         }
     }
     Ok(values)
-}
-
-/// Backoff schedule for the targetNotFound re-collect loop: 25, 50, 100, 200,
-/// 400 ms, capped at 500 ms, so a big page is not re-scanned every 25 ms for
-/// the whole 2 s deadline.
-fn retry_backoff(attempt: u32) -> Duration {
-    let shift = attempt.min(5);
-    Duration::from_millis((25u64 << shift).min(500))
 }
 
 fn choose(
@@ -2137,18 +2118,6 @@ mod tests {
         })
         .expect_err("empty nested css must fail");
         assert!(err.message.contains("css"));
-    }
-
-    #[test]
-    fn retry_backoff_grows_exponentially_then_caps_at_500ms() {
-        assert_eq!(retry_backoff(0), Duration::from_millis(25));
-        assert_eq!(retry_backoff(1), Duration::from_millis(50));
-        assert_eq!(retry_backoff(2), Duration::from_millis(100));
-        assert_eq!(retry_backoff(3), Duration::from_millis(200));
-        assert_eq!(retry_backoff(4), Duration::from_millis(400));
-        assert_eq!(retry_backoff(5), Duration::from_millis(500));
-        assert_eq!(retry_backoff(6), Duration::from_millis(500));
-        assert_eq!(retry_backoff(50), Duration::from_millis(500));
     }
 
     #[test]

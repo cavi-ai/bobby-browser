@@ -7,12 +7,23 @@
 - `type_text` ending in Enter reports the page it landed on with its full URL,
   query included, and the title read once the document stops changing; it
   reported the URL without its query (Firefox) and the previous page's title.
+  The typed control's read-back no longer carries a second page URL and title.
 - `intent_follow` completes once the destination page stops changing, so its
   `postState` shows the rendered page instead of the loading skeleton left
   when a pushed URL matched the expected state.
-- `click`, `type_text`, `control_action` and `intent_follow` wait for a target
-  that is not on the page yet, for up to 10 s and at most half the time left
-  in the call, before failing with `targetNotFound`.
+- Actions wait for a target that is not on the page yet, for up to 5 s and at
+  most half the time left in the call, before failing with `targetNotFound`:
+  `click`, `type_text`, `control_action`, `upload_files`, the click-and-wait
+  tools, and the follow, fill, complete-form, submit, locate, reveal and
+  dismiss intents. This is the only such wait; the Chromium resolver and
+  click no longer retry a missing target on their own.
+- `navigate` and `workflow_start` return once the document has loaded, the
+  scripts it is still fetching have run, and the page has stopped changing;
+  an action right after them could hit a server-rendered form before its
+  handler was attached.
+- A page title that discloses a credential is withheld the same way in
+  `navigate`, `page_list`, popups and settled-page evidence on both engines;
+  Firefox `navigate` and `page_list` returned it.
 - Firefox companion: a session start brings the enrolled Firefox to the companion
   build installed in its profile (unpacked sideload or signed `.xpi`). Each
   extension build carries a content-derived

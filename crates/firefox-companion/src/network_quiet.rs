@@ -9,7 +9,8 @@ use std::time::Instant;
 
 use serde_json::Value;
 use worker_pool::{
-    counted_in_flight, map_bidi_network_type, NetworkQuietFilters, NetworkQuietState,
+    counted_in_flight, map_bidi_network_type, pending_scripts, NetworkQuietFilters,
+    NetworkQuietState,
 };
 
 #[derive(Debug, Default)]
@@ -57,6 +58,15 @@ impl FirefoxNetworkQuiet {
         }
         excluded.sort();
         (scoped_count + unscoped_count, excluded)
+    }
+
+    /// Script fetches in flight for `context` (and unattributed ones).
+    pub fn pending_scripts(&self, context: &str) -> usize {
+        let now = Instant::now();
+        self.by_context
+            .get(context)
+            .map_or(0, |state| pending_scripts(state, now))
+            + pending_scripts(&self.unscoped, now)
     }
 
     pub fn mark_tracking_lost(&mut self) {

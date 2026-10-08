@@ -25,6 +25,12 @@ pub enum Route {
         content_type: &'static str,
         body: String,
     },
+    /// Serves `body` with this content type after `delay`.
+    Delayed {
+        delay: std::time::Duration,
+        content_type: &'static str,
+        body: String,
+    },
 }
 
 type Bodies = Arc<Mutex<Vec<Vec<u8>>>>;
@@ -142,6 +148,14 @@ async fn serve(
             } else {
                 Html(then.clone()).into_response()
             }
+        }
+        Route::Delayed {
+            delay,
+            content_type,
+            body,
+        } => {
+            tokio::time::sleep(*delay).await;
+            ([(header::CONTENT_TYPE, *content_type)], body.clone()).into_response()
         }
     }
 }

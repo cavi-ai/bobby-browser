@@ -124,7 +124,8 @@ struct WorkerIntentBrowser<'a> {
 }
 
 /// Longest an action waits for its target to appear.
-const TARGET_APPEAR_CAP: StdDuration = StdDuration::from_secs(10);
+/// It is the only wait for a late target: the resolvers fail at once.
+const TARGET_APPEAR_CAP: StdDuration = StdDuration::from_secs(5);
 
 /// Half the time left before `deadline`, at most `cap`. The other half stays
 /// with the action and its verification.
@@ -163,11 +164,17 @@ async fn await_target(
         .await;
 }
 
-/// The target a click, typed input or control action resolves before it acts.
+/// The target an action primitive resolves before it acts.
 fn primitive_action_target(command: &PrimitiveCommand) -> Option<TargetSpec> {
     let (selector, target) = match command {
         PrimitiveCommand::Click(command) => (&command.selector, &command.target),
         PrimitiveCommand::TypeText(command) => (&command.selector, &command.target),
+        PrimitiveCommand::UploadFiles(command) => (&command.selector, &command.target),
+        PrimitiveCommand::UploadAndConfirm(command) => {
+            (&command.upload.selector, &command.upload.target)
+        }
+        PrimitiveCommand::ClickAndWaitForPopup(command) => (&command.selector, &command.target),
+        PrimitiveCommand::ClickAndWaitForDownload(command) => (&command.selector, &command.target),
         PrimitiveCommand::ControlAction(command) => {
             return Some(control_target_spec(&command.target))
         }

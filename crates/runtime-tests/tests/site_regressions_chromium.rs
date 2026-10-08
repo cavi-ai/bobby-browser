@@ -36,5 +36,8 @@ chromium_case!(snapshot_targets_act_on_the_described_element);
 chromium_case!(type_text_enter_reports_the_settled_page);
 chromium_case!(intent_follow_post_state_shows_the_settled_page);
 chromium_case!(actions_wait_for_a_late_target);
+chromium_case!(actions_fail_a_missing_target_within_one_bound);
+chromium_case!(navigate_waits_for_late_scripts);
+chromium_case!(page_titles_withhold_disclosed_credentials);
 // `oversized_page_reports_truncation_not_target_not_found` is Firefox-only:
 // the 1024-node candidate cap it exercises exists only in the Firefox companion.
