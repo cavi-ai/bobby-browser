@@ -391,7 +391,8 @@ async fn workflow_observe_without_goal_returns_bound_live_accessibility_outcome(
     let evidence = &result["observationOutcome"]["evidence"][0];
     assert_eq!(evidence["kind"], "accessibilitySnapshot");
     assert_eq!(evidence["pageId"], binding["pageId"]);
-    assert_eq!(evidence["nodes"][0]["name"], "Email address");
+    // The target carries the node's name, so the name is not repeated.
+    assert!(evidence["nodes"][0].get("name").is_none(), "{response}");
     assert_eq!(
         evidence["nodes"][0]["target"]["accessibleName"],
         "Email address"

@@ -14,6 +14,7 @@ mod annotations;
 mod jobs;
 /// Server-to-client MCP notifications (runtime events, tool-list changes).
 pub mod notify;
+mod observation_text;
 mod prompts;
 /// JSON-RPC frame limits and error codes shared by transports.
 pub mod protocol;

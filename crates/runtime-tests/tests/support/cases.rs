@@ -1251,3 +1251,118 @@ pub async fn page_titles_withhold_disclosed_credentials(rig: &Rig) {
     );
     live.close().await;
 }
+
+const ENTRY_COUNT: usize = 30;
+/// Serialized `workflow_observe` result for the entries page before text
+/// deduplication; the deduplicated result must be at most half of it.
+const CHROMIUM_ENTRIES_UNDEDUPED_BYTES: usize = 34_456;
+const FIREFOX_ENTRIES_UNDEDUPED_BYTES: usize = 34_867;
+
+fn entry_text(index: usize) -> String {
+    format!(
+        "Entry {index:02}: a neutral sample paragraph standing in for a long post body, \
+         written only so that this link text runs well past two hundred characters \
+         and every repeated copy of it in an observation costs real bytes."
+    )
+}
+
+/// A list whose items each nest a list item around a long link and a
+/// button. The observation carries each text once, loses none, and every
+/// target taken from it acts on its own element.
+pub async fn observation_carries_each_text_once(rig: &Rig) {
+    let mut items = String::new();
+    for index in 0..ENTRY_COUNT {
+        items.push_str(&format!(
+            r##"<li><ul><li><a href="#entry-{index}" data-id="link-{index}">{}</a><button type="button" data-id="button-{index}">Save</button></li></ul></li>"##,
+            entry_text(index)
+        ));
+    }
+    let body = format!(
+        r#"<main><h1>Recent entries</h1><ul>{items}</ul><ol id="log"></ol></main>
+        <script>
+          document.addEventListener("click", (event) => {{
+            const reached = event.target.closest("[data-id]");
+            if (!reached) return;
+            event.preventDefault();
+            const entry = document.createElement("li");
+            entry.textContent = "acted " + reached.dataset.id;
+            document.getElementById("log").append(entry);
+          }}, true);
+        </script>"#
+    );
+    let site = FixtureSite::spawn(vec![("/entries", Route::Html(page("Entry list", &body)))]).await;
+    let live = Live::open(rig, &site.url("/entries")).await;
+    let observed = live.observe(json!({"maxNodes":2048})).await;
+    assert_eq!(
+        observed["status"], "completed",
+        "workflow_observe: {observed}"
+    );
+    let bytes = serde_json::to_string(&observed)
+        .expect("observation serializes")
+        .len();
+    eprintln!(
+        "entries observation, {}: {bytes} bytes",
+        if rig.is_firefox() {
+            "firefox"
+        } else {
+            "chromium"
+        }
+    );
+
+    let mut texts = Vec::new();
+    strings_under(&observed, "name", &mut texts);
+    strings_under(&observed, "accessibleName", &mut texts);
+    let page_texts = (0..ENTRY_COUNT)
+        .map(entry_text)
+        .chain(["Recent entries".to_owned(), "Save".to_owned()]);
+    for text in page_texts {
+        assert!(
+            texts.iter().any(|seen| seen.contains(text.as_str())),
+            "{text:?} is missing from the observation: {observed}"
+        );
+    }
+
+    let mut targets = Vec::new();
+    targets_under(&observed, &mut targets);
+    let mut acted = Vec::new();
+    for (role, target) in targets {
+        let name = target["accessibleName"].as_str().unwrap_or_default();
+        let id = match role {
+            "link" => (0..ENTRY_COUNT)
+                .find(|index| entry_text(*index) == name)
+                .map(|index| format!("link-{index}")),
+            "button" if name == "Save" => target["ordinal"]
+                .as_u64()
+                .map(|ordinal| format!("button-{ordinal}")),
+            _ => None,
+        };
+        let id = id.unwrap_or_else(|| panic!("unexpected observation target {target}"));
+        acted.push((target.clone(), id));
+    }
+    assert_eq!(
+        acted.len(),
+        2 * ENTRY_COUNT,
+        "observation targets: {observed}"
+    );
+    for (target, _) in &acted {
+        let clicked = live.call("click", json!({"target":target})).await;
+        assert_eq!(clicked["status"], "completed", "click {target}: {clicked}");
+    }
+    let after = live.snapshot(json!({"maxNodes":2048})).await;
+    let mut log = Vec::new();
+    strings_under(&after, "name", &mut log);
+    log.retain(|text| text.starts_with("acted "));
+    let expected: Vec<String> = acted.iter().map(|(_, id)| format!("acted {id}")).collect();
+    assert_eq!(log, expected, "clicks reached other elements: {after}");
+
+    let undeduped = if rig.is_firefox() {
+        FIREFOX_ENTRIES_UNDEDUPED_BYTES
+    } else {
+        CHROMIUM_ENTRIES_UNDEDUPED_BYTES
+    };
+    assert!(
+        bytes * 2 <= undeduped,
+        "observation is {bytes} bytes, more than half of {undeduped}: {observed}"
+    );
+    live.close().await;
+}
