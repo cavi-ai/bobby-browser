@@ -12,7 +12,7 @@ RESTART_FLAGS := $(if $(filter 1,$(FORCE)),--force)$(if $(filter 1,$(DISCONNECT_
 	firefox-start firefox-stop \
 	restart start stop reload verify status \
 	fmt lint test test-browsers-setup test-browsers test-browsers-chromium test-browsers-firefox \
-	fingerprint-dogfood fingerprint-collectors fingerprint-collectors-headed fingerprint-collectors-firefox \
+	fingerprint-dogfood \
 	behavioral-benchmark behavioral-e2e behavioral-dogfood
 
 help:
@@ -49,9 +49,6 @@ help:
 	@echo
 	@echo "Fingerprint dogfood"
 	@echo "  fingerprint-dogfood              live Chromium collector probe (needs Chrome)"
-	@echo "  fingerprint-collectors           BrowserLeaks/CreepJS/FingerprintJS (needs Chrome)"
-	@echo "  fingerprint-collectors-headed    same, headed Chrome (needs GUI)"
-	@echo "  fingerprint-collectors-firefox   live Firefox collectors (needs BOBBY_FIREFOX_*)"
 	@echo
 	@echo "Behavioral dogfood"
 	@echo "  behavioral-benchmark   offline interaction biometric scores"
@@ -203,15 +200,6 @@ test-browsers-firefox:
 
 fingerprint-dogfood:
 	cargo test -p worker-pool --test fingerprint_conformance -- --ignored --nocapture
-
-fingerprint-collectors:
-	cargo test -p worker-pool --test fingerprint_conformance chromium_production_collector_dogfood -- --ignored --nocapture
-
-fingerprint-collectors-headed:
-	BOBBY_FP_HEADED=1 cargo test -p worker-pool --test fingerprint_conformance chromium_production_collector_dogfood -- --ignored --nocapture
-
-fingerprint-collectors-firefox:
-	@$(REPO_ROOT)scripts/dev/fingerprint-firefox.sh
 
 behavioral-benchmark:
 	cargo test -p behavioral-engine --test benchmark -- --nocapture

@@ -404,7 +404,7 @@ async fn intent_locate_resolves_inside_an_iframe_without_a_frame_path() {
     );
 
     // A plain (non-boundary) click into the shadow must work and must not
-    // kill the page target — the agent-path crash from the benchmark runs.
+    // kill the page target.
     let shadow_button = || in_preview_shadow("#confirm-preview");
     let outcome = submit_primitive(PrimitiveCommand::WaitFor(WaitForCommand {
         condition: WaitCondition::Element {

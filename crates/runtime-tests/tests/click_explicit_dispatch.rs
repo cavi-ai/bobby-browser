@@ -1,9 +1,7 @@
 //! Live installed-Chromium proof: a plain click (no modifiers, humanization
-//! off) now dispatches through the same explicit move/press/release
-//! sequence as a modifier click, instead of the opaque `resolved.click`
-//! fast path that `dispatch_click`/`click` used to special-case. One click
-//! on `/reports`' "Generate report" button must still produce exactly one
-//! report generation.
+//! off) dispatches through the same explicit move/press/release sequence as
+//! a modifier click. One click on `/reports`' "Generate report" button
+//! produces exactly one report generation.
 
 use std::path::PathBuf;
 
@@ -124,9 +122,7 @@ async fn plain_click_through_the_explicit_sequence_generates_one_report() {
         matches!(outcome, CommandOutcome::Completed { .. }),
         "{outcome:?}"
     );
-    // No modifiers and humanization is off by default: this is the exact
-    // shape that used to route through `resolved.click(&page)` instead of
-    // `dispatch_click`'s explicit move/press/release sequence.
+    // No modifiers and humanization off (the default): the plain-click shape.
     let outcome = submit(PrimitiveCommand::Click(ClickCommand {
         selector: String::new(),
         target: Some(TargetSpec {

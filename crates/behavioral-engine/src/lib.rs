@@ -2,7 +2,7 @@
 //!
 //! Provides mouse movement simulation (Bezier curves), typing simulation
 //! (variable delays, corrections), and scrolling simulation (pauses,
-//! variable speeds) to evade bot detection systems.
+//! variable speeds) with human-like timing.
 
 mod mouse;
 mod score;

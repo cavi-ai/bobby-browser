@@ -486,7 +486,7 @@ enum VisionCommands {
         #[arg(long)]
         config: Option<PathBuf>,
     },
-    /// Collect training data from gauntlet runs
+    /// Collect vision training data
     Collect {
         /// Output directory (default: data/vision/)
         #[arg(long, default_value = "data/vision/")]

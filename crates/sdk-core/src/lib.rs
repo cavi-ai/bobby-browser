@@ -545,9 +545,9 @@ impl RuntimeService {
     ///
     /// The gateway cannot do this: a `WorkflowCheckpoint` needs `restart_url`
     /// and `current_url`, and nothing on `RuntimeInterface` exposes live page
-    /// state. So the three calls an agent used to make -- pin ids, save a
-    /// checkpoint naming them, submit -- collapse here, where the page
-    /// registry and the context graph are both reachable.
+    /// state. So pinning ids, saving a checkpoint naming them and submitting
+    /// collapse here, where the page registry and the context graph are both
+    /// reachable.
     ///
     /// This is sugar over `Executor::validate`, never a bypass. The gate still
     /// runs and still matches on all five fields; a checkpoint that fails to
@@ -640,7 +640,7 @@ impl RuntimeService {
         vision_capability_ok: bool,
         one_shot_session_ok: bool,
     ) -> CommandOutcome {
-        // SECURITY(F4): authoritative deny-by-default gate for `EvaluateJavaScript`.
+        // Authoritative deny-by-default gate for `EvaluateJavaScript`.
         // The session must have opted in (`ExecutionPolicy.javascript_evaluation ==
         // true`) or the command is refused here, before reaching `self.pages.execute`
         // or a worker. Independent of, and after, the token capability gate in

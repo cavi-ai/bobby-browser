@@ -379,9 +379,7 @@ fn fill(purpose: &str, role: &str, value: ControlAction) -> IntentCommand {
 #[tokio::test]
 async fn fill_not_found_escalates_with_a_ranked_window() {
     // A fill that matches nothing must escalate with the page's plausible
-    // fields in the window. The fill path used to escalate with an EMPTY
-    // window — the model was asked to pick from nothing, correctly
-    // abstained, and the records were §4i poison.
+    // fields in the window, never an empty one.
     let request_debug = Arc::new(std::sync::Mutex::new(Vec::new()));
     let assist = Arc::new(RecordingVision {
         proposal: VisionProposal {
@@ -1350,7 +1348,7 @@ async fn policy_denied_never_calls_vision() {
     );
 }
 
-/// C4: an open session policy does not substitute for the capability.
+/// An open session policy does not substitute for the capability.
 ///
 /// This is the row the node substrate makes load-bearing. A session names a
 /// node and sets `executionPolicy.visionAssist`, both of which it controls;
@@ -1404,9 +1402,7 @@ async fn an_open_session_policy_does_not_substitute_for_the_capability() {
     );
 }
 
-/// C4, the mirror: holding the capability does not substitute for the session
-/// grant. Without this the double gate would be a single gate wearing two
-/// names.
+/// Holding the capability does not substitute for the session grant.
 #[tokio::test]
 async fn holding_the_capability_does_not_substitute_for_the_session_grant() {
     let called = Arc::new(AtomicBool::new(false));

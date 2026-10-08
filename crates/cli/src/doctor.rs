@@ -2966,10 +2966,8 @@ mod cdp_port_tests {
     fn an_occupied_port_is_named_before_bobby_cdp_fails_to_bind_on_it() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        // Read the request before answering. Closing a socket with unread bytes
-        // still in it can reset the connection before the client reads the
-        // response, which made the probe see a failure instead of a 200 (CI,
-        // 2026-08-15).
+        // Read the request before answering: closing a socket with unread bytes
+        // can reset the connection before the client reads the response.
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = Vec::new();

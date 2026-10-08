@@ -1,4 +1,4 @@
-//! Offline behavioral biometric benchmark (CreepJS analogue for interactions).
+//! Offline behavioral biometric benchmark for interactions.
 //!
 //! Run: `cargo test -p behavioral-engine --test benchmark -- --nocapture`
 //! Or:  `make behavioral-benchmark`

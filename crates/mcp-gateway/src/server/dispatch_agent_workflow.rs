@@ -310,9 +310,8 @@ impl Server {
     /// The compact observation an `AccessibilitySnapshot` against a handle's
     /// current page produces -- the same live path `dispatch_workflow_observe`
     /// runs when the caller supplies no `goal`. Shared with
-    /// [`Server::attach_post_state`] (C2) so a mutating action's `postState`
-    /// and a caller's next `workflow_observe` are built by one function,
-    /// never two copies that can drift apart.
+    /// [`Server::attach_post_state`], so a mutating action's `postState` and a
+    /// caller's next `workflow_observe` are built by one function.
     #[allow(clippy::too_many_arguments)]
     async fn live_workflow_observation(
         &self,
@@ -380,9 +379,8 @@ impl Server {
     /// Appends `postState` to a completed action outcome: the same compact
     /// observation `workflow_observe` would return for this handle's page
     /// right now, built by [`Server::live_workflow_observation`] with
-    /// default bounds -- so the caller can skip the redundant re-observe
-    /// (2026-09-23 transcripts: 7-9 `workflow_observe` calls per run, one
-    /// after nearly every action). A failed action outcome is returned
+    /// default bounds -- so the caller can skip the redundant re-observe.
+    /// A failed action outcome is returned
     /// with `postStateStatus: notRequested`; observation failure adds only a
     /// bounded `unavailable` diagnostic. Optional state never changes action success.
     ///

@@ -3206,7 +3206,7 @@ mod playwright_semantic_click {
             let evidence = match &command {
                 PrimitiveCommand::Navigate(nav) => vec![Evidence::Navigation {
                     url: nav.url.clone(),
-                    title: "Bobby agent-benchmark fixture".into(),
+                    title: "Bobby test fixture".into(),
                 }],
                 _ => Vec::new(),
             };
@@ -3395,7 +3395,7 @@ mod playwright_semantic_click {
         assert!(response.error().is_none(), "{:?}", response.error());
         assert_eq!(
             response.result().unwrap()["result"]["value"],
-            "Bobby agent-benchmark fixture"
+            "Bobby test fixture"
         );
     }
 

@@ -70,11 +70,10 @@ const MAX_PENDING_CANCELLATIONS: usize = 1024;
 /// stops pulling more off the subscription. See the comment at its use site.
 const MAX_PENDING_NOTIFICATION_WRITES: usize = 64;
 /// In-flight bound shared by request handlers and queued notification writes
-/// (both live in `pending`). A client pipelining thousands of `tools/call`
-/// frames without reading responses used to grow `pending` without limit —
-/// memory and browser-process exhaustion from one misbehaving agent. Past
-/// the bound the read branch backpressures: it stops pulling frames until a
-/// pending handler completes, exactly like the notification branch.
+/// (both live in `pending`). Past the bound the read branch backpressures: it
+/// stops pulling frames until a pending handler completes, exactly like the
+/// notification branch, so one client pipelining `tools/call` frames without
+/// reading responses cannot grow `pending` without limit.
 const MAX_IN_FLIGHT_REQUESTS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

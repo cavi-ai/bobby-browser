@@ -289,8 +289,8 @@ async fn create_session_page(server: &Server) -> (SessionId, PageId) {
 #[tokio::test]
 async fn download_tool_advertises_the_runtime_configured_byte_limit() {
     let (server, _root) = fixture().await;
-    // `download_url` narrowed out of the default `explore` catalog (Phase 2
-    // slice C1); it is still fully callable, just advertised in `act`.
+    // `download_url` is outside the default `explore` catalog; it is still
+    // callable, and advertised in `act`.
     server
         .handle_message(request(
             1,

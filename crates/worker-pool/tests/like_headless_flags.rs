@@ -20,8 +20,7 @@ fn chrome_config(root: &std::path::Path) -> config::BrowserConfig {
     }
 }
 
-/// Evaluates every CreepJS likeHeadless flag in our environment and prints
-/// exactly which ones trip, so the floor is measured, not guessed.
+/// Evaluates each like-headless flag and prints which ones trip.
 #[tokio::test]
 #[ignore = "requires Chrome; no network needed"]
 async fn print_like_headless_flag_state() {

@@ -856,12 +856,9 @@ async fn fill_text_on_a_file_control_names_upload_files_instead_of_a_generic_mis
 
 /// A native file input is routinely hidden behind a styled "choose file"
 /// button, so the deterministic resolver's visible-only pass finds nothing
-/// for it -- reproducing the observed bug (`workflow_observe` lists a `File`
-/// control, `intent_complete_form` targets it, the resolver says
-/// `targetNotFound`). That must still fail typed before any vision fallback,
-/// not escalate: every browser method the escalation path could reach
-/// panics, so a regression that removes the early check fails loudly here
-/// rather than quietly changing only the message.
+/// for it. That must fail typed before any vision fallback, not escalate:
+/// every browser method the escalation path could reach panics, so removing
+/// the early check fails loudly here.
 #[tokio::test]
 async fn complete_form_on_a_hidden_file_control_fails_before_vision_with_the_upload_repair() {
     let mut hidden_file = file_input("Resume");

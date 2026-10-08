@@ -1097,10 +1097,10 @@ impl SessionCoordinator {
     }
 
     /// A live pair is enough to attach. Firefox often starts on `about:blank`,
-    /// which the companion does not publish, so `targetsDiscovered` never
-    /// arrives and the wait used to fail while the websocket was already
-    /// paired. Wait for a real discovery first; synthesize empty only after
-    /// the caller deadline so in-flight `targetsDiscovered` is not replaced.
+    /// which the companion does not publish, so `targetsDiscovered` may never
+    /// arrive while the websocket is paired. Wait for a real discovery first;
+    /// synthesize empty only after the caller deadline so in-flight
+    /// `targetsDiscovered` is not replaced.
     async fn synthesize_empty_if_paired(
         &self,
         profile_id: &ProfileId,

@@ -8,8 +8,7 @@
 //! after another against the same owner.
 //!
 //! Every request must be answered and every journey must complete. Latencies
-//! are printed, not asserted; run with `--nocapture` for the table the docs
-//! reproduce.
+//! are printed, not asserted; run with `--nocapture` for the table.
 //!
 //! A gateway connection holds one `interface.max_connections` slot, not a
 //! per-principal permit. `max_in_flight_per_principal + 1` agents attached under

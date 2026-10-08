@@ -25,12 +25,12 @@ fn default_standard_fonts() -> Vec<String> {
         "Arial Black".to_string(),
         "Calibri".to_string(),
         "Cambria".to_string(),
-        "Cambria Math".to_string(), // Win7 marker (CreepJS)
+        "Cambria Math".to_string(), // Win7 marker
         "Comic Sans MS".to_string(),
         "Courier New".to_string(),
         "Georgia".to_string(),
         "Impact".to_string(),
-        "Lucida Console".to_string(), // Win7 marker (CreepJS)
+        "Lucida Console".to_string(), // Win7 marker
         "Lucida Sans Unicode".to_string(),
         "Microsoft Sans Serif".to_string(),
         "Palatino Linotype".to_string(),

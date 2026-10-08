@@ -314,7 +314,7 @@ async fn solve_challenge_rejects_actions_it_cannot_ground() {
     for action in [
         VisionAction::ClickCandidate { index: 0 },
         // Typing needs a resolved target; a vision typeText carries none, and
-        // the empty-selector act errors at the driver. Click-only for now.
+        // the empty-selector act errors at the driver. Only clicks ground.
         VisionAction::TypeText { text: "x".into() },
     ] {
         let candidate = VisionProposal {

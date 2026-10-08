@@ -1453,11 +1453,7 @@ fn wait_evidence_includes_excluded_classes_when_present() {
     assert!(value.get("observed").is_none());
 }
 
-/// A satisfied wait reports what it read.
-///
-/// The poll already reads the value to decide whether it is satisfied. It was
-/// discarded, so an agent verifying a submit paid a second round trip
-/// snapshotting the page to learn what it had just confirmed.
+/// A satisfied wait reports the value it matched on.
 #[test]
 fn wait_evidence_carries_the_value_the_condition_matched_on() {
     let evidence = Evidence::Wait {
@@ -1629,11 +1625,9 @@ fn control_action_validates_bounds_and_evidence_round_trips() {
     );
 }
 
-// === L3 unification contract (fix/l3-unified-control-values) ===
-// These tests define the unified mutation vocabulary: FillIntent and
-// CompleteFormField carry ControlAction, FillValue no longer exists, and the
-// control_action verbs (setText/setChecked/selectOne/selectMany/setFiles/
-// clear) are the only wire spelling. Do not weaken these assertions.
+// === Unified control vocabulary ===
+// FillIntent and CompleteFormField carry ControlAction; the control_action verbs
+// (setText/setChecked/selectOne/selectMany/setFiles/clear) are the only wire spelling.
 
 #[test]
 fn fill_uses_the_control_action_vocabulary() {

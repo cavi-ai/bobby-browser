@@ -1,4 +1,4 @@
-//! Spec C exit proof (T8): a cold session completes a three-step onboarding
+//! A cold session completes a three-step onboarding
 //! flow with discovery snapshots; a second session on the same durable
 //! profile is answered by the persisted context graph before any snapshot
 //! and completes with strictly fewer runtime commands. Also measures

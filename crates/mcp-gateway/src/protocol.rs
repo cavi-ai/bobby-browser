@@ -4,15 +4,9 @@ pub const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 
 /// Every revision this gateway speaks, newest first.
 ///
-/// Rejecting an older revision outright made the gateway unreachable from any host that
-/// had not moved to the newest one: Claude Code offers 2025-06-18, got `Invalid params`,
-/// and dropped the connection, so `bobby-browser` never appeared in its tool list at all
-/// while `bobby doctor` reported the gateway healthy — the handshake it runs asks for the
-/// newest revision, so it never saw what a real client sees.
-///
-/// The MCP lifecycle expects negotiation here: the server answers with a revision it
-/// supports, and the client decides whether it can live with it. Only a revision this
-/// gateway does not implement is an error.
+/// The MCP lifecycle expects negotiation: the server answers with a revision it supports,
+/// and the client decides whether it can live with it. Only a revision this gateway does
+/// not implement is an error.
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
     &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 

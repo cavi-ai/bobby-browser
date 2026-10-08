@@ -42,12 +42,11 @@ SUITES = {
             # signal is production-negative recall (real escalations) —
             # floored at 100%. The aggregate abstain recall includes the
             # scripted-ambiguous singleton class, which flaps 66-100%
-            # between identical-config retrains at this corpus scale
-            # (measured across v5-v13), so its floor marks the collapse
-            # band, not the best run.
+            # between identical-config retrains at this corpus scale, so its
+            # floor marks the collapse band, not the best run.
             "element_accuracy": 0.98,
             "abstain_recall_production": 1.0,
-            # Singleton research classes (boundary probes, real-site absent
+            # Singleton classes (boundary probes, absent-target
             # probes) flap by construction at n=1-2 per phrasing; the floor
             # proves the class is alive without pretending a coin flip is a
             # regression.
@@ -66,8 +65,8 @@ SUITES = {
         "input": "data/contrastive-probe.jsonl",
         "floors": {
             "element_accuracy": 1.00,  # disambiguated rows must all resolve
-            # 2/3 ambiguous rows abstained is the observed flap floor for
-            # a healthy adapter; 0/3 is the no-abstention failure mode.
+            # 2/3 ambiguous rows abstained is the flap floor for a healthy
+            # adapter; 0/3 is the no-abstention failure mode.
             "abstain_recall": 0.66,
             # False abstains on disambiguated rows are the safety signal
             # that never flaps — hold it at 100%.

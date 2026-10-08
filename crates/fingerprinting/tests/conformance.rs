@@ -180,8 +180,7 @@ fn emitted_script_drops_placeholders_and_embeds_worker_bootstrap() {
     // Worker bootstrap is a JS string literal injected for getWorkerBootstrap().
     assert!(script.contains("bobby.fp.worker"));
     assert!(script.contains("getWorkerBootstrap"));
-    // Budget raised 40k -> 42k for the Notification.permission /
-    // pdfViewerEnabled / Web Share surfaces (CreepJS like-headless flags).
+    // Budget covers the Notification.permission / pdfViewerEnabled / Web Share surfaces.
     assert!(
         script.len() < 42_000,
         "script grew to {} bytes (budget 42k)",

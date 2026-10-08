@@ -1117,7 +1117,7 @@ async fn control_action_set_text_without_clear_first_still_clears_before_typing(
     let target = name_field.target.clone().unwrap();
 
     // The wire body carries no `clearFirst`; ControlAction::SetText must still
-    // default to replace semantics (matches the previously hard-coded true).
+    // default to replace semantics.
     let action: ControlAction =
         serde_json::from_value(serde_json::json!({"kind":"setText","value":"x"})).unwrap();
     let evidence = worker
@@ -1803,11 +1803,8 @@ async fn waits_for_dynamic_element_content_url_document_and_network_quiet() {
     worker.close().await.unwrap();
 }
 
-/// B1: a `Text` wait whose target matches more than one candidate must not
-/// error with `targetAmbiguous` — the matcher, not identity, decides which
-/// candidate satisfies it. Three `<p>` elements only one of which contains
-/// the wanted text (an onboarding-step paragraph); nine `<a>` links only one
-/// of which contains "Download" (a report-recovery link).
+/// A `Text` wait whose target matches several candidates does not error with
+/// `targetAmbiguous`: the text matcher decides which candidate satisfies it.
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn wait_for_text_resolves_an_ambiguous_target_by_matcher() {
@@ -3374,7 +3371,7 @@ async fn humanized_input_reaches_the_page_with_synthesized_timing() {
     worker.close().await.unwrap();
 }
 
-/// Dogfood the Chromium humanized stream as a detector would: inter-key
+/// The Chromium humanized stream, read as a detector would: inter-key
 /// intervals must vary like a human's (no machine-uniform cadence, no
 /// zero-ms chords), and the mouse path must not be a straight line.
 #[tokio::test]
@@ -3826,8 +3823,8 @@ async fn descends_unnamed_srcdoc_iframes_and_resolves_the_stamped_ordinal_hop() 
 }
 
 /// A hung `click_and_wait_for_popup` on one page must not block another
-/// page's commands: the worker-wide browser mutex used to be held for the
-/// whole click-plus-wait, up to `timeout_ms`, serializing every other page.
+/// page's commands: the worker-wide browser mutex is not held across the
+/// click-plus-wait.
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn a_hung_click_and_wait_for_popup_does_not_block_other_pages() {
@@ -3890,8 +3887,8 @@ async fn a_hung_click_and_wait_for_popup_does_not_block_other_pages() {
 
     // Give the click a head start so it is inside its wait loop, then prove
     // page B is not blocked behind page A's still-pending popup wait. The
-    // probe resolves a target, the path that used to take the worker-wide
-    // browser mutex; a whole-page inspect never did and would pass either way.
+    // probe resolves a target, the path that takes the worker-wide browser
+    // mutex; a whole-page inspect never does and would pass either way.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     let started = std::time::Instant::now();
     worker

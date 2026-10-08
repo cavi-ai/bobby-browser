@@ -199,11 +199,7 @@ async fn the_full_surface_has_room_for_at_least_one_more_small_tool() {
     );
 }
 
-/// The fixed cost of every call is the catalog an agent re-downloads on every
-/// `tools/list`. Phase 2 slice C1 set these at half (explore) and two thirds
-/// (full) of the pre-diet sizes measured on 7bdb7948 (75,648 and 115,089
-/// bytes). The advertise-only compaction lowered them again: explore 32,740
-/// -> 26,776 and full 77,053 -> 66,380 bytes on 7437c435.
+/// Byte ceilings for the catalog an agent downloads on every `tools/list`.
 const EXPLORE_BYTE_CEILING: usize = 28 * 1024;
 const FULL_BYTE_CEILING: usize = 68 * 1024;
 

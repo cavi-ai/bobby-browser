@@ -1,8 +1,7 @@
-//! C2: on success, `intent_follow`, `intent_submit_and_verify`,
-//! `intent_complete_form`, and boundary `click` carry `postState` -- the
-//! same compact observation `workflow_observe` would return for the acting
-//! page, built by the same function -- so a follow-up `workflow_observe`
-//! call is redundant. Absent on a failed outcome.
+//! On success, `intent_follow`, `intent_submit_and_verify`,
+//! `intent_complete_form`, and boundary `click` carry `postState`, the compact
+//! observation `workflow_observe` returns for the acting page. Absent on a
+//! failed outcome.
 
 mod common;
 

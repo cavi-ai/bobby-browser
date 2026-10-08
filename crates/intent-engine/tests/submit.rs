@@ -761,10 +761,8 @@ async fn submit_and_verify_wait_timeout_after_landed_click_is_not_a_resubmit_inv
     assert_eq!(log.waits.len(), 2);
 }
 
-/// Same shape as the timeout case above, but for the wait error B1 targets
-/// directly: the post-act wait's target matched more than one candidate.
-/// The click already landed, so this is `VerificationFailed`, not a
-/// retryable `TargetAmbiguous`.
+/// An ambiguous post-act wait target after the click landed is
+/// `VerificationFailed`, not a retryable `TargetAmbiguous`.
 #[tokio::test]
 async fn submit_and_verify_recodes_ambiguous_postclick_wait_as_verification_failed() {
     let calls = Arc::new(Mutex::new(CallLog::default()));
