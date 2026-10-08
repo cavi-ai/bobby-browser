@@ -4,18 +4,9 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 # Canonical form contract
 
-`FormSnapshot` is the versioned, engine-neutral contract for observing forms
-before an agent plans edits. Version 1 is additive: it does not change the
-existing accessibility snapshot. Agents can request the contract through the
-read-only MCP `form_snapshot` tool with `{ sessionId, pageId, maxControls? }`; it requires
-`page:read`, not browser mutation or caller-enabled JavaScript evaluation.
+A `FormSnapshot` describes the forms on a page in an engine-neutral shape, so an agent can plan edits before acting. Read one with the MCP `form_snapshot` tool, `GET /v1/sessions/{session}/pages/{page}/forms`, or the SDKs' `formSnapshot` and `read_page`. It needs `page:read`, not `browser:mutate`.
 
-The contract represents owned forms, unowned controls, labeled groups,
-constraints, validity, options, supported operations, and safe semantic
-targets. It intentionally excludes CSS selectors, DOM or backend node IDs, raw
-HTML, arbitrary attributes, and secret values.
-
-## Root shape
+It reports forms, controls outside forms, labeled groups, constraints, validity, options, the operations each control supports, and a safe semantic target. It never includes CSS selectors, DOM or backend IDs, raw HTML, arbitrary attributes or secret values.
 
 ```ts
 interface FormSnapshot {
@@ -28,68 +19,34 @@ interface FormSnapshot {
 }
 ```
 
-Every control has a stable snapshot-local ID, its form and group membership,
-a normalized `controlKind`, current typed state, constraints, validity,
-options, and `supportedOperations`. References must resolve inside the same
-snapshot; duplicate IDs, inconsistent group membership, and submit/reset
-references to the wrong control kind are invalid.
+Every control has a snapshot-local ID, its form and group, a normalized `controlKind`, typed current state, constraints, validity, options and `supportedOperations`. A control's target holds a role, accessible name, optional ordinal and bounded frame or shadow paths. If a safe target cannot be produced, the target is absent.
 
-Targets use only role, accessible name, optional ordinal, and bounded semantic
-frame/shadow paths. A missing target means the control was observable but a
-safe command-ready identity could not be produced.
+A snapshot is limited to 64 forms and 512 controls. `truncated: true` means discovery hit a limit. Unknown fields and unsupported schema versions are rejected.
 
-## Sensitive state
+## Passwords
 
-Password controls never contain `{ kind: "text", value: ... }`. Their state is
-represented without content:
+A password control never exposes its value. Its state is:
 
 ```json
 { "kind": "redacted", "present": true }
 ```
 
-`present` answers only whether a value exists. Consumers must not infer or log
-its contents. Rust serialization and both Rust and TypeScript validators reject
-password controls that expose text.
+`present` says only whether a value exists.
 
-## Bounds and compatibility
+## Act on controls
 
-Version 1 is fail-closed: unknown fields and unsupported schema versions are
-rejected. A snapshot contains at most 64 forms and 512 total controls; nested
-collections and strings are also bounded. `truncated: true` tells consumers
-that discovery reached a budget and the snapshot is incomplete.
+Pass a control's target to `control_action` (or the `controlAction` primitive). Before acting, bobby rereads the control and checks that it supports the operation. It then performs the operation once and returns evidence with the operation, target, typed state and validity. Unsupported or ambiguous targets fail before anything changes. An action whose effect is uncertain is never replayed automatically.
 
-Rust consumers use the types exported by the `types` crate and can generate a
-JSON Schema with its `schema` feature. TypeScript consumers use
-`FormSnapshot`, `FORM_SNAPSHOT_SCHEMA_VERSION`, and `isFormSnapshot` from
-`@cavi-ai/bobby-browser`.
-
-Future engine, MCP, and agent-skill adapters should produce or consume this
-contract instead of defining engine-specific form shapes.
-
-Live Chromium and Firefox reads use the same bounded raw DOM projection and
-the same Rust normalizer. Canonical IDs, control kinds, typed state, validity,
-supported operations, redaction, and truncation are not decided by
-engine-specific scripts.
-
-## Typed control actions
-
-Each control advertises the exact operations accepted by the reconciliable
-`controlAction` primitive. Chromium and Firefox preflight the operation against
-the reread control, execute it once through their native transport, then return
-`ControlActionEvidence` with the operation, semantic target, typed state,
-validity, and node-replacement status. Unsupported or ambiguous targets fail
-before mutation; uncertainty after dispatch is never blindly replayed.
-
-`controlAction` accepts one of the following unified operations:
-
-| Kind | Shape | Notes |
+| Kind | Shape | Effect |
 |---|---|---|
-| `setText` | `{ kind: "setText", value: string, clearFirst?: bool }` | Replace or append text; `clearFirst` defaults to true (replace existing) |
-| `setChecked` | `{ kind: "setChecked", checked: bool }` | Toggle checkbox or radio state |
-| `selectOne` | `{ kind: "selectOne", value: string }` | Select one option by value or visible label |
-| `selectMany` | `{ kind: "selectMany", values: [string] }` | Select multiple options by value or label |
-| `setFiles` | `{ kind: "setFiles", paths: [string] }` | Set file input paths |
-| `clear` | `{ kind: "clear" }` | Clear control value |
-| `activate` | `{ kind: "activate" }` | Activate a link or button |
+| `setText` | `{kind, value, clearFirst?}` | Replace (default) or append text |
+| `setChecked` | `{kind, checked}` | Set a checkbox or radio |
+| `selectOne` | `{kind, value}` | Select an option by value or visible label |
+| `selectMany` | `{kind, values}` | Select several options |
+| `setFiles` | `{kind, paths}` | Set file input paths. Needs `file:upload` |
+| `clear` | `{kind}` | Empty the control |
+| `activate` | `{kind}` | Activate a link or button |
 
-The `fill` intent and `completeForm` intent use the same `ControlAction` vocabulary, except `activate` is rejected in fill (fill is for control value operations only). `control_action` MCP tool accepts all kinds including `activate`.
+The `fill` and `completeForm` intents use the same vocabulary, without `activate`. See [Intent commands](../guides/intents.md).
+
+In TypeScript, use `FormSnapshot`, `FORM_SNAPSHOT_SCHEMA_VERSION` and `isFormSnapshot` from `@cavi-ai/bobby-browser`.

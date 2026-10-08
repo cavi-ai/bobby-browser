@@ -4,59 +4,15 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 # Evidence and checkpoints
 
-Adapters share evidence, checkpoint, and recovery contracts. This page owns
-**durable checkpoints and reconciliation**. Cursor continuity and `EventGap`
-live in [Events and recovery](../guides/events-recovery.md).
+Every command returns typed evidence of what happened. A checkpoint records where a workflow stands, so it can resume after a crash without repeating side effects. Event cursors and gaps are covered in [Events and recovery](../guides/events-recovery.md).
 
-## Why checkpoints
+## Evidence
 
-Long workflows must survive worker restarts and process crashes without silently
-replaying side effects. A checkpoint is a verified snapshot of workflow
-identity, page/session binding, restart URL, recovery class, invariants, and
-replayable inputs.
+A command outcome carries evidence items such as navigation results, accessibility snapshots, screenshots, JavaScript results and download digests. Fetch artifact bytes with `artifact:read` through `GET /v1/artifacts/{id}`, `client.artifact(reference)`, or an `artifact://<id>` MCP resource. Evidence in an outcome is not a substitute for a checkpoint when you need restart safety.
 
-## Writing a checkpoint
+## Checkpoints
 
-`POST /v1/checkpoints` requires `recovery:write`. Body shape matches the
-TypeScript SDK `CheckpointRequest`: the checkpoint (workflow / attempt /
-session / page ids, restart URL, recovery class, invariants, replayable inputs)
-plus `evidenceRefs`.
-
-`evidenceRefs` names command ids, not evidence. The runtime resolves each id
-against the journal it wrote itself, checks that the naming principal owns the
-command's session, and fails the checkpoint if an id has no terminal record. A
-caller cannot author evidence for work it did not perform — the same contract
-the MCP `checkpoint_save` tool enforces. Maximum 128 refs.
-
-Typical moments to checkpoint:
-
-- Before boundary work (`SubmitAndVerify`, boundary clicks /
-  `Follow` with `boundary: true`) — required, not optional: the runtime
-  refuses a Boundary command whose checkpoint does not already name the
-  exact `commandId`/`attemptId` the command will carry.
-- After durable evidence is available and before irreversible navigation
-
-## `autoCheckpoint`
-
-Over MCP, `intent_submit_and_verify`, `intent_follow`, and boundary `click`
-accept `autoCheckpoint`, which **defaults to `true`**. The runtime mints the
-pre-action checkpoint inside the same call and returns its `checkpointId`
-alongside the usual `workflowId` / `commandId` / `attemptId`.
-
-This is sugar over the gate, never a bypass. The runtime still matches the
-checkpoint against the command on all five fields — workflow, attempt, session,
-page, and `boundaryCommandId` — and a checkpoint that fails to save fails the
-command rather than letting it run unprotected.
-
-The runtime authors it because the gateway cannot: a checkpoint carries
-`restartUrl` and `currentUrl`, and no interface method exposes live page state.
-
-Pass `autoCheckpoint: false` when you need to author the checkpoint's
-`invariants` or `replayableInputs`. Then pin `commandId`/`attemptId` yourself
-and pass them to both `checkpoint_save` and the Boundary call; `intent_*` tools
-and `click` accept both ids.
-
-TypeScript:
+A checkpoint holds the workflow, attempt, session and page IDs, the restart URL, a recovery class, invariants and replayable inputs. `POST /v1/checkpoints` and the MCP tool `checkpoint_save` need `recovery:write`.
 
 ```ts
 await client.checkpoint(
@@ -65,54 +21,35 @@ await client.checkpoint(
 );
 ```
 
+`evidenceRefs` lists up to 128 command IDs, not evidence. The runtime resolves each against its own journal and checks that you own the command's session. A checkpoint fails if an ID has no terminal record, so a caller cannot author evidence for work it did not do.
+
+Checkpoint before boundary work: `intent_submit_and_verify`, `intent_follow` with `boundary: true`, and boundary clicks. The runtime refuses a boundary command unless a checkpoint already names its exact `commandId` and `attemptId`.
+
+### `autoCheckpoint`
+
+Over MCP, boundary tools take `autoCheckpoint`, which defaults to `true`. The runtime saves the checkpoint inside the same call and returns its `checkpointId`. The checkpoint must still match the command on workflow, attempt, session, page and boundary command. If it cannot be saved, the command fails instead of running unprotected.
+
+Pass `autoCheckpoint: false` to author `invariants` or `replayableInputs` yourself. Then pin `commandId` and `attemptId` and pass the same IDs to `checkpoint_save` and the boundary call.
+
 ## Recovery
 
-Inspect with `GET /v1/recovery/{workflowId}` / `client.recoveryStatus` /
-MCP `recovery_status` (`recovery:read`) before or after mutate calls.
-
-`POST /v1/recovery/{workflowId}` returns a `RecoveryDecision`. The TypeScript
-client maps `needsReconciliation` to HTTP 409.
-
-Loss at accepted, prepared, executing, verifying, or result-prepared boundaries
-that cannot prove the outcome remains `NeedsReconciliation` — never silently
-replayed. Replayable work may retry only through runtime policy. Boundary /
-reconciliable classes follow command-class rules — see
-[Intent commands](../guides/intents.md).
-
-Details and surface matrix: [Events and recovery](../guides/events-recovery.md).
-
-## Evidence
-
-Command outcomes carry typed evidence items (navigation, DOM snapshots,
-screenshots, JavaScript results, …). Artifact bytes are fetched separately with
-`artifact:read` via `GET /v1/artifacts/{id}` / `client.artifact(reference)`.
-
-Do not treat screenshots or JS results in the outcome envelope as a substitute
-for a durable checkpoint when you need restart safety.
+`GET /v1/recovery/{workflowId}` (or `recovery_status`) returns the checkpoint and receipts. `POST /v1/recovery/{workflowId}` (or `workflow_recover`) returns a decision to resume, restart or reconcile. If bobby cannot prove whether an interrupted action took effect, the decision is `needsReconciliation` (HTTP 409) and nothing is replayed. Replayable work retries only under runtime policy. Command classes are in [Intent commands](../guides/intents.md).
 
 ## Audit bundles
 
-`bobby audit export --workflow <workflowId>` writes one workflow's record to a
-tar a reviewer can check offline:
+`bobby audit export --workflow <workflowId>` writes a tar that a reviewer can check offline:
 
-- `journal.jsonl`: every command-journal line for the workflow's commands,
-  copied byte for byte (phases, envelopes, outcomes, evidence)
-- `checkpoint.json`: the workflow's checkpoint file, when one exists
-- `artifacts/<id>/…`: each artifact the journal names that is still on disk;
-  evicted ones are listed as `missingArtifacts`
-- `manifest.json`: the SHA-256 and size of every file above
-- `signature.json`: an Ed25519 signature over `manifest.json`
+| File | Contents |
+|---|---|
+| `journal.jsonl` | The workflow's command journal lines, byte for byte |
+| `checkpoint.json` | The workflow's checkpoint, if any |
+| `artifacts/<id>/...` | Artifacts the journal names that are still on disk. Missing ones are listed as `missingArtifacts` |
+| `manifest.json` | SHA-256 and size of every file |
+| `signature.json` | Ed25519 signature over the manifest |
 
-The signing key is created on first use at
-`<config dir>/audit-signing-key.pk8` (owner-only). `bobby audit key` prints its
-public key. `bobby audit verify <bundle> --public-key <hex>` recomputes every
-digest, rejects missing, extra, or altered files, and checks the signature
-against that key; without `--public-key` it accepts any valid signer and says
-so. Export only reads the runtime's files, so it runs next to a live runtime.
+The signing key is created on first use in the config directory (`audit-signing-key.pk8`, owner-only). `bobby audit key` prints the public key. `bobby audit verify <bundle> --public-key <hex>` recomputes every digest, rejects missing, extra or altered files, and checks the signature against that key. Without `--public-key` it accepts any valid signer and says so. Export reads the runtime's files and runs beside a live runtime. See [Workflow replay](../guides/replay.md).
 
 ## Next
 
 - [Events and recovery](../guides/events-recovery.md)
 - [Intent commands](../guides/intents.md)
-- [TypeScript SDK](../surfaces/typescript-sdk.md)
-- [Python SDK](../surfaces/python-sdk.md)

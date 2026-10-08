@@ -4,75 +4,40 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 # Multi-principal runtime
 
-A single bobby-browser instance serves many independent tenants. Each principal has:
+One bobby instance serves many independent callers. Each caller is a principal with:
 
-- A capability-scoped bearer token
-- An independent in-flight request quota (`interface.max_in_flight_per_principal`)
-- Server state (runtime binding, MCP lifecycle, idempotency, sessions) scoped to
-  that principal
+- A bearer token limited to a set of [capabilities](capabilities.md).
+- Its own in-flight request quota (`interface.max_in_flight_per_principal`).
+- Its own sessions, pages, idempotency keys and MCP state.
 
-Quota exhaustion returns HTTP **429** with a `Retry-After` header (seconds) and
-often `error.retryAfterMs` in the JSON body — see
-[HTTP API — Rate limits and retry](../surfaces/http-api.md#rate-limits-and-retry).
+A principal cannot see another principal's sessions or pages. Closing a session releases that principal's browser worker. When a principal exceeds its quota, the API returns HTTP 429 with `Retry-After`. See [HTTP API](../surfaces/http-api.md#rate-limits).
 
-Sessions and pages created by principal A are not visible to principal B.
-Deleting a session (`DELETE /v1/sessions/{id}` / MCP `session_close`) releases
-that principal's worker binding for the session.
+Remembered site context is keyed by the browser profile, not the principal. Any principal with `context:read` on a runtime with a durable profile can read it, and principals without that capability are denied on every surface. It holds structure and counters, never typed values or page content. See [Context graph](context-graph.md).
 
-Remembered site context (the persisted context graph) is keyed by the durable
-profile identity, not by principal: any principal holding `context:read` on a
-runtime with a durable profile identity (including managed Chromium's shared
-`managed-chromium`) can read it, and principals without it are denied on every
-surface. It contains structure and counters only — never
-typed values or page content.
+## Issue and revoke principals
 
-The bootstrap credential holds `authority:admin` only when minted with
-`--preset unrestricted` (or a marker-less legacy file healed as unrestricted).
-Default `bobby init` is the **agent** floor and cannot mint or revoke principals.
-With admin, the bootstrap is the only principal that can mint or revoke other tokens:
+The credential from `bobby init --preset unrestricted` holds `authority:admin` and is the only kind that can mint principals. The default `agent` preset cannot.
 
-- `POST /v1/principals` issues a scoped bearer (returned once in the response body)
-- `DELETE /v1/principals/{id}` revokes a principal immediately
+- `POST /v1/principals` issues a scoped bearer, returned once.
+- `DELETE /v1/principals/{id}` revokes it immediately.
 
-Issuance is capability-bounded: issued capabilities must be a subset of the issuer's,
-cannot include `authority:admin`, and are TTL-capped (90 days). Only SHA-256 hashes
-of issued bearers are persisted.
-
-Full header contract and mint curl: [Authentication](../guides/auth.md).
-
-## Issue request / response
-
-Request (`POST /v1/principals`):
+Issued capabilities must be a subset of the issuer's, cannot include `authority:admin`, and expire within 90 days. Only SHA-256 digests of issued tokens are stored.
 
 ```json
 {
   "principalId": "10000000-0000-0000-0000-000000000051",
   "capabilities": ["session:read", "session:write"],
-  "expiresAt": "2026-07-28T20:00:00.000Z"
+  "expiresAt": "2027-01-01T00:00:00.000Z"
 }
 ```
 
-Response `201`:
+The `201` response repeats these fields and adds `bearer`. A caller without `authority:admin` gets `403`. After revocation (`204`), the token gets `401`. The full request is in [Authentication](../guides/auth.md#issue-a-scoped-token).
 
-```json
-{
-  "principalId": "10000000-0000-0000-0000-000000000051",
-  "capabilities": ["session:read", "session:write"],
-  "expiresAt": "2026-07-28T20:00:00.000Z",
-  "bearer": "<one-time plaintext>"
-}
-```
+## Practice
 
-Capture `bearer` immediately. A non-admin caller receives `403`. After
-`DELETE /v1/principals/{principalId}` (`204`), the issued bearer yields `401`.
-
-## Operator tips
-
-- Mint least-privilege tokens for each automation job; keep `authority:admin`
-  off production worker hosts.
-- Rotate by issuing a new principal and revoking the old id.
-- MCP HTTP: rotating the bearer resets that principal's MCP initialize state —
-  clients must `initialize` again.
+- Issue the narrowest capabilities each job needs, and keep `authority:admin` off worker hosts.
+- Rotate by issuing a new principal and revoking the old one.
+- Over MCP HTTP, rotating a bearer resets that principal's MCP state, so clients send `initialize` again.
 
 ## Next
 
