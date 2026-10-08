@@ -1,209 +1,48 @@
 # bobby-browser
 
-A browser automation runtime for agents, with authenticated, capability-scoped
-control surfaces: MCP (stdio and streamable HTTP), ACP over stdio, Rust and
-TypeScript SDKs, and Playwright/Puppeteer over authenticated CDP. All adapters
-share the same capability, idempotency, evidence, checkpoint, and event
-contracts. Authentication fails closed; credentials are never accepted in URLs
-or query strings.
+A browser automation runtime for AI agents and applications. It drives Firefox or Chromium and exposes the browser through MCP tools, an HTTP API, ACP, authenticated CDP, and SDKs for TypeScript, Python and Rust.
 
-## Built for agents
+Every call is authenticated, limited by capabilities, journaled with evidence, and recoverable after a crash. Credentials are never accepted in URLs.
 
-An agent pays for every token it reads and every round trip it makes. The
-runtime is shaped around both.
-
-**A catalog you can afford.** `tools/list` opens on a phase, not the whole
-surface. The default `explore` phase is under 28 KiB and already covers the
-standard loop — observe, navigate, click, type, upload, complete and submit
-a form — so there is no `toolset_select` before the first action; `full` is
-under 68 KiB. `toolset_select` widens at any time, and hidden tools stay
-callable — phases change what is advertised, never what is permitted.
-Capability gates remain the only enforcement boundary. Set the opening phase
-with `BOBBY_MCP_TOOLSET` or `[mcp] startup_toolset`.
-
-**Say what you want, not how to click it.** Intents take a purpose — "the
-submit button", "the email field" — and resolve it against the accessibility
-tree, returning the candidates they considered and why they chose one. Pass an
-`a11y_snapshot` node's `target` straight through when you already have it.
-
-**Fewer round trips per action.** A Boundary command needs a pre-action
-checkpoint; `autoCheckpoint` mints it inside the same call instead of the three
-it used to take. Verified waits report what they observed, so confirming a
-submit does not cost a second snapshot.
-
-**Failures tell you what to do next.** Every error carries a machine-readable
-repair hint alongside the code, so an agent can act without first reading
-`bobby://failure-taxonomy`. A `needsReconciliation` outcome always says the same
-thing: do not retry, reconcile first.
-
-**Memory across sessions.** The runtime remembers each site's form structure —
-roles, names, ordinals — never typed values or credentials. `context_ask` and
-`context_neighbors` answer from it, so a cold session can locate a control
-before its first snapshot. `bobby context list` and `bobby context forget
-<site>` manage it; a release gate scans the store to prove no values land there.
-
-**It survives losing its place.** `recovery_status` takes a `workflowId`, or a
-`sessionId` when a compaction lost it, and lists that session's recoverable
-workflows newest-first.
-
-**Work that outlives a call.** `job_submit` / `job_status` / `job_cancel` mirror
-HTTP `/v1/jobs`. Built-in handlers: `echo`, `sleep`, `http_probe`, `http_wait`,
-and `http_fetch`.
+> **Alpha.** Interfaces are stable enough to build against but can change before 1.0. See [SECURITY.md](SECURITY.md).
 
 ## Install
 
-### Share a local runtime by team or project
-
-Use the same scope flags across installation, Firefox pairing, agent hosts,
-and CLI commands:
+Pick one.
 
 ```bash
-bobby --team engineering --project checkout install --companion --host claude --yes
-bobby --team engineering --project checkout firefox-start
-# Pair from the Bobby companion toolbar in that Firefox window.
-bobby --team engineering --project checkout runtime start
-bobby --team engineering --project checkout mcp-stdio
-bobby --team engineering --project checkout acp-stdio
-bobby --team engineering --project checkout runtime status
-bobby runtime list
-bobby --team engineering --project checkout runtime restart
-bobby --team engineering --project checkout runtime stop
-```
-
-Either flag can be used independently. Each scope has its own configuration,
-credential, browser profile, context, and storage. Clients in the same scope
-reuse one authenticated runtime on an automatically assigned loopback port.
-Each MCP/ACP connection keeps its own protocol state; disconnecting an agent
-leaves the owner available for other clients. `runtime stop` stops the scope
-explicitly, with the same guard as `runtime restart` (it asks before
-disconnecting attached agents, and refuses without a terminal unless
-`--disconnect-agents` is given); `runtime restart` stops and starts it again (`--force` terminates a
-hung owner). It lists what is attached and asks before disconnecting agents;
-without a terminal it refuses unless `--disconnect-agents` is given, and it saves
-the impact report to `runtime/restart-snapshots/` before stopping. Agents keep connecting after the
-scope's configuration changes; `runtime restart` applies the change. Eight agents on
-one owner each started a browser, filled a form, and closed in 2.0–2.1 s
-together, with no request lost; agents sharing one credential are capped at 8
-connections ([measurements](docs/bobby-browser/source/pages/surfaces/mcp-stdio.md#how-many-agents)).
-
-Scopes organize runtimes on one machine under the current OS user. Existing
-capability gates apply to every connection. Scoped host installation records
-the flags in its CLI entrypoint; `jobs`, `context`, `doctor`, and foreground
-`serve` use the same scope. Without flags, the CLI uses the personal scope.
-
-One command builds the runtime, updates the `bobby`, `mcp-gateway`, and
-`acp-gateway` binaries on PATH, installs the Firefox companion, wires your agent
-host, and creates the credential when missing:
-
-```bash
-make install
-```
-
-With a terminal it runs the checklist; without one (an agent shell, CI) it runs
-`bobby install --yes`. A running runtime owner keeps serving its old build:
-`bobby install` prints the owner pid when the installed `bobby` changed, and
-`make install RESTART=1` (`bobby install --restart-runtime`) stops that owner so
-the next agent connection starts the new build. Attached agents disconnect.
-
-Firefox companion only (extension + native host):
-
-```bash
-make firefox
-```
-
-Put `bobby`, `mcp-gateway`, and `acp-gateway` on your PATH as one set
-(`~/.cargo/bin` when that is already on PATH, else `~/.local/bin`); the
-install refuses a build missing either gateway:
-
-```bash
-make cli
-```
-
-It runs an interactive checklist. For CI or scripted setup:
-
-```bash
-cargo build --release -p bobby-browser
-./target/release/bobby install --host claude --skill --yes
-```
-
-### Homebrew (macOS / Linux)
-
-```bash
+# Homebrew
 brew tap cavi-ai/tap
 brew install cavi-ai/tap/bobby-browser
+
+# Install script (Linux and macOS)
+curl -fsSL https://raw.githubusercontent.com/cavi-ai/bobby-browser/main/scripts/install.sh | bash
+
+# From source
+cargo build --release -p bobby-browser
+./target/release/bobby install --cli
 ```
 
-Installs `bobby`, `mcp-gateway`, and `acp-gateway`. The tap repository is
-[`cavi-ai/homebrew-tap`](https://github.com/cavi-ai/homebrew-tap); brew strips
-the `homebrew-` prefix and addresses it as `cavi-ai/tap`, so the formula is
-reached as `cavi-ai/tap/bobby-browser` rather than repeating the project name.
+Each installs `bobby`, `mcp-gateway` and `acp-gateway`. Windows and release archives are covered in [Installation](docs/bobby-browser/source/pages/introduction/installation.md).
 
-The formula is named for the project, not the binary, so it matches the crate
-and the npm package and stays viable for a homebrew-core submission, where
-`bobby` alone would be too generic.
+## First session
 
-Homebrew rejects a formula outside a tap, so there is no
-`brew install --formula ./Formula/...` path; use the tap, or take the binaries
-straight from the [release assets](https://github.com/cavi-ai/bobby-browser/releases/latest).
-
-Release archives are three binaries on purpose: the CLI plus the two stdio
-gateways agents spawn. The default MCP Explore phase already includes the
-base controls; widen with `toolset_select` only for intents, jobs, or escape
-hatches.
-Use `workflow_start` and `workflow_observe` for lifecycle-safe setup and
-retained-first compact context in every MCP phase.
-
-`bobby install` merges into an existing Claude Code, Zed, or VS Code MCP config
-rather than replacing it, and writes no secrets into host config — the host
-points at `bobby mcp-stdio`, which loads the credential itself.
-
-Verify, then (companion path) start Firefox and Pair once:
+Wire up your agent host and check the setup:
 
 ```bash
-bobby doctor          # config, credential, storage, browsers, MCP handshake
-bobby doctor --fix    # repair safe Bobby-owned state, then re-check
-make firefox-start    # Bobby profile + --remote-debugging-port=9222; then Pair
+bobby install
+bobby doctor
 ```
 
-Doctor uses green/yellow/red status labels in a terminal and stable plain text
-when piped or when `NO_COLOR` is set. Add `--download-model` to `doctor --fix`
-only when you explicitly want Bobby to fetch the already-selected MLX model.
+`bobby install` creates a credential, writes the MCP entry for Claude Code, VS Code, Zed or an ACP host, and installs the agent skill. For Firefox, run `bobby install --companion`, then `bobby firefox-start` and click **Pair** in the Bobby Companion toolbar popup.
 
-New writes migrate existing idempotency ledgers to a versioned append log.
-Before rolling back to an older Bobby binary, stop all Bobby runtimes and run
-`bobby doctor --fix --downgrade-idempotency` with the newer binary and the same
-configuration. It converts healthy ledgers to the older format, preserves a
-backup, and retains unresolved reservations. It refuses ledgers that are in use
-or damaged. Normal `doctor` and `doctor --fix` do not downgrade; newer runtime
-writes can migrate a converted ledger again.
+Restart your agent host. The agent then calls `workflow_start` with `{"profile": "default", "url": "https://example.com"}`, `workflow_observe` with the returned handle, and `click`, `type_text` or an `intent_*` tool to act. See the [Quickstart](docs/bobby-browser/source/pages/introduction/quickstart.md).
 
-To configure and load-check a selected MLX model directly, run
-`bobby vision connect --yes --provider mlx --model <id> --activate`; add
-`--download-model` only when the CLI may fetch a missing cache.
+## Use from code
 
-Vision is the user-facing feature; Bobby runs its local service on demand:
+Run `bobby serve`, then export the token with `export AUTOMATION_RUNTIME_TOKEN="$(bobby token)"`.
 
-```bash
-bobby vision status   # selected provider/model and service state
-bobby vision start    # optional foreground run for debugging
-```
-
-Local agents already point at `bobby mcp-stdio` from install — no daemon.
-Optional HTTP / CDP:
-
-```bash
-bobby serve           # http://127.0.0.1:7777/healthz (streamable HTTP MCP)
-bobby cdp             # authenticated CDP on 127.0.0.1:9222 (dedicated port)
-```
-
-[CLI reference](docs/bobby-browser/source/pages/guides/cli.md) ·
-[Run the server](docs/bobby-browser/source/pages/guides/run.md) (optional HTTP)
-
-## Use from TypeScript
-
-```bash
-npm install @cavi-ai/bobby-browser
-```
+TypeScript (`npm install @cavi-ai/bobby-browser`):
 
 ```ts
 import { BrowserRuntimeClient } from "@cavi-ai/bobby-browser";
@@ -212,113 +51,51 @@ const client = new BrowserRuntimeClient({
   baseUrl: "http://127.0.0.1:7777",
   bearerToken: process.env.AUTOMATION_RUNTIME_TOKEN!,
 });
+const info = await client.runtimeInfo();
 ```
 
-## Use from Rust
-
-```bash
-cargo add bobby-browser-client
-```
-
-```rust,no_run
-use bobby_browser_client::{BrowserRuntimeClient, CreateSessionRequest};
-
-# async fn example() -> Result<(), Box<dyn std::error::Error>> {
-let client = BrowserRuntimeClient::new(
-    "http://127.0.0.1:7777",
-    std::env::var("AUTOMATION_RUNTIME_TOKEN")?,
-)?;
-let _info = client.runtime_info(None).await?;
-let _session = client
-    .create_session(
-        &CreateSessionRequest {
-            profile: "default".into(),
-            proxy: None,
-            execution_policy: Default::default(),
-        },
-        None,
-    )
-    .await?;
-# Ok(()) }
-```
-
-[`bobby-browser-client` on crates.io](https://crates.io/crates/bobby-browser-client) ·
-[API docs on docs.rs](https://docs.rs/bobby-browser-client) ·
-[Crate book](docs/bobby-browser/source/pages/rust/index.md)
-
-## Use from Python
-
-```bash
-pip install bobby-browser
-```
+Python (`pip install bobby-browser`):
 
 ```python
 import os
 from bobby_browser import BrowserRuntimeClient
 
 client = BrowserRuntimeClient("http://127.0.0.1:7777", os.environ["AUTOMATION_RUNTIME_TOKEN"])
+info = client.runtime_info()
 ```
 
-[`bobby-browser` on PyPI](https://pypi.org/project/bobby-browser/) ·
-[Python SDK guide](docs/bobby-browser/source/pages/surfaces/python-sdk.md) ·
-installable from this repo path with `pip install -e packages/python-sdk`
+Rust (`cargo add bobby-browser-client`):
 
-## Published artifacts
+```rust,no_run
+use bobby_browser_client::BrowserRuntimeClient;
 
-One version, one `v*` tag:
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+let client = BrowserRuntimeClient::new(
+    "http://127.0.0.1:7777",
+    std::env::var("AUTOMATION_RUNTIME_TOKEN")?,
+)?;
+let info = client.runtime_info(None).await?;
+# let _ = info;
+# Ok(()) }
+```
 
-| Artifact | Name |
-|---|---|
-| Binary | [GitHub release assets](https://github.com/cavi-ai/bobby-browser/releases/latest) — `bobby`, `mcp-gateway`, `acp-gateway`, and the Firefox companion |
-| Homebrew | [`cavi-ai/tap/bobby-browser`](https://github.com/cavi-ai/homebrew-tap) |
-| npm | [`@cavi-ai/bobby-browser`](https://www.npmjs.com/package/@cavi-ai/bobby-browser) |
-| crates.io | [`bobby-browser-client`](https://crates.io/crates/bobby-browser-client) — [docs.rs](https://docs.rs/bobby-browser-client) |
-| PyPI | [`bobby-browser`](https://pypi.org/project/bobby-browser/) |
+## Documentation
 
-Everything else in `crates/` and `packages/` is implementation and is not
-published. `scripts/check-version-agreement.py` enforces this in CI.
+Hosted at [cavi-ai.xyz/docs/bobby-browser](https://cavi-ai.xyz/docs/bobby-browser).
 
-> **Alpha.** The interfaces and contracts here are stable enough to build
-> against, but may still change before 1.0. See [SECURITY.md](SECURITY.md) for
-> the security model and reporting.
+- Start: [Overview](docs/bobby-browser/source/pages/introduction/overview.md), [Installation](docs/bobby-browser/source/pages/introduction/installation.md), [Quickstart](docs/bobby-browser/source/pages/introduction/quickstart.md), [First session from code](docs/bobby-browser/source/pages/introduction/first-session.md)
+- Guides: [Intent commands](docs/bobby-browser/source/pages/guides/intents.md), [Events and recovery](docs/bobby-browser/source/pages/guides/events-recovery.md), [Firefox companion](docs/bobby-browser/source/pages/guides/firefox-companion.md), [Troubleshooting](docs/bobby-browser/source/pages/guides/troubleshooting.md)
+- Reference: [CLI](docs/bobby-browser/source/pages/guides/cli.md), [Configuration](docs/bobby-browser/source/pages/guides/configuration.md), [HTTP API](docs/bobby-browser/source/pages/surfaces/http-api.md), [MCP tools](docs/bobby-browser/source/pages/surfaces/mcp-tools.md), [Rust SDK](docs/bobby-browser/source/pages/rust/index.md), [Python SDK](docs/bobby-browser/source/pages/surfaces/python-sdk.md), [TypeScript SDK](docs/bobby-browser/source/pages/surfaces/typescript-sdk.md)
+- Concepts: [Capabilities](docs/bobby-browser/source/pages/concepts/capabilities.md), [Evidence and checkpoints](docs/bobby-browser/source/pages/concepts/evidence-checkpoints.md), [Multi-principal runtime](docs/bobby-browser/source/pages/concepts/multi-principal.md)
 
-**Documentation:** [Online docs](https://cavi-ai.xyz/docs/bobby-browser) ·
-[Overview](docs/bobby-browser/source/pages/introduction/overview.md) ·
-[Quick start](docs/bobby-browser/source/pages/introduction/quickstart.md) ·
-[Docs consumer contract](docs/bobby-browser/CONSUMER.md) ·
-[Contributing](CONTRIBUTING.md)
-
-## Learn more
-
-These pages are also served at
-[cavi-ai.xyz/docs/bobby-browser](https://cavi-ai.xyz/docs/bobby-browser).
-
-- [Authentication](docs/bobby-browser/source/pages/guides/auth.md)
-- [Configuration](docs/bobby-browser/source/pages/guides/configuration.md)
-- [JavaScript evaluation](docs/bobby-browser/source/pages/guides/javascript-eval.md)
-- [Intents](docs/bobby-browser/source/pages/guides/intents.md)
-- [Bobby skills](docs/bobby-browser/source/pages/guides/skills.md)
-- [Events and recovery](docs/bobby-browser/source/pages/guides/events-recovery.md)
-- [MCP over HTTP](docs/bobby-browser/source/pages/surfaces/mcp-http.md) ·
-  [MCP over stdio](docs/bobby-browser/source/pages/surfaces/mcp-stdio.md) ·
-  [CDP](docs/bobby-browser/source/pages/surfaces/cdp.md)
-- [Capabilities](docs/bobby-browser/source/pages/concepts/capabilities.md) ·
-  [Evidence and checkpoints](docs/bobby-browser/source/pages/concepts/evidence-checkpoints.md) ·
-  [Multi-principal](docs/bobby-browser/source/pages/concepts/multi-principal.md)
+Packages: [GitHub releases](https://github.com/cavi-ai/bobby-browser/releases/latest), [npm](https://www.npmjs.com/package/@cavi-ai/bobby-browser), [PyPI](https://pypi.org/project/bobby-browser/), [crates.io](https://crates.io/crates/bobby-browser-client) ([docs.rs](https://docs.rs/bobby-browser-client)), [Homebrew tap](https://github.com/cavi-ai/homebrew-tap).
 
 ## Contributing
 
 ```bash
-make build            # workspace + gateways
-make test             # workspace tests
-make lint             # clippy -D warnings + fmt check
-pnpm install && pnpm --filter @cavi-ai/bobby-browser test
+make build   # workspace and gateways
+make test    # workspace tests
+make lint    # clippy and format check
 ```
 
-Which tests count as evidence: see [TESTING.md](TESTING.md).
-
-The CDP allowlist is published in
-[`docs/cdp-support.json`](docs/cdp-support.json). The same pages are built into
-an immutable versioned artifact, `bobby-browser-docs-v0.19.1.tar.gz` on the
-matching GitHub Release, for documentation hosts. The built tree is not
-tracked; `pnpm docs:build` regenerates it from `docs/bobby-browser/source`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [TESTING.md](TESTING.md). The CDP method allowlist is [`docs/cdp-support.json`](docs/cdp-support.json). The docs are built from `docs/bobby-browser/source` with `pnpm docs:build` into the release asset `bobby-browser-docs-v0.19.1.tar.gz`; the [consumer contract](docs/bobby-browser/CONSUMER.md) describes it.
