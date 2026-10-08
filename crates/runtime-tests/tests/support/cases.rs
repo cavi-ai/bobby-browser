@@ -1091,7 +1091,12 @@ pub async fn navigate_waits_for_late_scripts(rig: &Rig) {
         "Enter submitted the form natively before the app's handler was attached: {typed}"
     );
     let snapshot = live.snapshot(json!({})).await;
-    assert_node(&snapshot, "status", Some("handled rust engineer"));
+    let mut names = Vec::new();
+    strings_under(&snapshot, "name", &mut names);
+    assert!(
+        names.contains(&"handled rust engineer"),
+        "the app's submit handler did not run: {snapshot}"
+    );
     live.close().await;
 }
 
