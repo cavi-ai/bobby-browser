@@ -193,7 +193,7 @@ async fn stuck_locate_uses_injected_fake_vision_assist() {
     assert!(record.vision_proposal_sha256.is_some());
 }
 
-/// Opt-in dogfood proof for a real loopback vision node. The test deliberately
+/// Opt-in proof for a real loopback vision node. The test deliberately
 /// gives deterministic targeting an impossible role so the runtime must
 /// capture a screenshot, call the configured local provider, and record the
 /// returned proposal. Model accuracy is not asserted here: the durable corpus

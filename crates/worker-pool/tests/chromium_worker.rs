@@ -3371,7 +3371,7 @@ async fn humanized_input_reaches_the_page_with_synthesized_timing() {
     worker.close().await.unwrap();
 }
 
-/// Dogfood the Chromium humanized stream as a detector would: inter-key
+/// The Chromium humanized stream, read as a detector would: inter-key
 /// intervals must vary like a human's (no machine-uniform cadence, no
 /// zero-ms chords), and the mouse path must not be a straight line.
 #[tokio::test]

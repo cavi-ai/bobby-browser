@@ -358,8 +358,8 @@ def v1_metrics(predictions: list, examples: list) -> dict:
     # corpus scale). The gate floors them separately.
     neg_prod_total = 0
     neg_prod_abstained = 0
-    # Singleton research classes (scripted ambiguous boundaries, real-site
-    # absent-target probes) flap between retrains the way every singleton
+    # Singleton classes (scripted ambiguous boundaries, absent-target
+    # probes) flap between retrains the way every singleton
     # class does; they are reported separately so the mass class (real
     # production rejections) holds the hard floor.
     neg_singleton_total = 0

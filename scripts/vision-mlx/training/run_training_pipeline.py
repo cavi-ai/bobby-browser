@@ -102,8 +102,6 @@ class VisionTrainingPipeline:
             model_name=self.config.model_name,
         )
         
-        # TODO: Integrate with Bobby runtime to collect real data
-        # For now, generate synthetic data
         print("Generating synthetic training data...")
         self._generate_synthetic_data(collector)
         

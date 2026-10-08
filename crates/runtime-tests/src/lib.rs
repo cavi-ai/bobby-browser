@@ -144,7 +144,7 @@ const BEHAVIORAL_PROBE_HTML: &str = r#"<!doctype html>
 </body>
 </html>"#;
 
-/// Live Firefox behavioral dogfood summary (DOM probe + engine evidence).
+/// Live Firefox behavioral probe summary (DOM probe + engine evidence).
 #[derive(Debug, Clone, PartialEq)]
 pub struct BehavioralFirefoxDogfoodReport {
     pub confirmation_text: String,
@@ -473,7 +473,7 @@ pub async fn run_installed_firefox_workflow(
     )
 }
 
-/// Live Firefox dogfood for behavioral engine wiring (mouse / typing / scroll).
+/// Live Firefox probe for behavioral engine wiring (mouse / typing / scroll).
 ///
 /// Uses the same env + enrollment path as [`run_installed_firefox_workflow`]:
 /// `BOBBY_FIREFOX_BIN`, `BOBBY_FIREFOX_PROFILE`, `BOBBY_COMPANION_EXTENSION`.
@@ -935,7 +935,7 @@ fn proof_state_dir() -> PathBuf {
         .join("target/firefox-companion-proof")
 }
 
-/// Ensure dogfood profile `user.js` has fingerprint-related prefs.
+/// Ensure the test profile `user.js` has fingerprint-related prefs.
 /// Appends missing lines; does not rewrite existing prefs.
 pub fn ensure_firefox_fingerprint_prefs(profile: &Path) -> Result<(), CommandError> {
     const PREFS: &[(&str, &str)] = &[
@@ -976,7 +976,7 @@ pub fn ensure_firefox_fingerprint_prefs(profile: &Path) -> Result<(), CommandErr
         file.write_all(b"\n").map_err(io_error)?;
     }
     if existing.is_empty() {
-        file.write_all(b"// Bobby Browser fingerprint dogfood prefs (auto-appended)\n")
+        file.write_all(b"// Bobby Browser fingerprint test prefs (auto-appended)\n")
             .map_err(io_error)?;
     }
     file.write_all(additions.as_bytes()).map_err(io_error)?;

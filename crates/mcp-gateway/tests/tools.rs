@@ -4116,8 +4116,8 @@ async fn the_stdio_transport_writes_notifications_as_unsolicited_frames() {
 /// log is shared by every principal and `EventStore::read_after_for` reports
 /// `HistoryLost` against the store-wide front of the deque, so after
 /// `max_event_retention` appends a cursor-0 subscription gaps on its first read
-/// and never delivers a runtime event again. MCP has no resume cursor, so
-/// reconnecting reproduces it.
+/// and never delivers a runtime event again. MCP has no resume cursor, so a
+/// reconnect hits the same case.
 #[tokio::test]
 async fn a_subscription_opened_after_retention_wrapped_still_receives_new_events() {
     let events = EventStore::new(2);
