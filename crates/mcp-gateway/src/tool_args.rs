@@ -257,11 +257,7 @@ intent_args!(IntentWaitForStateArgs {
 
 // `expectedDestination`/`expectedState` is `Option` here only so the dispatch
 // arm can tell "absent" apart from "malformed" and reject the former with a
-// message naming the exact fix -- CHANGELOG 0.15.0: "exactly one of the two
-// is required". It used to fail `bounded_parse` outright (schema's
-// `required` list never named it -- see `schema.rs`'s `"intent_follow"`
-// arm -- so `validate_tool_arguments` passed and the rejection came from a
-// bound this struct alone enforced, with a message that did not say why).
+// message naming the exact fix: exactly one of the two is required.
 // Do not add a default here or in the dispatch arm: a follow with neither is
 // an unverified click, and defaulting a wait silently would misreport one as
 // verified.

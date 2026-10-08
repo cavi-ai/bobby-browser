@@ -249,12 +249,8 @@ async fn authority_digest_ignores_recovery_history_but_content_version_changes()
     assert_ne!(second.content_digest(), content_digest);
 }
 
-/// An agent that lost its `workflowId` can find its workflows again.
-///
-/// The store is one file per workflow with no index, so before this there was
-/// no way back at all: a compacted or restarted agent could not name any of
-/// its own in-flight workflows, and `recovery_status`/`workflow_recover` take
-/// the id as their only key.
+/// An agent that lost its `workflowId` can list its workflows, which
+/// `recovery_status` and `workflow_recover` need as their key.
 #[tokio::test]
 async fn a_session_lists_its_own_workflows_newest_first_within_the_cap() {
     let root = tempfile::tempdir().unwrap();

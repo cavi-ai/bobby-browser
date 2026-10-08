@@ -765,7 +765,7 @@ pub(crate) fn apply_runtime_tool_limits(name: &str, schema: &mut Value, max_down
     if name != "download_url" {
         return;
     }
-    // The oneOf scope branches no longer restate `maxBytes` (see
+    // The oneOf scope branches do not restate `maxBytes` (see
     // `apply_workflow_scope_advertisement`); the top-level `properties` entry
     // applies regardless of which branch an instance matches, so patching it
     // alone is enough.

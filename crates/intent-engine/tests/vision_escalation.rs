@@ -379,9 +379,7 @@ fn fill(purpose: &str, role: &str, value: ControlAction) -> IntentCommand {
 #[tokio::test]
 async fn fill_not_found_escalates_with_a_ranked_window() {
     // A fill that matches nothing must escalate with the page's plausible
-    // fields in the window. The fill path used to escalate with an EMPTY
-    // window — the model was asked to pick from nothing, correctly
-    // abstained, and the records were §4i poison.
+    // fields in the window, never an empty one.
     let request_debug = Arc::new(std::sync::Mutex::new(Vec::new()));
     let assist = Arc::new(RecordingVision {
         proposal: VisionProposal {

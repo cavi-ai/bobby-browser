@@ -352,8 +352,7 @@ mod tests {
         let mut child = Command::new("sleep").arg("5").spawn().unwrap();
         let pid = child.id();
         let path = registry_dir.path().join("legacy.pid");
-        // Pre-ownership format: a bare PID, no owner line. A binary from before this
-        // change could still write this during a rolling upgrade; it must be cleaned up,
+        // Legacy format: a bare PID, no owner line. It must be cleaned up,
         // never killed on unverifiable say-so.
         std::fs::write(&path, pid.to_string()).unwrap();
 

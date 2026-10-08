@@ -740,9 +740,9 @@ async fn command_schema_validates_the_full_union_but_advertises_an_opaque_comman
     // `recoveryReceipts` above, which keeps the `Evidence` union (and
     // `RecoveryDecision`/`RecoveryRecord`) out of this tool's reachable `$defs`.
     //
-    // `workflow_recover`'s advertised output now projects `RecoveryDecision`
-    // to status tags, so the tag-only `Evidence` projection no longer appears
-    // in `tools/list` at all; it lives on the un-advertised output schema.
+    // `workflow_recover`'s advertised output projects `RecoveryDecision`
+    // to status tags, so the tag-only `Evidence` projection does not appear
+    // in `tools/list`; it lives on the un-advertised output schema.
     let recover_schema = mcp_gateway::output_schema_for_test("workflow_recover");
     let evidence_variants = recover_schema["$defs"]["Evidence"]["oneOf"]
         .as_array()
@@ -2754,14 +2754,11 @@ async fn live_server_for_control_id_resolution() -> common::LiveServer {
     common::live_server(handle).await
 }
 
-// The bug this covers: an agent addresses `intent_complete_form`'s field
-// `name` with the `controlId` a prior `workflow_observe`/`form_snapshot`
-// call returned (here "control-1", target role=button/accessibleName=
-// "Customer document"). With no other hints, the compiler used to fall back
-// to `accessible_name = name`, and nothing on the page is accessibly named
-// "control-1" -- a guaranteed targetNotFound. The gateway must now resolve
-// that bare controlId against a form snapshot before compiling the intent,
-// so the resolved target the fake driver actually receives carries the
+// An agent addresses `intent_complete_form`'s field `name` with the
+// `controlId` a prior `workflow_observe`/`form_snapshot` call returned (here
+// "control-1", target role=button/accessibleName="Customer document"). The
+// gateway resolves that bare controlId against a form snapshot before
+// compiling the intent, so the target the fake driver receives carries the
 // control's real role/accessibleName, not the id.
 #[tokio::test]
 async fn intent_complete_form_resolves_a_bare_control_id_field_name_to_its_target() {
@@ -2879,7 +2876,7 @@ async fn intent_complete_form_leaves_hints_untouched_for_an_unknown_control_id()
 }
 
 // A field name that is not control-id-shaped must never trigger the
-// snapshot lookup at all -- zero snapshots, same as before this change.
+// snapshot lookup at all -- zero snapshots.
 #[tokio::test]
 async fn intent_complete_form_never_snapshots_for_a_plain_field_name() {
     let live = live_server_for_control_id_resolution().await;
@@ -4252,8 +4249,8 @@ async fn static_resources_are_readable_without_artifact_read() {
 async fn download_url_requires_and_threads_a_page_id() {
     let server = fixture_server(vec![Capability::BrowserMutate, Capability::FileDownload]).await;
 
-    // The advertised schema names pageId: the executor requires one, and the
-    // gateway used to send None unconditionally, failing every call.
+    // The advertised schema names pageId: the executor requires one, so the
+    // gateway must thread it through.
     let listed = server
         .handle_message(request(2, "tools/list", json!({})))
         .await
@@ -4357,14 +4354,9 @@ async fn context_neighbors_is_gated_on_context_read() {
     );
 }
 
-/// Idempotent retry has to actually replay over MCP.
-///
-/// The digest used to cover the whole `CommandEnvelope`, including `deadline`
-/// and the per-attempt `commandId`/`attemptId`. The gateway mints all three
-/// fresh on every dispatch and gives the caller no way to pin a deadline, so a
-/// retry could never match its own first try: every retry took the conflict
-/// branch. An agent that timed out and retried the way the tool told it to got
-/// `idempotencyConflict` on a command that may already have landed.
+/// An idempotent retry replays over MCP: the digest excludes the per-dispatch
+/// `deadline`, `commandId` and `attemptId`, so a retry matches its first try
+/// instead of returning `idempotencyConflict`.
 #[tokio::test]
 async fn a_retry_under_one_idempotency_key_replays_instead_of_dispatching_again() {
     let runtime = Arc::new(authenticated_with_intents().await);

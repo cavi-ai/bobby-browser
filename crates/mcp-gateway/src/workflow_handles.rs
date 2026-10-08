@@ -907,10 +907,8 @@ mod tests {
         );
     }
 
-    /// `page_activate {workflowHandle, pageId}` is "activate this page and
-    /// rebind the handle", the agent-observed call that used to die as a
-    /// binding conflict and force the agent off the handle path. Same
-    /// session required; the handle moves to the requested page.
+    /// `page_activate {workflowHandle, pageId}` activates the page and rebinds
+    /// the handle. Same session required; the handle moves to the requested page.
     #[test]
     fn page_activate_handle_plus_page_id_activates_and_rebinds() {
         let registry = registry();

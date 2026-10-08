@@ -413,8 +413,8 @@ fn compile_wait_for_state_is_wait_only() {
 #[test]
 fn compile_fill_accepts_a_snapshot_target_accessible_name_verbatim() {
     // An `a11y_snapshot` node's `target` is `{role, accessibleName, ordinal}`.
-    // Pasting it into `hints` used to drop the name and resolve on role plus
-    // ordinal alone, which silently targets the wrong control.
+    // Pasting it into `hints` keeps the name instead of resolving on role plus
+    // ordinal alone.
     let plan = compile_intent(&IntentCommand::Fill(FillIntent {
         purpose: "enter the applicant email".into(),
         hints: IntentHints {

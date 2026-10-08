@@ -1117,7 +1117,7 @@ async fn control_action_set_text_without_clear_first_still_clears_before_typing(
     let target = name_field.target.clone().unwrap();
 
     // The wire body carries no `clearFirst`; ControlAction::SetText must still
-    // default to replace semantics (matches the previously hard-coded true).
+    // default to replace semantics.
     let action: ControlAction =
         serde_json::from_value(serde_json::json!({"kind":"setText","value":"x"})).unwrap();
     let evidence = worker
@@ -3823,8 +3823,8 @@ async fn descends_unnamed_srcdoc_iframes_and_resolves_the_stamped_ordinal_hop() 
 }
 
 /// A hung `click_and_wait_for_popup` on one page must not block another
-/// page's commands: the worker-wide browser mutex used to be held for the
-/// whole click-plus-wait, up to `timeout_ms`, serializing every other page.
+/// page's commands: the worker-wide browser mutex is not held across the
+/// click-plus-wait.
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn a_hung_click_and_wait_for_popup_does_not_block_other_pages() {
@@ -3887,8 +3887,8 @@ async fn a_hung_click_and_wait_for_popup_does_not_block_other_pages() {
 
     // Give the click a head start so it is inside its wait loop, then prove
     // page B is not blocked behind page A's still-pending popup wait. The
-    // probe resolves a target, the path that used to take the worker-wide
-    // browser mutex; a whole-page inspect never did and would pass either way.
+    // probe resolves a target, the path that takes the worker-wide browser
+    // mutex; a whole-page inspect never does and would pass either way.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     let started = std::time::Instant::now();
     worker

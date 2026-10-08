@@ -117,8 +117,7 @@ pub struct IntentHints {
     pub near_text: Option<TextMatch>,
     /// Accessible name of the control, matched exactly. Accepts an
     /// `a11y_snapshot` node's `target` verbatim, which carries
-    /// `{role, accessibleName, ordinal}` -- before this existed the field was
-    /// dropped silently and the intent resolved on role and ordinal alone.
+    /// `{role, accessibleName, ordinal}`.
     /// Equivalent to `near_text: Exact`; setting both to different values is
     /// refused rather than resolved.
     pub accessible_name: Option<String>,
