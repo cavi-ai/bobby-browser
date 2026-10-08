@@ -34,6 +34,18 @@ client = BrowserRuntimeClient(
 strips a trailing `/v1` if present). The bearer is the plaintext from
 `bobby init` / bootstrap (conventional env name `AUTOMATION_RUNTIME_TOKEN`).
 
+JSON responses, including HTTP error bodies, are limited to 64 MiB before
+parsing. Set the constructor's `max_json_response_bytes` to a positive integer
+up to 256 MiB to adjust that budget. The client checks declared sizes and counts
+bytes while reading, including responses without `Content-Length`. Excess
+bodies raise `RuntimeClientError(kind="protocol")` and close the response.
+The limit bounds body bytes; decoded strings and parsed objects require
+additional memory.
+
+Artifacts use their reference's byte count instead of the JSON budget, with a
+256 MiB hard ceiling checked before dispatch. Length, media type, and SHA-256
+verification still apply before bytes are returned.
+
 ## Headers
 
 Every request sends:
