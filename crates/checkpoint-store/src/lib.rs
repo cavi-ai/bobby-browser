@@ -91,15 +91,22 @@ struct SessionIndex {
     sessions: HashMap<types::SessionId, Vec<CheckpointRef>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct CheckpointRef {
     workflow_id: WorkflowId,
     created_at: chrono::DateTime<chrono::Utc>,
     path: PathBuf,
+    file_len: u64,
+    modified: Option<SystemTime>,
 }
 
 impl SessionIndex {
-    fn update(&mut self, checkpoint: &WorkflowCheckpoint, path: PathBuf) {
+    fn update(
+        &mut self,
+        checkpoint: &WorkflowCheckpoint,
+        path: PathBuf,
+        metadata: &std::fs::Metadata,
+    ) {
         let entries = self
             .sessions
             .entry(checkpoint.session_id.clone())
@@ -109,6 +116,8 @@ impl SessionIndex {
             workflow_id: checkpoint.workflow_id.clone(),
             created_at: checkpoint.created_at,
             path,
+            file_len: metadata.len(),
+            modified: metadata.modified().ok(),
         });
         entries.sort_by_key(|entry| std::cmp::Reverse(entry.created_at));
     }
@@ -194,7 +203,9 @@ impl CheckpointStore {
         if result.is_ok() {
             let mut index = self.session_index.lock().await;
             if index.modified == Some(before) {
-                index.update(checkpoint, self.path(&checkpoint.workflow_id));
+                let path = self.path(&checkpoint.workflow_id);
+                let metadata = tokio::fs::metadata(&path).await?;
+                index.update(checkpoint, path, &metadata);
                 index.modified = Some(tokio::fs::metadata(self.root.as_path()).await?.modified()?);
             } else {
                 index.modified = None;
@@ -216,9 +227,8 @@ impl CheckpointStore {
 
     /// Checkpoints belonging to `session_id`, newest first, capped at `limit`.
     ///
-    /// The store is one file per workflow with no index, so an agent that lost
-    /// its `workflowId` -- compacted, restarted -- had no way back to a
-    /// recoverable workflow at all. This is that way back.
+    /// A derived index narrows reads to the session. Changed files refresh the
+    /// ordering before the limit is applied; selected files are read again.
     ///
     /// Filtering is the caller's to finish: a checkpoint records its
     /// `session_id` but no principal, so ownership has to be enforced above
@@ -236,7 +246,7 @@ impl CheckpointStore {
             return Ok(Vec::new());
         }
         let before = tokio::fs::metadata(self.root.as_path()).await?.modified()?;
-        let candidates = {
+        let mut candidates = {
             let mut index = self.session_index.lock().await;
             if index.modified != Some(before) {
                 let mut rebuilt = SessionIndex::default();
@@ -249,6 +259,9 @@ impl CheckpointStore {
                     if !name.ends_with(".json") || name.ends_with(".skill-issuance.json") {
                         continue;
                     }
+                    let Ok(metadata) = entry.metadata().await else {
+                        continue;
+                    };
                     let Ok(bytes) = tokio::fs::read(entry.path()).await else {
                         continue;
                     };
@@ -265,6 +278,8 @@ impl CheckpointStore {
                                 workflow_id: checkpoint.workflow_id,
                                 created_at: checkpoint.created_at,
                                 path: entry.path(),
+                                file_len: metadata.len(),
+                                modified: metadata.modified().ok(),
                             });
                     }
                 }
@@ -277,6 +292,54 @@ impl CheckpointStore {
             }
             index.sessions.get(session_id).cloned().unwrap_or_default()
         };
+        let mut refreshed = HashMap::new();
+        for candidate in &mut candidates {
+            // In-place writes do not change the directory timestamp. Check
+            // only this session's files, outside the shared index mutex.
+            let Ok(metadata) = tokio::fs::metadata(&candidate.path).await else {
+                continue;
+            };
+            let modified = metadata.modified().ok();
+            if modified.is_some()
+                && modified == candidate.modified
+                && metadata.len() == candidate.file_len
+            {
+                continue;
+            }
+            let Ok(bytes) = tokio::fs::read(&candidate.path).await else {
+                continue;
+            };
+            let Ok(checkpoint) = serde_json::from_slice::<WorkflowCheckpoint>(&bytes) else {
+                continue;
+            };
+            if checkpoint.session_id == *session_id
+                && checkpoint.workflow_id == candidate.workflow_id
+                && self.validate_schema(&checkpoint).is_ok()
+            {
+                let original = candidate.clone();
+                candidate.created_at = checkpoint.created_at;
+                candidate.modified = modified;
+                candidate.file_len = metadata.len();
+                refreshed.insert(candidate.workflow_id.clone(), (original, candidate.clone()));
+            }
+            // Keep invalid entries discoverable so an in-place repair can be
+            // revalidated on a later listing.
+        }
+        if !refreshed.is_empty() {
+            candidates.sort_by_key(|entry| std::cmp::Reverse(entry.created_at));
+            let mut index = self.session_index.lock().await;
+            if let Some(entries) = index.sessions.get_mut(session_id) {
+                for candidate in entries.iter_mut() {
+                    if let Some((original, updated)) = refreshed.get(&candidate.workflow_id) {
+                        // A concurrent save/rebuild may already have newer hints.
+                        if candidate == original {
+                            *candidate = updated.clone();
+                        }
+                    }
+                }
+                entries.sort_by_key(|entry| std::cmp::Reverse(entry.created_at));
+            }
+        }
         let mut found = Vec::new();
         for candidate in candidates {
             let Ok(bytes) = tokio::fs::read(&candidate.path).await else {
