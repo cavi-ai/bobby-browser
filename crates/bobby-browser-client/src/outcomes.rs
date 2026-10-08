@@ -518,11 +518,8 @@ pub enum Evidence {
         /// What the satisfying poll actually read: the element text or value,
         /// the URL, or the document ready state, depending on the condition.
         ///
-        /// The wait already reads this to decide whether it is satisfied. It
-        /// used to be discarded, so an agent that verified a submit had to
-        /// spend a second round trip snapshotting the page to learn what it
-        /// had just confirmed. Bounded by [`MAX_WAIT_OBSERVED_CHARS`] -- this
-        /// is a verification value, never a page-text dump.
+        /// Bounded by [`MAX_WAIT_OBSERVED_CHARS`]: a verification value, never
+        /// a page-text dump.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         observed: Option<String>,
     },
