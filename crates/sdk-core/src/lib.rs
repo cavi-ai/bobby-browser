@@ -640,7 +640,7 @@ impl RuntimeService {
         vision_capability_ok: bool,
         one_shot_session_ok: bool,
     ) -> CommandOutcome {
-        // SECURITY(F4): authoritative deny-by-default gate for `EvaluateJavaScript`.
+        // Authoritative deny-by-default gate for `EvaluateJavaScript`.
         // The session must have opted in (`ExecutionPolicy.javascript_evaluation ==
         // true`) or the command is refused here, before reaching `self.pages.execute`
         // or a worker. Independent of, and after, the token capability gate in

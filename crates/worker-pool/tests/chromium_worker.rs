@@ -1803,11 +1803,8 @@ async fn waits_for_dynamic_element_content_url_document_and_network_quiet() {
     worker.close().await.unwrap();
 }
 
-/// B1: a `Text` wait whose target matches more than one candidate must not
-/// error with `targetAmbiguous` — the matcher, not identity, decides which
-/// candidate satisfies it. Three `<p>` elements only one of which contains
-/// the wanted text (an onboarding-step paragraph); nine `<a>` links only one
-/// of which contains "Download" (a report-recovery link).
+/// A `Text` wait whose target matches several candidates does not error with
+/// `targetAmbiguous`: the text matcher decides which candidate satisfies it.
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn wait_for_text_resolves_an_ambiguous_target_by_matcher() {

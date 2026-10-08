@@ -34,17 +34,17 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
   const UNMASKED_VENDOR_WEBGL = 0x9245;
   const UNMASKED_RENDERER_WEBGL = 0x9246;
 
-  // Identity only — do not patch Function.prototype.toString (CreepJS stealth.hasToStringProxy).
+  // Identity only — do not patch Function.prototype.toString (a patched toString is detectable).
   function cloak(fn) { return fn; }
 
   try {
     // Only intervene when automation is actually on. A false→false redefine is a
-    // prototype lie that CreepJS scores as webDriverIsOn via lieProps.
+    // prototype lie that detectors flag.
     // Proxy the *native* getter so Function.prototype.toString.call stays
-    // `[native code]` (and CreepJS queryLies still sees illegal-invocation throws).
-    // Gecko: do NOT install a prototype Proxy — CreepJS sync getPrototypeLies calls
+    // `[native code]` (and illegal-invocation throws are preserved).
+    // Gecko: do NOT install a prototype Proxy — fingerprint scripts that call
     // Object.setPrototypeOf on getter functions and deadlocks the page script
-    // (FP ID stuck on Computing…). Use an instance override instead.
+    // (the page stalls). Use an instance override instead.
     if (navigator.webdriver === true) {
       const gecko = typeof InstallTrigger !== "undefined";
       if (gecko) {
@@ -61,7 +61,7 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
         if (typeof nativeGet === "function") {
           const proxiedGet = new Proxy(nativeGet, {
             apply: function (target, thisArg, args) {
-              // Preserve TypeError on illegal invocation for CreepJS queryLies.
+              // Preserve TypeError on illegal invocation.
               target.apply(thisArg, args);
               return false;
             },
@@ -112,7 +112,7 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
       if (!globalThis.chrome) {
         globalThis.chrome = {};
       }
-      // Never inject chrome.runtime stubs — CreepJS hasBadChromeRuntime checks
+      // Never inject chrome.runtime stubs — detectors check
       // `new chrome.runtime.sendMessage` TypeError shape.
       if (!globalThis.chrome.app) {
         globalThis.chrome.app = {
@@ -127,7 +127,7 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
   }
 
   try {
-    // CreepJS platform estimate: Windows expects no BarcodeDetector; Mac has it.
+    // Platform estimate: Windows expects no BarcodeDetector; Mac has it.
     // Hide on Windows personas so Mac hosts don't win the Bayes lean.
     const winPersona = P.platform === "Win32"
       || (P.clientHints && P.clientHints.platform === "Windows");
@@ -177,8 +177,8 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
       );
     }
     // Chromium: getComputedStyle Proxy (Segoe UI + ActiveText). Safe on Blink.
-    // Gecko: never replace getComputedStyle — CreepJS deadlocks. Instead rewrite
-    // style writes CreepJS uses (`setAttribute("style", "font: caption")`).
+    // Gecko: never replace getComputedStyle — it deadlocks fingerprint scripts. Instead rewrite
+    // style writes fingerprint scripts use (`setAttribute("style", "font: caption")`).
     if (typeof InstallTrigger === "undefined") {
       if (P.maxTouchPoints === 0 && typeof CSSStyleDeclaration !== "undefined") {
         const originalGPV = CSSStyleDeclaration.prototype.getPropertyValue;
@@ -231,7 +231,7 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
         return style;
       });
     } else if (winPersona) {
-      // CreepJS getSystemFonts: el.setAttribute("style", `font: ${font} !important`).
+      // System font probe: el.setAttribute("style", `font: ${font} !important`).
       const originalSetAttribute = Element.prototype.setAttribute;
       Element.prototype.setAttribute = cloak(function setAttribute(name, value) {
         if (String(name).toLowerCase() === "style") {
@@ -341,7 +341,7 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
     }
   } catch (_) {}
   // Firefox often never settles FontFace.load / document.fonts.load for missing
-  // local("…") fonts. CreepJS Promise.allSettled then stalls forever on Computing…
+  // local("…") fonts. Promise.allSettled over them then stalls forever.
   const FONT_LOAD_TIMEOUT_MS = 1200;
   function raceFontLoad(promise, onTimeout) {
     return new Promise(function (resolve, reject) {
@@ -603,7 +603,7 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
     // Apple Silicon) in BOTH page and worker scopes. Workers cannot be
     // wrapped on Gecko (blob+importScripts breaks them), so a page-scope
     // spoof would contradict the worker's native masked renderer —
-    // CreepJS hasBadWebGL. On Gecko, native masking is the consistent state.
+    // Detectors flag it. On Gecko, native masking is the consistent state.
     if (typeof InstallTrigger === "undefined") {
       patchWebGl(WebGLRenderingContext && WebGLRenderingContext.prototype);
       if (typeof WebGL2RenderingContext !== "undefined") {
@@ -854,7 +854,7 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
 
   try {
     // Headless reports "denied"; a fresh desktop profile says "default".
-    // CreepJS notificationIsDenied; permissions.query below reads this.
+    // permissions.query below reads this.
     if (typeof Notification !== "undefined" && Notification.permission === "denied") {
       Object.defineProperty(Notification, "permission", {
         get: cloak(function permission() { return "default"; }),
@@ -874,7 +874,7 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
   } catch (_) {}
 
   try {
-    // Headless omits Web Share; CreepJS noWebShare checks existence only.
+    // Headless omits Web Share; detectors check existence only.
     if (!("share" in navigator)) {
       Object.defineProperty(Navigator.prototype, "share", {
         value: cloak(function share() {}),
@@ -1181,7 +1181,7 @@ pub const INIT_SCRIPT_TEMPLATE: &str = r#"(function() {
   }
 
   // Worker wrapping: blob+importScripts breaks Dedicated/Shared workers on Gecko
-  // (CreepJS then stalls in worker scope collection). Chromium tolerates the wrap;
+  // (fingerprint scripts then stall in worker scope collection). Chromium tolerates the wrap;
   // skip install on Gecko. Detect engine before UA spoof — InstallTrigger is Gecko-only.
   const isGecko = typeof InstallTrigger !== "undefined";
   if (!isGecko) {
@@ -1589,18 +1589,11 @@ pub fn build_collector_probe_script() -> String {
   } catch (_) {}
   check("pdfViewerEnabled", pdfOk);
 
-  // No `chrome.runtime` check here, deliberately. An earlier version failed
-  // when `chrome` existed without `chrome.runtime` — which is the state of
-  // stock Chrome on an ordinary page, and also the state this very script
-  // aims for: the injection above never creates a `runtime` stub, because
-  // CreepJS's `hasBadChromeRuntime` detects the `new
-  // chrome.runtime.sendMessage` TypeError shape of a faked one. The probe was
-  // asserting the opposite of the design it was probing, so it failed against
-  // real Chrome every time it ran.
-  //
-  // The invariant that does hold is locked as a unit test instead
-  // (`the_template_never_injects_a_chrome_runtime_stub`), because it is a
-  // property of the emitted script and does not need a browser to check.
+  // No `chrome.runtime` check: stock Chrome has `chrome` without
+  // `chrome.runtime`, and the injection never creates a `runtime` stub because
+  // a faked one is detectable by the TypeError shape of
+  // `new chrome.runtime.sendMessage`. That invariant is a unit test
+  // (`the_template_never_injects_a_chrome_runtime_stub`).
 
   return {
     passed: fails.length === 0,
@@ -1816,7 +1809,7 @@ pub fn build_font_probe_script() -> String {
         maxTouchPoints: navigator.maxTouchPoints,
         ontouchstartInWindow: "ontouchstart" in window,
         createEventTouch: createEventTouch,
-        creepHasTouch: ("ontouchstart" in window) && createEventTouch,
+        hasTouch: ("ontouchstart" in window) && createEventTouch,
         anyPointerCoarse: anyPointerCoarse,
         anyPointerFine: anyPointerFine
       };
@@ -1861,8 +1854,7 @@ mod tests {
     fn init_script_stays_under_size_budget() {
         let session = crate::create_session(&FingerprintConfig::default().with_session_seed(7));
         let script = build_init_script(&session).unwrap();
-        // Budget raised 40k -> 42k for the Notification.permission /
-        // pdfViewerEnabled / Web Share surfaces (CreepJS like-headless flags).
+        // Budget covers the Notification.permission / pdfViewerEnabled / Web Share surfaces.
         assert!(
             script.len() < 42_000,
             "init script grew to {} bytes (budget 42k)",
@@ -1909,11 +1901,11 @@ mod tests {
         let win_script = build_init_script(&win).unwrap();
         assert!(win.platform == "Win32");
         assert!(win_script.contains("Win32") || win_script.contains("\"platform\":\"Win32\""));
-        // Conditional webdriver — Proxy native getter (CreepJS lieProps / webDriverIsOn).
+        // Conditional webdriver — Proxy native getter.
         assert!(INIT_SCRIPT_TEMPLATE.contains("navigator.webdriver === true"));
         assert!(INIT_SCRIPT_TEMPLATE.contains("new Proxy(nativeGet"));
         assert!(INIT_SCRIPT_TEMPLATE.contains("target.apply(thisArg, args)"));
-        // No global Function.prototype.toString cloak (CreepJS hasToStringProxy).
+        // No global Function.prototype.toString cloak.
         assert!(!INIT_SCRIPT_TEMPLATE.contains("Function.prototype.toString ="));
         assert!(INIT_SCRIPT_TEMPLATE.contains("function cloak(fn) { return fn; }"));
         // No plain false→false webdriver redefine (detected as Navigator.webdriver lie).
@@ -1964,9 +1956,8 @@ mod tests {
         assert!(mac_script.contains("Segoe UI"));
     }
 
-    /// The injection must never create a `chrome.runtime` stub: CreepJS
-    /// `hasBadChromeRuntime` fingerprints the TypeError shape of
-    /// `new chrome.runtime.sendMessage`, so a fake is a stronger signal than absence.
+    /// The injection must never create a `chrome.runtime` stub: the TypeError shape of
+    /// `new chrome.runtime.sendMessage` exposes a fake, a stronger signal than absence.
     #[test]
     fn the_template_never_injects_a_chrome_runtime_stub() {
         for inject in [true, false] {

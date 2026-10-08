@@ -160,10 +160,7 @@ async fn popup_opens_as_a_listed_page() {
     runtime.sessions.delete(&session.id).await.unwrap();
 }
 
-/// P4 repro: the popup closes itself (`window.close()`, the way the
-/// authorization page does), and the opener must still be listed afterward.
-/// Reported symptom: `list_pages` came back `pages: []` -- opener included --
-/// even though the opener answered the very next call.
+/// A popup that closes itself (`window.close()`) leaves the opener listed.
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn popup_closed_from_inside_still_lists_the_opener() {

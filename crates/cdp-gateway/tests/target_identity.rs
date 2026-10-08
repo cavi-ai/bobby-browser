@@ -136,7 +136,7 @@ async fn page_target_info_uses_verified_navigation_title() {
             execution_policy: types::ExecutionPolicy::default(),
             zigzagzig: false,
         }],
-        title: "Bobby agent-benchmark fixture".into(),
+        title: "Bobby test fixture".into(),
     });
     let authority = AuthorityStore::in_memory();
     let token = authority
@@ -195,6 +195,6 @@ async fn page_target_info_uses_verified_navigation_title() {
         ))
         .await;
     let target = &info.result().unwrap()["targetInfo"];
-    assert_eq!(target["title"], "Bobby agent-benchmark fixture");
+    assert_eq!(target["title"], "Bobby test fixture");
     assert_eq!(target["url"], "http://127.0.0.1:8766/");
 }

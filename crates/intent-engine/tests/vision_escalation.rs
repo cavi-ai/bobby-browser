@@ -1350,7 +1350,7 @@ async fn policy_denied_never_calls_vision() {
     );
 }
 
-/// C4: an open session policy does not substitute for the capability.
+/// An open session policy does not substitute for the capability.
 ///
 /// This is the row the node substrate makes load-bearing. A session names a
 /// node and sets `executionPolicy.visionAssist`, both of which it controls;
@@ -1404,9 +1404,7 @@ async fn an_open_session_policy_does_not_substitute_for_the_capability() {
     );
 }
 
-/// C4, the mirror: holding the capability does not substitute for the session
-/// grant. Without this the double gate would be a single gate wearing two
-/// names.
+/// Holding the capability does not substitute for the session grant.
 #[tokio::test]
 async fn holding_the_capability_does_not_substitute_for_the_session_grant() {
     let called = Arc::new(AtomicBool::new(false));

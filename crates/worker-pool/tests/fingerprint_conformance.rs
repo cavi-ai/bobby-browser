@@ -299,8 +299,8 @@ async fn chromium_font_mask_hides_host_fonts() {
     );
     assert_eq!(probe["touch"]["maxTouchPoints"], 0);
     assert_eq!(
-        probe["touch"]["creepHasTouch"], false,
-        "CreepJS hasTouch() must be false for desktop persona"
+        probe["touch"]["hasTouch"], false,
+        "hasTouch() must be false for desktop persona"
     );
     assert_eq!(
         probe["touch"]["anyPointerCoarse"], false,

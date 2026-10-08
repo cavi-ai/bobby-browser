@@ -2737,13 +2737,10 @@ async fn page_activate_with_handle_and_page_id_activates_and_rebinds() {
     assert_eq!(page_id, start_outcome["pageId"], "{page_id}");
 }
 
-/// C3 (`fix/invalid-params-shapes`): the six `Invalid params` rejections in
-/// the paid-for benchmark transcripts were `intent_follow` calls with
-/// `purpose` + `hints` and no `expectedDestination`/`expectedState` at all
-/// (dismissing a notification, accepting a cookie banner). CHANGELOG 0.15.0
-/// documents the contract as "exactly one of the two is required", so this
-/// is refused, not defaulted -- with the fix named verbatim in
-/// `error.message` rather than the generic `malformedArguments` text.
+/// `intent_follow` with `purpose` + `hints` and neither
+/// `expectedDestination` nor `expectedState` is refused, not defaulted, with
+/// the fix named in `error.message` rather than the generic
+/// `malformedArguments` text.
 #[tokio::test]
 async fn intent_follow_without_expected_state_names_the_fix() {
     let live = live_with_capabilities(vec![

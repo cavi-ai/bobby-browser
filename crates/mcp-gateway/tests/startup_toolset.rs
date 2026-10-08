@@ -5,9 +5,8 @@
 //! `tools/list` before it can call `toolset_select`, so a phase chosen after
 //! connecting cannot buy back the bytes it already paid for.
 //!
-//! Its own test binary on purpose. These tests mutate process environment,
-//! which races every other test sharing the process; keeping them alone here
-//! means the only reader of `BOBBY_MCP_TOOLSET` is the code under test.
+//! Its own test binary: these tests mutate process environment, so the only
+//! reader of `BOBBY_MCP_TOOLSET` must be the code under test.
 
 use std::sync::Arc;
 

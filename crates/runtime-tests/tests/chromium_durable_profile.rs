@@ -1,4 +1,4 @@
-//! Phase 3 D2: an opt-in durable identity for managed Chromium. A
+//! An opt-in durable identity for managed Chromium. A
 //! `ChromiumWorkerFactory` configured with `.with_durable_profile(id)`
 //! persists its user-data-dir at `<profiles_dir>/chromium/<id>` across
 //! sessions instead of disposing it per session, and that same id attaches

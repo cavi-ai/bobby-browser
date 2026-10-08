@@ -1,8 +1,6 @@
-//! F4: `SessionManager::create` must store the caller-supplied `ExecutionPolicy` on the
-//! `SessionState` rather than always defaulting to deny. Deny-by-default is still the
-//! invariant for requests that omit the field (covered at the type layer in
-//! `types/tests/contracts.rs`); this file proves the session-manager plumbing itself
-//! carries an explicit grant through, and does not silently discard it.
+//! `SessionManager::create` stores the caller-supplied `ExecutionPolicy` on the
+//! `SessionState`; requests that omit the field stay deny-by-default (covered in
+//! `types/tests/contracts.rs`).
 
 use session_manager::SessionManager;
 use types::{CreateSessionRequest, ExecutionPolicy};

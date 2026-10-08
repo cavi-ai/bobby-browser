@@ -1,9 +1,4 @@
-//! Training-data collection for the vision gauntlet.
-//!
-//! The collector API is staged ahead of the runner that will drive it: the
-//! command below creates and validates the output directory and prints the
-//! collection instructions, while `GauntletDataCollector`'s accessors and
-//! `save`/`stats` wait on the gauntlet integration.
+//! Training-data collection for vision assist journeys.
 #![allow(dead_code)]
 
 use std::fs::OpenOptions;
@@ -19,7 +14,7 @@ use vision_proxy::{
     DataCollectorConfig, ProposeInput, ProposeResponse, VisionAction, VisionDataCollector,
 };
 
-/// Configuration for the gauntlet data collection CLI tool.
+/// Configuration for the data collection CLI command.
 #[derive(Debug, Clone)]
 pub struct CollectConfig {
     /// Output directory for collected data (default: "data/vision/")
@@ -46,9 +41,9 @@ impl Default for CollectConfig {
     }
 }
 
-/// A single training example collected from a gauntlet run.
+/// A single training example collected from a journey run.
 #[derive(Debug, Clone, Serialize)]
-pub struct GauntletTrainingExample {
+pub struct JourneyTrainingExample {
     pub privacy_version: u8,
     /// Base64 encoded PNG screenshot
     pub image_b64: String,
@@ -64,7 +59,7 @@ pub struct GauntletTrainingExample {
     pub model_response: Option<serde_json::Value>,
     /// Whether the action succeeded (set by runtime)
     pub success: bool,
-    /// Gauntlet journey name
+    /// Journey name
     pub journey: String,
     /// Step within journey
     pub step: String,
@@ -81,7 +76,7 @@ pub struct GauntletTrainingExample {
     pub image_hash: String,
 }
 
-impl GauntletTrainingExample {
+impl JourneyTrainingExample {
     // A flat training record: one argument per field, as in
     // `VisionTrainingExample::new`.
     #[allow(clippy::too_many_arguments)]
@@ -148,15 +143,15 @@ impl GauntletTrainingExample {
     }
 }
 
-/// Collects training data from gauntlet runs.
-pub struct GauntletDataCollector {
+/// Collects training data from journey runs.
+pub struct JourneyDataCollector {
     config: CollectConfig,
     data_collector: Arc<VisionDataCollector>,
     output_file: Option<PathBuf>,
-    examples: Vec<GauntletTrainingExample>,
+    examples: Vec<JourneyTrainingExample>,
 }
 
-impl GauntletDataCollector {
+impl JourneyDataCollector {
     pub fn new(config: CollectConfig) -> Result<Self> {
         // Create output directory
         std::fs::create_dir_all(&config.output_dir).context("failed to create output directory")?;
@@ -184,7 +179,7 @@ impl GauntletDataCollector {
         &self.data_collector
     }
 
-    /// Collect a single training example from a gauntlet step.
+    /// Collect a single training example from a journey step.
     // Forwards the same flat record.
     #[allow(clippy::too_many_arguments)]
     pub fn collect_example(
@@ -200,11 +195,11 @@ impl GauntletDataCollector {
         step: String,
         error_message: Option<String>,
         screenshot_sanitized: bool,
-    ) -> Result<GauntletTrainingExample> {
+    ) -> Result<JourneyTrainingExample> {
         if !screenshot_sanitized {
             anyhow::bail!("training screenshot must be sanitized before collection");
         }
-        let example = GauntletTrainingExample::new(
+        let example = JourneyTrainingExample::new(
             screenshot_png_b64,
             purpose,
             intent_kind,
@@ -233,7 +228,7 @@ impl GauntletDataCollector {
                 stuck: example.stuck.clone(),
                 screenshot_png_b64: example.image_b64.clone(),
                 corpus_screenshot_png_b64: Some(example.image_b64.clone()),
-                context: None, // Would need to extract from context
+                context: None,
             },
             example.model_response.as_ref().and_then(|r| {
                 let action = r.get("action").and_then(parse_model_action);
@@ -416,19 +411,12 @@ pub fn run_collect(
     // Constructed for the side effect: `new` creates the output directory and
     // fails if it cannot, so the path printed above is validated before the
     // instructions below tell the operator to fill it.
-    let _collector = GauntletDataCollector::new(config)?;
+    let _collector = JourneyDataCollector::new(config)?;
 
-    // In production, this would:
-    // 1. Launch the gauntlet scenario server
-    // 2. Run each journey with vision assist enabled
-    // 3. Capture vision proposals and outcomes
-    // 4. Store as JSONL
-
-    // For now, print instructions
-    println!("\nTo collect real training data:");
+    println!("\nTo collect training data:");
     println!("1. Ensure Ollama is running with llava:7b");
     println!("2. Run: bobby serve --vision (enables vision assist)");
-    println!("3. Run gauntlet tests with vision enabled");
+    println!("3. Run journeys with vision enabled");
     println!("4. Data will be collected automatically by the vision proxy");
     println!("\nOr use the Python collector:");
     println!(
@@ -488,7 +476,7 @@ mod tests {
     #[test]
     fn collector_writes_candidate_actions_to_the_secondary_dataset() {
         let temp = tempfile::tempdir().unwrap();
-        let mut collector = GauntletDataCollector::new(CollectConfig {
+        let mut collector = JourneyDataCollector::new(CollectConfig {
             output_dir: temp.path().join("vision"),
             flush_interval_ms: 0,
             ..CollectConfig::default()
@@ -537,7 +525,7 @@ mod tests {
 
     #[test]
     fn test_example_creation() {
-        let example = GauntletTrainingExample::new(
+        let example = JourneyTrainingExample::new(
             "dGVzdA==".to_string(), // base64 "test"
             "test".to_string(),
             "locate".to_string(),
