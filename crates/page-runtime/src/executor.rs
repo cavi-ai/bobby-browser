@@ -1157,9 +1157,10 @@ impl PageRuntime {
                         // Report where the submit landed: the page the agent
                         // is on after the navigation, not the one it typed on.
                         // The signal is the URL moving off the page the field
-                        // was typed on; when no navigation starts inside the
-                        // bounded window the Enter did not navigate and the
-                        // call returns at once.
+                        // was typed on, watched for a bounded window. A
+                        // single-page app may already have pushed its URL and
+                        // keeps rendering after it, so the reported URL and
+                        // title are read once the document stops changing.
                         let page_inspect = InspectCommand {
                             selector: None,
                             target: None,
@@ -1208,13 +1209,27 @@ impl PageRuntime {
                                     },
                                 )
                                 .await;
-                            landed = lease
-                                .worker()
-                                .inspect(page_id, &page_inspect)
-                                .await
-                                .ok()
-                                .and_then(read_page)
-                                .or(landed);
+                        }
+                        let settle_budget = (envelope.deadline - Utc::now())
+                            .to_std()
+                            .unwrap_or_default()
+                            .min(worker_pool::navigation_settle::NAVIGATION_SETTLE_CAP);
+                        match lease
+                            .worker()
+                            .settle_page(page_id, settle_budget, None)
+                            .await
+                        {
+                            Some(settled) => landed = Some(settled),
+                            None if navigated => {
+                                landed = lease
+                                    .worker()
+                                    .inspect(page_id, &page_inspect)
+                                    .await
+                                    .ok()
+                                    .and_then(read_page)
+                                    .or(landed);
+                            }
+                            None => {}
                         }
                         if let Some((url, title)) = landed {
                             combined.push(Evidence::Navigation { url, title });

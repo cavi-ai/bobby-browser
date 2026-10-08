@@ -139,6 +139,16 @@ pub trait IntentBrowser: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Waits for an absent `target` to appear before an action resolves it.
+    /// The full runtime bounds the wait by the command deadline; fakes and
+    /// alternate runtimes return at once.
+    async fn await_target(&self, _page_id: &PageId, _target: &TargetSpec) {}
+
+    /// Waits until the document has stopped changing after a navigation the
+    /// intent caused, with the probe `navigate` settles with. Fakes and
+    /// alternate runtimes return at once.
+    async fn settle_page(&self, _page_id: &PageId, _requested_url: Option<&str>) {}
+
     async fn capture_screenshot(
         &self,
         page_id: &PageId,
@@ -2500,6 +2510,7 @@ async fn execute_follow(
         summarize_target(&target),
         wait_condition_kind(&expected_destination.condition)
     );
+    browser.await_target(page_id, &target).await;
     let candidates = match browser.collect_candidates(page_id, &target).await {
         Ok(candidates) => candidates,
         Err(error) => {
@@ -2653,6 +2664,11 @@ async fn execute_follow(
         Evidence::Wait { elapsed_ms, .. } => Some(*elapsed_ms),
         _ => None,
     });
+    // The destination can match (a pushed URL) long before the page behind
+    // it is built; the follow is done once the document stops changing.
+    browser
+        .settle_page(page_id, click.expected_url.as_deref())
+        .await;
 
     let mut evidence = vec![resolution];
     evidence.append(&mut click_evidence);
