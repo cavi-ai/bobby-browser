@@ -14,7 +14,9 @@
 //! database. A lockfile enforces the single-writer rule: only the runtime
 //! process opens the store, and a second opener is refused.
 
+mod limits;
 mod sitekey;
+pub use limits::ContextLimits;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -23,7 +25,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::fs::{File, OpenOptions};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 pub use sitekey::{page_pattern, site_key};
@@ -47,6 +49,8 @@ pub enum ContextStoreError {
     /// of these.
     #[error("context store lockfile is unusable: {0}")]
     LockUnusable(&'static str),
+    #[error("context resource limit: {0}")]
+    ResourceLimit(&'static str),
     #[error("unsupported context schema {actual}; expected {expected}")]
     UnsupportedSchema { actual: u16, expected: u16 },
 }
@@ -140,6 +144,7 @@ pub struct SkippedSite {
 pub struct OpenReport {
     pub sites_loaded: usize,
     pub skipped: Vec<SkippedSite>,
+    pub skipped_total: usize,
 }
 
 /// Days since the Unix epoch for a wall-clock time — the only timestamp
@@ -150,12 +155,116 @@ pub fn day_since_epoch(time: chrono::DateTime<chrono::Utc>) -> u32 {
 
 #[derive(Default)]
 struct StoreState {
-    sites: BTreeMap<String, SiteContext>,
+    sites: BTreeMap<String, CachedSite>,
     dirty: BTreeMap<String, u64>,
     revision: u64,
+    evictions: u64,
+    rejected_updates: u64,
+    clock: u64,
+    retention_cutoff: Option<u32>,
+}
+
+struct CachedSite {
+    site: SiteContext,
+    bytes: usize,
+    last_used: u64,
+}
+
+impl CachedSite {
+    fn new(key: &str, site: SiteContext) -> Self {
+        Self {
+            bytes: limits::site_bytes(&site)
+                .saturating_add(key.len())
+                .saturating_add(limits::node_bytes::<String, Self>()),
+            site,
+            last_used: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ContextUsage {
+    pub resident_sites: usize,
+    pub resident_bytes: usize,
+    pub pending_changes: usize,
+    pub evictions: u64,
+    pub rejected_updates: u64,
 }
 
 impl StoreState {
+    fn bytes(&self) -> usize {
+        self.sites
+            .values()
+            .fold(limits::map_bytes(&self.dirty), |bytes, entry| {
+                bytes.saturating_add(entry.bytes)
+            })
+            .saturating_add(
+                self.dirty
+                    .keys()
+                    .fold(0usize, |bytes, key| bytes.saturating_add(key.capacity())),
+            )
+    }
+
+    fn make_room(&mut self, key: &str, bytes: usize, dirty: bool, limits: ContextLimits) -> bool {
+        loop {
+            let old = self.sites.get(key).map_or(0, |entry| entry.bytes);
+            let extra = if dirty && !self.dirty.contains_key(key) {
+                limits::node_bytes::<String, u64>().saturating_add(key.len())
+            } else {
+                0
+            };
+            let wanted = self
+                .bytes()
+                .saturating_sub(old)
+                .saturating_add(bytes)
+                .saturating_add(extra);
+            let count = self.sites.len()
+                + self
+                    .dirty
+                    .keys()
+                    .filter(|key| !self.sites.contains_key(*key))
+                    .count()
+                + usize::from(!self.sites.contains_key(key) && !self.dirty.contains_key(key));
+            if wanted <= limits.max_resident_bytes && count <= limits.max_resident_sites {
+                return true;
+            }
+            let victim = self
+                .sites
+                .iter()
+                .filter(|(candidate, _)| {
+                    candidate.as_str() != key && !self.dirty.contains_key(*candidate)
+                })
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone());
+            let Some(victim) = victim else {
+                return false;
+            };
+            self.sites.remove(&victim);
+            self.evictions = self.evictions.saturating_add(1);
+        }
+    }
+
+    fn insert(&mut self, key: String, mut entry: CachedSite) {
+        let key = key.into_boxed_str().into_string();
+        self.clock = self.clock.wrapping_add(1);
+        entry.last_used = self.clock;
+        self.sites.insert(key, entry);
+    }
+
+    fn get(&mut self, key: &str) -> Option<SiteContext> {
+        self.clock = self.clock.wrapping_add(1);
+        let entry = self.sites.get_mut(key)?;
+        entry.last_used = self.clock;
+        let mut site = entry.site.clone();
+        if let Some(cutoff) = self.retention_cutoff {
+            prune_site(&mut site, cutoff);
+            if site.pages.is_empty() && site.challenges.is_empty() {
+                return None;
+            }
+        }
+        Some(site)
+    }
+
     fn mark_dirty(&mut self, key: &str) {
         self.revision = self.revision.wrapping_add(1);
         self.dirty.insert(key.to_string(), self.revision);
@@ -170,9 +279,20 @@ pub struct ContextStore {
     /// otherwise rename an older snapshot over a newer one.
     flushing: Arc<Mutex<()>>,
     _lock: Arc<Lockfile>,
+    limits: ContextLimits,
 }
 
 impl ContextStore {
+    pub async fn usage(&self) -> ContextUsage {
+        let state = self.state.lock().await;
+        ContextUsage {
+            resident_sites: state.sites.len(),
+            resident_bytes: state.bytes(),
+            pending_changes: state.dirty.len(),
+            evictions: state.evictions,
+            rejected_updates: state.rejected_updates,
+        }
+    }
     /// Opens the store for one profile, creating directories, claiming the
     /// single-writer lockfile, and building the in-memory index. Corrupt or
     /// unsupported files are skipped and reported, never fatal.
@@ -180,10 +300,21 @@ impl ContextStore {
         root: impl AsRef<Path>,
         profile_id: &str,
     ) -> Result<(Self, OpenReport), ContextStoreError> {
+        Self::open_with_limits(root, profile_id, ContextLimits::default()).await
+    }
+
+    pub async fn open_with_limits(
+        root: impl AsRef<Path>,
+        profile_id: &str,
+        limits: ContextLimits,
+    ) -> Result<(Self, OpenReport), ContextStoreError> {
+        limits
+            .validate()
+            .map_err(ContextStoreError::ResourceLimit)?;
         let root = root.as_ref().join(encode_component(profile_id));
         tokio::fs::create_dir_all(&root).await?;
         let lock = Lockfile::claim(&root)?;
-        let mut index = BTreeMap::new();
+        let mut state = StoreState::default();
         let mut report = OpenReport::default();
         let mut entries = tokio::fs::read_dir(&root).await?;
         while let Some(entry) = entries.next_entry().await? {
@@ -191,26 +322,31 @@ impl ContextStore {
             if path.extension().and_then(|value| value.to_str()) != Some("json") {
                 continue;
             }
-            match load_envelope(&path).await {
+            match load_envelope(&path, limits).await {
                 Ok((key, site)) => {
-                    index.insert(key, site);
+                    let entry = CachedSite::new(&key, site);
+                    if state.make_room(&key, entry.bytes, false, limits) {
+                        state.insert(key, entry);
+                    }
                     report.sites_loaded += 1;
                 }
                 Err(reason) => {
+                    let reason: String = reason.chars().take(512).collect();
                     tracing::warn!(file = %path.display(), %reason, "context.site_skipped");
-                    report.skipped.push(SkippedSite { file: path, reason });
+                    report.skipped_total += 1;
+                    if report.skipped.len() < 128 {
+                        report.skipped.push(SkippedSite { file: path, reason });
+                    }
                 }
             }
         }
         Ok((
             Self {
                 root: Arc::new(root),
-                state: Arc::new(Mutex::new(StoreState {
-                    sites: index,
-                    ..StoreState::default()
-                })),
+                state: Arc::new(Mutex::new(state)),
                 flushing: Arc::new(Mutex::new(())),
                 _lock: Arc::new(lock),
+                limits,
             },
             report,
         ))
@@ -224,18 +360,107 @@ impl ContextStore {
         ttl_days: u32,
         today: u32,
     ) -> Result<(Self, OpenReport), ContextStoreError> {
-        let (store, report) = Self::open(root, profile_id).await?;
-        store.sweep(ttl_days, today).await?;
+        Self::open_with_limits_and_ttl(root, profile_id, ContextLimits::default(), ttl_days, today)
+            .await
+    }
+
+    pub async fn open_with_limits_and_ttl(
+        root: impl AsRef<Path>,
+        profile_id: &str,
+        limits: ContextLimits,
+        ttl_days: u32,
+        today: u32,
+    ) -> Result<(Self, OpenReport), ContextStoreError> {
+        let (store, report) = Self::open_with_limits(root, profile_id, limits).await?;
+        let dropped = store.sweep(ttl_days, today).await?;
+        if dropped > 0 {
+            tracing::info!(dropped, "context.swept_expired_records");
+        }
         Ok((store, report))
     }
 
     /// In-memory view of a site, if present.
     pub async fn site(&self, site_key: &str) -> Option<SiteContext> {
-        self.state.lock().await.sites.get(site_key).cloned()
+        {
+            let mut state = self.state.lock().await;
+            if let Some(site) = state.get(site_key) {
+                return Some(site);
+            }
+            if state.dirty.contains_key(site_key) {
+                return None;
+            }
+        }
+        let _guard = self.flushing.lock().await;
+        {
+            let mut state = self.state.lock().await;
+            if let Some(site) = state.get(site_key) {
+                return Some(site);
+            }
+            if state.dirty.contains_key(site_key) {
+                return None;
+            }
+        }
+        let (key, mut site) = load_envelope(&self.path(site_key), self.limits)
+            .await
+            .ok()?;
+        if key != site_key {
+            return None;
+        }
+        if let Some(cutoff) = self.state.lock().await.retention_cutoff {
+            prune_site(&mut site, cutoff);
+            if site.pages.is_empty() && site.challenges.is_empty() {
+                return None;
+            }
+        }
+        let entry = CachedSite::new(&key, site.clone());
+        let mut state = self.state.lock().await;
+        if state.make_room(&key, entry.bytes, false, self.limits) {
+            state.insert(key, entry);
+        }
+        Some(site)
     }
 
     pub async fn list_sites(&self) -> Vec<String> {
-        self.state.lock().await.sites.keys().cloned().collect()
+        let _guard = self.flushing.lock().await;
+        let mut keys = std::collections::BTreeSet::new();
+        if let Ok(mut files) = tokio::fs::read_dir(self.root.as_ref()).await {
+            while let Ok(Some(file)) = files.next_entry().await {
+                if file
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+                {
+                    if let Ok((key, mut site)) = load_envelope(&file.path(), self.limits).await {
+                        if let Some(cutoff) = self.state.lock().await.retention_cutoff {
+                            prune_site(&mut site, cutoff);
+                            if site.pages.is_empty() && site.challenges.is_empty() {
+                                continue;
+                            }
+                        }
+                        keys.insert(key);
+                    }
+                }
+            }
+        }
+        let state = self.state.lock().await;
+        keys.extend(state.sites.iter().filter_map(|(key, entry)| {
+            let mut site = entry.site.clone();
+            if let Some(cutoff) = state.retention_cutoff {
+                prune_site(&mut site, cutoff);
+                if site.pages.is_empty() && site.challenges.is_empty() {
+                    return None;
+                }
+            }
+            Some(key.clone())
+        }));
+        for key in state
+            .dirty
+            .keys()
+            .filter(|key| !state.sites.contains_key(*key))
+        {
+            keys.remove(key);
+        }
+        keys.into_iter().collect()
     }
 
     /// Replaces (or inserts) a site's context, buffering the write behind
@@ -247,9 +472,100 @@ impl ContextStore {
 
     /// Mutate a site atomically, avoiding lost updates from cloned snapshots.
     pub async fn update_site(&self, site_key: &str, update: impl FnOnce(&mut SiteContext)) {
+        let guard = self.flushing.clone().lock_owned().await;
+        let current = {
+            let mut state = self.state.lock().await;
+            if state.dirty.contains_key(site_key) {
+                Some(state.get(site_key).unwrap_or_default())
+            } else {
+                state.get(site_key)
+            }
+        };
+        let mut site = match current {
+            Some(site) => site,
+            None => {
+                let path = self.path(site_key);
+                match tokio::fs::try_exists(&path).await {
+                    Ok(false) => SiteContext::default(),
+                    Ok(true) => match load_envelope(&path, self.limits).await {
+                        Ok((key, site)) if key == site_key => site,
+                        _ => {
+                            self.reject_update("existing site cannot be loaded within limits")
+                                .await;
+                            return;
+                        }
+                    },
+                    Err(_) => {
+                        self.reject_update("existing site cannot be inspected")
+                            .await;
+                        return;
+                    }
+                }
+            }
+        };
+        if let Some(cutoff) = self.state.lock().await.retention_cutoff {
+            prune_site(&mut site, cutoff);
+        }
+        update(&mut site);
+        let envelope = SiteEnvelope {
+            schema: SCHEMA_VERSION,
+            site_key: site_key.to_string(),
+            site,
+        };
+        if let Err(reason) = self.limits.check_envelope(&envelope) {
+            self.reject_update(&reason).await;
+            return;
+        }
+        let entry = CachedSite::new(site_key, envelope.site);
+        if entry
+            .bytes
+            .saturating_add(limits::node_bytes::<String, u64>())
+            .saturating_add(site_key.len())
+            > self.limits.max_resident_bytes
+        {
+            self.reject_update("site exceeds resident cache byte limit")
+                .await;
+            return;
+        }
+        let fits = self
+            .state
+            .lock()
+            .await
+            .make_room(site_key, entry.bytes, true, self.limits);
+        let _guard = if fits {
+            guard
+        } else {
+            // Return ownership of the writer lock after flushing. If the caller
+            // cancels, the owned transaction finishes and then releases it.
+            let store = self.clone();
+            match tokio::spawn(async move {
+                store.flush_locked().await;
+                guard
+            })
+            .await
+            {
+                Ok(guard) => guard,
+                Err(_) => {
+                    self.reject_update("pressure flush failed").await;
+                    return;
+                }
+            }
+        };
         let mut state = self.state.lock().await;
-        update(state.sites.entry(site_key.to_string()).or_default());
+        if !state.make_room(site_key, entry.bytes, true, self.limits) {
+            drop(state);
+            self.reject_update("resident cache limit; dirty updates preserved")
+                .await;
+            return;
+        }
+        state.insert(site_key.to_string(), entry);
         state.mark_dirty(site_key);
+    }
+
+    async fn reject_update(&self, reason: &str) {
+        let mut state = self.state.lock().await;
+        state.rejected_updates = state.rejected_updates.saturating_add(1);
+        tracing::warn!(%reason, rejected_updates = state.rejected_updates, "context.update_rejected");
     }
 
     /// Records one challenge outcome against a site. Success stamps the
@@ -311,7 +627,10 @@ impl ContextStore {
                 let Some(revision) = state.dirty.get(&key).copied() else {
                     continue;
                 };
-                (revision, state.sites.get(&key).cloned())
+                (
+                    revision,
+                    state.sites.get(&key).map(|entry| entry.site.clone()),
+                )
             };
             let result = match site {
                 Some(site) => self.write_site(&key, &site).await,
@@ -347,7 +666,26 @@ impl ContextStore {
         let key = site_key.to_string();
         tokio::spawn(async move {
             let _guard = guard;
+            if !tokio::fs::try_exists(store.path(&key)).await? {
+                let mut state = store.state.lock().await;
+                state.sites.remove(&key);
+                state.dirty.remove(&key);
+                return Ok(());
+            }
+            let fits = store
+                .state
+                .lock()
+                .await
+                .make_room(&key, 0, true, store.limits);
+            if !fits {
+                store.flush_locked().await;
+            }
             let mut state = store.state.lock().await;
+            if !state.make_room(&key, 0, true, store.limits) {
+                return Err(ContextStoreError::ResourceLimit(
+                    "cannot buffer erasure; dirty updates preserved",
+                ));
+            }
             state.sites.remove(&key);
             state.mark_dirty(&key);
             let revision = state.dirty[&key];
@@ -379,52 +717,66 @@ impl ContextStore {
 
     async fn sweep_locked(&self, ttl_days: u32, today: u32) -> Result<u64, ContextStoreError> {
         let cutoff = today.saturating_sub(ttl_days);
+        self.state.lock().await.retention_cutoff = Some(cutoff);
         let mut dropped = 0_u64;
-        let mut emptied = Vec::new();
-        let mut changed = Vec::new();
-        {
-            let mut state = self.state.lock().await;
-            for (key, site) in state.sites.iter_mut() {
-                let before_pages = site.pages.len();
-                let before = dropped;
-                for page in site.pages.values_mut() {
-                    for form in page.forms.values_mut() {
-                        for control in &mut form.controls {
-                            control.intents.retain(|_, stats| {
-                                let keep = stats.last_verified_day.is_some_and(|day| day >= cutoff);
-                                if !keep {
-                                    dropped += 1;
-                                }
-                                keep
-                            });
-                        }
-                        form.controls.retain(|control| !control.intents.is_empty());
-                    }
-                    page.forms.retain(|_, form| !form.controls.is_empty());
-                }
-                site.pages.retain(|_, page| !page.forms.is_empty());
-                if site.pages.is_empty() && site.challenges.is_empty() {
-                    emptied.push(key.clone());
-                } else if dropped != before || site.pages.len() != before_pages {
-                    changed.push(key.clone());
-                }
+        let keys: Vec<_> = self.state.lock().await.sites.keys().cloned().collect();
+        for key in keys {
+            let mut site = match self.state.lock().await.sites.get(&key) {
+                Some(entry) => entry.site.clone(),
+                None => continue,
+            };
+            let (removed, changed) = prune_site(&mut site, cutoff);
+            dropped += removed;
+            let empty = site.pages.is_empty() && site.challenges.is_empty();
+            if !changed && !empty && !self.state.lock().await.dirty.contains_key(&key) {
+                continue;
             }
-            for key in &emptied {
-                state.sites.remove(key);
-                state.mark_dirty(key);
-            }
-            for key in changed {
-                state.mark_dirty(&key);
+            if empty {
+                self.remove_site_file(&key).await?;
+                let mut state = self.state.lock().await;
+                state.sites.remove(&key);
+                state.dirty.remove(&key);
+            } else {
+                self.write_site(&key, &site).await?;
+                let entry = CachedSite::new(&key, site);
+                let mut state = self.state.lock().await;
+                state.dirty.remove(&key);
+                if state.make_room(&key, entry.bytes, false, self.limits) {
+                    state.insert(key, entry);
+                } else {
+                    state.sites.remove(&key);
+                }
             }
         }
-        let failed = self.flush_locked().await;
-        if !failed.is_empty() {
-            return Err(std::io::Error::other(format!(
-                "retention sweep failed to persist {} site(s): {}",
-                failed.len(),
-                failed.join(", ")
-            ))
-            .into());
+        // Evicted sites still participate in retention, one bounded file at a
+        // time. Cache residency cannot exempt durable records from expiry.
+        let mut files = tokio::fs::read_dir(self.root.as_ref()).await?;
+        while let Some(file) = files.next_entry().await? {
+            let path = file.path();
+            if !path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
+                continue;
+            }
+            let Ok((key, mut site)) = load_envelope(&path, self.limits).await else {
+                continue;
+            };
+            if self.state.lock().await.sites.contains_key(&key) {
+                continue;
+            }
+            let (removed, changed) = prune_site(&mut site, cutoff);
+            dropped += removed;
+            if site.pages.is_empty() && site.challenges.is_empty() {
+                self.remove_site_file(&key).await?;
+            } else if changed {
+                self.write_site(&key, &site).await?;
+            }
+        }
+        if let Some(key) = self.flush_locked().await.into_iter().next() {
+            return Err(
+                std::io::Error::other(format!("retention persistence failed for {key}")).into(),
+            );
         }
         Ok(dropped)
     }
@@ -444,6 +796,9 @@ impl ContextStore {
             site_key: key.to_string(),
             site: site.clone(),
         };
+        self.limits
+            .check_envelope(&envelope)
+            .map_err(|_| ContextStoreError::ResourceLimit("site file or structure limit"))?;
         let destination = self.path(key);
         let temporary = self.root.join(format!(
             ".{}.{}.tmp",
@@ -473,19 +828,82 @@ impl ContextStore {
     }
 }
 
-async fn load_envelope(path: &Path) -> Result<(String, SiteContext), String> {
-    let bytes = tokio::fs::read(path)
+fn prune_site(site: &mut SiteContext, cutoff: u32) -> (u64, bool) {
+    let before_pages = site.pages.len();
+    let mut dropped = 0;
+    for page in site.pages.values_mut() {
+        for form in page.forms.values_mut() {
+            for control in &mut form.controls {
+                control.intents.retain(|_, stats| {
+                    let keep = stats.last_verified_day.is_some_and(|day| day >= cutoff);
+                    if !keep {
+                        dropped += 1;
+                    }
+                    keep
+                });
+            }
+            form.controls.retain(|control| !control.intents.is_empty());
+        }
+        page.forms.retain(|_, form| !form.controls.is_empty());
+    }
+    site.pages.retain(|_, page| !page.forms.is_empty());
+    (dropped, dropped != 0 || before_pages != site.pages.len())
+}
+
+async fn load_envelope(
+    path: &Path,
+    limits: ContextLimits,
+) -> Result<(String, SiteContext), String> {
+    let file = File::open(path).await.map_err(|error| error.to_string())?;
+    if file
+        .metadata()
+        .await
+        .map_err(|error| error.to_string())?
+        .len()
+        > limits.max_file_bytes as u64
+    {
+        return Err("context site exceeds file byte limit".into());
+    }
+    let mut bytes = Vec::new();
+    file.take((limits.max_file_bytes as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
         .await
         .map_err(|error| error.to_string())?;
+    if bytes.len() > limits.max_file_bytes {
+        return Err("context site exceeds file byte limit".into());
+    }
+    decode_envelope(&bytes, limits)
+}
+
+fn decode_envelope(bytes: &[u8], limits: ContextLimits) -> Result<(String, SiteContext), String> {
     let envelope: SiteEnvelope =
-        serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
     if envelope.schema != SCHEMA_VERSION {
         return Err(format!(
             "unsupported schema {}; expected {SCHEMA_VERSION}",
             envelope.schema
         ));
     }
+    limits.check_site(&envelope.site).map_err(str::to_string)?;
     Ok((envelope.site_key, envelope.site))
+}
+
+/// Inspect a site without claiming the writer lock or modifying its file.
+pub fn inspect_site_file(path: &Path, limits: ContextLimits) -> Result<(), String> {
+    use std::io::Read;
+    limits.validate().map_err(str::to_string)?;
+    let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    if file.metadata().map_err(|error| error.to_string())?.len() > limits.max_file_bytes as u64 {
+        return Err("context site exceeds file byte limit".into());
+    }
+    let mut bytes = Vec::new();
+    file.take((limits.max_file_bytes as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > limits.max_file_bytes {
+        return Err("context site exceeds file byte limit".into());
+    }
+    decode_envelope(&bytes, limits).map(|_| ())
 }
 
 /// Injective filesystem encoding for arbitrary UTF-8 identity strings.

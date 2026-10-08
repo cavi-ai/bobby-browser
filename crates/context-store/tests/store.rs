@@ -81,6 +81,162 @@ async fn corrupt_and_unsupported_files_are_skipped_and_reported() {
 }
 
 #[tokio::test]
+async fn oversized_valid_site_is_reported_without_reading_or_erasing_it() {
+    use std::io::Write;
+    let temp = tempfile::tempdir().unwrap();
+    let (store, _) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
+    store.upsert_site("site", site(&["Email"], 100)).await;
+    assert!(store.flush().await.is_empty());
+    let path = store.root().join("73697465.json");
+    drop(store);
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    file.write_all(&vec![b' '; 2 * 1024 * 1024]).unwrap();
+    drop(file);
+    let original = std::fs::read(&path).unwrap();
+    let (reopened, report) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
+    assert_eq!(
+        report.sites_loaded, 0,
+        "oversized valid JSON must be refused"
+    );
+    assert_eq!(report.skipped.len(), 1);
+    assert!(reopened.site("site").await.is_none());
+    assert_eq!(std::fs::read(path).unwrap(), original);
+}
+
+#[tokio::test]
+async fn cache_eviction_reloads_persisted_sites_and_bounds_dirty_admissions() {
+    let temp = tempfile::tempdir().unwrap();
+    let limits = context_store::ContextLimits {
+        max_resident_sites: 2,
+        max_resident_bytes: 64 * 1024,
+        ..Default::default()
+    };
+    let (store, _) = ContextStore::open_with_limits(temp.path(), "profile-a", limits)
+        .await
+        .unwrap();
+    for name in ["one", "two", "three", "four"] {
+        store.upsert_site(name, site(&[name], 100)).await;
+        let usage = store.usage().await;
+        assert!(usage.resident_sites <= 2, "{usage:?}");
+        assert!(usage.resident_bytes <= 64 * 1024, "{usage:?}");
+    }
+    assert!(store.flush().await.is_empty());
+    assert_eq!(store.list_sites().await, ["four", "one", "three", "two"]);
+    for name in ["one", "two", "three", "four"] {
+        assert_eq!(store.site(name).await, Some(site(&[name], 100)));
+        assert!(store.usage().await.resident_sites <= 2);
+    }
+    assert!(store.usage().await.evictions > 0);
+    drop(store);
+    let (reopened, report) = ContextStore::open_with_limits(temp.path(), "profile-a", limits)
+        .await
+        .unwrap();
+    assert_eq!(report.sites_loaded, 4);
+    assert!(reopened.usage().await.resident_sites <= 2);
+    assert_eq!(reopened.site("one").await, Some(site(&["one"], 100)));
+}
+
+#[tokio::test]
+async fn site_structure_and_cache_byte_limits_preserve_the_previous_observation() {
+    let temp = tempfile::tempdir().unwrap();
+    let limits = context_store::ContextLimits {
+        max_site_records: 4,
+        max_resident_bytes: 16 * 1024,
+        ..Default::default()
+    };
+    let (store, _) = ContextStore::open_with_limits(temp.path(), "profile-a", limits)
+        .await
+        .unwrap();
+    store.upsert_site("site", site(&["Email"], 100)).await;
+    assert!(store.flush().await.is_empty());
+    let original = store.site("site").await.unwrap();
+    store
+        .upsert_site("site", site(&["Email", "Password"], 100))
+        .await;
+    assert_eq!(store.site("site").await.unwrap(), original);
+    store
+        .upsert_site("site", site(&[&"x".repeat(32 * 1024)], 100))
+        .await;
+    assert_eq!(store.site("site").await.unwrap(), original);
+    assert_eq!(store.usage().await.rejected_updates, 2);
+    assert!(store.usage().await.resident_bytes <= 16 * 1024);
+}
+
+#[tokio::test]
+async fn failed_pressure_flush_keeps_accepted_dirty_context_and_refuses_growth() {
+    let temp = tempfile::tempdir().unwrap();
+    let limits = context_store::ContextLimits {
+        max_resident_sites: 1,
+        ..Default::default()
+    };
+    let (store, _) = ContextStore::open_with_limits(temp.path(), "profile-a", limits)
+        .await
+        .unwrap();
+    store.upsert_site("one", site(&["Email"], 100)).await;
+    let original_root = store.root().to_path_buf();
+    let moved = temp.path().join("moved");
+    std::fs::rename(&original_root, &moved).unwrap();
+    store.upsert_site("two", site(&["Password"], 100)).await;
+    assert_eq!(store.site("one").await, Some(site(&["Email"], 100)));
+    assert!(store.site("two").await.is_none());
+    assert_eq!(store.usage().await.pending_changes, 1);
+    assert_eq!(store.usage().await.rejected_updates, 1);
+    std::fs::rename(moved, original_root).unwrap();
+    assert!(store.flush().await.is_empty());
+    drop(store);
+    let (reopened, _) = ContextStore::open_with_limits(temp.path(), "profile-a", limits)
+        .await
+        .unwrap();
+    assert_eq!(reopened.site("one").await, Some(site(&["Email"], 100)));
+}
+
+#[tokio::test]
+async fn retention_and_forget_include_evicted_sites() {
+    let temp = tempfile::tempdir().unwrap();
+    let limits = context_store::ContextLimits {
+        max_resident_sites: 1,
+        ..Default::default()
+    };
+    let (store, _) = ContextStore::open_with_limits(temp.path(), "profile-a", limits)
+        .await
+        .unwrap();
+    for name in ["one", "two", "three"] {
+        store.upsert_site(name, site(&[name], 1)).await;
+    }
+    store.upsert_site("fresh", site(&["Email"], 100)).await;
+    assert!(store.flush().await.is_empty());
+    assert_eq!(store.sweep(30, 100).await.unwrap(), 3);
+    assert_eq!(store.list_sites().await, ["fresh"]);
+    store.upsert_site("other", site(&["Password"], 100)).await;
+    assert!(store.flush().await.is_empty());
+    store.forget("fresh").await.unwrap();
+    assert!(store.site("fresh").await.is_none());
+    drop(store);
+    let (reopened, _) = ContextStore::open_with_limits(temp.path(), "profile-a", limits)
+        .await
+        .unwrap();
+    assert_eq!(reopened.list_sites().await, ["other"]);
+}
+
+#[tokio::test]
+async fn malformed_file_diagnostics_are_bounded_while_counting_every_skip() {
+    let temp = tempfile::tempdir().unwrap();
+    let (store, _) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
+    let root = store.root().to_path_buf();
+    drop(store);
+    for i in 0..300 {
+        std::fs::write(root.join(format!("bad-{i}.json")), b"bad").unwrap();
+    }
+    let (store, report) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
+    assert_eq!(report.skipped_total, 300);
+    assert!(report.skipped.len() < 300);
+    assert_eq!(store.usage().await.resident_sites, 0);
+}
+
+#[tokio::test]
 async fn profiles_are_isolated() {
     let temp = tempfile::tempdir().unwrap();
     let (store_a, _) = ContextStore::open(temp.path(), "profile-a").await.unwrap();

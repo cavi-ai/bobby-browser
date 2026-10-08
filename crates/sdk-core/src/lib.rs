@@ -257,33 +257,29 @@ impl RuntimeService {
         profile_id: &str,
     ) -> Result<Self, RuntimeError> {
         let promotion = match &config.context.dir {
-            Some(dir) => match context_store::ContextStore::open_with_ttl(
+            Some(dir) => match context_store::ContextStore::open_with_limits_and_ttl(
                 dir,
                 profile_id,
+                config.context.limits,
                 config.context.ttl_days,
                 context_store::day_since_epoch(Utc::now()),
             )
             .await
             {
                 Ok((store, report)) => {
-                    if !report.skipped.is_empty() {
+                    if report.skipped_total > 0 {
                         tracing::warn!(
-                            skipped = report.skipped.len(),
+                            skipped = report.skipped_total,
                             "context.store_opened_with_skipped_sites"
                         );
                     }
-                    // TTL sweep on open: expired records never serve an
-                    // answer, and their bytes leave with the next flush.
-                    let today = context_store::day_since_epoch(chrono::Utc::now());
-                    match store.sweep(config.context.ttl_days, today).await {
-                        Ok(dropped) if dropped > 0 => {
-                            tracing::info!(dropped, "context.swept_expired_records");
-                        }
-                        Ok(_) => {}
-                        Err(error) => {
-                            tracing::warn!(%error, "context.sweep_failed");
-                        }
-                    }
+                    let usage = store.usage().await;
+                    tracing::info!(
+                        resident_sites = usage.resident_sites,
+                        resident_bytes = usage.resident_bytes,
+                        cache_evictions = usage.evictions,
+                        "context.cache_opened"
+                    );
                     Some(Arc::new(page_runtime::ContextPromotion::new(store)))
                 }
                 Err(error) => {

@@ -1037,6 +1037,7 @@ dependencies = [
 name = "config"
 version = "0.19.1"
 dependencies = [
+ "context-store",
  "dirs",
  "serde",
  "serde_json",
