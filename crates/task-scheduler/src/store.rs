@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
 use crate::job::{Job, JobId, JobStatus};
@@ -231,7 +231,8 @@ impl JournalJobStore {
             torn_tail,
             max_sequence,
             incompatible_records,
-        } = scan_path(&path).await?;
+            ..
+        } = scan_path(&path, true).await?;
 
         let damaged = torn_tail || incompatible_records > 0 || max_sequence == Some(u64::MAX);
         if damaged {
@@ -304,20 +305,11 @@ impl JournalJobStore {
 
     /// Probe journal health without truncating, compacting, or creating the file.
     pub async fn inspect(path: impl AsRef<Path>) -> Result<JournalHealth, StoreError> {
-        let path = path.as_ref();
-        let bytes = match tokio::fs::read(path).await {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(JournalHealth::default());
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let bytes_len = bytes.len() as u64;
-        let scan = scan_bytes(&bytes)?;
+        let scan = scan_path(path.as_ref(), false).await?;
         Ok(JournalHealth {
-            exists: true,
-            bytes: bytes_len,
-            records: complete_line_count(&bytes),
+            exists: scan.exists,
+            bytes: scan.bytes,
+            records: scan.records,
             torn_tail: scan.torn_tail,
             incompatible_records: scan.incompatible_records,
         })
@@ -366,7 +358,7 @@ impl JournalJobStore {
                     .read(true)
                     .open(&*store.path)
                     .await?;
-                writer.next_sequence = scan_path(&store.path)
+                writer.next_sequence = scan_path(&store.path, false)
                     .await?
                     .max_sequence
                     .and_then(|seq| seq.checked_add(1))
@@ -442,7 +434,7 @@ impl JobStore for JournalJobStore {
                 .read(true)
                 .open(&*store.path)
                 .await?;
-            let scan = scan_path(&store.path).await?;
+            let scan = scan_path(&store.path, true).await?;
             writer.next_sequence = scan
                 .max_sequence
                 .and_then(|seq| seq.checked_add(1))
@@ -459,105 +451,80 @@ impl JobStore for JournalJobStore {
     }
 }
 
+#[derive(Default)]
 struct Scan {
     jobs: Vec<Job>,
     torn_tail: bool,
     max_sequence: Option<u64>,
     incompatible_records: usize,
+    exists: bool,
+    bytes: u64,
+    records: usize,
 }
 
-fn complete_len(bytes: &[u8]) -> usize {
-    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
-        bytes
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |at| at + 1)
-    } else {
-        bytes.len()
-    }
-}
-
-fn complete_line_count(bytes: &[u8]) -> usize {
-    bytes[..complete_len(bytes)]
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .count()
-}
-
-async fn scan_path(path: &Path) -> Result<Scan, StoreError> {
-    let mut file = match File::open(path).await {
+async fn scan_path(path: &Path, collect_jobs: bool) -> Result<Scan, StoreError> {
+    let file = match File::open(path).await {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Scan {
-                jobs: Vec::new(),
-                torn_tail: false,
-                max_sequence: None,
-                incompatible_records: 0,
-            });
+            return Ok(Scan::default());
         }
         Err(error) => return Err(error.into()),
     };
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).await?;
-    scan_bytes(&bytes)
-}
-
-fn scan_bytes(bytes: &[u8]) -> Result<Scan, StoreError> {
-    let torn_tail = !bytes.is_empty() && !bytes.ends_with(b"\n");
-    let complete_len = if torn_tail {
-        bytes
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |at| at + 1)
-    } else {
-        bytes.len()
+    let mut scan = Scan {
+        exists: true,
+        ..Scan::default()
     };
-
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    let mut line_number = 0usize;
     let mut latest: HashMap<JobId, Job> = HashMap::new();
-    let mut incompatible_records = 0;
-    let mut max_sequence = None;
-
-    for (index, line) in bytes[..complete_len]
-        .split(|byte| *byte == b'\n')
-        .enumerate()
-    {
+    loop {
+        line.clear();
+        let read = reader.read_until(b'\n', &mut line).await?;
+        if read == 0 {
+            break;
+        }
+        scan.bytes += read as u64;
+        line_number += 1;
+        if !line.ends_with(b"\n") {
+            scan.torn_tail = true;
+            break;
+        }
+        line.pop();
         if line.is_empty() {
             continue;
         }
-        match serde_json::from_slice::<JournalRecord>(line) {
+        scan.records += 1;
+        match serde_json::from_slice::<JournalRecord>(&line) {
             Ok(record) => {
+                scan.max_sequence = scan.max_sequence.max(Some(record.sequence));
                 if record.schema_version != JOURNAL_SCHEMA_VERSION {
-                    incompatible_records += 1;
-                    max_sequence = max_sequence.max(Some(record.sequence));
+                    scan.incompatible_records += 1;
                     continue;
                 }
                 if !record.job.has_valid_resolution()
                     || ((record.event == JobEvent::Resolved)
                         != (record.job.status == JobStatus::Resolved))
                 {
-                    incompatible_records += 1;
-                    max_sequence = max_sequence.max(Some(record.sequence));
+                    scan.incompatible_records += 1;
                     continue;
                 }
-                max_sequence = max_sequence.max(Some(record.sequence));
-                latest.insert(record.job.id.clone(), record.job);
+                if collect_jobs {
+                    latest.insert(record.job.id.clone(), record.job);
+                }
             }
             Err(_) => {
                 // A line this build cannot decode is skipped, so the job
                 // journal never stops the runtime from starting.
                 tracing::warn!(
-                    line = index + 1,
+                    line = line_number,
                     "job journal line unreadable by this build; skipped"
                 );
-                incompatible_records += 1;
+                scan.incompatible_records += 1;
             }
         }
     }
 
-    Ok(Scan {
-        jobs: latest.into_values().collect(),
-        torn_tail,
-        max_sequence,
-        incompatible_records,
-    })
+    scan.jobs = latest.into_values().collect();
+    Ok(scan)
 }
