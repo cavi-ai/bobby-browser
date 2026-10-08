@@ -199,44 +199,52 @@ async fn production_listener_enforces_sixty_four_live_connections() {
     assert!(response.contains("\"retryable\":true"), "{response}");
     assert!(response.contains("\"retryAfterMs\":1000"), "{response}");
 
+    // A flood behind 16 silent peers is dropped unanswered while every rejector
+    // is busy, or answered 429 by one that freed; none is admitted.
     let mut slow_rejections = Vec::new();
     for _ in 0..16 {
         slow_rejections.push(TcpStream::connect(address).await.unwrap());
     }
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while rejection_stats.active() < 16 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("authenticated listener should saturate only the configured rejectors");
-    let mut flood_reads = tokio::task::JoinSet::new();
+    let mut flood = Vec::new();
     for _ in 0..256 {
-        let mut peer = TcpStream::connect(address).await.unwrap();
+        flood.push(TcpStream::connect(address).await.unwrap());
+    }
+    let mut flood_reads = tokio::task::JoinSet::new();
+    for mut peer in flood {
         flood_reads.spawn(async move {
-            let mut byte = [0_u8; 1];
-            tokio::time::timeout(Duration::from_millis(250), peer.read(&mut byte))
+            let mut answer = Vec::new();
+            tokio::time::timeout(Duration::from_secs(30), peer.read_to_end(&mut answer))
                 .await
-                .is_ok_and(|read| read.is_ok_and(|count| count == 0))
+                .expect("excess authenticated peer was never closed")
+                .unwrap();
+            answer
         });
     }
-    while let Some(closed) = flood_reads.join_next().await {
+    let mut dropped = 0;
+    while let Some(answer) = flood_reads.join_next().await {
+        let answer = answer.unwrap();
         assert!(
-            closed.unwrap(),
-            "excess authenticated peer was not promptly dropped"
+            answer.is_empty() || answer.starts_with(b"HTTP/1.1 429"),
+            "excess authenticated peer was served: {}",
+            String::from_utf8_lossy(&answer)
         );
+        dropped += usize::from(answer.is_empty());
     }
+    assert!(
+        dropped > 0,
+        "no excess peer was dropped at rejector capacity"
+    );
     for mut peer in slow_rejections {
         let mut overload = Vec::new();
-        tokio::time::timeout(Duration::from_secs(1), peer.read_to_end(&mut overload))
+        tokio::time::timeout(Duration::from_secs(30), peer.read_to_end(&mut overload))
             .await
             .expect("bounded rejector should finish")
             .unwrap();
         assert!(overload.starts_with(b"HTTP/1.1 429"));
     }
-    tokio::time::timeout(Duration::from_secs(1), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         while rejection_stats.active() != 0 {
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await

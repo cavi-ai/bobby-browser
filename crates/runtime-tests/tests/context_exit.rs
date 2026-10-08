@@ -421,17 +421,22 @@ async fn fuzzy_match_latency_across_100_sites() {
 
     let promotion = page_runtime::ContextPromotion::new(store);
     let url = Some("https://site-42.example/form");
-    // Exact, then fuzzy (reordered tokens), timed over 1_000 iterations.
-    let exact_started = Instant::now();
+    // Exact, then fuzzy (reordered tokens): the median of 1_000 timed asks.
+    // Preemption on a loaded machine stretches some asks, not the median.
+    let mut exact = Vec::with_capacity(1_000);
     for _ in 0..1_000 {
+        let started = Instant::now();
         assert!(promotion.ask(url, "Field 7 of site 42").await.is_some());
+        exact.push(started.elapsed().as_secs_f64() * 1e6);
     }
-    let exact_us = exact_started.elapsed().as_secs_f64() * 1e6 / 1_000.0;
-    let fuzzy_started = Instant::now();
+    let exact_us = median(exact);
+    let mut fuzzy = Vec::with_capacity(1_000);
     for _ in 0..1_000 {
+        let started = Instant::now();
         assert!(promotion.ask(url, "site 42 of Field 7").await.is_some());
+        fuzzy.push(started.elapsed().as_secs_f64() * 1e6);
     }
-    let fuzzy_us = fuzzy_started.elapsed().as_secs_f64() * 1e6 / 1_000.0;
+    let fuzzy_us = median(fuzzy);
 
     let measurements = serde_json::json!({
         "sites": 100,
@@ -450,4 +455,9 @@ async fn fuzzy_match_latency_across_100_sites() {
         fuzzy_us < 1_000.0,
         "fuzzy ask too slow for the file-store decision: {fuzzy_us}us"
     );
+}
+
+fn median(mut samples: Vec<f64>) -> f64 {
+    samples.sort_by(f64::total_cmp);
+    samples[samples.len() / 2]
 }
