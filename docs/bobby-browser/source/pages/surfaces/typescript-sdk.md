@@ -41,6 +41,17 @@ mutating command envelope.
 strips a trailing `/v1` if present). Bearer is the plaintext from `bobby init`
 / bootstrap (conventional env name `AUTOMATION_RUNTIME_TOKEN`).
 
+JSON responses, including HTTP errors and event batches, are limited to 64 MiB
+before parsing. Set the constructor's `maxJsonResponseBytes` to a positive safe
+integer up to 256 MiB to adjust that budget. The client checks declared sizes
+and counts Fetch-decoded bytes while reading, so absent size headers and
+compressed bodies cannot bypass the bound. Excess bodies raise
+`RuntimeClientError` with `kind: "protocol"` and cancel the body reader.
+Cancellation and request deadlines also interrupt stalled JSON reads.
+The limit bounds body bytes; decoded strings and parsed objects require
+additional memory. Artifact verification keeps its separate `maxArtifactBytes`
+budget (64 MiB by default, configurable up to 256 MiB).
+
 ## Headers
 
 Every request sends:

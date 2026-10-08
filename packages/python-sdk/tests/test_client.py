@@ -410,3 +410,93 @@ class DeadlineTests(unittest.TestCase):
         for options in (RequestOptions(timeout_ms=0), RequestOptions(timeout_ms=-1), RequestOptions(timeout_ms=True), RequestOptions(deadline="not-a-date"), RequestOptions(deadline="2030-01-01T00:00:00")):
             with self.subTest(options=options), self.assertRaises(RuntimeClientError):
                 client._request_raw("GET", "/v1/runtime", None, options)
+
+    def test_oversized_declared_json_is_rejected_before_decoding(self):
+        def handler(req):
+            req.send_response(200)
+            req.send_header("Content-Type", "application/json")
+            req.send_header("Content-Length", str(64 * 1024 * 1024 + 1))
+            req.end_headers()
+            # A lying peer must not evade the declared-size check by closing.
+            req.wfile.write(b"[]")
+        server = _FakeServer(handler)
+        try:
+            client = BrowserRuntimeClient(server.base_url, "token")
+            with self.assertRaises(RuntimeClientError) as result:
+                client.runtime_info()
+            self.assertEqual(result.exception.kind, "protocol")
+            self.assertEqual(result.exception.status, 200)
+        finally:
+            server.close()
+
+    def test_artifact_size_outside_allocation_cap_never_dispatches(self):
+        requests = []
+        def handler(req):
+            requests.append(req.path)
+            req.send_response(200)
+            req.send_header("Content-Type", "application/octet-stream")
+            req.send_header("Content-Length", "0")
+            req.end_headers()
+        server = _FakeServer(handler)
+        try:
+            client = BrowserRuntimeClient(server.base_url, "token")
+            reference = {"artifactId": "artifact-1", "bytes": 256 * 1024 * 1024 + 1,
+                         "sha256": hashlib.sha256(b"").hexdigest(), "mediaType": "application/octet-stream"}
+            with self.assertRaises(RuntimeClientError):
+                client.read_artifact(reference)
+            self.assertEqual(requests, [])
+        finally:
+            server.close()
+
+    def test_configured_limit_counts_streamed_success_and_error_bytes(self):
+        for status in (200, 503):
+            with self.subTest(status=status):
+                def handler(req):
+                    req.send_response(status)
+                    req.send_header("Content-Type", "application/json")
+                    req.end_headers()
+                    req.wfile.write(b"[] ")
+                server = _FakeServer(handler)
+                try:
+                    client = BrowserRuntimeClient(server.base_url, "token", max_json_response_bytes=2)
+                    with self.assertRaises(RuntimeClientError) as result:
+                        client._request_raw("GET", "/v1/sessions", None, None)
+                    self.assertEqual(result.exception.kind, "protocol")
+                    self.assertEqual(result.exception.status, status)
+                finally:
+                    server.close()
+
+    def test_exact_json_limit_allows_the_complete_body(self):
+        def handler(req):
+            req.send_response(200)
+            req.send_header("Content-Type", "application/json")
+            req.end_headers()
+            req.wfile.write(b"[]")
+        server = _FakeServer(handler)
+        try:
+            client = BrowserRuntimeClient(server.base_url, "token", max_json_response_bytes=2)
+            self.assertEqual(client.read_session(), [])
+        finally:
+            server.close()
+
+    def test_invalid_response_budgets_are_rejected(self):
+        for maximum in (0, -1, True, 1.5, 256 * 1024 * 1024 + 1):
+            with self.subTest(maximum=maximum), self.assertRaises(ValueError):
+                BrowserRuntimeClient("http://localhost", "token", max_json_response_bytes=maximum)
+
+    def test_json_budget_does_not_truncate_a_valid_artifact(self):
+        data = b"artifact larger than the two-byte JSON quota"
+        def handler(req):
+            req.send_response(200)
+            req.send_header("Content-Type", "application/octet-stream")
+            req.send_header("Content-Length", str(len(data)))
+            req.end_headers()
+            req.wfile.write(data)
+        server = _FakeServer(handler)
+        try:
+            client = BrowserRuntimeClient(server.base_url, "token", max_json_response_bytes=2)
+            reference = {"artifactId": "artifact-1", "bytes": len(data),
+                         "sha256": hashlib.sha256(data).hexdigest(), "mediaType": "application/octet-stream"}
+            self.assertEqual(client.read_artifact(reference), data)
+        finally:
+            server.close()

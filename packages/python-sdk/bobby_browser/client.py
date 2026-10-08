@@ -29,6 +29,8 @@ from .errors import RuntimeClientError
 INTERFACE_VERSION = "2026-08-19"
 
 _DEFAULT_TIMEOUT_MS = 30_000
+_DEFAULT_MAX_JSON_RESPONSE_BYTES = 64 * 1024 * 1024
+_MAX_SDK_RESPONSE_BYTES = 256 * 1024 * 1024
 _JSON_CONTENT_TYPE = re.compile(r"^application/json(?:\s*;|$)", re.IGNORECASE)
 
 # CommandOutcome.status -> expected HTTP status, mirroring client.ts's
@@ -111,12 +113,23 @@ def _remaining(deadline: float) -> float:
     return remaining
 
 
-def _read_response(response: Any, deadline: float) -> bytes:
+def _read_response(response: Any, deadline: float, maximum: int) -> bytes:
     # urllib's socket timeout covers one blocking read, not the entire body.
     # read1 performs at most one raw read; renew its timeout from the remaining
     # monotonic budget so a trickling peer cannot extend the request forever.
     read = getattr(response, "read1", response.read)
-    chunks = []
+    _remaining(deadline)
+    length = _header_get(response.headers or {}, "content-length")
+    if length is not None:
+        try:
+            if re.fullmatch(r"[0-9]+", length) is None:
+                raise ValueError()
+            declared = int(length)
+        except ValueError:
+            raise RuntimeClientError("protocol", status=response.code, message="response content length is invalid") from None
+        if declared > maximum:
+            raise RuntimeClientError("protocol", status=response.code, message="response exceeds the client byte limit")
+    data = bytearray()
     while True:
         remaining = _remaining(deadline)
         # HTTPResponse can close its socket as the final chunk is consumed.
@@ -130,11 +143,13 @@ def _read_response(response: Any, deadline: float) -> bytes:
             stream = getattr(stream, "fp", None) or getattr(stream, "raw", None)
             if stream is None:
                 break
-        chunk = read(64 * 1024)
+        chunk = read(min(64 * 1024, maximum - len(data) + 1))
         _remaining(deadline)
         if not chunk:
-            return b"".join(chunks)
-        chunks.append(chunk)
+            return bytes(data)
+        if len(chunk) > maximum - len(data):
+            raise RuntimeClientError("protocol", status=response.code, message="response exceeds the client byte limit")
+        data.extend(chunk)
 
 
 def _header_get(headers: Mapping[str, str], name: str) -> Optional[str]:
@@ -168,6 +183,8 @@ class BrowserRuntimeClient:
             anywhere but that header, never logged, never put in a URL.
         timeout_ms: Default relative timeout for calls that do not pass
             ``options`` (default 30_000).
+        max_json_response_bytes: JSON response body limit before parsing,
+            including error bodies (default 64 MiB, maximum 256 MiB).
         opener: Override ``urllib.request`` opener (tests only).
     """
 
@@ -177,16 +194,20 @@ class BrowserRuntimeClient:
         bearer_token: str,
         *,
         timeout_ms: int = _DEFAULT_TIMEOUT_MS,
+        max_json_response_bytes: int = _DEFAULT_MAX_JSON_RESPONSE_BYTES,
         opener: Optional[urllib.request.OpenerDirector] = None,
     ) -> None:
         if not base_url or not bearer_token:
             raise ValueError("base_url and bearer_token are required")
+        if isinstance(max_json_response_bytes, bool) or not isinstance(max_json_response_bytes, int) or not 0 < max_json_response_bytes <= _MAX_SDK_RESPONSE_BYTES:
+            raise ValueError("max_json_response_bytes must be a positive integer within the SDK allocation cap")
         stripped = base_url.rstrip("/")
         if stripped.endswith("/v1"):
             stripped = stripped[: -len("/v1")]
         self._base_url = stripped
         self._bearer_token = bearer_token
         self._timeout_ms = timeout_ms
+        self._max_json_response_bytes = max_json_response_bytes
         self._opener = opener or urllib.request.build_opener()
 
     def __repr__(self) -> str:  # never print the bearer token
@@ -368,14 +389,16 @@ class BrowserRuntimeClient:
         artifact_id = reference.get("artifactId")
         if not artifact_id or not isinstance(artifact_id, str):
             raise self._protocol("artifact reference is missing artifactId")
+        expected_bytes = reference.get("bytes")
+        if isinstance(expected_bytes, bool) or not isinstance(expected_bytes, int) or not 0 <= expected_bytes <= _MAX_SDK_RESPONSE_BYTES:
+            raise self._protocol("artifact reference is outside the client hard bound")
         path = f"/v1/artifacts/{urllib.parse.quote(artifact_id)}"
-        status, content_type, headers, raw = self._request_raw("GET", path, None, options)
+        status, content_type, headers, raw = self._request_raw("GET", path, None, options, max_bytes=expected_bytes)
         if status != 200:
             raise self._response_error(status, self._decode_json_or_none(raw, content_type))
         expected_media_type = _media_type_essence(str(reference.get("mediaType", "")))
         if expected_media_type is None or content_type != expected_media_type:
             raise self._protocol("artifact media type does not match its reference", status)
-        expected_bytes = reference.get("bytes")
         content_length = _header_get(headers, "content-length")
         if (
             content_length is None
@@ -449,6 +472,8 @@ class BrowserRuntimeClient:
         path: str,
         body: Optional[Mapping[str, Any]],
         options: Optional[RequestOptions],
+        *,
+        max_bytes: Optional[int] = None,
     ) -> tuple:
         """Returns (status, content_type, headers, raw_bytes)."""
         url = f"{self._base_url}{path}"
@@ -464,7 +489,8 @@ class BrowserRuntimeClient:
             try:
                 status = response.code
                 response_headers = dict(response.headers.items()) if response.headers else {}
-                raw = _read_response(response, budget)
+                maximum = max_bytes if status == 200 and max_bytes is not None else self._max_json_response_bytes
+                raw = _read_response(response, budget, maximum)
             finally:
                 response.close()
         except TimeoutError as error:
