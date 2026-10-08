@@ -46,6 +46,9 @@ async fn site_regressions_hold_on_firefox() {
         intent_follow_clicks_the_visible_duplicate,
         snapshot_scopes_to_a_named_list,
         snapshot_targets_act_on_the_described_element,
+        type_text_enter_reports_the_settled_page,
+        intent_follow_post_state_shows_the_settled_page,
+        actions_wait_for_a_late_target,
     );
     for (name, case) in table {
         if AssertUnwindSafe(case(&rig)).catch_unwind().await.is_err() {

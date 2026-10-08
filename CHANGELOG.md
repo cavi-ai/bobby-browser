@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- `type_text` ending in Enter reports the page it landed on with its full URL,
+  query included, and the title read once the document stops changing; it
+  reported the URL without its query (Firefox) and the previous page's title.
+- `intent_follow` completes once the destination page stops changing, so its
+  `postState` shows the rendered page instead of the loading skeleton left
+  when a pushed URL matched the expected state.
+- `click`, `type_text`, `control_action` and `intent_follow` wait for a target
+  that is not on the page yet, for up to 10 s and at most half the time left
+  in the call, before failing with `targetNotFound`.
 - Firefox companion: a page opened or bound by the runtime keeps its lease when a
   frame snapshot lands while the tab is still blank or frame discovery fails.
 - Firefox companion: an accessibility snapshot is sanitized and depth- and

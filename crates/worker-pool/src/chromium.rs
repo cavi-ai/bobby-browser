@@ -1460,6 +1460,18 @@ impl BrowserWorker for ChromiumWorker {
         }])
     }
 
+    async fn settle_page(
+        &self,
+        page_id: &PageId,
+        budget: Duration,
+        requested_url: Option<&str>,
+    ) -> Option<(String, String)> {
+        let page = self.page_handle(page_id).await.ok()?;
+        let (url, title) =
+            settle_document(&page, budget, requested_url.unwrap_or_default()).await?;
+        Some((url, redact_secret_material(title)))
+    }
+
     async fn inspect(
         &self,
         page_id: &PageId,

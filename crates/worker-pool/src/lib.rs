@@ -403,6 +403,19 @@ pub trait BrowserWorker: Send + Sync {
         Err(unsupported_error())
     }
 
+    /// The page's URL and title once its document has stopped changing,
+    /// read by the probe `navigate` settles with and bounded by `budget`.
+    /// `requested_url` is the URL the caller expects, when it has one. `None`
+    /// when the worker cannot settle a page or no read succeeded in time.
+    async fn settle_page(
+        &self,
+        _page_id: &PageId,
+        _budget: std::time::Duration,
+        _requested_url: Option<&str>,
+    ) -> Option<(String, String)> {
+        None
+    }
+
     async fn form_snapshot(
         &self,
         _page_id: &PageId,

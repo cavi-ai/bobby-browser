@@ -697,3 +697,192 @@ pub async fn snapshot_targets_act_on_the_described_element(rig: &Rig) {
     }
     live.close().await;
 }
+
+/// Every object under `value` whose `kind` is `kind`.
+fn objects_of_kind<'a>(value: &'a Value, kind: &str, out: &mut Vec<&'a Value>) {
+    match value {
+        Value::Object(map) => {
+            if map.get("kind").and_then(Value::as_str) == Some(kind) {
+                out.push(value);
+            }
+            for child in map.values() {
+                objects_of_kind(child, kind, out);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                objects_of_kind(item, kind, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// L7, linkedin.com/feed: `type_text` with "rust engineer\n" into the
+/// header search box reported a navigation to the results path without its
+/// query and with the previous page's title. Enter pushes a URL with a query
+/// and the page keeps changing until the results and the new title land.
+pub async fn type_text_enter_reports_the_settled_page(rig: &Rig) {
+    let home = page(
+        "Home",
+        r#"<header><input id="q" aria-label="Search"></header><main id="main"><h1>Home feed</h1></main>
+        <script>
+            document.getElementById("q").addEventListener("keydown", (event) => {
+              if (event.key !== "Enter") return;
+              event.preventDefault();
+              const value = event.target.value;
+              history.pushState({}, "", "/search/results/?keywords=" + encodeURIComponent(value) + "&origin=HEADER");
+              const main = document.getElementById("main");
+              main.innerHTML = "<p id='tick'>loading</p>";
+              let ticks = 0;
+              const loader = setInterval(() => {
+                document.getElementById("tick").textContent = "loading " + ++ticks;
+                if (ticks < 25) return;
+                clearInterval(loader);
+                document.title = "Search results";
+                main.innerHTML = "<h1>Results</h1>";
+              }, 100);
+            });
+        </script>"#,
+    );
+    let site = FixtureSite::spawn(vec![("/home", Route::Html(home))]).await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let typed = live
+        .call(
+            "type_text",
+            json!({"target":{"role":"textbox","accessibleName":"Search"},
+                   "value":"rust engineer\n","clearFirst":true}),
+        )
+        .await;
+    assert_eq!(typed["status"], "completed", "type_text: {typed}");
+    let mut navigations = Vec::new();
+    objects_of_kind(&typed, "navigation", &mut navigations);
+    let expected_url = site.url("/search/results/?keywords=rust%20engineer&origin=HEADER");
+    assert!(
+        navigations.iter().any(|item| item["url"] == expected_url.as_str()
+            && item["title"] == "Search results"),
+        "type_text did not report the settled page {expected_url} titled \"Search results\": {typed}"
+    );
+    live.close().await;
+}
+
+/// L8, linkedin.com/jobs: `intent_follow` whose link pushes the new URL
+/// and renders the page later completed as soon as the URL matched, and its
+/// `postState` was the loading skeleton.
+pub async fn intent_follow_post_state_shows_the_settled_page(rig: &Rig) {
+    let jobs = page(
+        "Jobs",
+        r#"<main id="main"><a id="go" href="/jobs/collections/recommended">Recommended jobs</a></main>
+        <script>
+            document.getElementById("go").addEventListener("click", (event) => {
+              event.preventDefault();
+              history.pushState({}, "", "/jobs/collections/recommended");
+              const main = document.getElementById("main");
+              main.innerHTML = "<div role='presentation'></div>".repeat(19);
+              let ticks = 0;
+              const loader = setInterval(() => {
+                main.firstChild.setAttribute("data-tick", String(++ticks));
+                if (ticks < 15) return;
+                clearInterval(loader);
+                document.title = "Recommended";
+                main.innerHTML = "<h1>Recommended jobs</h1><ul><li><a href='/jobs/view/1'>Rust Engineer</a></li></ul>";
+              }, 100);
+            });
+        </script>"#,
+    );
+    let site = FixtureSite::spawn(vec![("/jobs", Route::Html(jobs))]).await;
+    let live = Live::open(rig, &site.url("/jobs")).await;
+    let followed = live
+        .call(
+            "intent_follow",
+            json!({
+                "purpose":"Open the recommended jobs",
+                "hints":{"role":"link","accessibleName":"Recommended jobs"},
+                "expectedState":{
+                    "condition":{"kind":"url","matcher":{"kind":"contains","value":"/jobs/"}},
+                    "timeoutMs":15000
+                }
+            }),
+        )
+        .await;
+    assert_eq!(followed["status"], "completed", "intent_follow: {followed}");
+    assert!(
+        find_node(&followed["postState"], "heading", Some("Recommended jobs")).is_some(),
+        "intent_follow postState is not the rendered page: {followed}"
+    );
+    live.close().await;
+}
+
+/// L9, linkedin.com/search: `intent_follow` on "Show all" right after the
+/// results started loading failed with targetNotFound at once; the same
+/// target clicked seconds later. Each action waits for its target to appear.
+pub async fn actions_wait_for_a_late_target(rig: &Rig) {
+    let late = page(
+        "Late",
+        r#"<main><h1>Late controls</h1><p role="status" id="status">waiting</p><div id="slot"></div></main>
+        <script>
+            setTimeout(() => {
+              document.getElementById("slot").innerHTML =
+                "<button id='late-button'>Late button</button>" +
+                "<input aria-label='Late field'>" +
+                "<label><input type='checkbox'> Late option</label>" +
+                "<a href='/jobs/all'>Show all</a>";
+              document.getElementById("late-button").addEventListener("click", () => {
+                document.getElementById("status").textContent = "clicked";
+              });
+            }, 3000);
+        </script>"#,
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/late", Route::Html(late)),
+        (
+            "/jobs/all",
+            Route::Html(page("All jobs", "<main><h1>All jobs</h1></main>")),
+        ),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/jobs/all")).await;
+    let actions = [
+        (
+            "click",
+            json!({"target":{"role":"button","accessibleName":"Late button"}}),
+        ),
+        (
+            "type_text",
+            json!({"target":{"role":"textbox","accessibleName":"Late field"},
+                   "value":"late text","clearFirst":true}),
+        ),
+        (
+            "control_action",
+            json!({"target":{"role":"checkbox","accessibleName":"Late option"},
+                   "action":{"kind":"setChecked","checked":true}}),
+        ),
+        (
+            "intent_follow",
+            json!({
+                "purpose":"Show every job",
+                "hints":{"role":"link","accessibleName":"Show all"},
+                "expectedState":{
+                    "condition":{"kind":"url","matcher":{"kind":"contains","value":"/jobs/all"}},
+                    "timeoutMs":15000
+                }
+            }),
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (tool, arguments) in actions {
+        let loaded = live
+            .call("navigate", json!({"url":site.url("/late")}))
+            .await;
+        assert_eq!(loaded["status"], "completed", "navigate: {loaded}");
+        let acted = live.call(tool, arguments).await;
+        if acted["status"] != "completed" {
+            failures.push(format!("{tool}: {acted}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "actions did not wait for their late target: {failures:#?}"
+    );
+    live.close().await;
+}

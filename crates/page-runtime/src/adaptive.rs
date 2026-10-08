@@ -1,10 +1,12 @@
 use std::{
     path::{Component, Path, PathBuf},
     sync::Arc,
+    time::Duration as StdDuration,
 };
 
 use artifact_store::{ArtifactStore, PendingArtifact};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use intent_engine::{IntentBrowser, IntentEngine, IntentOutcome, VisionAssist, VisionContext};
 use network_engine::{
     DirectHttpExecutor, EligibilityDecision, EligibilityPolicy, HttpCandidate, NetworkPolicy,
@@ -13,10 +15,11 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use types::{
     CaptureScreenshotCommand, ClickCommand, CommandEnvelope, CommandError, ControlActionCommand,
-    ErrorCode, ErrorLayer, Evidence, ExecutionPath, ExecutionReason, PageId, PageState,
-    PrimitiveCommand, RuntimeCommand, TargetSpec, TypeTextCommand, UploadFilesCommand,
-    WaitForCommand,
+    ElementState, ErrorCode, ErrorLayer, Evidence, ExecutionPath, ExecutionReason,
+    FormControlTarget, PageId, PageState, PrimitiveCommand, RuntimeCommand, TargetSpec,
+    TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand,
 };
+use worker_pool::navigation_settle::NAVIGATION_SETTLE_CAP;
 use worker_pool::WorkerLease;
 use workflow_journal::PreparedDownload;
 
@@ -116,6 +119,88 @@ impl From<VisionGate> for SessionGate {
 
 struct WorkerIntentBrowser<'a> {
     lease: &'a WorkerLease,
+    /// The command's deadline; bounds the waits the intent runs.
+    deadline: DateTime<Utc>,
+}
+
+/// Longest an action waits for its target to appear.
+const TARGET_APPEAR_CAP: StdDuration = StdDuration::from_secs(10);
+
+/// Half the time left before `deadline`, at most `cap`. The other half stays
+/// with the action and its verification.
+fn wait_budget(deadline: DateTime<Utc>, cap: StdDuration) -> StdDuration {
+    ((deadline - Utc::now()).to_std().unwrap_or_default() / 2).min(cap)
+}
+
+/// Waits until `target` is attached to the page, within
+/// [`wait_budget`]`(deadline, TARGET_APPEAR_CAP)`. Every action resolves its
+/// target once, so a target the page renders a moment later failed with
+/// `targetNotFound`. Only absence waits: a present, ambiguous or invalid
+/// target returns at once, and the action then reports on it as before.
+async fn await_target(
+    lease: &WorkerLease,
+    page_id: &PageId,
+    target: TargetSpec,
+    deadline: DateTime<Utc>,
+) {
+    let timeout_ms =
+        u64::try_from(wait_budget(deadline, TARGET_APPEAR_CAP).as_millis()).unwrap_or(u64::MAX);
+    if timeout_ms == 0 {
+        return;
+    }
+    let _ = lease
+        .worker()
+        .wait_for(
+            page_id,
+            &WaitForCommand {
+                condition: WaitCondition::Element {
+                    target: Box::new(target),
+                    state: ElementState::Attached,
+                },
+                timeout_ms,
+            },
+        )
+        .await;
+}
+
+/// The target a click, typed input or control action resolves before it acts.
+fn primitive_action_target(command: &PrimitiveCommand) -> Option<TargetSpec> {
+    let (selector, target) = match command {
+        PrimitiveCommand::Click(command) => (&command.selector, &command.target),
+        PrimitiveCommand::TypeText(command) => (&command.selector, &command.target),
+        PrimitiveCommand::ControlAction(command) => {
+            return Some(control_target_spec(&command.target))
+        }
+        _ => return None,
+    };
+    target.clone().or_else(|| {
+        (!selector.is_empty()).then(|| TargetSpec {
+            css: Some(selector.clone()),
+            ..TargetSpec::default()
+        })
+    })
+}
+
+/// A control target as the target resolver reads it. An unnamed frame or
+/// shadow hop carries an empty name, which can never match; it means any.
+fn control_target_spec(target: &FormControlTarget) -> TargetSpec {
+    fn segment(segment: &types::SemanticTargetSegment) -> Box<TargetSpec> {
+        Box::new(TargetSpec {
+            role: Some(segment.role.clone()),
+            accessible_name: (!segment.accessible_name.is_empty())
+                .then(|| segment.accessible_name.clone()),
+            ordinal: segment.ordinal,
+            ..TargetSpec::default()
+        })
+    }
+    TargetSpec {
+        role: Some(target.role.clone()),
+        accessible_name: Some(target.accessible_name.clone()),
+        ordinal: target.ordinal,
+        frame_path: target.frame_path.iter().map(segment).collect(),
+        shadow_path: target.shadow_path.iter().map(segment).collect(),
+        ..TargetSpec::default()
+    }
 }
 
 fn settlement_validation_issues(
@@ -280,6 +365,21 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
             .worker()
             .inspect(page_id, &types::InspectCommand::default())
             .await
+    }
+
+    async fn await_target(&self, page_id: &PageId, target: &TargetSpec) {
+        await_target(self.lease, page_id, target.clone(), self.deadline).await;
+    }
+
+    async fn settle_page(&self, page_id: &PageId, requested_url: Option<&str>) {
+        let budget = wait_budget(self.deadline, NAVIGATION_SETTLE_CAP);
+        if !budget.is_zero() {
+            let _ = self
+                .lease
+                .worker()
+                .settle_page(page_id, budget, requested_url)
+                .await;
+        }
     }
 
     async fn validation_issues(
@@ -1424,7 +1524,10 @@ async fn execute_intent(
     operational_metrics: Option<observability::OperationalMetrics>,
 ) -> Result<AdaptiveExecution, AdaptiveFailure> {
     let page_id = envelope.page_id.as_ref().expect("validated page id");
-    let browser = WorkerIntentBrowser { lease };
+    let browser = WorkerIntentBrowser {
+        lease,
+        deadline: envelope.deadline,
+    };
     let gates_open = vision_gate.session_ok && vision_gate.capability_ok;
     let recent_command_kinds = context_graph
         .as_ref()
@@ -1590,6 +1693,9 @@ async fn browser_execute(
     let RuntimeCommand::Primitive(command) = &envelope.command else {
         unreachable!("intent commands use execute_intent");
     };
+    if let (Some(page_id), Some(target)) = (page_id, primitive_action_target(command)) {
+        await_target(lease, page_id, target, envelope.deadline).await;
+    }
     let mut evidence = match command {
         PrimitiveCommand::Navigate(command) => {
             lease
