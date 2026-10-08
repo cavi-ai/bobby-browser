@@ -121,6 +121,10 @@ struct WorkerIntentBrowser<'a> {
     lease: &'a WorkerLease,
     /// The command's deadline; bounds the waits the intent runs.
     deadline: DateTime<Utc>,
+    /// Time this intent has spent waiting for absent targets. All its target
+    /// waits (each field of a form) share one [`TARGET_APPEAR_CAP`], so a form
+    /// waits for late fields once, not once per field.
+    target_waited: std::sync::Mutex<StdDuration>,
 }
 
 /// Longest an action waits for its target to appear.
@@ -133,19 +137,18 @@ fn wait_budget(deadline: DateTime<Utc>, cap: StdDuration) -> StdDuration {
     ((deadline - Utc::now()).to_std().unwrap_or_default() / 2).min(cap)
 }
 
-/// Waits until `target` is attached to the page, within
-/// [`wait_budget`]`(deadline, TARGET_APPEAR_CAP)`. Every action resolves its
-/// target once, so a target the page renders a moment later failed with
-/// `targetNotFound`. Only absence waits: a present, ambiguous or invalid
-/// target returns at once, and the action then reports on it as before.
+/// Waits until `target` is attached to the page, for at most `budget` (one
+/// [`wait_budget`]`(deadline, TARGET_APPEAR_CAP)` per command). Every action
+/// resolves its target once, so a target the page renders a moment later
+/// failed with `targetNotFound`. Only absence waits: a present, ambiguous or
+/// invalid target returns at once, and the action then reports on it as before.
 async fn await_target(
     lease: &WorkerLease,
     page_id: &PageId,
     target: TargetSpec,
-    deadline: DateTime<Utc>,
+    budget: StdDuration,
 ) {
-    let timeout_ms =
-        u64::try_from(wait_budget(deadline, TARGET_APPEAR_CAP).as_millis()).unwrap_or(u64::MAX);
+    let timeout_ms = u64::try_from(budget.as_millis()).unwrap_or(u64::MAX);
     if timeout_ms == 0 {
         return;
     }
@@ -375,7 +378,21 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
     }
 
     async fn await_target(&self, page_id: &PageId, target: &TargetSpec) {
-        await_target(self.lease, page_id, target.clone(), self.deadline).await;
+        let waited = || {
+            self.target_waited
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        };
+        let left = TARGET_APPEAR_CAP.saturating_sub(*waited());
+        let started = tokio::time::Instant::now();
+        await_target(
+            self.lease,
+            page_id,
+            target.clone(),
+            wait_budget(self.deadline, left),
+        )
+        .await;
+        *waited() += started.elapsed();
     }
 
     async fn settle_page(&self, page_id: &PageId, requested_url: Option<&str>) {
@@ -1534,6 +1551,7 @@ async fn execute_intent(
     let browser = WorkerIntentBrowser {
         lease,
         deadline: envelope.deadline,
+        target_waited: std::sync::Mutex::new(StdDuration::ZERO),
     };
     let gates_open = vision_gate.session_ok && vision_gate.capability_ok;
     let recent_command_kinds = context_graph
@@ -1701,7 +1719,8 @@ async fn browser_execute(
         unreachable!("intent commands use execute_intent");
     };
     if let (Some(page_id), Some(target)) = (page_id, primitive_action_target(command)) {
-        await_target(lease, page_id, target, envelope.deadline).await;
+        let budget = wait_budget(envelope.deadline, TARGET_APPEAR_CAP);
+        await_target(lease, page_id, target, budget).await;
     }
     let mut evidence = match command {
         PrimitiveCommand::Navigate(command) => {
