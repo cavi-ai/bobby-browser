@@ -4,33 +4,32 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 # Run the server
 
+`bobby serve` runs the HTTP API and the MCP-over-HTTP endpoint. Local agent hosts do not need it, because `bobby mcp-stdio` starts a shared runtime on demand. Run the server when applications, SDKs or remote clients connect by URL.
+
 ```bash
 bobby serve
-bobby serve --config /path/to/config.toml
-bobby serve --config ./config.toml --bootstrap-env ./bootstrap.env
-# from source:
-cargo run -p bobby-browser -- serve --config ./config.toml
+bobby serve --config /etc/bobby/config.toml --bootstrap-env /etc/bobby/bootstrap.env
 ```
 
-Environment equivalents: `BOBBY_BROWSER_CONFIG`, `BOBBY_BROWSER_BOOTSTRAP_ENV`.
-Prefer `bobby init` before first serve on non-loopback binds. Full flag list:
-[CLI reference](cli.md).
+| Flag | Environment variable | Meaning |
+|---|---|---|
+| `--config <path>` | `BOBBY_BROWSER_CONFIG` | `config.toml` to load |
+| `--bootstrap-env <path>` | `BOBBY_BROWSER_BOOTSTRAP_ENV` | Credential file |
+| `--vision`, `--no-vision` | | Start or skip the managed vision proxy |
 
-Then open:
+Check it:
 
-- `http://127.0.0.1:7777/healthz` — unauthenticated liveness
-- Authenticated routes under `/v1/*` (for example `GET /v1/runtime`) — bearer +
-  interface headers required
+```bash
+curl http://127.0.0.1:7777/healthz
+```
 
-There is no `/runtime` route. Use `/v1/runtime`. See [Authentication](auth.md)
-and the [HTTP API reference](../surfaces/http-api.md).
+Authenticated routes live under `/v1`. See [Authentication](auth.md) and the [HTTP API](../surfaces/http-api.md). On a non-loopback bind, create the credential first with `bobby init`. `bobby doctor` checks a running server's health.
 
-`bobby doctor` can probe `/healthz` after the server is up.
+Do not expose the runtime to untrusted networks. Keep it on loopback or behind a boundary you control.
 
 ## Deployment profiles
 
-`bobby profiles --json` prints the machine-readable profile contract. Validate
-the active configuration with `bobby doctor --profile <name>`.
+`bobby profiles --json` prints the profile contracts. Validate your setup against one with `bobby doctor --profile <name>`.
 
 | Profile | Transport | Bind | Browser | Storage | Start command |
 |---|---|---|---|---|---|
@@ -39,55 +38,26 @@ the active configuration with `bobby doctor --profile <name>`.
 | `openshell` | streamable HTTP | loopback | host managed | host durable | `bobby openshell install` |
 | `remote` | HTTP | operator controlled | remote managed | operator managed | `bobby serve --config <path>` |
 
-Every profile requires a bootstrap credential. `doctor` also checks browser
-selection, storage paths, and any configured Claude, VS Code, Zed, ACP, or
-OpenShell entry. `bobby doctor --fix` updates stale Bobby-owned entries while
-leaving unrelated host configuration intact.
+Every profile needs a bootstrap credential. `bobby doctor --fix` updates stale bobby-owned host entries and leaves other host configuration alone.
 
-With the server running, submit and inspect jobs via the broker HTTP API:
+## Jobs
+
+With the server running, submit and inspect built-in jobs:
 
 ```bash
 bobby jobs submit --name echo --payload '{"message":"hi"}'
 bobby jobs status <job_id>
 ```
 
-Bootstrap needs `job:*` capabilities (`bobby init --force` if an older
-`bootstrap.env` lacks them). See [CLI reference](cli.md).
-
-Do not expose the runtime to untrusted networks; reach it over loopback or an
-operator-controlled boundary.
+The credential needs `job:submit`, `job:read` and `job:cancel`. If an older `bootstrap.env` lacks them, run `bobby init --force`.
 
 ## Docker
 
+The repository includes a `Dockerfile` and `docker-compose.yml` for a non-root image running `bobby serve` with headless Chromium.
+
 ```bash
 docker compose up -d --build
-bash scripts/docker/smoke.sh
-```
-
-Builds a non-root image (`Dockerfile`) running `bobby serve` with managed
-headless Chromium and starts it via `docker-compose.yml` (service `bobby`,
-named volume `bobby-data` at `/var/lib/bobby`). Two env vars select and
-locate the browser engine:
-
-- `BOBBY_CHROME_EXECUTABLE=/usr/bin/chromium`
-- `AUTOMATION_RUNTIME_BROWSER_SELECTION={"preference":{"mode":"managedChromium"}}`
-
-`deploy/docker/entrypoint.sh` runs `bobby init` once (only if
-`/var/lib/bobby/bootstrap.env` is missing) to generate the bootstrap
-credential, without printing the bearer to `docker logs`. Retrieve it with:
-
-```bash
 docker compose exec bobby bobby token --stdout
 ```
 
-Security note: `deploy/docker/config.toml` binds `0.0.0.0` *inside* the
-container — Docker's port publishing cannot reach a process bound to the
-container's own loopback — but `docker-compose.yml` publishes the port as
-`127.0.0.1:7777:7777`, so the runtime stays loopback-only from the host's
-perspective. Change that published address only if you intend to expose the
-runtime beyond the host.
-
-`scripts/docker/smoke.sh` is the real proof: it builds, waits for
-`/healthz`, pulls the bootstrap bearer, and drives one MCP streamable HTTP
-session (`initialize` → `session_create`) exactly as an external client
-would, then tears the stack down.
+The compose file publishes `127.0.0.1:7777`, so the runtime is reachable only from the host. Change that address only if you mean to expose it. The container needs `BOBBY_CHROME_EXECUTABLE=/usr/bin/chromium` and `AUTOMATION_RUNTIME_BROWSER_SELECTION={"preference":{"mode":"managedChromium"}}`, both set in the compose file. On first start it creates a bootstrap credential without printing it to the logs. Data lives in the `bobby-data` volume at `/var/lib/bobby`.

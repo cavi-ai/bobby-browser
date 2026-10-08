@@ -4,119 +4,71 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 # Authentication
 
-The runtime enrolls a SHA-256 digest of a high-entropy bearer credential at startup. Supply the plaintext credential only through a protected process input, secret manager, or the local bootstrap file from `bobby init`, then send it as `Authorization: Bearer <token>`.
+Every caller authenticates with a bearer token and is limited to the capabilities its principal holds. The runtime stores only a SHA-256 digest of the token. Keep the plaintext in a secret manager, a protected environment variable or the local credential file. Never put a token in a URL, a command argument, committed configuration or a log.
 
-Never put a token in a URL, command argument, config committed to source control, or log.
+## Get a token
 
-## `bobby init`
+`bobby install` creates a credential for you. To create or rotate one by hand:
 
 ```bash
 bobby init
-# optional:
-bobby init --ttl-days 30
-bobby init --path /secure/path/bootstrap.env
+bobby init --ttl-days 7 --path /secure/path/bootstrap.env
 bobby init --force
 ```
 
-`bobby init` writes a dotenv secret under the OS config directory
-(`…/bobby-browser/bootstrap.env`) with the four `AUTOMATION_RUNTIME_BOOTSTRAP_*`
-variables, mode `0600` where supported. It prints the plaintext bearer once.
+`bobby init` writes `bootstrap.env` in the config directory (mode 0600) with four `AUTOMATION_RUNTIME_BOOTSTRAP_*` variables and prints the bearer once. It refuses to overwrite an existing file without `--force`, and `--force` invalidates the old bearer.
 
-If the secret file already exists, `bobby init` refuses unless you pass `--force`.
-Regeneration invalidates the previous bearer for new enrollment; existing
-authority-store records keyed to the old bearer will no longer match.
-
-For SDK / HTTP clients, export that same plaintext as `AUTOMATION_RUNTIME_TOKEN`
-(conventional client alias — not a serve bootstrap env var).
-
-`bobby token` prints the enrolled bearer, so the one `bobby init` printed does
-not have to be kept:
+SDKs and curl read the bearer from `AUTOMATION_RUNTIME_TOKEN`. Print it any time with `bobby token`:
 
 ```bash
 export AUTOMATION_RUNTIME_TOKEN="$(bobby token)"
 ```
 
-It reads the same file `bobby serve` resolves (`--bootstrap-env`,
-`BOBBY_BROWSER_BOOTSTRAP_ENV`, then the OS config path) and refuses to write to
-a redirected stdout unless `--stdout` says that was the intent.
+`bobby token` reads the same file `bobby serve` does and refuses to write to a redirected stdout unless you pass `--stdout`.
 
-## Serve resolution order
+`--preset` selects the capability floor: `agent` (default, everything except `authority:admin`), `unrestricted`, `claude`, `codex` or `openshell`. See [Capabilities](../concepts/capabilities.md).
 
-`bobby serve` resolves bootstrap in this order:
+## How the server finds its credential
 
-1. Process env (`AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN`,
-   `AUTOMATION_RUNTIME_BOOTSTRAP_PRINCIPAL`,
-   `AUTOMATION_RUNTIME_BOOTSTRAP_CAPABILITIES`,
-   `AUTOMATION_RUNTIME_BOOTSTRAP_EXPIRES_AT`)
-2. Local secret file (`BOBBY_BROWSER_BOOTSTRAP_ENV` or the default OS config path)
-3. Loopback auto-init (bind is `127.0.0.1` / `::1` only) — generates, writes, prints once
-4. Error — fail closed; non-loopback binds never auto-generate
+`bobby serve` looks for the credential in this order:
 
-Corrupt or unreadable secret files fail closed and name the path. There is no
-empty-auth fallback.
+1. The environment: `AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN`, `_PRINCIPAL`, `_CAPABILITIES`, `_EXPIRES_AT`.
+2. The credential file named by `--bootstrap-env` or `BOBBY_BROWSER_BOOTSTRAP_ENV`, else the default in the config directory.
+3. On a loopback bind only, a new credential, written and printed once.
+4. Otherwise it fails. There is no unauthenticated fallback, and a corrupt or unreadable file fails closed and names the path.
 
-## Shared HTTP request headers
+## HTTP headers
 
-Every `/v1/*` request (except MCP streamable HTTP's own rules — see
-[MCP over HTTP](../surfaces/mcp-http.md)) must carry:
+Every `/v1/*` request except `/v1/mcp` carries these headers:
 
 | Header | Required | Notes |
 |---|---|---|
-| `Authorization` | yes | `Bearer <token>`; exactly one header; printable ASCII bearer |
-| `x-interface-version` | yes | Current value: `{{INTERFACE_VERSION}}` |
-| `x-correlation-id` | yes | UUID string; max 64 bytes |
-| `x-deadline` | yes | RFC3339 timestamp; must be after now and within 5 minutes ahead |
-| `idempotency-key` | mutating POSTs | 1–128 printable ASCII; enables replay/conflict detection |
+| `Authorization` | yes | `Bearer <token>`. Exactly one header |
+| `x-interface-version` | yes | `{{INTERFACE_VERSION}}` |
+| `x-correlation-id` | yes | UUID, up to 64 bytes. Echoed in the response |
+| `x-deadline` | yes | RFC 3339 time, later than now and within 5 minutes |
+| `idempotency-key` | mutating POSTs | 1 to 128 printable ASCII characters |
 
-`GET /healthz` is unauthenticated and does not use these headers.
+`GET /healthz` needs none of them. `/v1/mcp` takes only the bearer; see [MCP over HTTP](../surfaces/mcp-http.md). Duplicate or conflicting security headers are rejected. Request bodies are limited to 1 MiB by default (`interface.max_request_bytes`). The SDKs set all of these headers for you.
 
-Duplicate or conflicting security-sensitive headers are rejected. Request bodies
-are bounded (1 MiB by default via interface config). Responses echo
-`x-interface-version` and `x-correlation-id` when present.
+Errors are JSON `{"error": {...}}` with `code`, `message` and `correlationId`. See [HTTP API](../surfaces/http-api.md#errors).
 
-The TypeScript SDK sets these headers automatically. Pass
-`options.idempotencyKey` on mutating calls when you need safe retries.
+## Issue a scoped token
 
-Error bodies are JSON `{ "error": InterfaceError }` with camelCase fields
-(`code`, `layer`, `message`, `correlationId`, …). See the
-[HTTP API reference](../surfaces/http-api.md) and TypeScript `InterfaceErrorCode`.
-
-## Mint a scoped principal
-
-Requires `authority:admin` on the caller (`bobby init --preset unrestricted`).
+A caller with `authority:admin` (create the credential with `--preset unrestricted`) can mint tokens with narrower capabilities, for example one per tenant or sandbox.
 
 ```bash
-DEADLINE=$(date -u -v+2M +"%Y-%m-%dT%H:%M:%S.000Z" 2>/dev/null \
-  || date -u -d '+2 minutes' +"%Y-%m-%dT%H:%M:%S.000Z")
-CORRELATION=$(uuidgen | tr '[:upper:]' '[:lower:]')
-EXPIRES=$(date -u -v+10M +"%Y-%m-%dT%H:%M:%S.000Z" 2>/dev/null \
-  || date -u -d '+10 minutes' +"%Y-%m-%dT%H:%M:%S.000Z")
-PRINCIPAL=$(uuidgen | tr '[:upper:]' '[:lower:]')
-
-curl -sS -X POST "http://127.0.0.1:7777/v1/principals" \
+PRINCIPAL=$(uuidgen | tr 'A-Z' 'a-z')
+curl -sS -X POST http://127.0.0.1:7777/v1/principals \
   -H "Authorization: Bearer ${AUTOMATION_RUNTIME_TOKEN}" \
   -H "x-interface-version: {{INTERFACE_VERSION}}" \
-  -H "x-correlation-id: ${CORRELATION}" \
-  -H "x-deadline: ${DEADLINE}" \
+  -H "x-correlation-id: $(uuidgen | tr 'A-Z' 'a-z')" \
+  -H "x-deadline: $(date -u -v+2M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+2 minutes' +%Y-%m-%dT%H:%M:%SZ)" \
   -H "idempotency-key: issue-${PRINCIPAL}" \
   -H "content-type: application/json" \
-  -d "{\"principalId\":\"${PRINCIPAL}\",\"capabilities\":[\"session:read\",\"session:write\"],\"expiresAt\":\"${EXPIRES}\"}"
+  -d "{\"principalId\":\"${PRINCIPAL}\",\"capabilities\":[\"session:read\",\"session:write\"],\"expiresAt\":\"$(date -u -v+1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)\"}"
 ```
 
-Successful response is `201` with a one-time `bearer`, plus `principalId`,
-`capabilities`, and `expiresAt`. Capture the bearer immediately; it is not
-retrievable again.
+The response is `201` with `principalId`, `capabilities`, `expiresAt` and a one-time `bearer`. Save the bearer now; it cannot be read again. Revoke with `DELETE /v1/principals/{principalId}` using the same headers, which returns `204`. See [Multi-principal runtime](../concepts/multi-principal.md).
 
-Revoke with `DELETE /v1/principals/{principalId}` (same context headers; no body).
-
-## Multi-principal issuance
-
-After bootstrap, multi-principal issuance uses authenticated HTTP:
-
-- `POST /v1/principals` — mint a scoped bearer (once)
-- `DELETE /v1/principals/{id}` — revoke immediately
-
-All issuance requests carry `Authorization`, `x-interface-version`, a bounded
-correlation id, a deadline, and an idempotency key for the mutating `POST`.
-
-Common auth failures and capability errors: [Troubleshooting](troubleshooting.md).
+For auth failures and capability errors, see [Troubleshooting](troubleshooting.md).

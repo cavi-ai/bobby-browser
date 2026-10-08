@@ -4,106 +4,56 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 # Context graph
 
-The context graph is bobby's memory of page structure. It exists so an agent
-can ask "where is the control described as X" and get a bound target with a
-confidence score instead of pulling a whole accessibility tree into its
-context.
+The context graph is bobby's memory of page structure. An agent can ask where a described control is and get a target with a confidence score, without pulling a whole accessibility tree into its context.
 
-Two layers:
+There are two layers:
 
-- **Session-hot** — observations from the current session, invalidated on any
-  command that may have changed the page. Always available, never persisted.
-- **Persisted** — per-profile, per-site structural memory promoted from
-  verified intent outcomes. Runtimes whose engine selection carries a durable
-  profile identity write and read this layer: a Firefox companion enrollment;
-  a named Chromium profile (`{"mode": "exact", "engine": "chromium",
-  "profileId": "<name>"}`), which also persists its user-data-dir at
-  `<profiles_dir>/chromium/<name>`; or managed Chromium without a
-  `profileId`, which remembers under the shared `managed-chromium` identity
-  while each session's browser profile stays disposable. A profile-less
-  Firefox selection and a `prefer` list have no stable identity and neither
-  read nor write it. Each verified outcome is written to disk before its
-  command returns, so the memory survives a runtime restart whether or not
-  the agent closed its session.
+- **Session memory.** Observations from the current session. Any command that may have changed the page invalidates them. Never persisted.
+- **Persisted memory.** Per profile and per site, promoted from verified intent outcomes. It is written to disk before the command returns, so it survives restarts.
 
-## What persists
+Persisted memory needs a profile with a durable identity: a paired Firefox profile, a Chromium selection with a `profileId`, or managed Chromium (remembered under `managed-chromium` while each session's browser profile stays disposable). A Firefox selection with no paired profile, and a `prefer` list, neither read nor write it. See [Configuration](../guides/configuration.md#engine-selection).
 
-Per site (keyed by scheme + registrable domain, never a full URL), per page
-pattern (query/fragment stripped, numeric path segments templated), per form,
-per control:
+## What it stores
 
-- `role`, `accessible_name`, `ordinal`, form membership
-- Per intent kind: success/failure counters, the day of the last verified
-  success, and how the record entered the graph (`observed` or
-  `vision-promoted`)
+For each site (scheme plus registrable domain, never a full URL), page pattern (query and fragment removed, numeric path segments templated), form and control:
 
-A completed form or extraction records every field it resolved. A failed one
-counts the failure against the step that failed only.
+- Role, accessible name, ordinal and form membership.
+- Per intent kind: success and failure counts, the day of the last verified success, and whether the record was `observed` or `vision-promoted`.
 
-**Never persisted:** typed values, credentials, page text, screenshots,
-journal ids, exact timestamps. Timestamps are day-precision by construction.
-The CI privacy canary (`context_privacy`) fills a form with a canary value
-through the live harness and scans every byte of the store for it.
+A completed form or extraction records every field it resolved. A failed one counts the failure against the failing step only. It never stores typed values, credentials, page text, screenshots, journal IDs or exact timestamps.
 
-## Provenance
+## Ask before you snapshot
 
-Every `context_ask` answer says where it came from: `observedAt` is a live
-page generation or `persisted`, and remembered answers carry their `source`.
-A remembered answer never claims to be a live observation.
+| Surface | Call | Needs |
+|---|---|---|
+| MCP | `context_ask` | `page:read` |
+| MCP | `context_neighbors` | `context:read` |
+| HTTP | `GET /v1/context/ask`, `/neighbors`, `/site/{key}` | `context:read` |
+| SDKs | `contextAsk`, `contextNeighbors`, `contextSite` | `context:read` |
 
-## Vision candidate ranking
+```json
+{"name": "context_ask", "arguments": {"workflowHandle": "wf_0123456789abcdef0123456789abcdef", "description": "Email address field"}}
+```
 
-When an intent escalates to vision on a page with retained context, the
-runtime orders the stuck step's near-miss candidates (up to 10) before the
-first 5 go to the provider, so a verified control outside the first 5 can
-still reach it. A retained control counts only for the same intent kind,
-with more verified successes than failures, matched to a candidate by role
-and accessible name. The
-candidate with the best record (net successes, then successes, then the most
-recent verification day, then observed over vision-promoted) moves first.
+A hit returns the target. A miss returns `hit: false` with `nextStep: "a11y_snapshot"`. Every answer says where it came from: `observedAt` is a live page generation or `persisted`, and remembered answers carry their `source`. A remembered answer never claims to be a live observation.
 
-- Two candidates tied for best leave the order unchanged
-  (`ambiguousRefusal`).
-- A retained record with no verification day is never used; when it is the
-  only match, the lookup reports `staleRejection`.
-- Ranking only reorders. The provider still chooses, and the action is still
-  verified.
+`workflow_observe` with a `goal` does this for you. When memory answers, it returns the remembered target with `source: "retained"` and takes no snapshot.
 
-`runtime_info.operationalMetrics.contextRankedVision` counts these lookups
-without values, names, URLs, or selectors: `attempted`; the record source
-(`sourceObserved`, `sourceVisionPromoted`, `sourceUnreported`); the outcome
-(`hit`, `miss`, `ambiguousRefusal`, `staleRejection`, `error`); provider
-escalations by transport (`providerEscalations`, `providerHttp`,
-`providerAcp`, `providerDirectLocal`); `candidateRankingLatencyMs`;
-`confidence`; and `verificationAccepted` / `verificationRejected`.
+## Vision ranking
+
+When an intent escalates to vision on a page with remembered context, bobby orders the stuck step's near-miss candidates (up to 10) before the first 5 go to the provider. A remembered control counts when it matches by role and name, has the same intent kind and has more verified successes than failures. The one with the best record moves first. Ties leave the order unchanged. A record with no verification day is never used. The provider still chooses, and the action is still verified.
 
 ## Retention and erasure
 
-- Records not verified within `[context].ttl_days` (default 90) are swept at
-  store open.
-- `bobby context list --profile <id>` shows remembered sites
-  (`--profile managed-chromium` for managed Chromium).
-- `bobby context forget <site-key> --profile <id>` erases one site
-  immediately and totally, and verifies the erasure before reporting.
-- `bobby doctor` reports the store path, site count, bytes, and lock health.
-- The store is single-writer: only the runtime process holds it. CLI and
-  doctor access is read-only or refused while the runtime runs.
+- Records without a verified success for `[context].ttl_days` (default 90) are removed when the store opens.
+- `bobby context list --profile <id>` lists remembered sites. Use `--profile managed-chromium` for managed Chromium.
+- `bobby context forget <site> --profile <id>` erases one site immediately and verifies the erasure.
+- `bobby doctor` reports the store path, site count, size and lock health.
+- Only the runtime holds the store while it runs. CLI and doctor access is read-only or refused.
 
-## Resource limits
+## Limits
 
-The resident cache keeps at most 256 sites and 64 MiB of conservatively
-accounted owned memory per profile. Clean sites can leave RAM and reload from
-their saved files. Eviction does not delete remembered sites. Dirty updates
-are flushed before eviction; if persistence fails, accepted updates remain
-buffered and new admissions can be refused with a warning.
-
-Site files are limited to 2 MiB and 16,384 structural records (pages, forms,
-controls, intent counters, and challenge counters combined). Oversized or
-unreadable files are reported and preserved. The runtime continues with live
-context. `bobby doctor` inspects files within the same limits without claiming
-the writer lock; runtime warnings identify rejected updates and skipped files.
-
-Configure compatible larger or smaller budgets in your runtime config:
+The in-memory cache keeps up to 256 sites and 64 MiB per profile. Sites that leave the cache reload from disk, and eviction deletes nothing. A site file is limited to 2 MiB and 16,384 records. An oversized or unreadable file is preserved, reported, and skipped. The runtime continues with live context.
 
 ```toml
 [context.limits]
@@ -113,26 +63,4 @@ max_resident_sites = 256
 max_resident_bytes = 67108864
 ```
 
-All limits must be positive. Memory accounting includes collection capacities
-and conservative B-tree allocation allowances. It is a cache admission budget,
-not a process RSS limit: bounded decoding buffers and caller-owned copies are
-additional transient memory. TTL and explicit erasure still apply to sites
-that have left the cache. The persisted schema remains v1.
-
-Use `bobby context --config <runtime-config> list --profile <id>` to inspect
-the same configured store and limits. `--dir` still overrides the store root;
-the config option also applies to `context forget`.
-
-## Reading
-
-- MCP `context_ask` (requires `page:read`) — live first, persisted fallback.
-- MCP `context_neighbors` (requires `context:read`) — the remembered form
-  structure around a located control.
-- HTTP `GET /v1/context/ask`, `GET /v1/context/neighbors`, and
-  `GET /v1/context/site/{key}` (all require `context:read`). See the
-  [HTTP API reference](../surfaces/http-api.md) for query and response shapes.
-
-On a known site, ask before you snapshot: `context_ask` answers before the
-first accessibility observation of a session. `workflow_observe` with a
-`goal` does this for you: when memory answers, it returns the remembered
-target (`"source":"retained"`) and takes no snapshot.
+All limits must be positive. `bobby context --config <file> list` applies the same limits.

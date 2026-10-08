@@ -4,31 +4,18 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 # Workflow replay
 
-`bobby audit replay` turns an [audit bundle](../concepts/evidence-checkpoints.md#audit-bundles)
-into one self-contained HTML page: every command in journal order, its phases
-with timestamps, its outcome and error, its evidence, and the screenshots the
-bundle carries. The page has no script and no external requests, so it opens
-from disk or as an attachment.
+`bobby audit replay` turns a signed [audit bundle](../concepts/evidence-checkpoints.md#audit-bundles) into one HTML page. The page lists every command in order with its phases, timestamps, outcome, evidence and screenshots. It has no scripts and makes no network requests, so it opens from disk or as an email attachment.
 
 ```bash
 bobby audit export --workflow <workflowId> --out workflow.tar
 bobby audit replay workflow.tar --public-key <hex>
-# writes workflow.html
 ```
 
-Replay verifies the bundle first: it refuses a bundle whose digests or
-signature do not match, and with `--public-key` one signed by anyone else. The
-header states the signer and whether it was pinned. Page and journal text is
-escaped; screenshots are embedded as `data:` images from the verified bytes.
+This writes `workflow.html` next to the bundle; pass `--out <path>` to choose another path. Replay verifies the bundle first and refuses one whose digests or signature do not match. With `--public-key` it also refuses a bundle signed by anyone else. Print your signing key with `bobby audit key`.
 
-[Sample replay](replay-sample.html): a real Chromium run against the test
-fixture (navigate, fill **Name**, screenshot, click **Continue**, screenshot),
-exported and replayed by the `audit_replay_live` test. Regenerate it with:
+The page header shows the signer and whether the key was pinned. Journal and page text is escaped, and screenshots are embedded from the verified bytes.
 
-```bash
-BOBBY_WRITE_REPLAY_SAMPLE="$PWD/docs/bobby-browser/source/pages/guides/replay-sample.html" \
-  cargo test -p bobby-browser --test audit_replay_live -- --ignored
-```
+See the [sample replay](replay-sample.html) of a short session that fills a field and clicks a button.
 
 ## Next
 

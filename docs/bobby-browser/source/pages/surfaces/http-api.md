@@ -2,187 +2,99 @@
 documentedVersion: {{PRODUCT_VERSION}}
 ---
 
-# HTTP API reference
+# HTTP API
 
-Authenticated broker routes under `/v1/*`. Interface version:
-`{{INTERFACE_VERSION}}` (`CURRENT_INTERFACE_VERSION` / TypeScript `INTERFACE_VERSION`).
+`bobby serve` exposes a JSON API under `/v1`. Use it from any language, or through the [TypeScript](typescript-sdk.md), [Python](python-sdk.md) and [Rust](../rust/index.md) SDKs. The machine-readable catalog is the [OpenAPI 3.1 spec](../openapi/v1.yaml). Interface version: `{{INTERFACE_VERSION}}`.
 
-Unauthenticated: `GET /healthz` → `{ "ok": true }`.
-
-There is no `/runtime` route. Use `GET /v1/runtime`.
-
-Broker `/v1/*` routes require the shared headers in
-[Authentication](../guides/auth.md). `/v1/mcp` is bearer-only.
+`GET /healthz` needs no authentication and returns `{"ok": true}`. Every `/v1` route except `/v1/mcp` needs a bearer token and the headers in [Authentication](../guides/auth.md). Bodies use camelCase JSON unless noted.
 
 ## Routes
 
-| Method | Path | Purpose | Required capability |
+| Method | Path | Purpose | Capability |
 |---|---|---|---|
 | GET | `/v1/runtime` | Runtime info | `session:read` |
 | GET | `/v1/sessions` | List sessions | `session:read` |
-| POST | `/v1/sessions` | Create session | `session:write` |
-| DELETE | `/v1/sessions/{session}` | Delete session (204) | `session:write` |
-| POST | `/v1/pages` | Open page | `page:write` |
-| GET | `/v1/context/ask` | Locate a described control (`sessionId`, `pageId`, `description`) | `context:read` |
-| GET | `/v1/context/neighbors` | Read remembered controls around a described target (same query) | `context:read` |
-| GET | `/v1/context/site/{key}` | Read remembered structure for a site key | `context:read` |
-| POST | `/v1/commands` | Submit command envelope | `browser:mutate` (+ nested caps for upload / download / JS / intents) |
-| POST | `/v1/checkpoints` | Persist workflow checkpoint | `recovery:write` |
-| POST | `/v1/recovery/{workflow}` | Recover workflow | `recovery:write` |
-| GET | `/v1/recovery/{workflow}` | Checkpoint + receipts | `recovery:read` |
-| GET | `/v1/events` | Read events (`after`, `limit` query) | `session:read` |
+| POST | `/v1/sessions` | Create a session | `session:write` |
+| DELETE | `/v1/sessions/{session}` | Delete a session (204) | `session:write` |
+| POST | `/v1/pages` | Open a page | `page:write` |
+| GET | `/v1/sessions/{session}/pages/{page}/forms` | Form snapshot | `page:read` |
+| POST | `/v1/commands` | Submit a command envelope | `browser:mutate`, plus the command's own capability |
+| GET | `/v1/context/ask` | Locate a described control | `context:read` |
+| GET | `/v1/context/neighbors` | Remembered controls around a target | `context:read` |
+| GET | `/v1/context/site/{key}` | Remembered structure for a site | `context:read` |
+| POST | `/v1/checkpoints` | Save a checkpoint | `recovery:write` |
+| GET | `/v1/recovery/{workflow}` | Checkpoint and receipts | `recovery:read` |
+| POST | `/v1/recovery/{workflow}` | Recover a workflow | `recovery:write` |
+| GET | `/v1/events` | Read events | `session:read` |
 | GET | `/v1/artifacts/{id}` | Read artifact bytes | `artifact:read` |
-| GET | `/v1/sessions/{session}/pages/{page}/forms` | Form snapshot (`maxControls` query, 1–512) | `page:read` |
-| POST | `/v1/jobs` | Submit a scheduled job | `job:submit` (+ `network:egress` for HTTP handlers) |
+| POST | `/v1/jobs` | Submit a job | `job:submit` (+ `network:egress` for HTTP jobs) |
 | GET | `/v1/jobs/{job}` | Job status | `job:read` |
-| DELETE | `/v1/jobs/{job}` | Cancel a job | `job:cancel` |
-| POST | `/v1/jobs/{job}/resolution` | Record an owner attestation | `job:read` + `job:cancel` + `authority:admin` |
-| POST | `/v1/principals` | Issue scoped bearer | `authority:admin` |
-| DELETE | `/v1/principals/{principal}` | Revoke principal | `authority:admin` |
+| DELETE | `/v1/jobs/{job}` | Cancel a job (204) | `job:cancel` |
+| POST | `/v1/jobs/{job}/resolution` | Record an operator attestation | `job:read`, `job:cancel`, `authority:admin` |
+| POST | `/v1/principals` | Issue a scoped bearer (201) | `authority:admin` |
+| DELETE | `/v1/principals/{principal}` | Revoke a principal (204) | `authority:admin` |
+| POST, GET | `/v1/mcp` | [MCP over HTTP](mcp-http.md) | per tool |
 
-MCP streamable HTTP is mounted at `POST /v1/mcp` (JSON-RPC) and
-`GET /v1/mcp` (SSE keep-alive channel) — see [MCP over HTTP](mcp-http.md)
-and [MCP tools](mcp-tools.md).
+## Request details
 
-Machine-readable catalog: [OpenAPI 3.1](../openapi/v1.yaml).
+**Create a session.** `POST /v1/sessions` takes `{profile, proxy, executionPolicy?, zigzagzig?}`. All `executionPolicy` flags default to off:
 
-## Request bodies (high level)
+```json
+{"profile": "default", "proxy": null, "executionPolicy": {"javascriptEvaluation": false, "visionAssist": false, "fingerprint": false, "humanize": false}}
+```
 
-Shapes use camelCase JSON. Do not invent fields; follow the TypeScript SDK
-validators / Rust types.
+`fingerprint` applies fingerprint spoofing and `humanize` adds human-like input timing. `zigzagzig: true` turns every flag on and recovers stuck commands automatically; see [Bobby skills](../guides/skills.md).
 
-- **POST `/v1/sessions`** — `{ profile, proxy, executionPolicy?, zigzagzig? }`. Every
-  `executionPolicy` flag is deny-by-default, so an omitted policy is
-  `{ javascriptEvaluation: false, visionAssist: false, fingerprint: false, humanize: false }`.
-  `fingerprint` applies fingerprint spoofing to workers leased for this
-  session; `humanize` synthesizes human-like input timing and reports what it
-  synthesized as `humanization` evidence. Both are written to the worker on
-  every lease, so one session's opt-in never carries into another's.
-  `zigzagzig: true` creates a godmode session: every policy flag is forced
-  on and each page-bound command runs under the ZigZagZig recovery ladder —
-  a stuck command escalates through observe, re-resolve, retry, in-place
-  challenge solve, checkpoint resume, and session replacement automatically
-  (see [Internal skill runtime](../guides/skills.md)).
-- **DELETE `/v1/sessions/{session}`** — empty body; `204` on success
-- **POST `/v1/pages`** — `{ session_id }` (snake_case on this request; session/page state also uses `id` / `session_id` / `page_ids`)
-- **GET `/v1/context/ask` and `/v1/context/neighbors`** — require exactly
-  `sessionId`, `pageId`, and a nonempty `description` of at most 256 bytes as
-  query parameters. A hit returns `answer` or `neighbors` with `hit: true`;
-  a miss returns `null`, `hit: false`, `reason: "notRemembered"`, and
-  `nextStep: "a11y_snapshot"`. Both responses mark `pageDerived: true`.
-- **GET `/v1/context/site/{key}`** — returns `site` (or `null` for an unknown
-  site) and `pageDerived: true`. Percent-encode the site key as one path
-  segment.
-- **POST `/v1/commands`** — `CommandEnvelope` (`schemaVersion: 2`, ids, `deadline`,
-  `command` where `command` is `{ kind: "primitive"|"intent", input: … }`).
-  Primitive `activatePage` uses `{ kind: "activatePage", input: { pageId } }`.
-  Primitive `accessibilitySnapshot` uses
-  `{ kind: "accessibilitySnapshot", input: { maxNodes? } }` (default 256,
-  max 2048; see [Accessibility snapshot](../guides/accessibility-snapshot.md)).
-- **POST `/v1/checkpoints`** — `{ checkpoint, evidenceRefs }` (see SDK
-  `CheckpointRequest`). `evidenceRefs` is a bounded list (max 128) of command
-  ids whose evidence the runtime already journaled; it resolves them itself.
-  Evidence is never supplied by the caller, and an id naming a command this
-  principal does not own, or one with no terminal journal record, fails the
-  checkpoint.
-- **GET `/v1/recovery/{workflow}`** — `RecoveryStatus`
-  (`{ workflowId, checkpoint, receipts }`); requires `recovery:read` and session
-  ownership of the workflow. Missing / unowned → not found.
-- **POST `/v1/recovery/{workflow}`** — returns `RecoveryDecision`; maps
-  `needsReconciliation` to HTTP 409
-- **POST `/v1/principals`** — `{ principalId, capabilities, expiresAt }` → `201` with one-time `bearer`
-- **GET `/v1/events`** — query `after` (cursor) and `limit` (bounded; SDK max 256).
-  Pass `stream=1` for a server-sent-event stream instead of a batch: each event
-  arrives as an SSE frame whose `id` is its cursor, a cursor gap arrives as a
-  terminal `event.gap` frame.
-- **GET `/v1/sessions/{session}/pages/{page}/forms`** — optional query
-  `maxControls` (integer 1–512). Returns a `FormSnapshot` (same contract as MCP
-  `form_snapshot`) with `pageDerived: true` on page-derived controls.
-- **POST `/v1/jobs`** — `{ name, payload?, priority?, maxRetries?, timeoutMs? }`
-  → `{ jobId, status }`. `priority` is `low` | `normal` | `high` | `critical`
-  (default `normal`); `maxRetries` defaults to `3`. Mutating: send
-  `idempotency-key` for safe retries. If admission persistence is uncertain,
-  the error response carries `jobId` and `error.reconciliationRequired: true`;
-  query that job before attempting a new submission.
-- **GET `/v1/jobs/{job}`** — job status record (`id`, `name`, `priority`,
-  `status`, `payload`, timestamps, `retryCount`, `maxRetries`, `result`,
-  `error`, …). `reconciliationRequired` means execution or persistence has
-  an uncertain outcome; inspect the external effect before submitting new work.
-- **DELETE `/v1/jobs/{job}`** — cancel; returns HTTP 204. Read job status afterward.
-- **POST `/v1/jobs/{job}/resolution`** — `{ decision, evidenceSha256 }` where
-  decision is `effectObserved` or `effectAbsent` and the digest is 64 lowercase
-  hex characters. The owner must have `job:read`, `job:cancel`, and
-  `authority:admin`. Only reconciliation-required jobs accept a resolution.
-  The stored receipt includes actor, timestamp, decision, and digest with
-  `provenance: "operatorAttested"`; job status becomes `resolved`. This records
-  an operator's assertion, never runtime verification, and never executes the
-  handler. Identical requests return the same receipt while retained;
-  conflicting requests are rejected. Receipts use terminal-job retention.
+**Open a page.** `POST /v1/pages` takes `{session_id}`. This body is snake_case; session and page state also use `id`, `session_id` and `page_ids`.
 
-Idempotency keys are scoped to the authenticated principal and operation. A
-completed key remains replayable for 15 minutes; unresolved keys remain in the
-durable ledger until an authoritative command or job outcome resolves them.
-Replays still require current authorization. Keys created before the durable
-ledger upgrade were memory-only and cannot be recovered after a process restart.
+**Submit a command.** `POST /v1/commands` takes an envelope with `schemaVersion: 2`, `commandId`, `workflowId`, `attemptId`, `sessionId`, `pageId`, `deadline`, and `command`. `command` is `{kind: "primitive" | "intent", input: {...}}`. Intents also need `intent:execute`. Examples are in [First session from code](../introduction/first-session.md) and [Intent commands](../guides/intents.md).
 
-Nested command kinds include primitives (`navigate`, `click`, …) and
-`{ kind: "intent", input: … }`. Intents additionally need `intent:execute`.
+**Context reads.** `ask` and `neighbors` take query parameters `sessionId`, `pageId` and `description` (non-empty, up to 256 bytes). A hit returns `answer` or `neighbors` with `hit: true`. A miss returns `null`, `hit: false`, `reason: "notRemembered"` and `nextStep: "a11y_snapshot"`. Both set `pageDerived: true`. `context/site/{key}` returns `site` (or `null`) and `pageDerived: true`; percent-encode the key as one path segment.
 
-## Status and errors
+**Form snapshot.** Optional query `maxControls` (1 to 512). Same contract as MCP `form_snapshot`.
 
-Successful JSON responses are typically `200`. Principal issuance returns
-`201`. Session delete and principal revocation return `204`.
+**Checkpoints.** `POST /v1/checkpoints` takes `{checkpoint, evidenceRefs}`. `evidenceRefs` lists up to 128 command IDs the runtime has already journaled. The runtime resolves the evidence itself. An ID that this principal does not own, or that has no terminal record, fails the checkpoint.
 
-Failures return JSON `{ "error": { … } }` where `error` is an `InterfaceError`:
+**Recovery.** `GET` returns `{workflowId, checkpoint, receipts}` for a workflow you own. `POST` returns a recovery decision; `needsReconciliation` is HTTP 409.
 
-| `code` (camelCase) | Typical HTTP |
+**Events.** Query `after` (cursor) and `limit`. Add `stream=1` for server-sent events: each frame's `id` is its cursor, and a cursor gap ends the stream with an `event.gap` frame.
+
+**Jobs.** `POST /v1/jobs` takes `{name, payload?, priority?, maxRetries?, timeoutMs?}` and returns `{jobId, status}`. `priority` is `low`, `normal` (default), `high` or `critical`; `maxRetries` defaults to 3. If persisting the job is uncertain, the error carries `jobId` and `reconciliationRequired: true`: query that job before submitting again. A job status with `reconciliationRequired` means the outcome is uncertain, so check the external effect first. `POST /v1/jobs/{job}/resolution` takes `{decision, evidenceSha256}` with `decision` of `effectObserved` or `effectAbsent` and a lowercase hex SHA-256. It records an operator's assertion, marks the job `resolved`, and never runs the handler.
+
+**Principals.** `POST /v1/principals` takes `{principalId, capabilities, expiresAt}` and returns the bearer once.
+
+## Idempotency
+
+Send an `idempotency-key` on mutating POSTs. Keys are scoped to the principal and operation. A completed key can be replayed for 15 minutes. Unresolved keys stay in a durable ledger until the command or job reaches an outcome, and replays are re-authorized. Reusing a key with a different payload is `idempotencyConflict`.
+
+## Errors
+
+Failures return `{"error": {...}}` with `code`, `message`, `correlationId` and related fields.
+
+| `code` | HTTP |
 |---|---|
-| `authenticationFailed` / `tokenExpired` | 401 |
-| `missingCapability` / `malformedScope` | 403 |
-| `artifactDenied` / `notFound` | 404 |
+| `authenticationFailed`, `tokenExpired` | 401 |
+| `missingCapability`, `malformedScope` | 403 |
+| `artifactDenied`, `notFound` | 404 |
 | `deadlineExceeded` | 408 |
-| `idempotencyConflict` / reconciliation | 409 |
+| `idempotencyConflict`, reconciliation required | 409 |
+| `invalidRequest`, `unsupportedInterfaceVersion` | 422 (413 when the body is too large) |
 | `resourceExhausted` | 429 |
-| `invalidRequest` | 422 (or 413 when oversized) |
-| `unsupportedInterfaceVersion` | 422 |
-| `engineUnreachable` | 503 |
 | `internal` | 500 |
+| `engineUnreachable` | 503 |
 
-`engineUnreachable` means the configured browser engine did not answer, so no
-session could be opened. The request itself was well-formed: run `bobby doctor`,
-start or re-point the engine it names, then resubmit unchanged.
+`engineUnreachable` means the browser engine did not answer. Run `bobby doctor`, fix the engine it names, and resend the same request.
 
-Command outcomes may map to `200` / `403` / `409` / `429` / `503` depending on
-`CommandOutcome.status` — the TypeScript client checks status against the body.
+A command outcome maps to 200, 403, 409, 429 or 503 by its `status`. The SDKs check the status against the body.
 
-### Rate limits and retry
+### Rate limits
 
-Each principal has an independent in-flight request quota
-(`interface.max_in_flight_per_principal` — see
-[Multi-principal runtime](../concepts/multi-principal.md)). Exhaustion and
-command `resourceExhausted` outcomes return **HTTP 429** with:
+Each principal has an in-flight request limit (`interface.max_in_flight_per_principal`, default 8). When it is exceeded, and when command outcomes report `resourceExhausted`, the API returns 429 with `Retry-After` in whole seconds (rounded up, minimum 1) and `error.retryAfterMs` when a finer hint exists. Retry after the delay.
 
-- Response header `Retry-After: <seconds>` (integer seconds)
-- Body field `error.retryAfterMs` when the runtime supplies a millisecond hint
+Retryable command failures return 503 with `Retry-After: 1`.
 
-`Retry-After` is always whole seconds: the broker rounds millisecond hints
-**up** (`ceil(ms / 1000)`, minimum **1**). A 50 ms hint therefore yields
-`Retry-After: 1`. Prefer `retryAfterMs` in the body when you need sub-second
-intent; never treat a missing or zero header as “retry immediately.”
+## Next
 
-Treat 429 as retryable after the indicated delay. Do not spin. Connection /
-accept limits on the listener can also emit 429 with `Retry-After`.
-
-HTTP **503** appears for retryable command failures (`retryableFailure`). Those
-responses always include `Retry-After: 1` — a fixed default, because
-`retryableFailure` has no per-outcome millisecond field yet. Prefer that
-header over spinning.
-
-## Clients
-
-- Typed clients: [TypeScript SDK](typescript-sdk.md) · [Python SDK](python-sdk.md)
-- Rust HTTP client: [bobby-browser-client](../rust/bobby-browser-client.md)
+- [Authentication](../guides/auth.md)
+- [Events and recovery](../guides/events-recovery.md)
 - [MCP tools](mcp-tools.md)
-- Compact a11y trees: [Accessibility snapshot](../guides/accessibility-snapshot.md)
-- Tutorial: [First browser session](../introduction/first-session.md)
-- Headers and mint curl: [Authentication](../guides/auth.md)

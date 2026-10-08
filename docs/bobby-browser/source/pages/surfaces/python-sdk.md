@@ -4,21 +4,13 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 # Python SDK
 
-Package: `bobby-browser` (Python >= 3.10, stdlib only -- no third-party HTTP
-client dependency).
-
-## Install
+`bobby-browser` is a typed client for the [HTTP API](http-api.md). It needs Python 3.10 or later and has no third-party dependencies.
 
 ```bash
 pip install bobby-browser
 ```
 
-From a bobby-browser checkout: `pip install -e packages/python-sdk`.
-
-`bobby install --skill-hermes` installs the Hermes skill that drives this
-client into `$HERMES_HOME/skills/` (else `~/.hermes/skills/`).
-
-## Construct the client
+## Connect
 
 ```python
 import os
@@ -28,90 +20,81 @@ client = BrowserRuntimeClient(
     "http://127.0.0.1:7777",
     os.environ["AUTOMATION_RUNTIME_TOKEN"],
 )
+info = client.runtime_info()
 ```
 
-`base_url` should be the broker origin without a trailing `/v1` (the client
-strips a trailing `/v1` if present). The bearer is the plaintext from
-`bobby init` / bootstrap (conventional env name `AUTOMATION_RUNTIME_TOKEN`).
+The first argument is the server origin; a trailing `/v1` is accepted. Get the token with `bobby token`.
 
-JSON responses, including HTTP error bodies, are limited to 64 MiB before
-parsing. Set the constructor's `max_json_response_bytes` to a positive integer
-up to 256 MiB to adjust that budget. The client checks declared sizes and counts
-bytes while reading, including responses without `Content-Length`. Excess
-bodies raise `RuntimeClientError(kind="protocol")` and close the response.
-The limit bounds body bytes; decoded strings and parsed objects require
-additional memory.
+The client sends the authorization, interface version, correlation ID and deadline headers on every request. Pass `RequestOptions` to a call to change them:
 
-Artifacts use their reference's byte count instead of the JSON budget, with a
-256 MiB hard ceiling checked before dispatch. Length, media type, and SHA-256
-verification still apply before bytes are returned.
+| Field | Effect |
+|---|---|
+| `idempotency_key` | Replay-safe retries for mutating calls |
+| `correlation_id` | Override the generated UUID |
+| `timeout_ms`, `deadline` | Request deadline (default 30 seconds) |
 
-## Headers
+Responses are limited to 64 MiB before parsing. Raise it up to 256 MiB with `max_json_response_bytes`. Artifacts are limited by their declared size, up to 256 MiB, and verified for length, media type and SHA-256 before they are returned.
 
-Every request sends:
+## Methods
 
-- `Authorization: Bearer …`
-- `x-interface-version: {{INTERFACE_VERSION}}` (`bobby_browser.INTERFACE_VERSION`)
-- `x-correlation-id` (UUID4; override via `RequestOptions(correlation_id=...)`)
-- `x-deadline` (from `RequestOptions(deadline=...)` / `timeout_ms`, default 30s)
+| Method | Route |
+|---|---|
+| `runtime_info()` | `GET /v1/runtime` |
+| `create_session(input, options=None)` | `POST /v1/sessions` |
+| `read_session(session_id=None)` | `GET /v1/sessions`. With an ID it filters the list and raises if nothing matches |
+| `delete_session(session_id)` | `DELETE /v1/sessions/{id}` |
+| `open_page(input, options=None)` | `POST /v1/pages` |
+| `read_page(session_id, page_id, max_controls=None)` | `GET /v1/sessions/{session}/pages/{page}/forms` |
+| `submit_command(envelope, options=None)` | `POST /v1/commands`. Returns the outcome with its `status` unchanged |
+| `create_checkpoint(input, options=None)` | `POST /v1/checkpoints` |
+| `recovery_status(workflow_id)` | `GET /v1/recovery/{id}` |
+| `recover_workflow(workflow_id)` | `POST /v1/recovery/{id}`. `needsReconciliation` is HTTP 409 |
+| `context_ask(session_id, page_id, description)` | `GET /v1/context/ask` |
+| `context_site(site_key)` | `GET /v1/context/site/{key}` |
+| `read_artifact(reference)` | `GET /v1/artifacts/{id}` |
+| `submit_job`, `job_status`, `cancel_job` | `/v1/jobs` |
+| `resolve_job(job_id, input)` | `POST /v1/jobs/{job}/resolution` |
 
-Pass `RequestOptions(idempotency_key=...)` on mutating calls for replay-safe
-retries.
+`resolve_job` records an operator attestation for a job whose outcome is uncertain. `input` is `{"decision": "effectObserved" | "effectAbsent", "evidenceSha256": ...}`. The caller needs `job:read`, `job:cancel` and `authority:admin`. See [Events and recovery](../guides/events-recovery.md).
 
-## Method catalog
+## Commands
 
-| Method | HTTP | Notes |
-|---|---|---|
-| `runtime_info()` | `GET /v1/runtime` | |
-| `create_session(input, options=None)` | `POST /v1/sessions` | |
-| `read_session(session_id=None, options=None)` | `GET /v1/sessions` | No single-id `GET` exists on the wire; with `session_id` this filters the list client-side and raises if no active session matches, with it omitted this returns the full list |
-| `delete_session(session_id, options=None)` | `DELETE /v1/sessions/{id}` | 204 on success |
-| `open_page(input, options=None)` | `POST /v1/pages` | |
-| `read_page(session_id, page_id, max_controls=None, options=None)` | `GET /v1/sessions/{session}/pages/{page}/forms` | Read-only, validated `FormSnapshot`; the PageRead HTTP surface, same contract as MCP `form_snapshot` |
-| `submit_command(envelope, options=None)` | `POST /v1/commands` | Raw `CommandEnvelope` in, `CommandOutcome` out with its `status` discriminator preserved exactly |
-| `create_checkpoint(input, options=None)` | `POST /v1/checkpoints` | |
-| `recovery_status(workflow_id, options=None)` | `GET /v1/recovery/{id}` | |
-| `recover_workflow(workflow_id, options=None)` | `POST /v1/recovery/{id}` | `needsReconciliation` maps to HTTP 409; every other decision to 200 |
-| `context_ask(session_id, page_id, description, options=None)` | `GET /v1/context/ask` | |
-| `context_site(site_key, options=None)` | `GET /v1/context/site/{key}` | |
-| `read_artifact(reference, options=None)` | `GET /v1/artifacts/{id}` | Verified bytes: content type, content length, and SHA-256 are checked before anything is returned |
-| `submit_job(input, options=None)` | `POST /v1/jobs` | |
-| `job_status(job_id, options=None)` | `GET /v1/jobs/{id}` | |
-| `cancel_job(job_id, options=None)` | `DELETE /v1/jobs/{id}` | 204 on success |
+`submit_command` takes a command envelope as a dictionary. The shape is in the [OpenAPI spec](../openapi/v1.yaml):
 
-There is no principals helper on the client today — mint/revoke with raw
-HTTP (see [Authentication](../guides/auth.md)).
+```python
+import uuid
+from datetime import datetime, timedelta, timezone
 
-## Intents
+session = client.create_session({"profile": "default", "proxy": None})
+page = client.open_page({"session_id": session["id"]})
+outcome = client.submit_command({
+    "schemaVersion": 2,
+    "commandId": str(uuid.uuid4()),
+    "workflowId": str(uuid.uuid4()),
+    "attemptId": str(uuid.uuid4()),
+    "sessionId": session["id"],
+    "pageId": page["id"],
+    "deadline": (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat(),
+    "command": {
+        "kind": "primitive",
+        "input": {"kind": "navigate", "input": {"url": "https://example.com", "waitUntil": "domContentLoaded", "timeoutMs": 30000}},
+    },
+})
+client.delete_session(session["id"])
+```
 
-This first Python SDK ships primitives only: build a raw `CommandEnvelope`
-dict (matching `docs/bobby-browser/source/openapi/v1.yaml` /
-`command.schema.json`) and pass it to `submit_command()`. There are no
-`locate` / `fill` / `follow` / `complete_form` intent-envelope helpers yet
-(compare the TypeScript SDK's `intents.ts`) — use the MCP `intent_*` tools or
-the TypeScript/Rust SDKs for intent-level workflows in the meantime.
+The SDK has no intent helpers. Send intent envelopes the same way (see [Intent commands](../guides/intents.md)), or use the MCP `intent_*` tools.
 
 ## Errors
 
-Failures raise `bobby_browser.RuntimeClientError` with `.kind` of `"http"` |
-`"transport"` | `"deadline"` | `"aborted"` | `"protocol"`. HTTP interface
-errors expose `.status`, `.code` (wire `InterfaceErrorCode`), `.retryable`,
-`.retry_after_ms`, `.reconciliation_required`, and `.required_capability`.
-The bearer token is never included in any error message or `repr()`.
+Failures raise `bobby_browser.RuntimeClientError` with `.kind` set to `http`, `transport`, `deadline`, `aborted` or `protocol`. HTTP errors also expose `.status`, `.code`, `.retryable`, `.retry_after_ms`, `.reconciliation_required` and `.required_capability`. The token never appears in error messages.
+
+## Hermes skill
+
+`bobby install --skill-hermes` installs a skill that drives this client for Hermes agents.
 
 ## Next
 
-- [First browser session](../introduction/first-session.md)
-- [HTTP API reference](http-api.md)
-- [Authentication](../guides/auth.md)
+- [First session from code](../introduction/first-session.md)
+- [HTTP API](http-api.md)
 - [TypeScript SDK](typescript-sdk.md)
-
-## Resolving uncertain jobs
-
-`resolve_job(job_id, input, options=None)` records an owner-scoped operator attestation for a
-reconciliation-required job. Supply `effectObserved` or `effectAbsent` with a
-64-character lowercase evidence SHA-256. The owner needs `job:read`,
-`job:cancel`, and `authority:admin`. The receipt has `operatorAttested`
-provenance, is validated against the request, and never replays the handler.
-See [Events and recovery](../guides/events-recovery.md) for degraded storage
-and retention semantics.

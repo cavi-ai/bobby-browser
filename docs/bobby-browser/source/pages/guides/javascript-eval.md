@@ -4,60 +4,34 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 # JavaScript evaluation
 
-Evaluating arbitrary JavaScript is **deny-by-default** and gated twice; both
-gates must pass:
+Run a JavaScript expression in a page and get the result back. Evaluation is off by default. Two checks must both pass:
 
-1. **Token capability** — bearer holds `javascript:evaluate`
-2. **Per-session execution policy** — session created with
-   `executionPolicy.javascriptEvaluation = true`
+1. The caller holds `javascript:evaluate`.
+2. The session was created with `executionPolicy.javascriptEvaluation = true`.
 
-A session created without an explicit grant (the default) rejects JavaScript
-with `policyDenied`, even if the token holds the capability. An unknown session
-fails closed.
+Otherwise the call fails with `policyDenied`.
 
-## Call path
+## Evaluate
 
-Submit a primitive command envelope via HTTP / MCP / SDK (`command` is nested
-`{ kind: "primitive", input: { kind: "evaluateJavaScript", input: … } }`).
-The TypeScript SDK's published `PrimitiveCommand` union may lag some MCP/Rust
-primitive kinds — prefer MCP schema / Rust types when a helper is missing.
+Create a session with the policy on:
 
-```ts
-await client.submit(
-  {
-    schemaVersion: 2,
-    commandId: crypto.randomUUID(),
-    workflowId: crypto.randomUUID(),
-    attemptId: crypto.randomUUID(),
-    sessionId: session.id,
-    pageId: page.id,
-    deadline: new Date(Date.now() + 30_000).toISOString(),
-    command: {
-      kind: "primitive",
-      input: {
-        kind: "evaluateJavaScript",
-        input: {
-          expression: "document.title",
-          timeoutMs: 5_000,
-          awaitPromise: false,
-        },
-      },
-    },
-  },
-  { idempotencyKey: crypto.randomUUID() },
-);
+```json
+{"name": "workflow_start", "arguments": {"profile": "default", "url": "https://example.com", "executionPolicy": {"javascriptEvaluation": true}}}
 ```
 
-MCP: flat tool `evaluate_javascript` with
-`{ sessionId, pageId, expression, timeoutMs?, awaitPromise?, workflowId? }`,
-or the same primitive envelope via `command_execute`.
+Then call the tool:
 
-## Bounds
+```json
+{"name": "evaluate_javascript", "arguments": {"workflowHandle": "wf_0123456789abcdef0123456789abcdef", "expression": "document.title", "timeoutMs": 5000}}
+```
 
-Configured under `[browser]`:
+Set `awaitPromise: true` to wait for a returned promise. Over HTTP, submit a primitive command with `kind: "evaluateJavaScript"` and the same `input`.
 
-- `max_js_result_bytes` (default 65536) — result truncated/bounded
-- `max_js_timeout_ms` (default 30000) — caller `timeoutMs` is clamped
+## Limits
 
-Successful runs may attach `javaScriptResult` evidence. Command class is
-`Reconciliable`.
+| Key | Default | Effect |
+|---|---|---|
+| `[browser].max_js_result_bytes` | `65536` | Results are truncated at this size and marked |
+| `[browser].max_js_timeout_ms` | `30000` | Caller `timeoutMs` is clamped to this |
+
+The command class is Reconciliable. Evaluation is not available on the Firefox companion engine; use Chromium for it.

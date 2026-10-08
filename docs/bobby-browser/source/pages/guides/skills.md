@@ -2,94 +2,53 @@
 documentedVersion: {{PRODUCT_VERSION}}
 ---
 
-# Internal skill runtime (Ghost / ZigZagZig)
+# Bobby skills
 
-> **Not the agent skill.** Agents install and follow the public skill via
-> `bobby install --skill` (`bobby-browser` under `~/.agents/skills/`, sourced
-> from `skill/SKILL.md` in the repo). That skill drives MCP tools.
-> `--skill-openclaw` writes the same MCP skill into `$OPENCLAW_STATE_DIR/skills/`
-> (else `~/.openclaw/skills/`). `--skill-hermes` writes the Python SDK skill
-> (`skill/hermes/SKILL.md`) into `$HERMES_HOME/skills/` (else `~/.hermes/skills/`).
-> **Ghost** and **ZigZagZig** (Rust: `SkillGhost` / `SkillZigZagZig`) below are
-> an in-process recovery router used by runtime tests — they are **not** MCP
-> tools and are not part of the public HTTP/SDK surface.
+Skills are packaged instructions and recovery behavior that sit on top of the browser tools. There are two kinds.
 
-Ghost, ZigZagZig, and related recovery tactics shape browser preparation and
-recovery **inside** `crates/skill-runtime`. They do **not** bypass the normal
-command lifecycle, policy checks, deadlines, or evidence rules.
+## Agent skill
 
-## Not a public API today
+The agent skill teaches an agent host how to drive bobby over MCP. Install it with:
 
-Internal skills are **not** exposed as commands on:
+```bash
+bobby install --skill
+```
 
-- HTTP (`/v1/*`)
-- MCP tools (`command_execute` and friends)
-- `@cavi-ai/bobby-browser`
+| Flag | Installs to |
+|---|---|
+| `--skill` | `~/.agents/skills/bobby-browser/` (or `.agents/skills/` in the project with `--project-skill`) |
+| `--skill-claude` | `~/.claude/skills/` |
+| `--skill-openclaw` | `$OPENCLAW_STATE_DIR/skills/`, else `~/.openclaw/skills/` |
+| `--skill-hermes` | `$HERMES_HOME/skills/`, else `~/.hermes/skills/` (drives the [Python SDK](../surfaces/python-sdk.md)) |
 
-Do not treat skill router aliases (`/ghost`, `/zigzagzig`) as public user
-commands for application integrations. Those aliases exist in the in-process
-skill router for runtime tests (for example `bobby_skill_recovery`), not as
-broker routes.
+## Recovery skills: Ghost and ZigZagZig
 
-The **ladder itself** is reachable in production one way: create the session
-with `zigzagzig: true` (`POST /v1/sessions`, TypeScript SDK
-`CreateSessionRequest.zigzagzig`, or MCP `session_create` / `workflow_start`
-with `zigzagzig: true` — advertised only to principals holding both
-`browser:fingerprint` and `browser:humanize`). A godmode session runs every
-page-bound command under the ladder below — no slash command needed.
+Ghost and ZigZagZig change how a session prepares and recovers. They run inside the runtime and respect the normal deadlines, policy checks and evidence rules.
 
-Public clients automate with primitives and intents via
-[HTTP](../surfaces/http-api.md), [MCP tools](../surfaces/mcp-tools.md), the
-[TypeScript SDK](../surfaces/typescript-sdk.md), or the
-[Python SDK](../surfaces/python-sdk.md). Recovery for public surfaces is
-inspect (`recovery_status` / `GET /v1/recovery/{id}` / `recoveryStatus`) plus
-mutate (`checkpoint` + `recover`) — see
-[Events and recovery](events-recovery.md).
+The way to use them is a ZigZagZig session. Set `zigzagzig: true` on `POST /v1/sessions`, `session_create` or `workflow_start`. Every policy flag is forced on, so the caller needs `browser:fingerprint` and `browser:humanize`. Each page-bound command in the session then runs under the recovery ladder below.
 
-## Internal skill router (contributor / runtime tests)
+The skill router also accepts these commands:
 
-When exercising the skill runtime, the in-process router recognizes:
+- `/ghost on|off|status` negotiates a coherent browser profile before launch, reports the engine and the capabilities it supports, and freezes the profile for the session. Required capabilities fail closed. Optional ones may degrade and stay visible in status. After `off`, a running browser may report `restartRequired` until the next safe launch.
+- `/zigzagzig run|status|stop` applies the recovery ladder to the original postcondition.
 
-### Ghost
+Ghost reports what the selected engine supports. It does not present one engine as another.
 
-Use `/ghost on|off|status` (`/ghost` is equivalent to `on`). Ghost
-negotiates a coherent browser profile before launch, reports the effective
-engine and supported capabilities, and freezes that profile for the session.
-Required capabilities fail closed; explicitly optional capabilities may degrade
-and remain visible in status. Turning Ghost off stops applying it to new work,
-but a live browser may report `restartRequired` until the next safe launch
-boundary.
+### Recovery ladder
 
-Ghost reports what the selected browser actually supports. It does not
-disguise one engine as another or inject contradictory page-visible values.
+ZigZagZig tries these tactics in order until the postcondition holds:
 
-### ZigZagZig
+1. Retry the read-only observation.
+2. Resolve the target again.
+3. Change the interaction method.
+4. Solve a blocking verification challenge in place. Sessions without vision assist skip this step.
+5. Reconcile from the verified checkpoint.
+6. Start a fresh Ghost session.
+7. Choose another compatible engine.
+8. Restart from the last durable boundary.
 
-Use `/zigzagzig run|status|stop` (`/zigzagzig` is equivalent to `run`).
-ZigZagZig applies a bounded recovery ladder to the original postcondition:
+Each tactic spends the workflow's existing deadline and tactic budget. An action whose effect is unknown is never replayed blindly: bobby inspects or reconciles first, and returns `effectUncertain` when it cannot prove the outcome.
 
-1. retry read-only observation;
-2. resolve the semantic target again;
-3. change the interaction method;
-4. solve a blocking human-verification challenge in place (the vision
-   `solveChallenge` loop, gated on the session's proven capabilities — a
-   session without vision assist declines this rung and climbs on);
-5. reconcile the verified checkpoint;
-6. start a fresh Ghost session;
-7. choose another compatible engine;
-8. restart from the last durable boundary.
+### Failures
 
-Each tactic consumes the existing workflow deadline and tactic budget. A
-mutation with an unknown effect is never blindly replayed: Bobby inspects or
-reconciles it first, returning `effectUncertain` when safety cannot be proven.
-Durable recovery receipts bind the issued decision, command identity, evidence,
-and terminal result so an interrupted finalization can settle exactly once.
-
-## Failure and evidence contract
-
-Skill outcomes use typed failures such as `unsupportedCapability`,
-`targetDrift`, `checkpointMismatch`, `strategyExhausted`, and
-`engineUnavailable`. Status and retained evidence are redacted: they may
-include effective profile digests, tactic decisions, checkpoint identity,
-timing, and attempt lineage, but not raw credentials, cookies, authentication
-headers, or unrestricted host paths.
+Skill failures are typed: `unsupportedCapability`, `targetDrift`, `checkpointMismatch`, `strategyExhausted`, `engineUnavailable`, `effectUncertain`. Status and evidence are redacted. They hold profile digests, tactic decisions, checkpoint identity, timing and attempt lineage, never credentials, cookies, auth headers or host paths.
