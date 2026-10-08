@@ -20,4 +20,4 @@ pub use registry::{
 pub use server::{
     CompanionServer, CompanionServerConfig, CompanionServerError, CompanionServerHandle,
 };
-pub use session::{CompanionSessionError, PageBindingTicket};
+pub use session::{CompanionSessionError, ExtensionConnection, PageBindingTicket};

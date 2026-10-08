@@ -163,6 +163,87 @@ async fn pair(socket: &mut ClientSocket, code: String) -> CompanionEvent {
     receive_event(socket).await
 }
 
+async fn connect_with_build(addr: SocketAddr, bearer: &str, build: &str) -> ClientSocket {
+    let mut request = endpoint(addr).into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("authorization", format!("Bearer {bearer}").parse().unwrap());
+    request.headers_mut().insert(
+        companion_protocol::EXTENSION_BUILD_HEADER,
+        build.parse().unwrap(),
+    );
+    connect_async(request).await.unwrap().0
+}
+
+#[tokio::test]
+async fn each_connection_records_its_extension_build_and_can_be_asked_to_reload() {
+    const OLD: &str = "0123456789abcdef0123456789abcdef";
+    const NEW: &str = "fedcba9876543210fedcba9876543210";
+    let server = CompanionServer::bind_loopback(loopback_config())
+        .await
+        .unwrap();
+    let code = server.registry().issue_pairing_code().await;
+    let mut first = connect_with_build(server.local_addr(), &code, OLD).await;
+    let (paired, credential) = pair_with_credential(&mut first, code).await;
+    let CompanionEvent::Paired { profile_id, .. } = paired else {
+        panic!("expected paired event");
+    };
+    let old = server.extension_connection(&profile_id).await.unwrap();
+    assert_eq!(old.build_id(), Some(OLD));
+
+    server
+        .send_request(&profile_id, CompanionRequest::Reload)
+        .await
+        .unwrap();
+    assert_eq!(receive_request(&mut first).await, CompanionRequest::Reload);
+
+    let pending = server.wait_for_extension_reconnect(&profile_id, &old, Duration::from_secs(5));
+    let reconnect = async {
+        first.close(None).await.unwrap();
+        connect_with_build(server.local_addr(), &credential, NEW).await
+    };
+    let (reconnected, mut second) = tokio::join!(pending, reconnect);
+    assert_eq!(reconnected.unwrap().build_id(), Some(NEW));
+    assert!(matches!(
+        receive_event(&mut second).await,
+        CompanionEvent::Paired { .. }
+    ));
+
+    let current = server.extension_connection(&profile_id).await.unwrap();
+    assert_eq!(
+        server
+            .wait_for_extension_reconnect(&profile_id, &current, Duration::from_millis(100))
+            .await
+            .unwrap_err(),
+        companion_core::CompanionSessionError::ProfileUnavailable
+    );
+}
+
+#[tokio::test]
+async fn a_malformed_extension_build_header_counts_as_none() {
+    let server = CompanionServer::bind_loopback(loopback_config())
+        .await
+        .unwrap();
+    let code = server.registry().issue_pairing_code().await;
+    let mut socket = connect_with_build(
+        server.local_addr(),
+        &code,
+        "0123456789ABCDEF0123456789ABCDEF",
+    )
+    .await;
+    let CompanionEvent::Paired { profile_id, .. } = pair(&mut socket, code).await else {
+        panic!("expected paired event");
+    };
+    assert_eq!(
+        server
+            .extension_connection(&profile_id)
+            .await
+            .unwrap()
+            .build_id(),
+        None
+    );
+}
+
 #[tokio::test]
 async fn non_loopback_bind_address_is_rejected() {
     let error = CompanionServer::bind_loopback(test_config("0.0.0.0:0".parse().unwrap()))

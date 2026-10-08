@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- Firefox companion: a session start brings the enrolled Firefox to the companion
+  build installed in its profile (unpacked sideload or signed `.xpi`). Each
+  extension build carries a content-derived
+  id; when the running build differs, the runtime asks the extension to reload,
+  or restarts the enrolled Firefox for a build that reports no id. A mismatch that
+  survives one attempt fails with a non-retryable error naming both builds.
 - Firefox companion: a page opened or bound by the runtime keeps its lease when a
   frame snapshot lands while the tab is still blank or frame discovery fails.
 - Firefox companion: an accessibility snapshot is sanitized and depth- and

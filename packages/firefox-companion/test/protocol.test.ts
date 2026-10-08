@@ -179,6 +179,14 @@ test("parseCompanionEvent rejects unknown protocol versions", () => {
   );
 });
 
+test("a reload request has exactly the Rust unit-variant shape", () => {
+  assert.deepEqual(parseCompanionRequest(JSON.stringify({ kind: "reload" })), { kind: "reload" });
+  assert.throws(
+    () => parseCompanionRequest(JSON.stringify({ kind: "reload", input: {} })),
+    /shape/,
+  );
+});
+
 test("parseCompanionEvent rejects unknown event kinds", () => {
   assert.throws(
     () => parseCompanionEvent(JSON.stringify({ kind: "surprise" })),

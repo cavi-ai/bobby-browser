@@ -1,6 +1,6 @@
 use companion_protocol::{
-    BrowserIdentity, CompanionCapabilities, CompanionEvent, CompanionRequest, PairRequest,
-    PROTOCOL_VERSION,
+    is_extension_build_id, BrowserIdentity, CompanionCapabilities, CompanionEvent,
+    CompanionRequest, PairRequest, EXTENSION_BUILD_HEADER, PROTOCOL_VERSION,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -380,6 +380,13 @@ fn validate_native_connect(request: &NativeConnectRequest) -> Result<(), NativeH
             return Err(NativeHostError::InvalidProtocol);
         }
     }
+    if request
+        .extension_build_id
+        .as_deref()
+        .is_some_and(|build| !is_extension_build_id(build))
+    {
+        return Err(NativeHostError::InvalidProtocol);
+    }
     let value = serde_json::to_value(request).map_err(|_| NativeHostError::InvalidProtocol)?;
     reject_extension_secrets(&value, 0)
 }
@@ -392,6 +399,9 @@ pub struct NativeConnectRequest {
     pub profile_id: ProfileId,
     pub identity: BrowserIdentity,
     pub capabilities: CompanionCapabilities,
+    /// The build the extension reports; forwarded to the runtime on connect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_build_id: Option<String>,
 }
 
 /// Secret-free enroll control message from the extension (`input` must be `{}`).
@@ -1057,7 +1067,11 @@ where
             serde_json::to_string(&pair).map_err(|_| NativeHostError::InvalidProtocol)?
         };
         let token = config.authentication_token()?;
-        let request = config.authenticated_request(&token)?;
+        let mut request = config.authenticated_request(&token)?;
+        if let Some(build) = connect.extension_build_id.as_deref() {
+            let build = HeaderValue::from_str(build).map_err(|_| NativeHostError::InvalidProtocol)?;
+            request.headers_mut().insert(EXTENSION_BUILD_HEADER, build);
+        }
         let attempt = connect_async(request);
         tokio::pin!(attempt);
         // The server consumes a pairing code when the upgrade arrives, so an

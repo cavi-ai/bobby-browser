@@ -98,3 +98,30 @@ fn discovery_and_grant_round_trip_with_browser_neutral_uuid_pages() {
     assert!(!encoded.contains("tabId"));
     assert!(!encoded.contains("frameId"));
 }
+
+#[test]
+fn reload_has_the_extension_wire_shape_and_build_ids_are_32_lowercase_hex() {
+    assert_eq!(
+        serde_json::to_value(CompanionRequest::Reload).unwrap(),
+        serde_json::json!({"kind": "reload"})
+    );
+    assert_eq!(
+        serde_json::from_str::<CompanionRequest>(r#"{"kind":"reload"}"#).unwrap(),
+        CompanionRequest::Reload
+    );
+    assert!(companion_protocol::is_extension_build_id(
+        "0123456789abcdef0123456789abcdef"
+    ));
+    for invalid in [
+        "",
+        "0123456789abcdef",
+        "0123456789ABCDEF0123456789ABCDEF",
+        "0123456789abcdef0123456789abcdeg",
+        "@@BOBBY_EXTENSION_BUILD_ID@@",
+    ] {
+        assert!(
+            !companion_protocol::is_extension_build_id(invalid),
+            "{invalid}"
+        );
+    }
+}
