@@ -16,6 +16,7 @@ axum = { workspace = true, features = ["multipart"] }
 broker.workspace = true
 checkpoint-store.workspace = true
 context-store.workspace = true
+companion-core.workspace = true
 companion-protocol.workspace = true
 cdp-gateway.workspace = true
 chrono.workspace = true

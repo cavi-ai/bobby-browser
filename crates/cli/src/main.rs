@@ -2917,6 +2917,7 @@ mod tests {
                 frames: true,
                 native_dialogs: false,
             },
+            extension_build_id: None,
         }
     }
 

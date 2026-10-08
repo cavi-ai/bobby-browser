@@ -492,3 +492,60 @@ test("silent native ports do not reset reconnect backoff before a validated mess
   ports[8]?.onDisconnect.emit();
   assert.equal(delays.at(-1), 100);
 });
+
+test("native pair carries only a stamped extension build id", () => {
+  const port = new FakePort();
+  const transport = new NativeCompanionTransport({ connectNative: () => port });
+  transport.start(() => {});
+  const pair = {
+    kind: "pair",
+    input: {
+      protocolVersion: 1,
+      companionId: "companion-1",
+      profileId: "profile-1",
+      identity: {
+        engine: "firefox",
+        browserName: "Firefox",
+        browserVersion: "stable",
+        os: "macos",
+        profileLabel: "default-release",
+      },
+      capabilities: {
+        observe: true,
+        navigate: true,
+        nativeInput: false,
+        tabs: true,
+        frames: true,
+        nativeDialogs: false,
+      },
+      extensionBuildId: "0123456789abcdef0123456789abcdef",
+    },
+  };
+
+  for (const extensionBuildId of ["@@BOBBY_EXTENSION_BUILD_ID@@", "0123", 7]) {
+    assert.throws(
+      () => transport.send({ ...pair, input: { ...pair.input, extensionBuildId } }),
+      /outbound/,
+    );
+  }
+  assert.deepEqual(port.sent, []);
+
+  transport.send(pair);
+  assert.deepEqual(port.sent, [pair]);
+});
+
+test("a reload request reaches the background listener", () => {
+  const port = new FakePort();
+  const received: unknown[] = [];
+  const transport = new NativeCompanionTransport({ connectNative: () => port });
+  transport.start((message) => {
+    received.push(message);
+  });
+  transport.send({ kind: "pong" });
+
+  port.onMessage.emit({ kind: "reload" });
+  port.onMessage.emit({ kind: "reload", input: {} });
+
+  assert.deepEqual(received, [{ kind: "reload" }]);
+  assert.throws(() => transport.send({ kind: "reload" }), /outbound/);
+});

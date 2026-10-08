@@ -101,6 +101,19 @@ impl Rig {
         Self::serve(root, service, Some(firefox)).await
     }
 
+    /// A runtime over a Firefox factory the caller composes from the rig's
+    /// configuration; the caller owns the browser.
+    pub async fn firefox_composed(
+        compose: impl FnOnce(&AppConfig) -> Arc<dyn worker_pool::WorkerFactory>,
+    ) -> Self {
+        let root = tempfile::tempdir().expect("create rig root");
+        let config = config(root.path(), vec![]);
+        let service = RuntimeService::build_with_worker_factory(&config, compose(&config))
+            .await
+            .expect("build Firefox runtime");
+        Self::serve(root, service, None).await
+    }
+
     async fn serve(
         root: tempfile::TempDir,
         service: RuntimeService,

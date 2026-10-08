@@ -176,6 +176,7 @@ async fn real_server_binding_and_worker_close_release_the_coordinator_page_id() 
             profile_id: profile_id.clone(),
             identity: pairing.identity,
             capabilities: pairing.capabilities,
+            extension_build_id: None,
         }
     });
     let (host_stream, mut extension) = duplex(2 * MAX_NATIVE_MESSAGE_BYTES);

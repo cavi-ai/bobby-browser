@@ -8,13 +8,16 @@ use anyhow::Result;
 use artifact_store::ArtifactStore;
 use async_trait::async_trait;
 use companion_core::{CompanionServer, CompanionServerConfig, CompanionServerHandle};
-use companion_protocol::{BrowserEngine, CompanionCapabilities};
+use companion_protocol::{
+    is_extension_build_id, BrowserEngine, CompanionCapabilities, CompanionRequest,
+};
 use config::{
     AppConfig, BrowserEngineConfig, BrowserSelectionConfig, EnginePreferenceConfig,
     FirefoxCompanionConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashSet,
     net::SocketAddr,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -48,6 +51,73 @@ struct ConfiguredFirefoxFactory {
     lifecycle: Mutex<()>,
     profile_owner: std::sync::Mutex<Option<std::fs::File>>,
     closed: std::sync::atomic::AtomicBool,
+    /// Installed extension builds this runtime already reloaded or recycled
+    /// Firefox for: each gets one attempt.
+    healed_builds: std::sync::Mutex<HashSet<String>>,
+}
+
+/// Gecko add-on id from `packages/firefox-companion/manifest.json`.
+const COMPANION_GECKO_ID: &str = "firefox-companion@bobby-browser.local";
+const MAX_BUILD_ID_FILE_BYTES: u64 = 4 * 1024;
+
+/// How the runtime brings the connected companion to the installed build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtensionHeal {
+    /// The connected companion runs the installed build.
+    Current,
+    /// Ask the companion to restart itself from the installed files.
+    Reload,
+    /// Restart the enrolled Firefox, which loads the installed files.
+    Recycle,
+    /// The one attempt for this installed build did not take.
+    Stale,
+}
+
+/// A companion that reports a build id handles `reload`; one that reports
+/// none predates it, so only a Firefox restart loads the installed build.
+fn extension_heal(installed: &str, connected: Option<&str>, attempted: bool) -> ExtensionHeal {
+    if connected == Some(installed) {
+        ExtensionHeal::Current
+    } else if attempted {
+        ExtensionHeal::Stale
+    } else if connected.is_some() {
+        ExtensionHeal::Reload
+    } else {
+        ExtensionHeal::Recycle
+    }
+}
+
+/// The build id of the companion installed unpacked in the profile, read
+/// from the `build-id.json` its build writes. `None` when no unpacked
+/// companion with a valid id is installed there.
+fn installed_extension_build(profile_dir: &Path) -> Option<String> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct BuildIdFile {
+        build_id: String,
+    }
+    let path = profile_dir
+        .join("extensions")
+        .join(COMPANION_GECKO_ID)
+        .join("build-id.json");
+    let metadata = std::fs::metadata(&path).ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_BUILD_ID_FILE_BYTES {
+        return None;
+    }
+    let file: BuildIdFile = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    is_extension_build_id(&file.build_id).then_some(file.build_id)
+}
+
+fn stale_extension_error(installed: &str, running: Option<&str>) -> CommandError {
+    CommandError {
+        code: ErrorCode::BrowserLaunchFailed,
+        message: format!(
+            "Firefox companion extension build {} is still running after one reload or restart; the profile has build {installed} installed",
+            running.unwrap_or("(none reported)")
+        ),
+        layer: ErrorLayer::Driver,
+        retryable: false,
+    }
 }
 
 #[derive(Clone)]
@@ -87,6 +157,12 @@ pub struct EnrolledFirefoxProfile {
 impl EnrolledFirefoxProfile {
     pub fn profile_id(&self) -> &ProfileId {
         &self.profile_id
+    }
+
+    /// The companion server the enrolled profile paired with; the composed
+    /// factory keeps serving it.
+    pub fn companion_server(&self) -> Arc<CompanionServerHandle> {
+        Arc::clone(&self.server)
     }
 }
 
@@ -222,6 +298,7 @@ impl WorkerFactory for ConfiguredFirefoxFactory {
                         "firefox companion discovery wait failed"
                     );
                 })?;
+            self.ensure_installed_extension(&server).await?;
             return self.launch_with_server(&server, session_id).await;
         }
 
@@ -240,6 +317,7 @@ impl WorkerFactory for ConfiguredFirefoxFactory {
                     "firefox companion pairing timed out waiting for extension discovery"
                 );
             })?;
+        self.ensure_installed_extension(&server).await?;
         let worker = self
             .launch_with_server(&server, session_id)
             .await
@@ -281,6 +359,73 @@ impl WorkerFactory for ConfiguredFirefoxFactory {
 }
 
 impl ConfiguredFirefoxFactory {
+    fn healed_builds(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
+        self.healed_builds
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
+    /// Firefox loads an extension only at start, so an install that replaced
+    /// the companion on disk leaves the old build running. Before serving a
+    /// session, bring the connected companion to the installed build: one
+    /// reload or Firefox restart per installed build, then a non-retryable
+    /// error naming both builds.
+    async fn ensure_installed_extension(
+        &self,
+        server: &Arc<CompanionServerHandle>,
+    ) -> Result<(), CommandError> {
+        let Some(installed) = installed_extension_build(&self.config.profile_dir) else {
+            return Ok(());
+        };
+        let profile_id = &self.config.profile_id;
+        let Some(connection) = server.extension_connection(profile_id).await else {
+            return Ok(());
+        };
+        let attempted = self.healed_builds().contains(&installed);
+        let heal = extension_heal(&installed, connection.build_id(), attempted);
+        match heal {
+            ExtensionHeal::Current => return Ok(()),
+            ExtensionHeal::Stale => {
+                return Err(stale_extension_error(&installed, connection.build_id()))
+            }
+            ExtensionHeal::Reload | ExtensionHeal::Recycle => {}
+        }
+        self.healed_builds().insert(installed.clone());
+        tracing::warn!(
+            installed = %installed,
+            running = connection.build_id().unwrap_or("none"),
+            action = ?heal,
+            "firefox companion extension differs from the installed build"
+        );
+        if heal == ExtensionHeal::Reload {
+            server
+                .send_request(profile_id, CompanionRequest::Reload)
+                .await
+                .map_err(companion_error)?;
+        } else {
+            // The shared BiDi session dies with the browser.
+            self.bidi.lock().await.take();
+            recycle_enrolled_firefox(&self.config).await?;
+        }
+        let reconnected = server
+            .wait_for_extension_reconnect(profile_id, &connection, self.config.timeout)
+            .await
+            .map_err(|error| {
+                companion_error(format!(
+                    "Firefox companion did not reconnect after {heal:?}: {error}"
+                ))
+            })?;
+        if reconnected.build_id() != Some(installed.as_str()) {
+            return Err(stale_extension_error(&installed, reconnected.build_id()));
+        }
+        server
+            .wait_for_discovery(profile_id, self.config.timeout)
+            .await
+            .map_err(companion_error)?;
+        tracing::info!(installed = %installed, "firefox companion extension runs the installed build");
+        Ok(())
+    }
+
     async fn launch_with_server(
         &self,
         server: &Arc<CompanionServerHandle>,
@@ -1474,6 +1619,7 @@ fn compose_worker_factory_inner(
                             lifecycle: Mutex::new(()),
                             profile_owner: std::sync::Mutex::new(profile_owner),
                             closed: std::sync::atomic::AtomicBool::new(false),
+                            healed_builds: std::sync::Mutex::new(HashSet::new()),
                         }),
                     })
                 })
@@ -1823,6 +1969,66 @@ mod tests {
         assert!(held.downcast_ref::<ProfileOwned>().is_some(), "{held:#}");
         drop(first);
         assert!(claim_profile_owner(root.path()).unwrap().is_some());
+    }
+
+    const BUILD_A: &str = "0123456789abcdef0123456789abcdef";
+    const BUILD_B: &str = "fedcba9876543210fedcba9876543210";
+
+    #[test]
+    fn a_stale_companion_gets_one_reload_or_recycle_per_installed_build() {
+        assert_eq!(
+            extension_heal(BUILD_B, Some(BUILD_B), false),
+            ExtensionHeal::Current
+        );
+        assert_eq!(
+            extension_heal(BUILD_B, Some(BUILD_B), true),
+            ExtensionHeal::Current
+        );
+        assert_eq!(
+            extension_heal(BUILD_B, Some(BUILD_A), false),
+            ExtensionHeal::Reload
+        );
+        assert_eq!(extension_heal(BUILD_B, None, false), ExtensionHeal::Recycle);
+        assert_eq!(
+            extension_heal(BUILD_B, Some(BUILD_A), true),
+            ExtensionHeal::Stale
+        );
+        assert_eq!(extension_heal(BUILD_B, None, true), ExtensionHeal::Stale);
+    }
+
+    #[test]
+    fn the_stale_error_is_final_and_names_both_builds() {
+        let error = stale_extension_error(BUILD_B, Some(BUILD_A));
+        assert!(!error.retryable);
+        assert!(error.message.contains(BUILD_A) && error.message.contains(BUILD_B));
+        assert!(stale_extension_error(BUILD_B, None)
+            .message
+            .contains("(none reported)"));
+    }
+
+    #[test]
+    fn the_installed_build_is_read_from_the_unpacked_companion() {
+        let profile = tempfile::tempdir().unwrap();
+        assert_eq!(installed_extension_build(profile.path()), None);
+        let extension = profile.path().join("extensions").join(COMPANION_GECKO_ID);
+        std::fs::create_dir_all(&extension).unwrap();
+        let file = extension.join("build-id.json");
+        std::fs::write(&file, format!(r#"{{"buildId":"{BUILD_A}"}}"#)).unwrap();
+        assert_eq!(
+            installed_extension_build(profile.path()).as_deref(),
+            Some(BUILD_A)
+        );
+        for invalid in [
+            r#"{"buildId":"@@BOBBY_EXTENSION_BUILD_ID@@"}"#,
+            r#"{"buildId":"0123456789ABCDEF0123456789ABCDEF"}"#,
+            r#"{"build":"0123456789abcdef0123456789abcdef"}"#,
+            "not json",
+        ] {
+            std::fs::write(&file, invalid).unwrap();
+            assert_eq!(installed_extension_build(profile.path()), None, "{invalid}");
+        }
+        std::fs::write(&file, vec![b' '; 8 * 1024]).unwrap();
+        assert_eq!(installed_extension_build(profile.path()), None);
     }
 
     #[test]

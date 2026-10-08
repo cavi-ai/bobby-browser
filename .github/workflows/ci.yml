@@ -293,6 +293,18 @@ jobs:
           xvfb-run -a make test-browsers-firefox TEST_BROWSERS_HEADLESS=0 \
             TEST_BROWSERS_FIREFOX_SUITES="--test firefox_companion --test behavioral_firefox --test fingerprint_firefox --test site_regressions_firefox --test journeys_firefox"
 
+      # The lifecycle suite sideloads the unsigned companion into its own
+      # profiles, which only Developer Edition, Nightly, or ESR accept.
+      - name: Install Firefox Developer Edition
+        uses: browser-actions/setup-firefox@latest
+        with:
+          firefox-version: latest-devedition
+
+      - name: Firefox companion lifecycle tests
+        run: |
+          xvfb-run -a make test-browsers-firefox TEST_BROWSERS_HEADLESS=0 \
+            TEST_BROWSERS_FIREFOX_SUITES="--test firefox_extension_lifecycle"
+
   node:
     name: node · typescript · docs
     if: ${{ !github.event.repository.private }} # public repos only (Actions is billed when private)

@@ -1,6 +1,6 @@
 use crate::{
     registry::{ConnectionAuthentication, PairingCodeClaim},
-    session::{PageBindingTicket, SessionCoordinator},
+    session::{ExtensionConnection, PageBindingTicket, SessionCoordinator},
     CompanionRegistry, CompanionSessionError, PairingInput,
 };
 use axum::{
@@ -17,8 +17,8 @@ use axum::{
     Json, Router,
 };
 use companion_protocol::{
-    ActionRequest, AttachmentGrant, BrowserTarget, CompanionEvent, CompanionRequest,
-    PROTOCOL_VERSION,
+    is_extension_build_id, ActionRequest, AttachmentGrant, BrowserTarget, CompanionEvent,
+    CompanionRequest, EXTENSION_BUILD_HEADER, PROTOCOL_VERSION,
 };
 use futures_util::{stream::SplitSink, SinkExt, StreamExt};
 use serde::{
@@ -154,6 +154,26 @@ impl CompanionServerHandle {
         self.coordinator.send_request(profile_id, request).await
     }
 
+    /// The extension connection serving the profile, if one is connected.
+    pub async fn extension_connection(
+        &self,
+        profile_id: &types::ProfileId,
+    ) -> Option<ExtensionConnection> {
+        self.coordinator.extension_connection(profile_id).await
+    }
+
+    /// Wait for the profile's extension to connect again after `previous`.
+    pub async fn wait_for_extension_reconnect(
+        &self,
+        profile_id: &types::ProfileId,
+        previous: &ExtensionConnection,
+        timeout: Duration,
+    ) -> Result<ExtensionConnection, CompanionSessionError> {
+        self.coordinator
+            .wait_for_extension_reconnect(profile_id, previous, timeout)
+            .await
+    }
+
     pub async fn wait_for_discovery(
         &self,
         profile_id: &types::ProfileId,
@@ -251,13 +271,27 @@ async fn companion_upgrade(
         return unauthorized_response();
     };
     let disconnect = state.disconnect.subscribe();
+    let extension_build = extension_build(&headers);
 
     upgrade
         // A small, bounded decoder headroom lets the application return the
         // typed 1 MiB limit error before closing the connection.
         .max_frame_size(MAX_FRAME_BYTES + FRAME_ERROR_HEADROOM_BYTES)
         .max_message_size(MAX_FRAME_BYTES + FRAME_ERROR_HEADROOM_BYTES)
-        .on_upgrade(move |socket| serve_socket(socket, state, authentication, disconnect))
+        .on_upgrade(move |socket| {
+            serve_socket(socket, state, authentication, disconnect, extension_build)
+        })
+}
+
+/// The build id the native host forwarded for its extension. A missing or
+/// malformed value is an extension that reports no build.
+fn extension_build(headers: &HeaderMap) -> Option<String> {
+    let mut values = headers.get_all(EXTENSION_BUILD_HEADER).iter();
+    let value = values.next()?.to_str().ok()?;
+    if values.next().is_some() || !is_extension_build_id(value) {
+        return None;
+    }
+    Some(value.to_owned())
 }
 
 fn bearer(headers: &HeaderMap) -> Option<String> {
@@ -292,6 +326,7 @@ async fn serve_socket(
     state: Arc<ServerState>,
     authentication: ConnectionAuthentication,
     mut disconnect: watch::Receiver<u64>,
+    extension_build: Option<String>,
 ) {
     let (sink, mut stream) = socket.split();
     let (outbound, receiver) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
@@ -316,7 +351,7 @@ async fn serve_socket(
             let companion_id = session.companion.companion_id.clone();
             let connection_id = state
                 .coordinator
-                .register(session.companion, outbound.clone())
+                .register(session.companion, outbound.clone(), extension_build)
                 .await;
             (profile_id, connection_id, companion_id)
         }
@@ -337,7 +372,10 @@ async fn serve_socket(
                 return;
             }
             let companion_id = paired.companion_id.clone();
-            let connection_id = state.coordinator.register(paired, outbound.clone()).await;
+            let connection_id = state
+                .coordinator
+                .register(paired, outbound.clone(), extension_build)
+                .await;
             (profile_id, connection_id, companion_id)
         }
     };

@@ -139,7 +139,8 @@ export type CompanionRequest =
   | { kind: "pair"; input: PairRequest }
   | { kind: "grant"; input: AttachmentGrant }
   | { kind: "action"; input: ActionRequest }
-  | { kind: "ping" };
+  | { kind: "ping" }
+  | { kind: "reload" };
 
 export type InteractionPath = "engineNative" | "extensionApi" | "hostNative";
 
@@ -401,6 +402,9 @@ export function parseCompanionRequest(payload: string): CompanionRequest {
     case "ping":
       exactKeys(message, ["kind"], "ping request");
       return { kind: "ping" };
+    case "reload":
+      exactKeys(message, ["kind"], "reload request");
+      return { kind: "reload" };
     default:
       throw new CompanionProtocolError(`unknown request kind: ${String(message.kind)}`);
   }

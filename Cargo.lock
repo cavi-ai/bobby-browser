@@ -3524,6 +3524,7 @@ dependencies = [
  "cdp-gateway",
  "checkpoint-store",
  "chrono",
+ "companion-core",
  "companion-protocol",
  "config",
  "context-store",
