@@ -1058,6 +1058,7 @@ pub async fn navigate_waits_for_late_scripts(rig: &Rig) {
             "/native",
             Route::Html(page("Native", "<p>native submit</p>")),
         ),
+        ("/blank", Route::Html(page("Blank", "<p>Blank</p>"))),
         (
             "/slow-analytics.js",
             Route::Delayed {
@@ -1069,19 +1070,23 @@ pub async fn navigate_waits_for_late_scripts(rig: &Rig) {
         (
             "/app.js",
             Route::Delayed {
-                delay: std::time::Duration::from_millis(1_500),
+                delay: std::time::Duration::from_millis(3_200),
                 content_type: "text/javascript",
                 body: app.to_owned(),
             },
         ),
     ])
     .await;
-    let live = Live::open(rig, &site.url("/search")).await;
+    let live = Live::open(rig, &site.url("/blank")).await;
+    let navigated = live
+        .call("navigate", json!({"url":site.url("/search")}))
+        .await;
+    assert_eq!(navigated["status"], "completed", "navigate: {navigated}");
     let typed = live
         .call(
             "type_text",
             json!({"target":{"role":"textbox","accessibleName":"Search"},
-                   "value":"rust engineer\n","clearFirst":true}),
+                   "value":"rust\n","clearFirst":true}),
         )
         .await;
     assert_eq!(typed["status"], "completed", "type_text: {typed}");
@@ -1094,7 +1099,7 @@ pub async fn navigate_waits_for_late_scripts(rig: &Rig) {
     let mut names = Vec::new();
     strings_under(&snapshot, "name", &mut names);
     assert!(
-        names.contains(&"handled rust engineer"),
+        names.contains(&"handled rust"),
         "the app's submit handler did not run: {snapshot}"
     );
     live.close().await;
