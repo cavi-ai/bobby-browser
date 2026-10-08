@@ -4,159 +4,87 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 # OpenShell host
 
-bobby-browser integrates with [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell)
-as a **host runtime**: the sandboxed agent stays inside OpenShell; bobby and the
-Firefox companion stay on the host. OpenShell owns filesystem, process, and
-egress policy. bobby owns browser automation, capabilities, and evidence.
-
-## Topology
+Run agents inside an [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell) sandbox while bobby and the browser stay on the host. OpenShell controls the sandbox's filesystem, processes and network egress. bobby controls browser automation, capabilities and evidence. Each sandbox gets its own bobby principal and talks to the host over [MCP over HTTP](../surfaces/mcp-http.md).
 
 | Layer | Role |
 |---|---|
-| OpenShell sandbox | Agent process, skill, MCP client; deny-by-default egress |
-| OpenShell policy proxy | Only allowlisted MCP Streamable HTTP to host bobby |
-| Host `bobby serve` | MCP at `POST /v1/mcp` + Firefox companion |
-| Host operator | Mint/revoke one principal per sandbox (`authority:admin`) |
+| OpenShell sandbox | Agent process, skill and MCP client, with egress denied by default |
+| OpenShell policy proxy | Allows only MCP traffic to the host |
+| Host `bobby serve` | MCP at `POST /v1/mcp` and the browser |
+| Host operator | Mints and revokes one principal per sandbox (`authority:admin`) |
 
-One OpenShell sandbox ↔ one bobby principal. Default capability floor is the
-narrow **openshell** preset (no `authority:admin`, no JS eval / vision / jobs /
-fingerprint / humanize). Use `--capabilities-preset agent` only when needed.
+## Set up
 
-## Isolation constraints
+1. Create an admin credential and pair the browser.
 
-- **Shared Firefox companion:** cookies, logins, and the durable context graph
-  are **profile-scoped**, not principal-scoped. Two sandboxes on the same host
-  companion share site state. For stronger isolation use a dedicated companion
-  profile per sandbox, or managed Chromium disposable workers (no persistent
-  logins). `bobby doctor` warns (`openshell-companion`) when ≥2 local sandboxes
-  share one enrolled companion.
-- **Cleartext MCP:** default `mcp.json` uses `http://` to the host gateway.
-  Firewall that path; do not bind bobby to untrusted networks. Doctor reports
-  `openshell-cleartext` when the MCP URL or `server.host` is non-loopback HTTP.
-- **Policy replace:** `openshell policy set` replaces the entire sandbox policy.
-  Prefer merging `openshell/policy-network.yaml` into an existing policy when you
-  already customize filesystem/process sections.
+```bash
+bobby init --preset unrestricted
+bobby install --companion
+bobby serve
+```
 
-## Install the pack
+2. Write the pack into your project.
 
 ```bash
 bobby install --host openshell --yes
-# or:
-bobby openshell install
-bobby init --emit openshell
 ```
 
-Writes project `openshell/`:
+This creates `openshell/` with `policy.yaml` (full sample policy), `policy-network.yaml` (a fragment to merge into an existing policy), `mcp.json` (client config), the agent skill and a README. The policy denies `evaluate_javascript` and `job_*` at the proxy as a second layer.
 
-- `policy.yaml` — full OpenShell sample (`protocol: mcp` allowlist; denies
-  `evaluate_javascript` / `job_*` at the proxy as defense in depth)
-- `policy-network.yaml` — **merge-only** `network_policies` fragment (do not
-  `policy set` this file alone)
-- `mcp.json` — streamable-HTTP client config (`Bearer ${AUTOMATION_RUNTIME_TOKEN}`)
-- `skills/bobby-browser/SKILL.md` — agent skill copy
-- `README.md` — operator steps
-
-The pack defaults to Codex and emits the OpenShell Codex binary allowlist:
-`/usr/bin/codex`, `/usr/local/bin/codex`, and
-`/usr/lib/node_modules/@openai/**`. Select Claude Code while retaining the
-existing Bobby binary path:
+The pack allowlists the Codex binary by default. Choose the agent or a custom path:
 
 ```bash
 bobby openshell install --agent claude
-# emits /usr/local/bin/claude
-```
-
-For another installation layout, `--agent-binary` replaces the selected
-agent's complete allowlist with the exact path provided:
-
-```bash
 bobby openshell install --agent-binary /opt/agents/custom
-```
-
-Default gateway host is `host.docker.internal:7777` (Docker Desktop). Override
-the endpoint independently:
-
-```bash
 bobby openshell install --mcp-host host.containers.internal --mcp-port 7777
 ```
 
-## Host prerequisites
+The default gateway host is `host.docker.internal:7777`.
 
-1. `bobby init --preset unrestricted` (needed to mint principals)
-2. Firefox companion paired (`bobby install --companion`, then Pair) — or accept
-   shared-profile risk / use Chromium disposable instead
-3. `bobby serve` reachable from the sandbox via the host gateway address
-4. Keep bind scoped — loopback plus the gateway interface OpenShell can dial
-
-## Per-sandbox provision
+3. Provision a principal for each sandbox.
 
 ```bash
 bobby openshell provision --sandbox demo-1
-# revokes any prior principal for demo-1, mints a fresh one (unique idempotency key)
-# writes ~/.config/bobby-browser/openshell/demo-1.env (0600)
-# inject AUTOMATION_RUNTIME_TOKEN into the OpenShell sandbox credentials
+```
+
+This revokes any earlier principal for `demo-1`, mints a new one, and writes its environment file with mode 0600 under `<os-config-dir>/bobby-browser/openshell/`. Inject `AUTOMATION_RUNTIME_TOKEN` from that file into the sandbox credentials, then apply the policy:
+
+```bash
 openshell policy set demo-1 --policy openshell/policy.yaml --wait
-# or merge openshell/policy-network.yaml into an existing policy, then policy set
 ```
 
-Prefer `BOBBY_MCP_TOOLSET=explore` (or `act`) inside the sandbox so `tools/list`
-stays under OpenShell’s MCP body budget.
+`openshell policy set` replaces the whole policy. To keep an existing policy, merge `policy-network.yaml` into it first.
 
-Wider capabilities when required:
+Set `BOBBY_MCP_TOOLSET=explore` in the sandbox so `tools/list` stays within OpenShell's MCP body budget.
 
-```bash
-bobby openshell provision --sandbox demo-1 --capabilities-preset agent
-```
+## Capabilities
 
-`rotate` is the same operation as `provision`: it revokes the prior principal
-and mints a fresh one. `list` and `status --sandbox <id>` report the locally
-recorded sandboxes from non-secret `.status.json` sidecars — neither prints a
-token.
+The default `openshell` preset allows browsing, intents, files, evidence and recovery. It excludes `authority:admin`, JavaScript evaluation, vision, jobs, fingerprint and humanize. Use `--capabilities-preset agent` for the full agent set without admin. Principals expire after 12 hours; change that with `--ttl-hours`.
 
-When the sandbox ends:
+## Manage sandboxes
 
-```bash
-bobby openshell revoke --sandbox demo-1
-```
+| Command | Effect |
+|---|---|
+| `bobby openshell provision --sandbox <id>` | Mint a principal. Rerunning rotates it |
+| `bobby openshell rotate --sandbox <id>` | Same as `provision` |
+| `bobby openshell list` | List sandboxes recorded locally. Prints no secrets |
+| `bobby openshell status --sandbox <id>` | Non-secret status for one sandbox |
+| `bobby openshell revoke --sandbox <id>` | Revoke the principal |
 
-The secrets root is `<os-config-dir>/bobby-browser/openshell/` —
-`~/.config/…` on Linux, `~/Library/Application Support/…` on macOS.
-`BOBBY_OPENSHELL_SECRETS_DIR` overrides it for tests and alternate secret roots;
-it is process-global, so set it for the whole command rather than per-sandbox.
+A sandbox id is 1 to 128 characters of `A-Z a-z 0-9 _ -`. Override the secrets directory with `BOBBY_OPENSHELL_SECRETS_DIR`.
 
-## Shared `/v1` client behavior
+## Isolation limits
 
-OpenShell operator commands and `jobs` tooling share the same blocking `/v1` HTTP
-client (`v1_client`) in the host runtime. This keeps bearer and interface headers,
-timeouts, retries, and request behavior consistent across principal lifecycle
-operations and `/v1/jobs` calls under the same OpenShell session.
-
-Re-running `provision` (or `rotate`) for the same sandbox id rotates: prior
-principal is revoked first, then a new principal is minted.
-
-```bash
-bobby openshell list
-bobby openshell status --sandbox demo-1
-bobby openshell rotate --sandbox demo-1
-```
+- Sandboxes that share one Firefox companion share cookies, logins and the context graph, because these belong to the browser profile, not the principal. For stronger isolation, use a separate companion profile per sandbox, or managed Chromium, which uses disposable workers with no persistent logins.
+- The default `mcp.json` uses plain HTTP. Keep that path on loopback or a firewalled interface.
 
 ## Doctor
 
-If `openshell/` is present in the working directory, `bobby doctor` reports
-`openshell-pack` plus `openshell-admin`, `openshell-companion`,
-`openshell-mcp-url`, `openshell-cleartext`, and `openshell-sandboxes` (and warns
-when an older pack lacks hardened deny_rules or `policy-network.yaml`).
-
-## Non-goals
-
-- Running Chromium/Firefox *inside* the OpenShell sandbox
-- A bobby-side relay control plane (use OpenShell’s supervisor proxy)
-- Minting tokens from inside the sandbox
+When `openshell/` is in the working directory, `bobby doctor` checks `openshell-pack`, `openshell-admin`, `openshell-companion` (two or more sandboxes on one companion), `openshell-mcp-url`, `openshell-cleartext` (non-loopback plain HTTP) and `openshell-sandboxes`.
 
 ## Related
 
 - [MCP over HTTP](../surfaces/mcp-http.md)
 - [Authentication](auth.md)
 - [Firefox companion](firefox-companion.md)
-- [Multi-principal](../concepts/multi-principal.md)
 - [Security model](../security/model.md)

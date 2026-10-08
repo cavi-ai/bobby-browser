@@ -4,10 +4,13 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 # Capabilities
 
-Tokens bind one principal to an explicit capability set and expiry. Revocation and
-expiry are checked again at dispatch, including long-lived MCP and CDP connections.
+A capability is a permission a token carries. Each token binds one principal to an explicit capability set and an expiry. The runtime checks the capability for every operation, and checks expiry and revocation again at dispatch, including on long-lived MCP and CDP connections. A missing capability returns `missingCapability` (HTTP 403) with `requiredCapability` set when known.
 
-Wire strings (camelCase JSON uses these exact values):
+Choose a set when you create a credential (`bobby init --preset`) or issue a principal (`POST /v1/principals`). The tables below show what each operation needs and what each preset allows.
+
+## Capability names
+
+JSON uses these exact strings:
 
 | Capability | Wire |
 |---|---|
@@ -84,8 +87,6 @@ Submitting a command still requires `browser:mutate`. Nested commands add:
 | Structured extraction (`extractStructured` / MCP `extract_structured`) | `vision:assist` (+ session `executionPolicy.visionAssist` + reachable `[vision]` / vision node endpoint) |
 | Fingerprint spoofing | `browser:fingerprint` at session creation (+ session `executionPolicy.fingerprint`) |
 | Humanized input timing | `browser:humanize` at session creation (+ session `executionPolicy.humanize`) |
-
-Missing capability → `missingCapability` (HTTP 403) with `requiredCapability` set when known.
 
 <!-- BEGIN GENERATED PRESET MATRIX -->
 ## Generated preset matrix

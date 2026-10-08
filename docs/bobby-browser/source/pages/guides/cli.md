@@ -2,138 +2,122 @@
 documentedVersion: {{PRODUCT_VERSION}}
 ---
 
-# CLI reference
+# CLI
 
-The `bobby` binary (Cargo package `bobby-browser`) is the primary way to run the
-runtime locally.
+`bobby` installs, configures and runs the runtime. With no subcommand it runs `bobby serve`. `bobby --version` prints the version and `bobby <command> --help` lists a command's flags.
 
-```bash
-cargo build -p bobby-browser --release
-./target/release/bobby --help
-./target/release/bobby --version
-```
+## Global options
 
-With no subcommand, `bobby` defaults to `serve`.
+| Option | Effect |
+|---|---|
+| `--team <name>` | Share a profile and runtime with this local team |
+| `--project <name>` | Share a project runtime, optionally within a team |
+
+Put them before the subcommand. Without them, bobby uses the personal scope.
 
 ## Commands
 
+| Command | Purpose |
+|---|---|
+| `install` (alias `setup`) | Credential, host configuration, agent skill, companion, vision |
+| `init` | Create or print a bootstrap credential |
+| `token` | Print the current bearer |
+| `doctor` | Check the local setup |
+| `serve` | Run the HTTP API and MCP-over-HTTP endpoint |
+| `cdp` | Run the runtime with authenticated CDP |
+| `mcp-stdio`, `acp-stdio` | Gateways that agent hosts launch |
+| `runtime` | Manage the shared local runtime |
+| `firefox-start` | Open the Bobby Firefox profile |
+| `enroll-firefox-profile`, `install-firefox-native-host`, `firefox-native-host` | Firefox companion plumbing |
+| `profiles` | List deployment profiles |
+| `jobs` | Submit, inspect and cancel jobs |
+| `openshell` | OpenShell pack and sandbox principals |
+| `context` | Inspect or erase remembered site context |
+| `audit` | Export, verify and replay audit bundles |
+| `vision` | Vision provider setup and diagnostics |
+
+### `bobby install`
+
+Interactive setup. Add `--yes` to accept defaults and `--host <claude|vscode|zed|acp|openshell>` (repeatable) to choose hosts without prompts. See [Installation](../introduction/installation.md) for the flag list.
+
 ### `bobby init`
 
-Generate a loopback bootstrap credential (dotenv file, mode `0600` where
-supported).
+Writes a credential file (mode 0600) and prints the bearer once.
 
 | Flag | Meaning |
 |---|---|
-| `--force` | Overwrite an existing bootstrap file |
-| `--ttl-days <n>` | Expiry in days (default from CLI) |
-| `--path <file>` | Bootstrap file path (else `BOBBY_BROWSER_BOOTSTRAP_ENV` / OS config dir) |
-| `--preset <name>` | Capability floor: `agent` (default), `unrestricted`, `claude`, `codex`, or `openshell`; see the [preset matrix](../concepts/capabilities.md#generated-preset-matrix) |
+| `--force` | Overwrite an existing file |
+| `--ttl-days <n>` | Expiry (default 30) |
+| `--path <file>` | File path. Default is `bootstrap.env` in the config directory |
+| `--preset <name>` | Capability floor: `agent` (default), `unrestricted`, `claude`, `codex`, `openshell`. See [Capabilities](../concepts/capabilities.md#generated-preset-matrix) |
+| `--emit <host>` | Print an MCP client fragment for `claude`, `zed`, `vscode`, `json` or `openshell` |
 
-Prints the plaintext bearer **once**. Map it to `AUTOMATION_RUNTIME_TOKEN` for
-SDK clients. Never commit the bearer or put it in `config.toml`.
+### `bobby token`
+
+Prints the enrolled bearer for SDK, HTTP and CDP clients. It refuses to write to a redirected stdout unless you pass `--stdout`.
 
 ### `bobby serve`
 
-Start the authenticated HTTP broker (and MCP HTTP mount).
-
 | Flag | Meaning |
 |---|---|
-| `--config <path>` | `config.toml` path (else `BOBBY_BROWSER_CONFIG`, else the scope's `config.toml`; never the working directory) |
-| `--bootstrap-env <path>` | Bootstrap dotenv path (else `BOBBY_BROWSER_BOOTSTRAP_ENV`, else default) |
+| `--config <path>` | `config.toml` to load |
+| `--bootstrap-env <path>` | Credential file |
+| `--vision`, `--no-vision` | Start or skip the managed vision proxy |
 
-On loopback, if no bootstrap credential exists, `serve` may generate one and
-print the bearer once. Non-loopback binds require credentials up front.
-
-Optional: `AUTOMATION_RUNTIME_BROWSER_SELECTION` (JSON) overrides engine
-selection. Without it, the selection persisted by
-`bobby enroll-firefox-profile` is used; default engine preference is Firefox.
-The same resolution order applies to the MCP gateway and `bobby doctor` —
-see [Configuration](configuration.md).
-
-Health: `GET http://<host>:<port>/healthz`.
+On loopback, `serve` creates a credential if none exists and prints it once. Non-loopback binds need one up front. Health is at `GET /healthz`. `bobby mcp-stdio` and `bobby acp-stdio` take the same flags. `bobby cdp` also takes `--cdp-port`. See [Run the server](run.md).
 
 ### `bobby doctor`
 
-Read-only setup checks (config load, browser selection, engine satisfiability,
-bootstrap presence, storage dirs, journal/corpus/context health, sidecar
-versions, Firefox/Chromium on PATH, optional `/healthz`). Plain `bobby doctor`
-does not rewrite bootstrap capabilities or create directories.
+Read-only checks of configuration, browser selection, credential, storage, sidecars, browsers on `PATH` and `/healthz`.
 
 | Flag | Meaning |
 |---|---|
-| `--config <path>` | Same as `serve` |
-| `--bootstrap-env <path>` | Same as `serve` |
-| `--skip-health` | Do not probe `/healthz` or `GET /v1/runtime` (default: probe) |
-| `--json` | Print a versioned JSON report on stdout (no human lines) |
-| `--profile <name>` | Validate `desktop`, `headless-ci`, `openshell`, or `remote` profile requirements |
-| `--fix` | Repair safe Bobby-owned state, create missing storage dirs, readiness-test the selected provider, then run doctor again |
-| `--download-model` | With `--fix`, explicitly allow downloading the already-selected MLX model |
+| `--config`, `--bootstrap-env` | Same as `serve` |
+| `--skip-health` | Do not probe `/healthz` or `GET /v1/runtime` |
+| `--json` | Versioned JSON report on stdout |
+| `--profile <name>` | Validate `desktop`, `headless-ci`, `openshell` or `remote` |
+| `--fix` | Repair bobby-owned state, then run again |
+| `--download-model` | With `--fix`, allow downloading the selected MLX model |
+| `--downgrade-idempotency` | Convert healthy idempotency ledgers for use by older binaries |
 
-Exit code `1` if any **fail** checks; warnings alone exit `0`. When something
-is wrong, the report **starts** with `next: bobby doctor --fix` (or another
-repair command). Fail lines that doctor can repair include ` · fix: …`. JSON
-`nextAction` names the same command.
+Exit status is 1 when any check fails and 0 for warnings only. An unhealthy report starts with `next: bobby doctor --fix`, and repairable failures name the fix. Output is plain text when piped or when `NO_COLOR` is set.
 
-In an interactive terminal, `ok`, `warn`, and `fail` are green, yellow, and
-red. Repair results use cyan, green, yellow, or red according to outcome.
-Piped output and `NO_COLOR=1 bobby doctor` remain plain and keep the same text
-labels, so color is never required to understand a result.
+`--fix` is idempotent. It restores an unrestricted credential's capabilities, creates missing storage directories, normalizes the selected vision provider, starts a loopback Ollama if the selected provider is down, and readiness-tests the provider. It never chooses a provider or model, overwrites a custom endpoint, stores secrets, installs system packages or leaves a daemon running. A missing MLX model stays an action item until you pass `--download-model`.
 
-`--fix` is conservative and idempotent. It can heal an existing unrestricted
-bootstrap capability set, create missing storage parent directories, normalize
-the selected provider into Bobby's canonical vision node, start a loopback
-Ollama if the selected provider is down, and readiness-test that selected
-provider. It does not choose a provider/model, overwrite a custom
-endpoint, persist secrets, install system packages, or leave a Bobby daemon
-running. A missing MLX cache remains an action item unless `--download-model`
-gives explicit consent for the download.
+### `bobby runtime`
 
-If `/healthz` is unreachable, the `healthz` check is **ok** with detail
-`not running` (start `bobby serve` when you want a live runtime). `--json`
-with `--fix` still prints repair labels on stderr; stdout is the post-fix
-report.
+Manage the shared runtime of the current scope.
 
-### `bobby profiles`
+| Subcommand | Effect |
+|---|---|
+| `start` | Start or reuse the runtime |
+| `status` | Show the owner and connection URL, and any pending change |
+| `stop` | Stop the runtime gracefully |
+| `restart` | Stop if running, then start |
+| `list` | List local scopes and their status |
 
-List the stable deployment profiles. Add `--json` for the machine-readable
-contract covering transport, authentication, bind scope, browser, storage, and
-start command.
+`stop` and `restart` ask before disconnecting attached agents. Without a terminal, pass `--disconnect-agents`.
+
+### `bobby firefox-start`
+
+Opens the installed Bobby Firefox profile for pairing or browsing. See [Firefox companion](firefox-companion.md).
 
 ### `bobby jobs`
 
-HTTP client for the broker job API (`/v1/jobs`). The scheduler runs
-**in-process inside `bobby serve`** — the CLI does not start a second scheduler.
-
-Bootstrap credentials need `job:submit`, `job:read`, and `job:cancel`. New
-`bobby init` / loopback serve credentials include these by default. Existing
-`bootstrap.env` files are not migrated; run `bobby init --force` (or enroll a
-principal with `job:*`) before using these commands.
+An HTTP client for `/v1/jobs`. The scheduler runs inside `bobby serve`.
 
 ```bash
 bobby jobs submit --name echo --payload '{"message":"hi"}'
-bobby jobs submit --name echo --payload-file ./job.json --priority high \
-  --idempotency-key run-1
+bobby jobs submit --name echo --payload-file ./job.json --priority high --idempotency-key run-1
 bobby jobs status <job_id>
 bobby jobs cancel <job_id>
 ```
 
-Shared flags on all `jobs` subcommands:
-
-| Flag | Meaning |
-|---|---|
-| `--config <path>` | Same as `serve` |
-| `--bootstrap-env <path>` | Same as `serve` (bearer source if no token env) |
-| `--base-url <url>` | Override `http://{host}:{port}` from config |
-| `--token <bearer>` | Override `AUTOMATION_RUNTIME_TOKEN` / bootstrap bearer |
-
-`submit` flags: `--name` (required), `--payload` (JSON string, default `{}`),
-`--payload-file`, `--priority` (`low|normal|high|critical`, default `normal`),
-`--max-retries`, `--timeout-ms`, `--idempotency-key`.
+Shared flags: `--config`, `--bootstrap-env`, `--base-url <url>` and `--token <bearer>`. `submit` takes `--name` (required), `--payload`, `--payload-file`, `--priority` (`low`, `normal`, `high`, `critical`), `--max-retries`, `--timeout-ms` and `--idempotency-key`. The credential needs `job:submit`, `job:read` and `job:cancel`.
 
 ### `bobby audit`
 
-Signed audit bundles for one workflow; see
-[Audit bundles](../concepts/evidence-checkpoints.md#audit-bundles).
+Signed audit bundles for one workflow. See [Evidence and checkpoints](../concepts/evidence-checkpoints.md#audit-bundles).
 
 ```bash
 bobby audit key
@@ -142,124 +126,57 @@ bobby audit verify bundle.tar --public-key <hex>
 bobby audit replay bundle.tar --out bundle.html
 ```
 
-`export` takes `--config <path>` (same as `serve`) and `--key <path>` (default
-`<config dir>/audit-signing-key.pk8`, created on first use). `verify` exits
-non-zero and names the file when a digest, an entry, or the signature does not
-match. `replay` verifies the bundle, then writes a self-contained HTML page;
-see [Workflow replay](replay.md).
+`export` takes `--config` and `--key <path>` (default `audit-signing-key.pk8` in the config directory, created on first use). `--out` must not exist. `verify` exits non-zero and names the failing file or signature. `replay` verifies and writes a self-contained page; see [Workflow replay](replay.md).
+
+### `bobby context`
+
+```bash
+bobby context list --profile <profile-id>
+bobby context forget --profile <profile-id> <site>
+```
+
+`list` shows remembered sites. `forget` erases everything remembered for one site. Both take `--config` and `--dir`. See [Context graph](../concepts/context-graph.md).
 
 ### `bobby vision`
 
-Vision provider setup. `connect` writes a provider profile into `config.toml`,
-`login` establishes or verifies the configured ACP harness login, and `collect`
-gathers training data from gauntlet runs.
+| Subcommand | Purpose |
+|---|---|
+| `connect` | Write a provider profile to `config.toml` |
+| `login` | Establish or verify the configured ACP harness login |
+| `status` | Show the provider, model and service state |
+| `start` | Run the vision service in the foreground |
+| `detect` | Classify a challenge without acting |
+| `solve` | Run the solve loop on a challenge |
+| `collect` | Collect training data from gauntlet runs |
 
 ```bash
 bobby vision connect --yes --provider mlx
 bobby vision connect --yes --provider mlx --activate --download-model
-bobby vision connect --yes --backend acp --provider codex \
-  --command codex --arg acp --auth advertised
-bobby vision login
+bobby vision connect --yes --backend acp --provider codex --command codex --arg acp --auth advertised
 ```
 
-`bobby install` also offers vision configuration during onboarding. Field
-reference: [Configuration](configuration.md#vision).
+`connect` flags: `--provider` (`openai`, `ollama`, `lmstudio`, `mlx`, `custom`), `--backend` (`direct` or `acp`), `--base-url`, `--model`, `--api-key-env`, `--command`, `--arg`, `--auth`, `--config`, `--yes`, `--activate`, `--download-model`. By default `connect` only writes configuration. `--activate` also readiness-tests the provider, and `--download-model` (which needs `--activate`) lets it fetch a missing MLX model. See [Configuration](configuration.md#vision).
 
-An explicitly selected provider is persisted before a bounded readiness test.
-For MLX, Bobby loads the exact selected model through the same managed command
-used at runtime and stops the setup-time child after the probe. Ollama and LM
-Studio remain externally managed; onboarding reports how to start/load them
-when their configured endpoint is unavailable.
-
-`vision connect` remains configuration-only by default. Add `--activate` to
-load/readiness-test the selection immediately. For MLX, add
-`--download-model` only when Bobby may download the selected model if its cache
-is missing; that flag requires `--activate`.
-
-### `bobby vision status` / `bobby vision start`
-
-`bobby vision status` reports the configured provider/model and whether the
-local vision service is running. Bobby starts that service on demand during
-normal agent use. `bobby vision start` runs it in the foreground for manual
-inspection and debugging.
-
-The former top-level `vision-proxy` command remains a hidden compatibility
-alias for scripts. New user workflows should use the `bobby vision` commands.
-
-### `bobby vision detect` / `bobby vision solve`
-
-`detect` classifies a captcha or human-verification challenge on a page without
-acting on it; `solve` drives the vision solve loop against one until it clears
-or the budget runs out. Both take a `--purpose` and target either a fresh
-session (`--url`) or an existing one (`--session` with `--page`).
+`detect` and `solve` take `--purpose` and either `--url` for a new session or `--session` with `--page` for an existing one. `detect` is read-only and defaults to a 15 second budget (`--timeout-ms`). `solve` defaults to 120 seconds and accepts `--zigzagzig` for humanized input and fingerprint spoofing. `--node` picks the vision node (default `vision`). Both need `vision:assist`.
 
 ```bash
 bobby vision detect --purpose "check for a captcha blocking signup" --url https://example.com
-bobby vision solve --purpose "solve the reCAPTCHA challenge" --session <id> --page <id>
+bobby vision solve --purpose "solve the challenge" --session <id> --page <id>
 ```
-
-`detect` is read-only and defaults to a 15s budget (`--timeout-ms`); `solve`
-mutates the page and defaults to 120s. Add `--zigzagzig` to `solve` for
-humanized input timing and fingerprint spoofing. `--node` selects the vision
-node the session escalates to (default `vision`). Both require the session to
-hold `vision:assist`.
 
 ### `bobby openshell`
 
-NVIDIA OpenShell host: write the pack, and mint or revoke one agent-scoped
-principal per sandbox.
+`install`, `provision`, `rotate`, `list`, `status` and `revoke`. See [OpenShell host](openshell.md).
 
-| Subcommand | Meaning |
-|---|---|
-| `install` | Write the `openshell/` pack (policy, `mcp.json`, skill, README) |
-| `provision --sandbox <id>` | Mint one agent-scoped principal and write its injection env at mode 0600 |
-| `rotate --sandbox <id>` | Revoke the prior principal and mint a fresh one |
-| `list` | List locally recorded sandboxes (no secrets) |
-| `status --sandbox <id>` | Non-secret status for one sandbox |
-| `revoke --sandbox <id>` | Revoke the principal provisioned for a sandbox |
-
-`install` defaults to `--agent codex`, whose policy allowlist covers the Codex
-paths in the OpenShell base image. Use `--agent claude` for the existing Claude
-Code path, or `--agent-binary <path>` to replace the selected preset with an
-explicit binary path.
-
-`bobby install --host openshell` writes the same pack, `bobby init --emit
-openshell` prints the MCP fragment, and `bobby doctor` reports `openshell-pack`
-and the related checks when a pack is present. See
-[OpenShell](openshell.md).
-
-### Firefox companion
-
-```bash
-bobby firefox-native-host --descriptor /abs/path/descriptor.json
-bobby install-firefox-native-host \
-  --wrapper /abs/wrapper \
-  --manifest /abs/manifest.json \
-  --cli /abs/bobby \
-  --descriptor /abs/descriptor.json
-bobby enroll-firefox-profile \
-  --descriptor /abs/descriptor.json \
-  --bidi-url ws://127.0.0.1:9224/session \
-  --profile-dir /abs/profile
-```
-
-See [Firefox companion](firefox-companion.md).
-
-## Environment
+## Environment variables
 
 | Variable | Role |
 |---|---|
-| `BOBBY_BROWSER_CONFIG` | Default config path |
-| `BOBBY_BROWSER_BOOTSTRAP_ENV` | Default bootstrap dotenv path |
-| `AUTOMATION_RUNTIME_BOOTSTRAP_*` | Direct bootstrap env contract (see [Authentication](auth.md)) |
-| `AUTOMATION_RUNTIME_TOKEN` | Client bearer (SDK / curl) |
-| `AUTOMATION_RUNTIME_BROWSER_SELECTION` | JSON engine/profile selection override (else the persisted enrollment, else the Firefox default) |
-| `BOBBY_MCP_TOOLSET` | Startup MCP phase, overriding `[mcp] startup_toolset` |
-| `BOBBY_OPENSHELL_SECRETS_DIR` | Root for per-sandbox OpenShell injection env files (default: OS config dir) |
-| `BOBBY_VISION_SERVER_SCRIPT` | `vision_server.py` path for `vision-proxy --spawn-server` |
-
-## Next
-
-- [Run the server](run.md)
-- [Configuration](configuration.md)
-- [First browser session](../introduction/first-session.md)
+| `BOBBY_BROWSER_CONFIG` | Default `config.toml` path |
+| `BOBBY_BROWSER_BOOTSTRAP_ENV` | Default credential file path |
+| `AUTOMATION_RUNTIME_BOOTSTRAP_*` | Direct credential input. See [Authentication](auth.md) |
+| `AUTOMATION_RUNTIME_TOKEN` | Client bearer for SDKs and curl |
+| `AUTOMATION_RUNTIME_BROWSER_SELECTION` | JSON engine selection, overriding the paired profile |
+| `BOBBY_MCP_TOOLSET` | Starting MCP toolset, overriding `[mcp] startup_toolset` |
+| `BOBBY_CHROME_EXECUTABLE` | Chromium binary to use |
+| `BOBBY_OPENSHELL_SECRETS_DIR` | Directory for per-sandbox OpenShell environment files |

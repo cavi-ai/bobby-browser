@@ -3586,6 +3586,33 @@ impl BrowserWorker for FirefoxCompanionWorker {
         ])
     }
 
+    async fn settle_page(
+        &self,
+        page_id: &PageId,
+        budget: Duration,
+        requested_url: Option<&str>,
+    ) -> Option<(String, String)> {
+        if !self.current_lease().capabilities.observe {
+            return None;
+        }
+        let context = self.context(page_id).await.ok()?;
+        let (url, title) = settle_document(
+            &self.transport,
+            &context,
+            budget,
+            requested_url.unwrap_or_default(),
+        )
+        .await?;
+        // The extension observation this replaces never returned a title
+        // that discloses a credential; neither does the settled read.
+        let title = if worker_pool::secret_material::contains_secret_material(&title) {
+            "[redacted]".to_owned()
+        } else {
+            title
+        };
+        Some((url, title))
+    }
+
     async fn form_snapshot(
         &self,
         page_id: &PageId,

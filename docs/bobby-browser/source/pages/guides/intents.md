@@ -4,603 +4,163 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 # Intent commands
 
-Semantic automation is available through the authenticated HTTP / TypeScript /
-MCP surfaces when the principal holds `intent:execute`.
+An intent is a goal-level step such as "fill the email field" or "submit the form and confirm the order page loaded". You describe the control by purpose and accessible hints. bobby finds it, acts, and verifies the result before returning evidence. Use intents instead of raw clicks when you want a step that fails loudly if it did not work.
 
-MCP exposes one tool per intent (`intent_locate`, `intent_fill`,
-`intent_complete_form`, `intent_submit_and_verify`, `intent_wait_for_state`,
-`intent_follow`, `intent_dismiss_obstruction`, `intent_extract`,
-`intent_solve_challenge`, `intent_detect_challenge`). They take
-`sessionId` / `pageId` / the intent's own fields, plus optional `workflowId`
-and `idempotencyKey`, and build the envelope server-side — see
-[MCP tools](../surfaces/mcp-tools.md).
+Intents need the `intent:execute` capability.
 
-There are **no** dedicated intent HTTP routes. Over HTTP, and over MCP when you
-need the escape hatch, submit via `POST /v1/commands` / `command_execute` /
-`BrowserRuntimeClient.submit` with
+## Run an intent
+
+Over MCP, call the matching tool:
 
 ```json
-{ "kind": "intent", "input": { "kind": "<intent>", "input": { … } } }
+{"name": "intent_fill", "arguments": {
+  "workflowHandle": "wf_0123456789abcdef0123456789abcdef",
+  "purpose": "enter the applicant email",
+  "hints": {"role": "textbox", "accessibleName": "Email address"},
+  "value": {"kind": "setText", "value": "ada@example.com"}
+}}
 ```
 
-inside a `CommandEnvelope` (`schemaVersion: 2`). TypeScript helpers:
-`locateEnvelope`, `fillEnvelope`, `submitAndVerifyEnvelope`,
-`waitForStateEnvelope`, `followEnvelope`, `dismissObstructionEnvelope`,
-`extractEnvelope`, `solveChallengeEnvelope`, `detectChallengeEnvelope`.
-Multi-field forms use `completeFormRuntimeCommand` with
-`intentEnvelope` (no dedicated `*Envelope` helper yet).
+Over HTTP, wrap the intent in a command envelope and send it to `POST /v1/commands`:
 
-Rust callers get the same builders from `bobby-browser-client`
-(Supported tier): `locate_envelope`, `fill_envelope`,
-`submit_and_verify_envelope`, `wait_for_state_envelope`,
-`follow_envelope`, `dismiss_obstruction_envelope`, `extract_envelope`,
-`solve_challenge_envelope`, `detect_challenge_envelope`, plus the
-`*_runtime_command` builders and `intent_envelope` for the general case.
-
-## Command classes
-
-| Class | Meaning |
-|---|---|
-| `Replayable` | Safe to retry under policy without a prior checkpoint |
-| `Reconciliable` | May need inspection / reconcile before replay |
-| `Boundary` | Mutating / side-effecting; checkpoint gate applies |
-
-| Intent | Class |
-|---|---|
-| `locate` | Replayable |
-| `waitForState` | Replayable |
-| `extract` | Replayable |
-| `fill` | Reconciliable |
-| `completeForm` | Reconciliable |
-| `dismissObstruction` | Reconciliable |
-| `solveChallenge` | Reconciliable |
-| `detectChallenge` | Replayable |
-| `submitAndVerify` | Boundary |
-| `follow` | Boundary if `boundary: true`, else Reconciliable |
-
-`solveChallenge` drives the vision solve loop against a captcha or
-verification widget (see `bobby vision solve`); `detectChallenge` only
-classifies — screenshot in, `challengeDetection` evidence out, never an
-action on the page. Detection is opt-in per call: nothing scans pages
-automatically.
-
-## Envelope examples
-
-Shared meta (ids are UUIDs; `deadline` RFC3339):
-
-```ts
-const meta = {
-  commandId: crypto.randomUUID(),
-  workflowId: crypto.randomUUID(),
-  attemptId: crypto.randomUUID(),
-  sessionId: session.id,
-  pageId: page.id,
-  deadline: new Date(Date.now() + 60_000).toISOString(),
-};
+```json
+{"kind": "intent", "input": {"kind": "fill", "input": {"purpose": "enter the applicant email", "hints": {"role": "textbox", "accessibleName": "Email address"}, "value": {"kind": "setText", "value": "ada@example.com"}}}}
 ```
 
-### Locate (Replayable)
-
-```ts
-import { locateEnvelope } from "@cavi-ai/bobby-browser";
-await client.submit(locateEnvelope(meta, "primary search box"), { idempotencyKey: crypto.randomUUID() });
-```
-
-Wire command: `{ kind: "intent", input: { kind: "locate", input: { purpose, hints } } }`.
-
-### Fill (Reconciliable)
+The TypeScript SDK builds envelopes with `locateEnvelope`, `fillEnvelope`, `submitAndVerifyEnvelope`, `waitForStateEnvelope`, `followEnvelope`, `dismissObstructionEnvelope`, `extractEnvelope`, `detectChallengeEnvelope` and `solveChallengeEnvelope`. For forms, use `completeFormRuntimeCommand` with `intentEnvelope`. The Rust client has the same builders in snake case.
 
 ```ts
 import { fillEnvelope } from "@cavi-ai/bobby-browser";
+
 await client.submit(
-  fillEnvelope(
-    meta,
-    "enter the applicant email",
-    { kind: "setText", value: "a@example.com", clearFirst: true },
-    { role: "textbox", nearText: { kind: "exact", value: "Email address" } },
-  ),
+  fillEnvelope(meta, "enter the applicant email",
+    { kind: "setText", value: "ada@example.com" },
+    { role: "textbox", nearText: { kind: "exact", value: "Email address" } }),
   { idempotencyKey: crypto.randomUUID() },
 );
 ```
 
-Unified `ControlAction` kinds for fill:
-
-| Kind | Shape | Notes |
-|---|---|---|
-| `setText` | `{ kind: "setText", value, clearFirst? }` | Default path for textboxes; `clearFirst` defaults to true (replace) |
-| `selectOne` | `{ kind: "selectOne", value }` | Matches option **value** first, then visible label (trimmed, case-insensitive) |
-| `selectMany` | `{ kind: "selectMany", values }` | Multi-select only; matches by value or label |
-| `setChecked` | `{ kind: "setChecked", checked: boolean }` | Checkbox / radio only |
-| `setFiles` | `{ kind: "setFiles", paths }` | Requires `file:upload` |
-| `clear` | `{ kind: "clear" }` | Clear field value |
-
-`select` therefore resolves by value first so forms using explicit values remain stable,
-then retries with trimmed visible-label matching before failing.
-
-Checkbox / radio example:
-
-```ts
-await client.submit(
-  fillEnvelope(
-    meta,
-    "accept terms",
-    { kind: "setChecked", checked: true },
-    { role: "checkbox", nearText: { kind: "exact", value: "I agree" } },
-  ),
-  { idempotencyKey: crypto.randomUUID() },
-);
-```
-
-`setChecked` toggles via a real click when the control's state differs. Radios
-may be selected (`checked: true`) but cannot be unchecked directly
-(`checked: false` fails closed). Non-checkable targets must not use
-`kind: "setChecked"`.
-
-When `role` and exact `nearText` are supplied, `nearText` is the control's
-accessible name while `purpose` remains the agent's task description. This
-avoids requiring natural task phrasing to equal a page label. A fill completes
-only when the worker returns value/upload postcondition evidence; an action
-without verification evidence fails closed.
-
-The `accessibleName` hint may instead be a `controlId` a prior
-`workflow_observe` (`includeForms: true`) or `form_snapshot` call returned,
-with every other hint left empty. The gateway resolves that id against a
-fresh form snapshot and fills in the control's own `role`/`accessibleName`/
-`ordinal`/`framePath`/`shadowPath` before compiling the intent, so a file
-input styled as a button (or any other control with no useful accessible
-name of its own) can still be addressed by id.
-
-### Native constraint validity
-
-After a successful type/select/check, fill verification also reads the
-browser's native constraint-validity state (`willValidate` /
-`validity.valid`). A value that was committed but violates `required`,
-`pattern`, length, range, type, or other HTML constraints fails closed with
-`verificationFailed`.
-
-Evidence carries:
-
-| Configuration key | Meaning |
-|---|---|
-| `formControlValid` | `"true"` / `"false"` |
-| `formControlValidationMessage` | Browser message, bounded (≤1024 chars) |
-
-Use the message to correct **only** the rejected field (especially inside
-`completeForm`, which stops at the first failure and keeps prior field
-evidence). Non-validating controls (`willValidate === false`) are treated as
-valid for this check.
-
-### CompleteForm (Reconciliable)
-
-Apply an ordered, uniquely named list of fill fields as **one** intent.
-Each field is resolved and verified before the next begins; execution stops
-at the first failure and retains evidence for fields already attempted
-(including a `completeFormField` configuration evidence entry per field name).
-It never submits — use `submitAndVerify` (Boundary) afterward.
-
-Resolution is just-in-time, so the list may include conditional fields that do
-not exist when the form is first observed. Put each conditional field after the
-field that reveals it; the engine resolves it against the updated page state
-without requiring a second `completeForm` call.
-
-`name` is the stable audit label for field evidence and, when `hints` is
-empty, the exact accessible-name fallback -- unless `name` itself is a
-`controlId` a prior `workflow_observe` (`includeForms: true`) or
-`form_snapshot` call returned, in which case the gateway resolves it against
-a fresh form snapshot and fills in the control's own target first. Explicit
-`hints` from `form_snapshot` (normally `role` and `accessibleName`) override
-both of those.
-
-The `intent_complete_form` MCP tool call also accepts `intent_fill`'s
-top-level `hints` as a convenience: when `fields` has exactly one entry and
-that field's own `hints` are empty, the gateway folds the top-level `hints`
-into it; otherwise (more than one field, or the field already has hints)
-the call is rejected with `hintsPerField`.
-
-The named MCP tool defaults `evidenceDetail` to `compact` on success and
-returns one filled-field summary. Full per-field evidence remains in runtime
-events; pass `evidenceDetail: "full"` when diagnosing. Failures always retain
-their detailed evidence so the caller can repair only the remaining fields.
-Compact success evidence also retains any `revealedControls` created by a
-conditional selection, including semantic targets that can be used without a
-new form snapshot.
-
-Constraints (compile / SDK reject before dispatch):
-
-- `fields` non-empty, at most 128
-- each `name` non-empty and unique within the form
-- each field `purpose` and the form `purpose` obey intent purpose bounds
-- any `files` field still requires `file:upload` on the bearer
-
-```ts
-import {
-  completeFormRuntimeCommand,
-  intentEnvelope,
-  submitAndVerifyEnvelope,
-} from "@cavi-ai/bobby-browser";
-
-await client.submit(
-  intentEnvelope(
-    meta,
-    completeFormRuntimeCommand({
-      purpose: "applicant contact form",
-      fields: [
-        {
-          name: "email",
-          purpose: "enter the applicant email",
-          hints: { role: "textbox", nearText: { kind: "exact", value: "Email address" } },
-          value: { kind: "setText", value: "a@example.com", clearFirst: true },
-        },
-        {
-          name: "terms",
-          purpose: "accept terms",
-          hints: { role: "checkbox", nearText: { kind: "exact", value: "I agree" } },
-          value: { kind: "setChecked", checked: true },
-        },
-      ],
-    }),
-  ),
-  { idempotencyKey: crypto.randomUUID() },
-);
-
-await client.submit(
-  submitAndVerifyEnvelope(meta, "submit application", { /* WaitForCommand expectedState */ }),
-  { idempotencyKey: crypto.randomUUID() },
-);
-```
-
-Wire command:
-`{ kind: "intent", input: { kind: "completeForm", input: { purpose, fields } } }`
-where each field is `{ name, purpose, hints?, value }`.
-
-### SubmitAndVerify (Boundary)
-
-```ts
-import { submitAndVerifyEnvelope } from "@cavi-ai/bobby-browser";
-await client.submit(
-  submitAndVerifyEnvelope(meta, "submit login", { /* WaitForCommand expectedState */ }),
-  { idempotencyKey: crypto.randomUUID() },
-);
-```
-
-With no hints, submit targeting defaults to the exact button named by
-`purpose`, avoiding ancestor-text ambiguity. Explicit button hints from the
-current snapshot remain authoritative.
-
-When the confirmation copy or redirect is known, use a `text` or `url`
-`expectedState` to prove that exact success state. When it is not known, use a
-`networkQuiet` expected state. After the exactly-once boundary click settles,
-the same call returns bounded `inspection` evidence and a
-`submitSettlement` outcome:
-
-- `settled` — the page settled with no visible `aria-invalid` controls
-- `validationRejected` — correct the fields in compact `formValidation`
-  evidence; each issue carries the control id, kind, accessible name, semantic
-  target, and browser validity, but never its value or the rest of the form
-  snapshot; do not blindly resubmit
-
-No follow-up inspect is needed for the network-quiet path.
-
-### WaitForState (Replayable)
-
-```ts
-import { waitForStateEnvelope } from "@cavi-ai/bobby-browser";
-await client.submit(
-  waitForStateEnvelope(meta, { /* WaitCondition */ }, 15_000),
-  { idempotencyKey: crypto.randomUUID() },
-);
-```
-
-### WaitCondition shape
-
-`WaitForState` and MCP `wait_for` share the same `WaitCondition` shape:
-
-| `kind` | Required fields |
-|---|---|
-| `element` | `target`, `state` |
-| `text` | `target`, `matcher` |
-| `value` | `target`, `matcher` |
-| `url` | `matcher` |
-| `document` | `ready` |
-| `networkQuiet` | `idleMs`, `maxInFlight`, optional `ignoreUrlSubstrings`, `ignoreResourceTypes`, `ignoreLongLived` |
-
-`matcher` is a `TextMatch` object: `{ kind: "exact" | "contains" | "regex", value }`.
-
-`state` is one of `attached`, `detached`, `visible`, `hidden`, `enabled`, `disabled`.
-
-`ready` is one of `commit`, `domContentLoaded`, `interactive`, `networkIdle`.
-
-For `text` and `value`, role-based (`role: main|RootWebArea|document|application|generic|body`) and
-`css: body|html|:root` targets read `document.body.innerText` so async confirmation text
-checks align with whole-page assertions.
-
-Firefox supports `text`, `value`, `document`, `url`, `element`, and `networkQuiet`.
-
-### Follow
-
-```ts
-import { followEnvelope } from "@cavi-ai/bobby-browser";
-await client.submit(
-  followEnvelope(meta, "docs link", { /* expectedDestination WaitForCommand */ }, { boundary: false }),
-  { idempotencyKey: crypto.randomUUID() },
-);
-```
-
-Set `boundary: true` when activation may mutate (for example sign-out); requires a
-matching workflow checkpoint.
-
-The MCP tool `intent_follow` takes the verification as `expectedState`;
-`expectedDestination` is the same field under its earlier name, and exactly
-one of the two is accepted. It defaults to compact evidence containing the
-current page generation, verified wait, and artifact references. Pass
-`evidenceDetail: "full"` for diagnostic evidence.
-
-### DismissObstruction (Reconciliable)
-
-Clears a popup / overlay / cookie banner. No caller `boundary` flag — always
-reconciliable. Default `timeoutMs` is 5000.
-
-```ts
-import { dismissObstructionEnvelope } from "@cavi-ai/bobby-browser";
-await client.submit(
-  dismissObstructionEnvelope(meta, "dismiss cookie banner"),
-  { idempotencyKey: crypto.randomUUID() },
-);
-```
-
-### Extract (Replayable)
-
-```ts
-import { extractEnvelope } from "@cavi-ai/bobby-browser";
-await client.submit(
-  extractEnvelope(meta, "product fields", [
-    { name: "title", purpose: "product title", value: { kind: "text" } },
-    { name: "link", purpose: "product link", value: { kind: "href" } },
-  ]),
-  { idempotencyKey: crypto.randomUUID() },
-);
-```
-
-Note: `ExtractValueKind` (`text`, `attribute`, `href`) is separate from fill and control operations.
-
-`ExtractValueKind`: `text`, `attribute` (+ `attribute` name), `href`.
-
-An `a11y_snapshot` node passed verbatim must be an *actionable* node (button,
-textbox, link, ...): text and layout roles the AX tree emits (`StaticText`,
-`LabelText`, `MenuListPopup`, ...) are never element candidates, so the field
-misses with an `a11yOnlyRole` marker instead of a generic `targetNotFound`.
-Read page text with page-scoped `wait_for`/`inspect` targets
-(`role: main|RootWebArea`) or `extract_structured` instead.
-
-### DetectChallenge (Replayable)
-
-```ts
-await client.submit(
-  intentEnvelope(meta, {
-    kind: "detectChallenge",
-    input: { purpose: "check for a captcha blocking signup", hints: { timeoutMs: 15_000 } },
-  }),
-  { idempotencyKey: crypto.randomUUID() },
-);
-```
-
-Completed evidence carries `{ kind: "challengeDetection", detection, priorKind? }`:
-`detection` is the classified challenge (`challenge_type`, `confidence`,
-`blocking`, optional `region`) or `null` when the page is provably clean;
-`priorKind` names the site prior that enriched the prompt when one existed.
-Detection carries no confidence floor — acting is what the floor protects.
-
-## Vision double-gate
-
-Vision-assisted resolution is **deny-by-default**. All three must pass:
-
-1. Bearer holds `vision:assist`
-2. Session created with `executionPolicy.visionAssist = true`
-3. A reachable assist backend is configured — `[vision].endpoint_url`, a
-   `[nodes]` vision node, or an ACP profile (`[vision].backend = "acp"`); no
-   backend, no escalation
-
-Otherwise vision escalation is denied (`VisionAssistDenied` / failed).
-
-Capability + session grant is **not** sufficient for functional vision assist:
-the configured endpoint must be **reachable** at runtime. A granted principal
-and an opted-in session still fail closed when the provider is down or
-misconfigured — `bobby doctor` warns on `vision-service` when the route cannot
-answer, and on
-`vision-provider` / `vision-upstream-key` when the selected upstream profile is
-missing or its required API key env is empty. Preferred local path:
-[Configuration — Setup](configuration.md#setup-preferred).
-
-When gates pass and deterministic resolution sticks, the engine captures a real
-PNG via `screenshot_bytes` (Chromium and Firefox) and posts it to the backend.
-Empty frames are not sent. Both engines execute the returned coordinates
-natively — Chromium through CDP input, Firefox through BiDi pointer actions
-against the bounded accessibility snapshot's candidates.
-
-### Candidate actions
-
-A stuck step keeps up to 10 near-miss candidates. The provider sees the first
-5 that carry a name and one of the roles `button`, `link`, `textbox`,
-`spinbutton`, `combobox`, `listbox`, `checkbox`, `radio`, `tab`, `menuitem`,
-`searchbox`, or `switch`, and answers with one of them and an action
-compatible with the intent:
-
-| Action | Intents |
-|---|---|
-| `clickCandidate` | locate, submitAndVerify, follow, dismissObstruction |
-| `typeIntoCandidate` | fill, type |
-| `extractFromCandidate` | extract |
-
-Any other pairing is rejected. `typeIntoCandidate` applies the fill's own
-control action to the chosen candidate: `setText`, `selectOne`, `selectMany`,
-`setChecked`, or `clear`. A candidate whose role cannot take that action is
-rejected before anything is mutated. A file fill whose input does not
-resolve may choose a `button` candidate (a styled file picker): the runtime
-uploads the fill's own paths through `upload_files`, and an upload failure
-reaches vision records only as a fixed message.
-
-When the page has retained context, the near-miss list is ordered before the
-provider's 5 are taken; see
-[Context graph — Vision candidate ranking](../concepts/context-graph.md#vision-candidate-ranking).
-
-## Vision prefill
-
-With `[vision].prefill = true` (the default), `complete_form` preflights
-fields before the first page mutation. Deterministically resolved fields stay on
-the deterministic path. Usable cached proposals for the current form are
-retained within the same page generation. They share a 32-entry limit with new
-proposals; repeated cached purposes occupy one entry. Unresolved fields that
-fit the remaining capacity share one screenshot and use at most four
-concurrent provider calls. Fields beyond that capacity use normal fallback.
-Runtime commands reserve half their remaining deadline for this speculative
-pass. When that budget expires, unfinished request futures are dropped and
-completed proposals may still be retained if the page generation matches.
-Remaining fields execute through normal fallback. Set `prefill = false` to
-disable this pass.
-
-Each request contains at most five role-and-name candidates. Retained page
-context may rank that window only when its structural record is fresh and has
-observed or vision-promoted provenance. The cache stores the candidate window
-and selected index under the page generation; it never stores the field value.
-When the field executes, the runtime resolves that candidate identity against
-the current DOM and applies the value it already owns.
-
-Evidence distinguishes the paths: `resolutionPath` is `visionPrefill` for a
-cache-resolved field, `visionFallback` for a live stuck-rescue escalation,
-`deterministic` when no vision ran. A cached proposal that no longer resolves
-or fails verification is dropped and escalated live. Provider loss records no
-cache entry and the form continues through the ordinary execution path.
-Cancelling the form cancels all in-flight prefill calls.
-
-`operationalMetrics.prefill` reports `budgetExhausted` (expired batches,
-including those skipped before starting), `partialBatchRetained` (expired
-batches that publish newly completed proposals), and `staleBatchDiscarded` (nonempty
-batches refused by the generation guard). `requestsCancelled` counts started
-provider requests dropped before returning a result, including when the intent
-is cancelled. Queued requests and completed requests are excluded. These
-cancellations do not increment provider failures or timeouts; dropping a request
-future does not prove that remote inference stopped. Counters contain no field
-values, candidate names, page identifiers, or screenshots.
-
-## Vision backend
-
-Two backends, selected by `[vision].backend`:
-
-- **`direct`** (default) — Bobby posts propose/extract to the endpoint in
-  `[vision]` (or a `[nodes.*.kind=vision]` node) and holds the upstream key.
-- **`acp`** — Bobby delegates the vision task to an ACP harness that already
-  owns the model login (Codex, Claude, OpenCode, Hermes, OpenClaw). Bobby never
-  receives or stores that provider token. Each task runs in a new ACP child
-  session with bounded text and image content, a strict JSON result,
-  evidence-digest validation, and an explicit close. A harness that asks for
-  interactive permission is cancelled and its child session closed.
-
-```bash
-bobby vision connect --yes --backend acp --provider codex \
-  --command codex --arg acp --auth advertised
-```
-
-Both are configured in [Configuration](configuration.md#vision). A session
-picks a named node with `executionPolicy.visionNode`.
-
-## Vision provider
-
-For the `direct` backend, upstream models are configured as named
-OpenAI-compatible profiles under `[vision.providers]` — see
-[Configuration](configuration.md#vision).
-
-```toml
-[vision]
-endpoint_url = "http://127.0.0.1:9100/vision" # https, or http on loopback only
-token_env = "BOBBY_VISION_TOKEN"              # env var holding the bearer (never in the file)
-provider = "openai"
-timeout_ms = 15000
-
-[vision.providers.openai]
-base_url = "https://api.openai.com/v1"
-model = "gpt-4o-mini"
-api_key_env = "OPENAI_API_KEY"
-```
-
-### Local setup (preferred)
-
-```bash
-bobby vision connect --yes --provider openai   # or ollama / lmstudio / custom
-export BOBBY_VISION_TOKEN=…
-export OPENAI_API_KEY=…                        # when the profile sets api_key_env
-bobby serve --vision                           # auto-spawns loopback vision-proxy
-```
-
-`bobby mcp-stdio --vision` uses the same spawn policy. `--no-vision` disables
-spawn. Manual `bobby vision-proxy` in a second terminal remains valid
-(`--bind`, `--path`, `--model`, `--openai-base-url`, `--api-key-env`).
-
-**Manual check:** after connect + env exports, start with `--vision`, open a
-session with `visionAssist: true` under a principal with `vision:assist`,
-force a stuck locate (or call `extract_structured`), and confirm escalation
-or structured extract succeeds.
-
-The runtime `POST`s JSON:
-
-```json
-{
-  "purpose": "…",
-  "intentKind": "locate",
-  "stuck": "zeroCandidates",
-  "screenshotPng": "<base64 PNG>"
-}
-```
-
-and expects:
-
-```json
-{
-  "confidence": 0.9,
-  "action": { "kind": "click", "x": 12.0, "y": 34.0 }
-}
-```
-
-`action.kind` is one of `click` (`x`,`y`), `typeText` (`text`), or
-`extractValue` (`value`). Invalid responses, out-of-range confidence, oversized
-bodies, and transport failures **decline** the escalation (fail closed).
-
-Accepted proposals still require the engine's **0.75** confidence floor and
-sha256-pinned verification before any browser action. That floor applies only
-to vision *proposals* that drive browser actions — not to structured
-extraction below.
-
-### Structured extraction
-
-The same `[vision]` endpoint also serves MCP `extract_structured` (HTTP /
-TypeScript: primitive `extractStructured`). The runtime sends
-`{schema, content, purpose}` (bounded page text) and the provider returns
-`{"value": <json>}`. The runtime validates the value against the supplied JSON
-schema and bounds it before it becomes `structuredExtraction` evidence — there
-is no confidence floor or action verification on this path.
-Gated like vision: `browser:mutate` + `vision:assist`, session
-`executionPolicy.visionAssist`, and a configured `[vision]` provider.
-
-## IntentHints
-
-Optional disambiguation on most intents (`locate`, `fill`, `follow`, …). Wire
-fields (camelCase):
+`meta` holds `commandId`, `workflowId`, `attemptId`, `sessionId`, `pageId` and `deadline`.
+
+## The intents
+
+| Intent | MCP tool | Class | Does |
+|---|---|---|---|
+| `locate` | `intent_locate` | Replayable | Finds a control and returns its fingerprint |
+| `fill` | `intent_fill` | Reconciliable | Sets one control and verifies the value |
+| `completeForm` | `intent_complete_form` | Reconciliable | Fills an ordered list of fields. Never submits |
+| `submitAndVerify` | `intent_submit_and_verify` | Boundary | Submits once and verifies `expectedState` |
+| `follow` | `intent_follow` | Reconciliable, Boundary with `boundary: true` | Activates a control and verifies the result |
+| `waitForState` | `intent_wait_for_state` | Replayable | Waits for a page condition |
+| `dismissObstruction` | `intent_dismiss_obstruction` | Reconciliable | Closes a popup, overlay or cookie banner |
+| `extract` | `intent_extract` | Replayable | Reads named fields without changing the page |
+| `detectChallenge` | `intent_detect_challenge` | Replayable | Classifies a captcha or verification challenge |
+| `solveChallenge` | `intent_solve_challenge` | Reconciliable | Runs the vision solve loop on a challenge |
+
+The class tells you how to retry. A Replayable intent is safe to repeat. A Reconciliable intent may need a page check before repeating. A Boundary intent changes the world and takes a checkpoint first; after a failure with `needsReconciliation`, inspect the page instead of retrying. See [Events and recovery](events-recovery.md).
+
+## Hints
+
+`hints` narrow which control matches:
 
 | Field | Meaning |
 |---|---|
-| `role` | Accessible role hint |
-| `nearText` | `TextMatch` (`exact` / `contains` / `regex`) near the control |
-| `ordinal` | Zero-based index among same role/name peers (from snapshot targets) |
-| `framePath` / `shadowPath` | Nested `TargetSpec` paths |
-| `allowBestMatch` | Permit best-effort matching when set |
+| `role` | Accessible role |
+| `accessibleName` | Accessible name. May be a `controlId` from `form_snapshot` |
+| `nearText` | `{kind: "exact" \| "contains" \| "regex", value}` near the control |
+| `ordinal` | Zero-based index among peers with the same role and name |
+| `framePath`, `shadowPath` | Paths into frames and shadow roots |
+| `allowBestMatch` | Accept a best-effort match |
 
-Copy snapshot targets with `intentHintsFromAccessibilityTarget` so `ordinal`
-survives. IntentHints support ordinal; when you need the full `TargetSpec` on
-a primitive, prefer MCP flat tools (omit `selector`) or HTTP/TS with
-`selector: ""` beside `target` — see
-[Accessibility snapshot](accessibility-snapshot.md).
+Copy a snapshot node's `target` into hints so `ordinal` is kept. In TypeScript, use `intentHintsFromAccessibilityTarget(node.target)`. With `role` and exact `nearText`, `nearText` is the accessible name and `purpose` stays a free-text task description. A `purpose` is required and bounded. With no hints, `submitAndVerify` targets the button named by `purpose`.
 
-## Purpose bounds
+## Fill values
 
-Intent `purpose` strings are non-empty and bounded (see
-`MAX_INTENT_PURPOSE_BYTES` in the TypeScript SDK). Helpers call
-`assertIntentPurpose`.
+`fill` and each `completeForm` field take a `value` with a `kind`:
+
+| Kind | Shape | Notes |
+|---|---|---|
+| `setText` | `{value, clearFirst?}` | `clearFirst` defaults to true |
+| `selectOne` | `{value}` | Matches option value first, then visible label |
+| `selectMany` | `{values}` | Multi-select |
+| `setChecked` | `{checked}` | Checkbox or radio. A radio cannot be unchecked |
+| `setFiles` | `{paths}` | Needs `file:upload` |
+| `clear` | none | Empties the field |
+
+A fill succeeds only with postcondition evidence. It also reads the browser's constraint validity. A committed value that violates `required`, `pattern`, a range or a type fails with `verificationFailed`. The evidence has `formControlValid` and `formControlValidationMessage`; fix that field and retry.
+
+## Fill a whole form
+
+`completeForm` resolves each field just before filling it, so a conditional field can follow the field that reveals it.
+
+```json
+{"name": "intent_complete_form", "arguments": {
+  "workflowHandle": "wf_0123456789abcdef0123456789abcdef",
+  "purpose": "applicant contact form",
+  "fields": [
+    {"name": "email", "purpose": "enter the applicant email",
+     "hints": {"role": "textbox", "accessibleName": "Email address"},
+     "value": {"kind": "setText", "value": "ada@example.com"}},
+    {"name": "terms", "purpose": "accept terms",
+     "hints": {"role": "checkbox", "accessibleName": "I agree"},
+     "value": {"kind": "setChecked", "checked": true}}
+  ]
+}}
+```
+
+- `fields` has 1 to 128 entries. Each `name` is unique and labels the evidence. If `name` is a `controlId` from `form_snapshot` and a field has no hints, bobby uses that control.
+- Execution stops at the first failed field. The evidence keeps the fields already filled, so retry only the rest.
+- Success evidence is compact by default and lists `revealedControls` with usable targets. Pass `evidenceDetail: "full"` to debug.
+- The MCP tool accepts top-level `hints` only when `fields` has exactly one entry without its own hints. Otherwise it fails with `hintsPerField`.
+
+## Submit and verify
+
+```json
+{"name": "intent_submit_and_verify", "arguments": {
+  "workflowHandle": "wf_0123456789abcdef0123456789abcdef",
+  "purpose": "Place order",
+  "expectedState": {"condition": {"kind": "url", "matcher": {"kind": "contains", "value": "/confirmed"}}, "timeoutMs": 30000}
+}}
+```
+
+`expectedState` is required. Use a `text` or `url` condition when you know the success state, or `networkQuiet` when you do not. With `networkQuiet` the result has `submitSettlement`:
+
+- `settled`: the page went quiet with no invalid controls.
+- `validationRejected`: fix the fields listed in `formValidation` (control, kind, name, target, validity, never values) and do not resubmit blindly.
+
+A second submit in the same workflow fails with `boundaryAlreadyExecuted` unless you pass `reSubmit: true`.
+
+## Wait conditions
+
+`waitForState` and the `wait_for` tool share one condition shape. See the table in [MCP tools](../surfaces/mcp-tools.md#reading-a-page). `state` is one of `attached`, `detached`, `visible`, `hidden`, `enabled`, `disabled`. `ready` is one of `commit`, `domContentLoaded`, `interactive`, `networkIdle`.
+
+## Follow
+
+`intent_follow` replaces a click followed by a wait. Give it `expectedState` (alias `expectedDestination`; send exactly one). Set `boundary: true` when the activation changes state, such as signing out. Evidence is compact by default.
+
+## Extract
+
+```json
+{"name": "intent_extract", "arguments": {
+  "workflowHandle": "wf_0123456789abcdef0123456789abcdef",
+  "purpose": "read the product details",
+  "fields": [
+    {"name": "title", "purpose": "product title", "value": {"kind": "text"}},
+    {"name": "link", "purpose": "product link", "value": {"kind": "href"}}
+  ]
+}}
+```
+
+Value kinds are `text`, `attribute` (with an attribute name) and `href`. A field that does not resolve is reported on that field, not as a call failure. Fields target actionable elements. To read plain page text, use `inspect` or `extract_structured`.
+
+## Vision assist
+
+When deterministic matching is stuck, an intent can ask a vision provider to pick a control from a screenshot. This is off unless all three hold:
+
+1. The caller holds `vision:assist`.
+2. The session was created with `executionPolicy.visionAssist = true`.
+3. A vision backend is configured. See [Configuration](configuration.md#vision).
+
+The provider chooses among up to five near-miss candidates, and bobby accepts a proposal only above a 0.75 confidence floor and after verifying it. With `[vision].prefill = true` (the default), `intent_complete_form` resolves unresolved fields from one screenshot before it starts. Evidence marks the path as `deterministic`, `visionPrefill` or `visionFallback`.
+
+`intent_detect_challenge` classifies a captcha and never acts: its `challengeDetection` evidence holds the type, confidence and whether it blocks, or `null` for a clean page. `intent_solve_challenge` runs the solve loop until the challenge clears or `timeoutMs` passes. bobby does not scan pages for challenges on its own.

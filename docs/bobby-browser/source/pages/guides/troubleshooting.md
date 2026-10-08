@@ -4,174 +4,88 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 # Troubleshooting
 
-Run `bobby doctor` first when something local fails to start. It is read-only:
-it reports, it does not rewrite bootstrap files or create storage directories.
-Use `--fix` for those repairs, and `--config` / `--bootstrap-env` to match how
-you launch `serve`. See [CLI reference](cli.md).
+Start with `bobby doctor`. It checks configuration, credential, storage, browser and host entries without changing anything. `bobby doctor --fix` repairs bobby-owned state. Pass `--config` and `--bootstrap-env` to match how you launch the server.
 
-## Auth failures (`401`)
+## Authentication errors (401)
 
-- Missing or wrong `Authorization: Bearer …`
-- Expired or revoked principal
-- Using bootstrap **file** vars incorrectly for HTTP clients — export the
-  plaintext as `AUTOMATION_RUNTIME_TOKEN` for the SDK / curl
-- MCP **stdio** needs all four `AUTOMATION_RUNTIME_BOOTSTRAP_*` vars (not token alone)
-- Non-loopback `serve` without a bootstrap credential — run `bobby init` first
+- Missing or wrong `Authorization: Bearer ...`, or an expired or revoked principal.
+- SDK and curl clients read `AUTOMATION_RUNTIME_TOKEN`. Set it with `export AUTOMATION_RUNTIME_TOKEN="$(bobby token)"`.
+- A direct `mcp-gateway` launch needs all four `AUTOMATION_RUNTIME_BOOTSTRAP_*` variables.
+- A non-loopback `bobby serve` needs a credential from `bobby init` first.
 
 See [Authentication](auth.md).
 
-## `missingCapability` (`403`)
+## `missingCapability` (403)
 
-Principal lacks the capability for that operation (or nested command). Check the
-matrix in [Capabilities](../concepts/capabilities.md). Default `bobby init`
-mints the agent floor (no `authority:admin`); use `--preset unrestricted` for
-the full operator set. Scoped issued principals are narrower still.
+The caller lacks the capability for the operation or for a nested command. Compare against [Capabilities](../concepts/capabilities.md). `bobby init` creates the agent preset, which has no `authority:admin`. Use `--preset unrestricted` for operator work.
 
-## Wrong path (`404`)
+## Not found (404)
 
-Use `/v1/runtime`, not `/runtime`. Catalog: [HTTP API](../surfaces/http-api.md).
-Session delete is `DELETE /v1/sessions/{sessionId}` (not a POST).
+Authenticated routes are under `/v1`, for example `/v1/runtime`. Delete a session with `DELETE /v1/sessions/{id}`.
 
-## `EventGap` (`409` on events)
+## Event gap (409 on events)
 
-Retention advanced past your cursor. Re-read durable state, then resume from
-`earliestAvailable` — [Events and recovery](events-recovery.md).
+Retention moved past your cursor. Re-read durable state and resume from the earliest cursor. See [Events and recovery](events-recovery.md).
 
-## SSE / streaming events
+## MCP
 
-`GET /v1/events?after=…&limit=…&stream=1` is the SSE path. If your client cannot
-parse SSE frames, omit `stream` and use the batch JSON response instead.
+- Send `initialize` (protocol `2025-11-25`) before `tools/list` or `tools/call`.
+- After a token rotation over HTTP, send `initialize` again.
+- MCP over HTTP takes only a bearer token. It ignores `x-interface-version`, `x-correlation-id` and `x-deadline`.
+- `workflowBindingConflict` means a call mixed `workflowHandle` with explicit IDs. `unknownWorkflowHandle` means the handle is gone; use explicit IDs.
 
-## MCP initialize order
+## Browser and engine
 
-Call `initialize` (protocol `2025-11-25`) before `tools/list` or `tools/call`.
-After token rotate on HTTP MCP, re-initialize for that principal.
-MCP HTTP is bearer-only: no `x-interface-version`, `x-correlation-id`, or
-`x-deadline` — [MCP over HTTP](../surfaces/mcp-http.md).
+- The default engine is Firefox. If doctor warns about BiDi, run `bobby firefox-start` and pair again. See [Firefox companion](firefox-companion.md).
+- Chromium needs an installed browser. Set `BOBBY_CHROME_EXECUTABLE` when it is not in a standard location.
+- `engineUnreachable` means the configured engine did not answer. Run `bobby doctor`, fix what it names, and resend the request unchanged.
 
-## Browser / engine
+## Configuration and credential paths
 
-- Default engine preference is **Firefox**. If doctor warns on Firefox BiDi,
-  start Firefox with remote debugging and run `bobby enroll-firefox-profile` —
-  the selection persists and is picked up by serve, the MCP gateway, and
-  doctor (see [Firefox companion](firefox-companion.md)).
-  `AUTOMATION_RUNTIME_BROWSER_SELECTION` remains an override.
-- Chromium live work needs an installed Chromium. Set
-  `BOBBY_CHROMIUM_EXECUTABLE` when not in a standard location.
-- Live browser tests are `--ignored` until a browser is present.
+- A malformed `config.toml` stops startup and names the path. Fix the TOML. Keep secrets out of it.
+- `--config` and `BOBBY_BROWSER_CONFIG` select the config file. `--bootstrap-env` and `BOBBY_BROWSER_BOOTSTRAP_ENV` select the credential file.
+- `unsupportedInterfaceVersion` means `x-interface-version` is missing or wrong. Send `{{INTERFACE_VERSION}}`.
 
-## Config and bootstrap paths
+## Form fills fail
 
-- Malformed `config.toml` fails startup and prints the path — fix TOML, do not
-  put secrets in the file.
-- `BOBBY_BROWSER_CONFIG` / `bobby serve --config` select the file.
-- `BOBBY_BROWSER_BOOTSTRAP_ENV` / `bobby serve --bootstrap-env` select the secret
-  dotenv from `bobby init`.
-
-## Interface version
-
-Send `x-interface-version: {{INTERFACE_VERSION}}`. Mismatch →
-`unsupportedInterfaceVersion`.
-
-## Session lifecycle
-
-- Create: `POST /v1/sessions` / `session_create`
-- Delete / close: `DELETE /v1/sessions/{id}` / MCP `session_close` /
-  TypeScript `deleteSession`
-- Bring a page forward: primitive `activatePage` or MCP `page_activate`
-
-## Semantic fill failures
-
-- Prefer exact `nearText` + `role` when the accessible name is known; leave
-  `purpose` as the agent task phrase.
-- `kind: "selectOne"` matches option **value** first, then fallback to visible label (trimmed, case-insensitive).
-- `kind: "setChecked"` is only for checkbox/radio. Radios accept
-  `checked: true` only — unchecking a radio fails closed.
-- A fill without postcondition evidence fails; do not treat a silent click as
-  success. Re-locate and retry under a new attempt id / idempotency key.
-- Files need `file:upload` on the bearer — missing capability →
-  `missingCapability`.
-- `completeForm` stops at the first failed field; evidence includes prior
-  successful fields plus the failing field. Fix that field (or hints), then
-  resubmit the whole form intent under a new attempt / idempotency key.
-  Duplicate or empty field `name`s are rejected before dispatch.
-- Native HTML constraints: if evidence has `formControlValid: "false"`, read
-  `formControlValidationMessage` and correct that value. Do not treat a
-  committed DOM value as success when constraint validity failed.
+- Prefer `role` plus exact `nearText` when you know the label, and keep `purpose` as the task description.
+- A fill without postcondition evidence fails. Do not treat a click as success. Locate again and retry with a new attempt ID or idempotency key.
+- `setChecked` is for checkboxes and radios. A radio cannot be unchecked.
+- File fields need `file:upload`.
+- `intent_complete_form` stops at the first failed field. Fix that field and resend the form. Duplicate or empty field names are rejected.
+- If evidence shows `formControlValid: "false"`, read `formControlValidationMessage` and correct the value.
 
 ## Accessibility snapshot
 
-- Primitive `accessibilitySnapshot` / MCP `a11y_snapshot` needs only
-  `browser:mutate`.
-- Default `maxNodes` is 256 (clamp 1…2048). Large pages set `truncated: true`
-  — raise `maxNodes` or narrow the viewport / DOM for more context. Retained
-  command-ready targets still include globally correct duplicate ordinals.
-- Form-control nodes may include `value`, `required`, `invalid`, `checked`,
-  bounds, and related flags. Password / masked values appear as
-  `"[redacted]"`.
-- Actionable nodes expose `target: { role, accessibleName, ordinal? }`. Use
-  `intentHintsFromAccessibilityTarget` to preserve that identity through
-  intents, including duplicate controls with `ordinal`. Primitive `TargetSpec`
-  inputs and MCP `click` / `type_text` / `upload_files` accept the same target
-  without a selector.
-- Guide: [Accessibility snapshot](accessibility-snapshot.md).
+- Large pages return `truncated: true`. Raise `maxNodes` or scope the snapshot with `target`.
+- Password and masked values read `"[redacted]"`.
+- Pass a node's `target` straight to `click`, `type_text` or `upload_files`. See [Accessibility snapshot](accessibility-snapshot.md).
 
 ## Vision assist
 
-- For ACP profiles, `bobby doctor` reports `vision-routing`,
-  `vision-acp-reachability`, and `vision-auth-path` separately and performs no
-  model call or harness `authenticate`. If reachability warns, verify the
-  configured harness executable is on PATH. `vision-auth-path` describes the
-  configured `auth-broker` strategy only — doctor does not probe whether the
-  harness advertises a matching method.
-- At runtime Bobby calls harness `authenticate` via `auth-broker`; unmatched
-  methods fail closed. Multi-step OAuth continue is not productized — log in
-  through the harness CLI (or use `existing-session` / `environment`) before
-  vision assist. Bobby does not read IDE Keychains.
-- ACP harness credentials are not Bobby configuration. Do not paste provider
-  tokens into `config.toml`. Direct/local providers remain available with
-  `--backend direct`.
+Vision assist needs the `vision:assist` capability, `executionPolicy.visionAssist = true` on the session, and a reachable provider. A capability and an opt-in alone are not enough.
 
-- Needs **all three**: `vision:assist` capability, session
-  `executionPolicy.visionAssist = true`, and `[vision].endpoint_url`.
-- Capability + session opt-in alone does **not** make vision assist work — the
-  provider endpoint must be **reachable**. `bobby doctor` warns on
-  `vision-service` when a loopback URL has no selected `provider` and nothing
-  listening on it, or when a propose round-trip to the URL fails.
-- **Preferred setup:** `bobby vision connect` → export printed env vars →
-  `bobby serve --vision`. With a selected `provider` and a loopback URL, each
-  runtime starts its own vision proxy on a free loopback port, and
-  `bobby doctor` reports `vision-service` ok without probing the configured
-  port. A `bobby vision-proxy` you run yourself serves the URL only when no
-  `provider` is selected.
-- `bobby doctor` also warns on `vision-provider` when `provider` names a
-  missing `[vision.providers.*]` entry, and on `vision-upstream-key` when the
-  active profile's `api_key_env` is unset (local profiles like Ollama / LM
-  Studio omit `api_key_env` — that check is skipped).
-- Token lives in the env named by `token_env` — never in `config.toml`.
-- Endpoint must be https (or http on loopback). Bad proposals fail closed.
-- LM Studio / MLX: use the Server URL the app shows; **1234** is a common
-  default port — confirm in the UI before editing `base_url`.
-- Code-review-graph answers **code structure**; bobby vision answers **page
-  pixels** — do not conflate the two.
-- Guide: [Intent commands](intents.md#vision-provider) /
-  [Configuration](configuration.md#vision).
+- Set up the provider with `bobby vision connect`, export the variables it prints, and start with `bobby serve --vision`. See [Configuration](configuration.md#vision).
+- Doctor checks: `vision-service` (provider reachable), `vision-provider` (selected profile exists), `vision-upstream-key` (the profile's key variable is set), `vision-routing`, `vision-acp-reachability` and `vision-auth-path` for ACP profiles. The ACP checks make no model call.
+- For an ACP harness, log in through the harness first. bobby calls the harness's `authenticate` at run time and fails closed when no advertised method matches. It does not read IDE keychains or store provider tokens.
+- The token lives in the variable named by `token_env`, never in `config.toml`. Endpoints must be `https`, or `http` on loopback.
+- For LM Studio or MLX, use the server URL the app shows. Port 1234 is common but not fixed.
 
-## Error catalog (`InterfaceErrorCode`)
+## Error codes
 
 | Code | Meaning |
 |---|---|
-| `invalidRequest` | Malformed headers/body/query |
-| `unsupportedInterfaceVersion` | Bad or missing interface version |
-| `invalidIdempotencyKey` | Idempotency key shape/bounds |
+| `invalidRequest` | Malformed headers, body or query |
+| `unsupportedInterfaceVersion` | Interface version missing or wrong |
+| `invalidIdempotencyKey` | Key is not 1 to 128 printable ASCII characters |
 | `idempotencyConflict` | Same key, different payload |
-| `deadlineExceeded` | Past `x-deadline`, or the command's `timeoutMs` envelope deadline expired mid-flight (retryable) |
-| `authenticationFailed` | Bad/missing bearer |
+| `deadlineExceeded` | Past `x-deadline`, or the command's `timeoutMs` ran out (retryable) |
+| `authenticationFailed` | Bad or missing bearer |
 | `tokenExpired` | Principal expired |
 | `missingCapability` | Capability check failed |
-| `malformedScope` | Scope/authority malformed |
+| `malformedScope` | Scope or authority malformed |
 | `artifactDenied` | Artifact access denied |
 | `unsupportedOperation` | Operation not supported |
-| `notFound` | Missing resource |
-| `resourceExhausted` | Capacity / in-flight limits |
+| `notFound` | Resource missing |
+| `resourceExhausted` | Capacity or in-flight limit reached |
 | `internal` | Unexpected server failure |

@@ -4,17 +4,12 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 # Reporting vulnerabilities
 
-Report security issues privately. Do not open public GitHub issues for
-vulnerabilities that could put operators or end users at risk.
-
-Preferred channel and response expectations are documented in
-[SECURITY.md](https://github.com/cavi-ai/bobby-browser/blob/main/SECURITY.md)
-in the repository root.
+Report security issues privately. Do not open public GitHub issues for vulnerabilities that could put operators or users at risk. The channel and response expectations are in [SECURITY.md](https://github.com/cavi-ai/bobby-browser/blob/main/SECURITY.md).
 
 Include:
 
-- Affected version / commit
-- Reproduction steps (loopback-only if possible)
-- Impact (auth bypass, capability escalation, secret leakage, …)
+- The affected version or commit
+- Steps to reproduce, on loopback if possible
+- The impact, such as authentication bypass, capability escalation or secret leakage
 
-See also the [security model](model.md) summary.
+See the [security model](model.md) for the guarantees bobby aims to hold.
