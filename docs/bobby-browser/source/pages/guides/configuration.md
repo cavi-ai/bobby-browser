@@ -4,138 +4,195 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 # Configuration
 
-`bobby serve`, `bobby mcp-stdio`, and the gateways load the scope's
-`config.toml` (the OS config dir `bobby-browser/` for the personal scope),
-overridable with `--config` / `BOBBY_BROWSER_CONFIG`. The working directory
-never selects the config, so agents started anywhere reach the same runtime.
-Relative paths inside the file resolve next to it. A missing file uses
-built-in defaults anchored the same way; a malformed file fails startup and
-names the path.
+bobby reads `config.toml` from the scope's config directory (the OS config directory under `bobby-browser/` for the personal scope). `--config` or `BOBBY_BROWSER_CONFIG` selects another file. The working directory never selects the config, so agents started anywhere reach the same runtime. Relative paths in the file resolve next to it. A missing file uses the defaults below. A malformed file stops startup and names the path.
 
-The committed
-[`config.toml`](https://github.com/cavi-ai/bobby-browser/blob/main/config.toml)
-is the canonical field list and mirrors `AppConfig` (`crates/config`). Values
-below match `AppConfig::default()` unless you override them.
+Credentials never go in `config.toml`. See [Authentication](auth.md).
 
 ## `[server]`
 
-| Field | Default | Meaning |
+| Key | Default | Meaning |
 |---|---|---|
-| `host` | `127.0.0.1` | Bind host (keep loopback unless you control the network) |
-| `port` | `7777` | HTTP listen port (`/healthz`, `/v1/*`) |
+| `host` | `127.0.0.1` | Bind address. Keep loopback unless you control the network |
+| `port` | `7777` | HTTP port for `/healthz` and `/v1/*` |
+| `shutdown_timeout_ms` | `10000` | Grace period on shutdown |
 
 ## `[browser]`
 
-| Field | Default | Meaning |
+| Key | Default | Meaning |
 |---|---|---|
+| `executable` | from `BOBBY_CHROME_EXECUTABLE` | Chromium binary |
 | `profiles_dir` | `./data/profiles` | Per-profile browser state |
-| `headless` | `true` | No visible window |
-| `max_active` | `8` | Max concurrent browser workers |
-| `upload_roots` | `["./data/uploads"]` | Allowed roots for file upload |
-| `downloads_dir` | `./data/downloads` | Download output directory |
+| `headless` | `true` | Run without a window |
+| `max_active` | `8` | Concurrent browser workers |
+| `upload_roots` | `["./data/uploads"]` | Directories uploads may read from |
+| `downloads_dir` | `./data/downloads` | Download destination |
 | `artifacts_dir` | `./data/artifacts` | Screenshots and other artifacts |
-| `max_artifact_bytes` | `8388608` | Max single artifact size |
-| `max_screenshot_dimension` | `16384` | Max screenshot width/height |
-| `max_js_result_bytes` | `65536` | JS eval result bound |
-| `max_js_timeout_ms` | `30000` | Clamp for JS `timeout_ms` |
+| `max_artifact_bytes` | `8388608` | Largest single artifact |
+| `max_screenshot_dimension` | `16384` | Largest screenshot width or height |
+| `max_js_result_bytes` | `65536` | JavaScript result bound |
+| `max_js_timeout_ms` | `30000` | Ceiling for evaluation `timeoutMs` |
 
-Engine choice is **not** a TOML field. Every entry point — `bobby serve`, the
-stdio MCP gateway, and `bobby doctor` — resolves the browser selection through
-one canonical order:
+### Engine selection
 
-1. `AUTOMATION_RUNTIME_BROWSER_SELECTION` (JSON) — an override; wins when set.
-2. The persisted enrollment at
-   `<config-dir>/bobby-browser/browser-selection.json`, written atomically
-   (owner-only, `0600`, on Unix) by `bobby enroll-firefox-profile`.
-3. The built-in default: exact **Firefox** (fail-closed — with no enrolled
-   profile, startup fails with an actionable error rather than silently
-   downgrading engines).
+The engine is not a TOML key. The runtime resolves it in this order:
 
-A source that is present but malformed is always an error, never skipped.
-`bobby doctor` reports which source resolved.
+1. `AUTOMATION_RUNTIME_BROWSER_SELECTION` (JSON), when set.
+2. The paired profile in `browser-selection.json`, written by Firefox pairing.
+3. Firefox. With no paired profile, startup fails with an actionable error.
 
-A managed-Chromium selection can opt into a durable profile the same way an
-enrolled Firefox profile does, by naming it in the exact-engine form:
-`{"mode": "exact", "engine": "chromium", "profileId": "<name>"}`. That
-persists the session's user-data-dir at `<profiles_dir>/chromium/<name>`
-instead of a disposable per-session directory, and attaches context-graph
-promotion under the same id (see `[context]` below). A managed-Chromium
-selection with no `profileId` keeps a disposable browser profile per session
-and remembers under the shared `managed-chromium` identity.
+A selection that is present but malformed is an error. `bobby doctor` reports which source won.
+
+A managed Chromium selection can use a durable profile with `{"mode": "exact", "engine": "chromium", "profileId": "<name>"}`. Its data lives in `<profiles_dir>/chromium/<name>`. Without `profileId`, each session gets a disposable profile.
 
 ## `[storage]`
 
-| Field | Default | Meaning |
+| Key | Default | Meaning |
 |---|---|---|
-| `journal_path` | `./data/storage/commands.jsonl` | Append-only command journal |
-| `scheduler_journal_path` | `./data/storage/scheduler-jobs.jsonl` | Append-only job scheduler journal |
-| `checkpoints_dir` | `./data/storage/checkpoints` | Journal checkpoints |
-| `authority_path` | `./data/storage/authority.json` | Authority storage |
+| `journal_path` | `./data/storage/commands.jsonl` | Command journal |
+| `scheduler_journal_path` | `./data/storage/scheduler-jobs.jsonl` | Job journal |
+| `checkpoints_dir` | `./data/storage/checkpoints` | Checkpoints |
+| `authority_path` | `./data/storage/authority.json` | Authority records |
 
 ## `[context]`
 
-Durable shared context graph (remembered form structure per site). Runtimes
-whose engine selection carries a durable profile identity open the store: a
-Firefox companion enrollment, a Chromium selection with an explicit
-`profileId` (see `[browser]` above), or managed Chromium without one, under
-`managed-chromium`. A profile-less Firefox selection and a `prefer` list read
-and write nothing.
+Remembered form structure per site. See [Context graph](../concepts/context-graph.md). It opens for profiles with a durable identity: a paired Firefox profile, a Chromium selection with `profileId`, or managed Chromium (stored under `managed-chromium`).
 
-| Field | Default | Meaning |
+| Key | Default | Meaning |
 |---|---|---|
-| `dir` | `<config-dir>/bobby-browser/context` (filled by `bobby serve`) | Store root; the profile id is appended as a subdirectory. Unset disables promotion |
-| `ttl_days` | `90` | Days a control record is kept without a verified success; swept at store open |
+| `dir` | `context` in the config directory | Store root. Unset disables remembering |
+| `ttl_days` | `90` | Days to keep a control without a verified success |
 
 ## `[mcp]`
 
-Presentation of the MCP tool surface. Nothing here is an enforcement
-boundary — capability gates remain the only one.
-
-| Field | Default | Meaning |
+| Key | Default | Meaning |
 |---|---|---|
-| `startup_toolset` | unset (`explore`) | Phase a connection starts in: `full`, `explore`, `act`, `intent`, `verify`. `BOBBY_MCP_TOOLSET` overrides it |
+| `startup_toolset` | unset (`explore`) | Toolset a connection starts with: `full`, `explore`, `act`, `intent`, `verify`. `BOBBY_MCP_TOOLSET` overrides it |
 
-An agent downloads all of `tools/list` during the handshake, before it can
-call `toolset_select` — so a phase chosen after connecting cannot buy back
-bytes already paid for. Starting narrow can:
-
-| Phase | `tools/list` |
-|---|---|
-| `full` | ~77 KB |
-| `explore` | ~33 KB |
-| `verify` | ~32 KB |
-| `act` | ~43 KB |
-| `intent` | ~48 KB |
-
-Narrowing changes only what is *advertised*. Hidden tools stay callable, and
-every phase keeps session/page lifecycle plus `toolset_select`, so an agent
-can always widen or clean up. An unparseable `BOBBY_MCP_TOOLSET` is ignored
-with a warning; an unparseable `startup_toolset` in config fails startup.
+A smaller starting set shrinks the `tools/list` an agent downloads at connect. It only changes what is advertised; hidden tools stay callable. An invalid `startup_toolset` stops startup, while an invalid `BOBBY_MCP_TOOLSET` is ignored with a warning. See [MCP tools](../surfaces/mcp-tools.md#toolsets).
 
 ```toml
 [mcp]
 startup_toolset = "intent"
 ```
 
-## `[http]` (outbound)
+## `[http]`
 
-Controls egress from the runtime (downloads, fetches), not the broker listen
-socket: `allow_loopback`, `allow_private_network`, redirect/body/timeout caps,
-`max_concurrent_requests`. Defaults deny private/loopback egress.
-`max_download_bytes` defaults to `67108864` (64 MiB) and is projected into the
-MCP `download_url.maxBytes` schema at startup, so clients can select a valid
-bound without probing the policy.
+Limits on outbound requests the runtime makes, such as downloads. These are not the server's own listener.
 
-## `[vision]`
+| Key | Default | Meaning |
+|---|---|---|
+| `allow_loopback` | `false` | Allow requests to loopback addresses |
+| `allow_private_network` | `false` | Allow requests to private networks |
+| `max_redirects` | `5` | Redirect limit |
+| `max_header_bytes` | `65536` | Response header limit |
+| `max_body_bytes` | `8388608` | Response body limit |
+| `max_download_bytes` | `67108864` | Largest download. Advertised as the maximum for `download_url.maxBytes` |
+| `request_timeout_ms` | `30000` | Per-request timeout |
+| `max_concurrent_requests` | `8` | Concurrent outbound requests |
 
-Vision can use either a direct HTTP provider or an ACP harness. ACP is the
-recommended path when Codex, Claude, OpenCode, Hermes, OpenClaw, or another
-workflow harness already owns the model login: Bobby never receives or stores
-that provider token.
+## `[interface]`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `max_request_bytes` | `1048576` | Largest request body |
+| `max_event_batch` | `256` | Events per batch read |
+| `max_event_retention` | `16384` | Events kept per principal |
+| `max_connections` | `64` | Concurrent connections, including attached MCP and ACP gateways |
+| `token_records_path` | `./data/storage/authorities.json` | Issued principal records |
+| `max_principals` | `16` | Enrolled principals |
+| `max_in_flight_per_principal` | `8` | In-flight HTTP requests per principal. The next gets `resourceExhausted` |
+| `max_rejection_workers` | `16` | Concurrent rejection workers (must be above 0) |
+
+## `[cdp]`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Bind CDP when running `bobby serve` |
+| `host` | `127.0.0.1` | Bind address |
+| `port` | `9222` | Listen port |
+| `auto_session` | `true` | Open a session for a client that has none |
+
+See [Authenticated CDP](../surfaces/cdp.md).
+
+## `[observability]`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `level` | `info` | Log level |
+| `format` | `json` | `json` or `pretty` |
+| `sink` | `stdout` | Log destination |
+
+`bobby doctor` can check vision health against objectives under `[observability.slo]`. Both are optional, and an unset one is not evaluated.
+
+| Key | Meaning |
+|---|---|
+| `vision_max_failure_rate` | Fail when the share of proposals ending `failed` or `timed_out` exceeds this (0.0 to 1.0) |
+| `vision_min_acceptance_rate` | Fail when the share of accepted proposals drops below this (0.0 to 1.0) |
+
+## Vision
+
+Vision assist lets an intent ask a model to choose a control from a screenshot. It is off unless the caller holds `vision:assist`, the session sets `executionPolicy.visionAssist`, and a backend is configured here. See [Intent commands](intents.md#vision-assist).
+
+### Set up a provider
 
 ```bash
-bobby vision connect --yes --backend acp --provider codex \
-  --command codex --arg acp --auth advertised
+bobby vision connect --yes --provider openai
+export BOBBY_VISION_TOKEN=...
+export OPENAI_API_KEY=...
+bobby serve --vision
+```
+
+`connect` writes the settings below. With a loopback `endpoint_url` and a selected `provider`, each runtime starts its own vision proxy on a free loopback port and sends vision requests there. The proxy exits with the runtime. A `bobby vision start` you run yourself serves `endpoint_url` only when no `provider` is selected.
+
+Add `--activate` to readiness-test the provider right away, and `--download-model` to let an MLX setup fetch a missing model. Ollama and LM Studio manage their own servers. `bobby doctor --fix` repeats the readiness test and normalizes bobby-owned settings.
+
+### Direct backend
+
+| Key | Default | Meaning |
+|---|---|---|
+| `backend` | `direct` | `direct` or `acp` |
+| `endpoint_url` | unset | Proxy URL. `https`, or `http` on loopback only. Unset disables escalation |
+| `token_env` | unset | Name of the variable holding the bearer |
+| `timeout_ms` | `15000` | Per-proposal timeout |
+| `provider` | unset | Active profile under `[vision.providers]` |
+| `propose_budget_ms` | unset | Round-trip budget. `bobby doctor` warns above it, and `/v1/runtime` reports it as `visionProposeBudgetMs` |
+| `health_failure_threshold` | `3` | Consecutive failures before `/v1/runtime` reports the provider `unhealthy` (or `degraded` for budget violations) |
+| `prefill` | `true` | Resolve unresolved form fields from one screenshot before filling |
+
+Each `[vision.providers.<name>]` profile has `base_url` (required, OpenAI-compatible), `model` (required) and `api_key_env` (optional; omit for local servers).
+
+```toml
+[vision]
+endpoint_url = "http://127.0.0.1:9100/vision"
+token_env = "BOBBY_VISION_TOKEN"
+provider = "myhost"
+
+[vision.providers.myhost]
+base_url = "https://vision.example.com/v1"
+model = "my-vision-model"
+api_key_env = "MY_VISION_API_KEY"
+```
+
+Presets for `bobby vision connect --provider`:
+
+| Provider | `base_url` | `model` | `api_key_env` |
+|---|---|---|---|
+| `openai` | `https://api.openai.com/v1` | `gpt-4o-mini` | `OPENAI_API_KEY` |
+| `ollama` | `http://127.0.0.1:11434` | `llava` | none |
+| `lmstudio` | `http://127.0.0.1:1234/v1` | `local-model` | none |
+| `mlx` | local | selected model | none |
+| `custom` | `--base-url` | `--model` | `--api-key-env` |
+
+Override with `--base-url` and `--model`. For LM Studio, use the server URL the app shows.
+
+The proxy reads at most 1 MiB from an upstream response, counted after decompression, and rejects larger replies. Extracted values are capped at 64 KiB. Errors report the provider and HTTP status without the upstream body.
+
+### ACP backend
+
+An ACP harness that already holds the model login (Codex, Claude, OpenCode, Hermes, OpenClaw) can serve vision. bobby never receives that provider token. Each task runs in a fresh child session with bounded text and image content and a strict JSON result.
+
+```bash
+bobby vision connect --yes --backend acp --provider codex --command codex --arg acp --auth advertised
 ```
 
 ```toml
@@ -149,186 +206,28 @@ args = ["acp"]
 auth = "advertised"
 ```
 
-| Field | Default | Meaning |
+`auth` is one of `advertised`, `oauth-authorization-code`, `oauth-device-code`, `environment`, `existing-session` or `none`. bobby calls the harness's `authenticate` method that matches the strategy and fails closed if none is advertised. Log in through the harness first. bobby does not read keychains.
+
+### Corpus and training data
+
+| Key | Default | Meaning |
 |---|---|---|
-| `prefill` | `true` | Before a form mutates, one screenshot proposes candidate-grounded targets for unresolved fields, with at most four provider calls in flight. Set `false` to disable |
-| `corpus_dir` | unset | When set, vision escalations append privacy-minimized JSONL records to `<corpus_dir>/vision-corpus.jsonl`: a separately masked screenshot, sanitized site context, candidate-only action, terminal outcome, and resolved target index. Records are skipped if a masked screenshot cannot be captured. Unset writes nothing |
-| `collect_training_data` | `false` | Capture proxy request/proposal pairs only when the request carries the separately masked corpus screenshot. Raw-only requests are not persisted. These unlabeled pairs are excluded from supervised training until an outcome and target are attached. Independent of `corpus_dir` |
-| `training_data_dir` | `vision-training-data` | Destination for `collect_training_data` captures |
+| `corpus_dir` | unset | Write privacy-reduced records of vision escalations to `vision-corpus.jsonl` here |
+| `collect_training_data` | `false` | Save proxy request and proposal pairs when a masked screenshot is present |
+| `training_data_dir` | `vision-training-data` | Destination for `collect_training_data` |
 
-Corpus collection supports authenticated pages without persisting typed or
-extracted values. Before capture, Bobby covers editable controls,
-credential-marked elements, and inaccessible embedded frames while preserving
-their geometry. URLs lose credentials, query strings, fragments, and dynamic
-identifiers; action labels retain candidate indexes instead of values. On Unix,
-directories use mode `0700` and files use `0600`. Non-editable page content can
-still appear in screenshots, so keep both paths local and access-controlled.
-
-Supported auth paths are `advertised`, `oauth-authorization-code`,
-`oauth-device-code`, `environment`, `existing-session`, and `none`. Bobby maps
-each path to an `auth-broker` strategy and calls the matching harness
-`authenticate` method when vision assist runs. Bobby does not read IDE
-Keychains or OS credential stores. If the harness does not advertise a method
-id that matches the configured strategy, vision assist fails closed. Multi-step
-OAuth (`AuthRequired` challenges) is not fully productized — establish the
-harness login outside Bobby first.
-Each vision task gets a new ACP child session, bounded text and image content,
-a strict JSON result, evidence-digest validation, and an explicit close.
-
-Deny-by-default direct HTTP vision-assist provider. Unset `endpoint_url` means
-escalation is unavailable even when the bearer and session opt in.
-
-| Field | Default | Meaning |
-|---|---|---|
-| `endpoint_url` | unset | Bobby → proxy URL — **https**, or **http only on loopback** |
-| `token_env` | unset | Env var name holding the loopback bearer (never store the token here) |
-| `timeout_ms` | `15000` | Per-proposal HTTP timeout |
-| `propose_budget_ms` | unset | Health budget for one propose round-trip: `bobby doctor`'s vision probe warns when the measured round-trip exceeds it, and `/v1/runtime` advertises it as `visionProposeBudgetMs`. Unset means no budget gate — `timeout_ms` stays the only bound. |
-| `health_failure_threshold` | `3` | Consecutive provider failures before `/v1/runtime` reports the provider `unhealthy` in `providerHealth`; the same count of consecutive `propose_budget_ms` violations reports `degraded`. Report-only — escalation behavior is unchanged. |
-
-`bobby doctor` also evaluates operator-facing SLOs against the runtime's
-operational metrics. Objectives live under `[observability.slo]` and every
-one is optional — unset objectives are not evaluated:
-
-| Field | Default | Meaning |
-|---|---|---|
-| `vision_max_failure_rate` | unset | Doctor fails when the fraction of vision proposals ending `failed` or `timed_out` exceeds this (0.0–1.0) |
-| `vision_min_acceptance_rate` | unset | Doctor fails when the fraction of accepted vision proposals falls below this (0.0–1.0) |
-
-Doctor's `provider-health` check fails on an `unhealthy` provider and warns
-on a `degraded` one; `slo-vision-latency-budget` warns when any propose
-round-trip exceeded `propose_budget_ms`.
-| `provider` | unset | Active profile name under `[vision.providers]` |
-| `providers.<name>` | unset | Named OpenAI-compatible upstream profiles |
-
-Each `[vision.providers.<name>]` profile:
-
-| Field | Required | Meaning |
-|---|---|---|
-| `base_url` | yes | Upstream OpenAI-compatible API base (proxy → provider) |
-| `model` | yes | Model id passed to the upstream |
-| `api_key_env` | no | Env var for the upstream API key; omit for local servers (Ollama, LM Studio) |
-
-Request / response shapes and confidence floor: [Intent commands](intents.md#vision-provider).
-Capability + session gates: [Capabilities](../concepts/capabilities.md).
-
-The vision proxy caps successful OpenAI-compatible, Ollama, and MLX upstream
-response bodies at 1 MiB before JSON decoding. The limit counts decompressed
-bytes and applies even without `Content-Length`. Oversized replies fail as
-invalid upstream payloads; the existing 64 KiB extracted-value limit still
-applies. Rejected requests report the provider and HTTP status without reading
-or exposing the upstream error body.
-
-Granting `vision:assist` and creating a session with
-`executionPolicy.visionAssist = true` is **not** enough for functional vision
-assist — the runtime must also reach a live provider at `[vision].endpoint_url`.
-When the URL is unset, escalation is unavailable even with capability and
-session opt-in. `bobby doctor` warns on `vision-service` when a loopback URL
-has no selected `provider` and nothing listening on it, or when a propose
-round-trip to the URL fails.
-
-Code-review-graph answers **code structure**; bobby vision answers **page
-pixels** — do not conflate the two.
-
-### Setup (preferred)
-
-1. Run `bobby vision connect` (interactive menu or `--yes --provider …`) to
-   write `endpoint_url`, `token_env`, `provider`, and the matching
-   `[vision.providers.*]` table.
-   Add `--activate` to load/readiness-test it immediately; MLX downloads also
-   require explicit `--download-model` consent.
-2. Export env vars the connect step printed (`BOBBY_VISION_TOKEN`, and
-   `api_key_env` when the profile requires one).
-3. Start `bobby serve --vision`. With a loopback `endpoint_url` and a
-   selected `provider`, every runtime starts its own `bobby vision-proxy` on a
-   loopback port the OS picks and sends vision there; the port in
-   `endpoint_url` is not used. The proxy exits with the runtime that started
-   it.
-
-These are distinct states:
-
-- **configured**: provider, model, and endpoint are persisted;
-- **cached**: the selected local model files exist;
-- **readiness-tested**: Bobby proved the configured provider can be reached or
-  loaded during a bounded check;
-- **runtime-loaded**: a running Bobby command currently owns the managed MLX
-  worker;
-- **externally managed**: Ollama or LM Studio owns its own server lifecycle.
-
-Explicit install selection performs the readiness test. `bobby doctor --fix`
-can repeat it and normalize Bobby-owned configuration. MLX is started only for
-the readiness check and then stopped; normal `serve`, `mcp-stdio`, and
-`acp-stdio` invocations own its runtime lifetime. `doctor --fix` never starts a
-persistent daemon. Downloading a missing selected MLX model additionally
-requires `--download-model`.
-
-A `bobby vision-proxy` you run yourself serves `endpoint_url` only when no
-`provider` is selected; with a provider selected, each runtime uses its own.
-
-```bash
-export BOBBY_VISION_TOKEN=…
-export OPENAI_API_KEY=…       # openai profile only
-bobby vision connect --yes --provider openai
-bobby serve --vision
-```
-
-### Preset providers
-
-| Provider | `base_url` (default) | `model` (default) | `api_key_env` |
-|---|---|---|---|
-| `openai` | `https://api.openai.com/v1` | `gpt-4o-mini` | `OPENAI_API_KEY` |
-| `ollama` | `http://127.0.0.1:11434` | `llava` | — |
-| `lmstudio` | `http://127.0.0.1:1234/v1` | `local-model` | — |
-
-For LM Studio (or MLX-hosted OpenAI-compatible servers), copy the **Server
-URL** the app displays — port **1234** is the common default, not a guarantee.
-Override with `bobby vision connect --base-url …` or edit
-`[vision.providers.<name>].base_url` after connect.
-
-### Custom provider
-
-Any OpenAI-compatible endpoint:
-
-```bash
-bobby vision connect --yes --provider custom \
-  --base-url https://my-host/v1 \
-  --model my-vision-model \
-  --api-key-env MY_VISION_API_KEY
-export MY_VISION_API_KEY=…
-export BOBBY_VISION_TOKEN=…
-bobby serve --vision
-```
-
-Or hand-edit:
-
-```toml
-[vision]
-endpoint_url = "http://127.0.0.1:9100/vision"
-token_env = "BOBBY_VISION_TOKEN"
-provider = "myhost"
-
-[vision.providers.myhost]
-base_url = "https://my-host/v1"
-model = "my-vision-model"
-api_key_env = "MY_VISION_API_KEY"   # omit when the upstream needs no key
-```
-
-`bobby doctor` warns on `vision-provider` when `provider` names a missing
-profile, and on `vision-upstream-key` when a profile's `api_key_env` is unset.
-
-`[vision]` is the single-provider form. `[nodes]` supersedes it — see below.
+Before capture, bobby covers editable controls, credential-marked elements and inaccessible frames, and strips URLs of credentials, query strings and fragments. Records are skipped if masking fails. Directories use mode 0700 and files 0600 on Unix. Other page content can still appear in screenshots, so keep these directories local and access-controlled.
 
 ## `[nodes.<name>]`
 
-Named, separately addressable nodes. A session picks one by name through
-`executionPolicy.visionNode`; nothing is process-wide.
+Named vision nodes. A session picks one with `executionPolicy.visionNode`.
 
-| Field | Default | Meaning |
+| Key | Default | Meaning |
 |---|---|---|
-| `kind` | required | `vision` — proposes an action from a screenshot. The only kind today; an unknown kind fails config load rather than being ignored. |
-| `endpoint_url` | required | Node URL — **https**, or **http only on loopback** |
-| `token_env` | unset | Env var name holding the node bearer (never store the token here) |
-| `timeout_ms` | `15000` | Per-call HTTP timeout |
+| `kind` | required | `vision`. Other values fail config load |
+| `endpoint_url` | required | `https`, or `http` on loopback |
+| `token_env` | unset | Variable holding the bearer |
+| `timeout_ms` | `15000` | Per-call timeout |
 
 ```toml
 [nodes.local-vision]
@@ -336,42 +235,4 @@ kind = "vision"
 endpoint_url = "http://127.0.0.1:8080/propose"
 ```
 
-A session that names no node escalates to no node. A session that names a node
-which is not configured is declined: the runtime never substitutes a different
-node, and never falls back to a remote default.
-
-Retained page context — what `context_ask` answers from — is held in-process,
-not in a node. There is deliberately no `kind = "context"`: an operator could
-write it and it would reach nothing.
-
-Locality comes from the address, not from a setting. A session bound to a
-loopback node cannot have its screenshots or page text leave the machine.
-
-When both `[vision]` and `[nodes]` are present, `[nodes]` wins and `[vision]`
-is ignored with a startup warning. With only `[vision]` set, that endpoint is
-reachable as a node named `vision`.
-
-## `[interface]`
-
-| Field | Default | Meaning |
-|---|---|---|
-| `max_request_bytes` | `1048576` | Max inbound request body |
-| `max_event_batch` | `256` | Max events per batch read |
-| `max_event_retention` | `16384` | Retained events per principal stream |
-| `max_connections` | `64` | Concurrent interface connections, including attached MCP/ACP gateway connections |
-| `token_records_path` | `./data/storage/authorities.json` | Issued principal records |
-| `max_principals` | `16` | Max enrolled principals |
-| `max_in_flight_per_principal` | `8` | Per principal: in-flight HTTP requests; the next one is refused with `resourceExhausted` |
-| `max_rejection_workers` | `16` | Concurrent rejection / policy-worker permits (must be > 0) |
-
-## Bootstrap env (not in config.toml)
-
-Credentials are never stored in `config.toml`. Resolve via:
-
-1. `AUTOMATION_RUNTIME_BOOTSTRAP_TOKEN` /
-   `…_PRINCIPAL` / `…_CAPABILITIES` / `…_EXPIRES_AT`
-2. Secret file (`--bootstrap-env` / `BOBBY_BROWSER_BOOTSTRAP_ENV` or OS config
-   `…/bobby-browser/bootstrap.env` from `bobby init`)
-3. Loopback auto-init on `bobby serve`
-
-See [Authentication](auth.md), [CLI reference](cli.md), and [Run the server](run.md).
+A session that names no node escalates to none. A session that names an unknown node is declined; bobby never substitutes another or falls back to a remote default. A session bound to a loopback node cannot send screenshots or page text off the machine. When `[nodes]` and `[vision]` are both set, `[nodes]` wins with a startup warning. With only `[vision]`, its endpoint is a node named `vision`.

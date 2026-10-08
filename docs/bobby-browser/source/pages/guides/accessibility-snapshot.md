@@ -4,148 +4,66 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 # Accessibility snapshot
 
-The `accessibilitySnapshot` primitive returns a compact accessibility tree for
-the current page. Class: **Replayable**. Capability: `browser:mutate` (no
-extra nested capability).
+An accessibility snapshot is a compact tree of what is on the page: roles, names, form state, and a ready-to-use `target` for every actionable element. Agents read it to decide what to do, then pass a `target` to `click`, `type_text`, `upload_files` or an intent. It needs `browser:mutate` and does not change the page.
 
-## Surfaces
+## Take a snapshot
 
-| Surface | How |
-|---|---|
-| HTTP / TypeScript SDK | `POST /v1/commands` primitive `accessibilitySnapshot` |
-| MCP | Flat tool `a11y_snapshot` (or the same primitive via `command_execute`) |
+MCP:
 
-## Request
-
-```ts
-await client.submit(
-  {
-    schemaVersion: 2,
-    commandId: crypto.randomUUID(),
-    workflowId: crypto.randomUUID(),
-    attemptId: crypto.randomUUID(),
-    sessionId: session.id,
-    pageId: page.id,
-    deadline: new Date(Date.now() + 60_000).toISOString(),
-    command: {
-      kind: "primitive",
-      input: {
-        kind: "accessibilitySnapshot",
-        input: { maxNodes: 256 },
-      },
-    },
-  },
-  { idempotencyKey: crypto.randomUUID() },
-);
+```json
+{"name": "a11y_snapshot", "arguments": {"workflowHandle": "wf_0123456789abcdef0123456789abcdef", "maxNodes": 256}}
 ```
 
-MCP: `a11y_snapshot` with `{ sessionId, pageId, maxNodes? }`.
+HTTP: submit a primitive command with `kind: "accessibilitySnapshot"` and `input: {"maxNodes": 256}` to `POST /v1/commands`.
 
-`maxNodes` is optional. Engines default to **256** and clamp to **1…2048**.
-When the live tree exceeds the budget, evidence sets `truncated: true`.
+`maxNodes` is 1 to 2048 and defaults to 256. When the page has more nodes, the evidence sets `truncated: true`; raise `maxNodes` or pass `target` to scope the snapshot to one region, such as the form you are working on. Over MCP, `workflow_observe` returns the same tree with retained context.
 
 ## Evidence
 
-Successful outcomes include `Evidence.accessibilitySnapshot`:
-
 ```ts
-{
-  kind: "accessibilitySnapshot",
-  pageId: string,
-  nodes: AccessibilityNode[],
-  truncated: boolean,
-}
+{ kind: "accessibilitySnapshot", pageId: string, nodes: AccessibilityNode[], truncated: boolean }
 ```
 
-### Node shape
+Each node is `{role, name, children?}`. Form controls add optional state:
 
-Every node is still a compact `{ role, name, children? }` tree — no DOM
-selectors, bounds, raw HTML, or browser backend IDs. Form controls may also
-carry structured state (all optional; omitted when unknown):
+| Field | Meaning |
+|---|---|
+| `value` | Current value. Sensitive values read `"[redacted]"` |
+| `description` | Accessible description |
+| `required`, `disabled`, `readOnly`, `invalid` | Constraint state |
+| `checked` | Checkbox or radio state |
+| `autocomplete` | Autocomplete token |
+| `valueMin`, `valueMax` | Range bounds |
+| `target` | `{role, accessibleName, ordinal?}` for actionable nodes |
 
-| Field | Wire | Meaning |
-|---|---|---|
-| `value` | string | Current control value (redacted when sensitive) |
-| `description` | string | Accessible description when present |
-| `required` | boolean | Required constraint |
-| `disabled` | boolean | Disabled |
-| `readOnly` | boolean | Read-only |
-| `invalid` | boolean | Currently invalid |
-| `checked` | boolean | Checkbox / radio checked state |
-| `autocomplete` | string | Autocomplete token |
-| `valueMin` / `valueMax` | string | Numeric / range bounds when exposed |
-| `target` | `{ role, accessibleName, ordinal? }` | Command-ready semantic target |
+Repeated role and name pairs get zero-based `ordinal` values in tree order. Ordinals count every matching control on the page, even ones cut by `maxNodes`. A node whose name is redacted has no `target`.
 
-Sensitive values (password controls, masked AX values, companion secret
-heuristics) serialize as `"[redacted]"` rather than the live contents.
+## Use a target
 
-Actionable nodes with a non-empty accessible name include a command-ready
-`target`. Unique role/name pairs omit `ordinal`. Repeated pairs receive stable,
-zero-based ordinals in accessibility-tree order (the second `Phone` textbox has
-`ordinal: 1`). Duplicate accounting covers the full engine snapshot before
-`maxNodes` truncation, so a retained target keeps its ordinal even when another
-matching control is outside the returned tree. Targets are omitted when the
-name is redacted.
+Pass it unchanged:
 
-### Using `target` in commands
+```json
+{"name": "type_text", "arguments": {
+  "workflowHandle": "wf_0123456789abcdef0123456789abcdef",
+  "target": {"role": "textbox", "accessibleName": "Phone", "ordinal": 1},
+  "value": "555-0100"
+}}
+```
 
-**MCP `click` / `type_text` / `upload_files`** — pass the snapshot `target`
-with `sessionId` and `pageId`; omit `selector`. `upload_files` also requires
-`paths`. A selector is required only on the legacy raw-selector path. See
-[MCP tools](../surfaces/mcp-tools.md).
+Over HTTP, a primitive command still has a `selector` field. Send `selector: ""` next to `target`.
 
-**HTTP / TypeScript primitives** — `ClickCommand`, `TypeTextCommand`, and
-`UploadFilesCommand` still carry a required `selector: string` on the wire.
-When driving from a snapshot `target`, set `selector: ""` and pass `target`
-(the SDK accepts a minimal `{ role, accessibleName, ordinal? }` as
-`TargetSpec`). Prefer MCP flat tools when you want to omit `selector`
-entirely.
-
-**Intent targeting** — convert the snapshot target into intent hints. The SDK
-helper preserves `role`, accessible name, and `ordinal`, so the same flow works
-for both unique and duplicate controls:
+For intents, convert the target to hints. In TypeScript:
 
 ```ts
 import { fillEnvelope, intentHintsFromAccessibilityTarget } from "@cavi-ai/bobby-browser";
 
-const node = /* AccessibilityNode with target */;
-await client.submit(
-  fillEnvelope(
-    meta,
-    "enter phone",
-    { kind: "text", text: "555-0100", clearFirst: true },
-    intentHintsFromAccessibilityTarget(node.target!),
-  ),
-  { idempotencyKey: crypto.randomUUID() },
-);
+fillEnvelope(meta, "enter phone", { kind: "setText", value: "555-0100" },
+  intentHintsFromAccessibilityTarget(node.target!));
 ```
 
-For primitive commands, `TargetSpec` fields are optional in the TypeScript SDK,
-matching the wire schema. Copy the snapshot target and pair it with an empty
-selector string on HTTP/TS:
-
-```ts
-await client.submit(/* envelope with */ {
-  kind: "click",
-  input: { selector: "", target: node.target!, boundary: false },
-});
-```
-
-Always verify with command / intent evidence — do not treat the snapshot alone
-as postcondition proof.
-
-## Engine notes
-
-- **Chromium** — normalizes Chrome's full accessibility tree; ignored nodes
-  are skipped and children re-parented; unnamed generic containers are kept
-  only for structure; form properties come from AX attributes.
-- **Firefox** — companion extension DOM walker; hidden-aware; form attributes
-  and validity-related flags are projected into the same node shape; secret-
-  like names/values are redacted.
+A snapshot is not proof that an action worked. Check the command or intent evidence.
 
 ## Next
 
 - [MCP tools](../surfaces/mcp-tools.md)
-- [HTTP API](../surfaces/http-api.md)
-- [Intent commands](intents.md) (semantic targeting after inspecting the tree)
-- [Troubleshooting](troubleshooting.md)
+- [Intent commands](intents.md)

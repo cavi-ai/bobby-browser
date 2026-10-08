@@ -4,123 +4,62 @@ documentedVersion: {{PRODUCT_VERSION}}
 
 # Events and recovery
 
-This page owns **event cursors and `EventGap`**. Durable checkpoints and
-reconciliation ownership live in
-[Evidence and checkpoints](../concepts/evidence-checkpoints.md).
+Read the runtime's event stream to follow what happened, and use checkpoints to resume a workflow after a crash or interruption. For what checkpoints contain, see [Evidence and checkpoints](../concepts/evidence-checkpoints.md).
 
-## Reading events (batch)
+## Read events
 
-`GET /v1/events?after=<cursor>&limit=<n>` requires `session:read`.
-`limit` is bounded by interface config (`max_event_batch`, default 256).
-
-TypeScript:
+`GET /v1/events?after=<cursor>&limit=<n>` returns a batch. It needs `session:read`. `limit` is capped by `interface.max_event_batch` (default 256).
 
 ```ts
 for await (const event of client.events(0, { limit: 100 })) {
-  // event.cursor advances; persist the last processed cursor
-  console.log(event);
+  console.log(event.cursor, event);
 }
 ```
 
-Persist the last processed event cursor. Reconnect with that cursor to resume
-exactly.
+Store the last cursor you processed and resume from it. Over MCP, `events_read` takes `cursor` and `limit` and waits for a newer event or its deadline. `notifications/bobby/event` pushes the same events.
 
-## Reading events (SSE)
+For a push stream over HTTP, add `stream=1`. Each server-sent frame has the event's cursor as its `id`.
 
-Pass `stream=1` for a server-sent-event stream instead of a JSON batch:
+### Gaps
 
-```http
-GET /v1/events?after=0&limit=100&stream=1
-Authorization: Bearer …
-x-interface-version: {{INTERFACE_VERSION}}
-x-correlation-id: …
-x-deadline: …
+If retention has moved past your cursor, the API returns HTTP 409 with the earliest available cursor. A stream ends with an `event.gap` frame. The TypeScript client throws `RuntimeClientError` with `eventGap`. Re-read durable state (sessions, checkpoints), then resume from the earliest cursor. Do not guess across a gap. `invalidCursor` and `invalidLimit` are caller errors.
+
+## Save a checkpoint
+
+A checkpoint records where a workflow is, backed by evidence the runtime already journaled. Pass the IDs of completed commands as `evidenceRefs`; the runtime resolves the evidence itself.
+
+```ts
+await client.checkpoint({ checkpoint, evidenceRefs: [commandId] }, { idempotencyKey: crypto.randomUUID() });
 ```
 
-Each event arrives as an SSE frame whose `id` is its cursor. A retention gap
-arrives as a terminal `event.gap` frame.
+Over MCP, boundary tools can checkpoint for you with `autoCheckpoint`.
 
-The TypeScript SDK `events()` iterator reads **JSON batches**
-(`GET /v1/events?after=&limit=`), not `stream=1`. Use raw SSE when you need a
-push stream; use the SDK when batch polling and `EventGap` handling are enough.
+## Inspect and recover
 
-## EventGap
+| Surface | Inspect (`recovery:read`) | Recover (`recovery:write`) |
+|---|---|---|
+| HTTP | `GET /v1/recovery/{workflowId}` | `POST /v1/checkpoints`, `POST /v1/recovery/{workflowId}` |
+| MCP | `recovery_status` | `checkpoint_save`, `workflow_recover` |
+| TypeScript | `recoveryStatus(workflowId)` | `checkpoint(...)`, `recover(workflowId)` |
 
-If retention has advanced past the caller's cursor, the broker returns HTTP 409
-with `{ error, gap }` where `gap` includes the earliest available cursor. The
-SDK surfaces this as `RuntimeClientError` with `eventGap`. Restart from that
-cursor only after re-reading durable session/checkpoint state. Never guess
-across a gap.
-
-`invalidCursor` and `invalidLimit` are caller errors.
-
-## Recovery
-
-Inspect durable state with `recovery:read`, then mutate with `recovery:write`.
+`recovery_status` returns `{workflowId, checkpoint, receipts}` for a workflow you own. Pass `sessionId` instead of `workflowId` over MCP to list the session's recoverable workflows, newest first.
 
 ```ts
 const status = await client.recoveryStatus(workflowId);
-// status.workflowId, status.checkpoint, status.receipts
-
-const decision = await client.recover(workflowId, {
-  idempotencyKey: crypto.randomUUID(),
-});
+const decision = await client.recover(workflowId, { idempotencyKey: crypto.randomUUID() });
 ```
 
-| Surface | Inspect (`recovery:read`) | Mutate (`recovery:write`) |
-|---|---|---|
-| HTTP | `GET /v1/recovery/{workflowId}` | `POST /v1/checkpoints`, `POST /v1/recovery/{workflowId}` |
-| MCP | `recovery_status` (`{ workflowId }`) | `checkpoint_save`, `workflow_recover` |
-| TypeScript SDK | `recoveryStatus(workflowId)` | `checkpoint(…)`, `recover(workflowId)` |
+A recovery decision is to resume, restart, or reconcile. When bobby cannot prove whether an interrupted action took effect, the decision is `needsReconciliation` (HTTP 409). Check the page, then continue. Never repeat the action blindly.
 
-`GET` / `recovery_status` returns camelCase `RecoveryStatus`:
-`{ workflowId, checkpoint, receipts }`. The workflow must be owned by the
-caller; missing or unowned workflows return not found. `receipts` mirrors the
-durable recovery receipts bound to the checkpoint.
+## Optional follow-up observations
 
-Any loss at accepted, prepared, executing, verifying, or result-prepared
-boundaries that cannot prove the outcome remains `NeedsReconciliation`.
+Some MCP actions return a follow-up observation as `postStateStatus`: `available`, `unavailable` or `notRequested`. If it is `unavailable`, the action itself still succeeded and `postState` is omitted. Read fresh state before the next step. Do not repeat a successful action because the observation failed.
 
-Skill-assisted recovery (internal skill runtime) follows the same authority
-rules — see [Internal skill runtime](skills.md). Not the public agent skill.
+## Storage problems and uncertain jobs
 
-## Storage integrity and scheduled jobs
+`GET /v1/runtime` reports `storageIntegrity` when durable history is unreadable, has duplicate keys, or is too large to restore. `bobby doctor` reports the same. Reads keep working, and new mutations that depend on the damaged store are refused. Restarting does not clear it. Keep the damaged files and repair them before restarting, because deleting the ledger and resubmitting can repeat an effect.
 
-`GET /v1/runtime` reports `storageIntegrity` when durable admission history is
-unreadable, has duplicate keys, or exceeds restoration capacity. The response
-contains stable store/reason names without filesystem paths or stored payloads.
-`bobby doctor` reports the degraded state. Reads remain available; affected new
-mutations, including requests without idempotency keys, are refused. Restarting
-cannot erase the issue. Fully delimited unreadable job transitions preserve the
-journal bytes and mark older pending/running records reconciliation-required;
-the runtime does not compact or replay them. A torn incomplete append still
-uses the existing write-before-execution truncation protocol.
-
-Keep damaged history as evidence and supply an authoritative repair before
-restarting. Deleting the ledger and resubmitting work can duplicate an effect.
-Resolution cannot write to a damaged job journal. Once the journal is writable,
-the owner with admin authority may record an attestation through
-`POST /v1/jobs/{job}/resolution`, or the SDK's `resolveJob` / `resolve_job`.
-Ordinary automation tokens cannot resolve jobs; operator involvement is required.
-If a resolution write fails or its request is canceled, the runtime refuses
-another attestation for that job until authoritative history is reloaded. A
-receipt may have reached storage even when its caller received no acknowledgment.
-See [HTTP API](../surfaces/http-api.md) for the receipt and retention contract.
-
-MCP actions with an optional follow-up observation return `postStateStatus`:
-`available`, `unavailable`, or `notRequested` when the action did not complete.
-An unavailable observation leaves the completed action successful and omits
-`postState`. Its bounded diagnostic has a contract error code (or
-`observationIncomplete`) and `reconciliationRequired`; raw error messages are
-omitted. Read fresh state before deciding the next action; do not repeat a
-successful action merely because its optional observation failed.
-
-Provider health and operational latency counters are process-local diagnostics.
-Provider health does not open a circuit breaker. The existing live Northstar
-release gate enforces action, tool-call, snapshot, and failure limits, and
-requires measured journey time and serialized-response bytes. Relative latency
-and byte comparisons require matching measured cohorts; a comparator unit test
-is not evidence that a live run met a performance threshold.
+For a job whose outcome is uncertain, an operator with `authority:admin` can record what they observed with `POST /v1/jobs/{job}/resolution`, or `resolveJob` and `resolve_job` in the SDKs. If a resolution write fails, further attestations for that job are refused until history is reloaded.
 
 ## Next
 
