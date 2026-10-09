@@ -564,7 +564,8 @@ async fn a_profile_directory_attaches_to_the_chrome_already_running_there() {
     std::fs::create_dir_all(&profile_dir).unwrap();
     let chrome = ProfileChrome(profile_dir.clone());
     // A Chrome the user started on its own profile, with remote debugging.
-    let mut user_chrome = std::process::Command::new(chrome_executable())
+    let mut command = std::process::Command::new(chrome_executable());
+    command
         .arg(format!("--user-data-dir={}", profile_dir.display()))
         .args([
             "--remote-debugging-port=0",
@@ -572,8 +573,13 @@ async fn a_profile_directory_attaches_to_the_chrome_already_running_there() {
             "--no-first-run",
             "--use-mock-keychain",
             "--password-store=basic",
-            "about:blank",
-        ])
+        ]);
+    // Hosts without a usable Chrome sandbox declare it, as for managed launches.
+    if std::env::var_os("BOBBY_CHROME_NO_SANDBOX").is_some() {
+        command.arg("--no-sandbox");
+    }
+    let mut user_chrome = command
+        .arg("about:blank")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -588,7 +594,8 @@ async fn a_profile_directory_attaches_to_the_chrome_already_running_there() {
     assert_eq!(
         running.len(),
         1,
-        "the user's Chrome is running: {running:?}"
+        "the user's Chrome is running: {running:?}, exit {:?}",
+        user_chrome.try_wait()
     );
 
     let config = config(root.path(), None);
