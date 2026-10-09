@@ -55,6 +55,7 @@ async fn site_regressions_hold_on_firefox() {
         settles_beside_text_churn,
         settles_beside_moving_children,
         settles_beside_combined_churn,
+        settle_cap_trace_names_the_churn,
         network_tracking_survives_a_heavy_page,
         browser_events_survive_a_request_burst,
         type_text_enter_reports_a_late_title,
