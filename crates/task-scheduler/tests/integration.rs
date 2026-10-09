@@ -1259,6 +1259,61 @@ fn journal_unreadable_middle_line_is_skipped() {
 }
 
 #[test]
+fn job_journal_sequence_regressions_require_reconciliation_without_blocking_new_work() {
+    runtime().block_on(async {
+        for sequence in [0, 1, 2, 7] {
+            let damaged = sequence < 2;
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("jobs.jsonl");
+            let store = JournalJobStore::open(&path).await.unwrap();
+            let mut job = Job::new("echo".into(), serde_json::json!({}), JobPriority::Normal);
+            store.put(&job).await.unwrap();
+            let mut stale: task_scheduler::JournalRecord =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            job.start();
+            store.update(&job, JobEvent::Started).await.unwrap();
+            drop(store);
+
+            // A higher sequence is a legitimate retry, including sequence gaps.
+            // Equal or decreasing sequences cannot authorize replay of Pending.
+            stale.sequence = sequence;
+            stale.event = JobEvent::Retried;
+            let mut original = std::fs::read(&path).unwrap();
+            serde_json::to_writer(&mut original, &stale).unwrap();
+            original.push(b'\n');
+            std::fs::write(&path, &original).unwrap();
+            let health = JournalJobStore::inspect(&path).await.unwrap();
+            for _ in 0..2 {
+                let store = JournalJobStore::open(&path).await.unwrap();
+                let expected = if damaged {
+                    JobStatus::ReconciliationRequired
+                } else {
+                    JobStatus::Pending
+                };
+                assert_eq!(store.get(&job.id).await.unwrap().unwrap().status, expected);
+                assert_eq!(health.incompatible_records, usize::from(damaged));
+                assert!(store.integrity_issue().is_none());
+                if damaged {
+                    assert!(store
+                        .pending()
+                        .await
+                        .unwrap()
+                        .iter()
+                        .all(|j| j.id != job.id));
+                    assert_eq!(std::fs::read(archived_journal(&path)).unwrap(), original);
+                }
+                let fresh = Job::new("fresh".into(), serde_json::json!({}), JobPriority::Normal);
+                store.put(&fresh).await.unwrap();
+                assert_eq!(
+                    store.get(&fresh.id).await.unwrap().unwrap().status,
+                    JobStatus::Pending
+                );
+            }
+        }
+    });
+}
+
+#[test]
 fn damaged_job_history_never_replays_an_older_pending_record() {
     let rt = runtime();
     rt.block_on(async {
