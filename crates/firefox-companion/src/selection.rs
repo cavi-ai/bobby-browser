@@ -1647,7 +1647,15 @@ fn compose_worker_factory_inner(
     };
     let mut chromium_factory = ChromiumWorkerFactory::new(config.browser.clone());
     if let Some(profile_id) = chromium_durable_profile_id {
-        chromium_factory = chromium_factory.with_durable_profile(profile_id);
+        // A listed profile keeps its own directory, such as a signed-in Chrome.
+        chromium_factory = match selection
+            .chromium
+            .iter()
+            .find(|profile| profile.profile_id == profile_id)
+        {
+            Some(profile) => chromium_factory.with_durable_profile_dir(profile.profile_dir.clone()),
+            None => chromium_factory.with_durable_profile(profile_id),
+        };
     }
     let mut registrations = vec![FactoryRegistration::new(
         BrowserEngine::Chromium,
@@ -1990,6 +1998,7 @@ pub fn build_enrolled_browser_selection(
             pairing_code_ttl_ms: 300_000,
             attachment_ttl_ms: 300_000,
         }],
+        chromium: Vec::new(),
     }
 }
 
@@ -2748,6 +2757,7 @@ mod tests {
                     profile_id: Some(profile_id.0.to_string()),
                 },
                 firefox: Vec::new(),
+                chromium: Vec::new(),
             },
         ) {
             Ok(_) => panic!("unsatisfiable exact Firefox preference unexpectedly composed"),
@@ -2792,6 +2802,7 @@ mod tests {
                     pairing_code_ttl_ms: 1_000,
                     attachment_ttl_ms: 1_000,
                 }],
+                chromium: Vec::new(),
             },
         )
         .unwrap();
@@ -2828,6 +2839,7 @@ mod tests {
                         pairing_code_ttl_ms: 80,
                         attachment_ttl_ms: 1000,
                     }],
+                    chromium: Vec::new(),
                 },
             )
             .unwrap();
@@ -3017,6 +3029,7 @@ mod tests {
                     pairing_code_ttl_ms: 1_000,
                     attachment_ttl_ms: 1_000,
                 }],
+                chromium: Vec::new(),
             },
         );
         assert!(result.is_err());
@@ -3311,6 +3324,7 @@ mod tests {
         let selection = BrowserSelectionConfig {
             preference: EnginePreferenceConfig::ManagedChromium,
             firefox: Vec::new(),
+            chromium: Vec::new(),
         };
 
         persist_browser_selection(&path, &selection).unwrap();

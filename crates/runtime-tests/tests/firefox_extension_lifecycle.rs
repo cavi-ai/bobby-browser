@@ -411,6 +411,7 @@ fn selection(
             pairing_code_ttl_ms: TIMEOUT.as_millis() as u64,
             attachment_ttl_ms: 300_000,
         }],
+        chromium: Vec::new(),
     }
 }
 

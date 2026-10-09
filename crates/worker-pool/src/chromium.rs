@@ -244,12 +244,11 @@ pub struct ChromiumWorkerFactory {
     config: BrowserConfig,
     pid_registry_dir: PathBuf,
     fingerprint: FingerprintConfig,
-    /// Opt-in durable profile identity. `None` (the default) keeps every
+    /// Opt-in durable user-data-dir. `None` (the default) keeps every
     /// session's user-data-dir disposable, keyed by `SessionId` and removed
-    /// with the session. `Some(id)` persists it at
-    /// `<profiles_dir>/chromium/<id>` across sessions instead, the Chromium
-    /// counterpart to a Firefox companion's enrolled profile.
-    durable_profile_id: Option<String>,
+    /// with the session. `Some(dir)` persists it across sessions instead, the
+    /// Chromium counterpart to a Firefox companion's enrolled profile.
+    durable_profile_dir: Option<PathBuf>,
     /// Held while a session attaches to the durable profile's Chrome, so
     /// concurrent sessions start at most one.
     shared_browser_attach: Arc<Mutex<()>>,
@@ -267,7 +266,7 @@ impl ChromiumWorkerFactory {
             config,
             pid_registry_dir,
             fingerprint: FingerprintConfig::default(),
-            durable_profile_id: None,
+            durable_profile_dir: None,
             shared_browser_attach: Arc::default(),
         }
     }
@@ -282,7 +281,7 @@ impl ChromiumWorkerFactory {
             config,
             pid_registry_dir,
             fingerprint: FingerprintConfig::default(),
-            durable_profile_id: None,
+            durable_profile_dir: None,
             shared_browser_attach: Arc::default(),
         }
     }
@@ -302,7 +301,15 @@ impl ChromiumWorkerFactory {
     /// Every session on the profile shares one Chrome, which keeps running
     /// when its sessions close and when this runtime exits.
     pub fn with_durable_profile(mut self, profile_id: String) -> Self {
-        self.durable_profile_id = Some(profile_id);
+        self.durable_profile_dir = Some(self.config.profiles_dir.join("chromium").join(profile_id));
+        self
+    }
+
+    /// The durable profile in `profile_dir` instead of the default location,
+    /// such as a signed-in Chrome profile. A Chrome already running there with
+    /// remote debugging serves the sessions.
+    pub fn with_durable_profile_dir(mut self, profile_dir: PathBuf) -> Self {
+        self.durable_profile_dir = Some(profile_dir);
         self
     }
 
@@ -354,10 +361,10 @@ impl ChromiumWorkerFactory {
 #[async_trait]
 impl WorkerFactory for ChromiumWorkerFactory {
     async fn launch(&self, session_id: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
-        let profile_dir = match &self.durable_profile_id {
-            Some(profile_id) => self.config.profiles_dir.join("chromium").join(profile_id),
-            None => self.config.profiles_dir.join(session_id.0.to_string()),
-        };
+        let profile_dir = self
+            .durable_profile_dir
+            .clone()
+            .unwrap_or_else(|| self.config.profiles_dir.join(session_id.0.to_string()));
         let download_dir = session_download_dir(&self.config.downloads_dir, session_id);
         tokio::fs::create_dir_all(&profile_dir)
             .await
@@ -367,7 +374,7 @@ impl WorkerFactory for ChromiumWorkerFactory {
             .map_err(|error| driver_error(ErrorCode::BrowserLaunchFailed, error))?;
 
         let config = self.chromium_config(&profile_dir)?;
-        let shared_browser = self.durable_profile_id.is_some();
+        let shared_browser = self.durable_profile_dir.is_some();
         let (mut browser, mut handler) = if shared_browser {
             let _attaching = self.shared_browser_attach.lock().await;
             attach_or_launch_shared_browser(&config, &profile_dir).await?

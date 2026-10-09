@@ -45,6 +45,7 @@
 
 ### Added
 
+- A browser selection's `chromium` entries give a durable Chromium profile its own directory, and sessions attach to a Chrome already running there.
 - `bobby install --restart-runtime` stops this scope's running runtime owner after the install; `bobby install` ends with one line naming a still-running owner when it replaced the PATH `bobby`.
 - `bobby runtime restart [--force]` and `make restart` stop this scope's runtime owner and start a new one, showing what is attached, asking before disconnecting agents, and saving the impact report under `runtime/restart-snapshots/`.
 
