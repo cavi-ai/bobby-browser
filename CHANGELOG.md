@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- On Firefox, a command that misses its deadline fails alone; other sessions and runtime restarts keep the running Firefox.
 - Restarting Firefox quits it with `browser.close` when possible, so site logins survive.
 - Settling ignores animations, counters and carousels that never stop changing the page.
 - Settling waits for the page to use a response that lands during the quiet window.
