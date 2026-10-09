@@ -837,12 +837,8 @@ pub async fn run() -> Result<()> {
             disconnect_agents,
             path,
         } => {
-            let path = match path {
-                Some(path) => path,
-                None => bootstrap_local::default_bootstrap_path()?,
-            };
-            onboarding::run_install(
-                &path,
+            onboarding::install(
+                path,
                 onboarding::InstallOptions {
                     hosts: host,
                     skill,
@@ -875,18 +871,14 @@ pub async fn run() -> Result<()> {
             vision,
             no_vision,
         } => {
-            let policy = policy_from_flags(vision, no_vision);
-            if std::env::var_os("BOBBY_BROWSER_SCOPE_DIR").is_some() {
-                runtime_scopes::owner(
-                    runtime_scopes::runtime_dir()?,
-                    resolve_config_path(config),
-                    resolve_bootstrap_path(bootstrap_env)?,
-                    policy,
-                )
-                .await?;
-            } else {
-                run_broker_serve(config, bootstrap_env, policy, false, None).await?;
-            }
+            runtime_scopes::serve(
+                config,
+                bootstrap_env,
+                policy_from_flags(vision, no_vision),
+                false,
+                None,
+            )
+            .await?;
         }
         CliCommand::Cdp {
             config,
@@ -895,22 +887,16 @@ pub async fn run() -> Result<()> {
             vision,
             no_vision,
         } => {
-            let policy = policy_from_flags(vision, no_vision);
-            if std::env::var_os("BOBBY_BROWSER_SCOPE_DIR").is_some() {
-                runtime_scopes::owner_with_cdp(
-                    runtime_scopes::runtime_dir()?,
-                    resolve_config_path(config),
-                    resolve_bootstrap_path(bootstrap_env)?,
-                    policy,
-                    cdp_port,
-                )
-                .await?;
-            } else {
-                run_broker_serve(config, bootstrap_env, policy, true, cdp_port).await?;
-            }
+            runtime_scopes::serve(
+                config,
+                bootstrap_env,
+                policy_from_flags(vision, no_vision),
+                true,
+                cdp_port,
+            )
+            .await?;
         }
         CliCommand::FirefoxNativeHost { descriptor } => {
-            let _telemetry = observability::init(&Default::default())?;
             run_configured_native_host(descriptor).await?
         }
         CliCommand::InstallFirefoxNativeHost {
@@ -2475,6 +2461,7 @@ fn installed_file_mode(path: &Path, _fallback: u32) -> std::io::Result<u32> {
 pub const FIREFOX_NATIVE_HOST_LOG: &str = "firefox-native-host.log";
 
 async fn run_configured_native_host(descriptor_path: PathBuf) -> Result<()> {
+    let _telemetry = observability::init(&Default::default())?;
     if !descriptor_path.is_absolute() {
         anyhow::bail!("firefox native-host descriptor path must be absolute");
     }

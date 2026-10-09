@@ -11,6 +11,28 @@ use std::{
 };
 use uuid::Uuid;
 
+/// Select the scoped owner or standalone server for a serve/CDP entrypoint.
+pub(crate) async fn serve(
+    config: Option<PathBuf>,
+    bootstrap_env: Option<PathBuf>,
+    policy: crate::VisionSpawnPolicy,
+    enable_cdp: bool,
+    cdp_port: Option<u16>,
+) -> Result<()> {
+    if std::env::var_os("BOBBY_BROWSER_SCOPE_DIR").is_some() {
+        let directory = runtime_dir()?;
+        let config = crate::resolve_config_path(config);
+        let bootstrap = crate::resolve_bootstrap_path(bootstrap_env)?;
+        if enable_cdp {
+            owner_with_cdp(directory, config, bootstrap, policy, cdp_port).await
+        } else {
+            owner(directory, config, bootstrap, policy).await
+        }
+    } else {
+        crate::run_broker_serve(config, bootstrap_env, policy, enable_cdp, cdp_port).await
+    }
+}
+
 #[derive(Clone, Debug, Default, clap::Args, Serialize, Deserialize)]
 pub(crate) struct Scope {
     /// Share Bobby's profile and runtime with this local team.
