@@ -154,4 +154,40 @@ fn opening_validates_and_indexes_without_decoding_the_payload_twice() {
     assert!(runtime
         .block_on(journal.append(archived.records[0].clone()))
         .is_err());
+
+    // A future phase fails typed decoding before its unused payload is reached.
+    // Probing its command ID must not materialize that payload either.
+    let incompatible_root = tempfile::tempdir().unwrap();
+    let incompatible_path = incompatible_root.path().join("commands.jsonl");
+    let incompatible_archive = incompatible_root
+        .path()
+        .join("commands.jsonl.archive-fixture");
+    let incompatible = String::from_utf8(original)
+        .unwrap()
+        .replace("\"phase\":\"prepared\"", "\"phase\":\"future\"");
+    std::fs::write(&incompatible_archive, &incompatible).unwrap();
+    PAYLOAD_ALLOCATIONS.store(0, Ordering::Relaxed);
+    TRACKING.store(true, Ordering::Relaxed);
+    let journal = runtime
+        .block_on(JsonlJournal::open(&incompatible_path))
+        .unwrap();
+    TRACKING.store(false, Ordering::Relaxed);
+    assert_eq!(
+        PAYLOAD_ALLOCATIONS.load(Ordering::Relaxed),
+        0,
+        "probing an incompatible archive materialized its unused payload"
+    );
+    assert_eq!(
+        std::fs::read(&incompatible_archive).unwrap(),
+        incompatible.as_bytes()
+    );
+    let scan = runtime
+        .block_on(journal.history(archived.records[0].command_id.clone()))
+        .unwrap();
+    assert!(scan.records.is_empty());
+    assert_eq!(scan.incompatible_records, 1);
+    assert!(matches!(
+        runtime.block_on(journal.append(archived.records[0].clone())),
+        Err(workflow_journal::JournalError::UncertainCommand)
+    ));
 }

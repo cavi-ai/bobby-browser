@@ -276,6 +276,58 @@ async fn reopens_committed_history_in_order() {
 }
 
 #[tokio::test]
+async fn archive_identity_probe_preserves_duplicate_key_and_invalid_record_handling() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("commands.jsonl");
+    let archive = dir.path().join("commands.jsonl.archive-fixture");
+    let replaced = CommandId::new();
+    let retained = CommandId::new();
+    let invalidated = CommandId::new();
+    let nested = CommandId::new();
+    let malformed = CommandId::new();
+    let non_object = CommandId::new();
+    let contents = format!(
+        concat!(
+            "{{\"commandId\":\"{}\",\"commandId\":\"{}\",\"unused\":[null,{{\"x\":true}}]}}\n",
+            "{{\"commandId\":\"{}\",\"commandId\":{{\"invalid\":true}}}}\n",
+            "{{\"unused\":{{\"commandId\":\"{}\"}}}}\n",
+            "{{\"commandId\":\"{}\",\"unused\":[}}\n",
+            "[{{\"commandId\":\"{}\"}}]\n"
+        ),
+        replaced.0, retained.0, invalidated.0, nested.0, malformed.0, non_object.0
+    );
+    tokio::fs::write(&archive, contents.as_bytes())
+        .await
+        .unwrap();
+    let journal = JsonlJournal::open(&path).await.unwrap();
+    assert!(matches!(
+        journal
+            .append(record(&retained, CommandPhase::Accepted))
+            .await,
+        Err(workflow_journal::JournalError::UncertainCommand)
+    ));
+    assert_eq!(
+        journal
+            .history(retained)
+            .await
+            .unwrap()
+            .incompatible_records,
+        5
+    );
+    for id in [replaced, invalidated, nested, malformed, non_object] {
+        journal
+            .append(record(&id, CommandPhase::Accepted))
+            .await
+            .unwrap();
+        assert_eq!(journal.history(id).await.unwrap().incompatible_records, 0);
+    }
+    assert_eq!(
+        tokio::fs::read(&archive).await.unwrap(),
+        contents.as_bytes()
+    );
+}
+
+#[tokio::test]
 async fn incompatible_archive_records_reserve_command_ids_without_blocking_new_commands() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("commands.jsonl");

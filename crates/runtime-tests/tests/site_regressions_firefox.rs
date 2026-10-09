@@ -54,6 +54,7 @@ async fn site_regressions_hold_on_firefox() {
         network_tracking_survives_a_heavy_page,
         type_text_enter_reports_a_late_title,
         navigate_ignores_requests_the_navigation_cancelled,
+        type_text_enter_reports_a_keydown_navigation_at_once,
         actions_wait_for_a_late_target,
         actions_fail_a_missing_target_within_one_bound,
         navigate_waits_for_late_scripts,

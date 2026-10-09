@@ -1286,6 +1286,73 @@ pub async fn navigate_ignores_requests_the_navigation_cancelled(rig: &Rig) {
     );
 }
 
+/// Enter pushState-navigates inside its own keydown and renders the results:
+/// every type_text reports the pushed URL and title within the settle window.
+pub async fn type_text_enter_reports_a_keydown_navigation_at_once(rig: &Rig) {
+    let home = page(
+        "Home",
+        r#"<header><input id="q" aria-label="Search"></header><main id="main"><h1>Home</h1></main>
+        <script>
+            document.getElementById("q").addEventListener("keydown", (event) => {
+              if (event.key !== "Enter") return;
+              event.preventDefault();
+              history.pushState({}, "", "/search?q=" + encodeURIComponent(event.target.value) +
+                "&at=" + Date.now());
+              document.title = "Search results";
+              document.getElementById("main").innerHTML =
+                "<h1>Search results</h1><ul><li>First result</li><li>Second result</li></ul>";
+            });
+        </script>"#,
+    );
+    let site = FixtureSite::spawn(vec![("/home", Route::Html(home))]).await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let pushed = site.url("/search?q=query&at=");
+    let bound_ms = worker_pool::navigation_settle::SAME_DOCUMENT_QUIET_MS + 300;
+    let mut failures = Vec::new();
+    for run in 1..=10 {
+        let loaded = live
+            .call("navigate", json!({"url":site.url("/home")}))
+            .await;
+        assert_eq!(loaded["status"], "completed", "navigate: {loaded}");
+        let typed = live
+            .call(
+                "type_text",
+                json!({"target":{"role":"textbox","accessibleName":"Search"},
+                       "value":"query\n","clearFirst":true}),
+            )
+            .await;
+        let returned_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_millis();
+        let mut navigations = Vec::new();
+        objects_of_kind(&typed, "navigation", &mut navigations);
+        let reported = navigations.iter().find_map(|item| {
+            let at = item["url"].as_str()?.strip_prefix(pushed.as_str())?;
+            (item["title"] == "Search results").then(|| at.parse::<u128>().ok())?
+        });
+        match reported {
+            _ if typed["status"] != "completed" => {
+                failures.push(format!("run {run}: status {}", typed["status"]));
+            }
+            None => failures.push(format!("run {run}: reported {navigations:?}")),
+            Some(at) if returned_ms.saturating_sub(at) >= u128::from(bound_ms) => {
+                failures.push(format!(
+                    "run {run}: returned {} ms after Enter, bound {bound_ms} ms",
+                    returned_ms.saturating_sub(at)
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+    live.close().await;
+    assert!(
+        failures.is_empty(),
+        "{} of 10 runs failed: {failures:?}",
+        failures.len()
+    );
+}
+
 /// Controls rendered a few seconds after load: every action and intent waits
 /// for its target to appear instead of failing targetNotFound at once.
 pub async fn actions_wait_for_a_late_target(rig: &Rig) {

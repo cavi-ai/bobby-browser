@@ -86,6 +86,45 @@ struct RecordProbe {
     sequence: Option<u64>,
 }
 
+/// Diagnostic identity only; never restores a record's execution authority.
+struct ArchiveRecordProbe {
+    command_id: Option<CommandId>,
+}
+
+impl<'de> Deserialize<'de> for ArchiveRecordProbe {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ProbeVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ProbeVisitor {
+            type Value = ArchiveRecordProbe;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a journal record object")
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut map: M,
+            ) -> Result<Self::Value, M::Error> {
+                let mut command_id = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    if key == "commandId" {
+                        // Match Value's last-key-wins behavior, including a final
+                        // invalid ID. Only this field needs to be materialized.
+                        let value = map.next_value::<serde_json::Value>()?;
+                        command_id = serde_json::from_value(value).ok();
+                    } else {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                    }
+                }
+                Ok(ArchiveRecordProbe { command_id })
+            }
+        }
+
+        deserializer.deserialize_map(ProbeVisitor)
+    }
+}
+
 struct Scan {
     scan: JournalScan,
     /// Decodable complete records, including records with invalid sequence order.
@@ -325,13 +364,9 @@ async fn open_writer(path: &Path) -> Result<WriterState, JournalError> {
                         archived_incompatible_records += 1;
                         // Incompatible records still reserve their command ID.
                         // Preserve the permissive recovery probe for old schemas.
-                        serde_json::from_slice::<serde_json::Value>(&line)
+                        serde_json::from_slice::<ArchiveRecordProbe>(&line)
                             .ok()
-                            .and_then(|value| {
-                                value
-                                    .get("commandId")
-                                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                            })
+                            .and_then(|probe| probe.command_id)
                     }
                 };
                 if let Some(id) = id {
