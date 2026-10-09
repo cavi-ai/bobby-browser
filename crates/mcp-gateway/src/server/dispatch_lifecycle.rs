@@ -7,14 +7,6 @@
 
 use super::*;
 
-pub(super) const TOOLS: &[&str] = &[
-    "runtime_info",
-    "session_list",
-    "session_create",
-    "session_close",
-    "page_open",
-];
-
 impl Server {
     /// Creates a session and records it for this connection. Runs in a
     /// spawned task so a request future dropped mid-create still finishes the

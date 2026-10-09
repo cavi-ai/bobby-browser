@@ -7,6 +7,7 @@
 
 use super::*;
 
+#[cfg(test)]
 pub(super) const TOOLS: &[&str] = &[
     "intent_locate",
     "intent_fill",
@@ -794,33 +795,9 @@ mod tests {
                 panic!("{name}: {arguments} failed schema validation: {violation:?}")
             });
 
-            let parsed: Result<(), ()> = match name {
-                "intent_locate" => bounded_parse::<IntentLocateArgs>(arguments.clone()).map(drop),
-                "intent_fill" => bounded_parse::<IntentFillArgs>(arguments.clone()).map(drop),
-                "intent_complete_form" => {
-                    bounded_parse::<IntentCompleteFormArgs>(arguments.clone()).map(drop)
-                }
-                "intent_submit_and_verify" => {
-                    bounded_parse::<IntentSubmitAndVerifyArgs>(arguments.clone()).map(drop)
-                }
-                "intent_wait_for_state" => {
-                    bounded_parse::<IntentWaitForStateArgs>(arguments.clone()).map(drop)
-                }
-                "intent_follow" => bounded_parse::<IntentFollowArgs>(arguments.clone()).map(drop),
-                "intent_dismiss_obstruction" => {
-                    bounded_parse::<IntentDismissObstructionArgs>(arguments.clone()).map(drop)
-                }
-                "intent_extract" => bounded_parse::<IntentExtractArgs>(arguments.clone()).map(drop),
-                "intent_solve_challenge" => {
-                    bounded_parse::<IntentSolveChallengeArgs>(arguments.clone()).map(drop)
-                }
-                "intent_detect_challenge" => {
-                    bounded_parse::<IntentDetectChallengeArgs>(arguments.clone()).map(drop)
-                }
-                other => {
-                    unreachable!("intent tool {other} missing from the parity guard's own dispatch")
-                }
-            };
+            let parsed: Result<(), ()> = (crate::catalog::descriptor(name)
+                .expect("registered intent")
+                .parse)(arguments.clone());
             parsed.unwrap_or_else(|()| {
                 let advertised: Vec<_> = properties.keys().collect();
                 panic!(

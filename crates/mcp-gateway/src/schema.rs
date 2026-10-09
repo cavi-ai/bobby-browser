@@ -31,495 +31,598 @@ pub(crate) fn validate_tool_arguments(
 }
 
 pub(crate) fn tool_schema(name: &str) -> Value {
-    let (properties, required) = match name {
-        "runtime_info" | "session_list" => (json!({}), vec![]),
-        "session_create" => (
-            json!({
-                "profile": string(1, 128),
-                "proxy": nullable(string(0, 2048)),
-                "executionPolicy": object(
-                    json!({
-                        "javascriptEvaluation":{"type":"boolean"},
-                        "visionAssist":{"type":"boolean"},
-                        "fingerprint":{"type":"boolean"},
-                        "humanize":{"type":"boolean"},
-                        "visionNode":string(1, 128)
-                    }),
-                    &[]
-                ),
-                "zigzagzig":{"type":"boolean"}
-            }),
-            vec!["profile"],
-        ),
-        "workflow_start" => (
-            json!({
-                "profile": string(1, 128),
-                "proxy": nullable(string(0, 2048)),
-                "executionPolicy": object(
-                    json!({
-                        "javascriptEvaluation":{"type":"boolean"},
-                        "visionAssist":{"type":"boolean"},
-                        "fingerprint":{"type":"boolean"},
-                        "humanize":{"type":"boolean"},
-                        "visionNode":string(1, 128)
-                    }),
-                    &[]
-                ),
-                "zigzagzig":{"type":"boolean"},
-                "url": string(1, MAX_URL_BYTES)
-            }),
-            vec!["profile"],
-        ),
-        "workflow_observe" => (
-            json!({
-                // `WORKFLOW_SCOPE_TOOLS` (SessionPageWorkflow): the
-                // advertisement rewrites this into handle-XOR-explicit-ids.
-                // `workflowHandle` stays declared (never required) so a
-                // pre-normalization call validates the same as other
-                // scope tools.
-                "workflowHandle": workflow_handle(),
-                // `validate_string` is intentionally byte-oriented. Four bytes per
-                // scalar prevents it from rejecting a valid 256-scalar UTF-8 goal;
-                // the observe parser applies the scalar limit before registry lookup.
-                "sessionId": id(),
-                "pageId": id(),
-                "workflowId": id(),
-                "goal": string(0, MAX_WORKFLOW_GOAL_SCALARS * 4),
-                "maxNodes": {"type":"integer","minimum":1,"maximum":2048},
-                "includeForms": {"type":"boolean"},
-                "maxControls": {"type":"integer","minimum":1,"maximum":512},
-                "evidenceDetail":{"type":"string","enum":["compact","full"]},
-                "target": {"type":"object","description":"Scope the observation to one region's subtree (same shape as a11y_snapshot.target) instead of the whole page"}
-            }),
-            vec!["sessionId", "pageId"],
-        ),
-        "context_ask" => (
-            json!({
-                "sessionId": id(),
-                "pageId": id(),
-                "description": string(1, 256)
-            }),
-            vec!["sessionId", "pageId", "description"],
-        ),
-        "context_neighbors" => (
-            json!({
-                "sessionId": id(),
-                "pageId": id(),
-                "description": string(1, 256)
-            }),
-            vec!["sessionId", "pageId", "description"],
-        ),
-        "toolset_select" => (
-            json!({
-                "toolset": {"type":"string","enum":["full","explore","act","intent","verify"]}
-            }),
-            vec!["toolset"],
-        ),
-        "page_open" => (
-            json!({"sessionId": id(), "url": string(1, MAX_URL_BYTES)}),
-            vec!["sessionId"],
-        ),
-        "page_close" => (
-            json!({"sessionId": id(), "pageId": id(), "workflowId": id()}),
-            vec!["sessionId", "pageId"],
-        ),
-        "page_activate" => (
-            json!({
-                "sessionId": id(),
-                "pageId": id(),
-                "workflowId": id(),
-                // handle+pageId = "activate this page and rebind the
-                // handle": normalization accepts the mix for this tool
-                // only, so the validation schema declares the handle too.
-                "workflowHandle": workflow_handle()
-            }),
-            vec!["sessionId", "pageId"],
-        ),
-        "a11y_snapshot" => (
-            json!({
-                "workflowId": id(),
-                "sessionId": id(),
-                "pageId": id(),
-                "maxNodes": {"type":"integer","minimum":1,"maximum":2048},
-                "target": {"type":"object","description":"Scope the tree to this target's subtree (e.g. the form being worked on) instead of the whole page; same shape as wait_for targets"}
-            }),
-            vec!["sessionId", "pageId"],
-        ),
-        "form_snapshot" => (
-            json!({"workflowId": id(), "sessionId": id(), "pageId": id(), "maxControls":{"type":"integer","minimum":1,"maximum":512}}),
-            vec!["sessionId", "pageId"],
-        ),
-        "control_action" => (
-            json!({
-                "workflowId": id(),
-                "sessionId": id(),
-                "pageId": id(),
-                "target": {"$ref":"#/$defs/ControlTarget"},
-                "action": {"$ref":"#/$defs/ControlActionKind"}
-            }),
-            vec!["sessionId", "pageId", "target", "action"],
-        ),
-        "network_log" => (
-            json!({
-                "workflowId": id(),
-                "sessionId": id(),
-                "pageId": id(),
-                "clear": {"type":"boolean"}
-            }),
-            vec!["sessionId", "pageId"],
-        ),
-        "emulate" => (
-            json!({
-                "workflowId": id(),
-                "sessionId": id(),
-                "pageId": id(),
-                "viewport": nullable(object(
-                    json!({"width":{"type":"integer","minimum":1,"maximum":16384},"height":{"type":"integer","minimum":1,"maximum":16384}}),
-                    &["width", "height"]
-                )),
-                "geolocation": nullable(object(
-                    json!({
-                        "latitude":{"type":"number","minimum":-90,"maximum":90},
-                        "longitude":{"type":"number","minimum":-180,"maximum":180},
-                        "accuracy":nullable(json!({"type":"number","minimum":0}))
-                    }),
-                    &["latitude", "longitude"]
-                )),
-                "mobile": {"type":"boolean"}
-            }),
-            vec!["sessionId", "pageId"],
-        ),
-        "dialog" => (
-            json!({
-                "workflowId": id(),
-                "sessionId": id(),
-                "pageId": id(),
-                "action": {"type":"string","enum":["accept","dismiss"]},
-                "timeoutMs": timeout_ms()
-            }),
-            vec!["sessionId", "pageId", "action"],
-        ),
-        "pdf" => (
-            json!({
-                "workflowId": id(),
-                "sessionId": id(),
-                "pageId": id(),
-                "landscape": {"type":"boolean"},
-                "printBackground": {"type":"boolean"},
-                "scale": {"type":"number","minimum":0.1,"maximum":2.0},
-                "pageRanges": nullable(string(0, 256))
-            }),
-            vec!["sessionId", "pageId"],
-        ),
-        "cookie_get" => (
-            json!({
-                "workflowId": id(),
-                "sessionId": id(),
-                "pageId": id(),
-                "urls": array(string(1, MAX_URL_BYTES), 64)
-            }),
-            vec!["sessionId", "pageId"],
-        ),
-        "cookie_set" => (
-            json!({
-                "workflowId": id(),
-                "sessionId": id(),
-                "pageId": id(),
-                "cookies": array(json!({"$ref":"#/$defs/SetCookieParam"}), 128)
-            }),
-            vec!["sessionId", "pageId", "cookies"],
-        ),
-        "cookie_delete" => (
-            json!({
-                "workflowId": id(),
-                "sessionId": id(),
-                "pageId": id(),
-                "urls": array(string(1, MAX_URL_BYTES), 64),
-                "names": array(string(1, 1024), 128)
-            }),
-            vec!["sessionId", "pageId"],
-        ),
-        "extract_structured" => (
-            json!({
-                "workflowId": id(),
-                "sessionId": id(),
-                "pageId": id(),
-                "schema": any_value(),
-                "purpose": nullable(string(1, 256))
-            }),
-            vec!["sessionId", "pageId", "schema"],
-        ),
-        "session_close" => (json!({"sessionId": id()}), vec!["sessionId"]),
-        "navigate" => (
-            json!({
-                "workflowId": id(),
-                "sessionId": id(),
-                "pageId": id(),
-                "url": string(1, MAX_URL_BYTES),
-                "waitUntil": {"type":"string","enum":["commit","domContentLoaded","interactive","networkIdle"]},
-                "timeoutMs": timeout_ms()
-            }),
-            vec!["sessionId", "pageId", "url"],
-        ),
-        "click" => (
-            json!({
-                "workflowId": id(),
-                "commandId": id_pin(),
-                "attemptId": id_pin(),
-                "sessionId": id(),
-                "pageId": id(),
-                "selector": string(1, MAX_STRING_BYTES),
-                "target": nullable(json!({"$ref":"#/$defs/TargetSpec"})),
-                "boundary": {"type":"boolean"},
-                "autoCheckpoint":{"type":"boolean"},
-                "expectedUrl": nullable(string(1, MAX_URL_BYTES)),
-                "modifiers": {
-                    "type": "array",
-                    "maxItems": 4,
-                    "uniqueItems": true,
-                    "items": {
-                        "type": "string",
-                        "enum": ["shift", "ctrl", "alt", "meta"]
-                    }
-                }
-            }),
-            vec!["sessionId", "pageId"],
-        ),
-        "click_and_wait_for_popup" => (
-            json!({
-                "workflowId": id(),
-                "commandId": id_pin(),
-                "attemptId": id_pin(),
-                "sessionId": id(),
-                "pageId": id(),
-                "selector": string(1, MAX_STRING_BYTES),
-                "target": nullable(json!({"$ref":"#/$defs/TargetSpec"})),
-                "timeoutMs": timeout_ms(),
-                "autoCheckpoint":{"type":"boolean"}
-            }),
-            vec!["sessionId", "pageId"],
-        ),
-        "click_and_wait_for_download" => (
-            json!({
-                "workflowId": id(),
-                "commandId": id_pin(),
-                "attemptId": id_pin(),
-                "sessionId": id(),
-                "pageId": id(),
-                "selector": string(1, MAX_STRING_BYTES),
-                "target": nullable(json!({"$ref":"#/$defs/TargetSpec"})),
-                "timeoutMs": timeout_ms(),
-                "autoCheckpoint":{"type":"boolean"}
-            }),
-            vec!["sessionId", "pageId"],
-        ),
-        "type_text" => (
-            json!({
-                "workflowId": id(),
-                "sessionId": id(),
-                "pageId": id(),
-                "selector": string(1, MAX_STRING_BYTES),
-                "target": nullable(json!({"$ref":"#/$defs/TargetSpec"})),
-                "value": string(0, MAX_STRING_BYTES),
-                "clearFirst": {"type":"boolean"},
-                "expectedUrl": nullable(string(1, MAX_URL_BYTES))
-            }),
-            vec!["sessionId", "pageId", "value"],
-        ),
-        "inspect" => (
-            json!({
-                "workflowId": id(),
-                "sessionId": id(),
-                "pageId": id(),
-                "selector": nullable(string(1, MAX_STRING_BYTES)),
-                "target": nullable(json!({"$ref":"#/$defs/TargetSpec"})),
-                "includeHtml": {"type":"boolean"}
-            }),
-            vec!["sessionId", "pageId"],
-        ),
-        "screenshot" => (
-            json!({
-                "workflowId": id(),
-                "sessionId": id(),
-                "pageId": id(),
-                "mode": {"$ref":"#/$defs/ScreenshotMode"}
-            }),
-            vec!["sessionId", "pageId"],
-        ),
-        "wait_for" => (
-            json!({
-                "workflowId": id(),
-                "sessionId": id(),
-                "pageId": id(),
-                "condition": {"$ref":"#/$defs/WaitCondition"},
-                "timeoutMs": timeout_ms()
-            }),
-            vec!["sessionId", "pageId", "condition", "timeoutMs"],
-        ),
-        "page_list" => (
-            json!({"sessionId": id(), "workflowId": id()}),
-            vec!["sessionId"],
-        ),
-        "download_url" => (
-            json!({
-                "workflowId": id(),
-                "sessionId": id(),
-                "pageId": id(),
-                "url": string(1, MAX_URL_BYTES),
-                "expectedContentType": nullable(string(1, 256)),
-                "maxBytes": {"type":"integer","minimum":1,"maximum":1099511627776_u64},
-                "saveAs": nullable(string(1, 4096))
-            }),
-            vec!["sessionId", "pageId", "url", "maxBytes"],
-        ),
-        "upload_files" => (
-            json!({
-                "workflowId": id(),
-                "sessionId": id(),
-                "pageId": id(),
-                "selector": string(1, MAX_STRING_BYTES),
-                "target": nullable(json!({"$ref":"#/$defs/TargetSpec"})),
-                "controlId": string(1, 128),
-                "paths": array(string(1, 4096), 16),
-                "expectedState": {"$ref":"#/$defs/WaitForCommand"},
-                "autoCheckpoint":{"type":"boolean"}
-            }),
-            vec!["sessionId", "pageId", "paths"],
-        ),
-        "evaluate_javascript" => (
-            json!({
-                "workflowId": id(),
-                "sessionId": id(),
-                "pageId": id(),
-                "expression": string(1, MAX_HTML_BYTES),
-                "timeoutMs": timeout_ms(),
-                "awaitPromise": {"type":"boolean"}
-            }),
-            vec!["sessionId", "pageId", "expression"],
-        ),
-        // Intent surface. `command_execute` still accepts the nested
-        // `{ kind: "intent", input: … }` form; these build the envelope for you.
-        "intent_locate" => (intent_properties(json!({})), intent_required(&["purpose"])),
-        "intent_fill" => (
-            intent_properties(json!({"value":{"$ref":"#/$defs/FillValue"}})),
-            intent_required(&["purpose", "value"]),
-        ),
-        "intent_complete_form" => (
-            intent_properties(json!({
-                "fields":nonempty_array(json!({"$ref":"#/$defs/CompleteFormField"}), MAX_COLLECTION_ITEMS),
-                "evidenceDetail":{"type":"string","enum":["compact","full"]}
-            })),
-            intent_required(&["purpose", "fields"]),
-        ),
-        "intent_submit_and_verify" => (
-            intent_properties(json!({
-                "expectedState":{"$ref":"#/$defs/WaitForCommand"},
-                "evidenceDetail":{"type":"string","enum":["compact","full"]},
-                "autoCheckpoint":{"type":"boolean"},
-                "reSubmit":{"type":"boolean","description":"Submit despite a prior completed submit for this workflow (boundaryAlreadyExecuted)."}
-            })),
-            intent_required(&["purpose", "expectedState"]),
-        ),
-        // The only intent with no purpose/hints of its own.
-        "intent_wait_for_state" => (
-            intent_scope(json!({
-                "condition":{"$ref":"#/$defs/WaitCondition"},
-                "timeoutMs":timeout_ms()
-            })),
-            intent_required(&["condition", "timeoutMs"]),
-        ),
-        "intent_follow" => (
-            intent_properties(json!({
-                "expectedDestination":{"$ref":"#/$defs/WaitForCommand"},
-                "expectedState":{"$ref":"#/$defs/WaitForCommand"},
-                "evidenceDetail":{"type":"string","enum":["compact","full"]},
-                "boundary":{"type":"boolean"},
-                "autoCheckpoint":{"type":"boolean"}
-            })),
-            intent_required(&["purpose"]),
-        ),
-        "intent_dismiss_obstruction" => (
-            intent_properties(json!({"timeoutMs":timeout_ms()})),
-            intent_required(&["purpose"]),
-        ),
-        // `ExtractIntent` (bobby-browser-client/src/commands.rs) carries `purpose` +
-        // `fields` only -- no top-level hints, unlike the other `intent_properties`
-        // callers. Each `ExtractField` has its own `hints` (see `extract_field`'s
-        // `$defs` entry), so advertising a top-level one here would validate but
-        // then fail `IntentExtractArgs`'s `deny_unknown_fields` parse.
-        "intent_extract" => (
-            without_property(
-                intent_properties(json!({
-                    "fields":nonempty_array(json!({"$ref":"#/$defs/ExtractField"}), MAX_COLLECTION_ITEMS)
-                })),
-                "hints",
-            ),
-            intent_required(&["purpose", "fields"]),
-        ),
-        "intent_solve_challenge" => (
-            intent_properties(json!({
-                "hints": challenge_hints_schema("timeoutMs")
-            })),
-            intent_required(&["purpose"]),
-        ),
-        "intent_detect_challenge" => (
-            intent_properties(json!({
-                "hints": challenge_hints_schema("timeoutMs")
-            })),
-            intent_required(&["purpose"]),
-        ),
-        "command_execute" => (
-            json!({
-                "envelope":{"$ref":"#/$defs/CommandEnvelope"},
-                "idempotencyKey":string(1, 128)
-            }),
-            vec!["envelope"],
-        ),
-        "checkpoint_save" => (
-            json!({
-                "checkpoint":{"$ref":"#/$defs/WorkflowCheckpoint"},
-                "evidenceRefs":array(id(), MAX_EVIDENCE_ITEMS)
-            }),
-            vec!["checkpoint"],
-        ),
-        "workflow_recover" => (json!({"workflowId":id()}), vec!["workflowId"]),
-        "job_submit" => (
-            json!({
-                "name": string(1, MAX_STRING_BYTES),
-                "payload": {},
-                "priority": {"type":"string","enum":["low","normal","high","critical"]},
-                "maxRetries": {"type":"integer","minimum":0,"maximum":32},
-                "timeoutMs": timeout_ms()
-            }),
-            vec!["name"],
-        ),
-        "job_status" => (json!({"jobId": string(1, 128)}), vec!["jobId"]),
-        "job_cancel" => (json!({"jobId": string(1, 128)}), vec!["jobId"]),
-        // Either key: `workflowId` for a known workflow, or `sessionId` to
-        // discover the recoverable workflows of a session. Neither is required
-        // here because exactly-one-of is not expressible in the subset this
-        // validator implements; the handler enforces it and names the failure.
-        "recovery_status" => (
-            json!({
-                "workflowId":id(),
-                "sessionId":id(),
-                "limit":{"type":"integer","minimum":1,"maximum":MAX_RECOVERABLE_WORKFLOWS}
-            }),
-            vec![],
-        ),
-        "events_read" => (
-            json!({
-                "cursor":{"type":"integer","minimum":0},
-                "limit":{"type":"integer","minimum":1,"maximum":MAX_EVENT_LIMIT}
-            }),
-            vec!["limit"],
-        ),
-        _ => (json!({}), vec![]),
-    };
+    let (properties, required) = crate::catalog::descriptor(name)
+        .map(|descriptor| (descriptor.schema)())
+        .unwrap_or_else(|| (json!({}), vec![]));
     let mut schema = object(properties, &required);
     schema["$schema"] = json!("https://json-schema.org/draft/2020-12/schema");
     schema["$defs"] = reachable_definitions(&schema);
     schema
+}
+
+pub(crate) fn a11y_snapshot_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "workflowId": id(),
+            "sessionId": id(),
+            "pageId": id(),
+            "maxNodes": {"type":"integer","minimum":1,"maximum":2048},
+            "target": {"type":"object","description":"Scope the tree to this target's subtree (e.g. the form being worked on) instead of the whole page; same shape as wait_for targets"}
+        }),
+        vec!["sessionId", "pageId"],
+    )
+}
+
+pub(crate) fn checkpoint_save_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "checkpoint":{"$ref":"#/$defs/WorkflowCheckpoint"},
+            "evidenceRefs":array(id(), MAX_EVIDENCE_ITEMS)
+        }),
+        vec!["checkpoint"],
+    )
+}
+
+pub(crate) fn click_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "workflowId": id(),
+            "commandId": id_pin(),
+            "attemptId": id_pin(),
+            "sessionId": id(),
+            "pageId": id(),
+            "selector": string(1, MAX_STRING_BYTES),
+            "target": nullable(json!({"$ref":"#/$defs/TargetSpec"})),
+            "boundary": {"type":"boolean"},
+            "autoCheckpoint":{"type":"boolean"},
+            "expectedUrl": nullable(string(1, MAX_URL_BYTES)),
+            "modifiers": {
+                "type": "array",
+                "maxItems": 4,
+                "uniqueItems": true,
+                "items": {
+                    "type": "string",
+                    "enum": ["shift", "ctrl", "alt", "meta"]
+                }
+            }
+        }),
+        vec!["sessionId", "pageId"],
+    )
+}
+
+pub(crate) fn click_and_wait_for_download_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "workflowId": id(),
+            "commandId": id_pin(),
+            "attemptId": id_pin(),
+            "sessionId": id(),
+            "pageId": id(),
+            "selector": string(1, MAX_STRING_BYTES),
+            "target": nullable(json!({"$ref":"#/$defs/TargetSpec"})),
+            "timeoutMs": timeout_ms(),
+            "autoCheckpoint":{"type":"boolean"}
+        }),
+        vec!["sessionId", "pageId"],
+    )
+}
+
+pub(crate) fn command_execute_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "envelope":{"$ref":"#/$defs/CommandEnvelope"},
+            "idempotencyKey":string(1, 128)
+        }),
+        vec!["envelope"],
+    )
+}
+
+pub(crate) fn context_ask_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "sessionId": id(),
+            "pageId": id(),
+            "description": string(1, 256)
+        }),
+        vec!["sessionId", "pageId", "description"],
+    )
+}
+
+pub(crate) fn control_action_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "workflowId": id(),
+            "sessionId": id(),
+            "pageId": id(),
+            "target": {"$ref":"#/$defs/ControlTarget"},
+            "action": {"$ref":"#/$defs/ControlActionKind"}
+        }),
+        vec!["sessionId", "pageId", "target", "action"],
+    )
+}
+
+pub(crate) fn cookie_delete_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "workflowId": id(),
+            "sessionId": id(),
+            "pageId": id(),
+            "urls": array(string(1, MAX_URL_BYTES), 64),
+            "names": array(string(1, 1024), 128)
+        }),
+        vec!["sessionId", "pageId"],
+    )
+}
+
+pub(crate) fn cookie_get_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "workflowId": id(),
+            "sessionId": id(),
+            "pageId": id(),
+            "urls": array(string(1, MAX_URL_BYTES), 64)
+        }),
+        vec!["sessionId", "pageId"],
+    )
+}
+
+pub(crate) fn cookie_set_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "workflowId": id(),
+            "sessionId": id(),
+            "pageId": id(),
+            "cookies": array(json!({"$ref":"#/$defs/SetCookieParam"}), 128)
+        }),
+        vec!["sessionId", "pageId", "cookies"],
+    )
+}
+
+pub(crate) fn dialog_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "workflowId": id(),
+            "sessionId": id(),
+            "pageId": id(),
+            "action": {"type":"string","enum":["accept","dismiss"]},
+            "timeoutMs": timeout_ms()
+        }),
+        vec!["sessionId", "pageId", "action"],
+    )
+}
+
+pub(crate) fn download_url_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "workflowId": id(),
+            "sessionId": id(),
+            "pageId": id(),
+            "url": string(1, MAX_URL_BYTES),
+            "expectedContentType": nullable(string(1, 256)),
+            "maxBytes": {"type":"integer","minimum":1,"maximum":1099511627776_u64},
+            "saveAs": nullable(string(1, 4096))
+        }),
+        vec!["sessionId", "pageId", "url", "maxBytes"],
+    )
+}
+
+pub(crate) fn emulate_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "workflowId": id(),
+            "sessionId": id(),
+            "pageId": id(),
+            "viewport": nullable(object(
+                json!({"width":{"type":"integer","minimum":1,"maximum":16384},"height":{"type":"integer","minimum":1,"maximum":16384}}),
+                &["width", "height"]
+            )),
+            "geolocation": nullable(object(
+                json!({
+                    "latitude":{"type":"number","minimum":-90,"maximum":90},
+                    "longitude":{"type":"number","minimum":-180,"maximum":180},
+                    "accuracy":nullable(json!({"type":"number","minimum":0}))
+                }),
+                &["latitude", "longitude"]
+            )),
+            "mobile": {"type":"boolean"}
+        }),
+        vec!["sessionId", "pageId"],
+    )
+}
+
+pub(crate) fn evaluate_javascript_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "workflowId": id(),
+            "sessionId": id(),
+            "pageId": id(),
+            "expression": string(1, MAX_HTML_BYTES),
+            "timeoutMs": timeout_ms(),
+            "awaitPromise": {"type":"boolean"}
+        }),
+        vec!["sessionId", "pageId", "expression"],
+    )
+}
+
+pub(crate) fn events_read_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "cursor":{"type":"integer","minimum":0},
+            "limit":{"type":"integer","minimum":1,"maximum":MAX_EVENT_LIMIT}
+        }),
+        vec!["limit"],
+    )
+}
+
+pub(crate) fn extract_structured_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "workflowId": id(),
+            "sessionId": id(),
+            "pageId": id(),
+            "schema": any_value(),
+            "purpose": nullable(string(1, 256))
+        }),
+        vec!["sessionId", "pageId", "schema"],
+    )
+}
+
+pub(crate) fn form_snapshot_input_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({"workflowId": id(), "sessionId": id(), "pageId": id(), "maxControls":{"type":"integer","minimum":1,"maximum":512}}),
+        vec!["sessionId", "pageId"],
+    )
+}
+
+pub(crate) fn inspect_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "workflowId": id(),
+            "sessionId": id(),
+            "pageId": id(),
+            "selector": nullable(string(1, MAX_STRING_BYTES)),
+            "target": nullable(json!({"$ref":"#/$defs/TargetSpec"})),
+            "includeHtml": {"type":"boolean"}
+        }),
+        vec!["sessionId", "pageId"],
+    )
+}
+
+pub(crate) fn intent_complete_form_schema() -> (Value, Vec<&'static str>) {
+    (
+        intent_properties(json!({
+            "fields":nonempty_array(json!({"$ref":"#/$defs/CompleteFormField"}), MAX_COLLECTION_ITEMS),
+            "evidenceDetail":{"type":"string","enum":["compact","full"]}
+        })),
+        intent_required(&["purpose", "fields"]),
+    )
+}
+
+pub(crate) fn intent_detect_challenge_schema() -> (Value, Vec<&'static str>) {
+    (
+        intent_properties(json!({
+            "hints": challenge_hints_schema("timeoutMs")
+        })),
+        intent_required(&["purpose"]),
+    )
+}
+
+pub(crate) fn intent_dismiss_obstruction_schema() -> (Value, Vec<&'static str>) {
+    (
+        intent_properties(json!({"timeoutMs":timeout_ms()})),
+        intent_required(&["purpose"]),
+    )
+}
+
+pub(crate) fn intent_extract_schema() -> (Value, Vec<&'static str>) {
+    (
+        without_property(
+            intent_properties(json!({
+                "fields":nonempty_array(json!({"$ref":"#/$defs/ExtractField"}), MAX_COLLECTION_ITEMS)
+            })),
+            "hints",
+        ),
+        intent_required(&["purpose", "fields"]),
+    )
+}
+
+pub(crate) fn intent_fill_schema() -> (Value, Vec<&'static str>) {
+    (
+        intent_properties(json!({"value":{"$ref":"#/$defs/FillValue"}})),
+        intent_required(&["purpose", "value"]),
+    )
+}
+
+pub(crate) fn intent_follow_schema() -> (Value, Vec<&'static str>) {
+    (
+        intent_properties(json!({
+            "expectedDestination":{"$ref":"#/$defs/WaitForCommand"},
+            "expectedState":{"$ref":"#/$defs/WaitForCommand"},
+            "evidenceDetail":{"type":"string","enum":["compact","full"]},
+            "boundary":{"type":"boolean"},
+            "autoCheckpoint":{"type":"boolean"}
+        })),
+        intent_required(&["purpose"]),
+    )
+}
+
+pub(crate) fn intent_locate_schema() -> (Value, Vec<&'static str>) {
+    (intent_properties(json!({})), intent_required(&["purpose"]))
+}
+
+pub(crate) fn intent_submit_and_verify_schema() -> (Value, Vec<&'static str>) {
+    (
+        intent_properties(json!({
+            "expectedState":{"$ref":"#/$defs/WaitForCommand"},
+            "evidenceDetail":{"type":"string","enum":["compact","full"]},
+            "autoCheckpoint":{"type":"boolean"},
+            "reSubmit":{"type":"boolean","description":"Submit despite a prior completed submit for this workflow (boundaryAlreadyExecuted)."}
+        })),
+        intent_required(&["purpose", "expectedState"]),
+    )
+}
+
+pub(crate) fn intent_wait_for_state_schema() -> (Value, Vec<&'static str>) {
+    (
+        intent_scope(json!({
+            "condition":{"$ref":"#/$defs/WaitCondition"},
+            "timeoutMs":timeout_ms()
+        })),
+        intent_required(&["condition", "timeoutMs"]),
+    )
+}
+
+pub(crate) fn job_cancel_schema() -> (Value, Vec<&'static str>) {
+    (json!({"jobId": string(1, 128)}), vec!["jobId"])
+}
+
+pub(crate) fn job_submit_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "name": string(1, MAX_STRING_BYTES),
+            "payload": {},
+            "priority": {"type":"string","enum":["low","normal","high","critical"]},
+            "maxRetries": {"type":"integer","minimum":0,"maximum":32},
+            "timeoutMs": timeout_ms()
+        }),
+        vec!["name"],
+    )
+}
+
+pub(crate) fn navigate_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "workflowId": id(),
+            "sessionId": id(),
+            "pageId": id(),
+            "url": string(1, MAX_URL_BYTES),
+            "waitUntil": {"type":"string","enum":["commit","domContentLoaded","interactive","networkIdle"]},
+            "timeoutMs": timeout_ms()
+        }),
+        vec!["sessionId", "pageId", "url"],
+    )
+}
+
+pub(crate) fn network_log_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "workflowId": id(),
+            "sessionId": id(),
+            "pageId": id(),
+            "clear": {"type":"boolean"}
+        }),
+        vec!["sessionId", "pageId"],
+    )
+}
+
+pub(crate) fn page_activate_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "sessionId": id(),
+            "pageId": id(),
+            "workflowId": id(),
+            // handle+pageId = "activate this page and rebind the
+            // handle": normalization accepts the mix for this tool
+            // only, so the validation schema declares the handle too.
+            "workflowHandle": workflow_handle()
+        }),
+        vec!["sessionId", "pageId"],
+    )
+}
+
+pub(crate) fn page_close_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({"sessionId": id(), "pageId": id(), "workflowId": id()}),
+        vec!["sessionId", "pageId"],
+    )
+}
+
+pub(crate) fn page_list_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({"sessionId": id(), "workflowId": id()}),
+        vec!["sessionId"],
+    )
+}
+
+pub(crate) fn page_open_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({"sessionId": id(), "url": string(1, MAX_URL_BYTES)}),
+        vec!["sessionId"],
+    )
+}
+
+pub(crate) fn pdf_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "workflowId": id(),
+            "sessionId": id(),
+            "pageId": id(),
+            "landscape": {"type":"boolean"},
+            "printBackground": {"type":"boolean"},
+            "scale": {"type":"number","minimum":0.1,"maximum":2.0},
+            "pageRanges": nullable(string(0, 256))
+        }),
+        vec!["sessionId", "pageId"],
+    )
+}
+
+pub(crate) fn recovery_status_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "workflowId":id(),
+            "sessionId":id(),
+            "limit":{"type":"integer","minimum":1,"maximum":MAX_RECOVERABLE_WORKFLOWS}
+        }),
+        vec![],
+    )
+}
+
+pub(crate) fn runtime_info_schema() -> (Value, Vec<&'static str>) {
+    (json!({}), vec![])
+}
+
+pub(crate) fn screenshot_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "workflowId": id(),
+            "sessionId": id(),
+            "pageId": id(),
+            "mode": {"$ref":"#/$defs/ScreenshotMode"}
+        }),
+        vec!["sessionId", "pageId"],
+    )
+}
+
+pub(crate) fn session_close_schema() -> (Value, Vec<&'static str>) {
+    (json!({"sessionId": id()}), vec!["sessionId"])
+}
+
+pub(crate) fn session_create_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "profile": string(1, 128),
+            "proxy": nullable(string(0, 2048)),
+            "executionPolicy": object(
+                json!({
+                    "javascriptEvaluation":{"type":"boolean"},
+                    "visionAssist":{"type":"boolean"},
+                    "fingerprint":{"type":"boolean"},
+                    "humanize":{"type":"boolean"},
+                    "visionNode":string(1, 128)
+                }),
+                &[]
+            ),
+            "zigzagzig":{"type":"boolean"}
+        }),
+        vec!["profile"],
+    )
+}
+
+pub(crate) fn toolset_select_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "toolset": {"type":"string","enum":["full","explore","act","intent","verify"]}
+        }),
+        vec!["toolset"],
+    )
+}
+
+pub(crate) fn type_text_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "workflowId": id(),
+            "sessionId": id(),
+            "pageId": id(),
+            "selector": string(1, MAX_STRING_BYTES),
+            "target": nullable(json!({"$ref":"#/$defs/TargetSpec"})),
+            "value": string(0, MAX_STRING_BYTES),
+            "clearFirst": {"type":"boolean"},
+            "expectedUrl": nullable(string(1, MAX_URL_BYTES))
+        }),
+        vec!["sessionId", "pageId", "value"],
+    )
+}
+
+pub(crate) fn upload_files_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "workflowId": id(),
+            "sessionId": id(),
+            "pageId": id(),
+            "selector": string(1, MAX_STRING_BYTES),
+            "target": nullable(json!({"$ref":"#/$defs/TargetSpec"})),
+            "controlId": string(1, 128),
+            "paths": array(string(1, 4096), 16),
+            "expectedState": {"$ref":"#/$defs/WaitForCommand"},
+            "autoCheckpoint":{"type":"boolean"}
+        }),
+        vec!["sessionId", "pageId", "paths"],
+    )
+}
+
+pub(crate) fn wait_for_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "workflowId": id(),
+            "sessionId": id(),
+            "pageId": id(),
+            "condition": {"$ref":"#/$defs/WaitCondition"},
+            "timeoutMs": timeout_ms()
+        }),
+        vec!["sessionId", "pageId", "condition", "timeoutMs"],
+    )
+}
+
+pub(crate) fn workflow_observe_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            // `WORKFLOW_SCOPE_TOOLS` (SessionPageWorkflow): the
+            // advertisement rewrites this into handle-XOR-explicit-ids.
+            // `workflowHandle` stays declared (never required) so a
+            // pre-normalization call validates the same as other
+            // scope tools.
+            "workflowHandle": workflow_handle(),
+            // `validate_string` is intentionally byte-oriented. Four bytes per
+            // scalar prevents it from rejecting a valid 256-scalar UTF-8 goal;
+            // the observe parser applies the scalar limit before registry lookup.
+            "sessionId": id(),
+            "pageId": id(),
+            "workflowId": id(),
+            "goal": string(0, MAX_WORKFLOW_GOAL_SCALARS * 4),
+            "maxNodes": {"type":"integer","minimum":1,"maximum":2048},
+            "includeForms": {"type":"boolean"},
+            "maxControls": {"type":"integer","minimum":1,"maximum":512},
+            "evidenceDetail":{"type":"string","enum":["compact","full"]},
+            "target": {"type":"object","description":"Scope the observation to one region's subtree (same shape as a11y_snapshot.target) instead of the whole page"}
+        }),
+        vec!["sessionId", "pageId"],
+    )
+}
+
+pub(crate) fn workflow_recover_schema() -> (Value, Vec<&'static str>) {
+    (json!({"workflowId":id()}), vec!["workflowId"])
+}
+
+pub(crate) fn workflow_start_schema() -> (Value, Vec<&'static str>) {
+    (
+        json!({
+            "profile": string(1, 128),
+            "proxy": nullable(string(0, 2048)),
+            "executionPolicy": object(
+                json!({
+                    "javascriptEvaluation":{"type":"boolean"},
+                    "visionAssist":{"type":"boolean"},
+                    "fingerprint":{"type":"boolean"},
+                    "humanize":{"type":"boolean"},
+                    "visionNode":string(1, 128)
+                }),
+                &[]
+            ),
+            "zigzagzig":{"type":"boolean"},
+            "url": string(1, MAX_URL_BYTES)
+        }),
+        vec!["profile"],
+    )
 }
 
 /// The schema advertised in `tools/list`, distinct from the schema

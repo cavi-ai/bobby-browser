@@ -5054,7 +5054,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
         let started = Instant::now();
         let deadline = started + Duration::from_millis(command.timeout_ms);
         let mut observations = 0;
-        let mut quiet_since = None;
+        let mut quiet_window = worker_pool::policy::QuietWindow::default();
         loop {
             observations += 1;
             // Parity with Chromium: a Url wait reports what it read, an
@@ -5384,13 +5384,15 @@ impl BrowserWorker for FirefoxCompanionWorker {
                     let (in_flight, excluded) =
                         self.network_quiet.lock().await.snapshot(&context, &filters);
                     excluded_classes = excluded;
-                    if in_flight <= *max_in_flight {
-                        let since = quiet_since.get_or_insert_with(Instant::now);
-                        (since.elapsed() >= Duration::from_millis(*idle_ms), None)
-                    } else {
-                        quiet_since = None;
-                        (false, None)
-                    }
+                    (
+                        quiet_window.observe(
+                            Instant::now(),
+                            in_flight,
+                            *max_in_flight,
+                            Duration::from_millis(*idle_ms),
+                        ),
+                        None,
+                    )
                 }
             };
             if satisfied {

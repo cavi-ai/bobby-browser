@@ -7,16 +7,6 @@
 
 use super::*;
 
-pub(super) const TOOLS: &[&str] = &[
-    "checkpoint_save",
-    "workflow_recover",
-    "job_submit",
-    "job_status",
-    "job_cancel",
-    "recovery_status",
-    "events_read",
-];
-
 impl Server {
     pub(super) async fn dispatch_workflow(
         &self,

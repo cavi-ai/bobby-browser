@@ -11,8 +11,6 @@ use sdk_core::workflow::{WorkflowService, WorkflowSetupFailure};
 use std::future::Future;
 use tokio::sync::oneshot;
 
-pub(super) const TOOLS: &[&str] = &["workflow_start", "workflow_observe"];
-
 const CLEANUP_DEADLINE_SECONDS: i64 = 30;
 const DEFAULT_WORKFLOW_OBSERVE_MAX_NODES: u32 = 256;
 const DEFAULT_WORKFLOW_OBSERVE_MAX_CONTROLS: u32 = 128;

@@ -109,19 +109,17 @@ impl Toolset {
     /// advertise-schema trim leaves budget headroom. They remain callable from
     /// any phase when a [`crate::jobs::JobPort`] is attached.
     pub fn advertises(self, tool: &str) -> bool {
-        if crate::jobs::is_job_tool(tool) {
-            return matches!(self, Self::Full | Self::Act | Self::Verify);
-        }
-        if self == Self::Full || ALWAYS.contains(&tool) {
-            return true;
-        }
-        match self {
-            Self::Full => true,
-            Self::Explore => EXPLORE.contains(&tool),
-            Self::Act => ACT.contains(&tool),
-            Self::Intent => INTENT.contains(&tool),
-            Self::Verify => VERIFY.contains(&tool),
-        }
+        let Some(descriptor) = crate::catalog::descriptor(tool) else {
+            return self == Self::Full;
+        };
+        let phase = match self {
+            Self::Full => return true,
+            Self::Explore => crate::catalog::EXPLORE,
+            Self::Act => crate::catalog::ACT,
+            Self::Intent => crate::catalog::INTENT,
+            Self::Verify => crate::catalog::VERIFY,
+        };
+        descriptor.phases & (crate::catalog::ALWAYS | phase) != 0
     }
 }
 
@@ -131,164 +129,7 @@ impl fmt::Display for Toolset {
     }
 }
 
-/// Present in every phase: session/page lifecycle, workflow setup/observation,
-/// and `toolset_select` so a narrowed agent can always leave its phase.
-const ALWAYS: &[&str] = &[
-    "runtime_info",
-    "session_create",
-    "session_list",
-    "session_close",
-    "page_open",
-    "page_list",
-    "page_close",
-    "page_activate",
-    "toolset_select",
-    "workflow_observe",
-    "workflow_start",
-];
-
-const EXPLORE: &[&str] = &[
-    "a11y_snapshot",
-    "navigate",
-    // Base controls: the default loop must click, type, and upload without a
-    // toolset_select + schema-discovery round trip first. `form_snapshot`,
-    // `inspect`, `wait_for`, `click_and_wait_for_download`, `dialog`,
-    // `download_url`, `cookie_get`, `screenshot`, `network_log`, and the
-    // read-only `context_*`/`intent_detect_challenge` tools cost real catalog
-    // bytes for a less-common path; they widen through `act`/`intent`/`verify`
-    // (still callable from here -- phases narrow advertisement, not
-    // capability).
-    "click",
-    "click_and_wait_for_popup",
-    "type_text",
-    "control_action",
-    "upload_files",
-    // Composite intents for common workflows stay in the default phase.
-    "intent_complete_form",
-    "intent_submit_and_verify",
-    "intent_follow",
-];
-
-/// Raw primitives. `command_execute` is the escape hatch for a caller minting
-/// its own envelope, and is absent from the other narrow phases.
-const ACT: &[&str] = &[
-    "click",
-    "click_and_wait_for_download",
-    "click_and_wait_for_popup",
-    "type_text",
-    "control_action",
-    "upload_files",
-    "dialog",
-    "emulate",
-    "navigate",
-    "wait_for",
-    "download_url",
-    "evaluate_javascript",
-    "cookie_get",
-    "cookie_set",
-    "cookie_delete",
-    "command_execute",
-    "network_log",
-    // Verification of an action without leaving the phase.
-    "a11y_snapshot",
-    "context_ask",
-];
-
-const INTENT: &[&str] = &[
-    "checkpoint_save",
-    "intent_locate",
-    "intent_fill",
-    "intent_complete_form",
-    "intent_submit_and_verify",
-    "intent_wait_for_state",
-    "intent_follow",
-    "intent_dismiss_obstruction",
-    "intent_extract",
-    "intent_solve_challenge",
-    "intent_detect_challenge",
-    "extract_structured",
-    "navigate",
-    "wait_for",
-    "a11y_snapshot",
-    "form_snapshot",
-    "context_ask",
-    "context_neighbors",
-];
-
-const VERIFY: &[&str] = &[
-    "checkpoint_save",
-    "recovery_status",
-    "workflow_recover",
-    "events_read",
-    "inspect",
-    "a11y_snapshot",
-    "form_snapshot",
-    "screenshot",
-    "context_ask",
-    "context_neighbors",
-    "pdf",
-    "job_submit",
-    "job_status",
-    "job_cancel",
-];
-
-/// Every tool the gateway can advertise. Kept sorted so docs parity and
-/// phase-membership tests stay deterministic.
-pub const EVERY_TOOL: &[&str] = &[
-    "a11y_snapshot",
-    "checkpoint_save",
-    "click",
-    "click_and_wait_for_download",
-    "click_and_wait_for_popup",
-    "command_execute",
-    "context_ask",
-    "context_neighbors",
-    "control_action",
-    "cookie_delete",
-    "cookie_get",
-    "cookie_set",
-    "dialog",
-    "download_url",
-    "emulate",
-    "evaluate_javascript",
-    "events_read",
-    "extract_structured",
-    "form_snapshot",
-    "inspect",
-    "intent_complete_form",
-    "intent_detect_challenge",
-    "intent_dismiss_obstruction",
-    "intent_extract",
-    "intent_fill",
-    "intent_follow",
-    "intent_locate",
-    "intent_solve_challenge",
-    "intent_submit_and_verify",
-    "intent_wait_for_state",
-    "job_cancel",
-    "job_status",
-    "job_submit",
-    "navigate",
-    "network_log",
-    "page_activate",
-    "page_close",
-    "page_list",
-    "page_open",
-    "pdf",
-    "recovery_status",
-    "runtime_info",
-    "screenshot",
-    "session_close",
-    "session_create",
-    "session_list",
-    "toolset_select",
-    "type_text",
-    "upload_files",
-    "wait_for",
-    "workflow_observe",
-    "workflow_recover",
-    "workflow_start",
-];
+pub use crate::catalog::EVERY_TOOL;
 
 #[cfg(test)]
 mod tests {
