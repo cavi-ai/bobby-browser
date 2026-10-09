@@ -103,6 +103,32 @@ fn inspection_and_archived_reads_avoid_unrelated_history_allocations() {
         "inspection allocated {largest} bytes at once"
     );
 
+    let original_bytes = std::fs::read(&path).unwrap();
+    let longest_record = original_bytes
+        .split(|byte| *byte == b'\n')
+        .map(|line| line.len() + 1)
+        .max()
+        .unwrap();
+    let live = runtime.block_on(JsonlJournal::open(&path)).unwrap();
+    RECORD_ALLOCATION_SIZE.store(longest_record, Ordering::Relaxed);
+    RECORD_ALLOCATIONS.store(0, Ordering::Relaxed);
+    TRACKING.store(true, Ordering::Relaxed);
+    let scan = runtime.block_on(live.history(command_id.clone())).unwrap();
+    TRACKING.store(false, Ordering::Relaxed);
+    let record_allocations = RECORD_ALLOCATIONS.load(Ordering::Relaxed);
+    assert!(
+        record_allocations < 64,
+        "reading 2048 active records made {record_allocations} record-sized allocations"
+    );
+    assert_eq!(scan.records.len(), 2048);
+    assert_eq!(scan.incompatible_records, 0);
+    assert!(!scan.torn_tail);
+    for (sequence, record) in scan.records.iter().enumerate() {
+        assert_eq!(record.sequence, sequence as u64);
+        assert_eq!(record.command_id, command_id);
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+
     let archive_path = root.path().join("archived.jsonl");
     let archive = root.path().join("archived.jsonl.archive-fixture");
     let mut original = serde_json::to_vec(&JournalRecord {
@@ -145,12 +171,6 @@ fn inspection_and_archived_reads_avoid_unrelated_history_allocations() {
     let indexed_path = root.path().join("indexed.jsonl");
     let mut archive_name = format!("indexed.jsonl.archive-{}", "x".repeat(61));
     let mut indexed_archive = root.path().join(&archive_name);
-    let longest_record = std::fs::read(&path)
-        .unwrap()
-        .split(|byte| *byte == b'\n')
-        .map(|line| line.len() + 1)
-        .max()
-        .unwrap();
     // Separate path copies from record allocations and power-of-two buffers.
     while indexed_archive.as_os_str().as_encoded_bytes().len() <= longest_record + 16 {
         archive_name.push('x');
