@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- On Firefox, opening a page waits the full operation timeout for the companion to bind it, and a refused binding names its reason.
 - Sessions on a durable Chromium profile share one Chrome that outlives the runtime; each session sees only its own pages and downloads.
 - Chromium pages no longer enable the unused Performance and Log domains, which slowed request-heavy pages.
 - Settling ignores animations, counters and carousels that never stop changing the page.
