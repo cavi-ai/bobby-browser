@@ -94,6 +94,18 @@ pub struct BrowserSelectionConfig {
     pub preference: EnginePreferenceConfig,
     #[serde(default)]
     pub firefox: Vec<FirefoxCompanionConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chromium: Vec<ChromiumProfileConfig>,
+}
+
+/// A durable Chromium profile kept in its own directory instead of
+/// `<profiles_dir>/chromium/<profileId>`. A Chrome already running on that
+/// directory with remote debugging is attached to, not relaunched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChromiumProfileConfig {
+    pub profile_id: String,
+    pub profile_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -807,6 +819,30 @@ scheduler_journal_path = "s"
             }
         );
         assert!(parsed.firefox.is_empty());
+    }
+
+    #[test]
+    fn a_chromium_profile_names_its_own_directory() {
+        let parsed: BrowserSelectionConfig = serde_json::from_value(serde_json::json!({
+            "preference": { "mode": "exact", "engine": "chromium", "profileId": "signed-in" },
+            "chromium": [{ "profileId": "signed-in", "profileDir": "/profiles/signed-in" }]
+        }))
+        .unwrap();
+        assert_eq!(parsed.chromium[0].profile_id, "signed-in");
+        assert_eq!(
+            parsed.chromium[0].profile_dir,
+            std::path::PathBuf::from("/profiles/signed-in")
+        );
+        assert!(
+            serde_json::from_value::<BrowserSelectionConfig>(serde_json::json!({
+                "chromium": [{ "profileId": "signed-in", "profileDir": "/p", "port": 9222 }]
+            }))
+            .is_err()
+        );
+        let without: BrowserSelectionConfig = serde_json::from_str("{}").unwrap();
+        assert!(!serde_json::to_string(&without)
+            .unwrap()
+            .contains("chromium"));
     }
 
     #[test]

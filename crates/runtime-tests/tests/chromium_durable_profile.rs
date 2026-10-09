@@ -554,3 +554,69 @@ async fn a_durable_profile_relaunches_chrome_after_it_dies() {
     assert_ne!(relaunched, before, "the dead Chrome was replaced");
     after.close().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chromium"]
+async fn a_profile_directory_attaches_to_the_chrome_already_running_there() {
+    let site = shared_site().await;
+    let root = tempfile::tempdir().unwrap();
+    let profile_dir = root.path().join("signed-in");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    let chrome = ProfileChrome(profile_dir.clone());
+    // A Chrome the user started on its own profile, with remote debugging.
+    let mut command = std::process::Command::new(chrome_executable());
+    command
+        .arg(format!("--user-data-dir={}", profile_dir.display()))
+        .args([
+            "--remote-debugging-port=0",
+            "--headless",
+            "--no-first-run",
+            "--use-mock-keychain",
+            "--password-store=basic",
+        ]);
+    // Hosts without a usable Chrome sandbox declare it, as for managed launches.
+    if std::env::var_os("BOBBY_CHROME_NO_SANDBOX").is_some() {
+        command.arg("--no-sandbox");
+    }
+    let mut user_chrome = command
+        .arg("about:blank")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    for _ in 0..200 {
+        if profile_dir.join("DevToolsActivePort").exists() && !chrome.pids().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let running = chrome.pids();
+    assert_eq!(
+        running.len(),
+        1,
+        "the user's Chrome is running: {running:?}, exit {:?}",
+        user_chrome.try_wait()
+    );
+
+    let config = config(root.path(), None);
+    let factory = Arc::new(
+        ChromiumWorkerFactory::new(config.browser.clone()).with_durable_profile_dir(profile_dir),
+    );
+    let runtime = RuntimeService::build_with_worker_factory(&config, factory)
+        .await
+        .unwrap();
+    let session = Session::open(&runtime, &site.url("/s/0")).await;
+    assert_eq!(
+        chrome.pids(),
+        running,
+        "the session used the running Chrome"
+    );
+    session.close().await;
+    assert_eq!(
+        chrome.pids(),
+        running,
+        "closing the session kept the user's Chrome"
+    );
+    let _ = user_chrome.kill();
+    let _ = user_chrome.wait();
+}
