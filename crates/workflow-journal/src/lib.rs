@@ -522,6 +522,40 @@ impl CommandJournal for JsonlJournal {
     }
 }
 
+/// One physical JSONL read. Ledgers decide what a torn or oversized line means.
+pub enum JsonlRead {
+    Eof,
+    /// Includes the trailing newline.
+    Complete(Vec<u8>),
+    /// Bytes with no trailing newline.
+    Torn(Vec<u8>),
+    TooLong,
+}
+
+/// Reads one line, capped at `max_bytes`. A longer line is [`JsonlRead::TooLong`]
+/// and is not returned.
+pub async fn read_jsonl_line<R>(reader: &mut R, max_bytes: u64) -> std::io::Result<JsonlRead>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let mut bytes = Vec::new();
+    let read = reader
+        .take(max_bytes.saturating_add(1))
+        .read_until(b'\n', &mut bytes)
+        .await?;
+    if read == 0 && bytes.is_empty() {
+        return Ok(JsonlRead::Eof);
+    }
+    if bytes.len() as u64 > max_bytes {
+        return Ok(JsonlRead::TooLong);
+    }
+    if bytes.ends_with(b"\n") {
+        Ok(JsonlRead::Complete(bytes))
+    } else {
+        Ok(JsonlRead::Torn(bytes))
+    }
+}
+
 /// One complete JSONL line, including its trailing newline.
 pub struct JsonlLine<'a> {
     pub offset: u64,
@@ -542,30 +576,36 @@ where
     F: FnMut(JsonlLine<'_>) -> std::io::Result<()>,
 {
     let mut reader = BufReader::new(file);
-    let mut line = Vec::new();
     let mut offset = 0u64;
     let mut bytes_read = 0u64;
     let mut number = 0usize;
     loop {
-        line.clear();
-        let read = reader.read_until(b'\n', &mut line).await?;
-        if read == 0 {
-            break;
+        match read_jsonl_line(&mut reader, u64::MAX).await? {
+            JsonlRead::Eof => break,
+            JsonlRead::TooLong => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "jsonl line exceeds the reader cap",
+                ));
+            }
+            JsonlRead::Torn(bytes) => {
+                bytes_read += bytes.len() as u64;
+                return Ok(JsonlScan {
+                    torn_tail: true,
+                    bytes_read,
+                });
+            }
+            JsonlRead::Complete(bytes) => {
+                bytes_read += bytes.len() as u64;
+                number += 1;
+                visit(JsonlLine {
+                    offset,
+                    number,
+                    bytes: &bytes,
+                })?;
+                offset += bytes.len() as u64;
+            }
         }
-        bytes_read += read as u64;
-        if !line.ends_with(b"\n") {
-            return Ok(JsonlScan {
-                torn_tail: true,
-                bytes_read,
-            });
-        }
-        number += 1;
-        visit(JsonlLine {
-            offset,
-            number,
-            bytes: &line,
-        })?;
-        offset += read as u64;
     }
     Ok(JsonlScan {
         torn_tail: false,
