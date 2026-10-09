@@ -3017,7 +3017,7 @@ use worker_pool::navigation_settle::{
 use worker_pool::secret_material::page_title_evidence;
 
 /// Waits until the document in `context` has loaded, `network` reports no
-/// script or fetch/XHR load in flight for it, and it has had no DOM mutation
+/// script or fetch/XHR load in flight for it, and it has had no content change
 /// for the probe's quiet window, and returns the URL and title read at that
 /// point. A redirect that replaces the document while the probe runs restarts
 /// it. When `budget` runs out first, returns the URL and title the context

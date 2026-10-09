@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 /// Longest a navigation waits for the document to stop changing.
 pub const NAVIGATION_SETTLE_CAP: Duration = Duration::from_secs(5);
-/// Time without a DOM mutation that counts as settled.
+/// Time without a content change that counts as settled.
 pub const NAVIGATION_QUIET_MS: u64 = 300;
 /// Quiet time required when the navigation was redirected. A script that
 /// bounces a sign-in page back to the app (`location.replace`) mutates no DOM,
@@ -20,8 +20,11 @@ pub const LOAD_POLL: Duration = Duration::from_millis(50);
 
 /// A promise that resolves to a JSON string `{url, title, quiet, begin}` once
 /// the document has loaded (`readyState` is `complete`, so every script it
-/// parsed has run) and then had no DOM mutation for the quiet window
-/// (`quiet: true`), or after `cap_ms` (`quiet: false`). `begin` is the URL
+/// parsed has run) and then had no content change for the quiet window
+/// (`quiet: true`), or after `cap_ms` (`quiet: false`). A content change is
+/// any DOM mutation except a node moved within the document and a node's
+/// repeated `class`/`style` changes or text edits (animations, counters,
+/// clocks); a node's first one in a probe still counts. `begin` is the URL
 /// and title the probe started on. The window is [`REDIRECTED_QUIET_MS`] when
 /// the document was reached through a server redirect (`performance`
 /// navigation timing) or sits on a URL other than `requested_url`,
@@ -42,7 +45,13 @@ const bare=url=>String(url).split('#')[0];\
 const inPlace=!!entry&&bare(entry.name)!==bare(location.href);\
 const quietMs=moved?{REDIRECTED_QUIET_MS}:inPlace?{SAME_DOCUMENT_QUIET_MS}:{NAVIGATION_QUIET_MS};\
 const restart=()=>{{clearTimeout(timer);if(document.readyState==='complete')timer=setTimeout(()=>finish(true),quietMs);}};\
-const observer=new MutationObserver(restart);\
+const edited=new WeakSet();\
+const restyle=r=>r.type==='characterData'||r.attributeName==='class'||r.attributeName==='style';\
+const changes=records=>{{const added=new Set(),removed=new Set();\
+records.forEach(r=>{{r.addedNodes.forEach(n=>added.add(n));r.removedNodes.forEach(n=>removed.add(n));}});\
+const relocated=n=>added.has(n)&&removed.has(n);\
+return records.filter(r=>r.type==='childList'?[...r.addedNodes,...r.removedNodes].some(n=>!relocated(n)):!restyle(r)||!edited.has(r.target)&&!!edited.add(r.target)).length>0;}};\
+const observer=new MutationObserver(records=>{{if(changes(records))restart();}});\
 observer.observe(document,{{subtree:true,childList:true,attributes:true,characterData:true}});\
 document.addEventListener('readystatechange',restart);\
 restart();const cap=setTimeout(()=>finish(false),{cap_ms});}})"

@@ -3809,8 +3809,8 @@ fn redact_secret_material(value: String) -> String {
 }
 
 /// Waits until the document has loaded, `tracker` reports no script or
-/// fetch/XHR load in flight, and the document has had no DOM mutation for the
-/// quiet window, and returns the URL and title read at that point. A redirect
+/// fetch/XHR load in flight, and the document has had no content change for
+/// the quiet window, and returns the URL and title read at that point. A redirect
 /// that replaces the document while the probe runs restarts it. When `budget`
 /// runs out first, returns the URL and title the page shows then; `None` only
 /// when the page cannot be read. Unknown loads cost one more probe.
