@@ -251,20 +251,132 @@ async fn events_are_delivered_independently_of_command_responses() {
     server.await.unwrap();
 }
 
+/// Accepts a client's session socket, then drops it so the client loses
+/// its connection; returns the listener for the reconnect.
+async fn accept_then_drop(listener: TcpListener) -> TcpListener {
+    let mut first = next_server_socket(&listener).await;
+    let session_new = recv_json(&mut first).await;
+    send_json(
+        &mut first,
+        json!({"id": session_new["id"], "type": "success", "result": {"sessionId": "first"}}),
+    )
+    .await;
+    drop(first);
+    listener
+}
+
+async fn wait_until_dead(client: &BidiClient) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while client.is_alive() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the client notices the dropped connection");
+}
+
 #[tokio::test]
-async fn response_deadline_terminates_the_uncertain_session_before_replacement() {
+async fn a_reconnect_starts_a_new_session() {
     let (listener, url) = listener_url().await;
+    let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
-        let mut socket = server_socket(listener).await;
-        let first = recv_json(&mut socket).await;
-        assert_eq!(first["method"], "never.respond");
-        let closed = tokio::time::timeout(Duration::from_secs(1), socket.next())
-            .await
-            .expect("transport closes promptly after a response deadline");
-        assert!(matches!(closed, None | Some(Ok(Message::Close(_)))));
+        let listener = accept_then_drop(listener).await;
+        dropped_tx.send(()).unwrap();
+        let mut second = next_server_socket(&listener).await;
+        let session_new = recv_json(&mut second).await;
+        assert_eq!(session_new["method"], "session.new");
+        send_json(
+            &mut second,
+            json!({"id": session_new["id"], "type": "success", "result": {"sessionId": "second"}}),
+        )
+        .await;
+        let status = recv_json(&mut second).await;
+        send_json(
+            &mut second,
+            json!({"id": status["id"], "type": "success", "result": {"ready": true}}),
+        )
+        .await;
     });
 
-    let client = BidiClient::connect(url, Duration::from_millis(100))
+    let client = BidiClient::connect_session(url, Duration::from_secs(1))
+        .await
+        .unwrap();
+    dropped_rx.await.unwrap();
+    wait_until_dead(&client).await;
+    client.reconnect_live().await.unwrap();
+    assert!(client.is_alive());
+    let status = client.send("session.status", json!({})).await.unwrap();
+    assert_eq!(status, json!({"ready": true}));
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_reconnect_to_a_taken_session_slot_leaves_the_client_dead() {
+    let (listener, url) = listener_url().await;
+    let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let listener = accept_then_drop(listener).await;
+        dropped_tx.send(()).unwrap();
+        let mut second = next_server_socket(&listener).await;
+        let session_new = recv_json(&mut second).await;
+        send_json(
+            &mut second,
+            json!({
+                "id": session_new["id"],
+                "type": "error",
+                "error": "session not created",
+                "message": "Maximum number of active sessions"
+            }),
+        )
+        .await;
+    });
+
+    let client = BidiClient::connect_session(url, Duration::from_secs(1))
+        .await
+        .unwrap();
+    dropped_rx.await.unwrap();
+    wait_until_dead(&client).await;
+    let error = client.reconnect_live().await.unwrap_err();
+    assert_eq!(error.code, ErrorCode::BrowserLaunchFailed);
+    assert!(error.retryable);
+    assert!(
+        !client.is_alive(),
+        "a sessionless socket kept the client alive"
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_response_deadline_fails_only_that_command() {
+    let (listener, url) = listener_url().await;
+    let (checked_tx, checked_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        let mut socket = server_socket(listener).await;
+        let hung = recv_json(&mut socket).await;
+        assert_eq!(hung["method"], "never.respond");
+        let next = recv_json(&mut socket).await;
+        assert_eq!(next["method"], "session.status");
+        send_json(
+            &mut socket,
+            json!({"id": hung["id"], "type": "success", "result": {"late": true}}),
+        )
+        .await;
+        send_json(
+            &mut socket,
+            json!({"id": next["id"], "type": "success", "result": {"ready": true}}),
+        )
+        .await;
+        let last = recv_json(&mut socket).await;
+        send_json(
+            &mut socket,
+            json!({"id": last["id"], "type": "success", "result": {"ready": true}}),
+        )
+        .await;
+        // Hold the socket open until the client has checked it is still alive.
+        let _ = checked_rx.await;
+    });
+
+    let client = BidiClient::connect(url, Duration::from_millis(200))
         .await
         .unwrap();
     let error = client.send("never.respond", json!({})).await.unwrap_err();
@@ -275,12 +387,14 @@ async fn response_deadline_terminates_the_uncertain_session_before_replacement()
         error.message,
         "Firefox BiDi never.respond response deadline exceeded"
     );
+    assert!(client.is_alive(), "a missed deadline closed the connection");
 
-    let follow_up = client.send("must.replace", json!({})).await.unwrap_err();
-    assert_eq!(follow_up.code, ErrorCode::DeadlineExceeded);
-    assert_eq!(follow_up.layer, ErrorLayer::Driver);
-    assert!(follow_up.retryable);
-    assert_eq!(follow_up.message, error.message);
+    let next = client.send("session.status", json!({})).await.unwrap();
+    assert_eq!(next, json!({"ready": true}));
+    let last = client.send("session.status", json!({})).await.unwrap();
+    assert_eq!(last, json!({"ready": true}));
+    assert!(client.is_alive(), "a late reply closed the connection");
+    checked_tx.send(()).unwrap();
     server.await.unwrap();
 }
 
