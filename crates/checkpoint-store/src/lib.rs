@@ -23,7 +23,7 @@ pub enum CheckpointStoreError {
     UnsupportedSchema { actual: u16, expected: u16 },
     #[error("checkpoint changed after the recovery snapshot was verified")]
     SnapshotChanged,
-    #[error("checkpoint workflow cannot be rebound to another session")]
+    #[error("checkpoint workflow or session identity changed")]
     IdentityChanged,
 }
 
@@ -140,8 +140,7 @@ impl CheckpointStore {
         let _guard = lock.lock().await;
         match self.read_bytes(&checkpoint.workflow_id).await {
             Ok(bytes) => {
-                let existing: WorkflowCheckpoint = serde_json::from_slice(&bytes)?;
-                self.validate_schema(&existing)?;
+                let existing = self.decode_checkpoint(&bytes, &checkpoint.workflow_id)?;
                 if existing.session_id != checkpoint.session_id {
                     return Err(CheckpointStoreError::IdentityChanged);
                 }
@@ -159,8 +158,7 @@ impl CheckpointStore {
         let lock = self.workflow_lock(workflow_id).await;
         let guard = lock.lock_owned().await;
         let bytes = self.read_bytes(workflow_id).await?;
-        let checkpoint: WorkflowCheckpoint = serde_json::from_slice(&bytes)?;
-        self.validate_schema(&checkpoint)?;
+        let checkpoint = self.decode_checkpoint(&bytes, workflow_id)?;
         Ok(LockedCheckpointSnapshot {
             store: self.clone(),
             authority_digest: checkpoint_authority_digest(&checkpoint)?,
@@ -220,9 +218,7 @@ impl CheckpointStore {
         workflow_id: &WorkflowId,
     ) -> Result<WorkflowCheckpoint, CheckpointStoreError> {
         let bytes = self.read_bytes(workflow_id).await?;
-        let checkpoint: WorkflowCheckpoint = serde_json::from_slice(&bytes)?;
-        self.validate_schema(&checkpoint)?;
-        Ok(checkpoint)
+        self.decode_checkpoint(&bytes, workflow_id)
     }
 
     /// Checkpoints belonging to `session_id`, newest first, capped at `limit`.
@@ -262,14 +258,17 @@ impl CheckpointStore {
                     let Ok(metadata) = entry.metadata().await else {
                         continue;
                     };
-                    let Ok(bytes) = tokio::fs::read(entry.path()).await else {
+                    let path = entry.path();
+                    let Ok(bytes) = tokio::fs::read(&path).await else {
                         continue;
                     };
                     let Ok(checkpoint) = serde_json::from_slice::<WorkflowCheckpoint>(&bytes)
                     else {
                         continue;
                     };
-                    if self.validate_schema(&checkpoint).is_ok() {
+                    if self.validate_schema(&checkpoint).is_ok()
+                        && path == self.path(&checkpoint.workflow_id)
+                    {
                         rebuilt
                             .sessions
                             .entry(checkpoint.session_id)
@@ -277,7 +276,7 @@ impl CheckpointStore {
                             .push(CheckpointRef {
                                 workflow_id: checkpoint.workflow_id,
                                 created_at: checkpoint.created_at,
-                                path: entry.path(),
+                                path,
                                 file_len: metadata.len(),
                                 modified: metadata.modified().ok(),
                             });
@@ -492,6 +491,19 @@ impl CheckpointStore {
             })?;
         }
         Ok(())
+    }
+
+    fn decode_checkpoint(
+        &self,
+        bytes: &[u8],
+        workflow_id: &WorkflowId,
+    ) -> Result<WorkflowCheckpoint, CheckpointStoreError> {
+        let checkpoint: WorkflowCheckpoint = serde_json::from_slice(bytes)?;
+        self.validate_schema(&checkpoint)?;
+        if checkpoint.workflow_id != *workflow_id {
+            return Err(CheckpointStoreError::IdentityChanged);
+        }
+        Ok(checkpoint)
     }
 
     async fn workflow_lock(&self, workflow_id: &WorkflowId) -> Arc<Mutex<()>> {

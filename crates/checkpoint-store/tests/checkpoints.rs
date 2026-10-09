@@ -66,6 +66,72 @@ async fn established_workflow_rejects_rebinding_to_another_session() {
 }
 
 #[tokio::test]
+async fn mismatched_workflow_identity_is_rejected_without_hiding_other_checkpoints() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let original = checkpoint(WorkflowId::new(), "https://example.test/original");
+    let mut neighbor = checkpoint(WorkflowId::new(), "https://example.test/neighbor");
+    neighbor.session_id = original.session_id.clone();
+    store.save(&original).await.unwrap();
+    store.save(&neighbor).await.unwrap();
+    assert_eq!(
+        store
+            .list_for_session(&original.session_id, 32)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    let path = checkpoint_store::checkpoint_path(root.path(), &original.workflow_id);
+    let mut swapped = original.clone();
+    swapped.workflow_id = neighbor.workflow_id.clone();
+    let damaged = serde_json::to_vec(&swapped).unwrap();
+    std::fs::write(&path, &damaged).unwrap();
+
+    for store in [store, CheckpointStore::open(root.path()).await.unwrap()] {
+        assert!(matches!(
+            store.load(&original.workflow_id).await,
+            Err(CheckpointStoreError::IdentityChanged)
+        ));
+        assert!(matches!(
+            store.lock_snapshot(&original.workflow_id).await,
+            Err(CheckpointStoreError::IdentityChanged)
+        ));
+        assert!(matches!(
+            store.save(&original).await,
+            Err(CheckpointStoreError::IdentityChanged)
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), damaged);
+        assert_eq!(
+            store
+                .list_for_session(&original.session_id, 32)
+                .await
+                .unwrap(),
+            vec![neighbor.clone()]
+        );
+        assert_eq!(store.load(&neighbor.workflow_id).await.unwrap(), neighbor);
+        let fresh = checkpoint(WorkflowId::new(), "https://example.test/fresh");
+        store.save(&fresh).await.unwrap();
+        assert_eq!(store.load(&fresh.workflow_id).await.unwrap(), fresh);
+    }
+
+    // Explicit repair restores normal reads and writes; failed operations did
+    // not silently overwrite or discard the mismatched evidence.
+    std::fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    assert_eq!(store.load(&original.workflow_id).await.unwrap(), original);
+    store.save(&original).await.unwrap();
+    assert_eq!(
+        store
+            .list_for_session(&original.session_id, 32)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn issued_skill_decision_survives_store_reopen_until_explicitly_cleared() {
     let root = tempfile::tempdir().unwrap();
     let workflow_id = WorkflowId::new();
