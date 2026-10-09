@@ -254,6 +254,15 @@ impl Browser {
         }
     }
 
+    /// How the Firefox the test started exited.
+    async fn started_exit(&mut self) -> std::process::ExitStatus {
+        let child = self.child.as_mut().expect("the test started Firefox");
+        tokio::time::timeout(TIMEOUT, child.wait())
+            .await
+            .expect("the started Firefox exited")
+            .expect("wait for the started Firefox")
+    }
+
     /// Stop whichever Firefox now owns the test profile: the runtime may have
     /// replaced the one the test started.
     async fn stop(mut self) {
@@ -339,8 +348,55 @@ fn runtime(
     enrolled: EnrolledFirefoxProfile,
     bidi_url: &Url,
 ) -> impl FnOnce(&AppConfig) -> Arc<dyn worker_pool::WorkerFactory> {
-    let profile_id = enrolled.profile_id().0.to_string();
-    let selection = BrowserSelectionConfig {
+    let selection = selection(env, profile, enrolled.profile_id(), bidi_url);
+    move |config| {
+        cli::compose_worker_factory_with_enrolled_firefox(
+            config,
+            selection,
+            Arc::new(|_| {}),
+            enrolled,
+        )
+        .expect("compose the enrolled Firefox runtime")
+    }
+}
+
+/// The runtime `bobby serve` composes on a later start of the same profile.
+fn restarted_runtime(
+    env: &Env,
+    profile: &Path,
+    profile_id: &ProfileId,
+    bidi_url: &Url,
+) -> impl FnOnce(&AppConfig) -> Arc<dyn worker_pool::WorkerFactory> {
+    let selection = selection(env, profile, profile_id, bidi_url);
+    move |config| {
+        firefox_companion::selection::compose_worker_factory_warm(config, selection)
+            .expect("compose the restarted Firefox runtime")
+    }
+}
+
+/// A runtime over `compose`, and its factory: `bobby serve` shuts the
+/// factory down after its serve loop ends.
+async fn serving(
+    compose: impl FnOnce(&AppConfig) -> Arc<dyn worker_pool::WorkerFactory>,
+) -> (Rig, Arc<dyn worker_pool::WorkerFactory>) {
+    let mut factory = None;
+    let rig = Rig::firefox_composed(|config| {
+        let composed = compose(config);
+        factory = Some(Arc::clone(&composed));
+        composed
+    })
+    .await;
+    (rig, factory.expect("the rig composed a factory"))
+}
+
+fn selection(
+    env: &Env,
+    profile: &Path,
+    profile_id: &ProfileId,
+    bidi_url: &Url,
+) -> BrowserSelectionConfig {
+    let profile_id = profile_id.0.to_string();
+    BrowserSelectionConfig {
         preference: EnginePreferenceConfig::Exact {
             engine: BrowserEngineConfig::Firefox,
             profile_id: Some(profile_id.clone()),
@@ -355,15 +411,6 @@ fn runtime(
             pairing_code_ttl_ms: TIMEOUT.as_millis() as u64,
             attachment_ttl_ms: 300_000,
         }],
-    };
-    move |config| {
-        cli::compose_worker_factory_with_enrolled_firefox(
-            config,
-            selection,
-            Arc::new(|_| {}),
-            enrolled,
-        )
-        .expect("compose the enrolled Firefox runtime")
     }
 }
 
@@ -399,6 +446,49 @@ async fn serve_session(rig: &Rig, site: &FixtureSite) {
         )
         .await;
     assert_eq!(clicked["status"], "completed", "click: {clicked}");
+    live.close().await;
+}
+
+/// `/sign-in#<value>` stores a persistent `login` cookie; `/account` shows
+/// the cookies the page sees in its heading.
+async fn login_site() -> FixtureSite {
+    FixtureSite::spawn(vec![
+        (
+            "/sign-in",
+            Route::Html(
+                "<!doctype html><html><head><title>Sign in</title><script>document.cookie='login='+location.hash.slice(1)+'; max-age=86400; path=/';</script></head><body><h1>Signed in</h1></body></html>"
+                    .into(),
+            ),
+        ),
+        (
+            "/account",
+            Route::Html(
+                "<!doctype html><html><head><title>Account</title></head><body><h1 id=\"who\"></h1><script>document.getElementById('who').textContent='account '+document.cookie;</script></body></html>"
+                    .into(),
+            ),
+        ),
+    ])
+    .await
+}
+
+async fn sign_in(rig: &Rig, site: &FixtureSite, login: &str) {
+    let live = Live::open(rig, &format!("{}#{login}", site.url("/sign-in"))).await;
+    support::rig::assert_node(
+        &live.snapshot(serde_json::json!({})).await,
+        "heading",
+        Some("Signed in"),
+    );
+    live.close().await;
+}
+
+async fn assert_signed_in(rig: &Rig, site: &FixtureSite, login: &str) {
+    let live = Live::open(rig, &site.url("/account")).await;
+    let expected = format!("account login={login}");
+    support::rig::assert_node(
+        &live.snapshot(serde_json::json!({})).await,
+        "heading",
+        Some(&expected),
+    );
     live.close().await;
 }
 
@@ -519,5 +609,135 @@ async fn workflow_start_starts_the_enrolled_firefox_when_it_is_not_running() {
         Some(installed.as_str())
     );
     drop(rig);
+    browser.stop().await;
+}
+
+#[tokio::test]
+#[ignore = "requires installed Firefox and the scoped test native host"]
+async fn a_runtime_restart_keeps_firefox_and_its_logins() {
+    let env = Env::load();
+    let profile = new_profile(&env);
+    install_extension(&env, profile.path(), Layout::Unpacked, None);
+    let (browser, enrolled, bidi_url) = enroll(&env, profile.path()).await;
+    let profile_id = enrolled.profile_id().clone();
+    let firefox = profile_owner_pids(profile.path());
+    let site = login_site().await;
+    let login = uuid::Uuid::new_v4().simple().to_string();
+
+    let (rig, factory) = serving(runtime(&env, profile.path(), enrolled, &bidi_url)).await;
+    sign_in(&rig, &site, &login).await;
+    drop(rig);
+    factory.shutdown().await;
+
+    let (rig, factory) = serving(restarted_runtime(
+        &env,
+        profile.path(),
+        &profile_id,
+        &bidi_url,
+    ))
+    .await;
+    assert_signed_in(&rig, &site, &login).await;
+    assert_eq!(
+        profile_owner_pids(profile.path()),
+        firefox,
+        "the runtime restart kept the running Firefox"
+    );
+    drop(rig);
+    factory.shutdown().await;
+    browser.stop().await;
+}
+
+#[tokio::test]
+#[ignore = "requires installed Firefox and the scoped test native host"]
+async fn a_firefox_restart_exits_cleanly_and_keeps_logins() {
+    let env = Env::load();
+    let profile = new_profile(&env);
+    // Only a Firefox restart replaces a companion that reports no build.
+    install_extension(&env, profile.path(), Layout::Unpacked, Some(None));
+    let (mut browser, enrolled, bidi_url) = enroll(&env, profile.path()).await;
+    install_extension(&env, profile.path(), Layout::Unpacked, None);
+    let site = login_site().await;
+    let login = uuid::Uuid::new_v4().simple().to_string();
+    let expiry = unix_ms() / 1000 + 86_400;
+    let client = firefox_companion::BidiClient::connect_session(bidi_url.clone(), TIMEOUT)
+        .await
+        .expect("open a BiDi session");
+    client
+        .send(
+            "storage.setCookie",
+            serde_json::json!({"cookie":{"name":"login","value":{"type":"string","value":login},
+                               "domain":"127.0.0.1","path":"/","expiry":expiry}}),
+        )
+        .await
+        .expect("store the login cookie");
+    client.end_session().await.expect("end the BiDi session");
+
+    let (rig, factory) = serving(runtime(&env, profile.path(), enrolled, &bidi_url)).await;
+    let live = Live::open(&rig, &site.url("/account")).await;
+    let exit = browser.started_exit().await;
+    assert!(
+        exit.success(),
+        "the restarted Firefox exited cleanly: {exit:?}"
+    );
+    support::rig::assert_node(
+        &live.snapshot(serde_json::json!({})).await,
+        "heading",
+        Some(&format!("account login={login}")),
+    );
+    live.close().await;
+    drop(rig);
+    factory.shutdown().await;
+    browser.stop().await;
+}
+
+#[tokio::test]
+#[ignore = "requires installed Firefox and the scoped test native host"]
+async fn a_hung_command_fails_alone_and_keeps_the_session() {
+    let env = Env::load();
+    let profile = new_profile(&env);
+    let (browser, bidi_url) = Browser::launch(&env, profile.path()).await;
+    let firefox = profile_owner_pids(profile.path());
+    let client =
+        firefox_companion::BidiClient::connect_session(bidi_url.clone(), Duration::from_secs(2))
+            .await
+            .expect("open a BiDi session");
+    // A tab of its own: the startup tab may still be loading its first page.
+    let created = client
+        .send("browsingContext.create", serde_json::json!({"type": "tab"}))
+        .await
+        .expect("open a tab");
+    let context = created["context"]
+        .as_str()
+        .expect("the new tab's context")
+        .to_owned();
+    let hung = client
+        .send(
+            "script.evaluate",
+            serde_json::json!({"expression":"new Promise(() => {})","awaitPromise":true,
+                               "target":{"context":context}}),
+        )
+        .await
+        .expect_err("a script that never settles misses its deadline");
+    assert_eq!(hung.code, types::ErrorCode::DeadlineExceeded, "{hung:?}");
+    client
+        .send(
+            "browsingContext.getTree",
+            serde_json::json!({"maxDepth": 0}),
+        )
+        .await
+        .expect("the connection still serves commands");
+    client
+        .end_session()
+        .await
+        .expect("the session ends cleanly");
+    let next = firefox_companion::BidiClient::connect_session(bidi_url, TIMEOUT)
+        .await
+        .expect("a new session starts on the same Firefox");
+    next.end_session().await.expect("end the new session");
+    assert_eq!(
+        profile_owner_pids(profile.path()),
+        firefox,
+        "Firefox kept running"
+    );
     browser.stop().await;
 }
