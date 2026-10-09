@@ -3,7 +3,7 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use types::{CommandId, CommandPhase};
-use workflow_journal::{JournalRecord, JsonlJournal};
+use workflow_journal::{CommandJournal, JournalRecord, JsonlJournal};
 
 // One test in this binary isolates measurements from other tests, including
 // allocations made by Tokio's filesystem workers.
@@ -46,7 +46,7 @@ unsafe impl GlobalAlloc for AllocationTracker {
 static ALLOCATOR: AllocationTracker = AllocationTracker;
 
 #[test]
-fn inspection_counts_history_without_retaining_decoded_records() {
+fn inspection_and_archived_reads_avoid_unrelated_history_allocations() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -88,4 +88,43 @@ fn inspection_counts_history_without_retaining_decoded_records() {
         largest < 128 * 1024,
         "inspection allocated {largest} bytes at once"
     );
+
+    let archive_path = root.path().join("archived.jsonl");
+    let archive = root.path().join("archived.jsonl.archive-fixture");
+    let mut original = serde_json::to_vec(&JournalRecord {
+        sequence: 0,
+        recorded_at: chrono::Utc::now(),
+        command_id: command_id.clone(),
+        phase: CommandPhase::Accepted,
+        envelope: None,
+        outcome: None,
+        prepared_result: None,
+    })
+    .unwrap();
+    original.push(b'\n');
+    std::fs::write(&archive, &original).unwrap();
+    let journal = runtime.block_on(JsonlJournal::open(&archive_path)).unwrap();
+
+    // A missing delimiter must not let this indexed read grow with newly
+    // appended archive bytes. Those bytes were never part of the indexed line.
+    let mut changed = original;
+    *changed.last_mut().unwrap() = b' ';
+    changed.resize(changed.len() + 1024 * 1024, b' ');
+    std::fs::write(&archive, &changed).unwrap();
+    LARGEST_ALLOCATION.store(0, Ordering::Relaxed);
+    TRACKING.store(true, Ordering::Relaxed);
+    let scan = runtime
+        .block_on(journal.history(command_id.clone()))
+        .unwrap();
+    TRACKING.store(false, Ordering::Relaxed);
+    let largest = LARGEST_ALLOCATION.load(Ordering::Relaxed);
+    assert!(
+        largest < 128 * 1024,
+        "archived history allocated {largest} bytes at once"
+    );
+    assert_eq!(scan.records.len(), 1);
+    assert_eq!(scan.records[0].command_id, command_id);
+    assert!(scan.incompatible_records > 0);
+    assert!(scan.torn_tail);
+    assert_eq!(std::fs::read(&archive).unwrap(), changed);
 }
