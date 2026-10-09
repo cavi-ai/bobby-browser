@@ -3016,6 +3016,7 @@ async fn settle_document(
     let deadline = started + budget;
     let mut begin = None;
     let mut settled = None;
+    let mut landed_probe_spent = false;
     let exit = loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -3076,16 +3077,21 @@ async fn settle_document(
                 } else {
                     SettleExit::Cap
                 };
-                // A script or fetch still loading, or one that landed while
-                // the probe ran, changes the page after the probe's read:
-                // wait for loads, then for the document to go quiet again.
-                let loads_quiet = {
+                // A script or fetch still loading changes the page once it
+                // lands: wait for it, then probe again. One that landed while
+                // the probe ran earns one more probe per settle.
+                let (pending, landed) = {
                     let network = network.lock().await;
-                    network.pending_page_loads(context) == 0
-                        && network.landed_page_loads(context) == landed_before
+                    (
+                        network.pending_page_loads(context),
+                        network.landed_page_loads(context) != landed_before,
+                    )
                 };
-                if loads_quiet {
-                    break exit;
+                if pending == 0 {
+                    if landed_probe_spent || !landed {
+                        break exit;
+                    }
+                    landed_probe_spent = true;
                 }
                 while network.lock().await.pending_page_loads(context) > 0
                     && Instant::now() < deadline

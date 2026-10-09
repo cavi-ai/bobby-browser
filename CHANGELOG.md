@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Settling waits for the page to apply a script or fetch/XHR that lands during the quiet window.
+- Settling waits for the page to use a response that lands during the quiet window.
 - On Chromium, settling ignores requests started by a document the navigation replaced.
 - Same-document navigations settle after 1 s without DOM changes.
 - Snapshots show sign-in field labels and targets; only entered secrets are redacted.

@@ -1118,6 +1118,124 @@ pub async fn type_text_enter_reports_a_late_title(rig: &Rig) {
     );
 }
 
+/// Enter pushState-navigates, the results request lands inside the quiet
+/// window, and the page renders 300 ms after it lands. Every type_text reports
+/// the rendered title.
+pub async fn type_text_enter_waits_for_a_landed_response(rig: &Rig) {
+    let home = page(
+        "Home",
+        r#"<header><input id="q" aria-label="Search"></header><main id="main"><h1>Home</h1></main>
+        <script>
+            document.getElementById("q").addEventListener("keydown", (event) => {
+              if (event.key !== "Enter") return;
+              event.preventDefault();
+              history.pushState({}, "", "/search?q=" + encodeURIComponent(event.target.value));
+              const main = document.getElementById("main");
+              main.innerHTML = "<p>Loading</p>";
+              setTimeout(() => { main.innerHTML = "<p>Still loading</p>"; }, 400);
+              fetch("/api/results?ms=1250")
+                .then((response) => response.json())
+                .then((rows) => setTimeout(() => {
+                  document.title = "Search results";
+                  main.innerHTML = "<h1>Search results</h1><ul>" +
+                    rows.map((row) => "<li>" + row + "</li>").join("") + "</ul>";
+                }, 300));
+            });
+        </script>"#,
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/home", Route::Html(home)),
+        (
+            "/api/results",
+            Route::QueryDelayed {
+                content_type: "application/json",
+                body: r#"["First result","Second result"]"#.to_owned(),
+            },
+        ),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let expected_url = site.url("/search?q=query%20terms");
+    let mut failures = Vec::new();
+    for run in 1..=LANDED_RUNS {
+        let loaded = live
+            .call("navigate", json!({"url":site.url("/home")}))
+            .await;
+        assert_eq!(loaded["status"], "completed", "navigate: {loaded}");
+        let typed = live
+            .call(
+                "type_text",
+                json!({"target":{"role":"textbox","accessibleName":"Search"},
+                       "value":"query terms\n","clearFirst":true}),
+            )
+            .await;
+        let mut navigations = Vec::new();
+        objects_of_kind(&typed, "navigation", &mut navigations);
+        if typed["status"] != "completed" {
+            failures.push(format!("run {run}: status {}", typed["status"]));
+        } else if !navigations
+            .iter()
+            .any(|item| item["url"] == expected_url.as_str() && item["title"] == "Search results")
+        {
+            let reported: Vec<_> = navigations.iter().map(|item| &item["title"]).collect();
+            failures.push(format!("run {run}: reported titles {reported:?}"));
+        }
+    }
+    live.close().await;
+    assert!(
+        failures.is_empty(),
+        "{} of {LANDED_RUNS} runs failed: {failures:?}",
+        failures.len()
+    );
+}
+
+const LANDED_RUNS: usize = 5;
+
+/// A page polls a fetch every 300 ms without changing the document. Every
+/// navigate to it settles within 2.5 s.
+pub async fn navigate_settles_on_a_polling_page(rig: &Rig) {
+    let polling = page(
+        "Polling",
+        r#"<main><h1>Polling</h1></main>
+        <script>
+            setInterval(() => { fetch("/api/poll?ms=20"); }, 300);
+        </script>"#,
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/polling", Route::Html(polling)),
+        (
+            "/api/poll",
+            Route::QueryDelayed {
+                content_type: "application/json",
+                body: "[]".to_owned(),
+            },
+        ),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/polling")).await;
+    let mut failures = Vec::new();
+    for run in 1..=LANDED_RUNS {
+        let started = std::time::Instant::now();
+        let loaded = live
+            .call("navigate", json!({"url":site.url("/polling")}))
+            .await;
+        let elapsed = started.elapsed();
+        assert_eq!(loaded["status"], "completed", "navigate: {loaded}");
+        if elapsed > std::time::Duration::from_millis(2_500) {
+            failures.push(format!(
+                "run {run}: navigate took {} ms",
+                elapsed.as_millis()
+            ));
+        }
+    }
+    live.close().await;
+    assert!(
+        failures.is_empty(),
+        "{} of {LANDED_RUNS} runs failed: {failures:?}",
+        failures.len()
+    );
+}
+
 /// A page starts a 2-3 s data request after it settles, and the agent
 /// navigates to a static page while that request is in flight. Every navigate
 /// settles quiet within 2 s.
