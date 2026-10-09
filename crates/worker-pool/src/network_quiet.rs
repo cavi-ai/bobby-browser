@@ -2,10 +2,11 @@
 //!
 //! Chromiumoxide enables the Network domain on every target, but does not
 //! expose an in-flight query API. This module owns a page-scoped tracker fed
-//! by CDP Network events and applies URL / resource-type / long-lived ignore
-//! predicates when counting requests that should block a quiet wait.
+//! by CDP Network and frame events and applies URL / resource-type /
+//! long-lived ignore predicates when counting requests that should block a
+//! quiet wait.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,6 +15,7 @@ use chromiumoxide::cdp::browser_protocol::network::{
     EventLoadingFailed, EventLoadingFinished, EventRequestWillBeSent, EventWebSocketClosed,
     EventWebSocketCreated, RequestId, ResourceType,
 };
+use chromiumoxide::cdp::browser_protocol::page::{EventFrameDetached, EventFrameNavigated};
 use chromiumoxide::Page;
 use futures::StreamExt;
 use tokio::sync::Mutex;
@@ -26,6 +28,8 @@ const MAX_REQUEST_ID_BYTES: usize = 1024;
 const MAX_REQUEST_URL_BYTES: usize = 16 * 1024;
 
 pub const LONG_LIVED_OPEN_THRESHOLD: Duration = Duration::from_secs(30);
+/// Replaced documents remembered so a request one of them starts late is not counted.
+const MAX_RETIRED_LOADERS: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct InFlightRequest {
@@ -33,6 +37,15 @@ pub struct InFlightRequest {
     pub resource_type: NetworkResourceType,
     pub started_at: Instant,
     pub is_websocket: bool,
+    /// The frame and document that started the request, when Chromium names them.
+    pub document: Option<RequestDocument>,
+}
+
+/// A Chromium frame and the loader of the document that started a request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestDocument {
+    pub frame: String,
+    pub loader: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -48,6 +61,12 @@ pub struct NetworkQuietState {
     /// Request IDs whose finish/fail arrived before `requestWillBeSent` was
     /// applied (listener tasks can reorder CDP events).
     completed_before_start: HashSet<String>,
+    /// The loader of the document each frame shows.
+    committed: HashMap<String, String>,
+    /// Loaders of documents a frame replaced or dropped, oldest first.
+    retired_loaders: VecDeque<String>,
+    /// Requests that ended with their document; a late finish for one is expected.
+    dropped: HashSet<String>,
     tracking_lost: bool,
 }
 
@@ -57,19 +76,110 @@ impl NetworkQuietState {
         request_id: &RequestId,
         url: String,
         resource_type: NetworkResourceType,
+        document: Option<RequestDocument>,
     ) {
-        self.upsert_id(request_id_key(request_id), url, resource_type);
+        let id = request_id_key(request_id);
+        if document
+            .as_ref()
+            .is_some_and(|document| self.retired_loaders.contains(&document.loader))
+        {
+            if !self.completed_before_start.remove(&id) {
+                self.forget(id);
+            }
+            return;
+        }
+        self.insert(id, url, resource_type, document);
     }
 
     pub fn upsert_websocket(&mut self, request_id: &RequestId, url: String) {
-        self.upsert_id(
+        self.insert(
             request_id_key(request_id),
             url,
             NetworkResourceType::WebSocket,
+            None,
         );
     }
 
     pub fn upsert_id(&mut self, id: String, url: String, resource_type: NetworkResourceType) {
+        self.insert(id, url, resource_type, None);
+    }
+
+    /// `frame` now shows the document `loader` loaded. Requests its earlier
+    /// documents started end with them; a navigation's document request stays.
+    pub fn commit_document(&mut self, frame: &str, loader: &str) {
+        self.retired_loaders.retain(|retired| retired != loader);
+        if self.committed.len() < MAX_TRACKED_REQUESTS || self.committed.contains_key(frame) {
+            if let Some(previous) = self.committed.insert(frame.to_owned(), loader.to_owned()) {
+                if previous != loader {
+                    self.retire_loader(previous);
+                }
+            }
+        }
+        self.end_requests(|request| {
+            request.resource_type != NetworkResourceType::Document
+                && request
+                    .document
+                    .as_ref()
+                    .is_some_and(|document| document.frame == frame && document.loader != loader)
+        });
+    }
+
+    /// `frame` left the page: every request it started ends with it.
+    pub fn detach_frame(&mut self, frame: &str) {
+        if let Some(loader) = self.committed.remove(frame) {
+            self.retire_loader(loader);
+        }
+        self.end_requests(|request| {
+            request
+                .document
+                .as_ref()
+                .is_some_and(|document| document.frame == frame)
+        });
+    }
+
+    fn end_requests(&mut self, ended: impl Fn(&InFlightRequest) -> bool) {
+        let ids: Vec<String> = self
+            .requests
+            .iter()
+            .filter(|(_, request)| ended(request))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            if let Some(document) = self
+                .requests
+                .remove(&id)
+                .and_then(|request| request.document)
+            {
+                self.retire_loader(document.loader);
+            }
+            self.forget(id);
+        }
+    }
+
+    fn retire_loader(&mut self, loader: String) {
+        if self.retired_loaders.contains(&loader) {
+            return;
+        }
+        if self.retired_loaders.len() >= MAX_RETIRED_LOADERS {
+            self.retired_loaders.pop_front();
+        }
+        self.retired_loaders.push_back(loader);
+    }
+
+    fn forget(&mut self, id: String) {
+        if self.dropped.len() >= MAX_TRACKED_REQUESTS {
+            self.dropped.clear();
+        }
+        self.dropped.insert(id);
+    }
+
+    fn insert(
+        &mut self,
+        id: String,
+        url: String,
+        resource_type: NetworkResourceType,
+        document: Option<RequestDocument>,
+    ) {
         if self.completed_before_start.remove(&id) {
             return;
         }
@@ -91,6 +201,7 @@ impl NetworkQuietState {
                 resource_type,
                 started_at: Instant::now(),
                 is_websocket,
+                document,
             },
         );
     }
@@ -100,7 +211,7 @@ impl NetworkQuietState {
     }
 
     pub fn remove_id(&mut self, id: &str) {
-        if self.requests.remove(id).is_none() {
+        if self.requests.remove(id).is_none() && !self.dropped.remove(id) {
             if id.len() > MAX_REQUEST_ID_BYTES
                 || self.completed_before_start.len() >= MAX_TRACKED_REQUESTS
             {
@@ -243,16 +354,24 @@ impl NetworkQuietTracker {
         let mut failed = page.event_listener::<EventLoadingFailed>().await?;
         let mut ws_created = page.event_listener::<EventWebSocketCreated>().await?;
         let mut ws_closed = page.event_listener::<EventWebSocketClosed>().await?;
+        let mut navigated = page.event_listener::<EventFrameNavigated>().await?;
+        let mut detached = page.event_listener::<EventFrameDetached>().await?;
 
         let state_will = Arc::clone(&state);
         tasks.push(tokio::spawn(async move {
             while let Some(event) = will_be_sent.next().await {
                 let url = event.request.url.clone();
                 let resource_type = map_resource_type(event.r#type.as_ref());
-                state_will
-                    .lock()
-                    .await
-                    .upsert_http(&event.request_id, url, resource_type);
+                let document = event.frame_id.as_ref().map(|frame| RequestDocument {
+                    frame: frame.inner().clone(),
+                    loader: event.loader_id.inner().clone(),
+                });
+                state_will.lock().await.upsert_http(
+                    &event.request_id,
+                    url,
+                    resource_type,
+                    document,
+                );
             }
             state_will.lock().await.mark_tracking_lost();
         }));
@@ -290,6 +409,30 @@ impl NetworkQuietTracker {
                 state_ws_closed.lock().await.remove(&event.request_id);
             }
             state_ws_closed.lock().await.mark_tracking_lost();
+        }));
+
+        // Chromium reports no loadingFailed for a request the next document
+        // cancels; the frame's commit or detach ends it instead.
+        let state_navigated = Arc::clone(&state);
+        tasks.push(tokio::spawn(async move {
+            while let Some(event) = navigated.next().await {
+                state_navigated
+                    .lock()
+                    .await
+                    .commit_document(event.frame.id.inner(), event.frame.loader_id.inner());
+            }
+            state_navigated.lock().await.mark_tracking_lost();
+        }));
+
+        let state_detached = Arc::clone(&state);
+        tasks.push(tokio::spawn(async move {
+            while let Some(event) = detached.next().await {
+                state_detached
+                    .lock()
+                    .await
+                    .detach_frame(event.frame_id.inner());
+            }
+            state_detached.lock().await.mark_tracking_lost();
         }));
 
         Ok(Arc::new(Self { state, tasks }))
@@ -371,6 +514,7 @@ mod tests {
             resource_type,
             started_at,
             is_websocket,
+            document: None,
         }
     }
 
@@ -507,9 +651,136 @@ mod tests {
             &id,
             "https://example.test/ping".into(),
             NetworkResourceType::Fetch,
+            None,
         );
         assert_eq!(state.requests().count(), 0);
         assert!(state.completed_before_start.is_empty());
+    }
+
+    fn started_by(
+        state: &mut NetworkQuietState,
+        id: &str,
+        resource_type: NetworkResourceType,
+        frame: &str,
+        loader: &str,
+    ) {
+        state.upsert_http(
+            &RequestId::new(id.to_owned()),
+            format!("https://example.test/{id}"),
+            resource_type,
+            Some(RequestDocument {
+                frame: frame.into(),
+                loader: loader.into(),
+            }),
+        );
+    }
+
+    fn tracked(state: &NetworkQuietState) -> Vec<String> {
+        let mut urls: Vec<String> = state
+            .requests()
+            .map(|request| request.url.clone())
+            .collect();
+        urls.sort();
+        urls
+    }
+
+    #[test]
+    fn a_commit_ends_the_replaced_documents_requests() {
+        let mut state = NetworkQuietState::default();
+        state.commit_document("main", "first");
+        started_by(
+            &mut state,
+            "data",
+            NetworkResourceType::Fetch,
+            "main",
+            "first",
+        );
+        started_by(
+            &mut state,
+            "ad",
+            NetworkResourceType::Script,
+            "child",
+            "inner",
+        );
+        started_by(
+            &mut state,
+            "next",
+            NetworkResourceType::Document,
+            "main",
+            "second",
+        );
+        assert_eq!(pending_page_loads(&state, Instant::now()), 2);
+
+        state.commit_document("main", "second");
+        assert_eq!(
+            tracked(&state),
+            ["https://example.test/ad", "https://example.test/next"]
+        );
+        started_by(
+            &mut state,
+            "late",
+            NetworkResourceType::Fetch,
+            "main",
+            "first",
+        );
+        state.remove(&RequestId::new("data".to_owned()));
+        state.remove(&RequestId::new("late".to_owned()));
+        assert!(state.completed_before_start.is_empty());
+        assert!(state.dropped.is_empty());
+        started_by(
+            &mut state,
+            "rows",
+            NetworkResourceType::Fetch,
+            "main",
+            "second",
+        );
+        assert_eq!(pending_page_loads(&state, Instant::now()), 2);
+    }
+
+    #[test]
+    fn a_detached_frame_ends_its_requests() {
+        let mut state = NetworkQuietState::default();
+        state.commit_document("child", "inner");
+        started_by(
+            &mut state,
+            "ad",
+            NetworkResourceType::Script,
+            "child",
+            "inner",
+        );
+        started_by(
+            &mut state,
+            "rows",
+            NetworkResourceType::Fetch,
+            "main",
+            "top",
+        );
+        state.detach_frame("child");
+        assert_eq!(tracked(&state), ["https://example.test/rows"]);
+        started_by(
+            &mut state,
+            "late",
+            NetworkResourceType::Xhr,
+            "child",
+            "inner",
+        );
+        assert_eq!(tracked(&state), ["https://example.test/rows"]);
+    }
+
+    #[test]
+    fn a_restored_document_counts_its_requests_again() {
+        let mut state = NetworkQuietState::default();
+        state.commit_document("main", "first");
+        state.commit_document("main", "second");
+        state.commit_document("main", "first");
+        started_by(
+            &mut state,
+            "data",
+            NetworkResourceType::Fetch,
+            "main",
+            "first",
+        );
+        assert_eq!(tracked(&state), ["https://example.test/data"]);
     }
 
     #[test]

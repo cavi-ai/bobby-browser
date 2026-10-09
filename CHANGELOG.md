@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- On Chromium, settling ignores requests started by a document the navigation replaced.
 - Same-document navigations settle after 1 s without DOM changes.
 - Snapshots show sign-in field labels and targets; only entered secrets are redacted.
 - Runtime owner logs to `owner.log`, rotated past 1 MiB.
