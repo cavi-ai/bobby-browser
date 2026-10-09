@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- On Chromium, a snapshot target whose name comes from slotted or other label content resolves, using the same accessibility names the snapshot reports.
+- On Chromium, action targets and intent hints match the accessibility names snapshots report, including names from slotted label content.
 - On Chromium, clicking an element covered by another fails `targetObscured`, as on Firefox, instead of clicking the covering element.
 - On Firefox, a new session starts with no tabs and gets only the pages it opens, so concurrent sessions never take each other's pages.
 - On Linux, Chrome keeps shared memory in `/dev/shm` unless it is smaller than 1 GiB.
