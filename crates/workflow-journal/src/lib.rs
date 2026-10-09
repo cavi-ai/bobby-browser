@@ -480,11 +480,17 @@ impl CommandJournal for JsonlJournal {
                 for entries in offsets.chunk_by(|a, b| Arc::ptr_eq(&a.path, &b.path)) {
                     let file = File::open(entries[0].path.as_ref()).await?;
                     let mut reader = BufReader::new(file);
+                    let mut position = 0;
+                    let mut line = Vec::new();
                     for entry in entries {
-                        reader.seek(std::io::SeekFrom::Start(entry.offset)).await?;
+                        if position != entry.offset {
+                            reader.seek(std::io::SeekFrom::Start(entry.offset)).await?;
+                            position = entry.offset;
+                        }
                         let mut limited = (&mut reader).take(entry.len);
-                        let mut line = Vec::new();
-                        limited.read_until(b'\n', &mut line).await?;
+                        line.clear();
+                        // Use bytes consumed, since archive damage may end a line early.
+                        position += limited.read_until(b'\n', &mut line).await? as u64;
                         if !line.ends_with(b"\n") {
                             scan.torn_tail = true;
                         }
