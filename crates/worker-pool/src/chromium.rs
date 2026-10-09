@@ -326,6 +326,11 @@ impl ChromiumWorkerFactory {
         if !self.config.headless {
             builder = builder.with_head();
         }
+        // A durable profile runs the extensions installed in it, such as a
+        // password manager; disposable profiles have none to run.
+        if self.durable_profile_dir.is_some() {
+            builder = builder.installed_extensions();
+        }
         // The fingerprint screen is spoofed at the JS layer, but CSS media
         // queries are evaluated natively against the real window: a default
         // 800x600 headless window contradicts a 1920x1080 spoofed screen and
@@ -4979,6 +4984,24 @@ fn set_cookie_param(
 #[cfg(test)]
 mod tests {
     use super::bound_observed;
+
+    #[test]
+    fn only_a_durable_profile_runs_its_installed_extensions() {
+        use super::ChromiumWorkerFactory;
+        let config = config::BrowserConfig {
+            executable: Some("/usr/bin/true".into()),
+            ..config::BrowserConfig::default()
+        };
+        let dir = std::path::Path::new("/profiles/p");
+        let args =
+            |factory: ChromiumWorkerFactory| factory.chromium_config(dir).unwrap().launch_args();
+        let registry = tempfile::tempdir().unwrap();
+        let disposable =
+            ChromiumWorkerFactory::with_pid_registry_dir(config.clone(), registry.path().into());
+        assert!(args(disposable.clone()).contains(&"--disable-extensions".to_string()));
+        let durable = disposable.with_durable_profile("p".into());
+        assert!(!args(durable).contains(&"--disable-extensions".to_string()));
+    }
 
     #[test]
     fn shared_memory_moves_to_disk_only_when_dev_shm_is_small() {

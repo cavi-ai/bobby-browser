@@ -44,7 +44,7 @@ A selection that is present but malformed is an error. `bobby doctor` reports wh
 
 A managed Chromium selection can use a durable profile with `{"mode": "exact", "engine": "chromium", "profileId": "<name>"}`. Its data lives in `<profiles_dir>/chromium/<name>`. Without `profileId`, each session gets a disposable profile.
 
-Every session on a durable profile shares one Chrome. A Chrome already running on the profile with remote debugging is attached to; otherwise one starts and keeps running after the runtime exits. To use an existing profile directory, such as a signed-in Chrome profile, list it:
+Every session on a durable profile shares one Chrome. A Chrome already running on the profile with remote debugging is attached to; otherwise one starts and keeps running after the runtime exits. Extensions installed in the profile, such as a password manager, run in it. To use an existing profile directory, such as a signed-in Chrome profile, list it:
 
 ```json
 {
