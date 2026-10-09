@@ -478,12 +478,13 @@ impl CommandJournal for JsonlJournal {
             if let Some(offsets) = writer.archived_offsets.get(&id) {
                 // Startup indexes each archive consecutively using one shared path.
                 for entries in offsets.chunk_by(|a, b| Arc::ptr_eq(&a.path, &b.path)) {
-                    let mut file = File::open(entries[0].path.as_ref()).await?;
+                    let file = File::open(entries[0].path.as_ref()).await?;
+                    let mut reader = BufReader::new(file);
                     for entry in entries {
-                        file.seek(std::io::SeekFrom::Start(entry.offset)).await?;
-                        let mut reader = BufReader::new((&mut file).take(entry.len));
+                        reader.seek(std::io::SeekFrom::Start(entry.offset)).await?;
+                        let mut limited = (&mut reader).take(entry.len);
                         let mut line = Vec::new();
-                        reader.read_until(b'\n', &mut line).await?;
+                        limited.read_until(b'\n', &mut line).await?;
                         if !line.ends_with(b"\n") {
                             scan.torn_tail = true;
                         }
