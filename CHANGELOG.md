@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- After a same-document navigation, settling waits for 1 s without DOM changes, so `intent_follow` `postState` and `type_text` with Enter include a request or title the page starts up to 1 s after its last change.
 - Runtime owner logs to `owner.log`, rotated past 1 MiB.
 - A session keeps its pages when Firefox restarts onto a new companion build.
 - `type_text` ending in Enter reports the landed page's full URL, query included, and its settled title.

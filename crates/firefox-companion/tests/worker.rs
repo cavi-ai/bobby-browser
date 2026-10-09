@@ -4788,12 +4788,14 @@ async fn click_on_a_target_past_the_control_walk_uses_the_located_selector() {
 async fn navigate_reports_the_document_a_script_redirect_settles_on() {
     let login = "https://example.test/login?next=/feed";
     let feed = "https://example.test/feed";
+    let settled = json!({
+        "url": feed, "title": "Feed", "quiet": true,
+        "begin": {"url": feed, "title": "Feed"}
+    });
     let bidi = FakeBidi::new(vec![
         Ok(json!({"context": "context-1"})),
         Ok(json!({"url": login, "navigation": "nav-1"})),
-        Ok(
-            json!({"result": {"type": "string", "value": json!({"url": feed, "title": "Feed"}).to_string()}}),
-        ),
+        Ok(json!({"result": {"type": "string", "value": settled.to_string()}})),
     ]);
     bidi.set_tree(json!({"contexts": [{"context": "context-1", "url": login, "children": []}]}))
         .await;
