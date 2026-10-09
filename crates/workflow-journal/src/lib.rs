@@ -157,9 +157,16 @@ struct WriterState {
     modified: Option<std::time::SystemTime>,
     offsets: HashMap<CommandId, Vec<IndexedRecord>>,
     archives: Vec<PathBuf>,
-    archived_offsets: HashMap<CommandId, Vec<(PathBuf, u64)>>,
+    archived_offsets: HashMap<CommandId, Vec<ArchivedRecordLocation>>,
     archived_torn_tail: bool,
     archived_incompatible_records: usize,
+}
+
+/// Derived bounds keep a changed delimiter from expanding a diagnostic read.
+struct ArchivedRecordLocation {
+    path: PathBuf,
+    offset: u64,
+    len: u64,
 }
 
 /// Rebuildable checks against the bytes validated at open or durably appended.
@@ -336,7 +343,7 @@ async fn open_writer(path: &Path) -> Result<WriterState, JournalError> {
     let metadata = file.metadata().await?;
     let identity = file_identity(file.try_clone().await?).await?;
     let mut archives = Vec::new();
-    let mut archived_offsets = HashMap::<CommandId, Vec<(PathBuf, u64)>>::new();
+    let mut archived_offsets = HashMap::<CommandId, Vec<ArchivedRecordLocation>>::new();
     let mut archived_torn_tail = false;
     let mut archived_incompatible_records = 0;
     let prefix = format!("{}.archive-", path.file_name().unwrap().to_string_lossy());
@@ -373,7 +380,11 @@ async fn open_writer(path: &Path) -> Result<WriterState, JournalError> {
                     archived_offsets
                         .entry(id)
                         .or_default()
-                        .push((archive.clone(), offset));
+                        .push(ArchivedRecordLocation {
+                            path: archive.clone(),
+                            offset,
+                            len: line.len() as u64,
+                        });
                 }
             }
             offset += line.len() as u64;
@@ -459,11 +470,15 @@ impl CommandJournal for JsonlJournal {
                 ..JournalScan::default()
             };
             if let Some(offsets) = writer.archived_offsets.get(&id) {
-                for (path, offset) in offsets {
-                    let mut reader = BufReader::new(File::open(path).await?);
-                    reader.seek(std::io::SeekFrom::Start(*offset)).await?;
+                for entry in offsets {
+                    let mut file = File::open(&entry.path).await?;
+                    file.seek(std::io::SeekFrom::Start(entry.offset)).await?;
+                    let mut reader = BufReader::new(file.take(entry.len));
                     let mut line = Vec::new();
                     reader.read_until(b'\n', &mut line).await?;
+                    if !line.ends_with(b"\n") {
+                        scan.torn_tail = true;
+                    }
                     if let Ok(record) = serde_json::from_slice::<JournalRecord>(&line) {
                         if record.command_id == id {
                             scan.records.push(record);

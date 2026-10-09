@@ -284,7 +284,8 @@ async fn archived_history_never_returns_another_commands_record_from_a_stale_off
         let requested = CommandId::new();
         let other = CommandId::new();
         let first = record(&requested, CommandPhase::Accepted);
-        let mut second = record(&requested, CommandPhase::Prepared);
+        let mut second = first.clone();
+        second.phase = CommandPhase::Prepared;
         second.sequence = 1;
         let first_line = format!("{}\n", serde_json::to_string(&first).unwrap());
         let second_line = format!("{}\n", serde_json::to_string(&second).unwrap());
