@@ -12,12 +12,16 @@ static TRACKING: AtomicBool = AtomicBool::new(false);
 static LARGEST_ALLOCATION: AtomicUsize = AtomicUsize::new(0);
 static PATH_ALLOCATION_SIZE: AtomicUsize = AtomicUsize::new(0);
 static PATH_ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+static READ_BUFFER_ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 
 fn record_allocation(size: usize) {
     if TRACKING.load(Ordering::Relaxed) {
         LARGEST_ALLOCATION.fetch_max(size, Ordering::Relaxed);
         if size == PATH_ALLOCATION_SIZE.load(Ordering::Relaxed) {
             PATH_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        }
+        if size == 8192 {
+            READ_BUFFER_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -175,6 +179,7 @@ fn inspection_and_archived_reads_avoid_unrelated_history_allocations() {
         vec![indexed_archive.clone()]
     );
     PATH_ALLOCATIONS.store(0, Ordering::Relaxed);
+    READ_BUFFER_ALLOCATIONS.store(0, Ordering::Relaxed);
     TRACKING.store(true, Ordering::Relaxed);
     let scan = runtime
         .block_on(indexed.history(command_id.clone()))
@@ -184,6 +189,11 @@ fn inspection_and_archived_reads_avoid_unrelated_history_allocations() {
     assert!(
         path_allocations < 64,
         "reading one archive with 2048 records made {path_allocations} path-sized allocations"
+    );
+    let read_buffer_allocations = READ_BUFFER_ALLOCATIONS.load(Ordering::Relaxed);
+    assert!(
+        read_buffer_allocations < 64,
+        "reading one archive with 2048 records made {read_buffer_allocations} 8-KiB allocations"
     );
     assert_eq!(scan.records.len(), 2048);
     assert!(scan.incompatible_records > 0);
