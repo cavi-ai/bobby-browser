@@ -7106,6 +7106,7 @@ fn session_error(error: CompanionSessionError) -> CommandError {
         | CompanionSessionError::QueueClosed
         | CompanionSessionError::ProfileUnavailable
         | CompanionSessionError::DiscoveryUnavailable
+        | CompanionSessionError::BindingRejected(_)
         | CompanionSessionError::Reconnecting => (ErrorCode::BrowserCommandFailed, true),
         // No reconnect is pending for this grant: retrying cannot restore it.
         CompanionSessionError::GrantUnavailable => (ErrorCode::BrowserCommandFailed, false),

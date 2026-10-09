@@ -21,7 +21,9 @@ const MAX_COMMAND_WAIT: Duration = Duration::from_secs(60);
 const MAX_PENDING_COMMANDS: usize = 256;
 const ABANDONED_COMMAND_RETENTION: Duration = Duration::from_secs(60);
 pub(crate) const MAX_PENDING_BINDINGS: usize = 64;
-const PAGE_BINDING_TTL: Duration = Duration::from_secs(10);
+/// Lifetime of a binding whose ticket has not started waiting; a waiting
+/// ticket's own timeout replaces it.
+const UNCLAIMED_BINDING_LIFETIME: Duration = MAX_COMMAND_WAIT;
 const GRANT_PUBLICATION_TIMEOUT: Duration = Duration::from_millis(250);
 /// How long a command on a grant whose connection dropped waits for the
 /// companion to reconnect and the grant to be re-adopted.
@@ -59,6 +61,8 @@ pub enum CompanionSessionError {
     BindingCapacity,
     #[error("companion page binding expired")]
     BindingExpired,
+    #[error("companion page binding report rejected: {0}")]
+    BindingRejected(&'static str),
     #[error(transparent)]
     Registry(#[from] RegistryError),
 }
@@ -113,6 +117,8 @@ struct PendingBinding {
     known_targets: HashSet<String>,
     response: oneshot::Sender<Result<AttachmentGrant, CompanionSessionError>>,
     expires_at: Instant,
+    /// Why the last report for this binding was refused, for the expiry error.
+    rejection: Option<&'static str>,
 }
 
 #[derive(Default)]
@@ -177,7 +183,13 @@ impl PageBindingTicket {
             .response
             .take()
             .expect("page binding ticket response is active");
-        let result = tokio::time::timeout(timeout.min(PAGE_BINDING_TTL), response).await;
+        // The binding lives exactly as long as this wait.
+        if let Some(nonce) = &self.binding_nonce {
+            if let Some(pending) = self.state.lock().await.bindings.get_mut(nonce) {
+                pending.expires_at = Instant::now() + timeout;
+            }
+        }
+        let result = tokio::time::timeout(timeout, response).await;
         match result {
             Ok(Ok(result)) => {
                 self.binding_nonce = None;
@@ -187,19 +199,17 @@ impl PageBindingTicket {
                 self.remove().await;
                 Err(CompanionSessionError::ConnectionClosed)
             }
-            Err(_) => {
-                self.remove().await;
-                Err(CompanionSessionError::BindingExpired)
-            }
+            Err(_) => Err(match self.remove().await {
+                Some(reason) => CompanionSessionError::BindingRejected(reason),
+                None => CompanionSessionError::BindingExpired,
+            }),
         }
     }
 
-    async fn remove(&mut self) {
-        let Some(binding_nonce) = self.binding_nonce.take() else {
-            return;
-        };
+    async fn remove(&mut self) -> Option<&'static str> {
+        let binding_nonce = self.binding_nonce.take()?;
         let mut state = self.state.lock().await;
-        remove_binding(&mut state, &binding_nonce, self.connection_id);
+        remove_binding(&mut state, &binding_nonce, self.connection_id)
     }
 }
 
@@ -330,14 +340,20 @@ fn expire_page_bindings(state: &mut SessionState, attachment_id: &AttachmentId, 
     }
 }
 
-fn remove_binding(state: &mut SessionState, binding_nonce: &str, connection_id: Uuid) {
+/// Removes the binding and returns why its last report was refused, if one was.
+fn remove_binding(
+    state: &mut SessionState,
+    binding_nonce: &str,
+    connection_id: Uuid,
+) -> Option<&'static str> {
     if state
         .bindings
         .get(binding_nonce)
         .is_some_and(|binding| binding.connection_id == connection_id)
     {
-        state.bindings.remove(binding_nonce);
+        return state.bindings.remove(binding_nonce)?.rejection;
     }
+    None
 }
 
 impl std::fmt::Debug for SessionCoordinator {
@@ -653,7 +669,8 @@ impl SessionCoordinator {
                         .map(|target| target.target_id)
                         .collect(),
                     response,
-                    expires_at: Instant::now() + PAGE_BINDING_TTL,
+                    expires_at: Instant::now() + UNCLAIMED_BINDING_LIFETIME,
+                    rejection: None,
                 },
             );
             (binding_nonce, record.connection_id, receiver)
@@ -893,21 +910,31 @@ impl SessionCoordinator {
             if pending.connection_id != connection_id || pending.profile_id != *profile_id {
                 return Err(CompanionSessionError::InvalidEvent);
             }
-            let Some(discovery) = state.discoveries.get(profile_id) else {
-                return Ok(());
-            };
-            let newly_discovered_page = discovery.connection_id == connection_id
-                && discovery.targets.iter().any(|target| {
-                    target.target_id == binding.target_id
-                        && target.kind == TargetKind::Page
-                        && !pending.known_targets.contains(&target.target_id)
+            let discovery = state.discoveries.get(profile_id);
+            let rejection = if discovery.is_none_or(|found| found.connection_id != connection_id) {
+                Some("the reporting connection has no target discovery")
+            } else if !discovery.is_some_and(|found| {
+                found.targets.iter().any(|target| {
+                    target.target_id == binding.target_id && target.kind == TargetKind::Page
                 })
-                && !state
-                    .grants
-                    .values()
-                    .flat_map(|grant| &grant.grant.pages)
-                    .any(|page| page.target_id == binding.target_id);
-            if !newly_discovered_page {
+            }) {
+                Some("the reported page is not among the discovered pages")
+            } else if pending.known_targets.contains(&binding.target_id) {
+                Some("the reported page existed before the binding began")
+            } else if state
+                .grants
+                .values()
+                .flat_map(|grant| &grant.grant.pages)
+                .any(|page| page.target_id == binding.target_id)
+            {
+                Some("the reported page is already bound")
+            } else {
+                None
+            };
+            if let Some(reason) = rejection {
+                if let Some(pending) = state.bindings.get_mut(&binding.binding_nonce) {
+                    pending.rejection = Some(reason);
+                }
                 return Ok(());
             }
             let attachment_id = pending.attachment_id.clone();
@@ -1752,6 +1779,97 @@ mod tests {
         drop(live_receiver);
         purge_expired_pending(&mut state, Instant::now());
         assert!(!state.pending.contains_key(&live_id));
+    }
+
+    /// Reports the binding for `target_id`, which the companion discovered.
+    async fn report_binding(
+        coordinator: &SessionCoordinator,
+        profile_id: &ProfileId,
+        connection_id: Uuid,
+        target_id: &str,
+        nonce: &str,
+    ) {
+        coordinator
+            .consume_event(
+                profile_id,
+                connection_id,
+                CompanionEvent::TargetsDiscovered(TargetDiscovery {
+                    protocol_version: PROTOCOL_VERSION,
+                    profile_id: profile_id.clone(),
+                    targets: ["trusted-target", target_id]
+                        .into_iter()
+                        .collect::<HashSet<_>>()
+                        .into_iter()
+                        .map(|target_id| BrowserTarget {
+                            target_id: target_id.into(),
+                            kind: TargetKind::Page,
+                        })
+                        .collect(),
+                }),
+            )
+            .await
+            .unwrap();
+        coordinator
+            .consume_event(
+                profile_id,
+                connection_id,
+                CompanionEvent::PageBindingDiscovered(PageBindingDiscovered {
+                    protocol_version: PROTOCOL_VERSION,
+                    profile_id: profile_id.clone(),
+                    target_id: target_id.into(),
+                    binding_nonce: nonce.into(),
+                }),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_binding_waits_as_long_as_its_ticket() {
+        let (coordinator, profile_id, connection_id, grant, _requests) = session_fixture(8).await;
+        let ticket = coordinator
+            .begin_page_binding(&grant.attachment_id, PageId::new())
+            .await
+            .unwrap();
+        let nonce = ticket.binding_nonce().to_owned();
+        let reporter = Arc::clone(&coordinator);
+        let reporter_profile = profile_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(15)).await;
+            report_binding(
+                &reporter,
+                &reporter_profile,
+                connection_id,
+                "slow-tab",
+                &nonce,
+            )
+            .await;
+        });
+        ticket.complete(Duration::from_secs(30)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_refused_binding_report_names_its_reason() {
+        let (coordinator, profile_id, connection_id, grant, _requests) = session_fixture(8).await;
+        let ticket = coordinator
+            .begin_page_binding(&grant.attachment_id, PageId::new())
+            .await
+            .unwrap();
+        let nonce = ticket.binding_nonce().to_owned();
+        report_binding(
+            &coordinator,
+            &profile_id,
+            connection_id,
+            "trusted-target",
+            &nonce,
+        )
+        .await;
+        assert_eq!(
+            ticket.complete(Duration::from_millis(100)).await,
+            Err(CompanionSessionError::BindingRejected(
+                "the reported page existed before the binding began"
+            ))
+        );
     }
 
     #[tokio::test]
@@ -2953,10 +3071,12 @@ mod tests {
         }
 
         first.complete(Duration::from_secs(1)).await.unwrap();
-        assert!(matches!(
+        assert_eq!(
             second.complete(Duration::from_millis(25)).await,
-            Err(CompanionSessionError::BindingExpired)
-        ));
+            Err(CompanionSessionError::BindingRejected(
+                "the reported page is already bound"
+            ))
+        );
         let _ = requests.recv().await.unwrap();
         assert!(
             tokio::time::timeout(Duration::from_millis(25), requests.recv())
