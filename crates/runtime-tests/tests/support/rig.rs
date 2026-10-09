@@ -36,7 +36,7 @@ fn config(root: &std::path::Path, upload_roots: Vec<std::path::PathBuf>) -> AppC
             executable: None,
             profiles_dir: root.join("profiles"),
             headless: true,
-            max_active: 1,
+            max_active: BrowserConfig::default().max_active,
             upload_roots,
             downloads_dir: root.join("downloads"),
             artifacts_dir: root.join("artifacts"),
