@@ -1360,10 +1360,19 @@ pub async fn browser_events_survive_a_request_burst(rig: &Rig) {
     let burst = page(
         "Burst",
         &format!(
-            r#"<main><h1>Burst</h1></main>
+            r#"<main><h1>Burst</h1><p id="rejected">rejected 0</p></main>
         <script>
+            let rejected = 0;
+            let firstError = "";
             for (let index = 0; index < {BURST_REQUESTS}; index++) {{
-              fetch("/api/burst?i=" + index).then((response) => console.log("item", index, response.status));
+              fetch("/api/burst?i=" + index)
+                .then((response) => console.log("item", index, response.status))
+                .catch((error) => {{
+                  rejected += 1;
+                  firstError = firstError || String(error);
+                  document.getElementById("rejected").textContent =
+                    "rejected " + rejected + ": " + firstError;
+                }});
             }}
         </script>"#
         ),
@@ -1389,11 +1398,17 @@ pub async fn browser_events_survive_a_request_burst(rig: &Rig) {
     assert_eq!(loaded["status"], "completed", "navigate: {loaded}");
     let wait = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while site.hits("/api/burst") < BURST_REQUESTS {
-        assert!(
-            std::time::Instant::now() < wait,
-            "the burst page sent {} of {BURST_REQUESTS} requests",
-            site.hits("/api/burst")
-        );
+        if std::time::Instant::now() >= wait {
+            // The page counts the fetches the browser itself refused.
+            let mut texts = Vec::new();
+            let snapshot = live.snapshot(json!({})).await;
+            strings_under(&snapshot, "name", &mut texts);
+            panic!(
+                "the burst page sent {} of {BURST_REQUESTS} requests; page reports {:?}",
+                site.hits("/api/burst"),
+                texts.iter().find(|text| text.starts_with("rejected"))
+            );
+        }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     let followed = follow_late_data_link(&live, &site).await;
