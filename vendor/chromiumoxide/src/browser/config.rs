@@ -55,6 +55,9 @@ pub struct BrowserConfig {
     /// See https://bugs.chromium.org/p/chromium/issues/detail?id=706008#c5
     pub(crate) extensions: Vec<String>,
 
+    /// Run the extensions installed in the profile instead of disabling them.
+    pub(crate) installed_extensions: bool,
+
     /// Environment variables to set for the Chromium process.
     /// Passes value through to std::process::Command::envs.
     pub process_envs: Option<HashMap<String, String>>,
@@ -108,6 +111,7 @@ pub struct BrowserConfigBuilder {
     executable: Option<PathBuf>,
     executation_detection: DetectionOptions,
     extensions: Vec<String>,
+    installed_extensions: bool,
     process_envs: Option<HashMap<String, String>>,
     user_data_dir: Option<PathBuf>,
     incognito: bool,
@@ -144,6 +148,7 @@ impl Default for BrowserConfigBuilder {
             executable: None,
             executation_detection: DetectionOptions::default(),
             extensions: Vec::new(),
+            installed_extensions: false,
             process_envs: None,
             user_data_dir: None,
             incognito: false,
@@ -261,6 +266,12 @@ impl BrowserConfigBuilder {
         self
     }
 
+    /// Runs the extensions installed in the profile instead of disabling them.
+    pub fn installed_extensions(mut self) -> Self {
+        self.installed_extensions = true;
+        self
+    }
+
     pub fn env(mut self, key: impl Into<String>, val: impl Into<String>) -> Self {
         self.process_envs
             .get_or_insert(HashMap::new())
@@ -348,6 +359,7 @@ impl BrowserConfigBuilder {
             port: self.port,
             executable,
             extensions: self.extensions,
+            installed_extensions: self.installed_extensions,
             process_envs: self.process_envs,
             user_data_dir: self.user_data_dir,
             incognito: self.incognito,
@@ -397,7 +409,9 @@ impl BrowserConfig {
         }
 
         if self.extensions.is_empty() {
-            builder.arg(Arg::key("disable-extensions"));
+            if !self.installed_extensions {
+                builder.arg(Arg::key("disable-extensions"));
+            }
         } else {
             builder.args(
                 self.extensions

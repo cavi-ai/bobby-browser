@@ -9,7 +9,7 @@
 - On Firefox, a command that misses its deadline fails alone; other sessions and runtime restarts keep the running Firefox.
 - Restarting Firefox quits it with `browser.close` when possible, so site logins survive.
 - On Firefox, opening a page waits the full operation timeout for the companion to bind it, and a refused binding names its reason.
-- Sessions on a durable Chromium profile share one Chrome that outlives the runtime; each session sees only its own pages and downloads.
+- Sessions on a durable Chromium profile share one Chrome that outlives the runtime and runs the profile's installed extensions; each session sees only its own pages and downloads.
 - Chromium pages no longer enable the unused Performance and Log domains, which slowed request-heavy pages.
 - Settling ignores animations, counters and carousels that never stop changing the page.
 - Settling waits for the page to use a response that lands during the quiet window.
