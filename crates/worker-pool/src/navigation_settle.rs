@@ -97,13 +97,46 @@ impl SettleExit {
     }
 }
 
+/// What a settle does once a probe resolves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterProbe {
+    /// No script or fetch/XHR load is pending: the settle ends.
+    Settled,
+    /// Loads are in flight: wait for them, then probe again.
+    AwaitLoads,
+    /// The loads are unknown: probe once more before ending.
+    ProbeAgain,
+}
+
+/// Decides the step after a probe from the page's pending loads (`None` when
+/// unknown) and whether a load `landed` while the probe ran. Unknown loads
+/// never count as none. An unknown read or a landed load costs one more probe,
+/// once per settle: `extra_probe_spent` records it.
+pub fn after_probe(
+    pending: Option<usize>,
+    landed: bool,
+    extra_probe_spent: &mut bool,
+) -> AfterProbe {
+    match pending {
+        Some(0) if !landed => AfterProbe::Settled,
+        Some(0) | None => {
+            if std::mem::replace(extra_probe_spent, true) {
+                AfterProbe::Settled
+            } else {
+                AfterProbe::ProbeAgain
+            }
+        }
+        Some(_) => AfterProbe::AwaitLoads,
+    }
+}
+
 /// Logs one line per settle. URL and title stay out of the log; only whether
 /// each changed between the first probe's start and the settled read.
 pub fn trace_settle(
     engine: &'static str,
     exit: SettleExit,
     started: Instant,
-    pending_page_loads: usize,
+    pending_page_loads: Option<usize>,
     begin: Option<&(String, String)>,
     settled: Option<&(String, String)>,
 ) {
@@ -111,11 +144,13 @@ pub fn trace_settle(
         (Some(begin), Some(settled)) => (begin.0 != settled.0, begin.1 != settled.1),
         _ => (false, false),
     };
+    let pending_page_loads =
+        pending_page_loads.map_or_else(|| "unknown".to_owned(), |count| count.to_string());
     tracing::info!(
         engine,
         exit = exit.as_str(),
         elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        pending_page_loads,
+        %pending_page_loads,
         url_changed,
         title_changed,
         "navigation settle"
@@ -136,5 +171,36 @@ mod tests {
         assert!(!read.quiet);
         assert_eq!(read.begin, ("https://a.test/a".into(), "A".into()));
         assert_eq!(parse_settled(r#"{"url":"u","title":"t"}"#), None);
+    }
+
+    #[test]
+    fn unknown_loads_cost_one_more_probe_and_never_count_as_none() {
+        let mut spent = false;
+        assert_eq!(
+            after_probe(Some(2), false, &mut spent),
+            AfterProbe::AwaitLoads
+        );
+        assert_eq!(after_probe(None, false, &mut spent), AfterProbe::ProbeAgain);
+        assert_eq!(
+            after_probe(Some(1), false, &mut spent),
+            AfterProbe::AwaitLoads
+        );
+        assert_eq!(after_probe(None, false, &mut spent), AfterProbe::Settled);
+        assert_eq!(after_probe(Some(0), false, &mut false), AfterProbe::Settled);
+    }
+
+    #[test]
+    fn a_landed_load_and_an_unknown_read_share_one_extra_probe() {
+        let mut spent = false;
+        assert_eq!(
+            after_probe(Some(0), true, &mut spent),
+            AfterProbe::ProbeAgain
+        );
+        assert_eq!(after_probe(Some(0), true, &mut spent), AfterProbe::Settled);
+        assert_eq!(after_probe(None, false, &mut spent), AfterProbe::Settled);
+        assert_eq!(
+            after_probe(Some(1), true, &mut spent),
+            AfterProbe::AwaitLoads
+        );
     }
 }

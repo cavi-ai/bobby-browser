@@ -977,10 +977,9 @@ pub async fn intent_follow_post_state_waits_for_fetched_content(rig: &Rig) {
 /// Runs of each timing-dependent case; every run must pass.
 const SETTLE_RUNS: usize = 20;
 
-/// A link pushState-navigates and renders a skeleton, then starts its data
-/// request 0-800 ms later; the request takes 600-1500 ms. Every
-/// intent_follow's postState shows the fetched content.
-pub async fn intent_follow_waits_for_a_late_data_request(rig: &Rig) {
+/// A start page whose link pushState-navigates and renders a skeleton, then
+/// starts its data request 0-800 ms later; the request takes 600-1500 ms.
+fn late_data_routes() -> Vec<(&'static str, Route)> {
     let start = page(
         "Start",
         r#"<main id="main"><a id="go" href="/results/list">Open results</a></main>
@@ -1001,7 +1000,7 @@ pub async fn intent_follow_waits_for_a_late_data_request(rig: &Rig) {
             });
         </script>"#,
     );
-    let site = FixtureSite::spawn(vec![
+    vec![
         ("/start", Route::Html(start)),
         (
             "/api/rows",
@@ -1010,32 +1009,46 @@ pub async fn intent_follow_waits_for_a_late_data_request(rig: &Rig) {
                 body: r#"["First row","Second row"]"#.to_owned(),
             },
         ),
-    ])
-    .await;
+    ]
+}
+
+/// Loads the late-data start page and follows its link. `None` when
+/// intent_follow's postState shows the fetched content.
+async fn follow_late_data_link(live: &Live<'_>, site: &FixtureSite) -> Option<String> {
+    let loaded = live
+        .call("navigate", json!({"url":site.url("/start")}))
+        .await;
+    assert_eq!(loaded["status"], "completed", "navigate: {loaded}");
+    let followed = live
+        .call(
+            "intent_follow",
+            json!({
+                "purpose":"Open the results",
+                "hints":{"role":"link","accessibleName":"Open results"},
+                "expectedState":{
+                    "condition":{"kind":"url","matcher":{"kind":"contains","value":"/results/"}},
+                    "timeoutMs":15000
+                }
+            }),
+        )
+        .await;
+    if followed["status"] != "completed" {
+        Some(format!("status {}", followed["status"]))
+    } else if find_node(&followed["postState"], "heading", Some("Results")).is_none() {
+        Some("postState is not the fetched page".to_owned())
+    } else {
+        None
+    }
+}
+
+/// Every intent_follow on the late-data start page shows the fetched content.
+pub async fn intent_follow_waits_for_a_late_data_request(rig: &Rig) {
+    let site = FixtureSite::spawn(late_data_routes()).await;
     let live = Live::open(rig, &site.url("/start")).await;
     let mut failures = Vec::new();
     for run in 1..=SETTLE_RUNS {
-        let loaded = live
-            .call("navigate", json!({"url":site.url("/start")}))
-            .await;
-        assert_eq!(loaded["status"], "completed", "navigate: {loaded}");
-        let followed = live
-            .call(
-                "intent_follow",
-                json!({
-                    "purpose":"Open the results",
-                    "hints":{"role":"link","accessibleName":"Open results"},
-                    "expectedState":{
-                        "condition":{"kind":"url","matcher":{"kind":"contains","value":"/results/"}},
-                        "timeoutMs":15000
-                    }
-                }),
-            )
-            .await;
-        if followed["status"] != "completed" {
-            failures.push(format!("run {run}: status {}", followed["status"]));
-        } else if find_node(&followed["postState"], "heading", Some("Results")).is_none() {
-            failures.push(format!("run {run}: postState is not the fetched page"));
+        if let Some(failure) = follow_late_data_link(&live, &site).await {
+            failures.push(format!("run {run}: {failure}"));
         }
     }
     live.close().await;
@@ -1043,6 +1056,148 @@ pub async fn intent_follow_waits_for_a_late_data_request(rig: &Rig) {
         failures.is_empty(),
         "{} of {SETTLE_RUNS} runs failed: {failures:?}",
         failures.len()
+    );
+}
+
+/// Requests the heavy page fires at once, more than a tracker holds.
+const HEAVY_REQUESTS: usize = 5_000;
+/// Late-data navigations after the heavy page.
+const RUNS_AFTER_HEAVY_PAGE: usize = 10;
+
+/// A page fires 5,000 requests and one with a 20 KB URL; the same session
+/// then follows the late-data link ten times. Network tracking is never lost
+/// and every intent_follow's postState shows the fetched content.
+pub async fn network_tracking_survives_a_heavy_page(rig: &Rig) {
+    let heavy = page(
+        "Heavy",
+        &format!(
+            r#"<main><h1>Heavy</h1></main>
+        <script>
+            addEventListener("load", async () => {{
+              fetch("/api/item?pad=" + "a".repeat(20 * 1024));
+              for (let index = 0; index < {HEAVY_REQUESTS}; index += 100) {{
+                const batch = [];
+                for (let item = index; item < index + 100; item++) batch.push(fetch("/api/item?i=" + item));
+                await Promise.all(batch);
+              }}
+            }});
+        </script>"#
+        ),
+    );
+    let mut routes = late_data_routes();
+    routes.push(("/heavy", Route::Html(heavy)));
+    routes.push((
+        "/api/item",
+        Route::Raw {
+            content_type: "application/json",
+            body: "{}".to_owned(),
+        },
+    ));
+    let site = FixtureSite::spawn(routes).await;
+    // `RUST_LOG` installs the stdio subscriber instead; tracking losses then go unchecked.
+    let capture = std::env::var_os("RUST_LOG")
+        .is_none()
+        .then(observability::test_support::CaptureSink::install);
+    let live = Live::open(rig, &site.url("/heavy")).await;
+    let wait = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while site.hits("/api/item") <= HEAVY_REQUESTS {
+        assert!(
+            std::time::Instant::now() < wait,
+            "the heavy page sent {} of {} requests",
+            site.hits("/api/item"),
+            HEAVY_REQUESTS + 1
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let mut failures = Vec::new();
+    for run in 1..=RUNS_AFTER_HEAVY_PAGE {
+        if let Some(failure) = follow_late_data_link(&live, &site).await {
+            failures.push(format!("run {run}: {failure}"));
+        }
+    }
+    let losses: Vec<String> = capture.as_ref().map_or_else(Vec::new, |capture| {
+        capture
+            .events()
+            .iter()
+            .filter(|event| {
+                event["fields"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("tracking lost"))
+            })
+            .map(|event| event["fields"].to_string())
+            .collect()
+    });
+    live.close().await;
+    assert!(
+        failures.is_empty() && losses.is_empty(),
+        "{} of {RUNS_AFTER_HEAVY_PAGE} runs failed: {failures:?}; tracking losses: {losses:?}",
+        failures.len()
+    );
+}
+
+/// Requests the burst page fires without waiting for any response.
+const BURST_REQUESTS: usize = 5_000;
+
+/// Navigate settles while a page fires 5,000 logged fetches at once; no browser
+/// event is dropped and the next intent_follow's postState shows the fetched content.
+pub async fn browser_events_survive_a_request_burst(rig: &Rig) {
+    let burst = page(
+        "Burst",
+        &format!(
+            r#"<main><h1>Burst</h1></main>
+        <script>
+            for (let index = 0; index < {BURST_REQUESTS}; index++) {{
+              fetch("/api/burst?i=" + index).then((response) => console.log("item", index, response.status));
+            }}
+        </script>"#
+        ),
+    );
+    let mut routes = late_data_routes();
+    routes.push(("/burst", Route::Html(burst)));
+    routes.push((
+        "/api/burst",
+        Route::Raw {
+            content_type: "application/json",
+            body: "{}".to_owned(),
+        },
+    ));
+    let site = FixtureSite::spawn(routes).await;
+    // `RUST_LOG` installs the stdio subscriber instead; dropped events then go unchecked.
+    let capture = std::env::var_os("RUST_LOG")
+        .is_none()
+        .then(observability::test_support::CaptureSink::install);
+    let live = Live::open(rig, &site.url("/start")).await;
+    let loaded = live
+        .call("navigate", json!({"url":site.url("/burst")}))
+        .await;
+    assert_eq!(loaded["status"], "completed", "navigate: {loaded}");
+    let wait = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while site.hits("/api/burst") < BURST_REQUESTS {
+        assert!(
+            std::time::Instant::now() < wait,
+            "the burst page sent {} of {BURST_REQUESTS} requests",
+            site.hits("/api/burst")
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let followed = follow_late_data_link(&live, &site).await;
+    let dropped: Vec<String> = capture.as_ref().map_or_else(Vec::new, |capture| {
+        capture
+            .events()
+            .iter()
+            .filter(|event| {
+                let fields = &event["fields"];
+                let message = fields["message"].as_str().unwrap_or_default();
+                (message.contains("tracking lost") && fields["reason"] == "lagged")
+                    || message.contains("event stream lost events")
+            })
+            .map(|event| event["fields"].to_string())
+            .collect()
+    });
+    live.close().await;
+    assert!(
+        followed.is_none() && dropped.is_empty(),
+        "intent_follow: {followed:?}; dropped events: {dropped:?}"
     );
 }
 

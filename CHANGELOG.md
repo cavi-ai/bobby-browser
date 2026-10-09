@@ -5,6 +5,8 @@
 ### Fixed
 
 - Settling waits for the page to use a response that lands during the quiet window.
+- On Firefox, network tracking, HAR and dialogs keep every event on pages that fire thousands of requests at once.
+- Settling keeps waiting for in-flight loads on pages with thousands of requests or very long URLs.
 - On Chromium, settling ignores requests started by a document the navigation replaced.
 - Same-document navigations settle after 1 s without DOM changes.
 - Snapshots show sign-in field labels and targets; only entered secrets are redacted.
