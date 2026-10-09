@@ -156,7 +156,7 @@ struct WriterState {
     file_len: u64,
     modified: Option<std::time::SystemTime>,
     offsets: HashMap<CommandId, Vec<IndexedRecord>>,
-    archives: Vec<PathBuf>,
+    archives: Vec<Arc<PathBuf>>,
     archived_offsets: HashMap<CommandId, Vec<ArchivedRecordLocation>>,
     archived_torn_tail: bool,
     archived_incompatible_records: usize,
@@ -164,7 +164,7 @@ struct WriterState {
 
 /// Derived bounds keep a changed delimiter from expanding a diagnostic read.
 struct ArchivedRecordLocation {
-    path: PathBuf,
+    path: Arc<PathBuf>,
     offset: u64,
     len: u64,
 }
@@ -265,7 +265,13 @@ impl JsonlJournal {
 
     /// Archives are diagnostic data, never command authority.
     pub async fn archives(&self) -> Vec<PathBuf> {
-        self.writer.lock().await.archives.clone()
+        self.writer
+            .lock()
+            .await
+            .archives
+            .iter()
+            .map(|path| path.as_ref().clone())
+            .collect()
     }
 
     pub async fn inspect(path: impl AsRef<Path>) -> Result<JournalHealth, JournalError> {
@@ -356,8 +362,8 @@ async fn open_writer(path: &Path) -> Result<WriterState, JournalError> {
         if !entry.file_name().to_string_lossy().starts_with(&prefix) {
             continue;
         }
-        let archive = entry.path();
-        let mut reader = BufReader::new(File::open(&archive).await?);
+        let archive = Arc::new(entry.path());
+        let mut reader = BufReader::new(File::open(archive.as_ref()).await?);
         let mut line = Vec::new();
         let mut offset = 0;
         while reader.read_until(b'\n', &mut line).await? > 0 {
@@ -381,7 +387,7 @@ async fn open_writer(path: &Path) -> Result<WriterState, JournalError> {
                         .entry(id)
                         .or_default()
                         .push(ArchivedRecordLocation {
-                            path: archive.clone(),
+                            path: Arc::clone(&archive),
                             offset,
                             len: line.len() as u64,
                         });
@@ -471,7 +477,7 @@ impl CommandJournal for JsonlJournal {
             };
             if let Some(offsets) = writer.archived_offsets.get(&id) {
                 for entry in offsets {
-                    let mut file = File::open(&entry.path).await?;
+                    let mut file = File::open(entry.path.as_ref()).await?;
                     file.seek(std::io::SeekFrom::Start(entry.offset)).await?;
                     let mut reader = BufReader::new(file.take(entry.len));
                     let mut line = Vec::new();

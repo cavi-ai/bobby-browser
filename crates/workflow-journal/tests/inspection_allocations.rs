@@ -10,10 +10,15 @@ use workflow_journal::{CommandJournal, JournalRecord, JsonlJournal};
 struct AllocationTracker;
 static TRACKING: AtomicBool = AtomicBool::new(false);
 static LARGEST_ALLOCATION: AtomicUsize = AtomicUsize::new(0);
+static PATH_ALLOCATION_SIZE: AtomicUsize = AtomicUsize::new(0);
+static PATH_ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 
 fn record_allocation(size: usize) {
     if TRACKING.load(Ordering::Relaxed) {
         LARGEST_ALLOCATION.fetch_max(size, Ordering::Relaxed);
+        if size == PATH_ALLOCATION_SIZE.load(Ordering::Relaxed) {
+            PATH_ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -127,4 +132,49 @@ fn inspection_and_archived_reads_avoid_unrelated_history_allocations() {
     assert!(scan.incompatible_records > 0);
     assert!(scan.torn_tail);
     assert_eq!(std::fs::read(&archive).unwrap(), changed);
+
+    let indexed_path = root.path().join("indexed.jsonl");
+    let mut archive_name = format!("indexed.jsonl.archive-{}", "x".repeat(61));
+    let mut indexed_archive = root.path().join(&archive_name);
+    // An odd path length separates PathBuf clones from power-of-two buffers.
+    if indexed_archive
+        .as_os_str()
+        .as_encoded_bytes()
+        .len()
+        .is_multiple_of(2)
+    {
+        archive_name.push('x');
+        indexed_archive = root.path().join(archive_name);
+    }
+    std::fs::copy(&path, &indexed_archive).unwrap();
+    PATH_ALLOCATION_SIZE.store(
+        indexed_archive.as_os_str().as_encoded_bytes().len(),
+        Ordering::Relaxed,
+    );
+    PATH_ALLOCATIONS.store(0, Ordering::Relaxed);
+    TRACKING.store(true, Ordering::Relaxed);
+    let indexed = runtime.block_on(JsonlJournal::open(&indexed_path)).unwrap();
+    TRACKING.store(false, Ordering::Relaxed);
+    let path_allocations = PATH_ALLOCATIONS.load(Ordering::Relaxed);
+    assert!(
+        path_allocations < 64,
+        "opening one archive with 2048 records made {path_allocations} path-sized allocations"
+    );
+    assert_eq!(
+        runtime.block_on(indexed.archives()),
+        vec![indexed_archive.clone()]
+    );
+    let scan = runtime
+        .block_on(indexed.history(command_id.clone()))
+        .unwrap();
+    assert_eq!(scan.records.len(), 2048);
+    assert!(scan.incompatible_records > 0);
+    for (sequence, record) in scan.records.iter().enumerate() {
+        assert_eq!(record.sequence, sequence as u64);
+        assert_eq!(record.command_id, command_id);
+    }
+    assert_eq!(
+        std::fs::read(&indexed_archive).unwrap(),
+        std::fs::read(&path).unwrap()
+    );
 }
