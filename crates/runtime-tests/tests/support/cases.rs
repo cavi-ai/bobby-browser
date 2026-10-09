@@ -977,39 +977,47 @@ pub async fn intent_follow_post_state_waits_for_fetched_content(rig: &Rig) {
 /// Runs of each timing-dependent case; every run must pass.
 const SETTLE_RUNS: usize = 20;
 
-/// A start page whose link pushState-navigates and renders a skeleton, then
-/// starts its data request 0-800 ms later; the request takes 600-1500 ms.
+/// The "Open results" link pushState-navigates and renders a skeleton into
+/// `#main`, then starts its data request 0-800 ms later; the request takes
+/// 600-1500 ms.
+const LATE_DATA_SCRIPT: &str = r#"<script>
+    document.getElementById("go").addEventListener("click", (event) => {
+      event.preventDefault();
+      history.pushState({}, "", "/results/list");
+      const main = document.getElementById("main");
+      main.innerHTML = "<div role='presentation'></div>".repeat(19);
+      setTimeout(() => {
+        fetch("/api/rows?ms=" + (600 + Math.floor(Math.random() * 901)))
+          .then((response) => response.json())
+          .then((rows) => {
+            main.innerHTML = "<h1>Results</h1><ul>" +
+              rows.map((row) => "<li>" + row + "</li>").join("") + "</ul>";
+          });
+      }, Math.floor(Math.random() * 801));
+    });
+</script>"#;
+
+/// The data request [`LATE_DATA_SCRIPT`] makes.
+fn rows_route() -> (&'static str, Route) {
+    (
+        "/api/rows",
+        Route::QueryDelayed {
+            content_type: "application/json",
+            body: r#"["First row","Second row"]"#.to_owned(),
+        },
+    )
+}
+
+/// A start page with the late-data link.
 fn late_data_routes() -> Vec<(&'static str, Route)> {
     let start = page(
         "Start",
-        r#"<main id="main"><a id="go" href="/results/list">Open results</a></main>
-        <script>
-            document.getElementById("go").addEventListener("click", (event) => {
-              event.preventDefault();
-              history.pushState({}, "", "/results/list");
-              const main = document.getElementById("main");
-              main.innerHTML = "<div role='presentation'></div>".repeat(19);
-              setTimeout(() => {
-                fetch("/api/rows?ms=" + (600 + Math.floor(Math.random() * 901)))
-                  .then((response) => response.json())
-                  .then((rows) => {
-                    main.innerHTML = "<h1>Results</h1><ul>" +
-                      rows.map((row) => "<li>" + row + "</li>").join("") + "</ul>";
-                  });
-              }, Math.floor(Math.random() * 801));
-            });
-        </script>"#,
-    );
-    vec![
-        ("/start", Route::Html(start)),
-        (
-            "/api/rows",
-            Route::QueryDelayed {
-                content_type: "application/json",
-                body: r#"["First row","Second row"]"#.to_owned(),
-            },
+        &format!(
+            r#"<main id="main"><a id="go" href="/results/list">Open results</a></main>
+        {LATE_DATA_SCRIPT}"#
         ),
-    ]
+    );
+    vec![("/start", Route::Html(start)), rows_route()]
 }
 
 /// Loads the late-data start page and follows its link. `None` when
@@ -1019,6 +1027,12 @@ async fn follow_late_data_link(live: &Live<'_>, site: &FixtureSite) -> Option<St
         .call("navigate", json!({"url":site.url("/start")}))
         .await;
     assert_eq!(loaded["status"], "completed", "navigate: {loaded}");
+    follow_results_link(live).await
+}
+
+/// Follows the late-data link on the current page. `None` when
+/// intent_follow's postState shows the fetched content.
+async fn follow_results_link(live: &Live<'_>) -> Option<String> {
     let followed = live
         .call(
             "intent_follow",
@@ -1057,6 +1071,125 @@ pub async fn intent_follow_waits_for_a_late_data_request(rig: &Rig) {
         "{} of {SETTLE_RUNS} runs failed: {failures:?}",
         failures.len()
     );
+}
+
+/// Placeholders that toggle a class every 100 ms.
+const SHIMMER: &str = r#"<div class="placeholder"></div><div class="placeholder"></div>
+<script>
+  setInterval(() => {
+    for (const node of document.querySelectorAll(".placeholder")) node.classList.toggle("dim");
+  }, 100);
+</script>"#;
+/// A counter whose text changes every 200 ms.
+const COUNTER: &str = r#"<p>Viewers <span id="count">0</span></p>
+<script>
+  {
+    const count = document.getElementById("count").firstChild;
+    let value = 0;
+    setInterval(() => { count.data = String(++value); }, 200);
+  }
+</script>"#;
+/// A carousel that moves its first slide to the end every second.
+const CAROUSEL: &str = r#"<ul id="slides"><li>Slide one</li><li>Slide two</li><li>Slide three</li></ul>
+<script>
+  {
+    const slides = document.getElementById("slides");
+    setInterval(() => slides.appendChild(slides.firstElementChild), 1000);
+  }
+</script>"#;
+
+/// Runs of each churn case; every run must pass.
+const CHURN_RUNS: usize = 10;
+
+/// The `exit` of each settle logged after the first `seen` captured events.
+fn settle_exits(
+    capture: Option<&observability::test_support::CaptureSink>,
+    seen: usize,
+) -> Vec<String> {
+    capture.map_or_else(Vec::new, |capture| {
+        capture.events()[seen..]
+            .iter()
+            .filter(|event| event["fields"]["message"] == "navigation settle")
+            .map(|event| event["fields"]["exit"].as_str().unwrap_or("").to_owned())
+            .collect()
+    })
+}
+
+/// A page with the late-data link next to `widgets`, which never stop
+/// changing the DOM. Every navigate to it settles quiet within 2.5 s; every
+/// intent_follow of its link settles quiet and its postState shows the
+/// fetched content.
+async fn settles_beside_churn(rig: &Rig, widgets: &str) {
+    let feed = page(
+        "Feed",
+        &format!(
+            r#"<main><div id="main"><h1>Feed</h1><a id="go" href="/results/list">Open results</a></div>
+        {widgets}</main>{LATE_DATA_SCRIPT}"#
+        ),
+    );
+    let site = FixtureSite::spawn(vec![("/feed", Route::Html(feed)), rows_route()]).await;
+    // `RUST_LOG` installs the stdio subscriber instead; settle exits then go unchecked.
+    let capture = std::env::var_os("RUST_LOG")
+        .is_none()
+        .then(observability::test_support::CaptureSink::install);
+    let live = Live::open(rig, &site.url("/feed")).await;
+    let quiet = |exits: &[String]| {
+        capture.is_none() || (!exits.is_empty() && exits.iter().all(|exit| exit == "quiet"))
+    };
+    let mut times = Vec::new();
+    let mut failures = Vec::new();
+    for run in 1..=CHURN_RUNS {
+        let seen = capture.as_ref().map_or(0, |capture| capture.events().len());
+        let started = std::time::Instant::now();
+        let loaded = live
+            .call("navigate", json!({"url":site.url("/feed")}))
+            .await;
+        let navigated = started.elapsed();
+        assert_eq!(loaded["status"], "completed", "navigate: {loaded}");
+        let navigate_exits = settle_exits(capture.as_ref(), seen);
+        let seen = capture.as_ref().map_or(0, |capture| capture.events().len());
+        let started = std::time::Instant::now();
+        let followed = follow_results_link(&live).await;
+        let follow = started.elapsed();
+        let follow_exits = settle_exits(capture.as_ref(), seen);
+        times.push((navigated.as_millis(), follow.as_millis()));
+        if navigated > std::time::Duration::from_millis(2_500) || !quiet(&navigate_exits) {
+            failures.push(format!(
+                "run {run}: navigate took {} ms, settle exits {navigate_exits:?}",
+                navigated.as_millis()
+            ));
+        }
+        if followed.is_some() || follow > std::time::Duration::from_secs(5) || !quiet(&follow_exits)
+        {
+            failures.push(format!(
+                "run {run}: intent_follow took {} ms, settle exits {follow_exits:?}: {followed:?}",
+                follow.as_millis()
+            ));
+        }
+    }
+    live.close().await;
+    eprintln!("settle beside churn, (navigate ms, intent_follow ms): {times:?}");
+    assert!(
+        failures.is_empty(),
+        "{} failures in {CHURN_RUNS} runs: {failures:?}",
+        failures.len()
+    );
+}
+
+pub async fn settles_beside_class_churn(rig: &Rig) {
+    settles_beside_churn(rig, SHIMMER).await;
+}
+
+pub async fn settles_beside_text_churn(rig: &Rig) {
+    settles_beside_churn(rig, COUNTER).await;
+}
+
+pub async fn settles_beside_moving_children(rig: &Rig) {
+    settles_beside_churn(rig, CAROUSEL).await;
+}
+
+pub async fn settles_beside_combined_churn(rig: &Rig) {
+    settles_beside_churn(rig, &[SHIMMER, COUNTER, CAROUSEL].concat()).await;
 }
 
 /// Requests the heavy page fires at once, more than a tracker holds.

@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Settling ignores animations, counters and carousels that never stop changing the page.
 - Settling waits for the page to use a response that lands during the quiet window.
 - On Firefox, network tracking, HAR and dialogs keep every event on pages that fire thousands of requests at once.
 - Settling keeps waiting for in-flight loads on pages with thousands of requests or very long URLs.
