@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Restarting Firefox quits it with `browser.close` when possible, so site logins survive.
 - Settling ignores animations, counters and carousels that never stop changing the page.
 - Settling waits for the page to use a response that lands during the quiet window.
 - On Firefox, network tracking, HAR and dialogs keep every event on pages that fire thousands of requests at once.
