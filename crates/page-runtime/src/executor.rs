@@ -282,6 +282,31 @@ impl PageRuntime {
             },
             None => None,
         };
+        // Enter can move the page during the keypress itself, so the URL the
+        // text is typed on is read before dispatch.
+        let typed_on = match (&envelope.command, envelope.page_id.as_ref()) {
+            (RuntimeCommand::Primitive(PrimitiveCommand::TypeText(command)), Some(page_id))
+                if command.value.contains(['\n', '\r']) =>
+            {
+                let budget = (envelope.deadline - Utc::now())
+                    .to_std()
+                    .unwrap_or(StdDuration::ZERO);
+                tokio::time::timeout(
+                    budget,
+                    lease.worker().inspect(page_id, &InspectCommand::default()),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .and_then(|evidence| {
+                    evidence.into_iter().find_map(|item| match item {
+                        Evidence::Inspection { url, .. } => Some(url),
+                        _ => None,
+                    })
+                })
+            }
+            _ => None,
+        };
         // The envelope deadline is a real bound, not an admission formality:
         // race the command against it so a hung browser call fails the
         // command (and only that command) instead of parking it forever.
@@ -902,6 +927,7 @@ impl PageRuntime {
                 &envelope,
                 lease_slot.as_ref().expect("lease survives to verify"),
                 evidence,
+                typed_on,
             )
             .await
         {
@@ -1036,6 +1062,7 @@ impl PageRuntime {
         envelope: &CommandEnvelope,
         lease: &worker_pool::WorkerLease,
         evidence: Vec<Evidence>,
+        typed_on: Option<String>,
     ) -> Result<Vec<Evidence>, CommandError> {
         let page_id = envelope.page_id.as_ref();
         let RuntimeCommand::Primitive(command) = &envelope.command else {
@@ -1157,7 +1184,8 @@ impl PageRuntime {
                         // Report where the submit landed: the page the agent
                         // is on after the navigation, not the one it typed on.
                         // The signal is the URL moving off the page the field
-                        // was typed on, watched for a bounded window. A
+                        // was typed on (read before the keypress when it could
+                        // be), watched for a bounded window. A
                         // single-page app may already have pushed its URL and
                         // keeps rendering after it, so the reported URL and
                         // title are read once the document stops changing.
@@ -1172,9 +1200,11 @@ impl PageRuntime {
                                 _ => None,
                             })
                         };
-                        let typed_on = combined.iter().find_map(|item| match item {
-                            Evidence::Inspection { url, .. } => Some(url.clone()),
-                            _ => None,
+                        let typed_on = typed_on.or_else(|| {
+                            combined.iter().find_map(|item| match item {
+                                Evidence::Inspection { url, .. } => Some(url.clone()),
+                                _ => None,
+                            })
                         });
                         let window = tokio::time::Instant::now() + ENTER_NAVIGATION_WINDOW;
                         let mut landed: Option<(String, String)>;

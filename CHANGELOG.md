@@ -9,6 +9,7 @@
 - Runtime owner logs to `owner.log`, rotated past 1 MiB.
 - A session keeps its pages when Firefox restarts onto a new companion build.
 - `type_text` ending in Enter reports the landed page's full URL, query included, and its settled title.
+- `type_text` ending in Enter detects a navigation made during the keypress without waiting 1 s.
 - `intent_follow` completes once the destination page stops changing, so `postState` shows the rendered page.
 - Settling after a navigation waits for the page's in-flight fetch and XHR requests, so `intent_follow` `postState` shows content the page fetches.
 - A page that does not settle within 5 s reports the URL, query included, and title it shows at that point.
