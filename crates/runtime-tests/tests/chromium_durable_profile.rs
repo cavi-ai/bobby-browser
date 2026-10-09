@@ -14,6 +14,10 @@
 //! Managed Chromium without a profile id keeps a disposable browser profile
 //! and still remembers: its runtime promotes under the shared
 //! `managed-chromium` identity, and a restarted runtime answers from disk.
+//!
+//! Every session on a durable profile shares one Chrome that outlives the
+//! runtime. Unix only: the tests stop that Chrome through `ps` and signals.
+#![cfg(unix)]
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,6 +34,8 @@ use worker_pool::ChromiumWorkerFactory;
 
 const FIELD_PURPOSE: &str = "Full name";
 const FIELD_VALUE: &str = "Maya Chen";
+/// Sessions sharing one durable profile at once.
+const SHARED_SESSIONS: usize = 8;
 
 const ONBOARDING: &str = r#"<!doctype html><title>New relationship</title><main>
 <h1>New relationship</h1>
@@ -65,7 +71,7 @@ fn config(root: &Path, context_dir: Option<&Path>) -> config::AppConfig {
             executable: Some(chrome_executable()),
             profiles_dir: root.join("profiles"),
             headless: true,
-            max_active: 1,
+            max_active: SHARED_SESSIONS,
             upload_roots: vec![],
             downloads_dir: root.join("downloads"),
             artifacts_dir: root.join("artifacts"),
@@ -238,6 +244,13 @@ async fn durable_chromium_profile_persists_context_across_sessions() {
     let durable_root = tempfile::tempdir().unwrap();
     let context_dir = durable_root.path().join("context");
     let durable_config = config(durable_root.path(), Some(&context_dir));
+    let _chrome = ProfileChrome(
+        durable_config
+            .browser
+            .profiles_dir
+            .join("chromium")
+            .join(durable_profile_id),
+    );
     let durable_factory = Arc::new(
         ChromiumWorkerFactory::new(durable_config.browser.clone())
             .with_durable_profile(durable_profile_id.to_string()),
@@ -366,4 +379,218 @@ async fn managed_chromium_remembers_across_runtimes_with_a_disposable_profile() 
     );
     assert!(answer.confidence >= 0.75);
     warm.close().await;
+}
+
+/// The Chrome serving a durable profile. It outlives sessions and runtimes
+/// by design, so the test stops it on every exit, failures included.
+struct ProfileChrome(PathBuf);
+
+impl ProfileChrome {
+    /// Main Chrome processes on this profile; helpers carry `--type=`.
+    fn pids(&self) -> Vec<i32> {
+        let output = std::process::Command::new("ps")
+            .args(["-A", "-ww", "-o", "pid=,command="])
+            .output()
+            .expect("list processes");
+        let needle = format!("--user-data-dir={}", self.0.display());
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.contains(&needle) && !line.contains("--type="))
+            .filter_map(|line| line.split_whitespace().next()?.parse().ok())
+            .collect()
+    }
+
+    async fn kill(&self) {
+        for pid in self.pids() {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        for _ in 0..100 {
+            if self.pids().is_empty() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("the profile's Chrome did not exit");
+    }
+}
+
+impl Drop for ProfileChrome {
+    fn drop(&mut self) {
+        for pid in self.pids() {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+    }
+}
+
+fn evidence_text(evidence: &[types::Evidence]) -> String {
+    serde_json::to_string(evidence).expect("serialize evidence")
+}
+
+async fn durable_runtime(config: &config::AppConfig, profile_id: &str) -> RuntimeService {
+    let factory = Arc::new(
+        ChromiumWorkerFactory::new(config.browser.clone()).with_durable_profile(profile_id.into()),
+    );
+    RuntimeService::build_with_worker_factory(config, factory)
+        .await
+        .unwrap()
+}
+
+async fn shared_site() -> FixtureSite {
+    let paths: Vec<String> = (0..SHARED_SESSIONS)
+        .map(|index| format!("/s/{index}"))
+        .collect();
+    let mut routes: Vec<(&str, Route)> = paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            (
+                path.as_str(),
+                Route::Html(format!(
+                    "<!doctype html><title>Session {index}</title><main>Session {index}</main>"
+                )),
+            )
+        })
+        .collect();
+    routes.push((
+        "/set",
+        Route::Html(
+            r#"<!doctype html><title>Set</title><script>document.cookie="shared=yes; path=/";</script>"#
+                .into(),
+        ),
+    ));
+    FixtureSite::spawn(routes).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chromium"]
+async fn sessions_on_a_durable_profile_share_one_chrome_that_outlives_the_runtime() {
+    let site = shared_site().await;
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path(), None);
+    let chrome = ProfileChrome(config.browser.profiles_dir.join("chromium").join("shared"));
+    let runtime = durable_runtime(&config, "shared").await;
+
+    let urls: Vec<String> = (0..SHARED_SESSIONS)
+        .map(|index| site.url(&format!("/s/{index}")))
+        .collect();
+    let mut sessions =
+        futures_util::future::join_all(urls.iter().map(|url| Session::open(&runtime, url))).await;
+    let browser = chrome.pids();
+    assert_eq!(
+        browser.len(),
+        1,
+        "one Chrome serves the profile: {browser:?}"
+    );
+
+    for (index, session) in sessions.iter_mut().enumerate() {
+        let listed = evidence_text(
+            &session
+                .submit(RuntimeCommand::Primitive(PrimitiveCommand::ListPages(
+                    types::ListPagesCommand,
+                )))
+                .await,
+        );
+        for other in (0..SHARED_SESSIONS).filter(|other| *other != index) {
+            assert!(
+                !listed.contains(&format!("/s/{other}\"")),
+                "session {index} lists session {other}'s page: {listed}"
+            );
+        }
+        assert!(
+            listed.contains(&format!("/s/{index}\"")),
+            "session {index} does not list its own page: {listed}"
+        );
+    }
+
+    sessions[0]
+        .submit(RuntimeCommand::Primitive(PrimitiveCommand::Navigate(
+            NavigateCommand {
+                url: site.url("/set"),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )))
+        .await;
+    let cookies = evidence_text(
+        &sessions[SHARED_SESSIONS - 1]
+            .submit(RuntimeCommand::Primitive(PrimitiveCommand::GetCookies(
+                types::GetCookiesCommand { urls: vec![] },
+            )))
+            .await,
+    );
+    assert!(
+        cookies.contains("shared"),
+        "a cookie one session set is missing in another: {cookies}"
+    );
+
+    let first = sessions.remove(0);
+    first.close().await;
+    assert_eq!(chrome.pids(), browser, "closing a session kept the browser");
+    sessions[0]
+        .submit(RuntimeCommand::Primitive(PrimitiveCommand::Navigate(
+            NavigateCommand {
+                url: site.url("/s/1"),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )))
+        .await;
+    for session in sessions {
+        session.close().await;
+    }
+    drop(runtime);
+
+    let restarted = durable_runtime(&config, "shared").await;
+    let mut after = Session::open(&restarted, &site.url("/s/0")).await;
+    assert_eq!(
+        chrome.pids(),
+        browser,
+        "a new runtime attached to the same Chrome"
+    );
+    let cookies = evidence_text(
+        &after
+            .submit(RuntimeCommand::Primitive(PrimitiveCommand::GetCookies(
+                types::GetCookiesCommand { urls: vec![] },
+            )))
+            .await,
+    );
+    assert!(
+        cookies.contains("shared"),
+        "the cookie did not survive the runtime restart: {cookies}"
+    );
+    after.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chromium"]
+async fn a_durable_profile_relaunches_chrome_after_it_dies() {
+    let site = shared_site().await;
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path(), None);
+    let chrome = ProfileChrome(
+        config
+            .browser
+            .profiles_dir
+            .join("chromium")
+            .join("relaunch"),
+    );
+    let runtime = durable_runtime(&config, "relaunch").await;
+
+    Session::open(&runtime, &site.url("/s/0"))
+        .await
+        .close()
+        .await;
+    let before = chrome.pids();
+    assert_eq!(before.len(), 1, "one Chrome serves the profile: {before:?}");
+    chrome.kill().await;
+
+    let after = Session::open(&runtime, &site.url("/s/1")).await;
+    let relaunched = chrome.pids();
+    assert_eq!(
+        relaunched.len(),
+        1,
+        "one Chrome serves the profile: {relaunched:?}"
+    );
+    assert_ne!(relaunched, before, "the dead Chrome was replaced");
+    after.close().await;
 }
