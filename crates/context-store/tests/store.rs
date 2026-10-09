@@ -81,6 +81,57 @@ async fn corrupt_and_unsupported_files_are_skipped_and_reported() {
 }
 
 #[tokio::test]
+async fn mismatched_site_identity_is_reported_and_cannot_revive_after_forget() {
+    let temp = tempfile::tempdir().unwrap();
+    let (store, _) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
+    store.upsert_site("one", site(&["Email"], 100)).await;
+    store.upsert_site("other", site(&["Username"], 100)).await;
+    assert!(store.flush().await.is_empty());
+    // Literal UTF-8 hex for "one", independent of the production encoder.
+    let path = store.root().join("6f6e65.json");
+    drop(store);
+    let mut envelope: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    envelope["site_key"] = serde_json::json!("swapped");
+    let original = serde_json::to_vec(&envelope).unwrap();
+    std::fs::write(&path, &original).unwrap();
+
+    let (store, _) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
+    store.forget("swapped").await.unwrap();
+    drop(store);
+
+    for _ in 0..2 {
+        let (store, report) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
+        assert!(
+            store.site("swapped").await.is_none(),
+            "forgotten context revived from a mismatched file"
+        );
+        assert!(store.site("one").await.is_none());
+        assert_eq!(report.sites_loaded, 1);
+        assert_eq!(report.skipped_total, 1);
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].file, path);
+        assert_eq!(store.list_sites().await, vec!["other"]);
+        assert_eq!(store.site("other").await, Some(site(&["Username"], 100)));
+        assert!(context_store::inspect_site_file(&path, Default::default()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        store.forget("swapped").await.unwrap();
+    }
+
+    let (store, _) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
+    store.upsert_site("fresh", site(&["Fresh"], 100)).await;
+    assert!(store.flush().await.is_empty());
+    store.forget("other").await.unwrap();
+    drop(store);
+    let (store, report) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
+    assert_eq!(store.list_sites().await, vec!["fresh"]);
+    assert_eq!(store.site("fresh").await, Some(site(&["Fresh"], 100)));
+    assert!(store.site("other").await.is_none());
+    assert_eq!(report.skipped_total, 1);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+}
+
+#[tokio::test]
 async fn oversized_valid_site_is_reported_without_reading_or_erasing_it() {
     use std::io::Write;
     let temp = tempfile::tempdir().unwrap();
