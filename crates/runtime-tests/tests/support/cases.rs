@@ -1351,20 +1351,27 @@ pub async fn network_tracking_survives_a_heavy_page(rig: &Rig) {
     );
 }
 
-/// Requests the burst page fires without waiting for any response.
+/// Requests the burst page fires.
 const BURST_REQUESTS: usize = 5_000;
+/// Fetches the burst page keeps in flight. Chromium refuses a page's fetches
+/// past roughly 1,350 in flight.
+const BURST_IN_FLIGHT: usize = 1_000;
 
-/// Navigate settles while a page fires 5,000 logged fetches at once; no browser
-/// event is dropped and the next intent_follow's postState shows the fetched content.
+/// Navigate settles while a page fires 5,000 logged fetches, 1,000 in flight;
+/// no browser event is dropped and the next intent_follow's postState shows the
+/// fetched content.
 pub async fn browser_events_survive_a_request_burst(rig: &Rig) {
     let burst = page(
         "Burst",
         &format!(
             r#"<main><h1>Burst</h1><p id="rejected">rejected 0</p></main>
         <script>
+            let next = 0;
             let rejected = 0;
             let firstError = "";
-            for (let index = 0; index < {BURST_REQUESTS}; index++) {{
+            const send = () => {{
+              if (next >= {BURST_REQUESTS}) return;
+              const index = next++;
               fetch("/api/burst?i=" + index)
                 .then((response) => console.log("item", index, response.status))
                 .catch((error) => {{
@@ -1372,8 +1379,10 @@ pub async fn browser_events_survive_a_request_burst(rig: &Rig) {
                   firstError = firstError || String(error);
                   document.getElementById("rejected").textContent =
                     "rejected " + rejected + ": " + firstError;
-                }});
-            }}
+                }})
+                .finally(send);
+            }};
+            for (let lane = 0; lane < {BURST_IN_FLIGHT}; lane++) send();
         </script>"#
         ),
     );
