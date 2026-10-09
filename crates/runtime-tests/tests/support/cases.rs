@@ -29,6 +29,7 @@ macro_rules! every_case {
             snapshot_scopes_to_a_named_list,
             snapshot_targets_act_on_the_described_element,
             snapshot_target_types_into_a_slot_labelled_field,
+            snapshot_targets_resolve_beside_a_modal_dialog,
             type_text_enter_reports_the_settled_page,
             type_text_enter_accepts_a_reformatted_landed_field,
             intent_follow_post_state_shows_the_settled_page,
@@ -764,6 +765,54 @@ pub async fn snapshot_target_types_into_a_slot_labelled_field(rig: &Rig) {
     assert_eq!(
         located["status"], "completed",
         "intent_locate {field}: {located}"
+    );
+    live.close().await;
+}
+
+/// A modal dialog over a page, hidden from assistive technology, that has a
+/// control with the same role and name: the snapshot's targets for that name
+/// resolve, and one reaches the dialog's.
+pub async fn snapshot_targets_resolve_beside_a_modal_dialog(rig: &Rig) {
+    let body = r#"<main aria-hidden="true"><button data-id="page">Close</button></main>
+        <div role="dialog" aria-modal="true" aria-label="Notice"
+             style="position:fixed;inset:0;background:#fff">
+          <button data-id="dialog">Close</button>
+          <p role="status" aria-label="idle" id="status"></p>
+        </div>
+        <script>
+          document.addEventListener("click", (event) => {
+            const reached = event.target.closest("[data-id]");
+            if (reached) document.getElementById("status").setAttribute("aria-label", "acted " + reached.dataset.id);
+          }, true);
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/modal", Route::Html(page("Modal", body)))]).await;
+    let live = Live::open(rig, &site.url("/modal")).await;
+    let snapshot = live.snapshot(json!({})).await;
+    let mut targets = Vec::new();
+    targets_under(&snapshot, &mut targets);
+    let closes: Vec<Value> = targets
+        .iter()
+        .filter(|(role, target)| *role == "button" && target["accessibleName"] == "Close")
+        .map(|(_, target)| (*target).clone())
+        .collect();
+    assert!(
+        !closes.is_empty(),
+        "no Close target in the snapshot: {snapshot}"
+    );
+    let mut reached_dialog = false;
+    for target in closes {
+        let clicked = live.call("click", json!({"target":target})).await;
+        let code = clicked["error"]["code"].as_str().unwrap_or_default();
+        assert!(
+            code != "targetAmbiguous" && code != "targetNotFound",
+            "snapshot target {target} did not resolve: {clicked}"
+        );
+        let after = live.snapshot(json!({})).await;
+        reached_dialog |= find_node(&after, "status", Some("acted dialog")).is_some();
+    }
+    assert!(
+        reached_dialog,
+        "no Close target reached the dialog's button"
     );
     live.close().await;
 }

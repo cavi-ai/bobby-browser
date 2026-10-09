@@ -637,7 +637,7 @@ pub async fn gather_candidates(
         scope.scope_id,
     )
     .await?;
-    let raw = name_from_accessibility(&scope.execution_page, target, raw).await?;
+    let raw = align_with_accessibility(&scope.execution_page, target, raw).await?;
     let mut candidates: Vec<Candidate> = raw.into_iter().map(into_candidate).collect();
     // Auto-descend one level into iframes for main-frame intents: agents
     // cannot name a framePath for content they cannot see, so without this
@@ -1029,7 +1029,7 @@ pub async fn resolve_target_with_visibility(
         scope.scope_id,
     )
     .await?;
-    let raw = name_from_accessibility(&scope.execution_page, target, raw).await?;
+    let raw = align_with_accessibility(&scope.execution_page, target, raw).await?;
     let (candidate, evidence, best_match_authorized) = choose(target, raw, require_visible)?;
     let owner = owners.get(&candidate.id).cloned();
     // A candidate gathered from a closed shadow root must be located relative
@@ -1160,11 +1160,13 @@ pub async fn resolve_ambiguous_wait_values(
     Ok(values)
 }
 
-/// When no gathered name is the target's name, gives the candidates Chrome's
-/// accessibility tree names with the target's role and name that role and
-/// name. Snapshots report those names, which can come from content the
-/// gathered names do not read, such as an element slotted into a label.
-async fn name_from_accessibility(
+/// Aligns the gathered candidates for a role and name target with Chrome's
+/// accessibility tree, which snapshots report, unless exactly one gathered
+/// candidate already matches and no ordinal is asked. The tree's matches take
+/// the target's role and name, which can come from content the gathered names
+/// do not read, such as an element slotted into a label; gathered matches the
+/// tree leaves out, such as controls hidden behind a modal dialog, drop out.
+async fn align_with_accessibility(
     page: &Page,
     target: &TargetSpec,
     mut raw: Vec<BrowserCandidate>,
@@ -1172,15 +1174,35 @@ async fn name_from_accessibility(
     let (Some(role), Some(name)) = (&target.role, &target.accessible_name) else {
         return Ok(raw);
     };
-    if raw.iter().any(|candidate| {
+    let gathered_match = |candidate: &BrowserCandidate| {
         candidate
             .role
             .as_deref()
             .is_some_and(|actual| actual.eq_ignore_ascii_case(role))
             && candidate.name.as_deref().map(str::trim) == Some(name.trim())
-    }) {
+    };
+    if target.ordinal.is_none() && raw.iter().filter(|c| gathered_match(c)).count() == 1 {
         return Ok(raw);
     }
+    let exposed = accessibility_matches(page, role, name).await?;
+    if exposed.is_empty() {
+        return Ok(raw);
+    }
+    raw.retain(|candidate| exposed.contains(&candidate.id) || !gathered_match(candidate));
+    for candidate in raw.iter_mut().filter(|c| exposed.contains(&c.id)) {
+        candidate.role = Some(role.clone());
+        candidate.name = Some(name.clone());
+    }
+    Ok(raw)
+}
+
+/// The gathered ids of the elements Chrome's accessibility tree exposes with
+/// `role` and `name`.
+async fn accessibility_matches(
+    page: &Page,
+    role: &str,
+    name: &str,
+) -> Result<Vec<String>, CommandError> {
     let document = page
         .execute(GetDocumentParams::builder().depth(0).build())
         .await
@@ -1191,14 +1213,15 @@ async fn name_from_accessibility(
         .execute(
             QueryAxTreeParams::builder()
                 .backend_node_id(document.backend_node_id)
-                .accessible_name(name.clone())
-                .role(role.clone())
+                .accessible_name(name)
+                .role(role)
                 .build(),
         )
         .await
         .map_err(cdp_error)?
         .result
         .nodes;
+    let mut ids = Vec::new();
     for backend_node_id in nodes
         .into_iter()
         .filter(|node| !node.ignored)
@@ -1234,19 +1257,14 @@ async fn name_from_accessibility(
             .result
             .result
             .value;
-        if let Some(candidate) = id
-            .as_ref()
-            .and_then(|id| id.as_str())
-            .and_then(|id| raw.iter_mut().find(|candidate| candidate.id == id))
-        {
-            candidate.role = Some(role.clone());
-            candidate.name = Some(name.clone());
+        if let Some(id) = id.as_ref().and_then(|id| id.as_str()) {
+            ids.push(id.to_owned());
         }
     }
     let _ = page
         .execute(ReleaseObjectGroupParams::new(AX_RESOLVE_GROUP))
         .await;
-    Ok(raw)
+    Ok(ids)
 }
 
 const AX_RESOLVE_GROUP: &str = "bobby-accessibility-named";
