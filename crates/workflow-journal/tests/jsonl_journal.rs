@@ -276,6 +276,56 @@ async fn reopens_committed_history_in_order() {
 }
 
 #[tokio::test]
+async fn archived_history_preserves_discovery_order_across_files_and_sparse_offsets() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("commands.jsonl");
+    let requested = CommandId::new();
+    let unrelated = CommandId::new();
+    for (name, first_sequence) in [("first", 20), ("second", 10)] {
+        let archive = dir.path().join(format!("commands.jsonl.archive-{name}"));
+        let mut bytes = Vec::new();
+        for (id, sequence) in [
+            (&requested, first_sequence),
+            (&unrelated, 99),
+            (&requested, first_sequence + 1),
+        ] {
+            let mut entry = record(id, CommandPhase::Accepted);
+            entry.sequence = sequence;
+            serde_json::to_writer(&mut bytes, &entry).unwrap();
+            bytes.push(b'\n');
+        }
+        tokio::fs::write(archive, bytes).await.unwrap();
+    }
+    let journal = JsonlJournal::open(&path).await.unwrap();
+    let archives = journal.archives().await;
+    let mut expected = Vec::new();
+    for archive in &archives {
+        for line in tokio::fs::read_to_string(archive).await.unwrap().lines() {
+            let entry: JournalRecord = serde_json::from_str(line).unwrap();
+            if entry.command_id == requested {
+                expected.push(entry.sequence);
+            }
+        }
+    }
+    assert_eq!(archives.len(), 2);
+    let scan = journal.history(requested.clone()).await.unwrap();
+    assert_eq!(scan.records.len(), 4);
+    assert_eq!(
+        scan.records
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert!(scan
+        .records
+        .iter()
+        .all(|entry| entry.command_id == requested));
+    assert!(scan.incompatible_records > 0);
+    assert!(!scan.torn_tail);
+}
+
+#[tokio::test]
 async fn archived_history_never_returns_another_commands_record_from_a_stale_offset() {
     for prepend in [false, true] {
         let dir = tempfile::tempdir().unwrap();
