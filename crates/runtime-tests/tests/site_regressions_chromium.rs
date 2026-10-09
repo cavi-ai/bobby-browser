@@ -38,6 +38,7 @@ chromium_case!(intent_follow_post_state_shows_the_settled_page);
 chromium_case!(type_text_enter_reports_the_rewritten_url);
 chromium_case!(intent_follow_post_state_waits_for_fetched_content);
 chromium_case!(intent_follow_waits_for_a_late_data_request);
+chromium_case!(network_tracking_survives_a_heavy_page);
 chromium_case!(type_text_enter_reports_a_late_title);
 chromium_case!(navigate_ignores_requests_the_navigation_cancelled);
 chromium_case!(actions_wait_for_a_late_target);

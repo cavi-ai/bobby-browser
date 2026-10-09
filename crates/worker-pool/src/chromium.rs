@@ -5,8 +5,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::navigation_settle::{
-    navigation_settle_expression, parse_settled, trace_settle, SettleExit, LOAD_POLL,
-    NAVIGATION_SETTLE_CAP,
+    after_probe, navigation_settle_expression, parse_settled, trace_settle, AfterProbe, SettleExit,
+    LOAD_POLL, NAVIGATION_SETTLE_CAP,
 };
 use crate::secret_material::page_title_evidence;
 use artifact_store::ArtifactStore;
@@ -3813,7 +3813,7 @@ fn redact_secret_material(value: String) -> String {
 /// quiet window, and returns the URL and title read at that point. A redirect
 /// that replaces the document while the probe runs restarts it. When `budget`
 /// runs out first, returns the URL and title the page shows then; `None` only
-/// when the page cannot be read.
+/// when the page cannot be read. Unknown loads cost one more probe.
 async fn settle_document(
     page: &Page,
     budget: Duration,
@@ -3824,6 +3824,7 @@ async fn settle_document(
     let deadline = started + budget;
     let mut begin = None;
     let mut settled = None;
+    let mut unknown_reads = 0;
     let exit = loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -3860,20 +3861,28 @@ async fn settle_document(
                 let Some(tracker) = tracker else {
                     break exit;
                 };
-                if tracker.pending_page_loads().await == 0 {
-                    break exit;
+                match after_probe(tracker.pending_page_loads().await, &mut unknown_reads) {
+                    AfterProbe::Settled => break exit,
+                    AfterProbe::ProbeAgain => continue,
+                    AfterProbe::AwaitLoads => {
+                        while tracker
+                            .pending_page_loads()
+                            .await
+                            .is_some_and(|pending| pending > 0)
+                            && Instant::now() < deadline
+                        {
+                            tokio::time::sleep(LOAD_POLL).await;
+                        }
+                        continue;
+                    }
                 }
-                while tracker.pending_page_loads().await > 0 && Instant::now() < deadline {
-                    tokio::time::sleep(LOAD_POLL).await;
-                }
-                continue;
             }
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
     let pending = match tracker {
         Some(tracker) => tracker.pending_page_loads().await,
-        None => 0,
+        None => Some(0),
     };
     trace_settle(
         "chromium",

@@ -48,8 +48,8 @@ pub use form_snapshot::{
 };
 pub use har::{har_document, HarEntry, HarRecorder};
 pub use network_quiet::{
-    counted_in_flight, map_bidi_network_type, pending_page_loads, NetworkQuietFilters,
-    NetworkQuietState,
+    bounded_request_id, counted_in_flight, map_bidi_network_type, pending_page_loads,
+    warn_tracking_lost, NetworkQuietFilters, NetworkQuietState, TrackingLoss, MAX_TRACKED_REQUESTS,
 };
 pub use selection::{
     BrowserWorkerSelector, EnginePreference, FactoryRegistration, RequiredCapabilities,
