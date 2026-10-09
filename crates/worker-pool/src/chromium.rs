@@ -3834,6 +3834,10 @@ async fn settle_document(
                 SettleExit::Unreadable
             };
         }
+        let landed_before = match tracker {
+            Some(tracker) => tracker.landed_page_loads().await,
+            None => 0,
+        };
         let mut params = EvaluateParams::new(navigation_settle_expression(
             remaining.as_millis().max(1),
             requested_url,
@@ -3855,12 +3859,15 @@ async fn settle_document(
                 } else {
                     SettleExit::Cap
                 };
-                // A script or fetch still loading changes the page once it
-                // lands: wait for it, then for the document to go quiet again.
+                // A script or fetch still loading, or one that landed while
+                // the probe ran, changes the page after the probe's read:
+                // wait for loads, then for the document to go quiet again.
                 let Some(tracker) = tracker else {
                     break exit;
                 };
-                if tracker.pending_page_loads().await == 0 {
+                if tracker.pending_page_loads().await == 0
+                    && tracker.landed_page_loads().await == landed_before
+                {
                     break exit;
                 }
                 while tracker.pending_page_loads().await > 0 && Instant::now() < deadline {

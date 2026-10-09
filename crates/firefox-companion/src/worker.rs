@@ -3026,6 +3026,7 @@ async fn settle_document(
                 SettleExit::Unreadable
             };
         }
+        let landed_before = network.lock().await.landed_page_loads(context);
         let expression = navigation_settle_expression(remaining.as_millis().max(1), requested_url);
         // Firefox does not always reject a pending evaluation when a script
         // redirect replaces the document under it, so the probe races a watch
@@ -3075,9 +3076,15 @@ async fn settle_document(
                 } else {
                     SettleExit::Cap
                 };
-                // A script or fetch still loading changes the page once it
-                // lands: wait for it, then for the document to go quiet again.
-                if network.lock().await.pending_page_loads(context) == 0 {
+                // A script or fetch still loading, or one that landed while
+                // the probe ran, changes the page after the probe's read:
+                // wait for loads, then for the document to go quiet again.
+                let loads_quiet = {
+                    let network = network.lock().await;
+                    network.pending_page_loads(context) == 0
+                        && network.landed_page_loads(context) == landed_before
+                };
+                if loads_quiet {
                     break exit;
                 }
                 while network.lock().await.pending_page_loads(context) > 0

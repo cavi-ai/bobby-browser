@@ -68,6 +68,8 @@ pub struct NetworkQuietState {
     /// Requests that ended with their document; a late finish for one is expected.
     dropped: HashSet<String>,
     tracking_lost: bool,
+    /// Script and fetch/XHR loads that finished or failed.
+    landed_page_loads: u64,
 }
 
 impl NetworkQuietState {
@@ -211,7 +213,13 @@ impl NetworkQuietState {
     }
 
     pub fn remove_id(&mut self, id: &str) {
-        if self.requests.remove(id).is_none() && !self.dropped.remove(id) {
+        if let Some(request) = self.requests.remove(id) {
+            if is_page_load(&request, Instant::now()) {
+                self.landed_page_loads += 1;
+            }
+            return;
+        }
+        if !self.dropped.remove(id) {
             if id.len() > MAX_REQUEST_ID_BYTES
                 || self.completed_before_start.len() >= MAX_TRACKED_REQUESTS
             {
@@ -231,6 +239,11 @@ impl NetworkQuietState {
 
     pub fn requests(&self) -> impl Iterator<Item = &InFlightRequest> {
         self.requests.values()
+    }
+
+    /// How many loads [`pending_page_loads`] counted have finished or failed.
+    pub fn landed_page_loads(&self) -> u64 {
+        self.landed_page_loads
     }
 }
 
@@ -261,17 +274,19 @@ pub fn counted_in_flight(
 pub fn pending_page_loads(state: &NetworkQuietState, now: Instant) -> usize {
     state
         .requests()
-        .filter(|request| {
-            let open = now.duration_since(request.started_at);
-            match request.resource_type {
-                NetworkResourceType::Script => open < LONG_LIVED_OPEN_THRESHOLD,
-                NetworkResourceType::Fetch | NetworkResourceType::Xhr => {
-                    open < crate::navigation_settle::NAVIGATION_SETTLE_CAP
-                }
-                _ => false,
-            }
-        })
+        .filter(|request| is_page_load(request, now))
         .count()
+}
+
+fn is_page_load(request: &InFlightRequest, now: Instant) -> bool {
+    let open = now.duration_since(request.started_at);
+    match request.resource_type {
+        NetworkResourceType::Script => open < LONG_LIVED_OPEN_THRESHOLD,
+        NetworkResourceType::Fetch | NetworkResourceType::Xhr => {
+            open < crate::navigation_settle::NAVIGATION_SETTLE_CAP
+        }
+        _ => false,
+    }
 }
 
 fn exclusion_class(
@@ -445,6 +460,33 @@ impl NetworkQuietTracker {
 
     pub async fn pending_page_loads(&self) -> usize {
         pending_page_loads(&*self.state.lock().await, Instant::now())
+    }
+
+    pub async fn landed_page_loads(&self) -> u64 {
+        self.state.lock().await.landed_page_loads()
+    }
+}
+
+#[cfg(test)]
+mod landed_tests {
+    use super::*;
+
+    #[test]
+    fn landed_page_loads_counts_finished_scripts_and_fetches() {
+        let mut state = NetworkQuietState::default();
+        for (id, kind) in [
+            ("fetch", NetworkResourceType::Fetch),
+            ("script", NetworkResourceType::Script),
+            ("document", NetworkResourceType::Document),
+        ] {
+            state.upsert_id(id.into(), format!("https://a.test/{id}"), kind);
+        }
+        state.remove_id("document");
+        assert_eq!(state.landed_page_loads(), 0);
+        state.remove_id("fetch");
+        state.remove_id("script");
+        state.remove_id("fetch");
+        assert_eq!(state.landed_page_loads(), 2);
     }
 }
 

@@ -69,6 +69,15 @@ impl FirefoxNetworkQuiet {
             + pending_page_loads(&self.unscoped, now)
     }
 
+    /// Script and fetch/XHR loads for `context` (and unattributed ones) that
+    /// finished or failed.
+    pub fn landed_page_loads(&self, context: &str) -> u64 {
+        self.by_context
+            .get(context)
+            .map_or(0, NetworkQuietState::landed_page_loads)
+            + self.unscoped.landed_page_loads()
+    }
+
     pub fn mark_tracking_lost(&mut self) {
         self.unscoped.mark_tracking_lost();
     }
@@ -166,12 +175,15 @@ mod tests {
         let filters = NetworkQuietFilters::default();
         let (count, _) = quiet.snapshot("tab", &filters);
         assert_eq!(count, 1);
+        assert_eq!(quiet.landed_page_loads("tab"), 0);
         quiet.observe_event(
             "network.responseCompleted",
             &json!({"request": {"request": "r1"}}),
         );
         let (count, _) = quiet.snapshot("tab", &filters);
         assert_eq!(count, 0);
+        assert_eq!(quiet.landed_page_loads("tab"), 1);
+        assert_eq!(quiet.landed_page_loads("other"), 0);
     }
 
     #[test]
