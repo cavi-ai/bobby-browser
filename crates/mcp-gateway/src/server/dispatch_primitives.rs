@@ -7,18 +7,6 @@
 
 use super::*;
 
-pub(super) const TOOLS: &[&str] = &[
-    "command_execute",
-    "navigate",
-    "click",
-    "click_and_wait_for_download",
-    "click_and_wait_for_popup",
-    "type_text",
-    "inspect",
-    "screenshot",
-    "wait_for",
-];
-
 impl Server {
     pub(super) async fn dispatch_primitives(
         &self,

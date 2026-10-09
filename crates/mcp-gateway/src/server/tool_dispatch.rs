@@ -42,48 +42,59 @@ impl Server {
         defaulted_handle: Option<String>,
     ) -> Value {
         let name = call.name.as_str();
-        if dispatch_agent_workflow::TOOLS.contains(&name) {
-            self.dispatch_agent_workflow(
-                id,
-                call,
-                context,
-                handle.as_deref(),
-                defaulted_handle.as_deref(),
-            )
-            .await
-        } else if dispatch_lifecycle::TOOLS.contains(&name) {
-            self.dispatch_lifecycle(id, call, context).await
-        } else if dispatch_primitives::TOOLS.contains(&name) {
-            self.dispatch_primitives(
-                id,
-                call,
-                context,
-                handle.as_deref(),
-                defaulted_handle.as_deref(),
-            )
-            .await
-        } else if dispatch_intents::TOOLS.contains(&name) {
-            self.dispatch_intents(
-                id,
-                call,
-                context,
-                handle.as_deref(),
-                defaulted_handle.as_deref(),
-            )
-            .await
-        } else if dispatch_page_ops::TOOLS.contains(&name) {
-            self.dispatch_page_ops(
-                id,
-                call,
-                context,
-                handle.as_deref(),
-                defaulted_handle.as_deref(),
-            )
-            .await
-        } else if dispatch_workflow::TOOLS.contains(&name) {
-            self.dispatch_workflow(id, call, context).await
-        } else {
-            unreachable!("availability checked above")
+        match crate::catalog::descriptor(name)
+            .expect("availability checked above")
+            .group
+        {
+            crate::catalog::DispatchGroup::AgentWorkflow => {
+                self.dispatch_agent_workflow(
+                    id,
+                    call,
+                    context,
+                    handle.as_deref(),
+                    defaulted_handle.as_deref(),
+                )
+                .await
+            }
+            crate::catalog::DispatchGroup::Lifecycle => {
+                self.dispatch_lifecycle(id, call, context).await
+            }
+            crate::catalog::DispatchGroup::Primitives => {
+                self.dispatch_primitives(
+                    id,
+                    call,
+                    context,
+                    handle.as_deref(),
+                    defaulted_handle.as_deref(),
+                )
+                .await
+            }
+            crate::catalog::DispatchGroup::Intents => {
+                self.dispatch_intents(
+                    id,
+                    call,
+                    context,
+                    handle.as_deref(),
+                    defaulted_handle.as_deref(),
+                )
+                .await
+            }
+            crate::catalog::DispatchGroup::PageOps => {
+                self.dispatch_page_ops(
+                    id,
+                    call,
+                    context,
+                    handle.as_deref(),
+                    defaulted_handle.as_deref(),
+                )
+                .await
+            }
+            crate::catalog::DispatchGroup::Workflow => {
+                self.dispatch_workflow(id, call, context).await
+            }
+            crate::catalog::DispatchGroup::Toolset => {
+                unreachable!("toolset switch is handled before dispatch")
+            }
         }
     }
 

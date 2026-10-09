@@ -3077,7 +3077,7 @@ impl BrowserWorker for ChromiumWorker {
         let started = Instant::now();
         let deadline = started + Duration::from_millis(command.timeout_ms);
         let mut observations = 0;
-        let mut quiet_since = None;
+        let mut quiet_window = crate::policy::QuietWindow::default();
         loop {
             observations += 1;
             let tracker = self.network_trackers.lock().await.get(page_id).cloned();
@@ -3088,7 +3088,7 @@ impl BrowserWorker for ChromiumWorker {
                 &page,
                 tracker.as_deref(),
                 &command.condition,
-                &mut quiet_since,
+                &mut quiet_window,
             )
             .await
             {
@@ -3742,7 +3742,7 @@ async fn wait_condition_satisfied(
     page: &Page,
     tracker: Option<&crate::network_quiet::NetworkQuietTracker>,
     condition: &WaitCondition,
-    quiet_since: &mut Option<Instant>,
+    quiet_window: &mut crate::policy::QuietWindow,
 ) -> Result<WaitPoll, CommandError> {
     match condition {
         WaitCondition::Element { target, state } => {
@@ -3898,21 +3898,16 @@ async fn wait_condition_satisfied(
                 ignore_long_lived: *ignore_long_lived,
             };
             let (in_flight, excluded_classes) = tracker.snapshot(&filters).await;
-            if in_flight <= *max_in_flight {
-                let since = quiet_since.get_or_insert_with(Instant::now);
-                Ok(WaitPoll {
-                    satisfied: since.elapsed() >= Duration::from_millis(*idle_ms),
-                    excluded_classes,
-                    observed: None,
-                })
-            } else {
-                *quiet_since = None;
-                Ok(WaitPoll {
-                    satisfied: false,
-                    excluded_classes,
-                    observed: None,
-                })
-            }
+            Ok(WaitPoll {
+                satisfied: quiet_window.observe(
+                    Instant::now(),
+                    in_flight,
+                    *max_in_flight,
+                    Duration::from_millis(*idle_ms),
+                ),
+                excluded_classes,
+                observed: None,
+            })
         }
     }
 }

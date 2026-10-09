@@ -11,6 +11,7 @@
 #![recursion_limit = "256"]
 
 mod annotations;
+mod catalog;
 mod jobs;
 /// Server-to-client MCP notifications (runtime events, tool-list changes).
 pub mod notify;

@@ -4,6 +4,7 @@ mod form_snapshot;
 mod har;
 pub mod navigation_settle;
 mod network_quiet;
+pub mod policy;
 pub mod process_registry;
 pub mod secret_material;
 mod selection;

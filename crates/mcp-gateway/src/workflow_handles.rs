@@ -19,66 +19,11 @@ pub(crate) enum WorkflowScope {
 /// Tools whose advertised scope can be replaced by a retained workflow handle.
 /// Keep this literal table sorted: later call-time normalization uses this same
 /// allowlist, so a tool can never advertise a handle form it cannot accept.
-pub(crate) const WORKFLOW_SCOPE_TOOLS: &[(&str, WorkflowScope)] = &[
-    ("a11y_snapshot", WorkflowScope::SessionPageWorkflow),
-    ("click", WorkflowScope::SessionPageWorkflow),
-    (
-        "click_and_wait_for_download",
-        WorkflowScope::SessionPageWorkflow,
-    ),
-    (
-        "click_and_wait_for_popup",
-        WorkflowScope::SessionPageWorkflow,
-    ),
-    ("context_ask", WorkflowScope::SessionPage),
-    ("context_neighbors", WorkflowScope::SessionPage),
-    ("control_action", WorkflowScope::SessionPageWorkflow),
-    ("cookie_delete", WorkflowScope::SessionPageWorkflow),
-    ("cookie_get", WorkflowScope::SessionPageWorkflow),
-    ("cookie_set", WorkflowScope::SessionPageWorkflow),
-    ("dialog", WorkflowScope::SessionPageWorkflow),
-    ("download_url", WorkflowScope::SessionPageWorkflow),
-    ("emulate", WorkflowScope::SessionPageWorkflow),
-    ("evaluate_javascript", WorkflowScope::SessionPageWorkflow),
-    ("extract_structured", WorkflowScope::SessionPageWorkflow),
-    ("form_snapshot", WorkflowScope::SessionPage),
-    ("inspect", WorkflowScope::SessionPageWorkflow),
-    ("intent_complete_form", WorkflowScope::SessionPageWorkflow),
-    (
-        "intent_detect_challenge",
-        WorkflowScope::SessionPageWorkflow,
-    ),
-    (
-        "intent_dismiss_obstruction",
-        WorkflowScope::SessionPageWorkflow,
-    ),
-    ("intent_extract", WorkflowScope::SessionPageWorkflow),
-    ("intent_fill", WorkflowScope::SessionPageWorkflow),
-    ("intent_follow", WorkflowScope::SessionPageWorkflow),
-    ("intent_locate", WorkflowScope::SessionPageWorkflow),
-    ("intent_solve_challenge", WorkflowScope::SessionPageWorkflow),
-    (
-        "intent_submit_and_verify",
-        WorkflowScope::SessionPageWorkflow,
-    ),
-    ("intent_wait_for_state", WorkflowScope::SessionPageWorkflow),
-    ("navigate", WorkflowScope::SessionPageWorkflow),
-    ("network_log", WorkflowScope::SessionPageWorkflow),
-    ("page_activate", WorkflowScope::SessionPageWorkflow),
-    ("page_close", WorkflowScope::SessionPageWorkflow),
-    ("pdf", WorkflowScope::SessionPageWorkflow),
-    ("screenshot", WorkflowScope::SessionPageWorkflow),
-    ("type_text", WorkflowScope::SessionPageWorkflow),
-    ("upload_files", WorkflowScope::SessionPageWorkflow),
-    ("wait_for", WorkflowScope::SessionPageWorkflow),
-    ("workflow_observe", WorkflowScope::SessionPageWorkflow),
-];
+#[cfg(test)]
+pub(crate) use crate::catalog::WORKFLOW_SCOPE_TOOLS;
 
 pub(crate) fn workflow_scope_for_tool(name: &str) -> Option<WorkflowScope> {
-    WORKFLOW_SCOPE_TOOLS
-        .binary_search_by_key(&name, |(tool, _)| *tool)
-        .ok()
-        .map(|index| WORKFLOW_SCOPE_TOOLS[index].1)
+    crate::catalog::descriptor(name).and_then(|tool| tool.scope)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
