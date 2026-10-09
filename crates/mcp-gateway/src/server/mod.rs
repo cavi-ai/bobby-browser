@@ -769,61 +769,10 @@ impl Server {
             .context(chrono::Utc::now() + chrono::Duration::minutes(1), None)
             .capabilities;
         let mut tools = Vec::new();
-        for name in [
-            "checkpoint_save",
-            "click",
-            "click_and_wait_for_download",
-            "click_and_wait_for_popup",
-            "context_ask",
-            "context_neighbors",
-            "cookie_delete",
-            "cookie_get",
-            "cookie_set",
-            "command_execute",
-            "control_action",
-            "intent_complete_form",
-            "intent_detect_challenge",
-            "intent_dismiss_obstruction",
-            "intent_extract",
-            "intent_fill",
-            "intent_follow",
-            "intent_locate",
-            "intent_solve_challenge",
-            "intent_submit_and_verify",
-            "intent_wait_for_state",
-            "dialog",
-            "download_url",
-            "emulate",
-            "evaluate_javascript",
-            "events_read",
-            "inspect",
-            "job_cancel",
-            "job_status",
-            "job_submit",
-            "navigate",
-            "network_log",
-            "a11y_snapshot",
-            "extract_structured",
-            "form_snapshot",
-            "page_activate",
-            "page_close",
-            "page_list",
-            "page_open",
-            "pdf",
-            "recovery_status",
-            "runtime_info",
-            "screenshot",
-            "session_close",
-            "session_create",
-            "session_list",
-            "toolset_select",
-            "type_text",
-            "upload_files",
-            "wait_for",
-            "workflow_start",
-            "workflow_observe",
-            "workflow_recover",
-        ] {
+        let mut descriptors = crate::catalog::DESCRIPTORS.iter().collect::<Vec<_>>();
+        descriptors.sort_by_key(|tool| tool.catalog_order);
+        for tool in descriptors {
+            let name = tool.name;
             if crate::jobs::is_job_tool(name) && self.jobs.is_none() {
                 continue;
             }

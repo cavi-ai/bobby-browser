@@ -1,3 +1,6 @@
+mod locate;
+use locate::{locate, LocateMode, LocateRequest, LocatedTarget};
+
 use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
@@ -370,124 +373,64 @@ async fn reveal_field(
     revealed_field_value: &ControlAction,
 ) -> IntentOutcome {
     let plan_summary = format!("reveal {}", summarize_target(reveal_target));
-    browser.await_target(page_id, reveal_target).await;
-    let candidates = match browser.collect_candidates(page_id, reveal_target).await {
-        Ok(candidates) => candidates,
-        Err(error) => {
-            return non_escalating_failure(
-                error,
-                intent_evidence(execution_record(
-                    "completeForm",
-                    Some(purpose.to_owned()),
-                    plan_summary,
-                    Vec::new(),
-                    None,
-                    "revealGatherFailed",
-                )),
-            );
-        }
+    let LocatedTarget {
+        candidate,
+        evidence: candidate_evidence,
+        best_match_authorized,
+    } = match locate(
+        page_id,
+        browser,
+        vision,
+        LocateRequest {
+            intent_kind: "completeForm",
+            purpose: Some(purpose),
+            plan_summary: &plan_summary,
+            target: reveal_target,
+            mode: LocateMode::Reveal,
+        },
+    )
+    .await
+    {
+        Ok(located) => located,
+        Err(outcome) => return outcome,
     };
-
-    let decision =
-        match resolve_candidates(reveal_target, &candidates, &ResolutionPolicy::default()) {
-            Ok(decision) => decision,
+    let mut click_evidence = {
+        let resolution = Evidence::Resolution {
+            target: Box::new(reveal_target.clone()),
+            fingerprint: Box::new(fingerprint(page_id, &candidate)),
+            candidates: vec![candidate_evidence.clone()],
+            best_match_authorized,
+        };
+        let (selector, action_target) = action_target(&candidate, reveal_target);
+        let click = ClickCommand {
+            selector,
+            target: Some(action_target),
+            boundary: true,
+            expected_url: None,
+            modifiers: Vec::new(),
+        };
+        match browser.click(page_id, &click).await {
+            Ok(mut evidence) => {
+                let mut all = vec![resolution];
+                all.append(&mut evidence);
+                all
+            }
             Err(error) => {
                 return IntentOutcome::Failed {
-                    error: CommandError {
-                        code: ErrorCode::InvalidRequest,
-                        message: error.to_string(),
-                        layer: ErrorLayer::Page,
-                        retryable: false,
-                    },
-                    evidence: vec![intent_evidence(execution_record(
-                        "completeForm",
-                        Some(purpose.to_owned()),
-                        plan_summary,
-                        Vec::new(),
-                        None,
-                        "revealResolveFailed",
-                    ))],
+                    error,
+                    evidence: vec![
+                        resolution,
+                        intent_evidence(execution_record(
+                            "completeForm",
+                            Some(purpose.to_owned()),
+                            plan_summary,
+                            vec![candidate_evidence],
+                            None,
+                            "revealActFailed",
+                        )),
+                    ],
                 };
             }
-        };
-
-    let mut click_evidence = match decision {
-        ResolutionDecision::Resolved {
-            candidate,
-            evidence: candidate_evidence,
-            best_match_authorized,
-        } => {
-            let resolution = Evidence::Resolution {
-                target: Box::new(reveal_target.clone()),
-                fingerprint: Box::new(fingerprint(page_id, &candidate)),
-                candidates: vec![candidate_evidence.clone()],
-                best_match_authorized,
-            };
-            let (selector, action_target) = action_target(&candidate, reveal_target);
-            let click = ClickCommand {
-                selector,
-                target: Some(action_target),
-                boundary: true,
-                expected_url: None,
-                modifiers: Vec::new(),
-            };
-            match browser.click(page_id, &click).await {
-                Ok(mut evidence) => {
-                    let mut all = vec![resolution];
-                    all.append(&mut evidence);
-                    all
-                }
-                Err(error) => {
-                    return IntentOutcome::Failed {
-                        error,
-                        evidence: vec![
-                            resolution,
-                            intent_evidence(execution_record(
-                                "completeForm",
-                                Some(purpose.to_owned()),
-                                plan_summary,
-                                vec![candidate_evidence],
-                                None,
-                                "revealActFailed",
-                            )),
-                        ],
-                    };
-                }
-            }
-        }
-        ResolutionDecision::NotFound => {
-            return stuck_outcome(
-                StuckReport {
-                    intent_kind: "completeForm",
-                    kind: StuckKind::TargetMissing,
-                    purpose: Some(purpose.to_owned()),
-                    plan_summary,
-                    candidates: Vec::new(),
-                    verification: "revealTargetNotFound",
-                    fill_payload: None,
-                },
-                page_id,
-                browser,
-                vision,
-            )
-            .await;
-        }
-        ResolutionDecision::Ambiguous { candidates } => {
-            return stuck_outcome(
-                StuckReport {
-                    intent_kind: "completeForm",
-                    kind: StuckKind::TargetAmbiguous,
-                    purpose: Some(purpose.to_owned()),
-                    plan_summary,
-                    candidates,
-                    verification: "revealTargetAmbiguous",
-                    fill_payload: None,
-                },
-                page_id,
-                browser,
-                vision,
-            )
-            .await;
         }
     };
 
@@ -926,124 +869,48 @@ async fn execute_locate(
         _ => (None, false),
     };
     let plan_summary = summarize_target(&target);
-    browser.await_target(page_id, &target).await;
-    let candidates = match browser.collect_candidates(page_id, &target).await {
-        Ok(candidates) => candidates,
-        Err(error) => {
-            return non_escalating_failure(
-                error,
-                intent_evidence(execution_record(
-                    "locate",
-                    purpose,
-                    plan_summary,
-                    Vec::new(),
-                    None,
-                    "gatherFailed",
-                )),
-            );
-        }
+    let LocatedTarget {
+        candidate,
+        evidence: candidate_evidence,
+        best_match_authorized,
+    } = match locate(
+        page_id,
+        browser,
+        vision,
+        LocateRequest {
+            intent_kind: "locate",
+            purpose: purpose.as_deref(),
+            plan_summary: &plan_summary,
+            target: &target,
+            mode: if purpose_is_implicit_match {
+                LocateMode::Purpose
+            } else {
+                LocateMode::Standard
+            },
+        },
+    )
+    .await
+    {
+        Ok(located) => located,
+        Err(outcome) => return outcome,
     };
-    let decision = match resolve_candidates(&target, &candidates, &ResolutionPolicy::default()) {
-        Ok(decision) => decision,
-        Err(error) => {
-            return IntentOutcome::Failed {
-                error: CommandError {
-                    code: ErrorCode::InvalidRequest,
-                    message: error.to_string(),
-                    layer: ErrorLayer::Page,
-                    retryable: false,
-                },
-                evidence: vec![intent_evidence(execution_record(
-                    "locate",
-                    purpose,
-                    plan_summary,
-                    Vec::new(),
-                    None,
-                    "resolveFailed",
-                ))],
-            };
-        }
+    let fingerprint = fingerprint(page_id, &candidate);
+    let resolution = Evidence::Resolution {
+        target: Box::new(target),
+        fingerprint: Box::new(fingerprint),
+        candidates: vec![candidate_evidence.clone()],
+        best_match_authorized,
     };
-    let decision = match decision {
-        unresolved @ (ResolutionDecision::NotFound | ResolutionDecision::Ambiguous { .. })
-            if purpose_is_implicit_match =>
-        {
-            purpose
-                .as_deref()
-                .and_then(|purpose| disambiguate_by_purpose(&target, &candidates, purpose))
-                .unwrap_or(unresolved)
-        }
-        decision => decision,
-    };
-
-    match decision {
-        ResolutionDecision::Resolved {
-            candidate,
-            evidence,
-            best_match_authorized,
-        } => {
-            let fingerprint = fingerprint(page_id, &candidate);
-            let resolution = Evidence::Resolution {
-                target: Box::new(target),
-                fingerprint: Box::new(fingerprint),
-                candidates: vec![evidence.clone()],
-                best_match_authorized,
-            };
-            let record = execution_record(
-                "locate",
-                purpose,
-                plan_summary,
-                vec![evidence],
-                None,
-                "resolved",
-            );
-            IntentOutcome::Completed {
-                evidence: vec![resolution, intent_evidence(record)],
-            }
-        }
-        ResolutionDecision::NotFound => {
-            // The page's interactive candidates still went unmatched, and the
-            // model should see them: a stuck escalation with no candidate
-            // list asks the model to pick blind. Attach the near-miss set
-            // (capped, score zero) so both the prompt and the corpus carry it.
-            // The window is purpose-ranked: DOM order puts sidebar chrome
-            // ahead of the page's actionable content and truncates the target
-            // out of the top 5 (measured: every live harvest step abstained
-            // because its target never entered the window).
-            let near_misses = ranked_near_miss_window(&candidates, purpose.as_deref());
-            stuck_outcome(
-                StuckReport {
-                    intent_kind: "locate",
-                    kind: StuckKind::TargetMissing,
-                    purpose,
-                    plan_summary,
-                    candidates: near_misses,
-                    verification: "targetNotFound",
-                    fill_payload: None,
-                },
-                page_id,
-                browser,
-                vision,
-            )
-            .await
-        }
-        ResolutionDecision::Ambiguous { candidates } => {
-            stuck_outcome(
-                StuckReport {
-                    intent_kind: "locate",
-                    kind: StuckKind::TargetAmbiguous,
-                    purpose,
-                    plan_summary,
-                    candidates,
-                    verification: "targetAmbiguous",
-                    fill_payload: None,
-                },
-                page_id,
-                browser,
-                vision,
-            )
-            .await
-        }
+    let record = execution_record(
+        "locate",
+        purpose,
+        plan_summary,
+        vec![candidate_evidence],
+        None,
+        "resolved",
+    );
+    IntentOutcome::Completed {
+        evidence: vec![resolution, intent_evidence(record)],
     }
 }
 
@@ -1618,132 +1485,26 @@ async fn execute_fill(
         _ => None,
     };
     let plan_summary = format!("{} value={}", summarize_target(&target), fill_kind(&value));
-    let fill_payload = match value {
-        ControlAction::Activate => None,
-        _ => Some(VisionFillPayload {
-            action: value.clone(),
-        }),
-    };
-    browser.await_target(page_id, &target).await;
-    let candidates = match browser.collect_candidates(page_id, &target).await {
-        Ok(candidates) => candidates,
-        Err(error) => {
-            return non_escalating_failure(
-                error,
-                intent_evidence(execution_record(
-                    "fill",
-                    purpose,
-                    plan_summary,
-                    Vec::new(),
-                    None,
-                    "gatherFailed",
-                )),
-            );
-        }
-    };
-    // Labels and wrapper nodes often share a control's accessible name. They
-    // must not make a fill ambiguous when exactly one gathered candidate can
-    // perform the requested typed action. Preserve the original pool when no
-    // candidate is compatible so the existing action-mismatch diagnostic is
-    // still available instead of degrading it to target-not-found.
-    //
-    // The pool swap is for RESOLUTION only. The escalation window below must
-    // carry the full (ranked) census: the adapter trains on full-page
-    // windows, and a compatible-only window (often a single row) is so far
-    // off that distribution that the model abstains on its only option.
-    // Act-time compatibility still fails closed on an incompatible pick.
-    let window_candidates = candidates.clone();
-    let compatible_candidates = candidates
-        .iter()
-        .filter(|candidate| compatible(&value, candidate))
-        .cloned()
-        .collect::<Vec<_>>();
-    let candidates = if compatible_candidates.is_empty() {
-        candidates
-    } else {
-        compatible_candidates
-    };
-
-    let decision = match resolve_candidates(&target, &candidates, &ResolutionPolicy::default()) {
-        Ok(decision) => decision,
-        Err(error) => {
-            return IntentOutcome::Failed {
-                error: CommandError {
-                    code: ErrorCode::InvalidRequest,
-                    message: error.to_string(),
-                    layer: ErrorLayer::Page,
-                    retryable: false,
-                },
-                evidence: vec![intent_evidence(execution_record(
-                    "fill",
-                    purpose,
-                    plan_summary,
-                    Vec::new(),
-                    None,
-                    "resolveFailed",
-                ))],
-            };
-        }
-    };
-
-    let (candidate, candidate_evidence, best_match_authorized) = match decision {
-        ResolutionDecision::Resolved {
-            candidate,
-            evidence,
-            best_match_authorized,
-        } => (candidate, evidence, best_match_authorized),
-        ResolutionDecision::NotFound => {
-            // A native file input is very often visually hidden behind a
-            // styled "choose file" button, so the visible-only resolution
-            // above legitimately finds nothing -- but the control is real,
-            // and no vision escalation can fill it: `ControlAction::SetFiles`
-            // takes paths, which are runtime-only, so only `upload_files`
-            // (or `control_action`) can act on it. Catch that here, before
-            // the stuck path can turn it into a `targetNotFound` that then
-            // escalates to a vision fallback which was never going to help.
-            if !matches!(value, ControlAction::SetFiles { .. })
-                && targets_file_control(&target, &window_candidates)
-            {
-                return file_control_failure(purpose, plan_summary, Vec::new());
-            }
-            // Fill escalations must carry the same purpose-ranked window as
-            // locate: an empty window asks the model to pick from nothing,
-            // and it correctly abstains — those records are the §4i poison
-            // class, not selection signal.
-            let near_misses = ranked_near_miss_window(&window_candidates, purpose.as_deref());
-            return stuck_outcome(
-                StuckReport {
-                    intent_kind: "fill",
-                    kind: StuckKind::TargetMissing,
-                    purpose,
-                    plan_summary,
-                    candidates: near_misses,
-                    verification: "targetNotFound",
-                    fill_payload: fill_payload.clone(),
-                },
-                page_id,
-                browser,
-                vision,
-            )
-            .await;
-        }
-        ResolutionDecision::Ambiguous { candidates } => {
-            return stuck_outcome(
-                StuckReport {
-                    intent_kind: "fill",
-                    kind: StuckKind::TargetAmbiguous,
-                    purpose,
-                    plan_summary,
-                    candidates,
-                    verification: "targetAmbiguous",
-                    fill_payload,
-                },
-                page_id,
-                browser,
-                vision,
-            )
-            .await;
-        }
+    let LocatedTarget {
+        candidate,
+        evidence: candidate_evidence,
+        best_match_authorized,
+    } = match locate(
+        page_id,
+        browser,
+        vision,
+        LocateRequest {
+            intent_kind: "fill",
+            purpose: purpose.as_deref(),
+            plan_summary: &plan_summary,
+            target: &target,
+            mode: LocateMode::Fill(&value),
+        },
+    )
+    .await
+    {
+        Ok(located) => located,
+        Err(outcome) => return outcome,
     };
 
     if !compatible(&value, &candidate) {
@@ -2087,99 +1848,30 @@ async fn execute_submit_and_verify(
         summarize_target(&target),
         wait_condition_kind(&expected_state.condition)
     );
-    browser.await_target(page_id, &target).await;
-    let candidates = match browser.collect_candidates(page_id, &target).await {
-        Ok(candidates) => candidates,
-        Err(error) => {
-            return non_escalating_failure(
-                error,
-                intent_evidence(execution_record(
-                    "submitAndVerify",
-                    purpose,
-                    plan_summary,
-                    Vec::new(),
-                    None,
-                    "gatherFailed",
-                )),
-            );
-        }
-    };
-
-    let decision = match resolve_candidates(&target, &candidates, &ResolutionPolicy::default()) {
-        Ok(decision) => decision,
-        Err(error) => {
-            return IntentOutcome::Failed {
-                error: CommandError {
-                    code: ErrorCode::InvalidRequest,
-                    message: error.to_string(),
-                    layer: ErrorLayer::Page,
-                    retryable: false,
-                },
-                evidence: vec![intent_evidence(execution_record(
-                    "submitAndVerify",
-                    purpose,
-                    plan_summary,
-                    Vec::new(),
-                    None,
-                    "resolveFailed",
-                ))],
-            };
-        }
-    };
-    let decision = if purpose_is_implicit_match {
-        purpose
-            .as_deref()
-            .and_then(|purpose| disambiguate_submit_by_purpose(&target, &candidates, purpose))
-            .unwrap_or_else(|| match decision {
-                ResolutionDecision::Resolved { evidence, .. } => ResolutionDecision::Ambiguous {
-                    candidates: vec![evidence],
-                },
-                unresolved => unresolved,
-            })
-    } else {
-        decision
-    };
-
-    let (candidate, candidate_evidence, best_match_authorized) = match decision {
-        ResolutionDecision::Resolved {
-            candidate,
-            evidence,
-            best_match_authorized,
-        } => (candidate, evidence, best_match_authorized),
-        ResolutionDecision::NotFound => {
-            return stuck_outcome(
-                StuckReport {
-                    intent_kind: "submitAndVerify",
-                    kind: StuckKind::TargetMissing,
-                    purpose,
-                    plan_summary,
-                    candidates: Vec::new(),
-                    verification: "targetNotFound",
-                    fill_payload: None,
-                },
-                page_id,
-                browser,
-                vision,
-            )
-            .await;
-        }
-        ResolutionDecision::Ambiguous { candidates } => {
-            return stuck_outcome(
-                StuckReport {
-                    intent_kind: "submitAndVerify",
-                    kind: StuckKind::TargetAmbiguous,
-                    purpose,
-                    plan_summary,
-                    candidates,
-                    verification: "targetAmbiguous",
-                    fill_payload: None,
-                },
-                page_id,
-                browser,
-                vision,
-            )
-            .await;
-        }
+    let LocatedTarget {
+        candidate,
+        evidence: candidate_evidence,
+        best_match_authorized,
+    } = match locate(
+        page_id,
+        browser,
+        vision,
+        LocateRequest {
+            intent_kind: "submitAndVerify",
+            purpose: purpose.as_deref(),
+            plan_summary: &plan_summary,
+            target: &target,
+            mode: if purpose_is_implicit_match {
+                LocateMode::SubmitPurpose
+            } else {
+                LocateMode::Standard
+            },
+        },
+    )
+    .await
+    {
+        Ok(located) => located,
+        Err(outcome) => return outcome,
     };
 
     let fingerprint = fingerprint(page_id, &candidate);
@@ -2514,86 +2206,26 @@ async fn execute_follow(
         summarize_target(&target),
         wait_condition_kind(&expected_destination.condition)
     );
-    browser.await_target(page_id, &target).await;
-    let candidates = match browser.collect_candidates(page_id, &target).await {
-        Ok(candidates) => candidates,
-        Err(error) => {
-            return non_escalating_failure(
-                error,
-                intent_evidence(execution_record(
-                    "follow",
-                    purpose,
-                    plan_summary,
-                    Vec::new(),
-                    None,
-                    "gatherFailed",
-                )),
-            );
-        }
-    };
-
-    let decision = match resolve_candidates(&target, &candidates, &ResolutionPolicy::default()) {
-        Ok(decision) => decision,
-        Err(error) => {
-            return IntentOutcome::Failed {
-                error: CommandError {
-                    code: ErrorCode::InvalidRequest,
-                    message: error.to_string(),
-                    layer: ErrorLayer::Page,
-                    retryable: false,
-                },
-                evidence: vec![intent_evidence(execution_record(
-                    "follow",
-                    purpose,
-                    plan_summary,
-                    Vec::new(),
-                    None,
-                    "resolveFailed",
-                ))],
-            };
-        }
-    };
-
-    let (candidate, candidate_evidence, best_match_authorized) = match decision {
-        ResolutionDecision::Resolved {
-            candidate,
-            evidence,
-            best_match_authorized,
-        } => (candidate, evidence, best_match_authorized),
-        ResolutionDecision::NotFound => {
-            return stuck_outcome(
-                StuckReport {
-                    intent_kind: "follow",
-                    kind: StuckKind::TargetMissing,
-                    purpose,
-                    plan_summary,
-                    candidates: Vec::new(),
-                    verification: "targetNotFound",
-                    fill_payload: None,
-                },
-                page_id,
-                browser,
-                vision,
-            )
-            .await;
-        }
-        ResolutionDecision::Ambiguous { candidates } => {
-            return stuck_outcome(
-                StuckReport {
-                    intent_kind: "follow",
-                    kind: StuckKind::TargetAmbiguous,
-                    purpose,
-                    plan_summary,
-                    candidates,
-                    verification: "targetAmbiguous",
-                    fill_payload: None,
-                },
-                page_id,
-                browser,
-                vision,
-            )
-            .await;
-        }
+    let LocatedTarget {
+        candidate,
+        evidence: candidate_evidence,
+        best_match_authorized,
+    } = match locate(
+        page_id,
+        browser,
+        vision,
+        LocateRequest {
+            intent_kind: "follow",
+            purpose: purpose.as_deref(),
+            plan_summary: &plan_summary,
+            target: &target,
+            mode: LocateMode::Standard,
+        },
+    )
+    .await
+    {
+        Ok(located) => located,
+        Err(outcome) => return outcome,
     };
 
     let fingerprint = fingerprint(page_id, &candidate);
@@ -2705,86 +2337,26 @@ async fn execute_dismiss_obstruction(
         _ => None,
     };
     let plan_summary = format!("{} timeout_ms={timeout_ms}", summarize_target(&target));
-    browser.await_target(page_id, &target).await;
-    let candidates = match browser.collect_candidates(page_id, &target).await {
-        Ok(candidates) => candidates,
-        Err(error) => {
-            return non_escalating_failure(
-                error,
-                intent_evidence(execution_record(
-                    "dismissObstruction",
-                    purpose,
-                    plan_summary,
-                    Vec::new(),
-                    None,
-                    "gatherFailed",
-                )),
-            );
-        }
-    };
-
-    let decision = match resolve_candidates(&target, &candidates, &ResolutionPolicy::default()) {
-        Ok(decision) => decision,
-        Err(error) => {
-            return IntentOutcome::Failed {
-                error: CommandError {
-                    code: ErrorCode::InvalidRequest,
-                    message: error.to_string(),
-                    layer: ErrorLayer::Page,
-                    retryable: false,
-                },
-                evidence: vec![intent_evidence(execution_record(
-                    "dismissObstruction",
-                    purpose,
-                    plan_summary,
-                    Vec::new(),
-                    None,
-                    "resolveFailed",
-                ))],
-            };
-        }
-    };
-
-    let (candidate, candidate_evidence, best_match_authorized) = match decision {
-        ResolutionDecision::Resolved {
-            candidate,
-            evidence,
-            best_match_authorized,
-        } => (candidate, evidence, best_match_authorized),
-        ResolutionDecision::NotFound => {
-            return stuck_outcome(
-                StuckReport {
-                    intent_kind: "dismissObstruction",
-                    kind: StuckKind::TargetMissing,
-                    purpose,
-                    plan_summary,
-                    candidates: Vec::new(),
-                    verification: "targetNotFound",
-                    fill_payload: None,
-                },
-                page_id,
-                browser,
-                vision,
-            )
-            .await;
-        }
-        ResolutionDecision::Ambiguous { candidates } => {
-            return stuck_outcome(
-                StuckReport {
-                    intent_kind: "dismissObstruction",
-                    kind: StuckKind::TargetAmbiguous,
-                    purpose,
-                    plan_summary,
-                    candidates,
-                    verification: "targetAmbiguous",
-                    fill_payload: None,
-                },
-                page_id,
-                browser,
-                vision,
-            )
-            .await;
-        }
+    let LocatedTarget {
+        candidate,
+        evidence: candidate_evidence,
+        best_match_authorized,
+    } = match locate(
+        page_id,
+        browser,
+        vision,
+        LocateRequest {
+            intent_kind: "dismissObstruction",
+            purpose: purpose.as_deref(),
+            plan_summary: &plan_summary,
+            target: &target,
+            mode: LocateMode::Standard,
+        },
+    )
+    .await
+    {
+        Ok(located) => located,
+        Err(outcome) => return outcome,
     };
 
     let fingerprint = fingerprint(page_id, &candidate);

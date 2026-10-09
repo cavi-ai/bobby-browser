@@ -7,28 +7,6 @@
 
 use super::*;
 
-pub(super) const TOOLS: &[&str] = &[
-    "page_list",
-    "page_close",
-    "page_activate",
-    "a11y_snapshot",
-    "context_ask",
-    "context_neighbors",
-    "form_snapshot",
-    "control_action",
-    "network_log",
-    "emulate",
-    "dialog",
-    "pdf",
-    "cookie_get",
-    "cookie_set",
-    "cookie_delete",
-    "extract_structured",
-    "download_url",
-    "upload_files",
-    "evaluate_javascript",
-];
-
 impl Server {
     pub(super) async fn dispatch_page_ops(
         &self,
