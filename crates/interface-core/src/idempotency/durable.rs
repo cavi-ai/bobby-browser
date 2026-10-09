@@ -182,7 +182,7 @@ async fn load(path: &Path) -> io::Result<Option<Loaded>> {
     }
     let expected = checksum(&DurableSnapshot {
         schema_version: 2,
-        entries: header.entries.clone(),
+        entries: &header.entries,
     })?;
     if header.sha256 != expected {
         return Err(invalid());
@@ -313,7 +313,7 @@ impl Journal {
     pub async fn checkpoint(&mut self, path: &Path, entries: Vec<DurableEntry>) -> io::Result<()> {
         let sha256 = checksum(&DurableSnapshot {
             schema_version: 2,
-            entries: entries.clone(),
+            entries: &entries,
         })?;
         let mut bytes = serde_json::to_vec(&Header {
             schema_version: 2,

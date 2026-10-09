@@ -293,9 +293,9 @@ enum DurableState {
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct DurableSnapshot {
+struct DurableSnapshot<Entries = Vec<DurableEntry>> {
     schema_version: u16,
-    entries: Vec<DurableEntry>,
+    entries: Entries,
 }
 
 struct StoreState<O> {
