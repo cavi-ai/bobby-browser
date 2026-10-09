@@ -273,42 +273,29 @@ async fn file_identity(file: File) -> Result<same_file::Handle, std::io::Error> 
 }
 
 async fn open_writer(path: &Path) -> Result<WriterState, JournalError> {
-    let scan = scan_path(path).await?;
-    if scan.scan.torn_tail
-        || scan.scan.incompatible_records > 0
-        || scan.max_sequence == Some(u64::MAX)
-    {
-        archive_damaged_journal(path).await?;
-    }
     let mut options = OpenOptions::new();
     options.create(true).append(true).read(true);
     #[cfg(unix)]
     options.mode(0o600);
-    let file = options.open(path).await?;
+    let mut file = options.open(path).await?;
+    let mut offsets = HashMap::<CommandId, Vec<IndexedRecord>>::new();
+    // Validate and index the writer's actual file in one streaming pass.
+    let scan = scan_file(file.try_clone().await?, Some(&mut offsets)).await?;
+    let next_sequence = if scan.scan.torn_tail
+        || scan.scan.incompatible_records > 0
+        || scan.max_sequence == Some(u64::MAX)
+    {
+        archive_damaged_journal(path).await?;
+        offsets.clear();
+        file = options.open(path).await?;
+        0
+    } else {
+        scan.max_sequence.map_or(0, |sequence| sequence + 1)
+    };
     file.sync_all().await?;
     sync_parent(path).await?;
     let metadata = file.metadata().await?;
     let identity = file_identity(file.try_clone().await?).await?;
-    let mut offsets = HashMap::<CommandId, Vec<IndexedRecord>>::new();
-    let mut reader = BufReader::new(file.try_clone().await?);
-    let mut offset = 0;
-    let mut next_sequence = 0;
-    let mut line = Vec::new();
-    while reader.read_until(b'\n', &mut line).await? > 0 {
-        if !line.iter().all(u8::is_ascii_whitespace) {
-            let record: JournalRecord = serde_json::from_slice(&line)?;
-            offsets
-                .entry(record.command_id)
-                .or_default()
-                .push(IndexedRecord::new(offset, &line));
-            next_sequence = record
-                .sequence
-                .checked_add(1)
-                .ok_or(JournalError::UncertainCommand)?;
-        }
-        offset += line.len() as u64;
-        line.clear();
-    }
     let mut archives = Vec::new();
     let mut archived_offsets = HashMap::<CommandId, Vec<(PathBuf, u64)>>::new();
     let mut archived_torn_tail = false;
@@ -462,10 +449,18 @@ async fn scan_path(path: &Path) -> Result<Scan, JournalError> {
         }
         Err(error) => return Err(error.into()),
     };
+    scan_file(file, None).await
+}
+
+async fn scan_file(
+    file: File,
+    mut index: Option<&mut HashMap<CommandId, Vec<IndexedRecord>>>,
+) -> Result<Scan, JournalError> {
     let mut reader = BufReader::new(file);
     let mut scan = JournalScan::default();
     let mut records = 0usize;
     let mut max_sequence = None;
+    let mut offset = 0;
     let mut line = Vec::new();
     while reader.read_until(b'\n', &mut line).await? > 0 {
         if !line.ends_with(b"\n") {
@@ -480,6 +475,12 @@ async fn scan_path(path: &Path) -> Result<Scan, JournalError> {
                         scan.incompatible_records += 1;
                     }
                     max_sequence = max_sequence.max(Some(record.sequence));
+                    if let Some(index) = index.as_deref_mut() {
+                        index
+                            .entry(record.command_id)
+                            .or_default()
+                            .push(IndexedRecord::new(offset, &line));
+                    }
                 }
                 Err(_) => {
                     if let Ok(probe) = serde_json::from_slice::<RecordProbe>(&line) {
@@ -489,6 +490,7 @@ async fn scan_path(path: &Path) -> Result<Scan, JournalError> {
                 }
             }
         }
+        offset += line.len() as u64;
         line.clear();
     }
     Ok(Scan {
