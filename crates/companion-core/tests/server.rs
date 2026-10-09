@@ -1,7 +1,11 @@
-use companion_core::{CompanionServer, CompanionServerConfig, CompanionServerError, PairingInput};
+use companion_core::{
+    CompanionServer, CompanionServerConfig, CompanionServerError, CompanionServerHandle,
+    PairingInput,
+};
 use companion_protocol::{
-    ActionRequest, ActionResult, BrowserTarget, CompanionEvent, CompanionRequest, InteractionPath,
-    PairRequest, TargetDiscovery, TargetKind, PROTOCOL_VERSION,
+    ActionRequest, ActionResult, AttachmentGrant, BrowserTarget, CompanionEvent, CompanionRequest,
+    InteractionPath, PageBindingDiscovered, PairRequest, TargetDiscovery, TargetKind,
+    PROTOCOL_VERSION,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
@@ -14,6 +18,7 @@ use tokio_tungstenite::{
     tungstenite::{client::IntoClientRequest, http::StatusCode, Error, Message},
     MaybeTlsStream, WebSocketStream,
 };
+use types::{AttachmentId, PageId, ProfileId};
 
 const PRIVATE_BEARER: &str = "private-bearer-that-must-never-appear";
 const PRIVATE_FRAME_MARKER: &str = "private-frame-body-that-must-never-appear";
@@ -115,6 +120,51 @@ async fn receive_request(socket: &mut ClientSocket) -> CompanionRequest {
             other => panic!("expected companion request, got {other:?}"),
         }
     }
+}
+
+/// Binds a page to the attachment the way a session does: the companion
+/// reports the binding on a newly discovered page target, and the server
+/// publishes the grant that now holds it.
+async fn bind_page(
+    server: &CompanionServerHandle,
+    socket: &mut ClientSocket,
+    profile_id: &ProfileId,
+    attachment_id: &AttachmentId,
+    target_id: &str,
+) -> (PageId, AttachmentGrant) {
+    let page_id = PageId::new();
+    let ticket = server
+        .begin_page_binding(attachment_id, page_id.clone())
+        .await
+        .unwrap();
+    send_event(
+        socket,
+        &CompanionEvent::TargetsDiscovered(TargetDiscovery {
+            protocol_version: PROTOCOL_VERSION,
+            profile_id: profile_id.clone(),
+            targets: vec![BrowserTarget {
+                target_id: target_id.into(),
+                kind: TargetKind::Page,
+            }],
+        }),
+    )
+    .await;
+    send_event(
+        socket,
+        &CompanionEvent::PageBindingDiscovered(PageBindingDiscovered {
+            protocol_version: PROTOCOL_VERSION,
+            profile_id: profile_id.clone(),
+            target_id: target_id.into(),
+            binding_nonce: ticket.binding_nonce().into(),
+        }),
+    )
+    .await;
+    let grant = ticket.complete(Duration::from_secs(5)).await.unwrap();
+    assert_eq!(
+        receive_request(socket).await,
+        CompanionRequest::Grant(grant.clone())
+    );
+    (page_id, grant)
 }
 
 async fn receive_event(socket: &mut ClientSocket) -> CompanionEvent {
@@ -489,13 +539,21 @@ async fn discovery_requires_an_explicit_real_grant_before_actions_are_dispatched
     assert_eq!(discovered, vec![target]);
     assert!(server.active_grant(&profile_id).await.is_none());
 
-    let grant = server.grant_discovered_targets(&profile_id).await.unwrap();
+    let grant = server.grant_attachment(&profile_id).await.unwrap();
     let CompanionRequest::Grant(wire_grant) = receive_request(&mut socket).await else {
         panic!("expected explicit attachment grant");
     };
     assert_eq!(wire_grant, grant);
     assert_eq!(grant.attachment_id.0.get_version_num(), 4);
-    assert_eq!(grant.pages[0].page_id.0.get_version_num(), 4);
+    assert!(grant.pages.is_empty(), "a new attachment holds no pages");
+    let (page_id, grant) = bind_page(
+        &server,
+        &mut socket,
+        &profile_id,
+        &grant.attachment_id,
+        "bound-tab",
+    )
+    .await;
     let renewed = server.renew_grant(&grant.attachment_id).await.unwrap();
     let CompanionRequest::Grant(wire_renewal) = receive_request(&mut socket).await else {
         panic!("expected explicit attachment renewal");
@@ -511,7 +569,7 @@ async fn discovery_requires_an_explicit_real_grant_before_actions_are_dispatched
         protocol_version: PROTOCOL_VERSION,
         attachment_id: grant.attachment_id.clone(),
         command_id: command_id.clone(),
-        page_id: grant.pages[0].page_id.clone(),
+        page_id,
         operation: "observe".into(),
         input: serde_json::json!({}),
         deadline_unix_ms: now_unix_ms() + 5_000,
@@ -580,13 +638,21 @@ async fn dispatch_rejects_mismatched_attachment_page_and_profile_bindings() {
         .wait_for_discovery(&profile_id, Duration::from_secs(1))
         .await
         .unwrap();
-    let grant = server.grant_discovered_targets(&profile_id).await.unwrap();
+    let grant = server.grant_attachment(&profile_id).await.unwrap();
     let _ = receive_request(&mut socket).await;
+    let (page_id, grant) = bind_page(
+        &server,
+        &mut socket,
+        &profile_id,
+        &grant.attachment_id,
+        "bound-tab",
+    )
+    .await;
     let base = ActionRequest {
         protocol_version: PROTOCOL_VERSION,
         attachment_id: grant.attachment_id.clone(),
         command_id: types::CommandId::new(),
-        page_id: grant.pages[0].page_id.clone(),
+        page_id,
         operation: "observe".into(),
         input: serde_json::json!({}),
         deadline_unix_ms: now_unix_ms() + 5_000,
@@ -716,7 +782,7 @@ async fn wait_for_discovery_accepts_a_paired_session_without_targets() {
         .await
         .unwrap();
     assert_eq!(discovered, Vec::<BrowserTarget>::new());
-    let grant = server.grant_discovered_targets(&profile_id).await.unwrap();
+    let grant = server.grant_attachment(&profile_id).await.unwrap();
     assert!(grant.pages.is_empty());
 }
 

@@ -207,7 +207,7 @@ async fn real_server_binding_and_worker_close_release_the_coordinator_page_id() 
         .wait_for_discovery(&profile_id, Duration::from_secs(1))
         .await
         .unwrap();
-    let initial_grant = server.grant_discovered_targets(&profile_id).await.unwrap();
+    let initial_grant = server.grant_attachment(&profile_id).await.unwrap();
     let initial_grant_wire: CompanionRequest =
         serde_json::from_value(read_native_message(&mut extension).await.unwrap().unwrap())
             .unwrap();

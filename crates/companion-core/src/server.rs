@@ -188,11 +188,13 @@ impl CompanionServerHandle {
         self.coordinator.active_grant(profile_id).await
     }
 
-    pub async fn grant_discovered_targets(
+    /// A new attachment for the profile. It holds no pages: a session owns
+    /// only the pages it opens and binds.
+    pub async fn grant_attachment(
         &self,
         profile_id: &types::ProfileId,
     ) -> Result<AttachmentGrant, CompanionSessionError> {
-        self.coordinator.grant_discovered_targets(profile_id).await
+        self.coordinator.grant_attachment(profile_id).await
     }
 
     pub async fn renew_grant(
