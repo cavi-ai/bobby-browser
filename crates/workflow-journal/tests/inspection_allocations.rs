@@ -136,7 +136,17 @@ fn inspection_and_archived_reads_avoid_unrelated_history_allocations() {
     let indexed_path = root.path().join("indexed.jsonl");
     let mut archive_name = format!("indexed.jsonl.archive-{}", "x".repeat(61));
     let mut indexed_archive = root.path().join(&archive_name);
-    // An odd path length separates PathBuf clones from power-of-two buffers.
+    let longest_record = std::fs::read(&path)
+        .unwrap()
+        .split(|byte| *byte == b'\n')
+        .map(|line| line.len() + 1)
+        .max()
+        .unwrap();
+    // Separate path copies from record allocations and power-of-two buffers.
+    while indexed_archive.as_os_str().as_encoded_bytes().len() <= longest_record + 16 {
+        archive_name.push('x');
+        indexed_archive = root.path().join(&archive_name);
+    }
     if indexed_archive
         .as_os_str()
         .as_encoded_bytes()
@@ -164,9 +174,17 @@ fn inspection_and_archived_reads_avoid_unrelated_history_allocations() {
         runtime.block_on(indexed.archives()),
         vec![indexed_archive.clone()]
     );
+    PATH_ALLOCATIONS.store(0, Ordering::Relaxed);
+    TRACKING.store(true, Ordering::Relaxed);
     let scan = runtime
         .block_on(indexed.history(command_id.clone()))
         .unwrap();
+    TRACKING.store(false, Ordering::Relaxed);
+    let path_allocations = PATH_ALLOCATIONS.load(Ordering::Relaxed);
+    assert!(
+        path_allocations < 64,
+        "reading one archive with 2048 records made {path_allocations} path-sized allocations"
+    );
     assert_eq!(scan.records.len(), 2048);
     assert!(scan.incompatible_records > 0);
     for (sequence, record) in scan.records.iter().enumerate() {

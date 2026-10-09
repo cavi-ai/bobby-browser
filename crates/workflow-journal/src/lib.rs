@@ -476,22 +476,25 @@ impl CommandJournal for JsonlJournal {
                 ..JournalScan::default()
             };
             if let Some(offsets) = writer.archived_offsets.get(&id) {
-                for entry in offsets {
-                    let mut file = File::open(entry.path.as_ref()).await?;
-                    file.seek(std::io::SeekFrom::Start(entry.offset)).await?;
-                    let mut reader = BufReader::new(file.take(entry.len));
-                    let mut line = Vec::new();
-                    reader.read_until(b'\n', &mut line).await?;
-                    if !line.ends_with(b"\n") {
-                        scan.torn_tail = true;
-                    }
-                    if let Ok(record) = serde_json::from_slice::<JournalRecord>(&line) {
-                        if record.command_id == id {
-                            scan.records.push(record);
-                        } else {
-                            // Archive contents may change after offsets are built.
-                            // Never attribute another command's diagnostic data.
-                            scan.incompatible_records += 1;
+                // Startup indexes each archive consecutively using one shared path.
+                for entries in offsets.chunk_by(|a, b| Arc::ptr_eq(&a.path, &b.path)) {
+                    let mut file = File::open(entries[0].path.as_ref()).await?;
+                    for entry in entries {
+                        file.seek(std::io::SeekFrom::Start(entry.offset)).await?;
+                        let mut reader = BufReader::new((&mut file).take(entry.len));
+                        let mut line = Vec::new();
+                        reader.read_until(b'\n', &mut line).await?;
+                        if !line.ends_with(b"\n") {
+                            scan.torn_tail = true;
+                        }
+                        if let Ok(record) = serde_json::from_slice::<JournalRecord>(&line) {
+                            if record.command_id == id {
+                                scan.records.push(record);
+                            } else {
+                                // Archive contents may change after offsets are built.
+                                // Never attribute another command's diagnostic data.
+                                scan.incompatible_records += 1;
+                            }
                         }
                     }
                 }
