@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- On Chromium, a snapshot target whose name comes from slotted or other label content resolves, using the same accessibility names the snapshot reports.
 - On Firefox, a new session starts with no tabs and gets only the pages it opens, so concurrent sessions never take each other's pages.
 - On Linux, Chrome keeps shared memory in `/dev/shm` unless it is smaller than 1 GiB.
 - On Firefox, a command that misses its deadline fails alone; other sessions and runtime restarts keep the running Firefox.

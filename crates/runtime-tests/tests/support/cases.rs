@@ -28,6 +28,7 @@ macro_rules! every_case {
             intent_follow_clicks_the_visible_duplicate,
             snapshot_scopes_to_a_named_list,
             snapshot_targets_act_on_the_described_element,
+            snapshot_target_types_into_a_slot_labelled_field,
             type_text_enter_reports_the_settled_page,
             type_text_enter_accepts_a_reformatted_landed_field,
             intent_follow_post_state_shows_the_settled_page,
@@ -722,6 +723,36 @@ pub async fn snapshot_targets_act_on_the_described_element(rig: &Rig) {
             "click {target} did not reach {reached}: {after}"
         );
     }
+    live.close().await;
+}
+
+/// A text field inside a shadow root, labelled through a slotted element
+/// that carries its own name: the snapshot's target for the field types into it.
+pub async fn snapshot_target_types_into_a_slot_labelled_field(rig: &Rig) {
+    let body = r#"<main><search-field><span slot="scope" aria-label="Within this section"></span></search-field></main>
+        <script>
+          customElements.define("search-field", class extends HTMLElement {
+            constructor() {
+              super();
+              this.attachShadow({mode: "open"}).innerHTML =
+                '<label><slot name="scope"></slot><textarea rows="1" placeholder="Search"></textarea></label>';
+            }
+          });
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/field", Route::Html(page("Field", body)))]).await;
+    let live = Live::open(rig, &site.url("/field")).await;
+    let snapshot = live.snapshot(json!({})).await;
+    let mut targets = Vec::new();
+    targets_under(&snapshot, &mut targets);
+    let field = targets
+        .iter()
+        .find(|(role, _)| *role == "textbox")
+        .map(|(_, target)| (*target).clone())
+        .unwrap_or_else(|| panic!("no textbox target in the snapshot: {snapshot}"));
+    let typed = live
+        .call("type_text", json!({"target":field,"value":"query"}))
+        .await;
+    assert_eq!(typed["status"], "completed", "type_text {field}: {typed}");
     live.close().await;
 }
 

@@ -4,11 +4,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chromiumoxide::browser::BrowserHandle;
+use chromiumoxide::cdp::browser_protocol::accessibility::QueryAxTreeParams;
 #[cfg(test)]
 use chromiumoxide::cdp::browser_protocol::dom::Node as CdpNode;
 use chromiumoxide::cdp::browser_protocol::dom::{
-    BackendNodeId, DescribeNodeParams, GetContentQuadsParams, GetFrameOwnerParams,
-    RequestNodeParams, SetFileInputFilesParams, ShadowRootType,
+    BackendNodeId, DescribeNodeParams, GetContentQuadsParams, GetDocumentParams,
+    GetFrameOwnerParams, RequestNodeParams, ResolveNodeParams, SetFileInputFilesParams,
+    ShadowRootType,
 };
 use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
 use chromiumoxide::cdp::browser_protocol::page::{
@@ -16,7 +18,8 @@ use chromiumoxide::cdp::browser_protocol::page::{
 };
 use chromiumoxide::cdp::browser_protocol::target::GetTargetsParams;
 use chromiumoxide::cdp::js_protocol::runtime::{
-    EvaluateParams, ExecutionContextId, RemoteObjectId,
+    CallFunctionOnParams, EvaluateParams, ExecutionContextId, ReleaseObjectGroupParams,
+    RemoteObjectId,
 };
 use chromiumoxide::keys::get_key_definition;
 use chromiumoxide::layout::{ElementQuad, Point};
@@ -61,7 +64,7 @@ struct JsLocator {
     id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BrowserCandidate {
     id: String,
@@ -1006,7 +1009,17 @@ pub async fn resolve_target_with_visibility(
         scope.scope_id,
     )
     .await?;
-    let (candidate, evidence, best_match_authorized) = choose(target, raw, require_visible)?;
+    let (candidate, evidence, best_match_authorized) =
+        match choose(target, raw.clone(), require_visible) {
+            Err(error) if error.code == ErrorCode::TargetNotFound => {
+                let named = accessibility_named(&scope.execution_page, target, &raw).await?;
+                if named.is_empty() {
+                    return Err(error);
+                }
+                choose(target, named, require_visible)?
+            }
+            chosen => chosen?,
+        };
     let owner = owners.get(&candidate.id).cloned();
     // A candidate gathered from a closed shadow root must be located relative
     // to that root's own element handle, not the outer document/frame context.
@@ -1135,6 +1148,92 @@ pub async fn resolve_ambiguous_wait_values(
     }
     Ok(values)
 }
+
+/// The gathered candidates Chrome's accessibility tree gives the target's role
+/// and name, in tree order, carrying that role and name. Snapshots report
+/// those names, which can come from content the gathered names do not read,
+/// such as an element slotted into a label.
+async fn accessibility_named(
+    page: &Page,
+    target: &TargetSpec,
+    raw: &[BrowserCandidate],
+) -> Result<Vec<BrowserCandidate>, CommandError> {
+    let (Some(role), Some(name)) = (&target.role, &target.accessible_name) else {
+        return Ok(Vec::new());
+    };
+    let document = page
+        .execute(GetDocumentParams::builder().depth(0).build())
+        .await
+        .map_err(cdp_error)?
+        .result
+        .root;
+    let nodes = page
+        .execute(
+            QueryAxTreeParams::builder()
+                .backend_node_id(document.backend_node_id)
+                .accessible_name(name.clone())
+                .role(role.clone())
+                .build(),
+        )
+        .await
+        .map_err(cdp_error)?
+        .result
+        .nodes;
+    let mut named = Vec::new();
+    for backend_node_id in nodes
+        .into_iter()
+        .filter(|node| !node.ignored)
+        .filter_map(|node| node.backend_dom_node_id)
+    {
+        let object = page
+            .execute(
+                ResolveNodeParams::builder()
+                    .backend_node_id(backend_node_id)
+                    .object_group(AX_RESOLVE_GROUP)
+                    .build(),
+            )
+            .await
+            .map_err(cdp_error)?
+            .result
+            .object;
+        let Some(object_id) = object.object_id else {
+            continue;
+        };
+        let id = page
+            .execute(
+                CallFunctionOnParams::builder()
+                    .object_id(object_id)
+                    .function_declaration(
+                        "function(){return this.getAttribute('data-bobby-target')}",
+                    )
+                    .return_by_value(true)
+                    .build()
+                    .map_err(|error| target_error(ErrorCode::BrowserCommandFailed, error))?,
+            )
+            .await
+            .map_err(cdp_error)?
+            .result
+            .result
+            .value;
+        if let Some(candidate) = id
+            .as_ref()
+            .and_then(|id| id.as_str())
+            .and_then(|id| raw.iter().find(|candidate| candidate.id == id))
+        {
+            named.push(BrowserCandidate {
+                role: Some(role.clone()),
+                name: Some(name.clone()),
+                ..candidate.clone()
+            });
+        }
+    }
+    let _ = page
+        .execute(ReleaseObjectGroupParams::new(AX_RESOLVE_GROUP))
+        .await;
+    Ok(named)
+}
+
+const AX_RESOLVE_GROUP: &str = "bobby-accessibility-named";
 
 fn choose(
     target: &TargetSpec,
