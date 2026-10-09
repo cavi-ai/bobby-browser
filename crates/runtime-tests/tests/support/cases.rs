@@ -1681,7 +1681,9 @@ pub async fn type_text_enter_reports_a_keydown_navigation_at_once(rig: &Rig) {
     let site = FixtureSite::spawn(vec![("/home", Route::Html(home))]).await;
     let live = Live::open(rig, &site.url("/home")).await;
     let pushed = site.url("/search?q=query&at=");
-    let bound_ms = worker_pool::navigation_settle::SAME_DOCUMENT_QUIET_MS + 300;
+    // One same-document settle; any slower settle path waits at least the
+    // redirected quiet window.
+    let bound_ms = worker_pool::navigation_settle::REDIRECTED_QUIET_MS;
     let mut failures = Vec::new();
     for run in 1..=10 {
         let loaded = live

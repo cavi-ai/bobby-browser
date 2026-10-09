@@ -1165,12 +1165,14 @@ impl SessionCoordinator {
             .map(|record| record.grant.clone())
     }
 
-    pub(crate) async fn grant_discovered_targets(
+    /// A new attachment holding no pages: every page it gets, it binds. The
+    /// browser's other tabs belong to other sessions, or to nobody.
+    pub(crate) async fn grant_attachment(
         &self,
         profile_id: &ProfileId,
     ) -> Result<AttachmentGrant, CompanionSessionError> {
         let _grant_update = acquire_grant_update(&self.grant_updates).await?;
-        let (session, discovery) = {
+        let session = {
             let state = self.state.lock().await;
             let session = state
                 .sessions
@@ -1180,17 +1182,16 @@ impl SessionCoordinator {
             let discovery = state
                 .discoveries
                 .get(profile_id)
-                .cloned()
                 .ok_or(CompanionSessionError::DiscoveryUnavailable)?;
             if session.connection_id != discovery.connection_id
                 || session.companion_id != discovery.companion_id
             {
                 return Err(CompanionSessionError::ConnectionClosed);
             }
-            (session, discovery)
+            session
         };
         let lease = self.registry.attach(profile_id.clone()).await?;
-        let grant = grant_for_lease(&lease, discovery.targets);
+        let grant = grant_for_lease(&lease);
         send_grant_request(&session.outbound, &grant).await?;
 
         let mut state = self.state.lock().await;
@@ -1412,19 +1413,13 @@ impl SessionCoordinator {
     }
 }
 
-fn grant_for_lease(lease: &AttachmentLease, targets: Vec<BrowserTarget>) -> AttachmentGrant {
+fn grant_for_lease(lease: &AttachmentLease) -> AttachmentGrant {
     AttachmentGrant {
         protocol_version: PROTOCOL_VERSION,
         attachment_id: lease.attachment_id.clone(),
         profile_id: lease.profile_id.clone(),
         expires_at_unix_ms: lease_expiry_unix_ms(lease),
-        pages: targets
-            .into_iter()
-            .map(|target| GrantedPage {
-                target_id: target.target_id,
-                page_id: PageId::new(),
-            })
-            .collect(),
+        pages: Vec::new(),
     }
 }
 
@@ -1522,10 +1517,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let grant = coordinator
-            .grant_discovered_targets(&profile_id)
-            .await
-            .unwrap();
+        let grant = coordinator.grant_attachment(&profile_id).await.unwrap();
         let _grant_request = requests.recv().await.unwrap();
         (coordinator, profile_id, connection_id, grant, requests)
     }
@@ -1588,12 +1580,12 @@ mod tests {
         page_id
     }
 
-    fn action(grant: &AttachmentGrant, command_id: CommandId) -> ActionRequest {
+    fn action(grant: &AttachmentGrant, page_id: &PageId, command_id: CommandId) -> ActionRequest {
         ActionRequest {
             protocol_version: PROTOCOL_VERSION,
             attachment_id: grant.attachment_id.clone(),
             command_id,
-            page_id: grant.pages[0].page_id.clone(),
+            page_id: page_id.clone(),
             operation: "observe".into(),
             input: serde_json::json!({}),
             deadline_unix_ms: now_unix_ms() + 30_000,
@@ -1628,18 +1620,24 @@ mod tests {
             )
             .await
             .unwrap();
-        let grant = coordinator
-            .grant_discovered_targets(&profile_id)
-            .await
-            .unwrap();
+        let grant = coordinator.grant_attachment(&profile_id).await.unwrap();
         let _grant_request = requests.recv().await.unwrap();
+        let page_id = bind_page_for_release(
+            &coordinator,
+            &profile_id,
+            connection_id,
+            &grant,
+            &mut requests,
+            "bound-target",
+        )
+        .await;
 
         let command_id = CommandId::new();
         let action = ActionRequest {
             protocol_version: PROTOCOL_VERSION,
             attachment_id: grant.attachment_id,
             command_id: command_id.clone(),
-            page_id: grant.pages[0].page_id.clone(),
+            page_id,
             operation: "observe".into(),
             input: serde_json::json!({}),
             deadline_unix_ms: now_unix_ms() + 5_000,
@@ -1683,10 +1681,19 @@ mod tests {
     async fn aborted_dispatch_keeps_a_bounded_tombstone_and_consumes_the_late_event() {
         let (coordinator, profile_id, connection_id, grant, mut requests) =
             session_fixture(4).await;
+        let page_id = bind_page_for_release(
+            &coordinator,
+            &profile_id,
+            connection_id,
+            &grant,
+            &mut requests,
+            "bound-target",
+        )
+        .await;
         let command_id = CommandId::new();
         let dispatch = tokio::spawn({
             let coordinator = Arc::clone(&coordinator);
-            let action = action(&grant, command_id.clone());
+            let action = action(&grant, &page_id, command_id.clone());
             async move { coordinator.dispatch_action(action).await }
         });
         let _action_request = requests.recv().await.unwrap();
@@ -1713,11 +1720,20 @@ mod tests {
         const EXPECTED_PENDING_BOUND: usize = 256;
         let (coordinator, profile_id, connection_id, grant, mut requests) =
             session_fixture(EXPECTED_PENDING_BOUND + 2).await;
+        let page_id = bind_page_for_release(
+            &coordinator,
+            &profile_id,
+            connection_id,
+            &grant,
+            &mut requests,
+            "bound-target",
+        )
+        .await;
 
         for _ in 0..EXPECTED_PENDING_BOUND {
             let dispatch = tokio::spawn({
                 let coordinator = Arc::clone(&coordinator);
-                let action = action(&grant, CommandId::new());
+                let action = action(&grant, &page_id, CommandId::new());
                 async move { coordinator.dispatch_action(action).await }
             });
             let _action_request = requests.recv().await.unwrap();
@@ -1727,7 +1743,7 @@ mod tests {
 
         let mut overflow = tokio::spawn({
             let coordinator = Arc::clone(&coordinator);
-            let action = action(&grant, CommandId::new());
+            let action = action(&grant, &page_id, CommandId::new());
             async move { coordinator.dispatch_action(action).await }
         });
         let overflow_result = tokio::time::timeout(Duration::from_millis(50), &mut overflow).await;
@@ -1846,6 +1862,44 @@ mod tests {
             .await;
         });
         ticket.complete(Duration::from_secs(30)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_new_attachment_takes_no_page_another_session_is_binding() {
+        let (coordinator, profile_id, connection_id, grant, mut requests) =
+            session_fixture(8).await;
+        let ticket = coordinator
+            .begin_page_binding(&grant.attachment_id, PageId::new())
+            .await
+            .unwrap();
+        let nonce = ticket.binding_nonce().to_owned();
+        coordinator
+            .consume_event(
+                &profile_id,
+                connection_id,
+                CompanionEvent::TargetsDiscovered(TargetDiscovery {
+                    protocol_version: PROTOCOL_VERSION,
+                    profile_id: profile_id.clone(),
+                    targets: ["trusted-target", "new-tab"]
+                        .into_iter()
+                        .map(|target_id| BrowserTarget {
+                            target_id: target_id.into(),
+                            kind: TargetKind::Page,
+                        })
+                        .collect(),
+                }),
+            )
+            .await
+            .unwrap();
+        // Another session attaches after the tab appears and before its report.
+        let other = coordinator.grant_attachment(&profile_id).await.unwrap();
+        let _other_request = requests.recv().await.unwrap();
+        assert!(
+            other.pages.is_empty(),
+            "a new attachment took pages: {other:?}"
+        );
+        report_binding(&coordinator, &profile_id, connection_id, "new-tab", &nonce).await;
+        ticket.complete(Duration::from_secs(1)).await.unwrap();
     }
 
     #[tokio::test]
@@ -2278,7 +2332,7 @@ mod tests {
 
         let result = tokio::time::timeout(
             Duration::from_secs(2),
-            coordinator.grant_discovered_targets(&profile_id),
+            coordinator.grant_attachment(&profile_id),
         )
         .await
         .expect("rediscovery grant publication must have a terminal deadline");
@@ -2698,10 +2752,7 @@ mod tests {
             .begin_page_binding(&grant.attachment_id, page_id.clone())
             .await
             .unwrap();
-        let replacement = coordinator
-            .grant_discovered_targets(&profile_id)
-            .await
-            .unwrap();
+        let replacement = coordinator.grant_attachment(&profile_id).await.unwrap();
         assert_ne!(replacement.attachment_id, grant.attachment_id);
         assert!(coordinator
             .state
@@ -2933,10 +2984,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let reconnected_grant = coordinator
-            .grant_discovered_targets(&profile_id)
-            .await
-            .unwrap();
+        let reconnected_grant = coordinator.grant_attachment(&profile_id).await.unwrap();
         let _grant_request = requests.recv().await.unwrap();
         let second_page = bind_page_for_release(
             &coordinator,
