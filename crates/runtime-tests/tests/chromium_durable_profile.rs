@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
+use runtime_tests::ProfileChrome;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use test_site::{FixtureSite, Route};
 use types::{
@@ -379,47 +380,6 @@ async fn managed_chromium_remembers_across_runtimes_with_a_disposable_profile() 
     );
     assert!(answer.confidence >= 0.75);
     warm.close().await;
-}
-
-/// The Chrome serving a durable profile. It outlives sessions and runtimes
-/// by design, so the test stops it on every exit, failures included.
-struct ProfileChrome(PathBuf);
-
-impl ProfileChrome {
-    /// Main Chrome processes on this profile; helpers carry `--type=`.
-    fn pids(&self) -> Vec<i32> {
-        let output = std::process::Command::new("ps")
-            .args(["-A", "-ww", "-o", "pid=,command="])
-            .output()
-            .expect("list processes");
-        let needle = format!("--user-data-dir={}", self.0.display());
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter(|line| line.contains(&needle) && !line.contains("--type="))
-            .filter_map(|line| line.split_whitespace().next()?.parse().ok())
-            .collect()
-    }
-
-    async fn kill(&self) {
-        for pid in self.pids() {
-            unsafe { libc::kill(pid, libc::SIGKILL) };
-        }
-        for _ in 0..100 {
-            if self.pids().is_empty() {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        panic!("the profile's Chrome did not exit");
-    }
-}
-
-impl Drop for ProfileChrome {
-    fn drop(&mut self) {
-        for pid in self.pids() {
-            unsafe { libc::kill(pid, libc::SIGKILL) };
-        }
-    }
 }
 
 fn evidence_text(evidence: &[types::Evidence]) -> String {
