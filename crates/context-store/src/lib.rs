@@ -124,11 +124,11 @@ pub struct SiteContext {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct SiteEnvelope {
+struct SiteEnvelope<Site = SiteContext> {
     schema: u16,
     /// The real site key; the filename is its canonical UTF-8 hex encoding.
     site_key: String,
-    site: SiteContext,
+    site: Site,
 }
 
 /// A site file that failed to load. Corruption is reported and skipped —
@@ -793,7 +793,7 @@ impl ContextStore {
         let envelope = SiteEnvelope {
             schema: SCHEMA_VERSION,
             site_key: key.to_string(),
-            site: site.clone(),
+            site,
         };
         self.limits
             .check_envelope(&envelope)
