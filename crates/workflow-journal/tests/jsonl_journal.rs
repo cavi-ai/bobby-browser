@@ -45,6 +45,120 @@ async fn replace_preserving_length_and_modified(path: &std::path::Path, bytes: &
     assert_eq!(after.modified().unwrap(), before.modified().unwrap());
 }
 
+fn rewrite_in_place_preserving_metadata(path: &std::path::Path, bytes: &[u8]) {
+    use std::io::Write;
+
+    let before = std::fs::metadata(path).unwrap();
+    assert_eq!(before.len(), bytes.len() as u64);
+    let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.write_all(bytes).unwrap();
+    file.set_times(std::fs::FileTimes::new().set_modified(before.modified().unwrap()))
+        .unwrap();
+    file.sync_all().unwrap();
+    let after = file.metadata().unwrap();
+    assert_eq!(after.len(), before.len());
+    assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
+    }
+}
+
+async fn assert_indexed_mutation_is_archived(edit: fn(&str, &CommandId) -> String) {
+    // Exercise indexes populated by both append and reopening existing records.
+    for reopen in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("commands.jsonl");
+        let id = CommandId::new();
+        let mut journal = JsonlJournal::open(&path).await.unwrap();
+        journal
+            .append(record(&id, CommandPhase::Accepted))
+            .await
+            .unwrap();
+        journal
+            .append(record(&id, CommandPhase::Prepared))
+            .await
+            .unwrap();
+        if reopen {
+            drop(journal);
+            journal = JsonlJournal::open(&path).await.unwrap();
+        }
+        let original = tokio::fs::read_to_string(&path).await.unwrap();
+        let damaged = edit(&original, &id);
+        assert_ne!(damaged, original);
+        rewrite_in_place_preserving_metadata(&path, damaged.as_bytes());
+
+        let scan = journal.history(id.clone()).await.unwrap();
+        assert!(
+            scan.incompatible_records > 0,
+            "changed indexed bytes must be diagnostic only"
+        );
+        assert!(scan.records.iter().all(|entry| entry.command_id == id));
+        let archives = journal.archives().await;
+        assert_eq!(archives.len(), 1);
+        assert_eq!(
+            tokio::fs::read(&archives[0]).await.unwrap(),
+            damaged.as_bytes()
+        );
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"");
+
+        let fresh = CommandId::new();
+        journal
+            .append(record(&fresh, CommandPhase::Accepted))
+            .await
+            .unwrap();
+        drop(journal);
+        let reopened = JsonlJournal::open(&path).await.unwrap();
+        let scan = reopened.history(fresh).await.unwrap();
+        assert_eq!(scan.records.len(), 1);
+        assert_eq!(scan.records[0].sequence, 0);
+        assert_eq!(scan.incompatible_records, 0);
+        assert!(reopened.history(id).await.unwrap().incompatible_records > 0);
+    }
+}
+
+#[tokio::test]
+async fn indexed_history_archives_in_place_command_identity_changes() {
+    assert_indexed_mutation_is_archived(|bytes, id| {
+        bytes.replace(&id.0.to_string(), &CommandId::new().0.to_string())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn indexed_history_archives_in_place_sequence_changes() {
+    assert_indexed_mutation_is_archived(|bytes, _| {
+        bytes.replace("\"sequence\":1", "\"sequence\":2")
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn indexed_history_archives_in_place_phase_changes() {
+    assert_indexed_mutation_is_archived(|bytes, _| bytes.replace("accepted", "prepared")).await;
+}
+
+#[tokio::test]
+async fn indexed_history_archives_in_place_malformed_json() {
+    assert_indexed_mutation_is_archived(|bytes, _| {
+        let mut bytes = bytes.to_owned();
+        bytes.replace_range(0..1, "!");
+        bytes
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn indexed_history_archives_in_place_missing_record_delimiter() {
+    assert_indexed_mutation_is_archived(|bytes, _| {
+        let mut bytes = bytes.to_owned();
+        bytes.replace_range(bytes.len() - 1.., " ");
+        bytes
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn replacement_with_unchanged_metadata_rebuilds_command_offsets() {
     let dir = tempfile::tempdir().unwrap();
