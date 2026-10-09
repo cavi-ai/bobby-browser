@@ -753,6 +753,17 @@ pub async fn snapshot_target_types_into_a_slot_labelled_field(rig: &Rig) {
         .call("type_text", json!({"target":field,"value":"query"}))
         .await;
     assert_eq!(typed["status"], "completed", "type_text {field}: {typed}");
+    let located = live
+        .call(
+            "intent_locate",
+            json!({"purpose":"Find the search field",
+                   "hints":{"role":field["role"],"accessibleName":field["accessibleName"]}}),
+        )
+        .await;
+    assert_eq!(
+        located["status"], "completed",
+        "intent_locate {field}: {located}"
+    );
     live.close().await;
 }
 

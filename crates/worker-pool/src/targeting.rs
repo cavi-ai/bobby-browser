@@ -64,7 +64,7 @@ struct JsLocator {
     id: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BrowserCandidate {
     id: String,
@@ -618,6 +618,7 @@ pub async fn gather_candidates(
         scope.scope_id,
     )
     .await?;
+    let raw = name_from_accessibility(&scope.execution_page, target, raw).await?;
     let mut candidates: Vec<Candidate> = raw.into_iter().map(into_candidate).collect();
     // Auto-descend one level into iframes for main-frame intents: agents
     // cannot name a framePath for content they cannot see, so without this
@@ -1009,17 +1010,8 @@ pub async fn resolve_target_with_visibility(
         scope.scope_id,
     )
     .await?;
-    let (candidate, evidence, best_match_authorized) =
-        match choose(target, raw.clone(), require_visible) {
-            Err(error) if error.code == ErrorCode::TargetNotFound => {
-                let named = accessibility_named(&scope.execution_page, target, &raw).await?;
-                if named.is_empty() {
-                    return Err(error);
-                }
-                choose(target, named, require_visible)?
-            }
-            chosen => chosen?,
-        };
+    let raw = name_from_accessibility(&scope.execution_page, target, raw).await?;
+    let (candidate, evidence, best_match_authorized) = choose(target, raw, require_visible)?;
     let owner = owners.get(&candidate.id).cloned();
     // A candidate gathered from a closed shadow root must be located relative
     // to that root's own element handle, not the outer document/frame context.
@@ -1149,18 +1141,27 @@ pub async fn resolve_ambiguous_wait_values(
     Ok(values)
 }
 
-/// The gathered candidates Chrome's accessibility tree gives the target's role
-/// and name, in tree order, carrying that role and name. Snapshots report
-/// those names, which can come from content the gathered names do not read,
-/// such as an element slotted into a label.
-async fn accessibility_named(
+/// When no gathered name is the target's name, gives the candidates Chrome's
+/// accessibility tree names with the target's role and name that role and
+/// name. Snapshots report those names, which can come from content the
+/// gathered names do not read, such as an element slotted into a label.
+async fn name_from_accessibility(
     page: &Page,
     target: &TargetSpec,
-    raw: &[BrowserCandidate],
+    mut raw: Vec<BrowserCandidate>,
 ) -> Result<Vec<BrowserCandidate>, CommandError> {
     let (Some(role), Some(name)) = (&target.role, &target.accessible_name) else {
-        return Ok(Vec::new());
+        return Ok(raw);
     };
+    if raw.iter().any(|candidate| {
+        candidate
+            .role
+            .as_deref()
+            .is_some_and(|actual| actual.eq_ignore_ascii_case(role))
+            && candidate.name.as_deref().map(str::trim) == Some(name.trim())
+    }) {
+        return Ok(raw);
+    }
     let document = page
         .execute(GetDocumentParams::builder().depth(0).build())
         .await
@@ -1179,7 +1180,6 @@ async fn accessibility_named(
         .map_err(cdp_error)?
         .result
         .nodes;
-    let mut named = Vec::new();
     for backend_node_id in nodes
         .into_iter()
         .filter(|node| !node.ignored)
@@ -1218,19 +1218,16 @@ async fn accessibility_named(
         if let Some(candidate) = id
             .as_ref()
             .and_then(|id| id.as_str())
-            .and_then(|id| raw.iter().find(|candidate| candidate.id == id))
+            .and_then(|id| raw.iter_mut().find(|candidate| candidate.id == id))
         {
-            named.push(BrowserCandidate {
-                role: Some(role.clone()),
-                name: Some(name.clone()),
-                ..candidate.clone()
-            });
+            candidate.role = Some(role.clone());
+            candidate.name = Some(name.clone());
         }
     }
     let _ = page
         .execute(ReleaseObjectGroupParams::new(AX_RESOLVE_GROUP))
         .await;
-    Ok(named)
+    Ok(raw)
 }
 
 const AX_RESOLVE_GROUP: &str = "bobby-accessibility-named";
