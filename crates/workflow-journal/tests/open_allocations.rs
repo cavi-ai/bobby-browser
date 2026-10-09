@@ -118,4 +118,40 @@ fn opening_validates_and_indexes_without_decoding_the_payload_twice() {
     assert_eq!(scan.records.len(), 2);
     assert_eq!(scan.records[1].sequence, 8);
     assert_eq!(scan.records[1].phase, CommandPhase::Executing);
+
+    // The same payload in a preserved archive must also be decoded only once.
+    let archive_root = tempfile::tempdir().unwrap();
+    let archive_path = archive_root.path().join("commands.jsonl");
+    let archive = archive_root.path().join("commands.jsonl.archive-fixture");
+    std::fs::write(&archive, &original).unwrap();
+    PAYLOAD_ALLOCATIONS.store(0, Ordering::Relaxed);
+    TRACKING.store(true, Ordering::Relaxed);
+    let journal = runtime.block_on(JsonlJournal::open(&archive_path)).unwrap();
+    TRACKING.store(false, Ordering::Relaxed);
+    let allocations = PAYLOAD_ALLOCATIONS.load(Ordering::Relaxed);
+    assert_eq!(
+        allocations, 1,
+        "archive loading materialized the payload {allocations} times"
+    );
+    assert_eq!(runtime.block_on(journal.archives()), vec![archive.clone()]);
+    assert_eq!(std::fs::read(&archive).unwrap(), original);
+    assert!(std::fs::read(&archive_path).unwrap().is_empty());
+    let archived = runtime
+        .block_on(journal.history(scan.records[0].command_id.clone()))
+        .unwrap();
+    assert_eq!(archived.records.len(), 1);
+    assert_eq!(archived.records[0].sequence, 7);
+    assert_eq!(archived.records[0].phase, CommandPhase::Prepared);
+    assert_eq!(
+        archived.records[0]
+            .prepared_result
+            .as_ref()
+            .unwrap()
+            .state_delta["value"],
+        "x".repeat(PAYLOAD_LEN)
+    );
+    assert!(archived.incompatible_records > 0);
+    assert!(runtime
+        .block_on(journal.append(archived.records[0].clone()))
+        .is_err());
 }
