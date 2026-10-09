@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Snapshots show sign-in field labels and targets; only entered secrets are redacted.
 - Runtime owner logs to `owner.log`, rotated past 1 MiB.
 - A session keeps its pages when Firefox restarts onto a new companion build.
 - `type_text` ending in Enter reports the landed page's full URL, query included, and its settled title.
