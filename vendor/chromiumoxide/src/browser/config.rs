@@ -493,7 +493,9 @@ impl BrowserConfig {
 
 /// These are passed to the Chrome binary by default.
 /// Via https://github.com/puppeteer/puppeteer/blob/4846b8723cf20d3551c0d755df394cc5e0c82a94/src/node/Launcher.ts#L157
-static DEFAULT_ARGS: [ArgConst; 24] = [
+/// `disable-dev-shm-usage` is left to the caller: it only helps where
+/// `/dev/shm` is too small, and elsewhere moves shared memory to disk.
+static DEFAULT_ARGS: [ArgConst; 23] = [
     ArgConst::key("disable-background-networking"),
     ArgConst::values(
         "enable-features",
@@ -505,7 +507,6 @@ static DEFAULT_ARGS: [ArgConst; 24] = [
     ArgConst::key("disable-client-side-phishing-detection"),
     ArgConst::key("disable-component-extensions-with-background-pages"),
     ArgConst::key("disable-default-apps"),
-    ArgConst::key("disable-dev-shm-usage"),
     ArgConst::values("disable-features", &["TranslateUI"]),
     ArgConst::key("disable-hang-monitor"),
     ArgConst::key("disable-ipc-flooding-protection"),
