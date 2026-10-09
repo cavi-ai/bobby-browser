@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Firefox snapshots name sign-in fields by their labels and give them targets; empty fields read empty and only entered secrets are redacted.
+- Firefox snapshots name sign-in fields by their labels and give them targets; empty fields read empty, only entered secrets are redacted, and `type_text` into a password field completes.
 - Runtime owner logs to `owner.log`, rotated past 1 MiB.
 - A session keeps its pages when Firefox restarts onto a new companion build.
 - `type_text` ending in Enter reports the landed page's full URL, query included, and its settled title.
