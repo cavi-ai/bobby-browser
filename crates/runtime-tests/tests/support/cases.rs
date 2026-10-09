@@ -1118,6 +1118,85 @@ pub async fn type_text_enter_reports_a_late_title(rig: &Rig) {
     );
 }
 
+/// A page starts a 2-3 s data request after it settles, and the agent
+/// navigates to a static page while that request is in flight. Every navigate
+/// settles quiet within 2 s.
+pub async fn navigate_ignores_requests_the_navigation_cancelled(rig: &Rig) {
+    let source = page(
+        "Source",
+        r#"<main><h1>Source</h1></main>
+        <script>
+            addEventListener("load", () => setTimeout(() => {
+              fetch("/api/slow?ms=" + (2000 + Math.floor(Math.random() * 1001)));
+            }, 800));
+        </script>"#,
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/source", Route::Html(source)),
+        (
+            "/target",
+            Route::Html(page("Target", "<main><h1>Target</h1></main>")),
+        ),
+        (
+            "/api/slow",
+            Route::QueryDelayed {
+                content_type: "application/json",
+                body: "[]".to_owned(),
+            },
+        ),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/target")).await;
+    // `RUST_LOG` installs the stdio subscriber instead; settle exits then go unchecked.
+    let capture = std::env::var_os("RUST_LOG")
+        .is_none()
+        .then(observability::test_support::CaptureSink::install);
+    let mut failures = Vec::new();
+    for run in 1..=SETTLE_RUNS {
+        let requests = site.hits("/api/slow");
+        let loaded = live
+            .call("navigate", json!({"url":site.url("/source")}))
+            .await;
+        assert_eq!(loaded["status"], "completed", "navigate: {loaded}");
+        let wait = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while site.hits("/api/slow") == requests {
+            assert!(
+                std::time::Instant::now() < wait,
+                "run {run}: the data request never started"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let seen = capture.as_ref().map_or(0, |capture| capture.events().len());
+        let started = std::time::Instant::now();
+        let moved = live
+            .call("navigate", json!({"url":site.url("/target")}))
+            .await;
+        let elapsed = started.elapsed();
+        assert_eq!(moved["status"], "completed", "navigate: {moved}");
+        let exits: Vec<String> = capture.as_ref().map_or_else(Vec::new, |capture| {
+            capture.events()[seen..]
+                .iter()
+                .filter(|event| event["fields"]["message"] == "navigation settle")
+                .map(|event| event["fields"]["exit"].as_str().unwrap_or("").to_owned())
+                .collect()
+        });
+        let exits_quiet =
+            capture.is_none() || (!exits.is_empty() && exits.iter().all(|exit| exit == "quiet"));
+        if elapsed > std::time::Duration::from_secs(2) || !exits_quiet {
+            failures.push(format!(
+                "run {run}: navigate took {} ms, settle exits {exits:?}",
+                elapsed.as_millis()
+            ));
+        }
+    }
+    live.close().await;
+    assert!(
+        failures.is_empty(),
+        "{} of {SETTLE_RUNS} runs failed: {failures:?}",
+        failures.len()
+    );
+}
+
 /// Controls rendered a few seconds after load: every action and intent waits
 /// for its target to appear instead of failing targetNotFound at once.
 pub async fn actions_wait_for_a_late_target(rig: &Rig) {
