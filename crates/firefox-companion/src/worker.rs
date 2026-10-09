@@ -370,10 +370,7 @@ impl CompanionExtensionObserver {
         &self,
         lease: &AttachmentLease,
     ) -> Result<AttachmentLease, CompanionSessionError> {
-        let grant = self
-            .server
-            .grant_discovered_targets(&lease.profile_id)
-            .await?;
+        let grant = self.server.grant_attachment(&lease.profile_id).await?;
         let fresh = self
             .server
             .registry()

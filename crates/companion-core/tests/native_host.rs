@@ -1,13 +1,14 @@
 use companion_core::{
     encode_native_message, read_native_message, run_native_host, run_native_host_with_enroll,
     validate_extension_message, validate_server_message, write_native_message, CompanionServer,
-    CompanionServerConfig, EnrollFinalize, EnrollHostError, NativeConnectRequest, NativeHostConfig,
-    NativeHostEnroll, NativeHostError, NativeReconnectBackoff, MAX_NATIVE_MESSAGE_BYTES,
+    CompanionServerConfig, CompanionServerHandle, EnrollFinalize, EnrollHostError,
+    NativeConnectRequest, NativeHostConfig, NativeHostEnroll, NativeHostError,
+    NativeReconnectBackoff, MAX_NATIVE_MESSAGE_BYTES,
 };
 use companion_protocol::{
     ActionRequest, ActionResult, BrowserEngine, BrowserIdentity, BrowserTarget,
-    CompanionCapabilities, CompanionEvent, CompanionRequest, InteractionPath, TargetDiscovery,
-    TargetKind, PROTOCOL_VERSION,
+    CompanionCapabilities, CompanionEvent, CompanionRequest, InteractionPath,
+    PageBindingDiscovered, TargetDiscovery, TargetKind, PROTOCOL_VERSION,
 };
 use serde_json::json;
 use std::{
@@ -21,8 +22,53 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
-use tokio::io::{duplex, split, AsyncRead, ReadBuf};
-use types::{CommandId, CompanionId, ProfileId};
+use tokio::io::{duplex, split, AsyncRead, AsyncWrite, ReadBuf};
+use types::{AttachmentId, CommandId, CompanionId, PageId, ProfileId};
+
+/// Binds a page to the attachment the way a session does: the companion
+/// reports the binding on a newly discovered page target, and the server
+/// publishes the grant that now holds it.
+async fn bind_page<S>(
+    server: &CompanionServerHandle,
+    extension: &mut S,
+    profile_id: &ProfileId,
+    attachment_id: &AttachmentId,
+    mut targets: Vec<BrowserTarget>,
+    target_id: &str,
+) -> PageId
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let page_id = PageId::new();
+    let ticket = server
+        .begin_page_binding(attachment_id, page_id.clone())
+        .await
+        .unwrap();
+    targets.push(BrowserTarget {
+        target_id: target_id.into(),
+        kind: TargetKind::Page,
+    });
+    for event in [
+        CompanionEvent::TargetsDiscovered(TargetDiscovery {
+            protocol_version: PROTOCOL_VERSION,
+            profile_id: profile_id.clone(),
+            targets,
+        }),
+        CompanionEvent::PageBindingDiscovered(PageBindingDiscovered {
+            protocol_version: PROTOCOL_VERSION,
+            profile_id: profile_id.clone(),
+            target_id: target_id.into(),
+            binding_nonce: ticket.binding_nonce().into(),
+        }),
+    ] {
+        write_native_message(extension, &serde_json::to_value(event).unwrap())
+            .await
+            .unwrap();
+    }
+    ticket.complete(Duration::from_secs(5)).await.unwrap();
+    read_native_message(extension).await.unwrap().unwrap();
+    page_id
+}
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -540,10 +586,10 @@ async fn rust_request_crosses_server_native_and_extension_and_event_returns_with
             .wait_for_discovery(&profile_id, Duration::from_secs(1))
             .await
             .unwrap(),
-        vec![target]
+        vec![target.clone()]
     );
 
-    let grant = server.grant_discovered_targets(&profile_id).await.unwrap();
+    let grant = server.grant_attachment(&profile_id).await.unwrap();
     let wire_grant: CompanionRequest = serde_json::from_value(
         read_native_message(&mut extension_stream)
             .await
@@ -552,13 +598,22 @@ async fn rust_request_crosses_server_native_and_extension_and_event_returns_with
     )
     .unwrap();
     assert_eq!(wire_grant, CompanionRequest::Grant(grant.clone()));
+    let page_id = bind_page(
+        &server,
+        &mut extension_stream,
+        &profile_id,
+        &grant.attachment_id,
+        vec![target],
+        "bound-tab",
+    )
+    .await;
 
     let command_id = CommandId::new();
     let action = ActionRequest {
         protocol_version: PROTOCOL_VERSION,
         attachment_id: grant.attachment_id,
         command_id: command_id.clone(),
-        page_id: grant.pages[0].page_id.clone(),
+        page_id,
         operation: "observe".into(),
         input: json!({}),
         deadline_unix_ms: 4_102_444_800_000,
@@ -1223,11 +1278,23 @@ async fn a_rejected_action_result_fails_its_command_and_keeps_the_relay() {
         .wait_for_discovery(&profile_id, Duration::from_secs(1))
         .await
         .unwrap();
-    let grant = server.grant_discovered_targets(&profile_id).await.unwrap();
+    let grant = server.grant_attachment(&profile_id).await.unwrap();
     read_native_message(&mut extension_stream)
         .await
         .unwrap()
         .unwrap();
+    let page_id = bind_page(
+        &server,
+        &mut extension_stream,
+        &profile_id,
+        &grant.attachment_id,
+        vec![BrowserTarget {
+            target_id: "tab-1".into(),
+            kind: TargetKind::Page,
+        }],
+        "bound-tab",
+    )
+    .await;
 
     for (text, rejected) in [
         ("see https://example.test/?token=private-value", true),
@@ -1238,7 +1305,7 @@ async fn a_rejected_action_result_fails_its_command_and_keeps_the_relay() {
             protocol_version: PROTOCOL_VERSION,
             attachment_id: grant.attachment_id.clone(),
             command_id: command_id.clone(),
-            page_id: grant.pages[0].page_id.clone(),
+            page_id: page_id.clone(),
             operation: "a11yTree".into(),
             input: json!({}),
             deadline_unix_ms: 4_102_444_800_000,
@@ -1338,11 +1405,23 @@ async fn a_respawned_native_host_restores_the_attachment_grant() {
         .wait_for_discovery(&profile_id, Duration::from_secs(1))
         .await
         .unwrap();
-    let grant = server.grant_discovered_targets(&profile_id).await.unwrap();
+    let grant = server.grant_attachment(&profile_id).await.unwrap();
     read_native_message(&mut first_extension)
         .await
         .unwrap()
         .unwrap();
+    let page_id = bind_page(
+        &server,
+        &mut first_extension,
+        &profile_id,
+        &grant.attachment_id,
+        vec![BrowserTarget {
+            target_id: "tab-1".into(),
+            kind: TargetKind::Page,
+        }],
+        "bound-tab",
+    )
+    .await;
 
     #[cfg(unix)]
     {
@@ -1373,7 +1452,7 @@ async fn a_respawned_native_host_restores_the_attachment_grant() {
         protocol_version: PROTOCOL_VERSION,
         attachment_id: grant.attachment_id.clone(),
         command_id: command_id.clone(),
-        page_id: grant.pages[0].page_id.clone(),
+        page_id: page_id.clone(),
         operation: "a11yTree".into(),
         input: json!({}),
         deadline_unix_ms: 4_102_444_800_000,
@@ -1400,7 +1479,11 @@ async fn a_respawned_native_host_restores_the_attachment_grant() {
         assert_eq!(paired.unwrap().unwrap()["kind"], "paired");
         let regrant = within("re-sent grant", read_native_message(&mut extension)).await;
         let regrant: CompanionRequest = serde_json::from_value(regrant.unwrap().unwrap()).unwrap();
-        assert_eq!(regrant, CompanionRequest::Grant(grant.clone()));
+        let CompanionRequest::Grant(regrant) = regrant else {
+            panic!("expected the re-sent grant: {regrant:?}");
+        };
+        assert_eq!(regrant.attachment_id, grant.attachment_id);
+        assert!(regrant.pages.iter().any(|page| page.page_id == page_id));
         let request = within("action", read_native_message(&mut extension)).await;
         assert_eq!(request.unwrap().unwrap()["kind"], "action");
         write_native_message(&mut extension, &reply).await.unwrap();

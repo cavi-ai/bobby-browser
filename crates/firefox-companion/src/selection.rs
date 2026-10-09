@@ -470,7 +470,7 @@ impl ConfiguredFirefoxFactory {
         session_id: &SessionId,
     ) -> Result<Arc<dyn BrowserWorker>, CommandError> {
         let grant = server
-            .grant_discovered_targets(&self.config.profile_id)
+            .grant_attachment(&self.config.profile_id)
             .await
             .map_err(companion_error)?;
         let lease = server
