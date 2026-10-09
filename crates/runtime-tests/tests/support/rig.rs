@@ -119,6 +119,8 @@ impl Rig {
         service: RuntimeService,
         firefox: Option<InstalledFirefoxRuntime>,
     ) -> Self {
+        // `RUST_LOG` prints the runtime's own events, such as each navigation settle.
+        std::mem::forget(observability::init_stdio());
         let authority = Arc::new(AuthorityStore::in_memory());
         let token = authority
             .issue(

@@ -2994,13 +2994,14 @@ impl PageOpenOperation {
 }
 
 use worker_pool::navigation_settle::{
-    navigation_settle_expression, parse_settled, LOAD_POLL, NAVIGATION_SETTLE_CAP,
+    navigation_settle_expression, parse_settled, trace_settle, SettleExit, LOAD_POLL,
+    NAVIGATION_SETTLE_CAP,
 };
 use worker_pool::secret_material::page_title_evidence;
 
 /// Waits until the document in `context` has loaded, `network` reports no
 /// script or fetch/XHR load in flight for it, and it has had no DOM mutation
-/// for `NAVIGATION_QUIET_MS`, and returns the URL and title read at that
+/// for the probe's quiet window, and returns the URL and title read at that
 /// point. A redirect that replaces the document while the probe runs restarts
 /// it. When `budget` runs out first, returns the URL and title the context
 /// shows then; `None` only when the context cannot be read.
@@ -3011,12 +3012,19 @@ async fn settle_document(
     requested_url: &str,
     network: &AsyncMutex<FirefoxNetworkQuiet>,
 ) -> Option<(String, String)> {
-    let deadline = Instant::now() + budget;
+    let started = Instant::now();
+    let deadline = started + budget;
+    let mut begin = None;
     let mut settled = None;
-    loop {
+    let exit = loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return current_page(transport, context).await.or(settled);
+            settled = current_page(transport, context).await.or(settled);
+            break if settled.is_some() {
+                SettleExit::Cap
+            } else {
+                SettleExit::Unreadable
+            };
         }
         let expression = navigation_settle_expression(remaining.as_millis().max(1), requested_url);
         // Firefox does not always reject a pending evaluation when a script
@@ -3059,12 +3067,18 @@ async fn settle_document(
                 .or_else(|| response.get("value"))
                 .and_then(Value::as_str)
                 .and_then(parse_settled);
-            if read.is_some() {
-                settled = read;
+            if let Some(read) = read {
+                begin.get_or_insert(read.begin);
+                settled = Some(read.page);
+                let exit = if read.quiet {
+                    SettleExit::Quiet
+                } else {
+                    SettleExit::Cap
+                };
                 // A script or fetch still loading changes the page once it
                 // lands: wait for it, then for the document to go quiet again.
                 if network.lock().await.pending_page_loads(context) == 0 {
-                    return settled;
+                    break exit;
                 }
                 while network.lock().await.pending_page_loads(context) > 0
                     && Instant::now() < deadline
@@ -3075,7 +3089,17 @@ async fn settle_document(
             }
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    };
+    let pending = network.lock().await.pending_page_loads(context);
+    trace_settle(
+        "firefox",
+        exit,
+        started,
+        pending,
+        begin.as_ref(),
+        settled.as_ref(),
+    );
+    settled
 }
 
 /// The URL and title `context` shows now, `None` when it cannot be read.

@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Same-document navigations settle after 1 s without DOM changes.
 - Snapshots show sign-in field labels and targets; only entered secrets are redacted.
 - Runtime owner logs to `owner.log`, rotated past 1 MiB.
 - A session keeps its pages when Firefox restarts onto a new companion build.

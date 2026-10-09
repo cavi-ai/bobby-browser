@@ -5,7 +5,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::navigation_settle::{
-    navigation_settle_expression, parse_settled, LOAD_POLL, NAVIGATION_SETTLE_CAP,
+    navigation_settle_expression, parse_settled, trace_settle, SettleExit, LOAD_POLL,
+    NAVIGATION_SETTLE_CAP,
 };
 use crate::secret_material::page_title_evidence;
 use artifact_store::ArtifactStore;
@@ -3819,12 +3820,19 @@ async fn settle_document(
     requested_url: &str,
     tracker: Option<&crate::network_quiet::NetworkQuietTracker>,
 ) -> Option<(String, String)> {
-    let deadline = Instant::now() + budget;
+    let started = Instant::now();
+    let deadline = started + budget;
+    let mut begin = None;
     let mut settled = None;
-    loop {
+    let exit = loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return current_page(page).await.or(settled);
+            settled = current_page(page).await.or(settled);
+            break if settled.is_some() {
+                SettleExit::Cap
+            } else {
+                SettleExit::Unreadable
+            };
         }
         let mut params = EvaluateParams::new(navigation_settle_expression(
             remaining.as_millis().max(1),
@@ -3840,14 +3848,20 @@ async fn settle_document(
                 .ok()
                 .and_then(|encoded| parse_settled(&encoded))
             {
-                settled = Some(read);
+                begin.get_or_insert(read.begin);
+                settled = Some(read.page);
+                let exit = if read.quiet {
+                    SettleExit::Quiet
+                } else {
+                    SettleExit::Cap
+                };
                 // A script or fetch still loading changes the page once it
                 // lands: wait for it, then for the document to go quiet again.
                 let Some(tracker) = tracker else {
-                    return settled;
+                    break exit;
                 };
                 if tracker.pending_page_loads().await == 0 {
-                    return settled;
+                    break exit;
                 }
                 while tracker.pending_page_loads().await > 0 && Instant::now() < deadline {
                     tokio::time::sleep(LOAD_POLL).await;
@@ -3856,7 +3870,20 @@ async fn settle_document(
             }
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    };
+    let pending = match tracker {
+        Some(tracker) => tracker.pending_page_loads().await,
+        None => 0,
+    };
+    trace_settle(
+        "chromium",
+        exit,
+        started,
+        pending,
+        begin.as_ref(),
+        settled.as_ref(),
+    );
+    settled
 }
 
 /// The URL and title `page` shows now, `None` when it cannot be read.

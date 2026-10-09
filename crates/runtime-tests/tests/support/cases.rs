@@ -974,6 +974,150 @@ pub async fn intent_follow_post_state_waits_for_fetched_content(rig: &Rig) {
     live.close().await;
 }
 
+/// Runs of each timing-dependent case; every run must pass.
+const SETTLE_RUNS: usize = 20;
+
+/// A link pushState-navigates and renders a skeleton, then starts its data
+/// request 0-800 ms later; the request takes 600-1500 ms. Every
+/// intent_follow's postState shows the fetched content.
+pub async fn intent_follow_waits_for_a_late_data_request(rig: &Rig) {
+    let start = page(
+        "Start",
+        r#"<main id="main"><a id="go" href="/results/list">Open results</a></main>
+        <script>
+            document.getElementById("go").addEventListener("click", (event) => {
+              event.preventDefault();
+              history.pushState({}, "", "/results/list");
+              const main = document.getElementById("main");
+              main.innerHTML = "<div role='presentation'></div>".repeat(19);
+              setTimeout(() => {
+                fetch("/api/rows?ms=" + (600 + Math.floor(Math.random() * 901)))
+                  .then((response) => response.json())
+                  .then((rows) => {
+                    main.innerHTML = "<h1>Results</h1><ul>" +
+                      rows.map((row) => "<li>" + row + "</li>").join("") + "</ul>";
+                  });
+              }, Math.floor(Math.random() * 801));
+            });
+        </script>"#,
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/start", Route::Html(start)),
+        (
+            "/api/rows",
+            Route::QueryDelayed {
+                content_type: "application/json",
+                body: r#"["First row","Second row"]"#.to_owned(),
+            },
+        ),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/start")).await;
+    let mut failures = Vec::new();
+    for run in 1..=SETTLE_RUNS {
+        let loaded = live
+            .call("navigate", json!({"url":site.url("/start")}))
+            .await;
+        assert_eq!(loaded["status"], "completed", "navigate: {loaded}");
+        let followed = live
+            .call(
+                "intent_follow",
+                json!({
+                    "purpose":"Open the results",
+                    "hints":{"role":"link","accessibleName":"Open results"},
+                    "expectedState":{
+                        "condition":{"kind":"url","matcher":{"kind":"contains","value":"/results/"}},
+                        "timeoutMs":15000
+                    }
+                }),
+            )
+            .await;
+        if followed["status"] != "completed" {
+            failures.push(format!("run {run}: status {}", followed["status"]));
+        } else if find_node(&followed["postState"], "heading", Some("Results")).is_none() {
+            failures.push(format!("run {run}: postState is not the fetched page"));
+        }
+    }
+    live.close().await;
+    assert!(
+        failures.is_empty(),
+        "{} of {SETTLE_RUNS} runs failed: {failures:?}",
+        failures.len()
+    );
+}
+
+/// Enter pushState-navigates and fetches the results (600-1500 ms), renders
+/// them, and sets the title 0-800 ms later. Every type_text reports the new
+/// title.
+pub async fn type_text_enter_reports_a_late_title(rig: &Rig) {
+    let home = page(
+        "Home",
+        r#"<header><input id="q" aria-label="Search"></header><main id="main"><h1>Home</h1></main>
+        <script>
+            document.getElementById("q").addEventListener("keydown", (event) => {
+              if (event.key !== "Enter") return;
+              event.preventDefault();
+              history.pushState({}, "", "/search?q=" + encodeURIComponent(event.target.value));
+              const main = document.getElementById("main");
+              main.innerHTML = "<p>Loading</p>";
+              fetch("/api/results?ms=" + (600 + Math.floor(Math.random() * 901)))
+                .then((response) => response.json())
+                .then((rows) => {
+                  main.innerHTML = "<h1>Search results</h1><ul>" +
+                    rows.map((row) => "<li>" + row + "</li>").join("") + "</ul>";
+                  setTimeout(() => {
+                    document.title = "Search results";
+                  }, Math.floor(Math.random() * 801));
+                });
+            });
+        </script>"#,
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/home", Route::Html(home)),
+        (
+            "/api/results",
+            Route::QueryDelayed {
+                content_type: "application/json",
+                body: r#"["First result","Second result"]"#.to_owned(),
+            },
+        ),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let expected_url = site.url("/search?q=query%20terms");
+    let mut failures = Vec::new();
+    for run in 1..=SETTLE_RUNS {
+        let loaded = live
+            .call("navigate", json!({"url":site.url("/home")}))
+            .await;
+        assert_eq!(loaded["status"], "completed", "navigate: {loaded}");
+        let typed = live
+            .call(
+                "type_text",
+                json!({"target":{"role":"textbox","accessibleName":"Search"},
+                       "value":"query terms\n","clearFirst":true}),
+            )
+            .await;
+        let mut navigations = Vec::new();
+        objects_of_kind(&typed, "navigation", &mut navigations);
+        if typed["status"] != "completed" {
+            failures.push(format!("run {run}: status {}", typed["status"]));
+        } else if !navigations
+            .iter()
+            .any(|item| item["url"] == expected_url.as_str() && item["title"] == "Search results")
+        {
+            let reported: Vec<_> = navigations.iter().map(|item| &item["title"]).collect();
+            failures.push(format!("run {run}: reported titles {reported:?}"));
+        }
+    }
+    live.close().await;
+    assert!(
+        failures.is_empty(),
+        "{} of {SETTLE_RUNS} runs failed: {failures:?}",
+        failures.len()
+    );
+}
+
 /// Controls rendered a few seconds after load: every action and intent waits
 /// for its target to appear instead of failing targetNotFound at once.
 pub async fn actions_wait_for_a_late_target(rig: &Rig) {

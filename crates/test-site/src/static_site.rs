@@ -31,6 +31,12 @@ pub enum Route {
         content_type: &'static str,
         body: String,
     },
+    /// Serves `body` with this content type after the request's `ms` query
+    /// parameter in milliseconds, at most ten seconds.
+    QueryDelayed {
+        content_type: &'static str,
+        body: String,
+    },
 }
 
 type Bodies = Arc<Mutex<Vec<Vec<u8>>>>;
@@ -155,6 +161,18 @@ async fn serve(
             body,
         } => {
             tokio::time::sleep(*delay).await;
+            ([(header::CONTENT_TYPE, *content_type)], body.clone()).into_response()
+        }
+        Route::QueryDelayed { content_type, body } => {
+            let ms = uri
+                .query()
+                .into_iter()
+                .flat_map(|query| query.split('&'))
+                .find_map(|pair| pair.strip_prefix("ms="))
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0)
+                .min(10_000);
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
             ([(header::CONTENT_TYPE, *content_type)], body.clone()).into_response()
         }
     }
