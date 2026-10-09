@@ -29,6 +29,7 @@ macro_rules! every_case {
             snapshot_scopes_to_a_named_list,
             snapshot_targets_act_on_the_described_element,
             type_text_enter_reports_the_settled_page,
+            type_text_enter_accepts_a_reformatted_landed_field,
             intent_follow_post_state_shows_the_settled_page,
             type_text_enter_reports_the_rewritten_url,
             intent_follow_post_state_waits_for_fetched_content,
@@ -803,6 +804,48 @@ pub async fn type_text_enter_reports_the_settled_page(rig: &Rig) {
             );
         }
     }
+    live.close().await;
+}
+
+/// Enter submits a GET form and the landed page shows the query, reformatted,
+/// in its own search box: type_text completes and reports the landed page.
+pub async fn type_text_enter_accepts_a_reformatted_landed_field(rig: &Rig) {
+    let search = r#"<form action="/results"><input name="q" aria-label="Search"></form>"#;
+    let home = page("Home", &format!("{search}<main><h1>Home</h1></main>"));
+    let results = page(
+        "Results",
+        &format!(
+            r#"{search}<main><h1>Results</h1></main>
+            <script>
+                const query = new URLSearchParams(location.search).get("q") || "";
+                document.querySelector("input").value =
+                    query.replace(/\b\w/g, (letter) => letter.toUpperCase());
+            </script>"#
+        ),
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/home", Route::Html(home)),
+        ("/results", Route::Html(results)),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let typed = live
+        .call(
+            "type_text",
+            json!({"target":{"role":"textbox","accessibleName":"Search"},
+                   "value":"query terms\n","clearFirst":true}),
+        )
+        .await;
+    assert_eq!(typed["status"], "completed", "type_text: {typed}");
+    let mut navigations = Vec::new();
+    objects_of_kind(&typed, "navigation", &mut navigations);
+    let expected_url = site.url("/results?q=query+terms");
+    assert!(
+        navigations
+            .iter()
+            .any(|item| item["url"] == expected_url.as_str() && item["title"] == "Results"),
+        "type_text did not report the landed page {expected_url}: {typed}"
+    );
     live.close().await;
 }
 

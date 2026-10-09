@@ -98,21 +98,24 @@ impl PageRuntime {
                     Err(error) => return Err(error),
                 };
                 let inspected = verification.iter().find_map(|item| match item {
-                    Evidence::Inspection { text, .. } => Some(text.as_str()),
+                    Evidence::Inspection { text, url, .. } => Some((text.as_str(), url.as_str())),
                     _ => None,
                 });
                 let matches = if submitted_with_enter {
-                    inspected.is_none_or(|inspected| {
-                        typed_value_verified(
-                            &typed_text,
-                            command.clear_first,
-                            inspected,
-                            observed,
-                            kind,
-                        )
+                    // A read-back from the page the submit landed on shows that
+                    // page's field, which the site may fill with its own value.
+                    inspected.is_none_or(|(inspected, read_on)| {
+                        typed_on.as_deref().is_some_and(|typed_on| read_on != typed_on)
+                            || typed_value_verified(
+                                &typed_text,
+                                command.clear_first,
+                                inspected,
+                                observed,
+                                kind,
+                            )
                     })
                 } else {
-                    inspected.is_some_and(|inspected| {
+                    inspected.is_some_and(|(inspected, _)| {
                         typed_value_verified(
                             &command.value,
                             command.clear_first,
