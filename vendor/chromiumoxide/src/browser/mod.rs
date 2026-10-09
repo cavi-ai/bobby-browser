@@ -211,17 +211,7 @@ impl Browser {
 
         let (tx, rx) = channel(1);
 
-        let handler_config = HandlerConfig {
-            ignore_https_errors: config.ignore_https_errors,
-            ignore_invalid_messages: config.ignore_invalid_messages,
-            viewport: config.viewport.clone(),
-            context_ids: Vec::new(),
-            request_timeout: config.request_timeout,
-            request_intercept: config.request_intercept,
-            cache_enabled: config.cache_enabled,
-        };
-
-        let fut = Handler::new(conn, rx, handler_config);
+        let fut = Handler::new(conn, rx, config.handler_config());
         let browser_context = fut.default_browser_context().clone();
 
         let browser = Self {
