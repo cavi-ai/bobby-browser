@@ -230,19 +230,33 @@ impl Browser {
         if std::env::var_os("MOZ_HEADLESS").is_some() {
             command.arg("--headless");
         }
+        let log = profile.join("firefox.log");
+        let output = std::fs::File::create(&log).expect("create the Firefox log");
         let child = command
             .arg("about:blank")
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(output.try_clone().expect("share the Firefox log"))
+            .stderr(output)
             .kill_on_drop(true)
             .spawn()
             .expect("launch Firefox");
-        let browser = Self {
+        let mut browser = Self {
             profile: profile.to_path_buf(),
             child: Some(child),
         };
-        let url = wait_for_endpoint(profile).await;
+        let url = match tokio::time::timeout(TIMEOUT, wait_for_endpoint(profile)).await {
+            Ok(url) => url,
+            Err(_) => {
+                let state = match browser.child.as_mut().map(|child| child.try_wait()) {
+                    Some(Ok(Some(status))) => format!("exited with {status}"),
+                    _ => "still running".to_owned(),
+                };
+                let output = std::fs::read_to_string(&log).unwrap_or_default();
+                let lines: Vec<&str> = output.lines().collect();
+                let tail = lines[lines.len().saturating_sub(40)..].join("\n");
+                panic!("Firefox published no BiDi endpoint and is {state}; output:\n{tail}");
+            }
+        };
         (browser, url)
     }
 
@@ -307,16 +321,12 @@ fn profile_owner_pids(profile: &Path) -> Vec<i32> {
 }
 
 async fn wait_for_endpoint(profile: &Path) -> Url {
-    tokio::time::timeout(TIMEOUT, async {
-        loop {
-            if let Ok(url) = firefox_companion::read_bidi_url_from_profile_dir(profile) {
-                return url;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+    loop {
+        if let Ok(url) = firefox_companion::read_bidi_url_from_profile_dir(profile) {
+            return url;
         }
-    })
-    .await
-    .expect("Firefox published its BiDi endpoint")
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 /// Start Firefox on the profile and pair its sideloaded companion.
