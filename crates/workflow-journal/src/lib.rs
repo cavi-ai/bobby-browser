@@ -464,8 +464,14 @@ impl CommandJournal for JsonlJournal {
                     reader.seek(std::io::SeekFrom::Start(*offset)).await?;
                     let mut line = Vec::new();
                     reader.read_until(b'\n', &mut line).await?;
-                    if let Ok(record) = serde_json::from_slice(&line) {
-                        scan.records.push(record);
+                    if let Ok(record) = serde_json::from_slice::<JournalRecord>(&line) {
+                        if record.command_id == id {
+                            scan.records.push(record);
+                        } else {
+                            // Archive contents may change after offsets are built.
+                            // Never attribute another command's diagnostic data.
+                            scan.incompatible_records += 1;
+                        }
                     }
                 }
             }

@@ -276,6 +276,65 @@ async fn reopens_committed_history_in_order() {
 }
 
 #[tokio::test]
+async fn archived_history_never_returns_another_commands_record_from_a_stale_offset() {
+    for prepend in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("commands.jsonl");
+        let archive = dir.path().join("commands.jsonl.archive-fixture");
+        let requested = CommandId::new();
+        let other = CommandId::new();
+        let first = record(&requested, CommandPhase::Accepted);
+        let mut second = record(&requested, CommandPhase::Prepared);
+        second.sequence = 1;
+        let first_line = format!("{}\n", serde_json::to_string(&first).unwrap());
+        let second_line = format!("{}\n", serde_json::to_string(&second).unwrap());
+        let original = format!("{first_line}{second_line}");
+        tokio::fs::write(&archive, &original).await.unwrap();
+        let journal = JsonlJournal::open(&path).await.unwrap();
+        assert_eq!(
+            journal
+                .history(requested.clone())
+                .await
+                .unwrap()
+                .records
+                .len(),
+            2
+        );
+
+        // Exercise an in-place ID rewrite and an insertion that shifts offsets.
+        let other_line = first_line.replace(&requested.0.to_string(), &other.0.to_string());
+        let changed = if prepend {
+            format!("{other_line}{original}")
+        } else {
+            format!("{other_line}{second_line}")
+        };
+        tokio::fs::write(&archive, &changed).await.unwrap();
+        let scan = journal.history(requested.clone()).await.unwrap();
+        assert_eq!(scan.records.len(), 1);
+        assert!(scan
+            .records
+            .iter()
+            .all(|record| record.command_id == requested));
+        assert!(scan.incompatible_records > 0);
+        assert!(matches!(
+            journal
+                .append(record(&requested, CommandPhase::Executing))
+                .await,
+            Err(workflow_journal::JournalError::UncertainCommand)
+        ));
+        assert_eq!(tokio::fs::read(&archive).await.unwrap(), changed.as_bytes());
+        let fresh = CommandId::new();
+        journal
+            .append(record(&fresh, CommandPhase::Accepted))
+            .await
+            .unwrap();
+        let scan = journal.history(fresh).await.unwrap();
+        assert_eq!(scan.records.len(), 1);
+        assert_eq!(scan.incompatible_records, 0);
+    }
+}
+
+#[tokio::test]
 async fn archive_identity_probe_preserves_duplicate_key_and_invalid_record_handling() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("commands.jsonl");
