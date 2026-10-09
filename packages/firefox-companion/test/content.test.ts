@@ -635,6 +635,62 @@ test("a11yTree exposes bounded form state without leaking sensitive values", () 
   assert.equal(encoded.includes(secret), false);
 });
 
+test("sign-in fields show their labels, read empty when empty, and redact only the password", () => {
+  const secret = "typed-pass-58";
+  const document = documentFor(`
+    <form>
+      <iframe title="Sign in" allow="identity-credentials-get"></iframe>
+      <div><span>or</span></div>
+      <label for="identifier">Email or username</label>
+      <input id="identifier" type="text" autocomplete="username webauthn">
+      <label for="password">Password</label>
+      <input id="password" type="password" autocomplete="current-password">
+    </form>
+  `);
+  type Node = { role?: string; name?: string; value?: string; target?: { accessibleName: string }; children?: Node[] };
+  const flat = (nodes: Node[]): Node[] => nodes.flatMap((node) => [node, ...flat(node.children ?? [])]);
+  const snapshot = () =>
+    flat((executeContentAction(document, "a11yTree", { maxNodes: 64, includeText: true }) as { nodes: Node[] }).nodes);
+
+  const empty = snapshot();
+  const field = (nodes: Node[], name: string) => nodes.find((node) => node.role === "textbox" && node.name === name);
+  assert.equal(field(empty, "Email or username")?.target?.accessibleName, "Email or username");
+  assert.equal(field(empty, "Email or username")?.value, "");
+  assert.equal(field(empty, "Password")?.target?.accessibleName, "Password");
+  assert.equal(field(empty, "Password")?.value, "");
+  assert.ok(empty.some((node) => node.role === "iframe" && node.name === "Sign in"));
+  const texts = empty.filter((node) => node.role === "StaticText").map((node) => node.name);
+  assert.deepEqual(texts, ["or", "Email or username", "Password"]);
+  const observedEmpty = observeDocument(document).controls;
+  assert.equal(observedEmpty.find((control) => control.cssPath === "#identifier")?.name, "Email or username");
+  const emptyPassword = observedEmpty.find((control) => control.name === "Password");
+  assert.ok(emptyPassword);
+  assert.equal(emptyPassword.value, undefined);
+  assert.equal(JSON.stringify(observedEmpty).includes("[redacted]"), false);
+
+  document.querySelector<HTMLInputElement>("#identifier")!.value = "reader@example.test";
+  document.querySelector<HTMLInputElement>("#password")!.value = secret;
+  const filled = snapshot();
+  assert.equal(field(filled, "Email or username")?.value, "reader@example.test");
+  assert.equal(field(filled, "Password")?.value, "[redacted]");
+  const observedFilled = observeDocument(document);
+  assert.equal(observedFilled.controls.find((control) => control.name === "Password")?.value, "[redacted]");
+  assert.equal(JSON.stringify([filled, observedFilled]).includes(secret), false);
+});
+
+test("a webauthn token does not clear a password field's redaction", () => {
+  const secret = "typed-pass-59";
+  const document = documentFor(
+    `<label for="p">Passphrase</label><input id="p" autocomplete="current-password webauthn" value="${secret}">`,
+  );
+  const observed = observeDocument(document);
+  assert.equal(observed.controls[0]?.value, "[redacted]");
+  assert.equal(observed.controls[0]?.name, "[redacted]");
+  const tree = JSON.stringify(executeContentAction(document, "a11yTree", { maxNodes: 16, includeText: true }));
+  assert.equal(tree.includes(secret), false);
+  assert.equal(tree.includes("Passphrase"), false);
+});
+
 test("a11yTree keeps the global ordinal when a duplicate is truncated", () => {
   const document = documentFor(`
     <label for="home-phone">Phone</label><input id="home-phone">

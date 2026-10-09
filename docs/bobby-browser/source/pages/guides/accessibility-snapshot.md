@@ -28,7 +28,7 @@ Each node is `{role, name, children?}`. Form controls add optional state:
 
 | Field | Meaning |
 |---|---|
-| `value` | Current value. Sensitive values read `"[redacted]"` |
+| `value` | Current value. Sensitive values read `"[redacted]"`; an empty field reads empty |
 | `description` | Accessible description |
 | `required`, `disabled`, `readOnly`, `invalid` | Constraint state |
 | `checked` | Checkbox or radio state |

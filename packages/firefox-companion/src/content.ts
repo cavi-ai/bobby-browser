@@ -251,7 +251,8 @@ function isSensitiveTextContext(element: Element): boolean {
   const control = element.closest(CONTROL_SELECTOR);
   if (control && isSensitiveControl(control)) return true;
   const label = element.closest("label");
-  if (!label) return false;
+  // A label reading exactly a public control label shows, as the name does.
+  if (!label || isPublicControlLabel(label.textContent)) return false;
   const labelled = label.getAttribute("for");
   if (labelled) {
     const target = label.ownerDocument.getElementById(labelled);
@@ -578,15 +579,19 @@ function accessibleName(
   );
 }
 
+const PUBLIC_CONTROL_LABELS = ["Password", "Authentication code"];
+
 function publicControlLabel(element: Element): string | undefined {
   if (!["INPUT", "TEXTAREA", "SELECT"].includes(element.tagName)) return undefined;
   const input = element as HTMLInputElement;
   const names = [element.getAttribute("aria-label"), ...Array.from(input.labels ?? []).map((label) => label.textContent)];
   // Emit only these exact fixed labels; never forward arbitrary text from a
   // sensitive control's metadata, which can include credentials.
-  return ["Password", "Authentication code"].find((safeName) =>
-    names.some((name) => name?.trim() === safeName)
-  );
+  return PUBLIC_CONTROL_LABELS.find((safeName) => names.some((name) => name?.trim() === safeName));
+}
+
+function isPublicControlLabel(text: string | null): boolean {
+  return PUBLIC_CONTROL_LABELS.includes(text?.trim() ?? "");
 }
 
 function isSensitiveControl(element: Element, budget?: WorkBudget): boolean {
@@ -599,7 +604,14 @@ function isSensitiveControl(element: Element, budget?: WorkBudget): boolean {
   if (element.attributes.length > 128) return true;
   for (const attribute of element.attributes) {
     if (!takeWork(budget)) return true;
-    const value = attribute.value.slice(0, MAX_CONTROL_FIELD_LENGTH * 8);
+    // A frame's permission policy names features such as
+    // `identity-credentials-get`; it is never reported and holds no secret.
+    if (element.tagName === "IFRAME" && attribute.name === "allow") continue;
+    let value = attribute.value.slice(0, MAX_CONTROL_FIELD_LENGTH * 8);
+    // The `webauthn` autofill token offers passkeys on an identifier field.
+    if (attribute.name === "autocomplete") {
+      value = value.split(/\s+/).filter((token) => token.toLowerCase() !== "webauthn").join(" ");
+    }
     if (
       SENSITIVE_MARKER.test(attribute.name) ||
       SENSITIVE_MARKER.test(value) ||
@@ -613,7 +625,12 @@ function isSensitiveControl(element: Element, budget?: WorkBudget): boolean {
 
 function controlValue(element: Element, sensitive = isSensitiveControl(element)): string | undefined {
   if (!["INPUT", "SELECT", "TEXTAREA"].includes(element.tagName)) return undefined;
-  if (sensitive) return REDACTED;
+  // An empty sensitive field holds nothing to withhold; it reads empty.
+  if (sensitive) {
+    return (element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement).value === ""
+      ? undefined
+      : REDACTED;
+  }
   // File inputs expose a browser-supplied local path through `value`; only
   // the selected file names are reported.
   if (element.tagName === "INPUT" && (element as HTMLInputElement).type === "file") {
