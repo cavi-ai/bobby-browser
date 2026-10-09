@@ -426,6 +426,58 @@ async fn sweep_reports_persistence_failure() {
 
     let error = store.sweep(90, 200).await.unwrap_err();
     assert!(matches!(error, ContextStoreError::Io(_)));
+    assert!(store.list_sites().await.is_empty());
+}
+
+#[tokio::test]
+async fn listing_applies_retention_to_resident_context_after_a_failed_sweep() {
+    let temp = tempfile::tempdir().unwrap();
+    let (store, _) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
+    store.upsert_site("expired", site(&["Expired"], 69)).await;
+    store.upsert_site("boundary", site(&["Boundary"], 70)).await;
+    store.upsert_site("fresh", site(&["Fresh"], 100)).await;
+    store.upsert_site("empty", SiteContext::default()).await;
+    let mut unverified = site(&["Unverified"], 100);
+    unverified
+        .pages
+        .get_mut("/login")
+        .unwrap()
+        .forms
+        .get_mut("login")
+        .unwrap()
+        .controls[0]
+        .intents
+        .get_mut("fill")
+        .unwrap()
+        .last_verified_day = None;
+    store.upsert_site("unverified", unverified).await;
+    let challenge = SiteContext {
+        challenges: std::collections::BTreeMap::from([(
+            "challenge".into(),
+            context_store::ChallengeStats::default(),
+        )]),
+        ..Default::default()
+    };
+    store.upsert_site("challenge", challenge).await;
+    assert_eq!(
+        store.list_sites().await,
+        vec![
+            "boundary",
+            "challenge",
+            "empty",
+            "expired",
+            "fresh",
+            "unverified"
+        ]
+    );
+    // The failure sets the cutoff before persistence and leaves resident
+    // snapshots unpruned. Listing must still apply the public retention rule.
+    std::fs::remove_dir_all(store.root()).unwrap();
+    assert!(store.sweep(30, 100).await.is_err());
+    assert_eq!(
+        store.list_sites().await,
+        vec!["boundary", "challenge", "fresh"]
+    );
 }
 
 #[tokio::test]
