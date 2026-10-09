@@ -5,6 +5,61 @@
 
 use super::*;
 
+/// Non-escalating resolution retains the full census for near-miss reporting.
+/// Gather and resolver failures remain distinct: callers intentionally handle
+/// them differently during reveal waits and structured extraction.
+pub(super) struct Decision {
+    pub census: Vec<Candidate>,
+    pub resolution: Result<ResolutionDecision, dom_engine::ResolutionError>,
+}
+
+pub(super) async fn decide(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    target: &TargetSpec,
+    action: Option<&ControlAction>,
+) -> Result<Decision, CommandError> {
+    let census = browser.collect_candidates(page_id, target).await?;
+    let resolution = decide_candidates(target, &census, action);
+    Ok(Decision { census, resolution })
+}
+
+pub(super) fn decide_candidates(
+    target: &TargetSpec,
+    census: &[Candidate],
+    action: Option<&ControlAction>,
+) -> Result<ResolutionDecision, dom_engine::ResolutionError> {
+    let compatible_pool = action
+        .map(|action| {
+            census
+                .iter()
+                .filter(|candidate| compatible(action, candidate))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let pool = if compatible_pool.is_empty() {
+        census
+    } else {
+        &compatible_pool
+    };
+    resolve_candidates(target, pool, &ResolutionPolicy::default())
+}
+
+pub(super) fn decide_file_candidates(
+    target: &TargetSpec,
+    candidates: &[Candidate],
+) -> Result<ResolutionDecision, dom_engine::ResolutionError> {
+    resolve_candidates(
+        target,
+        candidates,
+        &ResolutionPolicy {
+            require_visible: false,
+            ..ResolutionPolicy::default()
+        },
+    )
+}
+
 pub(super) enum LocateMode<'a> {
     Standard,
     Purpose,
@@ -76,8 +131,7 @@ pub(super) async fn locate(
     } else {
         &compatible_pool
     };
-    let policy = ResolutionPolicy::default();
-    let decision = resolve_candidates(request.target, pool, &policy).map_err(|error| {
+    let decision = decide_candidates(request.target, pool, None).map_err(|error| {
         failure(
             CommandError {
                 code: ErrorCode::InvalidRequest,

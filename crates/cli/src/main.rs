@@ -3,6 +3,7 @@ mod audit_replay;
 mod bootstrap_local;
 mod deployment_profiles;
 mod doctor;
+mod host_stdio;
 mod jobs_client;
 mod onboarding;
 mod openshell;
@@ -11,6 +12,7 @@ mod runtime_scopes;
 mod v1_client;
 mod vision_child;
 mod vision_collect;
+mod vision_commands;
 mod vision_connect;
 mod vision_login;
 mod vision_readiness;
@@ -758,18 +760,7 @@ pub async fn run() -> Result<()> {
     };
     cli.scope.apply()?;
     match command {
-        CliCommand::FirefoxStart => {
-            let root = config::bobby_config_dir().context("config directory unavailable")?;
-            let defaults = read_enroll_defaults(&enroll_defaults_path(&root))
-                .context("Firefox profile not installed; run `bobby install --companion` with the same team/project flags")?;
-            let endpoint = firefox_companion::selection::start_installed_firefox(
-                &defaults.profile_dir,
-                Duration::from_secs(30),
-            )
-            .await
-            .map_err(|error| anyhow::anyhow!(error.message))?;
-            println!("Firefox ready at {endpoint}; Pair from the companion toolbar if not already enrolled");
-        }
+        CliCommand::FirefoxStart => runtime_scopes::firefox_start().await?,
         CliCommand::Runtime { command } => runtime_scopes::run(command).await?,
         CliCommand::RuntimeOwner {
             state_dir,
@@ -799,17 +790,13 @@ pub async fn run() -> Result<()> {
             vision,
             no_vision,
         } => {
-            let bootstrap_path = resolve_bootstrap_path(bootstrap_env)?;
-            load_managed_vision_token(&bootstrap_path, "BOBBY_VISION_TOKEN")?;
-            let config_path = resolve_config_path(config);
-            let policy = policy_from_flags(vision, no_vision);
-            let origin =
-                runtime_scopes::ensure_owner(config_path.clone(), bootstrap_path.clone(), policy)
-                    .await?;
-            unsafe {
-                std::env::set_var("BOBBY_RUNTIME_URL", origin);
-            }
-            onboarding::exec_mcp_stdio(&bootstrap_path, &config_path)?;
+            host_stdio::run(
+                host_stdio::Protocol::Mcp,
+                bootstrap_env,
+                config,
+                policy_from_flags(vision, no_vision),
+            )
+            .await?;
         }
         CliCommand::AcpStdio {
             bootstrap_env,
@@ -817,17 +804,13 @@ pub async fn run() -> Result<()> {
             vision,
             no_vision,
         } => {
-            let bootstrap_path = resolve_bootstrap_path(bootstrap_env)?;
-            load_managed_vision_token(&bootstrap_path, "BOBBY_VISION_TOKEN")?;
-            let config_path = resolve_config_path(config);
-            let policy = policy_from_flags(vision, no_vision);
-            let origin =
-                runtime_scopes::ensure_owner(config_path.clone(), bootstrap_path.clone(), policy)
-                    .await?;
-            unsafe {
-                std::env::set_var("BOBBY_RUNTIME_URL", origin);
-            }
-            onboarding::exec_acp_stdio(&bootstrap_path, &config_path)?;
+            host_stdio::run(
+                host_stdio::Protocol::Acp,
+                bootstrap_env,
+                config,
+                policy_from_flags(vision, no_vision),
+            )
+            .await?;
         }
         CliCommand::Install {
             host,
@@ -956,48 +939,20 @@ pub async fn run() -> Result<()> {
             json,
             profile,
         } => {
-            if fix {
-                let options = doctor::DoctorFixOptions {
+            doctor::run_cli(doctor::DoctorCliOptions {
+                options: doctor::DoctorFixOptions {
                     config,
                     bootstrap_env,
                     check_health: !skip_health,
                     download_model,
                     profile,
-                };
-                let report = if downgrade_idempotency {
-                    doctor::run_idempotency_downgrade(options)?
-                } else {
-                    doctor::run_doctor_fix(options)?
-                };
-                if json {
-                    report.render_actions();
-                    report
-                        .post_fix
-                        .render_json_to(&mut std::io::stdout().lock())?;
-                } else {
-                    report.render();
-                }
-                if report.post_fix.failures() > 0
-                    || report
-                        .actions
-                        .iter()
-                        .any(|action| action.status == doctor::DoctorFixStatus::Failed)
-                {
-                    std::process::exit(1);
-                }
-            } else {
-                let report =
-                    doctor::run_doctor_with_profile(config, bootstrap_env, !skip_health, profile)?;
-                if json {
-                    report.render_json_to(&mut std::io::stdout().lock())?;
-                } else {
-                    report.render();
-                }
-                if report.failures() > 0 {
-                    std::process::exit(1);
-                }
-            }
+                },
+                fix,
+                downgrade_idempotency,
+                json,
+            })?;
         }
+
         CliCommand::Profiles { json } => deployment_profiles::print_catalog(json),
         CliCommand::Token {
             bootstrap_env,
@@ -1007,63 +962,7 @@ pub async fn run() -> Result<()> {
         CliCommand::Openshell { command } => run_openshell(command)?,
         CliCommand::Context { command, config } => run_context(command, config).await?,
         CliCommand::Audit { command } => run_audit(command)?,
-        CliCommand::Vision { command } => match command {
-            VisionCommands::Connect(args) => vision_connect::connect(args.into())?,
-            VisionCommands::Login(args) => vision_login::login(args.config, &args.name).await?,
-            VisionCommands::Status { config } => vision_status(config).await?,
-            VisionCommands::Start { config } => run_configured_vision_service(config).await?,
-            VisionCommands::Collect {
-                output,
-                examples,
-                journey,
-            } => {
-                vision_collect::run_collect(output, examples, journey)?;
-            }
-            VisionCommands::Solve {
-                purpose,
-                url,
-                session,
-                page,
-                node,
-                timeout_ms,
-                zigzagzig,
-                common,
-            } => {
-                let (base_url, bearer) = prepare_jobs_client(&common)?;
-                vision_solve::solve(vision_solve::VisionSolveOptions {
-                    purpose,
-                    url,
-                    session,
-                    page,
-                    node,
-                    timeout_ms,
-                    zigzagzig,
-                    base_url,
-                    bearer,
-                })?;
-            }
-            VisionCommands::Detect {
-                purpose,
-                url,
-                session,
-                page,
-                node,
-                timeout_ms,
-                common,
-            } => {
-                let (base_url, bearer) = prepare_jobs_client(&common)?;
-                vision_solve::detect(vision_solve::VisionDetectOptions {
-                    purpose,
-                    url,
-                    session,
-                    page,
-                    node,
-                    timeout_ms,
-                    base_url,
-                    bearer,
-                })?;
-            }
-        },
+        CliCommand::Vision { command } => vision_commands::run(command).await?,
         CliCommand::VisionConnect(args) => vision_connect::connect(args.into())?,
         CliCommand::VisionProxy {
             bind,

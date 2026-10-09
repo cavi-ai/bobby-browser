@@ -986,6 +986,23 @@ pub(crate) async fn run(command: RuntimeCommand) -> Result<()> {
     Ok(())
 }
 
+pub(crate) async fn firefox_start() -> Result<()> {
+    use crate::{enroll_defaults_path, read_enroll_defaults};
+    let root = config::bobby_config_dir().context("config directory unavailable")?;
+    let defaults = read_enroll_defaults(&enroll_defaults_path(&root))
+                .context("Firefox profile not installed; run `bobby install --companion` with the same team/project flags")?;
+    let endpoint = firefox_companion::selection::start_installed_firefox(
+        &defaults.profile_dir,
+        Duration::from_secs(30),
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!(error.message))?;
+    println!(
+        "Firefox ready at {endpoint}; Pair from the companion toolbar if not already enrolled"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

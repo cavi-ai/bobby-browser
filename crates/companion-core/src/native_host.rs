@@ -1,8 +1,10 @@
+mod relay_state;
 use companion_protocol::{
     is_extension_build_id, BrowserIdentity, CompanionCapabilities, CompanionEvent,
     CompanionRequest, PairRequest, EXTENSION_BUILD_HEADER, PROTOCOL_VERSION,
 };
 use futures_util::{SinkExt, StreamExt};
+use relay_state::{RelayAction, RelayEvent, RelayState};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -1050,8 +1052,7 @@ where
     ));
 
     let result = async {
-        let mut enroll_finalized = !finalize_enroll;
-        let mut backoff = NativeReconnectBackoff::default();
+        let mut relay = RelayState::new(finalize_enroll);
         'reconnect: loop {
         if *native_closed_receiver.borrow() {
             break Ok(());
@@ -1081,7 +1082,7 @@ where
             tokio::select! {
                 _ = wait_for_config_change(&mut config_changes) => {
                     if config.refresh_endpoint() {
-                        backoff.reset();
+                        relay.step(RelayEvent::EndpointChanged);
                         continue 'reconnect;
                     }
                 }
@@ -1097,7 +1098,7 @@ where
                 // A replacement endpoint has its own credential; an old
                 // listener rejecting the prior one must not block handoff.
                 if config.refresh_endpoint() {
-                    backoff.reset();
+                    relay.step(RelayEvent::EndpointChanged);
                     continue;
                 }
                 // The server is the authority: a refused stored credential is
@@ -1105,7 +1106,7 @@ where
                 if has_credential {
                     log.record("credential_refused", "stored reconnect credential deleted");
                     config.forget_reconnect_credential()?;
-                    if config.has_pairing_code() {
+                    if relay.step(RelayEvent::AuthRefused { can_pair: config.has_pairing_code() }) == RelayAction::ReconnectAfter(Duration::ZERO) {
                         continue;
                     }
                 }
@@ -1114,7 +1115,9 @@ where
             }
             Err(error) if has_credential => {
                 log.record("connect_failed", &connect_failure(&error));
-                let delay = backoff.next_delay();
+                let RelayAction::ReconnectAfter(delay) = relay.step(RelayEvent::Disconnected { has_credential: true }) else {
+                    break Err(NativeHostError::WebSocket);
+                };
                 if sleep_or_native_closed(delay, &mut native_closed_receiver).await {
                     break Ok(());
                 }
@@ -1129,7 +1132,7 @@ where
             "connected",
             if has_credential { "reconnect credential" } else { "pairing code" },
         );
-        backoff.reset();
+        relay.step(RelayEvent::Connected);
         let (mut socket_writer, mut socket_reader) = socket.split();
         if !has_credential
             && socket_writer
@@ -1223,7 +1226,7 @@ where
                                 .get("kind")
                                 .and_then(|kind| kind.as_str())
                                 == Some("paired");
-                            if !enroll_finalized && is_initial_pair {
+                            if is_initial_pair && relay.step(RelayEvent::Paired) == RelayAction::FinalizeEnrollment {
                                 // Persist before the extension observes durable success.
                                 if let Some(enroll) = enroll.as_ref() {
                                     let finalize = match enroll.complete_enrollment(&connect).await
@@ -1239,18 +1242,19 @@ where
                                     write_native_message(&mut native_writer, &value).await?;
                                     write_enroll_status(&mut native_writer, "enrollOk", None)
                                         .await?;
-                                    enroll_finalized = true;
-                                    match finalize {
+                                    let keep_relay = matches!(finalize, EnrollFinalize::KeepRelay);
+                                    match relay.step(RelayEvent::EnrollmentFinalized { keep_relay }) {
                                         // Temp enrollment listener was dropped; exit so day-2
                                         // serve can bind the same address.
-                                        EnrollFinalize::ReleaseListener => {
+                                        RelayAction::Stop => {
                                             break Ok(ConnectionResult::NativeClosed);
                                         }
                                         // Live serve already owns the bind; keep relaying.
                                         // Skip the fallthrough write — paired was already sent.
-                                        EnrollFinalize::KeepRelay => {
+                                        RelayAction::Continue => {
                                             continue;
                                         }
+                                        _ => break Err(NativeHostError::InvalidProtocol),
                                     }
                                 }
                             }
@@ -1277,23 +1281,25 @@ where
         };
 
         match connection? {
-            ConnectionResult::NativeClosed => break Ok(()),
+            ConnectionResult::NativeClosed => {
+                relay.step(RelayEvent::NativeClosed);
+                break Ok(());
+            }
             ConnectionResult::EndpointChanged => {
                 log.record("disconnected", "endpoint changed");
-                backoff.reset()
-            }
-            ConnectionResult::Reconnect(reason) if config.has_reconnect_credential()? => {
-                log.record("disconnected", reason);
-                let delay = backoff.next_delay();
-                if sleep_or_native_closed(delay, &mut native_closed_receiver).await {
-                    break Ok(());
-                }
+                relay.step(RelayEvent::EndpointChanged);
             }
             ConnectionResult::Reconnect(reason) => {
                 log.record("disconnected", reason);
-                break Err(NativeHostError::WebSocket);
+                match relay.step(RelayEvent::Disconnected { has_credential: config.has_reconnect_credential()? }) {
+                    RelayAction::ReconnectAfter(delay) => {
+                        if sleep_or_native_closed(delay, &mut native_closed_receiver).await { break Ok(()); }
+                    }
+                    _ => break Err(NativeHostError::WebSocket),
+                }
             }
         }
+
         }
     }
     .await;
