@@ -8,8 +8,8 @@ use std::{
 use super::argument::{Arg, ArgConst, ArgsBuilder};
 use crate::async_process::{self, Child, Stdio};
 use crate::detection::{self, DetectionOptions};
-use crate::handler::REQUEST_TIMEOUT;
 use crate::handler::viewport::Viewport;
+use crate::handler::{HandlerConfig, REQUEST_TIMEOUT};
 
 /// Default `Browser::launch` timeout in MS
 pub const LAUNCH_TIMEOUT: u64 = 20_000;
@@ -368,6 +368,22 @@ impl BrowserConfigBuilder {
 
 impl BrowserConfig {
     pub fn launch(&self) -> io::Result<Child> {
+        let mut cmd = async_process::Command::new(&self.executable);
+        cmd.args(self.launch_args());
+
+        if let Some(ref envs) = self.process_envs {
+            cmd.envs(envs);
+        }
+        cmd.stdout(Stdio::null()).stderr(Stdio::piped()).spawn()
+    }
+
+    /// The executable [`BrowserConfig::launch`] spawns.
+    pub fn executable(&self) -> &Path {
+        &self.executable
+    }
+
+    /// The command-line arguments [`BrowserConfig::launch`] passes to the executable.
+    pub fn launch_args(&self) -> Vec<String> {
         let mut builder = ArgsBuilder::new();
 
         if self.disable_default_args {
@@ -457,15 +473,21 @@ impl BrowserConfig {
             ));
         }
 
-        let mut cmd = async_process::Command::new(&self.executable);
+        builder.into_iter().collect()
+    }
 
-        let args = builder.into_iter().collect::<Vec<String>>();
-        cmd.args(args);
-
-        if let Some(ref envs) = self.process_envs {
-            cmd.envs(envs);
+    /// The handler settings [`crate::Browser::launch`] uses, for a connection
+    /// to a browser this config launched separately.
+    pub fn handler_config(&self) -> HandlerConfig {
+        HandlerConfig {
+            ignore_https_errors: self.ignore_https_errors,
+            ignore_invalid_messages: self.ignore_invalid_messages,
+            viewport: self.viewport.clone(),
+            context_ids: Vec::new(),
+            request_timeout: self.request_timeout,
+            request_intercept: self.request_intercept,
+            cache_enabled: self.cache_enabled,
         }
-        cmd.stdout(Stdio::null()).stderr(Stdio::piped()).spawn()
     }
 }
 

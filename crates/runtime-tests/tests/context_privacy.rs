@@ -142,6 +142,15 @@ async fn typed_values_never_reach_the_context_store() {
         },
         nodes: Default::default(),
     };
+    // The durable profile's Chrome outlives the runtime; stop it with the test.
+    #[cfg(unix)]
+    let _chrome = runtime_tests::ProfileChrome(
+        config
+            .browser
+            .profiles_dir
+            .join("chromium")
+            .join("canary-profile"),
+    );
     let factory = Arc::new(
         ChromiumWorkerFactory::new(config.browser.clone())
             .with_durable_profile("canary-profile".to_string()),
