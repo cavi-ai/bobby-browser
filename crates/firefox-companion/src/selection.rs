@@ -36,8 +36,6 @@ use crate::{CompanionExtensionObserver, FirefoxCompanionFactory};
 
 /// Bounds `session.end` at shutdown and `browser.close` before a restart.
 const BIDI_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long a starting runtime waits for a stopping one to end its session.
-const STALE_SESSION_GRACE: Duration = Duration::from_secs(5);
 
 struct FirefoxRegistration {
     profile_id: ProfileId,
@@ -615,16 +613,8 @@ impl ConfiguredFirefoxFactory {
         }
         let endpoint = live_endpoint_override(&self.config.profile_dir, &self.config.bidi_url)
             .unwrap_or_else(|| self.config.bidi_url.clone());
-        match crate::bidi::session_slot_occupied(endpoint.clone(), self.config.timeout).await {
+        match crate::bidi::session_slot_occupied(endpoint, self.config.timeout).await {
             Ok(false) => Ok(()),
-            // A runtime that just stopped may still be ending its session.
-            Ok(true)
-                if wait_until_bidi_slot_free(&endpoint, STALE_SESSION_GRACE)
-                    .await
-                    .is_ok() =>
-            {
-                Ok(())
-            }
             Ok(true) => {
                 tracing::warn!(
                     url = %self.config.bidi_url,

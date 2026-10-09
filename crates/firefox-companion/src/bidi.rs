@@ -68,6 +68,8 @@ struct SharedState {
     close_signal: watch::Sender<bool>,
     writer_result: Mutex<Option<Result<(), String>>>,
     writer_done: Notify,
+    /// Held across a reconnect so callers sharing the client reopen it once.
+    reconnect: Mutex<()>,
 }
 
 enum WriterCommand {
@@ -145,28 +147,28 @@ impl Drop for PendingGuard {
 impl BidiClient {
     pub async fn connect_session(url: Url, timeout: Duration) -> Result<Self, CommandError> {
         let client = Self::connect(url, timeout).await?;
-        match client
+        client.start_session().await?;
+        Ok(client)
+    }
+
+    async fn start_session(&self) -> Result<(), CommandError> {
+        match self
             .send(
                 "session.new",
                 serde_json::json!({"capabilities": {"alwaysMatch": {}}}),
             )
             .await
         {
-            Ok(_) => Ok(client),
-            Err(error) if session_slot_taken(&error) => {
-                // A new `/session` socket is sessionless. Firefox 155 never
-                // registers `/session/{id}` for BiDi-only sessions, so this
-                // connection cannot attach or session.end the leftover. Map
-                // to BrowserLaunchFailed so MCP allowlists the diagnostic;
-                // the factory recycles the enrolled profile and retries.
-                drop(client);
-                Err(CommandError {
-                    code: ErrorCode::BrowserLaunchFailed,
-                    message: error.message,
-                    layer: ErrorLayer::Driver,
-                    retryable: true,
-                })
-            }
+            Ok(_) => Ok(()),
+            // Firefox registers no `/session/{id}` for BiDi-only sessions, so no
+            // socket can attach to or end the leftover. BrowserLaunchFailed lets
+            // the factory restart the enrolled profile and retry.
+            Err(error) if session_slot_taken(&error) => Err(CommandError {
+                code: ErrorCode::BrowserLaunchFailed,
+                message: error.message,
+                layer: ErrorLayer::Driver,
+                retryable: true,
+            }),
             Err(error) => Err(error),
         }
     }
@@ -193,6 +195,7 @@ impl BidiClient {
             close_signal,
             writer_result: Mutex::new(None),
             writer_done: Notify::new(),
+            reconnect: Mutex::new(()),
         });
 
         tokio::spawn(writer_task(
@@ -288,19 +291,11 @@ impl BidiClient {
                     transport_failure("Firefox BiDi response channel closed").error()
                 }))
             }
+            // A missed deadline fails this command only: the connection and its
+            // session stay up for every other command, and a late reply is dropped.
             Err(_) => {
                 guard.retire().await;
-                let error = command_deadline(method, "response");
-                terminate(
-                    &self.shared,
-                    TerminalFailure {
-                        code: error.code,
-                        message: error.message.clone(),
-                        retryable: error.retryable,
-                    },
-                )
-                .await;
-                Err(error)
+                Err(command_deadline(method, "response"))
             }
         }
     }
@@ -345,9 +340,11 @@ impl BidiClient {
                 .is_none()
     }
 
-    /// Open a new WebSocket to the same BiDi URL without `session.new`.
-    /// RemoteAgent keeps the WebDriver session after a dropped socket.
+    /// Reopen a lost connection and start a new session on it. Firefox keeps a
+    /// BiDi-only session past its dropped socket and lets no new socket join
+    /// it, so while that session lives this fails and the client stays dead.
     pub async fn reconnect_live(&self) -> Result<(), CommandError> {
+        let _reconnecting = self.shared.reconnect.lock().await;
         if self.is_alive() {
             return Ok(());
         }
@@ -386,6 +383,18 @@ impl BidiClient {
             Arc::clone(&self.shared),
             self.events.clone(),
         ));
+        if let Err(error) = self.start_session().await {
+            terminate(
+                &self.shared,
+                TerminalFailure {
+                    code: error.code,
+                    message: error.message.clone(),
+                    retryable: error.retryable,
+                },
+            )
+            .await;
+            return Err(error);
+        }
         Ok(())
     }
 }
@@ -848,6 +857,7 @@ mod tests {
             close_signal,
             writer_result: Mutex::new(None),
             writer_done: Notify::new(),
+            reconnect: Mutex::new(()),
         }
     }
 

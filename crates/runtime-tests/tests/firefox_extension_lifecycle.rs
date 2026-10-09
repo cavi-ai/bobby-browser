@@ -689,3 +689,57 @@ async fn a_firefox_restart_exits_cleanly_and_keeps_logins() {
     factory.shutdown().await;
     browser.stop().await;
 }
+
+#[tokio::test]
+#[ignore = "requires installed Firefox and the scoped test native host"]
+async fn a_hung_command_fails_alone_and_keeps_the_session() {
+    let env = Env::load();
+    let profile = new_profile(&env);
+    let (browser, bidi_url) = Browser::launch(&env, profile.path()).await;
+    let firefox = profile_owner_pids(profile.path());
+    let client =
+        firefox_companion::BidiClient::connect_session(bidi_url.clone(), Duration::from_secs(2))
+            .await
+            .expect("open a BiDi session");
+    let tree = client
+        .send(
+            "browsingContext.getTree",
+            serde_json::json!({"maxDepth": 0}),
+        )
+        .await
+        .expect("read the open contexts");
+    let context = tree["contexts"][0]["context"]
+        .as_str()
+        .expect("a top-level context")
+        .to_owned();
+    let hung = client
+        .send(
+            "script.evaluate",
+            serde_json::json!({"expression":"new Promise(() => {})","awaitPromise":true,
+                               "target":{"context":context}}),
+        )
+        .await
+        .expect_err("a script that never settles misses its deadline");
+    assert_eq!(hung.code, types::ErrorCode::DeadlineExceeded);
+    client
+        .send(
+            "browsingContext.getTree",
+            serde_json::json!({"maxDepth": 0}),
+        )
+        .await
+        .expect("the connection still serves commands");
+    client
+        .end_session()
+        .await
+        .expect("the session ends cleanly");
+    let next = firefox_companion::BidiClient::connect_session(bidi_url, TIMEOUT)
+        .await
+        .expect("a new session starts on the same Firefox");
+    next.end_session().await.expect("end the new session");
+    assert_eq!(
+        profile_owner_pids(profile.path()),
+        firefox,
+        "Firefox kept running"
+    );
+    browser.stop().await;
+}
