@@ -9,9 +9,14 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 cd "$repo_root"
 
 out="$repo_root/.tmp/test-browsers"
-# The extension only accepts com.bobby_browser.companion[.scope_<16 hex>].
-host_name="com.bobby_browser.companion.scope_7465737462726f77"
+# The checkout's test host name, from the Makefile. The extension only
+# accepts com.bobby_browser.companion[.scope_<16 hex>].
+host_name="${TEST_BROWSERS_HOST:?run through make test-browsers-setup}"
 live_host_name="com.bobby_browser.companion"
+if [[ ! "$host_name" =~ ^com\.bobby_browser\.companion\.scope_[0-9a-f]{16}$ ]]; then
+  echo "invalid test host name: $host_name" >&2
+  exit 2
+fi
 
 case "$(uname -s)" in
   Darwin) manifest_dir="$HOME/Library/Application Support/Mozilla/NativeMessagingHosts" ;;

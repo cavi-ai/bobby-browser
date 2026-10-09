@@ -2,7 +2,6 @@
 //! defined by the test, and real HTTP 302 redirects.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -11,7 +10,8 @@ use axum::extract::State;
 use axum::http::{header, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
 use axum::Router;
-use tokio::task::JoinHandle;
+
+use crate::ServerThread;
 
 pub enum Route {
     /// Serves this document with status 200.
@@ -48,8 +48,7 @@ struct Entry {
 }
 
 pub struct FixtureSite {
-    address: SocketAddr,
-    task: JoinHandle<()>,
+    server: ServerThread,
     hits: HashMap<String, Arc<AtomicUsize>>,
     bodies: HashMap<String, Bodies>,
 }
@@ -80,18 +79,8 @@ impl FixtureSite {
             })
             .collect();
         let app = Router::new().fallback(serve).with_state(Arc::new(table));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind fixture listener");
-        let address = listener.local_addr().expect("read fixture address");
-        let task = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .await
-                .expect("serve regression fixture");
-        });
         Self {
-            address,
-            task,
+            server: ServerThread::start(app),
             hits,
             bodies,
         }
@@ -107,7 +96,7 @@ impl FixtureSite {
     }
 
     pub fn url(&self, path: &str) -> String {
-        format!("http://{}{path}", self.address)
+        format!("http://{}{path}", self.server.address())
     }
 
     /// Requests the route at `path` has served so far (any method).
@@ -115,12 +104,6 @@ impl FixtureSite {
         self.hits
             .get(path)
             .map_or(0, |counter| counter.load(Ordering::SeqCst))
-    }
-}
-
-impl Drop for FixtureSite {
-    fn drop(&mut self) {
-        self.task.abort();
     }
 }
 

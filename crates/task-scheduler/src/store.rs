@@ -497,8 +497,11 @@ async fn scan_path(path: &Path, collect_jobs: bool) -> Result<Scan, StoreError> 
         scan.records += 1;
         match serde_json::from_slice::<JournalRecord>(&line) {
             Ok(record) => {
+                let out_of_order = scan
+                    .max_sequence
+                    .is_some_and(|sequence| record.sequence <= sequence);
                 scan.max_sequence = scan.max_sequence.max(Some(record.sequence));
-                if record.schema_version != JOURNAL_SCHEMA_VERSION {
+                if out_of_order || record.schema_version != JOURNAL_SCHEMA_VERSION {
                     scan.incompatible_records += 1;
                     continue;
                 }

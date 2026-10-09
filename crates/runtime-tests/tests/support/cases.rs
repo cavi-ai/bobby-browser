@@ -1,11 +1,63 @@
-//! Regression cases reproduced on minimal local pages. Each one is a failure
-//! observed on linkedin.com on 2026-10-06 through the real runtime and fixed
-//! in PR #612. The same cases run against Chromium and Firefox.
+//! Browser behavior cases on minimal local pages, run against every engine
+//! through the production MCP server.
 
 use serde_json::{json, Value};
 
 use super::rig::{assert_node, find_node, strings_under, targets_under, Live, Rig};
 use test_site::{FixtureSite, Route};
+
+/// Invokes `$each! { case, ... }` with every case both engines run, then any
+/// engine-specific `$extra` cases. Each engine's suite expands this one list.
+#[allow(unused_macros)]
+macro_rules! every_case {
+    ($each:ident $(, $extra:ident)* $(,)?) => {
+        $each! {
+            hidden_subtrees_do_not_spend_the_node_budget,
+            snapshot_target_scopes_the_tree,
+            workflow_start_reports_the_settled_page,
+            observe_after_navigate_includes_late_content,
+            accessible_names_are_computed,
+            secret_words_are_not_secrets,
+            scheme_like_text_is_page_text,
+            disclosed_credentials_are_withheld,
+            large_dom_link_resolves_for_intent_follow,
+            redacted_page_fields_do_not_block_actions,
+            snapshot_budget_keeps_ancestors_of_kept_nodes,
+            containers_are_not_named_from_content,
+            type_text_reaches_the_visible_duplicate,
+            intent_follow_clicks_the_visible_duplicate,
+            snapshot_scopes_to_a_named_list,
+            snapshot_targets_act_on_the_described_element,
+            type_text_enter_reports_the_settled_page,
+            intent_follow_post_state_shows_the_settled_page,
+            type_text_enter_reports_the_rewritten_url,
+            intent_follow_post_state_waits_for_fetched_content,
+            intent_follow_waits_for_a_late_data_request,
+            settles_beside_class_churn,
+            settles_beside_text_churn,
+            settles_beside_moving_children,
+            settles_beside_combined_churn,
+            settle_cap_trace_names_the_churn,
+            network_tracking_survives_a_heavy_page,
+            browser_events_survive_a_request_burst,
+            type_text_enter_reports_a_late_title,
+            type_text_enter_waits_for_a_landed_response,
+            navigate_settles_on_a_polling_page,
+            navigate_ignores_requests_the_navigation_cancelled,
+            type_text_enter_reports_a_keydown_navigation_at_once,
+            actions_wait_for_a_late_target,
+            actions_fail_a_missing_target_within_one_bound,
+            navigate_waits_for_late_scripts,
+            page_titles_withhold_disclosed_credentials,
+            observation_carries_each_text_once,
+            sign_in_fields_show_their_labels,
+            concurrent_sessions_each_keep_their_own_page,
+            $($extra,)*
+        }
+    };
+}
+#[allow(unused_imports)]
+pub(crate) use every_case;
 
 const HIDDEN_NODES: usize = 3000;
 
@@ -42,10 +94,8 @@ async fn feed_site() -> FixtureSite {
     FixtureSite::spawn(vec![("/feed", Route::Html(feed_page()))]).await
 }
 
-/// F1, linkedin.com/feed: the default `workflow_observe` and
-/// `a11y_snapshot` with `maxNodes: 120` returned only the page header and
-/// its hidden menu subtrees; the `main` landmark and the "Feed post" list
-/// items were never reached because hidden subtrees spent the node budget.
+/// Hidden subtrees spend no node budget: the default `workflow_observe` and
+/// a 120-node `a11y_snapshot` reach `main` and its list items.
 pub async fn hidden_subtrees_do_not_spend_the_node_budget(rig: &Rig) {
     let site = feed_site().await;
     let live = Live::open(rig, &site.url("/feed")).await;
@@ -58,9 +108,8 @@ pub async fn hidden_subtrees_do_not_spend_the_node_budget(rig: &Rig) {
     live.close().await;
 }
 
-/// F2, linkedin.com/feed: an `a11y_snapshot` scoped to `{role: main}`
-/// still contained the page `banner`, and a scope naming no region was not
-/// reported as `targetNotFound`.
+/// An `a11y_snapshot` scoped to `{role: main}` holds no `banner`, and a scope
+/// naming no region fails `targetNotFound`.
 pub async fn snapshot_target_scopes_the_tree(rig: &Rig) {
     let site = feed_site().await;
     let live = Live::open(rig, &site.url("/feed")).await;
@@ -81,9 +130,8 @@ pub async fn snapshot_target_scopes_the_tree(rig: &Rig) {
     live.close().await;
 }
 
-/// F9, linkedin.com/feed: `workflow_start` on the feed URL reported the
-/// login URL and login title, because the feed redirected to a login page
-/// that replaced itself back to the feed a moment later.
+/// A page that redirects to a login page which replaces itself back: the
+/// `workflow_start` result reports the final URL and title.
 pub async fn workflow_start_reports_the_settled_page(rig: &Rig) {
     let login = page(
         "Login",
@@ -123,9 +171,8 @@ pub async fn workflow_start_reports_the_settled_page(rig: &Rig) {
     live.close().await;
 }
 
-/// F10, linkedin.com/messaging: a `workflow_observe` issued right after
-/// `navigate` returned a near-empty tree because the conversation list is
-/// inserted by script some time after load.
+/// Content a script inserts after load is in the first `workflow_observe`
+/// after `navigate`.
 pub async fn observe_after_navigate_includes_late_content(rig: &Rig) {
     let late = page(
         "Late",
@@ -157,10 +204,8 @@ pub async fn observe_after_navigate_includes_late_content(rig: &Rig) {
     live.close().await;
 }
 
-/// F11, linkedin.com/feed: controls named only through an svg `<title>`,
-/// `aria-labelledby` with two ids, a placeholder, nested spans, or an image
-/// `alt` showed up in `a11y_snapshot` with no name, and `type_text` on the
-/// search box by `{role: textbox, accessibleName: "Search"}` failed.
+/// Controls named only by an svg `<title>`, a two-id `aria-labelledby`, a
+/// placeholder, nested spans or an image `alt` get that name and act by it.
 pub async fn accessible_names_are_computed(rig: &Rig) {
     let body = r##"
         <button><svg width="16" height="16"><title>Close dialog</title><path d="M0 0h16v16z"/></svg></button>
@@ -208,9 +253,8 @@ pub async fn accessible_names_are_computed(rig: &Rig) {
     live.close().await;
 }
 
-/// F12, linkedin.com/feed: `type_text` into the search box failed because
-/// the page text contained the words "token" and "credential" and a
-/// "Forgot password?" link; the words alone were treated as secret material.
+/// Words like "token", "credential" and "password" in page text are not
+/// secret material: the page is observed and actions on it succeed.
 pub async fn secret_words_are_not_secrets(rig: &Rig) {
     let body = r#"
         <p>Manage your token and credential settings.</p>
@@ -255,9 +299,8 @@ pub async fn scheme_like_text_is_page_text(rig: &Rig) {
 const BEARER_TOKEN: &str = "Zx9Kq2Lm7Rt4Vw8Yb3Nc6Hd1Jf5Gs0Ae2PuXo7Ti";
 const PEM_BODY: &str = "MIIEowIBAAKCAQEAx7Qk2LmZr9VtW4YbNc6HdJf5GsAePuXo7TiKq";
 
-/// F12 counterpart: text that really discloses a credential (an
-/// `Authorization: Bearer` header value, a PEM private key block) is never
-/// agent-visible, as pinned by `crates/firefox-companion/src/secret_material.rs`.
+/// Text that discloses a credential (a bearer header value, a PEM private
+/// key) is never in a result.
 pub async fn disclosed_credentials_are_withheld(rig: &Rig) {
     assert_eq!(BEARER_TOKEN.len(), 40);
     let body = format!(
@@ -303,9 +346,8 @@ fn large_page(visible: usize, after: &str) -> String {
     page("Large", &body)
 }
 
-/// F13, linkedin.com/jobs: `intent_follow` with
-/// `{role: link, accessibleName: "Show all"}` failed to resolve the link,
-/// which sits after thousands of hidden and more than 4096 visible nodes.
+/// `intent_follow` resolves a link that follows thousands of hidden and more
+/// than 4096 visible nodes.
 pub async fn large_dom_link_resolves_for_intent_follow(rig: &Rig) {
     let site = FixtureSite::spawn(vec![
         (
@@ -336,10 +378,8 @@ pub async fn large_dom_link_resolves_for_intent_follow(rig: &Rig) {
     live.close().await;
 }
 
-/// F13 counterpart: when the target is absent from a page larger than the
-/// Firefox companion's candidate cap, the failure says the candidate set was
-/// truncated (`resourceExhausted`) instead of reporting `targetNotFound`.
-/// Firefox only; Chromium has no candidate cap.
+/// A target absent from a page larger than the Firefox candidate cap fails
+/// `resourceExhausted` naming the truncation. Firefox only.
 pub async fn oversized_page_reports_truncation_not_target_not_found(rig: &Rig) {
     let site = FixtureSite::spawn(vec![("/jobs", Route::Html(large_page(4500, "")))]).await;
     let live = Live::open(rig, &site.url("/jobs")).await;
@@ -371,12 +411,8 @@ pub async fn oversized_page_reports_truncation_not_target_not_found(rig: &Rig) {
 const TRACKING_ID: &str = "Zx9Kq2Lm7Rt4Vw8Yb3Nc6Hd1Jf5Gs0Ae2PuXo7Ti9QaB4cDe";
 const CSRF_TOKEN: &str = "Qm41ZzK2xP9vLr7TnW3bYc8Hd5Jf6GsA";
 
-/// linkedin.com/feed, Firefox: `type_text` into the search box and
-/// `intent_follow` on "Show all" failed with "extension observation
-/// contained unsanitized sensitive material" because one page field
-/// matched the secret rule and the whole observation was rejected. A
-/// matching field is redacted instead and the action proceeds without
-/// exposing the secret.
+/// A page field that matches the secret rule is redacted, and actions on the
+/// page proceed without exposing it.
 pub async fn redacted_page_fields_do_not_block_actions(rig: &Rig) {
     assert_eq!(TRACKING_ID.len(), 48);
     let body = format!(
@@ -428,10 +464,8 @@ pub async fn redacted_page_fields_do_not_block_actions(rig: &Rig) {
     live.close().await;
 }
 
-/// linkedin.com/feed: `a11y_snapshot` with `maxNodes: 120` returned only the
-/// header and `truncated: true` because a node was counted after its
-/// descendants, so a subtree that ran out of budget discarded its own root
-/// and every node already built under it. A node reserves its slot first.
+/// A snapshot bounded by `maxNodes` keeps the ancestors of every node it
+/// keeps and reports `truncated`.
 pub async fn snapshot_budget_keeps_ancestors_of_kept_nodes(rig: &Rig) {
     let mut buttons = String::new();
     for index in 0..200 {
@@ -471,10 +505,8 @@ fn nodes_with_role<'a>(value: &'a Value, role: &str, out: &mut Vec<&'a Value>) {
     }
 }
 
-/// linkedin.com/feed: `main`, `banner`, `navigation`, `list`, `form` and
-/// `contentinfo` were named by the concatenated text of every descendant,
-/// bloating each snapshot. Only roles that take their name from content are
-/// named from it; `listitem` keeps its text on purpose.
+/// Landmarks, lists and forms are not named from their content; list items
+/// keep their text.
 pub async fn containers_are_not_named_from_content(rig: &Rig) {
     let body = r#"<header>Site banner text</header>
         <nav>Navigation words <a href="/a">Alpha</a></nav>
@@ -522,11 +554,8 @@ fn textbox_value<'a>(snapshot: &'a Value, name: &str) -> Option<&'a str> {
     find_node(snapshot, "textbox", Some(name)).and_then(|node| node["value"].as_str())
 }
 
-/// L4, linkedin.com/feed, Firefox: `type_text` with the snapshot's
-/// `{role: textbox, accessibleName: "I'm looking for…"}` failed with "Origin
-/// element ... is not displayed": a hidden duplicate earlier in the page
-/// shares the control's identifying attribute. A control below the fold
-/// takes text as well.
+/// `type_text` reaches the visible textbox when a hidden duplicate shares its
+/// identifying attribute, and reaches a textbox below the fold.
 pub async fn type_text_reaches_the_visible_duplicate(rig: &Rig) {
     let body = r#"<header>
         <div style="display:none"><input name="keywords" placeholder="I'm looking for…"></div>
@@ -556,10 +585,8 @@ pub async fn type_text_reaches_the_visible_duplicate(rig: &Rig) {
     live.close().await;
 }
 
-/// L5, linkedin.com/jobs, Firefox: `intent_follow` on `{role: link,
-/// accessibleName: "Show all"}` clicked, but the page never navigated: the
-/// link shares its identifying attribute with a hidden menu copy and an
-/// element that is not a link.
+/// `intent_follow` clicks the visible link when hidden copies and a non-link
+/// element share its identifying attribute.
 pub async fn intent_follow_clicks_the_visible_duplicate(rig: &Rig) {
     let body = r#"<nav><div role="menu" style="display:none">
           <a href="/jobs/wrong-menu" data-test="show-all">Show all</a></div>
@@ -593,9 +620,8 @@ pub async fn intent_follow_clicks_the_visible_duplicate(rig: &Rig) {
     live.close().await;
 }
 
-/// L6, linkedin.com/messaging, Firefox: the full snapshot listed `{role:
-/// list, accessibleName: "Conversation List"}` (named by `aria-label`), and
-/// a snapshot scoped to exactly that target failed with targetNotFound.
+/// A snapshot scoped to a list named by `aria-label` returns that list, not
+/// a hidden list of the same name.
 pub async fn snapshot_scopes_to_a_named_list(rig: &Rig) {
     let mut items = String::new();
     for index in 0..40 {
@@ -1325,20 +1351,38 @@ pub async fn network_tracking_survives_a_heavy_page(rig: &Rig) {
     );
 }
 
-/// Requests the burst page fires without waiting for any response.
+/// Requests the burst page fires.
 const BURST_REQUESTS: usize = 5_000;
+/// Fetches the burst page keeps in flight. Chromium refuses a page's fetches
+/// past roughly 1,350 in flight.
+const BURST_IN_FLIGHT: usize = 1_000;
 
-/// Navigate settles while a page fires 5,000 logged fetches at once; no browser
-/// event is dropped and the next intent_follow's postState shows the fetched content.
+/// Navigate settles while a page fires 5,000 logged fetches, 1,000 in flight;
+/// no browser event is dropped and the next intent_follow's postState shows the
+/// fetched content.
 pub async fn browser_events_survive_a_request_burst(rig: &Rig) {
     let burst = page(
         "Burst",
         &format!(
-            r#"<main><h1>Burst</h1></main>
+            r#"<main><h1>Burst</h1><p id="rejected">rejected 0</p></main>
         <script>
-            for (let index = 0; index < {BURST_REQUESTS}; index++) {{
-              fetch("/api/burst?i=" + index).then((response) => console.log("item", index, response.status));
-            }}
+            let next = 0;
+            let rejected = 0;
+            let firstError = "";
+            const send = () => {{
+              if (next >= {BURST_REQUESTS}) return;
+              const index = next++;
+              fetch("/api/burst?i=" + index)
+                .then((response) => console.log("item", index, response.status))
+                .catch((error) => {{
+                  rejected += 1;
+                  firstError = firstError || String(error);
+                  document.getElementById("rejected").textContent =
+                    "rejected " + rejected + ": " + firstError;
+                }})
+                .finally(send);
+            }};
+            for (let lane = 0; lane < {BURST_IN_FLIGHT}; lane++) send();
         </script>"#
         ),
     );
@@ -1363,11 +1407,17 @@ pub async fn browser_events_survive_a_request_burst(rig: &Rig) {
     assert_eq!(loaded["status"], "completed", "navigate: {loaded}");
     let wait = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while site.hits("/api/burst") < BURST_REQUESTS {
-        assert!(
-            std::time::Instant::now() < wait,
-            "the burst page sent {} of {BURST_REQUESTS} requests",
-            site.hits("/api/burst")
-        );
+        if std::time::Instant::now() >= wait {
+            // The page counts the fetches the browser itself refused.
+            let mut texts = Vec::new();
+            let snapshot = live.snapshot(json!({})).await;
+            strings_under(&snapshot, "name", &mut texts);
+            panic!(
+                "the burst page sent {} of {BURST_REQUESTS} requests; page reports {:?}",
+                site.hits("/api/burst"),
+                texts.iter().find(|text| text.starts_with("rejected"))
+            );
+        }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     let followed = follow_late_data_link(&live, &site).await;
@@ -2228,4 +2278,68 @@ pub async fn sign_in_fields_show_their_labels(rig: &Rig) {
         );
     }
     live.close().await;
+}
+
+/// Sessions the runtime serves at once, its default capacity.
+const CONCURRENT_SESSIONS: usize = 8;
+
+/// Eight sessions run at once on one runtime: each opens its own page, types
+/// into it, reads back only its own text, and lists only its own page.
+pub async fn concurrent_sessions_each_keep_their_own_page(rig: &Rig) {
+    let paths: Vec<String> = (0..CONCURRENT_SESSIONS)
+        .map(|index| format!("/session/{index}"))
+        .collect();
+    let routes = paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let body = r#"<main><input placeholder="Note"></main>"#;
+            (
+                path.as_str(),
+                Route::Html(page(&format!("Session {index}"), body)),
+            )
+        })
+        .collect();
+    let site = FixtureSite::spawn(routes).await;
+    let urls: Vec<String> = paths.iter().map(|path| site.url(path)).collect();
+    let sessions =
+        futures_util::future::join_all(urls.iter().map(|url| Live::open(rig, url))).await;
+    let checks = sessions
+        .iter()
+        .zip(&paths)
+        .enumerate()
+        .map(|(index, (live, path))| async move {
+            let note = format!("note {index}");
+            let typed = live
+                .call(
+                    "type_text",
+                    json!({"target":{"role":"textbox","accessibleName":"Note"},
+                           "value":note,"clearFirst":true}),
+                )
+                .await;
+            assert_eq!(
+                typed["status"], "completed",
+                "session {index} type_text: {typed}"
+            );
+            let snapshot = live.snapshot(json!({})).await;
+            assert_eq!(
+                textbox_value(&snapshot, "Note"),
+                Some(note.as_str()),
+                "session {index} reads another session's text: {snapshot}"
+            );
+            let listed = live
+                .rig
+                .tool("page_list", json!({"sessionId":live.session_id}))
+                .await;
+            let mut urls = Vec::new();
+            strings_under(&listed, "url", &mut urls);
+            assert!(
+                !urls.is_empty() && urls.iter().all(|url| url.ends_with(path.as_str())),
+                "session {index} lists pages it does not own: {listed}"
+            );
+        });
+    futures_util::future::join_all(checks).await;
+    for live in sessions {
+        live.close().await;
+    }
 }

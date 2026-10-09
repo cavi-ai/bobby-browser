@@ -12,7 +12,59 @@ use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use axum::Router;
 use futures_util::StreamExt;
-use tokio::task::JoinHandle;
+
+/// A fixture server on its own thread and runtime, so load on the runtime
+/// under test never delays its responses. Dropping it stops the server.
+pub(crate) struct ServerThread {
+    address: SocketAddr,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ServerThread {
+    pub(crate) fn start(app: Router) -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fixture listener");
+        listener
+            .set_nonblocking(true)
+            .expect("make fixture listener nonblocking");
+        let address = listener.local_addr().expect("read fixture address");
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build fixture runtime");
+            runtime.block_on(async move {
+                let listener =
+                    tokio::net::TcpListener::from_std(listener).expect("adopt fixture listener");
+                tokio::select! {
+                    served = axum::serve(listener, app) => served.expect("serve fixture"),
+                    _ = stopped => {}
+                }
+            });
+        });
+        Self {
+            address,
+            stop: Some(stop),
+            thread: Some(thread),
+        }
+    }
+
+    pub(crate) fn address(&self) -> SocketAddr {
+        self.address
+    }
+}
+
+impl Drop for ServerThread {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
 
 const INDEX: &str = r#"<!doctype html>
 <html>
@@ -54,14 +106,13 @@ const INDEX: &str = r#"<!doctype html>
 </html>"#;
 
 pub struct FixtureServer {
-    address: SocketAddr,
-    task: JoinHandle<()>,
+    server: ServerThread,
     peak_requests: Arc<AtomicUsize>,
 }
 
 impl FixtureServer {
     pub fn base_url(&self) -> String {
-        format!("http://{}", self.address)
+        format!("http://{}", self.server.address())
     }
 
     pub fn peak_requests(&self) -> usize {
@@ -70,12 +121,6 @@ impl FixtureServer {
 
     pub fn reset_peak_requests(&self) {
         self.peak_requests.store(0, Ordering::SeqCst);
-    }
-}
-
-impl Drop for FixtureServer {
-    fn drop(&mut self) {
-        self.task.abort();
     }
 }
 
@@ -517,18 +562,8 @@ pub async fn spawn() -> FixtureServer {
                     .expect("event stream fixture response")
             }),
         );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind fixture listener");
-    let address = listener.local_addr().expect("read fixture address");
-    let task = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .await
-            .expect("serve deterministic fixture");
-    });
     FixtureServer {
-        address,
-        task,
+        server: ServerThread::start(app),
         peak_requests,
     }
 }
@@ -607,18 +642,8 @@ pub async fn spawn_frame_host(child_url: &str) -> FixtureServer {
             }
         }),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind frame host fixture listener");
-    let address = listener.local_addr().expect("read frame host address");
-    let task = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .await
-            .expect("serve frame host fixture");
-    });
     FixtureServer {
-        address,
-        task,
+        server: ServerThread::start(app),
         peak_requests: Arc::new(AtomicUsize::new(0)),
     }
 }

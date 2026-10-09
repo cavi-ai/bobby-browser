@@ -159,7 +159,9 @@ test:
 # profile and test native host only (never the live bobby setup). Run
 # test-browsers-setup once; it installs only the test host manifest.
 TEST_BROWSERS_DIR := $(REPO_ROOT).tmp/test-browsers
-TEST_BROWSERS_HOST := com.bobby_browser.companion.scope_7465737462726f77
+# One test host per checkout, so suites in separate checkouts never share one.
+TEST_BROWSERS_HOST := com.bobby_browser.companion.scope_$(shell printf %s '$(REPO_ROOT)' | shasum -a 256 | cut -c1-16)
+export TEST_BROWSERS_HOST
 ifeq ($(shell uname -s),Darwin)
 TEST_BROWSERS_MANIFEST := $(HOME)/Library/Application Support/Mozilla/NativeMessagingHosts/$(TEST_BROWSERS_HOST).json
 TEST_BROWSERS_FIREFOX := /Applications/Firefox Developer Edition.app/Contents/MacOS/firefox

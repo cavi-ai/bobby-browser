@@ -10,6 +10,25 @@ use serde_json::{json, Value};
 use super::rig::{assert_node, find_node, strings_under, Live, Rig};
 use test_site::{FixtureSite, Route};
 
+/// Invokes `$each! { journey, ... }` with every journey both engines run,
+/// then any engine-specific `$extra` journeys.
+#[allow(unused_macros)]
+macro_rules! every_journey {
+    ($each:ident $(, $extra:ident)* $(,)?) => {
+        $each! {
+            j1_sign_in_redirect_then_app,
+            j2_search_and_follow_result,
+            j3_form_validation_then_success,
+            j4_upload_hidden_and_visible,
+            j5_popup_and_frame,
+            j6_cross_site_navigation_recovery,
+            $($extra,)*
+        }
+    };
+}
+#[allow(unused_imports)]
+pub(crate) use every_journey;
+
 /// Directories the upload journey uses: one inside the configured upload
 /// roots, one outside them.
 pub struct Dirs {
