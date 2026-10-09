@@ -81,7 +81,7 @@ fn expected_bytes(site: &SiteContext) -> Vec<u8> {
 }
 
 #[test]
-fn flush_and_retention_do_not_clone_sites_for_serialization() {
+fn listing_flush_and_retention_avoid_redundant_site_copies() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -93,6 +93,12 @@ fn flush_and_retention_do_not_clone_sites_for_serialization() {
     let mut expected = fixture();
     runtime.block_on(store.upsert_site("site", expected.clone()));
     let path = store.root().join("73697465.json");
+
+    TRACKING.store(true, Ordering::Relaxed);
+    let listed = runtime.block_on(store.list_sites());
+    TRACKING.store(false, Ordering::Relaxed);
+    let listing_allocations = PAYLOAD_ALLOCATIONS.swap(0, Ordering::Relaxed);
+    assert_eq!(listed, vec!["site"]);
 
     TRACKING.store(true, Ordering::Relaxed);
     let failed = runtime.block_on(store.flush());
@@ -125,7 +131,8 @@ fn flush_and_retention_do_not_clone_sites_for_serialization() {
     assert!(report.skipped.is_empty());
     assert_eq!(runtime.block_on(store.site("site")), Some(expected));
 
-    eprintln!("payload allocations: flush={flush_allocations}, retention={sweep_allocations}");
+    eprintln!("payload allocations: listing={listing_allocations}, flush={flush_allocations}, retention={sweep_allocations}");
+    assert_eq!(listing_allocations, 0, "listing copied resident context");
     assert!(
         flush_allocations < CONTROLS * 2,
         "flush copied the serialization payload"

@@ -429,12 +429,15 @@ impl ContextStore {
                     .extension()
                     .is_some_and(|extension| extension == "json")
                 {
-                    if let Ok((key, mut site)) = load_envelope(&file.path(), self.limits).await {
-                        if let Some(cutoff) = self.state.lock().await.retention_cutoff {
-                            prune_site(&mut site, cutoff);
-                            if site.pages.is_empty() && site.challenges.is_empty() {
-                                continue;
-                            }
+                    if let Ok((key, site)) = load_envelope(&file.path(), self.limits).await {
+                        if self
+                            .state
+                            .lock()
+                            .await
+                            .retention_cutoff
+                            .is_some_and(|cutoff| !has_retained_context(&site, cutoff))
+                        {
+                            continue;
                         }
                         keys.insert(key);
                     }
@@ -443,12 +446,11 @@ impl ContextStore {
         }
         let state = self.state.lock().await;
         keys.extend(state.sites.iter().filter_map(|(key, entry)| {
-            let mut site = entry.site.clone();
-            if let Some(cutoff) = state.retention_cutoff {
-                prune_site(&mut site, cutoff);
-                if site.pages.is_empty() && site.challenges.is_empty() {
-                    return None;
-                }
+            if state
+                .retention_cutoff
+                .is_some_and(|cutoff| !has_retained_context(&entry.site, cutoff))
+            {
+                return None;
             }
             Some(key.clone())
         }));
@@ -825,6 +827,22 @@ impl ContextStore {
         }
         result
     }
+}
+
+/// Whether pruning would leave any visible context. Challenges are preserved
+/// by the existing retention policy; controls need a verified retained intent.
+fn has_retained_context(site: &SiteContext, cutoff: u32) -> bool {
+    !site.challenges.is_empty()
+        || site.pages.values().any(|page| {
+            page.forms.values().any(|form| {
+                form.controls.iter().any(|control| {
+                    control
+                        .intents
+                        .values()
+                        .any(|stats| stats.last_verified_day.is_some_and(|day| day >= cutoff))
+                })
+            })
+        })
 }
 
 fn prune_site(site: &mut SiteContext, cutoff: u32) -> (u64, bool) {
