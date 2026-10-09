@@ -5,6 +5,7 @@
 ### Fixed
 
 - Sessions on a durable Chromium profile share one Chrome that outlives the runtime; each session sees only its own pages and downloads.
+- Chromium pages no longer enable the unused Performance and Log domains, which slowed request-heavy pages.
 - Settling ignores animations, counters and carousels that never stop changing the page.
 - Settling waits for the page to use a response that lands during the quiet window.
 - On Firefox, network tracking, HAR and dialogs keep every event on pages that fire thousands of requests at once.
