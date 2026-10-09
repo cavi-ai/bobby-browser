@@ -155,6 +155,25 @@ impl ResolvedTarget {
             .next())
     }
 
+    /// Whether a pointer at the target's center reaches the target or one of
+    /// its descendants, rather than an element drawn over it.
+    pub async fn receives_pointer(&self, page: &Page) -> Result<bool, CommandError> {
+        self.eval(
+            page,
+            "return ((target)=>{\
+             const rect=target.getBoundingClientRect();\
+             const width=document.documentElement.clientWidth;\
+             const height=document.documentElement.clientHeight;\
+             const x=Math.min(Math.max(rect.left+rect.width/2,0),width-1);\
+             const y=Math.min(Math.max(rect.top+rect.height/2,0),height-1);\
+             const owner=target.getRootNode();\
+             const hit=typeof owner.elementFromPoint==='function'\
+               ?owner.elementFromPoint(x,y):document.elementFromPoint(x,y);\
+             return hit!==null&&(hit===target||target.contains(hit));})(el);",
+        )
+        .await
+    }
+
     /// Scrolls the target into view. A coordinate-based click dispatch
     /// (`clickable_point` followed by `Input.dispatchMouseEvent`) needs the
     /// target on-screen first -- unlike a native `Element::click()`, which
