@@ -5,9 +5,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncBufReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 use tracing::warn;
 use types::{AttemptId, CommandEnvelope, CommandId, CommandOutcome, CommandPhase, Evidence};
@@ -115,11 +116,60 @@ struct WriterState {
     next_sequence: u64,
     file_len: u64,
     modified: Option<std::time::SystemTime>,
-    offsets: HashMap<CommandId, Vec<u64>>,
+    offsets: HashMap<CommandId, Vec<IndexedRecord>>,
     archives: Vec<PathBuf>,
     archived_offsets: HashMap<CommandId, Vec<(PathBuf, u64)>>,
     archived_torn_tail: bool,
     archived_incompatible_records: usize,
+}
+
+/// Rebuildable checks against the bytes validated at open or durably appended.
+/// Length bounds indexed reads even if a delimiter is subsequently damaged.
+struct IndexedRecord {
+    offset: u64,
+    len: usize,
+    digest: [u8; 32],
+}
+
+impl IndexedRecord {
+    fn new(offset: u64, bytes: &[u8]) -> Self {
+        Self {
+            offset,
+            len: bytes.len(),
+            digest: Sha256::digest(bytes).into(),
+        }
+    }
+}
+
+async fn read_indexed_records(
+    file: &File,
+    entries: &[IndexedRecord],
+    id: &CommandId,
+) -> Result<Option<Vec<JournalRecord>>, JournalError> {
+    let mut reader = BufReader::new(file.try_clone().await?);
+    let mut records = Vec::with_capacity(entries.len());
+    for entry in entries {
+        reader.seek(std::io::SeekFrom::Start(entry.offset)).await?;
+        let mut line = vec![0; entry.len];
+        if let Err(error) = reader.read_exact(&mut line).await {
+            if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                return Ok(None);
+            }
+            return Err(error.into());
+        }
+        let digest: [u8; 32] = Sha256::digest(&line).into();
+        if !line.ends_with(b"\n") || digest != entry.digest {
+            return Ok(None);
+        }
+        let Ok(record) = serde_json::from_slice::<JournalRecord>(&line) else {
+            return Ok(None);
+        };
+        if &record.command_id != id {
+            return Ok(None);
+        }
+        records.push(record);
+    }
+    Ok(Some(records))
 }
 
 /// Preserve damaged bytes intact before opening a fresh journal. No repair is
@@ -239,7 +289,7 @@ async fn open_writer(path: &Path) -> Result<WriterState, JournalError> {
     sync_parent(path).await?;
     let metadata = file.metadata().await?;
     let identity = file_identity(file.try_clone().await?).await?;
-    let mut offsets = HashMap::<CommandId, Vec<u64>>::new();
+    let mut offsets = HashMap::<CommandId, Vec<IndexedRecord>>::new();
     let mut reader = BufReader::new(file.try_clone().await?);
     let mut offset = 0;
     let mut next_sequence = 0;
@@ -247,7 +297,10 @@ async fn open_writer(path: &Path) -> Result<WriterState, JournalError> {
     while reader.read_until(b'\n', &mut line).await? > 0 {
         if !line.iter().all(u8::is_ascii_whitespace) {
             let record: JournalRecord = serde_json::from_slice(&line)?;
-            offsets.entry(record.command_id).or_default().push(offset);
+            offsets
+                .entry(record.command_id)
+                .or_default()
+                .push(IndexedRecord::new(offset, &line));
             next_sequence = record
                 .sequence
                 .checked_add(1)
@@ -338,7 +391,7 @@ impl CommandJournal for JsonlJournal {
                 .offsets
                 .entry(record.command_id)
                 .or_default()
-                .push(offset);
+                .push(IndexedRecord::new(offset, &bytes));
             writer.file_len += bytes.len() as u64;
             writer.modified = writer.file.metadata().await?.modified().ok();
             writer.next_sequence = next;
@@ -360,18 +413,16 @@ impl CommandJournal for JsonlJournal {
             {
                 // Read the same file that owns the offsets, even if an external
                 // replacement occurs after refresh. The next operation refreshes it.
-                let mut reader = BufReader::new(writer.file.try_clone().await?);
-                let mut records = Vec::with_capacity(offsets.len());
-                for offset in offsets {
-                    reader.seek(std::io::SeekFrom::Start(*offset)).await?;
-                    let mut line = Vec::new();
-                    reader.read_until(b'\n', &mut line).await?;
-                    records.push(serde_json::from_slice(&line)?);
+                if let Some(records) = read_indexed_records(&writer.file, offsets, &id).await? {
+                    return Ok(JournalScan {
+                        records,
+                        ..JournalScan::default()
+                    });
                 }
-                return Ok(JournalScan {
-                    records,
-                    ..JournalScan::default()
-                });
+                // In-place damage can leave identity, size and mtime unchanged.
+                // Preserve it even when changed bytes still decode as valid JSON.
+                archive_damaged_journal(&journal.path).await?;
+                *writer = open_writer(&journal.path).await?;
             }
             let mut scan = JournalScan {
                 torn_tail: writer.archived_torn_tail,
