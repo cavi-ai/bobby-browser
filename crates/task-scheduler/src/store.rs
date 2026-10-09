@@ -505,10 +505,11 @@ async fn scan_path(path: &Path, collect_jobs: bool) -> Result<Scan, StoreError> 
                     scan.incompatible_records += 1;
                     continue;
                 }
-                if !record.job.has_valid_resolution()
-                    || ((record.event == JobEvent::Resolved)
-                        != (record.job.status == JobStatus::Resolved))
-                {
+                let event_matches_status = record.event
+                    == JobEvent::from_status(&record.job.status)
+                    || (record.event == JobEvent::Submitted
+                        && record.job.status == JobStatus::Pending);
+                if !record.job.has_valid_resolution() || !event_matches_status {
                     scan.incompatible_records += 1;
                     continue;
                 }

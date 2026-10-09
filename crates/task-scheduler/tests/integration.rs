@@ -1314,6 +1314,107 @@ fn job_journal_sequence_regressions_require_reconciliation_without_blocking_new_
 }
 
 #[test]
+fn contradictory_job_events_require_reconciliation_without_blocking_new_work() {
+    runtime().block_on(async {
+        let cases = [
+            (
+                JobStatus::Pending,
+                vec![JobEvent::Submitted, JobEvent::Retried],
+            ),
+            (JobStatus::Running, vec![JobEvent::Started]),
+            (JobStatus::Completed, vec![JobEvent::Completed]),
+            (JobStatus::Failed, vec![JobEvent::Failed]),
+            (JobStatus::Cancelled, vec![JobEvent::Cancelled]),
+            (JobStatus::ReconciliationRequired, vec![JobEvent::Recovered]),
+            (JobStatus::Resolved, vec![JobEvent::Resolved]),
+        ];
+        for (status, valid_events) in cases {
+            for event in [
+                JobEvent::Submitted,
+                JobEvent::Started,
+                JobEvent::Completed,
+                JobEvent::Failed,
+                JobEvent::Retried,
+                JobEvent::Cancelled,
+                JobEvent::Recovered,
+                JobEvent::Resolved,
+            ] {
+                let damaged = !valid_events.contains(&event);
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("jobs.jsonl");
+                let store = JournalJobStore::open(&path).await.unwrap();
+                let owner = types::PrincipalId::from_uuid(uuid::Uuid::new_v4());
+                let mut job = Job::new("echo".into(), serde_json::json!({}), JobPriority::Normal)
+                    .with_owner(owner.clone());
+                store.put(&job).await.unwrap();
+                drop(store);
+                job.status = status.clone();
+                if status == JobStatus::Resolved {
+                    let time = chrono::Utc::now();
+                    job.completed_at = Some(time);
+                    job.resolution = Some(types::JobResolutionReceipt {
+                        job_id: job.id.0.clone(),
+                        actor: owner,
+                        resolved_at: time,
+                        decision: types::JobResolutionDecision::EffectAbsent,
+                        evidence_sha256: "a".repeat(64),
+                        provenance: "operatorAttested".into(),
+                    });
+                }
+                let record = task_scheduler::JournalRecord {
+                    schema_version: task_scheduler::JOURNAL_SCHEMA_VERSION,
+                    sequence: 1,
+                    recorded_at: chrono::Utc::now(),
+                    event,
+                    job: job.clone(),
+                };
+                let mut original = std::fs::read(&path).unwrap();
+                serde_json::to_writer(&mut original, &record).unwrap();
+                original.push(b'\n');
+                std::fs::write(&path, &original).unwrap();
+                let health = JournalJobStore::inspect(&path).await.unwrap();
+                assert_eq!(std::fs::read(&path).unwrap(), original);
+                for _ in 0..2 {
+                    let store = JournalJobStore::open(&path).await.unwrap();
+                    let expected = if damaged || status == JobStatus::Running {
+                        JobStatus::ReconciliationRequired
+                    } else {
+                        status.clone()
+                    };
+                    assert_eq!(
+                        store.get(&job.id).await.unwrap().unwrap().status,
+                        expected,
+                        "{event:?} with {status:?}"
+                    );
+                    assert_eq!(health.incompatible_records, usize::from(damaged));
+                    assert!(store.integrity_issue().is_none());
+                    if damaged {
+                        assert!(store
+                            .pending()
+                            .await
+                            .unwrap()
+                            .iter()
+                            .all(|j| j.id != job.id));
+                        assert_eq!(std::fs::read(archived_journal(&path)).unwrap(), original);
+                    } else {
+                        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+                    }
+                    let fresh =
+                        Job::new("fresh".into(), serde_json::json!({}), JobPriority::Normal);
+                    store.put(&fresh).await.unwrap();
+                    drop(store);
+                    let store = JournalJobStore::open(&path).await.unwrap();
+                    assert_eq!(
+                        store.get(&fresh.id).await.unwrap().unwrap().status,
+                        JobStatus::Pending
+                    );
+                }
+            }
+        }
+    });
+}
+
+#[test]
 fn damaged_job_history_never_replays_an_older_pending_record() {
     let rt = runtime();
     rt.block_on(async {
@@ -1826,7 +1927,7 @@ fn oversized_journal_retains_newest_terminal_jobs() {
                 "schemaVersion": 1,
                 "sequence": index,
                 "recordedAt": "2026-08-05T00:00:00Z",
-                "event": "submitted",
+                "event": if index % 21 == 0 { "submitted" } else { "completed" },
                 "job": job,
             });
             text.push_str(&serde_json::to_string(&record).unwrap());
