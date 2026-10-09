@@ -701,16 +701,14 @@ async fn a_hung_command_fails_alone_and_keeps_the_session() {
         firefox_companion::BidiClient::connect_session(bidi_url.clone(), Duration::from_secs(2))
             .await
             .expect("open a BiDi session");
-    let tree = client
-        .send(
-            "browsingContext.getTree",
-            serde_json::json!({"maxDepth": 0}),
-        )
+    // A tab of its own: the startup tab may still be loading its first page.
+    let created = client
+        .send("browsingContext.create", serde_json::json!({"type": "tab"}))
         .await
-        .expect("read the open contexts");
-    let context = tree["contexts"][0]["context"]
+        .expect("open a tab");
+    let context = created["context"]
         .as_str()
-        .expect("a top-level context")
+        .expect("the new tab's context")
         .to_owned();
     let hung = client
         .send(
@@ -720,7 +718,7 @@ async fn a_hung_command_fails_alone_and_keeps_the_session() {
         )
         .await
         .expect_err("a script that never settles misses its deadline");
-    assert_eq!(hung.code, types::ErrorCode::DeadlineExceeded);
+    assert_eq!(hung.code, types::ErrorCode::DeadlineExceeded, "{hung:?}");
     client
         .send(
             "browsingContext.getTree",
