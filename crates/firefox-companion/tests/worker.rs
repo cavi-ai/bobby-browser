@@ -1134,6 +1134,60 @@ async fn destruction_after_ready_but_before_exposure_fails_open_and_finishes_cle
 }
 
 #[tokio::test]
+async fn a_slow_page_release_does_not_drop_later_events() {
+    let bidi = FakeBidi::new(vec![Ok(json!({"context": "context-released"}))]);
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let releases = Arc::new(AtomicUsize::new(0));
+    let worker = FirefoxCompanionWorker::new(
+        WorkerId::new(),
+        PathBuf::from("/profiles/firefox"),
+        lease(),
+        bidi.clone(),
+        Arc::new(BlockingCleanupObserver {
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+            releases: Arc::clone(&releases),
+        }),
+    )
+    .await
+    .unwrap();
+    worker.open_page(PageId::new()).await.unwrap();
+
+    bidi.emit(
+        "browsingContext.contextDestroyed",
+        json!({"context": "context-released"}),
+    );
+    started.notified().await;
+    for index in 0..8 {
+        bidi.emit(
+            "network.beforeRequestSent",
+            json!({
+                "context": "context-other",
+                "request": {"request": format!("request-{index}"), "url": "https://example.test/", "method": "GET"},
+            }),
+        );
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+    }
+    release.notify_one();
+    wait_for_release_count(&releases, 1).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+
+    assert!(
+        !bidi
+            .calls()
+            .await
+            .iter()
+            .any(|call| call.method == "browsingContext.getTree"),
+        "the event stream lagged while a page release was pending"
+    );
+}
+
+#[tokio::test]
 async fn open_page_uses_a_transient_binding_title_and_restores_the_exact_original() {
     let bidi = FakeBidi::new(vec![Ok(json!({"context": "context-bound"}))]);
     let observer = FakeObserver::new(observation());
@@ -4263,6 +4317,15 @@ async fn hung_binding_release_times_out_each_attempt_and_does_not_stall_later_cl
     })
     .await
     .expect("a hung release must not stall the next lifecycle event");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while attempts.load(Ordering::SeqCst) < 4 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the hung release retries each attempt");
+    // The last hung attempt records its failure once its 10 ms deadline passes.
+    tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(attempts.load(Ordering::SeqCst), 4);
     let error = worker
         .open_page(PageId::new())

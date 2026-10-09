@@ -19,7 +19,9 @@ use types::{CommandError, ErrorCode, ErrorLayer};
 use url::Url;
 
 const COMMAND_CAPACITY: usize = 64;
-const EVENT_CAPACITY: usize = 64;
+/// Events a subscriber may fall behind by before it lags. Read events are
+/// released, so a stalled subscriber retains at most this many.
+const EVENT_CAPACITY: usize = 4_096;
 
 struct PendingResponse {
     response: oneshot::Sender<Result<Value, CommandError>>,
@@ -919,6 +921,36 @@ mod tests {
             .await
             .is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn a_stalled_subscriber_retains_at_most_the_event_capacity() {
+        let shared = test_shared();
+        let (events, mut stalled) = broadcast::channel(EVENT_CAPACITY);
+        let overflow = 100;
+        for index in 0..EVENT_CAPACITY + overflow {
+            handle_message(
+                json!({
+                    "type": "event",
+                    "method": "network.beforeRequestSent",
+                    "params": {"index": index},
+                }),
+                &shared,
+                &events,
+            )
+            .await
+            .unwrap();
+            assert!(events.len() <= EVENT_CAPACITY);
+        }
+        assert_eq!(events.len(), EVENT_CAPACITY);
+        assert!(matches!(
+            stalled.recv().await,
+            Err(broadcast::error::RecvError::Lagged(lagged)) if lagged == overflow as u64
+        ));
+        for index in overflow..EVENT_CAPACITY + overflow {
+            assert_eq!(stalled.recv().await.unwrap().params["index"], index);
+        }
+        assert_eq!(events.len(), 0);
     }
 
     #[tokio::test]

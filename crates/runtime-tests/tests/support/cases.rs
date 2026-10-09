@@ -1135,6 +1135,72 @@ pub async fn network_tracking_survives_a_heavy_page(rig: &Rig) {
     );
 }
 
+/// Requests the burst page fires without waiting for any response.
+const BURST_REQUESTS: usize = 5_000;
+
+/// Navigate settles while a page fires 5,000 logged fetches at once; no browser
+/// event is dropped and the next intent_follow's postState shows the fetched content.
+pub async fn browser_events_survive_a_request_burst(rig: &Rig) {
+    let burst = page(
+        "Burst",
+        &format!(
+            r#"<main><h1>Burst</h1></main>
+        <script>
+            for (let index = 0; index < {BURST_REQUESTS}; index++) {{
+              fetch("/api/burst?i=" + index).then((response) => console.log("item", index, response.status));
+            }}
+        </script>"#
+        ),
+    );
+    let mut routes = late_data_routes();
+    routes.push(("/burst", Route::Html(burst)));
+    routes.push((
+        "/api/burst",
+        Route::Raw {
+            content_type: "application/json",
+            body: "{}".to_owned(),
+        },
+    ));
+    let site = FixtureSite::spawn(routes).await;
+    // `RUST_LOG` installs the stdio subscriber instead; dropped events then go unchecked.
+    let capture = std::env::var_os("RUST_LOG")
+        .is_none()
+        .then(observability::test_support::CaptureSink::install);
+    let live = Live::open(rig, &site.url("/start")).await;
+    let loaded = live
+        .call("navigate", json!({"url":site.url("/burst")}))
+        .await;
+    assert_eq!(loaded["status"], "completed", "navigate: {loaded}");
+    let wait = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while site.hits("/api/burst") < BURST_REQUESTS {
+        assert!(
+            std::time::Instant::now() < wait,
+            "the burst page sent {} of {BURST_REQUESTS} requests",
+            site.hits("/api/burst")
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let followed = follow_late_data_link(&live, &site).await;
+    let dropped: Vec<String> = capture.as_ref().map_or_else(Vec::new, |capture| {
+        capture
+            .events()
+            .iter()
+            .filter(|event| {
+                let fields = &event["fields"];
+                let message = fields["message"].as_str().unwrap_or_default();
+                (message.contains("tracking lost") && fields["reason"] == "lagged")
+                    || message.contains("event stream lost events")
+            })
+            .map(|event| event["fields"].to_string())
+            .collect()
+    });
+    live.close().await;
+    assert!(
+        followed.is_none() && dropped.is_empty(),
+        "intent_follow: {followed:?}; dropped events: {dropped:?}"
+    );
+}
+
 /// Enter pushState-navigates and fetches the results (600-1500 ms), renders
 /// them, and sets the title 0-800 ms later. Every type_text reports the new
 /// title.

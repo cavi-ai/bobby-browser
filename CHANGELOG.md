@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- On Firefox, network tracking, HAR and dialogs keep every event on pages that fire thousands of requests at once.
 - Settling keeps waiting for in-flight loads on pages with thousands of requests or very long URLs.
 - On Chromium, settling ignores requests started by a document the navigation replaced.
 - Same-document navigations settle after 1 s without DOM changes.

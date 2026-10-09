@@ -52,6 +52,7 @@ async fn site_regressions_hold_on_firefox() {
         intent_follow_post_state_waits_for_fetched_content,
         intent_follow_waits_for_a_late_data_request,
         network_tracking_survives_a_heavy_page,
+        browser_events_survive_a_request_burst,
         type_text_enter_reports_a_late_title,
         navigate_ignores_requests_the_navigation_cancelled,
         type_text_enter_reports_a_keydown_navigation_at_once,

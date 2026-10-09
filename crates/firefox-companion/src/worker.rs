@@ -1456,7 +1456,14 @@ impl FirefoxCompanionWorker {
                             let removals =
                                 mark_destroyed_context(&cleanup_pages, &cleanup_registry, context)
                                     .await;
-                            release_removed_pages(&task_failure, removals).await;
+                            // Releasing a page is a companion round trip; this loop keeps
+                            // reading events meanwhile so none are dropped.
+                            if !removals.is_empty() {
+                                let failure = Arc::clone(&task_failure);
+                                tokio::spawn(async move {
+                                    release_removed_pages(&failure, removals).await;
+                                });
+                            }
                             // A prompt pending on a destroyed context can
                             // never be handled; drop it or the map grows one
                             // orphan per killed tab with an open dialog.
@@ -1614,13 +1621,13 @@ impl FirefoxCompanionWorker {
                             .mark_tracking_lost(worker_pool::TrackingLoss::Lagged);
                         har_pending_task.write().await.clear();
                         tracing::warn!("Firefox event stream lost events; pending HAR discarded and network quiet marked uncertain");
-                        reconcile_contexts(
-                            &cleanup_transport,
-                            &cleanup_pages,
-                            &cleanup_registry,
-                            &task_failure,
-                        )
-                        .await;
+                        let transport = Arc::clone(&cleanup_transport);
+                        let pages = Arc::clone(&cleanup_pages);
+                        let registry = Arc::clone(&cleanup_registry);
+                        let failure = Arc::clone(&task_failure);
+                        tokio::spawn(async move {
+                            reconcile_contexts(&transport, &pages, &registry, &failure).await;
+                        });
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         let removals = mark_all_contexts(&cleanup_pages, &cleanup_registry).await;
