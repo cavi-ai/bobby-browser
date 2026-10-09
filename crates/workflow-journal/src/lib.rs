@@ -111,6 +111,7 @@ pub struct JsonlJournal {
 
 struct WriterState {
     file: File,
+    identity: same_file::Handle,
     next_sequence: u64,
     file_len: u64,
     modified: Option<std::time::SystemTime>,
@@ -191,16 +192,34 @@ impl JsonlJournal {
     }
 
     async fn refresh(&self, writer: &mut WriterState) -> Result<(), JournalError> {
-        let metadata = tokio::fs::metadata(&*self.path).await;
-        if metadata
-            .as_ref()
-            .is_ok_and(|m| m.len() == writer.file_len && m.modified().ok() == writer.modified)
-        {
-            return Ok(());
+        match File::open(&*self.path).await {
+            Ok(file) => {
+                let metadata = file.metadata().await?;
+                let identity = file_identity(file).await?;
+                // Size and mtime may survive atomic replacement. The index and
+                // append handle must still refer to the file at the current path.
+                if identity == writer.identity
+                    && metadata.len() == writer.file_len
+                    && metadata.modified().ok() == writer.modified
+                {
+                    return Ok(());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
         *writer = open_writer(&self.path).await?;
         Ok(())
     }
+}
+
+async fn file_identity(file: File) -> Result<same_file::Handle, std::io::Error> {
+    let file = file.into_std().await;
+    // Identity uses device/inode on Unix and volume/file index on Windows.
+    // Keep its filesystem metadata call off the async runtime threads.
+    tokio::task::spawn_blocking(move || same_file::Handle::from_file(file))
+        .await
+        .map_err(std::io::Error::other)?
 }
 
 async fn open_writer(path: &Path) -> Result<WriterState, JournalError> {
@@ -219,8 +238,9 @@ async fn open_writer(path: &Path) -> Result<WriterState, JournalError> {
     file.sync_all().await?;
     sync_parent(path).await?;
     let metadata = file.metadata().await?;
+    let identity = file_identity(file.try_clone().await?).await?;
     let mut offsets = HashMap::<CommandId, Vec<u64>>::new();
-    let mut reader = BufReader::new(File::open(path).await?);
+    let mut reader = BufReader::new(file.try_clone().await?);
     let mut offset = 0;
     let mut next_sequence = 0;
     let mut line = Vec::new();
@@ -281,6 +301,7 @@ async fn open_writer(path: &Path) -> Result<WriterState, JournalError> {
     }
     Ok(WriterState {
         file,
+        identity,
         next_sequence,
         file_len: metadata.len(),
         modified: metadata.modified().ok(),
@@ -337,7 +358,9 @@ impl CommandJournal for JsonlJournal {
                 .get(&id)
                 .filter(|_| !writer.archived_offsets.contains_key(&id))
             {
-                let mut reader = BufReader::new(File::open(&*journal.path).await?);
+                // Read the same file that owns the offsets, even if an external
+                // replacement occurs after refresh. The next operation refreshes it.
+                let mut reader = BufReader::new(writer.file.try_clone().await?);
                 let mut records = Vec::with_capacity(offsets.len());
                 for offset in offsets {
                     reader.seek(std::io::SeekFrom::Start(*offset)).await?;

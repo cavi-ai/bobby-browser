@@ -26,6 +26,117 @@ fn record(command_id: &CommandId, phase: CommandPhase) -> JournalRecord {
     }
 }
 
+async fn replace_preserving_length_and_modified(path: &std::path::Path, bytes: &[u8]) {
+    let before = std::fs::metadata(path).unwrap();
+    assert_eq!(before.len(), bytes.len() as u64);
+    let replacement = path.with_extension("replacement");
+    std::fs::write(&replacement, bytes).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&replacement)
+        .unwrap();
+    file.set_times(std::fs::FileTimes::new().set_modified(before.modified().unwrap()))
+        .unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    tokio::fs::rename(replacement, path).await.unwrap();
+    let after = std::fs::metadata(path).unwrap();
+    assert_eq!(after.len(), before.len());
+    assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+}
+
+#[tokio::test]
+async fn replacement_with_unchanged_metadata_rebuilds_command_offsets() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("commands.jsonl");
+    let journal = JsonlJournal::open(&path).await.unwrap();
+    let old = CommandId::new();
+    let new = CommandId::new();
+    journal
+        .append(record(&old, CommandPhase::Accepted))
+        .await
+        .unwrap();
+    let original = tokio::fs::read_to_string(&path).await.unwrap();
+    let replacement = original.replace(&old.0.to_string(), &new.0.to_string());
+    replace_preserving_length_and_modified(&path, replacement.as_bytes()).await;
+
+    assert!(journal.history(old).await.unwrap().records.is_empty());
+    let scan = journal.history(new.clone()).await.unwrap();
+    assert_eq!(scan.records.len(), 1);
+    assert_eq!(scan.records[0].command_id, new);
+    assert_eq!(scan.records[0].sequence, 0);
+    assert_eq!(scan.incompatible_records, 0);
+}
+
+#[tokio::test]
+async fn replacement_with_unchanged_metadata_rebinds_durable_appends() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("commands.jsonl");
+    let journal = JsonlJournal::open(&path).await.unwrap();
+    let id = CommandId::new();
+    journal
+        .append(record(&id, CommandPhase::Accepted))
+        .await
+        .unwrap();
+    let original = tokio::fs::read(&path).await.unwrap();
+    replace_preserving_length_and_modified(&path, &original).await;
+
+    journal
+        .append(record(&id, CommandPhase::Prepared))
+        .await
+        .unwrap();
+    drop(journal);
+    let scan = JsonlJournal::open(&path)
+        .await
+        .unwrap()
+        .history(id)
+        .await
+        .unwrap();
+    assert_eq!(
+        scan.records.len(),
+        2,
+        "successful append must survive reopening the current path"
+    );
+    assert_eq!(scan.records[1].sequence, 1);
+    assert_eq!(scan.records[1].phase, CommandPhase::Prepared);
+}
+
+#[tokio::test]
+async fn damaged_replacement_with_unchanged_metadata_is_archived() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("commands.jsonl");
+    let journal = JsonlJournal::open(&path).await.unwrap();
+    let id = CommandId::new();
+    journal
+        .append(record(&id, CommandPhase::Accepted))
+        .await
+        .unwrap();
+    let mut damaged = tokio::fs::read(&path).await.unwrap();
+    damaged[0] = b'!';
+    replace_preserving_length_and_modified(&path, &damaged).await;
+
+    let scan = journal.history(id).await.unwrap();
+    assert!(scan.incompatible_records > 0);
+    let archives = journal.archives().await;
+    assert_eq!(archives.len(), 1);
+    assert_eq!(tokio::fs::read(&archives[0]).await.unwrap(), damaged);
+    assert_eq!(tokio::fs::read(&path).await.unwrap(), b"");
+    let fresh = CommandId::new();
+    journal
+        .append(record(&fresh, CommandPhase::Accepted))
+        .await
+        .unwrap();
+    drop(journal);
+    let scan = JsonlJournal::open(&path)
+        .await
+        .unwrap()
+        .history(fresh)
+        .await
+        .unwrap();
+    assert_eq!(scan.records.len(), 1);
+    assert_eq!(scan.incompatible_records, 0);
+}
+
 #[tokio::test]
 async fn reopens_committed_history_in_order() {
     let dir = tempfile::tempdir().unwrap();
