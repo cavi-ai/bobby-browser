@@ -112,6 +112,7 @@ fn session_subscribe_params() -> Value {
         "browsingContext.downloadWillBegin",
         "browsingContext.downloadEnd",
         "browsingContext.userPromptOpened",
+        "browsingContext.domContentLoaded",
         "network.beforeRequestSent",
         "network.responseCompleted",
         "network.fetchError"
@@ -1455,7 +1456,14 @@ impl FirefoxCompanionWorker {
                             let removals =
                                 mark_destroyed_context(&cleanup_pages, &cleanup_registry, context)
                                     .await;
-                            release_removed_pages(&task_failure, removals).await;
+                            // Releasing a page is a companion round trip; this loop keeps
+                            // reading events meanwhile so none are dropped.
+                            if !removals.is_empty() {
+                                let failure = Arc::clone(&task_failure);
+                                tokio::spawn(async move {
+                                    release_removed_pages(&failure, removals).await;
+                                });
+                            }
                             // A prompt pending on a destroyed context can
                             // never be handled; drop it or the map grows one
                             // orphan per killed tab with an open dialog.
@@ -1465,6 +1473,12 @@ impl FirefoxCompanionWorker {
                                 .await
                                 .retain(|_, (owner, _)| owner.as_deref() != Some(context));
                         }
+                    }
+                    Ok(event) if event.method == "browsingContext.domContentLoaded" => {
+                        network_quiet_task
+                            .lock()
+                            .await
+                            .observe_event(&event.method, &event.params);
                     }
                     Ok(event) if event.method == "network.beforeRequestSent" => {
                         network_quiet_task
@@ -1601,16 +1615,19 @@ impl FirefoxCompanionWorker {
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        network_quiet_task.lock().await.mark_tracking_lost();
+                        network_quiet_task
+                            .lock()
+                            .await
+                            .mark_tracking_lost(worker_pool::TrackingLoss::Lagged);
                         har_pending_task.write().await.clear();
                         tracing::warn!("Firefox event stream lost events; pending HAR discarded and network quiet marked uncertain");
-                        reconcile_contexts(
-                            &cleanup_transport,
-                            &cleanup_pages,
-                            &cleanup_registry,
-                            &task_failure,
-                        )
-                        .await;
+                        let transport = Arc::clone(&cleanup_transport);
+                        let pages = Arc::clone(&cleanup_pages);
+                        let registry = Arc::clone(&cleanup_registry);
+                        let failure = Arc::clone(&task_failure);
+                        tokio::spawn(async move {
+                            reconcile_contexts(&transport, &pages, &registry, &failure).await;
+                        });
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         let removals = mark_all_contexts(&cleanup_pages, &cleanup_registry).await;
@@ -2994,8 +3011,8 @@ impl PageOpenOperation {
 }
 
 use worker_pool::navigation_settle::{
-    navigation_settle_expression, parse_settled, trace_settle, SettleExit, LOAD_POLL,
-    NAVIGATION_SETTLE_CAP,
+    after_probe, navigation_settle_expression, parse_settled, trace_settle, AfterProbe, SettleExit,
+    LOAD_POLL, NAVIGATION_SETTLE_CAP,
 };
 use worker_pool::secret_material::page_title_evidence;
 
@@ -3004,7 +3021,8 @@ use worker_pool::secret_material::page_title_evidence;
 /// for the probe's quiet window, and returns the URL and title read at that
 /// point. A redirect that replaces the document while the probe runs restarts
 /// it. When `budget` runs out first, returns the URL and title the context
-/// shows then; `None` only when the context cannot be read.
+/// shows then; `None` only when the context cannot be read. Unknown loads
+/// cost one more probe.
 async fn settle_document(
     transport: &Arc<dyn BidiTransport>,
     context: &str,
@@ -3014,6 +3032,7 @@ async fn settle_document(
 ) -> Option<(String, String)> {
     let started = Instant::now();
     let deadline = started + budget;
+    let mut extra_probe_spent = false;
     let mut begin = None;
     let mut settled = None;
     let exit = loop {
@@ -3026,6 +3045,7 @@ async fn settle_document(
                 SettleExit::Unreadable
             };
         }
+        let landed_before = network.lock().await.landed_page_loads(context);
         let expression = navigation_settle_expression(remaining.as_millis().max(1), requested_url);
         // Firefox does not always reject a pending evaluation when a script
         // redirect replaces the document under it, so the probe races a watch
@@ -3076,16 +3096,31 @@ async fn settle_document(
                     SettleExit::Cap
                 };
                 // A script or fetch still loading changes the page once it
-                // lands: wait for it, then for the document to go quiet again.
-                if network.lock().await.pending_page_loads(context) == 0 {
-                    break exit;
+                // lands: wait for it, then probe again. One that landed while
+                // the probe ran earns one more probe per settle.
+                let (pending, landed) = {
+                    let network = network.lock().await;
+                    (
+                        network.pending_page_loads(context),
+                        network.landed_page_loads(context) != landed_before,
+                    )
+                };
+                match after_probe(pending, landed, &mut extra_probe_spent) {
+                    AfterProbe::Settled => break exit,
+                    AfterProbe::ProbeAgain => continue,
+                    AfterProbe::AwaitLoads => {
+                        while network
+                            .lock()
+                            .await
+                            .pending_page_loads(context)
+                            .is_some_and(|pending| pending > 0)
+                            && Instant::now() < deadline
+                        {
+                            tokio::time::sleep(LOAD_POLL).await;
+                        }
+                        continue;
+                    }
                 }
-                while network.lock().await.pending_page_loads(context) > 0
-                    && Instant::now() < deadline
-                {
-                    tokio::time::sleep(LOAD_POLL).await;
-                }
-                continue;
             }
         }
         tokio::time::sleep(Duration::from_millis(100)).await;

@@ -5,8 +5,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::navigation_settle::{
-    navigation_settle_expression, parse_settled, trace_settle, SettleExit, LOAD_POLL,
-    NAVIGATION_SETTLE_CAP,
+    after_probe, navigation_settle_expression, parse_settled, trace_settle, AfterProbe, SettleExit,
+    LOAD_POLL, NAVIGATION_SETTLE_CAP,
 };
 use crate::secret_material::page_title_evidence;
 use artifact_store::ArtifactStore;
@@ -3813,7 +3813,7 @@ fn redact_secret_material(value: String) -> String {
 /// quiet window, and returns the URL and title read at that point. A redirect
 /// that replaces the document while the probe runs restarts it. When `budget`
 /// runs out first, returns the URL and title the page shows then; `None` only
-/// when the page cannot be read.
+/// when the page cannot be read. Unknown loads cost one more probe.
 async fn settle_document(
     page: &Page,
     budget: Duration,
@@ -3824,6 +3824,7 @@ async fn settle_document(
     let deadline = started + budget;
     let mut begin = None;
     let mut settled = None;
+    let mut extra_probe_spent = false;
     let exit = loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -3834,6 +3835,10 @@ async fn settle_document(
                 SettleExit::Unreadable
             };
         }
+        let landed_before = match tracker {
+            Some(tracker) => tracker.landed_page_loads().await,
+            None => 0,
+        };
         let mut params = EvaluateParams::new(navigation_settle_expression(
             remaining.as_millis().max(1),
             requested_url,
@@ -3856,24 +3861,35 @@ async fn settle_document(
                     SettleExit::Cap
                 };
                 // A script or fetch still loading changes the page once it
-                // lands: wait for it, then for the document to go quiet again.
+                // lands: wait for it, then probe again. One that landed while
+                // the probe ran earns one more probe per settle.
                 let Some(tracker) = tracker else {
                     break exit;
                 };
-                if tracker.pending_page_loads().await == 0 {
-                    break exit;
+                let pending = tracker.pending_page_loads().await;
+                let landed = tracker.landed_page_loads().await != landed_before;
+                match after_probe(pending, landed, &mut extra_probe_spent) {
+                    AfterProbe::Settled => break exit,
+                    AfterProbe::ProbeAgain => continue,
+                    AfterProbe::AwaitLoads => {
+                        while tracker
+                            .pending_page_loads()
+                            .await
+                            .is_some_and(|pending| pending > 0)
+                            && Instant::now() < deadline
+                        {
+                            tokio::time::sleep(LOAD_POLL).await;
+                        }
+                        continue;
+                    }
                 }
-                while tracker.pending_page_loads().await > 0 && Instant::now() < deadline {
-                    tokio::time::sleep(LOAD_POLL).await;
-                }
-                continue;
             }
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
     let pending = match tracker {
         Some(tracker) => tracker.pending_page_loads().await,
-        None => 0,
+        None => Some(0),
     };
     trace_settle(
         "chromium",
