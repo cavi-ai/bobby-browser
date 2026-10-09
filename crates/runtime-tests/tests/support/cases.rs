@@ -1510,3 +1510,111 @@ pub async fn observation_carries_each_text_once(rig: &Rig) {
     );
     live.close().await;
 }
+
+const SIGN_IN_IDENTIFIER: &str = "reader@example.test";
+const SIGN_IN_PASSWORD: &str = "fixture-pass-41";
+
+/// A sign-in form whose identifier field offers passkeys
+/// (`autocomplete="username webauthn"`) beside a password field, a divider
+/// and a sign-in frame that may request credentials. Fields are named by
+/// their labels and targetable, empty values read empty, and only the typed
+/// password is redacted.
+pub async fn sign_in_fields_show_their_labels(rig: &Rig) {
+    let body = r#"<main><h1>Welcome back</h1>
+        <form action="/signin" onsubmit="event.preventDefault()">
+          <iframe title="Sign in" src="/signin-frame" allow="identity-credentials-get"></iframe>
+          <div><span>or</span></div>
+          <label for="identifier">Email or username</label>
+          <input id="identifier" name="identifier" type="text" autocomplete="username webauthn">
+          <label for="password">Password</label>
+          <input id="password" name="password" type="password" autocomplete="current-password">
+          <button type="submit">Next</button>
+        </form></main>"#;
+    let site = FixtureSite::spawn(vec![
+        ("/signin", Route::Html(page("Sign in", body))),
+        (
+            "/signin-frame",
+            Route::Html(page("Frame", "<button>Continue with a passkey</button>")),
+        ),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/signin")).await;
+    let snapshot = live.snapshot(json!({})).await;
+    let observed = live.observe(json!({})).await;
+    for (what, result) in [
+        ("a11y_snapshot", &snapshot),
+        ("workflow_observe", &observed),
+    ] {
+        assert_eq!(result["status"], "completed", "{what}: {result}");
+        for label in ["Email or username", "Password"] {
+            let field = find_node(result, "textbox", Some(label))
+                .unwrap_or_else(|| panic!("{what} has no field named {label:?}: {result}"));
+            assert_eq!(
+                field["target"]["accessibleName"], label,
+                "{what} gave the {label:?} field no target: {result}"
+            );
+            assert!(
+                field["value"].as_str().unwrap_or_default().is_empty(),
+                "{what} reported the empty {label:?} field as non-empty: {result}"
+            );
+        }
+        // Chromium reports the frame's role as `Iframe`, the companion as `iframe`.
+        assert!(
+            ["iframe", "Iframe"]
+                .iter()
+                .any(|role| find_node(result, role, Some("Sign in")).is_some()),
+            "{what} has no frame named \"Sign in\": {result}"
+        );
+        assert!(
+            !result.to_string().contains("[redacted]"),
+            "{what} redacted text on a form with nothing secret in it: {result}"
+        );
+    }
+    let mut texts = Vec::new();
+    strings_under(&snapshot, "name", &mut texts);
+    strings_under(&observed, "name", &mut texts);
+    assert!(
+        texts.contains(&"or"),
+        "the divider text is missing: {snapshot} {observed}"
+    );
+
+    for (label, value) in [
+        ("Email or username", SIGN_IN_IDENTIFIER),
+        ("Password", SIGN_IN_PASSWORD),
+    ] {
+        let target = find_node(&snapshot, "textbox", Some(label)).expect("field found above")
+            ["target"]
+            .clone();
+        let typed = live
+            .call(
+                "type_text",
+                json!({"target":target,"value":value,"clearFirst":true}),
+            )
+            .await;
+        assert_eq!(typed["status"], "completed", "type_text {label:?}: {typed}");
+    }
+    let after = live.snapshot(json!({})).await;
+    let identifier = find_node(&after, "textbox", Some("Email or username"))
+        .unwrap_or_else(|| panic!("identifier field missing after typing: {after}"));
+    assert_eq!(
+        identifier["value"], SIGN_IN_IDENTIFIER,
+        "the identifier field does not hold the typed value: {after}"
+    );
+    let password = find_node(&after, "textbox", Some("Password"))
+        .unwrap_or_else(|| panic!("password field missing after typing: {after}"));
+    assert_eq!(
+        password["value"], "[redacted]",
+        "the typed password is not redacted: {after}"
+    );
+    let observed_after = live.observe(json!({})).await;
+    for (what, result) in [
+        ("a11y_snapshot", &after),
+        ("workflow_observe", &observed_after),
+    ] {
+        assert!(
+            !result.to_string().contains(SIGN_IN_PASSWORD),
+            "{what} exposed the typed password: {result}"
+        );
+    }
+    live.close().await;
+}

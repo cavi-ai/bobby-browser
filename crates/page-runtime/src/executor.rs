@@ -1903,6 +1903,14 @@ fn typed_value_verified(
     if !clear_first && inspected.ends_with(value) {
         return true;
     }
+    // A redacted read-back cannot show the value; the control's typed read-back must.
+    if inspected == "[redacted]"
+        && observed.is_some_and(|observed| {
+            observed == value || (!clear_first && observed.ends_with(value))
+        })
+    {
+        return true;
+    }
     if value.parse::<bool>().is_ok() && observed == Some(value) {
         return true;
     }
@@ -1956,6 +1964,49 @@ mod tests {
     #[test]
     fn append_fails_when_inspected_does_not_end_with_value() {
         assert!(!typed_value_verified("x", false, "prefilled", None, "text"));
+    }
+
+    #[test]
+    fn redacted_read_back_passes_when_the_typed_read_back_matches() {
+        assert!(typed_value_verified(
+            "pass-41",
+            true,
+            "[redacted]",
+            Some("pass-41"),
+            "text"
+        ));
+        assert!(typed_value_verified(
+            "41",
+            false,
+            "[redacted]",
+            Some("pass-41"),
+            "text"
+        ));
+    }
+
+    #[test]
+    fn redacted_read_back_fails_without_a_matching_typed_read_back() {
+        assert!(!typed_value_verified(
+            "pass-41",
+            true,
+            "[redacted]",
+            Some("pass-4"),
+            "text"
+        ));
+        assert!(!typed_value_verified(
+            "pass-41",
+            true,
+            "[redacted]",
+            None,
+            "text"
+        ));
+        assert!(!typed_value_verified(
+            "true",
+            true,
+            "[redacted]",
+            Some("[redacted]"),
+            "checkable"
+        ));
     }
 
     #[test]

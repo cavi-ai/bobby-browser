@@ -57,6 +57,7 @@ async fn site_regressions_hold_on_firefox() {
         navigate_waits_for_late_scripts,
         page_titles_withhold_disclosed_credentials,
         observation_carries_each_text_once,
+        sign_in_fields_show_their_labels,
     );
     for (name, case) in table {
         if AssertUnwindSafe(case(&rig)).catch_unwind().await.is_err() {
