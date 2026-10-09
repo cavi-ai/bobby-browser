@@ -1192,6 +1192,63 @@ pub async fn settles_beside_combined_churn(rig: &Rig) {
     settles_beside_churn(rig, &[SHIMMER, COUNTER, CAROUSEL].concat()).await;
 }
 
+/// A bar inside `main` rewrites its `data-progress` attribute every 50 ms, so
+/// navigating to it settles at the cap. That settle's trace names
+/// `data-progress` with a nonzero count and places the churn inside `main`.
+pub async fn settle_cap_trace_names_the_churn(rig: &Rig) {
+    if std::env::var_os("RUST_LOG").is_some() {
+        eprintln!("settle_cap_trace_names_the_churn skipped: RUST_LOG replaces the capture sink");
+        return;
+    }
+    let progress = page(
+        "Progress",
+        r#"<main><h1>Progress</h1><div id="bar" data-progress="0"></div></main>
+        <script>
+            {
+                const bar = document.getElementById("bar");
+                let value = 0;
+                setInterval(() => bar.setAttribute("data-progress", String(++value)), 50);
+            }
+        </script>"#,
+    );
+    let site = FixtureSite::spawn(vec![("/progress", Route::Html(progress))]).await;
+    let capture = observability::test_support::CaptureSink::install();
+    let live = Live::open(rig, &site.url("/progress")).await;
+    let seen = capture.events().len();
+    let loaded = live
+        .call("navigate", json!({"url":site.url("/progress")}))
+        .await;
+    live.close().await;
+    assert_eq!(loaded["status"], "completed", "navigate: {loaded}");
+    let settles: Vec<Value> = capture.events()[seen..]
+        .iter()
+        .filter(|event| event["fields"]["message"] == "navigation settle")
+        .cloned()
+        .collect();
+    assert!(
+        !settles.is_empty() && settles.iter().all(|event| event["fields"]["exit"] == "cap"),
+        "every settle ends at the cap: {settles:?}"
+    );
+    for event in &settles {
+        let fields = &event["fields"];
+        let progress = fields["top_attributes"]
+            .as_str()
+            .unwrap_or_default()
+            .split(' ')
+            .find_map(|pair| pair.strip_prefix("data-progress="))
+            .and_then(|count| count.parse::<u64>().ok());
+        assert!(
+            progress.is_some_and(|count| count > 0),
+            "cap trace names data-progress: {event}"
+        );
+        assert_eq!(
+            fields["inside_main"], true,
+            "cap trace places the churn in main: {event}"
+        );
+    }
+    eprintln!("settle cap trace: {settles:?}");
+}
+
 /// Requests the heavy page fires at once, more than a tracker holds.
 const HEAVY_REQUESTS: usize = 5_000;
 /// Late-data navigations after the heavy page.

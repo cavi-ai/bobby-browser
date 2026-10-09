@@ -3824,6 +3824,7 @@ async fn settle_document(
     let deadline = started + budget;
     let mut begin = None;
     let mut settled = None;
+    let mut churn = None;
     let mut extra_probe_spent = false;
     let exit = loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -3855,6 +3856,7 @@ async fn settle_document(
             {
                 begin.get_or_insert(read.begin);
                 settled = Some(read.page);
+                churn = read.churn;
                 let exit = if read.quiet {
                     SettleExit::Quiet
                 } else {
@@ -3898,6 +3900,7 @@ async fn settle_document(
         pending,
         begin.as_ref(),
         settled.as_ref(),
+        churn.as_ref(),
     );
     settled
 }

@@ -42,6 +42,7 @@ chromium_case!(settles_beside_class_churn);
 chromium_case!(settles_beside_text_churn);
 chromium_case!(settles_beside_moving_children);
 chromium_case!(settles_beside_combined_churn);
+chromium_case!(settle_cap_trace_names_the_churn);
 chromium_case!(network_tracking_survives_a_heavy_page);
 chromium_case!(type_text_enter_reports_a_late_title);
 chromium_case!(type_text_enter_waits_for_a_landed_response);

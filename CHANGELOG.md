@@ -43,6 +43,7 @@
 
 ### Changed
 
+- A settle that ends at the 5 s cap logs the page changes that kept it busy.
 - `bobby runtime stop` shows what is attached, asks before disconnecting agents, refuses without a terminal unless `--disconnect-agents` is given, and saves the impact report first.
 - `make install` runs `bobby install --yes` when stdin or stdout is not a terminal; `make install RESTART=1` passes `--restart-runtime`.
 - `Formula/bobby-browser.rb` carries the v0.19.1 asset digests.
