@@ -34,6 +34,9 @@ use worker_pool::{
 
 use crate::{CompanionExtensionObserver, FirefoxCompanionFactory};
 
+/// Bounds `session.end` at shutdown and `browser.close` before a restart.
+const BIDI_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
 struct FirefoxRegistration {
     profile_id: ProfileId,
     factory: Arc<ConfiguredFirefoxFactory>,
@@ -376,8 +379,13 @@ impl WorkerFactory for ConfiguredFirefoxFactory {
             // keeps it alive past connection loss, and with its one-session
             // limit a leaked session bricks every later `session.new` until
             // the browser restarts.
-            if let Err(error) = client.end_session().await {
-                tracing::warn!(error = %error.message, "firefox BiDi session end on shutdown failed");
+            match tokio::time::timeout(BIDI_CLOSE_TIMEOUT, client.end_session()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::warn!(
+                    error = %error.message,
+                    "firefox BiDi session end on shutdown failed"
+                ),
+                Err(_) => tracing::warn!("firefox BiDi session end on shutdown timed out"),
             }
         }
         self.server.lock().await.take();
@@ -433,9 +441,9 @@ impl ConfiguredFirefoxFactory {
                 .await
                 .map_err(companion_error)?;
         } else {
-            // The shared BiDi session dies with the browser.
-            self.bidi.lock().await.take();
-            recycle_enrolled_firefox(&self.config).await?;
+            // The shared BiDi session dies with the browser; it closes it.
+            let session = self.bidi.lock().await.take();
+            recycle_enrolled_firefox(&self.config, session).await?;
         }
         let reconnected = server
             .wait_for_extension_reconnect(profile_id, &connection, self.config.timeout)
@@ -535,7 +543,7 @@ impl ConfiguredFirefoxFactory {
                 url = %configured,
                 "firefox BiDi session.new still blocked; recycling enrolled profile"
             );
-            recycle_enrolled_firefox(&self.config).await?;
+            recycle_enrolled_firefox(&self.config, None).await?;
             let endpoint =
                 live_endpoint_override(&self.config.profile_dir, &configured).unwrap_or(configured);
             return crate::BidiClient::connect_session(endpoint, self.config.timeout).await;
@@ -565,7 +573,7 @@ impl ConfiguredFirefoxFactory {
                 error = %error.message,
                 "Firefox BiDi endpoint unreachable; recycling enrolled profile"
             );
-            match recycle_enrolled_firefox(&self.config).await {
+            match recycle_enrolled_firefox(&self.config, None).await {
                 Ok(()) => {
                     let retry_url = live_endpoint_override(&self.config.profile_dir, &configured)
                         .unwrap_or(configured);
@@ -612,7 +620,7 @@ impl ConfiguredFirefoxFactory {
                     url = %self.config.bidi_url,
                     "firefox BiDi session slot occupied; recycling enrolled profile"
                 );
-                recycle_enrolled_firefox(&self.config).await
+                recycle_enrolled_firefox(&self.config, None).await
             }
             // A refused probe with no live endpoint elsewhere means Firefox's
             // BiDi listener is down: recycle once instead of failing late.
@@ -628,7 +636,7 @@ impl ConfiguredFirefoxFactory {
                     error = %error.message,
                     "firefox BiDi endpoint probe failed; recycling enrolled profile"
                 );
-                recycle_enrolled_firefox(&self.config).await
+                recycle_enrolled_firefox(&self.config, None).await
             }
             Err(_) => Ok(()),
         }
@@ -924,49 +932,79 @@ fn command_owns_profile(command: &str, profile: &Path) -> bool {
         })
 }
 
-fn terminate_firefox_listeners(port: u16, profile: &Path) -> Result<(), CommandError> {
-    for pid in tcp_listen_pids(port) {
-        let Some(command) = process_command(pid) else {
-            continue;
-        };
-        if command_owns_profile(&command, profile) {
-            terminate_pid(pid);
-        }
-    }
-    Ok(())
+fn runs_on_profile(pid: u32, profile: &Path) -> bool {
+    process_command(pid).is_some_and(|command| command_owns_profile(&command, profile))
 }
 
-async fn wait_until_port_free(
-    port: u16,
-    profile: &Path,
-    timeout: Duration,
-) -> Result<(), CommandError> {
+/// Waits until none of `pids` runs on the profile any more, which releases
+/// the profile lock.
+async fn wait_for_exit(pids: &[u32], profile: &Path, timeout: Duration) -> bool {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        let remaining: Vec<u32> = tcp_listen_pids(port)
-            .into_iter()
-            .filter(|pid| {
-                process_command(*pid).is_some_and(|command| command_owns_profile(&command, profile))
-            })
-            .collect();
-        if remaining.is_empty() {
-            return Ok(());
+        if !pids.iter().any(|pid| runs_on_profile(*pid, profile)) {
+            return true;
         }
         if tokio::time::Instant::now() >= deadline {
-            for pid in remaining {
-                kill_pid(pid);
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            if tcp_listen_pids(port).into_iter().all(|pid| {
-                !process_command(pid).is_some_and(|command| command_owns_profile(&command, profile))
-            }) {
-                return Ok(());
-            }
-            return Err(companion_error(
-                "Firefox did not release the BiDi port after recycle",
-            ));
+            return false;
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Quit the Firefox serving the enrolled profile's BiDi port so its cookie
+/// and session-store writes land: `browser.close` over a session when one is
+/// available, else SIGTERM, and SIGKILL only after `config.timeout`.
+async fn stop_enrolled_firefox(
+    config: &FirefoxRuntimeConfig,
+    endpoint: &Url,
+    port: u16,
+    session: Option<crate::BidiClient>,
+) -> Result<(), CommandError> {
+    let profile = &config.profile_dir;
+    let pids: Vec<u32> = tcp_listen_pids(port)
+        .into_iter()
+        .filter(|pid| runs_on_profile(*pid, profile))
+        .collect();
+    if pids.is_empty() {
+        return Ok(());
+    }
+    let session = match session.filter(crate::BidiClient::is_alive) {
+        Some(session) => Some(session),
+        None => crate::BidiClient::connect_session(endpoint.clone(), BIDI_CLOSE_TIMEOUT)
+            .await
+            .ok(),
+    };
+    let closing = match &session {
+        // Firefox may drop the socket before it answers.
+        Some(session) => {
+            session
+                .send("browser.close", serde_json::json!({}))
+                .await
+                .is_ok()
+                || !session.is_alive()
+        }
+        None => false,
+    };
+    if !closing {
+        for pid in &pids {
+            terminate_pid(*pid);
+        }
+    }
+    if wait_for_exit(&pids, profile, config.timeout).await {
+        return Ok(());
+    }
+    tracing::warn!(
+        ?pids,
+        graceful = if closing { "browser.close" } else { "SIGTERM" },
+        "enrolled Firefox did not exit in time; sending SIGKILL"
+    );
+    for pid in &pids {
+        kill_pid(*pid);
+    }
+    if wait_for_exit(&pids, profile, Duration::from_secs(2)).await {
+        Ok(())
+    } else {
+        Err(companion_error("Firefox did not exit after recycle"))
     }
 }
 
@@ -1130,7 +1168,10 @@ async fn wait_until_bidi_slot_free(url: &Url, timeout: Duration) -> Result<(), C
 /// dies: RemoteAgent keeps the slot, and a new `/session` socket is sessionless.
 /// The enrolled Bobby profile is dedicated automation Firefox, so recycling it
 /// (same profile, same remote-debugging port, no re-pair) is the recovery.
-async fn recycle_enrolled_firefox(config: &FirefoxRuntimeConfig) -> Result<(), CommandError> {
+async fn recycle_enrolled_firefox(
+    config: &FirefoxRuntimeConfig,
+    session: Option<crate::BidiClient>,
+) -> Result<(), CommandError> {
     validate_enrolled_profile(&config.profile_dir)?;
     let endpoint = live_endpoint_override(&config.profile_dir, &config.bidi_url)
         .unwrap_or_else(|| config.bidi_url.clone());
@@ -1139,8 +1180,7 @@ async fn recycle_enrolled_firefox(config: &FirefoxRuntimeConfig) -> Result<(), C
     let bin = enrolled_firefox_bin().ok_or_else(|| {
         companion_error("Firefox binary not found to recycle the leaked BiDi session")
     })?;
-    terminate_firefox_listeners(port, &config.profile_dir)?;
-    wait_until_port_free(port, &config.profile_dir, config.timeout).await?;
+    stop_enrolled_firefox(config, &endpoint, port, session).await?;
     let endpoint_file = config.profile_dir.join("WebDriverBiDiServer.json");
     match std::fs::symlink_metadata(&endpoint_file) {
         Ok(metadata) if metadata.is_file() => {
