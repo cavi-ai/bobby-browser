@@ -276,6 +276,60 @@ async fn reopens_committed_history_in_order() {
 }
 
 #[tokio::test]
+async fn incompatible_archive_records_reserve_command_ids_without_blocking_new_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("commands.jsonl");
+    let archive = dir.path().join("commands.jsonl.archive-fixture");
+    let legacy = CommandId::new();
+    let incompatible = CommandId::new();
+    let torn = CommandId::new();
+    let contents = format!(
+        "{}\n\n{}\n{}",
+        v1_navigate_line(0, &legacy),
+        serde_json::json!({"commandId": incompatible, "sequence": "legacy"}),
+        serde_json::json!({"commandId": torn})
+    );
+    tokio::fs::write(&archive, contents.as_bytes())
+        .await
+        .unwrap();
+
+    let journal = JsonlJournal::open(&path).await.unwrap();
+    for id in [&legacy, &incompatible, &torn] {
+        let scan = journal.history(id.clone()).await.unwrap();
+        assert!(scan.records.is_empty());
+        assert_eq!(scan.incompatible_records, 3);
+        assert!(scan.torn_tail);
+        assert!(matches!(
+            journal.append(record(id, CommandPhase::Accepted)).await,
+            Err(workflow_journal::JournalError::UncertainCommand)
+        ));
+    }
+    let fresh = CommandId::new();
+    journal
+        .append(record(&fresh, CommandPhase::Accepted))
+        .await
+        .unwrap();
+    let scan = journal.history(fresh.clone()).await.unwrap();
+    assert_eq!(scan.records.len(), 1);
+    assert_eq!(scan.records[0].sequence, 0);
+    assert_eq!(scan.incompatible_records, 0);
+    assert!(!scan.torn_tail);
+    assert_eq!(
+        tokio::fs::read(&archive).await.unwrap(),
+        contents.as_bytes()
+    );
+    drop(journal);
+    let reopened = JsonlJournal::open(&path).await.unwrap();
+    assert_eq!(reopened.history(fresh).await.unwrap().records.len(), 1);
+    assert!(matches!(
+        reopened
+            .append(record(&legacy, CommandPhase::Accepted))
+            .await,
+        Err(workflow_journal::JournalError::UncertainCommand)
+    ));
+}
+
+#[tokio::test]
 async fn archives_and_reports_a_torn_final_line() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("commands.jsonl");
