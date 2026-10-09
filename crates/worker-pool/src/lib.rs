@@ -33,6 +33,19 @@ pub use chromium::{is_dead_worker_error, ChromiumWorkerFactory};
 /// The Firefox worker's message once its transport is gone or it was closed.
 pub const FIREFOX_WORKER_CLOSED_MESSAGE: &str = "Firefox companion worker is closed";
 
+/// A Firefox BiDi transport died. Chromium's closed-page check uses this so
+/// the Chromium module does not own Firefox's wording.
+pub fn is_firefox_bidi_transport_dead(message: &str) -> bool {
+    message.contains("Firefox BiDi")
+        && !message.contains("client closed")
+        && (message.contains("connection closed")
+            || message.contains("connection ended")
+            || message.contains("disconnected")
+            || message.contains("command channel closed")
+            || message.contains("command capacity closed")
+            || message.contains("response channel closed"))
+}
+
 /// What a caller is told when its session's browser is gone.
 pub const BROWSER_GONE_MESSAGE: &str =
     "this session's browser is gone; create a new session and close this one";

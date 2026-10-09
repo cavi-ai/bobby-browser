@@ -3,14 +3,23 @@
 
 #[cfg(test)]
 use crate::tool_args::*;
-use crate::tool_meta::{
-    WORKFLOW_OBSERVE_OPERATION, WORKFLOW_OBSERVE_REQUIRED_CAPABILITIES, WORKFLOW_START_OPERATION,
-    WORKFLOW_START_REQUIRED_CAPABILITIES,
-};
 use crate::workflow_handles::WorkflowScope;
 #[cfg(test)]
 use serde::de::DeserializeOwned;
-use serde_json::Value;
+use serde_json::{json, Value};
+
+pub(crate) const WORKFLOW_START_REQUIRED_CAPABILITIES: &[types::Capability] = &[
+    types::Capability::SessionRead,
+    types::Capability::SessionWrite,
+    types::Capability::PageWrite,
+];
+pub(crate) const WORKFLOW_START_OPERATION: types::InterfaceOperation =
+    types::InterfaceOperation::CreateSession;
+
+pub(crate) const WORKFLOW_OBSERVE_REQUIRED_CAPABILITIES: &[types::Capability] =
+    &[types::Capability::BrowserMutate];
+pub(crate) const WORKFLOW_OBSERVE_OPERATION: types::InterfaceOperation =
+    types::InterfaceOperation::SubmitCommand;
 
 pub(crate) const ALWAYS: u8 = 1;
 pub(crate) const EXPLORE: u8 = 2;
@@ -46,6 +55,7 @@ pub(crate) struct ToolDescriptor {
     pub destructive: bool,
     pub idempotent: bool,
     pub open_world: bool,
+    pub page_derived: bool,
 }
 
 #[cfg(test)]
@@ -60,6 +70,7 @@ macro_rules! tools {
         capabilities: $caps:expr, operation: $operation:expr,
         schema: $schema:ident, args: $args:ty, phases: $phases:expr,
         $(scope: $scope:ident,)? group: $group:ident,
+        $(page_derived: $derived:literal,)?
         hints: ($read:expr, $destructive:expr, $idempotent:expr, $open:expr) } )*) => {
         pub const EVERY_TOOL: &[&str] = &[$(stringify!($name)),*];
         #[cfg(test)]
@@ -72,10 +83,13 @@ macro_rules! tools {
             schema: crate::schema::$schema, #[cfg(test)] parse: parse::<$args>, phases: $phases,
             scope: tools!(@scope $($scope)?), group: DispatchGroup::$group,
             read_only: $read, destructive: $destructive, idempotent: $idempotent, open_world: $open,
+            page_derived: tools!(@flag $($derived)?),
         }),*];
     };
     (@scope $scope:ident) => { Some(WorkflowScope::$scope) };
     (@scope) => { None };
+    (@flag $derived:literal) => { $derived };
+    (@flag) => { false };
 }
 
 pub(crate) fn descriptor(name: &str) -> Option<&'static ToolDescriptor> {
@@ -85,10 +99,51 @@ pub(crate) fn descriptor(name: &str) -> Option<&'static ToolDescriptor> {
         .map(|index| &DESCRIPTORS[index])
 }
 
+pub(crate) fn required_capabilities(name: &str) -> Option<&'static [types::Capability]> {
+    descriptor(name).map(|tool| tool.capabilities)
+}
+
+pub(crate) fn required_operation(name: &str) -> Option<types::InterfaceOperation> {
+    descriptor(name).and_then(|tool| tool.operation)
+}
+
+pub(crate) fn tool_description(name: &str) -> &'static str {
+    descriptor(name).map_or("Runtime operation.", |tool| tool.description)
+}
+
+pub(crate) fn tool_title(name: &str) -> &'static str {
+    descriptor(name).map_or("Untitled tool", |tool| tool.title)
+}
+
+pub(crate) fn is_page_derived(name: &str) -> bool {
+    descriptor(name).is_some_and(|tool| tool.page_derived)
+}
+
+/// MCP host hints. `required_capabilities` remains the authority over what a
+/// principal may call.
+pub(crate) fn tool_annotations(name: &str) -> Value {
+    let tool = descriptor(name);
+    let read_only = tool.is_some_and(|tool| tool.read_only);
+    let destructive = tool.is_some_and(|tool| tool.destructive);
+    let idempotent = tool.is_some_and(|tool| tool.idempotent);
+    let open_world = tool.is_some_and(|tool| tool.open_world);
+    let mut hints = serde_json::Map::new();
+    if read_only {
+        hints.insert("readOnlyHint".to_owned(), json!(true));
+    } else {
+        hints.insert("destructiveHint".to_owned(), json!(destructive));
+    }
+    if idempotent {
+        hints.insert("idempotentHint".to_owned(), json!(true));
+    }
+    hints.insert("openWorldHint".to_owned(), json!(open_world));
+    Value::Object(hints)
+}
+
 tools! {
     a11y_snapshot { order: 32, title: "Accessibility snapshot", description: "Capture a compact accessibility tree with command-ready targets. Same-process iframe targets include their frame hop; use the in-frame target directly. Requires browser:mutate.",
         capabilities: &[types::Capability::BrowserMutate], operation: Some(types::InterfaceOperation::SubmitCommand), schema: a11y_snapshot_schema, args: A11ySnapshotArgs,
-        phases: EXPLORE | ACT | INTENT | VERIFY, scope: SessionPageWorkflow, group: PageOps, hints: (true, false, false, false) }
+        phases: EXPLORE | ACT | INTENT | VERIFY, scope: SessionPageWorkflow, group: PageOps, page_derived: true, hints: (true, false, false, false) }
     checkpoint_save { order: 0, title: "Save checkpoint", description: "Persist a verified checkpoint from evidenceRefs. Requires recovery:write. Save before Boundary commands with pinned boundary IDs. On failure, confirm each referenced command completed.",
         capabilities: &[types::Capability::RecoveryWrite], operation: Some(types::InterfaceOperation::CreateCheckpoint), schema: checkpoint_save_schema, args: CheckpointSaveArgs,
         phases: INTENT | VERIFY, group: Workflow, hints: (false, false, true, false) }
@@ -109,10 +164,10 @@ tools! {
         phases: ACT, group: Primitives, hints: (false, false, false, true) }
     context_ask { order: 4, title: "Ask where a control is", description: "Resolve a described control from retained context. Requires page:read. Returns a target and confidence. On failure or after a page change, refresh with a11y_snapshot.",
         capabilities: &[types::Capability::PageRead], operation: Some(types::InterfaceOperation::ReadPage), schema: context_ask_schema, args: ContextAskArgs,
-        phases: ACT | INTENT | VERIFY, scope: SessionPage, group: PageOps, hints: (true, false, false, false) }
+        phases: ACT | INTENT | VERIFY, scope: SessionPage, group: PageOps, page_derived: true, hints: (true, false, false, false) }
     context_neighbors { order: 5, title: "Show remembered form structure around a control", description: "Show the remembered form structure around a described control: its form, sibling controls, and per-intent success counters, marked as remembered rather than live-observed. Requires context:read. Returns nothing for an unknown site or control.",
         capabilities: &[types::Capability::ContextRead], operation: Some(types::InterfaceOperation::ReadContext), schema: context_ask_schema, args: ContextNeighborsArgs,
-        phases: INTENT | VERIFY, scope: SessionPage, group: PageOps, hints: (true, false, false, false) }
+        phases: INTENT | VERIFY, scope: SessionPage, group: PageOps, page_derived: true, hints: (true, false, false, false) }
     control_action { order: 10, title: "Form control action", description: "Apply one native control action and reread state. Pass a snapshot target verbatim. Requires browser:mutate; file:upload for setFiles. On failure with targetNotFound, refresh form_snapshot.",
         capabilities: &[types::Capability::BrowserMutate], operation: Some(types::InterfaceOperation::SubmitCommand), schema: control_action_schema, args: ControlActionArgs,
         phases: EXPLORE | ACT, scope: SessionPageWorkflow, group: PageOps, hints: (false, false, false, false) }
@@ -151,13 +206,13 @@ tools! {
             types::Capability::BrowserMutate,
             types::Capability::VisionAssist,
         ], operation: Some(types::InterfaceOperation::SubmitCommand), schema: extract_structured_schema, args: ExtractStructuredArgs,
-        phases: INTENT, scope: SessionPageWorkflow, group: PageOps, hints: (false, false, false, true) }
+        phases: INTENT, scope: SessionPageWorkflow, group: PageOps, page_derived: true, hints: (false, false, false, true) }
     form_snapshot { order: 34, title: "Form snapshot", description: "Read a bounded inventory of a page's form controls and each one's current state (passwords redacted, no selectors). Requires page:read.",
         capabilities: &[types::Capability::PageRead], operation: Some(types::InterfaceOperation::ReadPage), schema: form_snapshot_input_schema, args: FormSnapshotArgs,
-        phases: INTENT | VERIFY, scope: SessionPage, group: PageOps, hints: (true, false, false, false) }
+        phases: INTENT | VERIFY, scope: SessionPage, group: PageOps, page_derived: true, hints: (true, false, false, false) }
     inspect { order: 26, title: "Inspect page", description: "Read a page's visible text, optionally scoped to one element by selector or target, with HTML on request. Requires browser:mutate.",
         capabilities: &[types::Capability::BrowserMutate], operation: Some(types::InterfaceOperation::SubmitCommand), schema: inspect_schema, args: InspectArgs,
-        phases: VERIFY, scope: SessionPageWorkflow, group: Primitives, hints: (true, false, false, false) }
+        phases: VERIFY, scope: SessionPageWorkflow, group: Primitives, page_derived: true, hints: (true, false, false, false) }
     intent_complete_form { order: 11, title: "Complete form", description: "Fill ordered named fields in one verified intent; never submits. Pass workflowHandle. Requires browser:mutate and intent:execute. Fields resolve just-in-time; revealedBy activates first. Defaults evidenceDetail=compact. On failure retry remaining fields.",
         capabilities: &[
             types::Capability::BrowserMutate,
@@ -182,7 +237,7 @@ tools! {
             types::Capability::BrowserMutate,
             types::Capability::IntentExecute,
         ], operation: Some(types::InterfaceOperation::SubmitCommand), schema: intent_extract_schema, args: IntentExtractArgs,
-        phases: INTENT, scope: SessionPageWorkflow, group: Intents, hints: (true, false, false, false) }
+        phases: INTENT, scope: SessionPageWorkflow, group: Intents, page_derived: true, hints: (true, false, false, false) }
     intent_fill { order: 15, title: "Fill control", description: "Fill one described form control and verify the value (Reconciliable). Requires browser:mutate and intent:execute. accessibleName may be a controlId from form_snapshot. Produces fill evidence carrying the browser's own validity state. On failure with verificationFailed, read the retained validation message and re-fill; on targetNotFound, take a fresh a11y_snapshot and pass the new target.",
         capabilities: &[
             types::Capability::BrowserMutate,
@@ -285,7 +340,7 @@ tools! {
         phases: ACT | INTENT, scope: SessionPageWorkflow, group: Primitives, hints: (true, false, false, false) }
     workflow_observe { order: 51, title: "Observe retained workflow", description: "Observe retained or live accessibility evidence. Requires browser:mutate; forms need page:read. Defaults evidenceDetail=compact.",
         capabilities: WORKFLOW_OBSERVE_REQUIRED_CAPABILITIES, operation: Some(WORKFLOW_OBSERVE_OPERATION), schema: workflow_observe_schema, args: WorkflowObserveArgs,
-        phases: ALWAYS, scope: SessionPageWorkflow, group: AgentWorkflow, hints: (true, false, false, false) }
+        phases: ALWAYS, scope: SessionPageWorkflow, group: AgentWorkflow, page_derived: true, hints: (true, false, false, false) }
     workflow_recover { order: 52, title: "Recover workflow", description: "Recover from the last verified checkpoint. Requires recovery:write. Returns resume, restart, or reconciliation evidence. On failure with notFound, verify session ownership with session_list.",
         capabilities: &[types::Capability::RecoveryWrite], operation: Some(types::InterfaceOperation::RecoverWorkflow), schema: workflow_recover_schema, args: WorkflowRecoverArgs,
         phases: VERIFY, group: Workflow, hints: (false, false, false, false) }
@@ -325,5 +380,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn form_intents_describe_the_compact_verified_loop() {
+        let complete = tool_description("intent_complete_form");
+        assert!(
+            complete.contains("evidenceDetail=compact"),
+            "whole-form intent must advertise compact success evidence"
+        );
+        assert!(
+            complete.contains("just-in-time") && complete.contains("revealedBy"),
+            "whole-form intent must explain that fields resolve just-in-time and name revealedBy as the activation hook for a field that only appears once revealed"
+        );
+
+        let submit = tool_description("intent_submit_and_verify");
+        assert!(
+            submit.contains("Submit once")
+                && submit.contains("submitSettlement=settled|validationRejected")
+                && submit.contains("do not inspect or blindly resubmit"),
+            "verified submit must identify the exactly-once settled stopping condition"
+        );
+    }
+
+    #[test]
+    fn iframe_and_download_descriptions_identify_terminal_evidence() {
+        let snapshot = tool_description("a11y_snapshot");
+        assert!(
+            snapshot.contains("use the in-frame target directly"),
+            "iframe targets must discourage a redundant second discovery pass"
+        );
+
+        let download = tool_description("download_url");
+        assert!(
+            download.contains("no shell check is needed"),
+            "digest-verified saved downloads must identify terminal evidence"
+        );
     }
 }

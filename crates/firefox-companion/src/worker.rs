@@ -45,6 +45,11 @@ use types::{
     WaitCondition, WaitForCommand, WaitUntil, WorkerId,
 };
 use url::Url;
+use worker_pool::navigation_settle::{
+    navigation_settle_expression, parse_settled, run_settle, ProbeStep, SettleSession,
+    NAVIGATION_SETTLE_CAP,
+};
+use worker_pool::secret_material::page_title_evidence;
 use worker_pool::{resolve_upload_paths, BrowserWorker, WorkerFactory};
 
 use crate::bidi::{BidiClient, BidiEvent, BidiTransport, SharedBiDiTransport};
@@ -3007,11 +3012,75 @@ impl PageOpenOperation {
     }
 }
 
-use worker_pool::navigation_settle::{
-    after_probe, navigation_settle_expression, parse_settled, trace_settle, AfterProbe, SettleExit,
-    LOAD_POLL, NAVIGATION_SETTLE_CAP,
-};
-use worker_pool::secret_material::page_title_evidence;
+struct FirefoxSettle<'a> {
+    transport: &'a Arc<dyn BidiTransport>,
+    context: &'a str,
+    network: &'a AsyncMutex<FirefoxNetworkQuiet>,
+}
+
+#[async_trait]
+impl SettleSession for FirefoxSettle<'_> {
+    async fn probe(&mut self, remaining: Duration, requested_url: &str) -> ProbeStep {
+        let expression = navigation_settle_expression(remaining.as_millis().max(1), requested_url);
+        // Firefox does not always reject a pending evaluation when a script
+        // redirect replaces the document under it, so the probe races a watch
+        // on the context's URL and restarts in the new document when it moves.
+        let started_at = context_url(self.transport, self.context).await;
+        let probe = tokio::time::timeout(
+            remaining + Duration::from_secs(1),
+            self.transport.send(
+                "script.evaluate",
+                json!({
+                    "expression": expression,
+                    "target": {"context": self.context, "sandbox": COMPANION_SANDBOX},
+                    "awaitPromise": true,
+                    "resultOwnership": "none",
+                }),
+            ),
+        );
+        let moved = async {
+            let Some(started_at) = started_at else {
+                return std::future::pending::<()>().await;
+            };
+            loop {
+                tokio::time::sleep(SETTLE_URL_WATCH_INTERVAL).await;
+                if context_url(self.transport, self.context)
+                    .await
+                    .is_some_and(|current| current != started_at)
+                {
+                    return;
+                }
+            }
+        };
+        tokio::select! {
+            attempt = probe => {
+                let read = if let Ok(Ok(response)) = attempt {
+                    response
+                        .pointer("/result/value")
+                        .or_else(|| response.get("value"))
+                        .and_then(Value::as_str)
+                        .and_then(parse_settled)
+                } else {
+                    None
+                };
+                ProbeStep::Finished(read)
+            }
+            () = moved => ProbeStep::Replaced,
+        }
+    }
+
+    async fn current_page(&mut self) -> Option<(String, String)> {
+        current_page(self.transport, self.context).await
+    }
+
+    async fn landed_loads(&mut self) -> u64 {
+        self.network.lock().await.landed_page_loads(self.context)
+    }
+
+    async fn pending_loads(&mut self) -> Option<usize> {
+        self.network.lock().await.pending_page_loads(self.context)
+    }
+}
 
 /// Waits until the document in `context` has loaded, `network` reports no
 /// script or fetch/XHR load in flight for it, and it has had no content change
@@ -3027,114 +3096,17 @@ async fn settle_document(
     requested_url: &str,
     network: &AsyncMutex<FirefoxNetworkQuiet>,
 ) -> Option<(String, String)> {
-    let started = Instant::now();
-    let deadline = started + budget;
-    let mut extra_probe_spent = false;
-    let mut begin = None;
-    let mut settled = None;
-    let mut churn = None;
-    let exit = loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            settled = current_page(transport, context).await.or(settled);
-            break if settled.is_some() {
-                SettleExit::Cap
-            } else {
-                SettleExit::Unreadable
-            };
-        }
-        let landed_before = network.lock().await.landed_page_loads(context);
-        let expression = navigation_settle_expression(remaining.as_millis().max(1), requested_url);
-        // Firefox does not always reject a pending evaluation when a script
-        // redirect replaces the document under it, so the probe races a watch
-        // on the context's URL and restarts in the new document when it moves.
-        let started_at = context_url(transport, context).await;
-        let probe = tokio::time::timeout(
-            remaining + Duration::from_secs(1),
-            transport.send(
-                "script.evaluate",
-                json!({
-                    "expression": expression,
-                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
-                    "awaitPromise": true,
-                    "resultOwnership": "none",
-                }),
-            ),
-        );
-        let moved = async {
-            let Some(started_at) = started_at else {
-                return std::future::pending::<()>().await;
-            };
-            loop {
-                tokio::time::sleep(SETTLE_URL_WATCH_INTERVAL).await;
-                if context_url(transport, context)
-                    .await
-                    .is_some_and(|current| current != started_at)
-                {
-                    return;
-                }
-            }
-        };
-        let attempt = tokio::select! {
-            attempt = probe => attempt,
-            () = moved => continue,
-        };
-        if let Ok(Ok(response)) = attempt {
-            let read = response
-                .pointer("/result/value")
-                .or_else(|| response.get("value"))
-                .and_then(Value::as_str)
-                .and_then(parse_settled);
-            if let Some(read) = read {
-                begin.get_or_insert(read.begin);
-                settled = Some(read.page);
-                churn = read.churn;
-                let exit = if read.quiet {
-                    SettleExit::Quiet
-                } else {
-                    SettleExit::Cap
-                };
-                // A script or fetch still loading changes the page once it
-                // lands: wait for it, then probe again. One that landed while
-                // the probe ran earns one more probe per settle.
-                let (pending, landed) = {
-                    let network = network.lock().await;
-                    (
-                        network.pending_page_loads(context),
-                        network.landed_page_loads(context) != landed_before,
-                    )
-                };
-                match after_probe(pending, landed, &mut extra_probe_spent) {
-                    AfterProbe::Settled => break exit,
-                    AfterProbe::ProbeAgain => continue,
-                    AfterProbe::AwaitLoads => {
-                        while network
-                            .lock()
-                            .await
-                            .pending_page_loads(context)
-                            .is_some_and(|pending| pending > 0)
-                            && Instant::now() < deadline
-                        {
-                            tokio::time::sleep(LOAD_POLL).await;
-                        }
-                        continue;
-                    }
-                }
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
-    let pending = network.lock().await.pending_page_loads(context);
-    trace_settle(
+    run_settle(
         "firefox",
-        exit,
-        started,
-        pending,
-        begin.as_ref(),
-        settled.as_ref(),
-        churn.as_ref(),
-    );
-    settled
+        budget,
+        requested_url,
+        &mut FirefoxSettle {
+            transport,
+            context,
+            network,
+        },
+    )
+    .await
 }
 
 /// The URL and title `context` shows now, `None` when it cannot be read.

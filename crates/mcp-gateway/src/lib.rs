@@ -10,7 +10,6 @@
 
 #![recursion_limit = "256"]
 
-mod annotations;
 mod catalog;
 mod jobs;
 /// Server-to-client MCP notifications (runtime events, tool-list changes).
@@ -24,7 +23,6 @@ mod resources;
 mod schema;
 mod server;
 mod tool_args;
-mod tool_meta;
 pub mod toolset;
 mod workflow_handles;
 
