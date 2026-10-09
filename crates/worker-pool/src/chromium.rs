@@ -69,6 +69,30 @@ use crate::{
 };
 
 const CHROME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+/// Below this size `/dev/shm` cannot hold Chrome's shared memory, as in a
+/// container's 64 MiB default.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const MIN_DEV_SHM_BYTES: u64 = 1 << 30;
+
+/// Chrome keeps shared memory in `/dev/shm`; only a missing or small one
+/// needs it moved to disk, which is slow when a page holds many responses.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn shared_memory_needs_disk(dev_shm_bytes: Option<u64>) -> bool {
+    dev_shm_bytes.is_none_or(|bytes| bytes < MIN_DEV_SHM_BYTES)
+}
+
+#[cfg(target_os = "linux")]
+// The `statvfs` field types differ between targets.
+#[allow(clippy::useless_conversion)]
+fn dev_shm_bytes() -> Option<u64> {
+    let path = std::ffi::CString::new("/dev/shm").ok()?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let stats = unsafe { stats.assume_init() };
+    Some(u64::from(stats.f_blocks).saturating_mul(u64::from(stats.f_frsize)))
+}
 /// How long a Chrome start may take to open its DevTools endpoint.
 const CHROME_LAUNCH_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long a connection to a running Chrome's DevTools endpoint may take.
@@ -316,6 +340,10 @@ impl ChromiumWorkerFactory {
             if blocked {
                 builder = builder.no_sandbox();
             }
+        }
+        #[cfg(target_os = "linux")]
+        if shared_memory_needs_disk(dev_shm_bytes()) {
+            builder = builder.arg("--disable-dev-shm-usage");
         }
         builder
             .build()
@@ -4944,6 +4972,14 @@ fn set_cookie_param(
 #[cfg(test)]
 mod tests {
     use super::bound_observed;
+
+    #[test]
+    fn shared_memory_moves_to_disk_only_when_dev_shm_is_small() {
+        use super::shared_memory_needs_disk;
+        assert!(shared_memory_needs_disk(None));
+        assert!(shared_memory_needs_disk(Some(64 << 20)));
+        assert!(!shared_memory_needs_disk(Some(8 << 30)));
+    }
 
     /// A wait observation is truncated on a character boundary.
     ///
