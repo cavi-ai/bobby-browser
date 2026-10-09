@@ -4214,7 +4214,7 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
         let profile = root.path().join("context").join("profile-a");
         std::fs::create_dir_all(&profile).unwrap();
         std::fs::write(
-            profile.join("https___example.com.json"),
+            profile.join("68747470733a2f2f6578616d706c652e636f6d.json"),
             br#"{"schema":1,"site_key":"https://example.com","site":{"pages":{}}}"#,
         )
         .unwrap();
@@ -4229,6 +4229,39 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
         assert!(check.detail.contains("1 site files"), "{check:?}");
         assert!(check.detail.contains("lock held"), "{check:?}");
         assert_eq!(check.status, DoctorStatus::Ok);
+    }
+
+    #[test]
+    fn doctor_reports_mismatched_context_identity_without_changing_its_bytes() {
+        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
+        let env = DoctorEnvGuard::clear();
+        env.set(
+            "AUTOMATION_RUNTIME_BROWSER_SELECTION",
+            r#"{"preference":{"mode":"managedChromium"}}"#,
+        );
+        let root = tempfile::tempdir().unwrap();
+        let config = doctor_config_fixture(root.path());
+        std::fs::write(
+            &config,
+            format!(
+                "{}\n[context]\ndir = \"{}\"\n",
+                std::fs::read_to_string(&config).unwrap(),
+                root.path().join("context").display()
+            ),
+        )
+        .unwrap();
+        let profile = root.path().join("context/70726f66696c652d61");
+        std::fs::create_dir_all(&profile).unwrap();
+        let path = profile.join("6f6e65.json");
+        let bytes = br#"{"schema":1,"site_key":"two","site":{"pages":{}}}"#;
+        std::fs::write(&path, bytes).unwrap();
+
+        let report = run_doctor(Some(config), None, false).unwrap();
+        let check = report.check("context-store").expect("context-store");
+        assert_eq!(check.status, DoctorStatus::Fail);
+        assert!(check.detail.contains("identity"), "{check:?}");
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        assert!(!profile.join(".context-store.lock").exists());
     }
 
     #[test]

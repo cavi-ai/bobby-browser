@@ -126,8 +126,7 @@ pub struct SiteContext {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SiteEnvelope {
     schema: u16,
-    /// The real site key; the filename is a sanitized encoding of it and
-    /// does not round-trip.
+    /// The real site key; the filename is its canonical UTF-8 hex encoding.
     site_key: String,
     site: SiteContext,
 }
@@ -872,10 +871,14 @@ async fn load_envelope(
     if bytes.len() > limits.max_file_bytes {
         return Err("context site exceeds file byte limit".into());
     }
-    decode_envelope(&bytes, limits)
+    decode_envelope(path, &bytes, limits)
 }
 
-fn decode_envelope(bytes: &[u8], limits: ContextLimits) -> Result<(String, SiteContext), String> {
+fn decode_envelope(
+    path: &Path,
+    bytes: &[u8],
+    limits: ContextLimits,
+) -> Result<(String, SiteContext), String> {
     let envelope: SiteEnvelope =
         serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
     if envelope.schema != SCHEMA_VERSION {
@@ -885,6 +888,10 @@ fn decode_envelope(bytes: &[u8], limits: ContextLimits) -> Result<(String, SiteC
         ));
     }
     limits.check_site(&envelope.site).map_err(str::to_string)?;
+    let expected_name = format!("{}.json", encode_component(&envelope.site_key));
+    if path.file_name().and_then(|name| name.to_str()) != Some(expected_name.as_str()) {
+        return Err("context site identity does not match filename".into());
+    }
     Ok((envelope.site_key, envelope.site))
 }
 
@@ -903,7 +910,7 @@ pub fn inspect_site_file(path: &Path, limits: ContextLimits) -> Result<(), Strin
     if bytes.len() > limits.max_file_bytes {
         return Err("context site exceeds file byte limit".into());
     }
-    decode_envelope(&bytes, limits).map(|_| ())
+    decode_envelope(path, &bytes, limits).map(|_| ())
 }
 
 /// Injective filesystem encoding for arbitrary UTF-8 identity strings.
