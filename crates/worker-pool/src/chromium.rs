@@ -890,6 +890,9 @@ impl ChromiumWorker {
                 "target has no clickable point",
             )
         })?;
+        if !resolved.receives_pointer(page).await? {
+            return Err(obscured_click_target());
+        }
         self.dispatch_click(page, target, &command.modifiers)
             .await
             .map_err(|(_, error)| error)
@@ -1986,6 +1989,15 @@ impl BrowserWorker for ChromiumWorker {
                 }
                 Err(error) => return Err(error),
             };
+            match resolved.receives_pointer(&page).await {
+                Ok(true) => {}
+                Ok(false) => return Err(obscured_click_target()),
+                Err(error) if should_retry_click_target_detach(detach_retried, &error) => {
+                    detach_retried = true;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
             let mut click_future: std::pin::Pin<
                 Box<dyn std::future::Future<Output = Result<(), CommandError>> + Send + '_>,
             > = if humanized {
@@ -4260,6 +4272,15 @@ fn driver_error_is_retryable(code: ErrorCode) -> bool {
             | ErrorCode::PolicyDenied
             | ErrorCode::FrameNotFound
     )
+}
+
+fn obscured_click_target() -> CommandError {
+    CommandError {
+        code: ErrorCode::TargetObscured,
+        message: "click target is covered by another element".into(),
+        layer: ErrorLayer::Driver,
+        retryable: false,
+    }
 }
 
 fn page_missing() -> CommandError {

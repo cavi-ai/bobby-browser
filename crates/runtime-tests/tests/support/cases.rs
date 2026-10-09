@@ -48,6 +48,7 @@ macro_rules! every_case {
             type_text_enter_reports_a_keydown_navigation_at_once,
             actions_wait_for_a_late_target,
             actions_fail_a_missing_target_within_one_bound,
+            click_refuses_a_covered_target,
             navigate_waits_for_late_scripts,
             page_titles_withhold_disclosed_credentials,
             observation_carries_each_text_once,
@@ -1982,6 +1983,42 @@ pub async fn actions_fail_a_missing_target_within_one_bound(rig: &Rig) {
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");
+    live.close().await;
+}
+
+/// A link drawn under another link that covers its whole container: click
+/// fails targetObscured and never follows the covering link.
+pub async fn click_refuses_a_covered_target(rig: &Rig) {
+    let home = page(
+        "Home",
+        r#"<main><div style="position:relative;width:480px;height:120px">
+            <a href="/over" aria-label="Over" style="position:absolute;inset:0;z-index:2"></a>
+            <a href="/under" style="position:relative;z-index:1">Under</a>
+        </div></main>"#,
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/home", Route::Html(home)),
+        ("/over", Route::Html(page("Over", "<h1>Over</h1>"))),
+        ("/under", Route::Html(page("Under", "<h1>Under</h1>"))),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let clicked = live
+        .call(
+            "click",
+            json!({"target":{"role":"link","accessibleName":"Under"}}),
+        )
+        .await;
+    assert_eq!(
+        clicked["error"]["code"], "targetObscured",
+        "click on a covered link: {clicked}"
+    );
+    let (listed_url, _) = listed_page(&live).await;
+    assert_eq!(
+        listed_url,
+        site.url("/home").as_str(),
+        "the click followed another link"
+    );
     live.close().await;
 }
 
