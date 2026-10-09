@@ -319,19 +319,26 @@ async fn open_writer(path: &Path) -> Result<WriterState, JournalError> {
                 archived_torn_tail = true;
             }
             if !line.iter().all(u8::is_ascii_whitespace) {
-                if serde_json::from_slice::<JournalRecord>(&line).is_err() {
-                    archived_incompatible_records += 1;
-                }
-                if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&line) {
-                    if let Some(id) = value
-                        .get("commandId")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    {
-                        archived_offsets
-                            .entry(id)
-                            .or_default()
-                            .push((archive.clone(), offset));
+                let id = match serde_json::from_slice::<JournalRecord>(&line) {
+                    Ok(record) => Some(record.command_id),
+                    Err(_) => {
+                        archived_incompatible_records += 1;
+                        // Incompatible records still reserve their command ID.
+                        // Preserve the permissive recovery probe for old schemas.
+                        serde_json::from_slice::<serde_json::Value>(&line)
+                            .ok()
+                            .and_then(|value| {
+                                value
+                                    .get("commandId")
+                                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                            })
                     }
+                };
+                if let Some(id) = id {
+                    archived_offsets
+                        .entry(id)
+                        .or_default()
+                        .push((archive.clone(), offset));
                 }
             }
             offset += line.len() as u64;
