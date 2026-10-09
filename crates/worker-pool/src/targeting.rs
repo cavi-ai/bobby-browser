@@ -731,7 +731,13 @@ async fn gather_frame_candidates(
         None => match browser {
             Some(active_browser) => (
                 None,
-                find_oopif(active_browser, &scope.frame_id, frame).await?,
+                find_oopif(
+                    active_browser,
+                    &scope.execution_page,
+                    &scope.frame_id,
+                    frame,
+                )
+                .await?,
             ),
             None => (None, None),
         },
@@ -831,7 +837,9 @@ async fn open_target_scope(
                 break (Some(child), None);
             }
             let found = match browser {
-                Some(active_browser) => find_oopif(active_browser, &frame_id, &candidate).await?,
+                Some(active_browser) => {
+                    find_oopif(active_browser, &execution_page, &frame_id, &candidate).await?
+                }
                 None => None,
             };
             if found.is_some() || Instant::now() >= deadline {
@@ -1564,8 +1572,28 @@ async fn find_child_frame_by_name_or_src(
     Ok((children.len() == 1).then(|| children[0].clone()))
 }
 
+/// Every frame id in the page's frame tree.
+pub(crate) async fn page_frame_ids(
+    page: &Page,
+) -> Result<HashSet<chromiumoxide::cdp::browser_protocol::page::FrameId>, CommandError> {
+    let tree = page
+        .execute(GetFrameTreeParams::default())
+        .await
+        .map_err(cdp_error)?
+        .result
+        .frame_tree;
+    let mut ids = HashSet::new();
+    let mut pending = vec![tree];
+    while let Some(node) = pending.pop() {
+        ids.insert(node.frame.id.clone());
+        pending.extend(node.child_frames.unwrap_or_default());
+    }
+    Ok(ids)
+}
+
 async fn find_oopif(
     browser: &BrowserHandle,
+    page: &Page,
     parent: &chromiumoxide::cdp::browser_protocol::page::FrameId,
     candidate: &Candidate,
 ) -> Result<Option<(Page, chromiumoxide::cdp::browser_protocol::page::FrameId)>, CommandError> {
@@ -1586,11 +1614,23 @@ async fn find_oopif(
                 })
         })
         .collect::<Vec<_>>();
-    let target = targets
+    let mut target = targets
         .iter()
         .find(|target| target.parent_frame_id.as_ref() == Some(parent))
-        .cloned()
-        .or_else(|| (targets.len() == 1).then(|| targets[0].clone()));
+        .cloned();
+    // The one matching frame elsewhere in this page's tree; the browser may
+    // also serve other sessions' pages, whose frames never qualify.
+    if target.is_none() && targets.len() == 1 {
+        let frames = page_frame_ids(page).await?;
+        target = targets
+            .first()
+            .filter(|only| {
+                only.parent_frame_id
+                    .as_ref()
+                    .is_some_and(|id| frames.contains(id))
+            })
+            .cloned();
+    }
     let Some(target) = target else {
         return Ok(None);
     };
