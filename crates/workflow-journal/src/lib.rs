@@ -194,15 +194,21 @@ async fn read_indexed_records(
 ) -> Result<Option<Vec<JournalRecord>>, JournalError> {
     let mut reader = BufReader::new(file.try_clone().await?);
     let mut records = Vec::with_capacity(entries.len());
+    // The cloned handle may share an existing file position; always seek first.
+    let mut position = None;
+    let mut line = Vec::new();
     for entry in entries {
-        reader.seek(std::io::SeekFrom::Start(entry.offset)).await?;
-        let mut line = vec![0; entry.len];
+        if position != Some(entry.offset) {
+            reader.seek(std::io::SeekFrom::Start(entry.offset)).await?;
+        }
+        line.resize(entry.len, 0);
         if let Err(error) = reader.read_exact(&mut line).await {
             if error.kind() == std::io::ErrorKind::UnexpectedEof {
                 return Ok(None);
             }
             return Err(error.into());
         }
+        position = Some(entry.offset + entry.len as u64);
         let digest: [u8; 32] = Sha256::digest(&line).into();
         if !line.ends_with(b"\n") || digest != entry.digest {
             return Ok(None);
