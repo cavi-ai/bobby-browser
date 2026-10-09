@@ -924,6 +924,52 @@ pub fn native_host_log_path() -> PathBuf {
     proof_state_dir().join(cli::FIREFOX_NATIVE_HOST_LOG)
 }
 
+/// The Chrome serving a durable Chromium profile directory. It outlives
+/// sessions and runtimes by design, so a test holds this guard to stop it on
+/// every exit, failures included.
+#[cfg(unix)]
+pub struct ProfileChrome(pub PathBuf);
+
+#[cfg(unix)]
+impl ProfileChrome {
+    /// Main Chrome processes on this profile; helpers carry `--type=`.
+    pub fn pids(&self) -> Vec<i32> {
+        let output = std::process::Command::new("ps")
+            .args(["-A", "-ww", "-o", "pid=,command="])
+            .output()
+            .expect("list processes");
+        let needle = format!("--user-data-dir={}", self.0.display());
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.contains(&needle) && !line.contains("--type="))
+            .filter_map(|line| line.split_whitespace().next()?.parse().ok())
+            .collect()
+    }
+
+    /// Kills the profile's Chrome and waits until it is gone.
+    pub async fn kill(&self) {
+        for pid in self.pids() {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        for _ in 0..100 {
+            if self.pids().is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("the profile's Chrome did not exit");
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProfileChrome {
+    fn drop(&mut self) {
+        for pid in self.pids() {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+    }
+}
+
 /// `BOBBY_FIREFOX_PROOF_DIR` redirects the state directory (and the
 /// native-host descriptor in it) for a scoped local test install.
 fn proof_state_dir() -> PathBuf {

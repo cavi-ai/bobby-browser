@@ -35,6 +35,7 @@ use chromiumoxide::cdp::browser_protocol::page::{
 };
 use chromiumoxide::cdp::browser_protocol::target::{EventTargetCreated, TargetId};
 use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+use chromiumoxide::handler::Handler;
 use chromiumoxide::layout::Point;
 use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide::Page;
@@ -60,14 +61,124 @@ use types::{
 use crate::{
     process_registry, resolve_upload_paths, session_download_dir,
     targeting::{
-        gather_candidates, inspect_page_scoped_target, resolve_ambiguous_wait_values,
-        resolve_target as resolve_browser_target, resolve_target_with_visibility,
-        TARGET_GONE_MESSAGE,
+        gather_candidates, inspect_page_scoped_target, page_frame_ids,
+        resolve_ambiguous_wait_values, resolve_target as resolve_browser_target,
+        resolve_target_with_visibility, TARGET_GONE_MESSAGE,
     },
     BrowserWorker, WorkerFactory,
 };
 
 const CHROME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a Chrome start may take to open its DevTools endpoint.
+const CHROME_LAUNCH_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long a connection to a running Chrome's DevTools endpoint may take.
+const CHROME_ATTACH_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Closes a session's pages on a browser other sessions share. A page that is
+/// already gone needs no close.
+async fn close_session_pages(pages: Vec<Page>) {
+    let closing = pages.into_iter().map(|page| async move {
+        if let Err(error) = tokio::time::timeout(CHROME_SHUTDOWN_TIMEOUT, page.close()).await {
+            tracing::warn!(%error, "closing a session page on a shared browser timed out");
+        }
+    });
+    futures::future::join_all(closing).await;
+}
+
+/// Connects to the Chrome serving `profile_dir`, starting one when none
+/// answers. The Chrome it starts is detached, so it outlives every session
+/// and this runtime; any later runtime attaches to it the same way.
+async fn attach_or_launch_shared_browser(
+    config: &ChromiumConfig,
+    profile_dir: &Path,
+) -> Result<(Browser, Handler), CommandError> {
+    if let Some(attached) = connect_profile_browser(config, profile_dir).await {
+        return Ok(attached);
+    }
+    spawn_detached_chrome(config)?;
+    let deadline = tokio::time::Instant::now() + CHROME_LAUNCH_TIMEOUT;
+    loop {
+        if let Some(attached) = connect_profile_browser(config, profile_dir).await {
+            return Ok(attached);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(driver_error(
+                ErrorCode::BrowserLaunchFailed,
+                format!(
+                    "Chrome opened no DevTools endpoint for {} within {} s; a browser \
+                     without remote debugging may hold the profile",
+                    profile_dir.display(),
+                    CHROME_LAUNCH_TIMEOUT.as_secs()
+                ),
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// The Chrome named by the profile's `DevToolsActivePort`, when it answers.
+/// The file's browser path carries that process's id, so a stale file never
+/// attaches to another browser on a reused port.
+async fn connect_profile_browser(
+    config: &ChromiumConfig,
+    profile_dir: &Path,
+) -> Option<(Browser, Handler)> {
+    let active = tokio::fs::read_to_string(profile_dir.join("DevToolsActivePort"))
+        .await
+        .ok()?;
+    let mut lines = active.lines();
+    let port: u16 = lines.next()?.trim().parse().ok()?;
+    let path = lines.next()?.trim();
+    let url = format!("ws://127.0.0.1:{port}{path}");
+    tokio::time::timeout(
+        CHROME_ATTACH_TIMEOUT,
+        Browser::connect_with_config(url, config.handler_config()),
+    )
+    .await
+    .ok()?
+    .ok()
+}
+
+/// Starts Chrome in its own session with no pipes to this process, so it is
+/// neither stopped with the runtime nor stalled by a closed stderr.
+fn spawn_detached_chrome(config: &ChromiumConfig) -> Result<(), CommandError> {
+    let mut command = std::process::Command::new(config.executable());
+    command
+        .args(config.launch_args())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if let Some(envs) = &config.process_envs {
+        command.envs(envs);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| driver_error(ErrorCode::BrowserLaunchFailed, error))?;
+    // Reap it whenever it exits so it never lingers as a zombie.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
 
 /// Finish graceful shutdown or kill/reap the child this handle exclusively owns.
 /// A dropped CDP future does not cancel work inside Chrome, so the shutdown
@@ -115,6 +226,9 @@ pub struct ChromiumWorkerFactory {
     /// `<profiles_dir>/chromium/<id>` across sessions instead, the Chromium
     /// counterpart to a Firefox companion's enrolled profile.
     durable_profile_id: Option<String>,
+    /// Held while a session attaches to the durable profile's Chrome, so
+    /// concurrent sessions start at most one.
+    shared_browser_attach: Arc<Mutex<()>>,
 }
 
 impl ChromiumWorkerFactory {
@@ -130,6 +244,7 @@ impl ChromiumWorkerFactory {
             pid_registry_dir,
             fingerprint: FingerprintConfig::default(),
             durable_profile_id: None,
+            shared_browser_attach: Arc::default(),
         }
     }
 
@@ -144,6 +259,7 @@ impl ChromiumWorkerFactory {
             pid_registry_dir,
             fingerprint: FingerprintConfig::default(),
             durable_profile_id: None,
+            shared_browser_attach: Arc::default(),
         }
     }
 
@@ -158,30 +274,18 @@ impl ChromiumWorkerFactory {
     /// opts in; managed Chromium stays disposable here while its runtime
     /// still attaches context-graph promotion under
     /// `EnginePreferenceConfig::durable_profile_id` (`managed-chromium`).
+    ///
+    /// Every session on the profile shares one Chrome, which keeps running
+    /// when its sessions close and when this runtime exits.
     pub fn with_durable_profile(mut self, profile_id: String) -> Self {
         self.durable_profile_id = Some(profile_id);
         self
     }
-}
 
-#[async_trait]
-impl WorkerFactory for ChromiumWorkerFactory {
-    async fn launch(&self, session_id: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
-        let profile_dir = match &self.durable_profile_id {
-            Some(profile_id) => self.config.profiles_dir.join("chromium").join(profile_id),
-            None => self.config.profiles_dir.join(session_id.0.to_string()),
-        };
-        let download_dir = session_download_dir(&self.config.downloads_dir, session_id);
-        tokio::fs::create_dir_all(&profile_dir)
-            .await
-            .map_err(|error| driver_error(ErrorCode::BrowserLaunchFailed, error))?;
-        tokio::fs::create_dir_all(&download_dir)
-            .await
-            .map_err(|error| driver_error(ErrorCode::BrowserLaunchFailed, error))?;
-
+    fn chromium_config(&self, profile_dir: &Path) -> Result<ChromiumConfig, CommandError> {
         let mut builder = ChromiumConfig::builder()
-            .user_data_dir(profile_dir.clone())
-            .launch_timeout(Duration::from_secs(20))
+            .user_data_dir(profile_dir)
+            .launch_timeout(CHROME_LAUNCH_TIMEOUT)
             // Strip --enable-automation + disable AutomationControlled so
             // navigator.webdriver is natively false (CreepJS webDriverIsOn).
             .hide();
@@ -213,16 +317,42 @@ impl WorkerFactory for ChromiumWorkerFactory {
                 builder = builder.no_sandbox();
             }
         }
-        let config = builder
+        builder
             .build()
-            .map_err(|error| driver_error(ErrorCode::BrowserLaunchFailed, error))?;
-        let (mut browser, mut handler) = Browser::launch(config)
+            .map_err(|error| driver_error(ErrorCode::BrowserLaunchFailed, error))
+    }
+}
+
+#[async_trait]
+impl WorkerFactory for ChromiumWorkerFactory {
+    async fn launch(&self, session_id: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
+        let profile_dir = match &self.durable_profile_id {
+            Some(profile_id) => self.config.profiles_dir.join("chromium").join(profile_id),
+            None => self.config.profiles_dir.join(session_id.0.to_string()),
+        };
+        let download_dir = session_download_dir(&self.config.downloads_dir, session_id);
+        tokio::fs::create_dir_all(&profile_dir)
             .await
             .map_err(|error| driver_error(ErrorCode::BrowserLaunchFailed, error))?;
+        tokio::fs::create_dir_all(&download_dir)
+            .await
+            .map_err(|error| driver_error(ErrorCode::BrowserLaunchFailed, error))?;
+
+        let config = self.chromium_config(&profile_dir)?;
+        let shared_browser = self.durable_profile_id.is_some();
+        let (mut browser, mut handler) = if shared_browser {
+            let _attaching = self.shared_browser_attach.lock().await;
+            attach_or_launch_shared_browser(&config, &profile_dir).await?
+        } else {
+            Browser::launch(config)
+                .await
+                .map_err(|error| driver_error(ErrorCode::BrowserLaunchFailed, error))?
+        };
         let worker_id = WorkerId::new();
         // Best-effort: launch proceeds even if the child PID cannot be read or
         // the registry file cannot be written. This backstops future runs, it
-        // is not a launch precondition.
+        // is not a launch precondition. A shared browser is a connection with
+        // no child, so it is never registered for reaping.
         let pid_registry_path = browser
             .get_mut_child()
             .and_then(|child| child.as_mut_inner().id())
@@ -267,6 +397,7 @@ impl WorkerFactory for ChromiumWorkerFactory {
             max_js_result_bytes: self.config.max_js_result_bytes,
             max_js_timeout_ms: self.config.max_js_timeout_ms,
             browser: Mutex::new(Some(browser)),
+            shared_browser,
             pages: Mutex::new(HashMap::new()),
             closed_targets: Mutex::new(HashSet::new()),
             network_trackers: Mutex::new(HashMap::new()),
@@ -352,6 +483,9 @@ struct ChromiumWorker {
     max_js_result_bytes: usize,
     max_js_timeout_ms: u64,
     browser: Mutex<Option<Browser>>,
+    /// The browser serves every session on a durable profile: this worker
+    /// owns only its pages and never closes the browser.
+    shared_browser: bool,
     pages: Mutex<HashMap<PageId, Page>>,
     /// Targets this worker closed, kept until the browser reaps them so
     /// `sync_untracked_pages` does not re-adopt a page that is on its way out.
@@ -448,7 +582,13 @@ fn should_retry_transient_click_loss(
 
 impl ChromiumWorker {
     async fn shutdown(&self) -> Result<(), CommandError> {
-        self.pages.lock().await.clear();
+        let pages: Vec<Page> = self
+            .pages
+            .lock()
+            .await
+            .drain()
+            .map(|(_, page)| page)
+            .collect();
         self.network_trackers.lock().await.clear();
         for (_, task) in self.har_tasks.lock().await.drain() {
             task.abort();
@@ -461,10 +601,15 @@ impl ChromiumWorker {
         let result = {
             // Serialize close/terminate and retain ownership if reaping fails.
             let mut owned = self.browser.lock().await;
-            let result = if let Some(browser) = owned.as_mut() {
-                shutdown_browser(browser).await
-            } else {
-                Ok(())
+            let result = match owned.as_mut() {
+                // Other sessions keep using the browser: close only this
+                // session's pages, then drop the connection.
+                Some(_) if self.shared_browser => {
+                    close_session_pages(pages).await;
+                    Ok(())
+                }
+                Some(browser) => shutdown_browser(browser).await,
+                None => Ok(()),
             };
             if result.is_ok() {
                 owned.take();
@@ -1235,15 +1380,42 @@ impl ChromiumWorker {
     }
 
     /// Register page targets the runtime did not open — popups from
-    /// `window.open` and any other tab the site spawned. One browser serves
-    /// one session, so an untracked page target belongs to this session.
+    /// `window.open` and any other tab the site spawned. A browser of its own
+    /// serves one session, so an untracked page target belongs to it; on a
+    /// shared browser only pages opened from this session's pages do.
     /// Lazy (on `list_pages`) rather than a background listener: the only
     /// consumer is the listing itself.
     async fn sync_untracked_pages(&self) -> Result<(), CommandError> {
         let Ok(browser) = self.browser_handle().await else {
             return Ok(());
         };
-        let live = browser.pages().await.map_err(command_failed)?;
+        let mut live = browser.pages().await.map_err(command_failed)?;
+        if self.shared_browser {
+            let mut owned: HashSet<TargetId> = self
+                .pages
+                .lock()
+                .await
+                .values()
+                .map(|page| page.target_id().clone())
+                .collect();
+            // Follow opener chains: a popup of this session's popup is its too.
+            loop {
+                let before = owned.len();
+                for page in &live {
+                    if page
+                        .opener_id()
+                        .as_ref()
+                        .is_some_and(|opener| owned.contains(opener))
+                    {
+                        owned.insert(page.target_id().clone());
+                    }
+                }
+                if owned.len() == before {
+                    break;
+                }
+            }
+            live.retain(|page| owned.contains(page.target_id()));
+        }
         // `Page.close` is acknowledged before the browser finishes destroying
         // the target, so a page this worker just closed can still sit in the
         // handler's target cache. Tombstones keep it from being resurrected
@@ -1318,6 +1490,9 @@ impl ChromiumWorker {
                 Some(status) => (false, Some(status.to_string())),
                 None => (true, None),
             },
+            // A shared browser is no child of this runtime: the connect
+            // below is the liveness check.
+            None if self.shared_browser => (true, None),
             None => {
                 let alive = self
                     .pid_registry_path
@@ -2770,16 +2945,32 @@ impl BrowserWorker for ChromiumWorker {
         let resolved = self
             .resolve_target(page_id, &page, &command.selector, command.target.as_ref())
             .await?;
+        // Download events reach every connection to a shared browser: only
+        // this page's frames start this session's download.
+        let frames = if self.shared_browser {
+            Some(page_frame_ids(&page).await?)
+        } else {
+            None
+        };
         resolved.click_js(&page).await?;
-        let begin = tokio::time::timeout(Duration::from_millis(command.timeout_ms), begins.next())
-            .await
-            .map_err(|_| timeout_error(command.timeout_ms))?
-            .ok_or_else(|| {
-                driver_error(
-                    ErrorCode::BrowserCommandFailed,
-                    "download event stream closed",
-                )
-            })?;
+        let begin = tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
+            loop {
+                let begin = begins.next().await.ok_or_else(|| {
+                    driver_error(
+                        ErrorCode::BrowserCommandFailed,
+                        "download event stream closed",
+                    )
+                })?;
+                if frames
+                    .as_ref()
+                    .is_none_or(|frames| frames.contains(&begin.frame_id))
+                {
+                    return Ok::<_, CommandError>(begin);
+                }
+            }
+        })
+        .await
+        .map_err(|_| timeout_error(command.timeout_ms))??;
         let completed = tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
             loop {
                 let event = progress.next().await.ok_or_else(|| {
@@ -2804,11 +2995,22 @@ impl BrowserWorker for ChromiumWorker {
         })
         .await
         .map_err(|_| timeout_error(command.timeout_ms))??;
-        let path = completed
+        let mut path = completed
             .file_path
             .clone()
             .map(PathBuf::from)
             .unwrap_or_else(|| self.download_dir.join(&begin.suggested_filename));
+        // The download directory is browser-wide, so on a shared browser
+        // another session may have redirected it: bring the file home.
+        if self.shared_browser && !path.starts_with(&self.download_dir) {
+            let home = self
+                .download_dir
+                .join(format!("{}-{}", begin.guid, begin.suggested_filename));
+            tokio::fs::rename(&path, &home)
+                .await
+                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+            path = home;
+        }
         let bytes = tokio::fs::read(&path)
             .await
             .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
@@ -5063,6 +5265,7 @@ mod tests {
             max_js_result_bytes: 1024,
             max_js_timeout_ms: 1_000,
             browser: super::Mutex::new(None),
+            shared_browser: false,
             pages: super::Mutex::new(super::HashMap::new()),
             closed_targets: super::Mutex::new(super::HashSet::new()),
             network_trackers: super::Mutex::new(super::HashMap::new()),
