@@ -53,11 +53,13 @@ jobs:
           node-version: 24.18.1
           cache: pnpm
 
+      # The runner image already carries Chrome's libraries; skipping apt keeps
+      # a slow package mirror out of the job.
       - name: Install Chrome for workspace tests
         uses: browser-actions/setup-chrome@latest
         with:
           chrome-version: 150.0.7871.124
-          install-dependencies: true
+          install-dependencies: false
 
       - name: Locate Chrome for workspace tests
         run: |
@@ -163,7 +165,7 @@ jobs:
         uses: browser-actions/setup-chrome@latest
         with:
           chrome-version: 150.0.7871.124
-          install-dependencies: true
+          install-dependencies: false
 
       - name: Locate Chrome
         run: |
@@ -177,7 +179,7 @@ jobs:
         run: |
           echo "executable=$BOBBY_CHROME_EXECUTABLE"
           ls -la "$BOBBY_CHROME_EXECUTABLE" || true
-          ldd "$BOBBY_CHROME_EXECUTABLE" | grep "not found" || true
+          if ldd "$BOBBY_CHROME_EXECUTABLE" | grep "not found"; then exit 1; fi
 
       - name: Worker live tests
         timeout-minutes: 10
