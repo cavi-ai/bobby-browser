@@ -326,6 +326,35 @@ async fn archived_history_preserves_discovery_order_across_files_and_sparse_offs
 }
 
 #[tokio::test]
+async fn archived_history_seeks_to_the_next_indexed_record_after_an_early_newline() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("commands.jsonl");
+    let archive = dir.path().join("commands.jsonl.archive-fixture");
+    let requested = CommandId::new();
+    let first = record(&requested, CommandPhase::Accepted);
+    let mut second = first.clone();
+    second.sequence = 1;
+    second.phase = CommandPhase::Prepared;
+    let first_line = format!("{}\n", serde_json::to_string(&first).unwrap());
+    let second_line = format!("{}\n", serde_json::to_string(&second).unwrap());
+    let original = format!("{first_line}{second_line}");
+    tokio::fs::write(&archive, &original).await.unwrap();
+    let journal = JsonlJournal::open(&path).await.unwrap();
+
+    let mut changed = original.into_bytes();
+    changed[..first_line.len()].fill(b' ');
+    changed[0] = b'\n';
+    tokio::fs::write(&archive, &changed).await.unwrap();
+    let scan = journal.history(requested.clone()).await.unwrap();
+    assert_eq!(scan.records.len(), 1);
+    assert_eq!(scan.records[0].sequence, second.sequence);
+    assert_eq!(scan.records[0].phase, second.phase);
+    assert_eq!(scan.records[0].command_id, requested);
+    assert!(scan.incompatible_records > 0);
+    assert_eq!(tokio::fs::read(&archive).await.unwrap(), changed);
+}
+
+#[tokio::test]
 async fn archived_history_never_returns_another_commands_record_from_a_stale_offset() {
     for prepend in [false, true] {
         let dir = tempfile::tempdir().unwrap();

@@ -5,6 +5,7 @@
 ### Fixed
 
 - On Firefox, a new session starts with no tabs and gets only the pages it opens, so concurrent sessions never take each other's pages.
+- On Linux, Chrome keeps shared memory in `/dev/shm` unless it is smaller than 1 GiB.
 - On Firefox, a command that misses its deadline fails alone; other sessions and runtime restarts keep the running Firefox.
 - Restarting Firefox quits it with `browser.close` when possible, so site logins survive.
 - On Firefox, opening a page waits the full operation timeout for the companion to bind it, and a refused binding names its reason.
