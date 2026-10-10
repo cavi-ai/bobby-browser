@@ -264,6 +264,38 @@ async fn dismiss_completes_when_target_becomes_hidden_but_stays_attached() {
 }
 
 #[tokio::test]
+async fn dismiss_completes_when_a_same_named_control_surfaces_after_the_close() {
+    let close_for = |action: &str| Candidate {
+        id: action.into(),
+        css: Some("[aria-label=\"Close\"]".into()),
+        attributes: BTreeMap::from([
+            ("aria-label".into(), "Close".into()),
+            ("data-action".into(), action.into()),
+        ]),
+        ..still_present()
+    };
+    let browser = FakeBrowser {
+        candidate_sequence: Arc::new(Mutex::new(VecDeque::from([
+            vec![close_for("close-dialog")],
+            vec![close_for("close-banner")],
+        ]))),
+        ..FakeBrowser::default()
+    };
+    let outcome = IntentEngine::execute(
+        &dismiss(CLOSE_BUTTON_PURPOSE, Some("button"), 500),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, IntentOutcome::Completed { .. }),
+        "expected Completed, got {outcome:?}"
+    );
+}
+
+#[tokio::test]
 async fn dismiss_missing_target_is_stuck_without_vision_configured() {
     let calls = Arc::new(Mutex::new(CallLog::default()));
     let browser = FakeBrowser {

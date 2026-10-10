@@ -487,6 +487,11 @@ pub trait BrowserWorker: Send + Sync {
     ) -> Result<Vec<dom_engine::Candidate>, CommandError> {
         Err(unsupported_error())
     }
+    /// A target naming only the element `target` resolves to now. Workers
+    /// whose candidates carry element identity return `target` itself.
+    async fn pin_target(&self, _page_id: &PageId, target: &TargetSpec) -> TargetSpec {
+        target.clone()
+    }
     async fn capture_screenshot(
         &self,
         _page_id: &PageId,

@@ -3491,6 +3491,19 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 false,
             )
             .await?;
+        // Accessibility candidates carry no selector, so the companion resolves
+        // a CSS target; a hidden or detached element adds no candidate.
+        if let Some(css) = target.css.as_ref().filter(|css| !css.is_empty()) {
+            let mut candidates = accessibility_candidates(&nodes);
+            let location = self
+                .observer
+                .locate_target(&self.current_lease(), page_id, target)
+                .await?;
+            if location.found {
+                candidates.push(located_candidate(&location, css.clone()));
+            }
+            return Ok(candidates);
+        }
         if truncated && !accessibility_tree_has_match(&nodes, target) {
             // The bounded snapshot never reached the target; a search that is
             // not capped by the node budget decides whether it exists.
@@ -3525,6 +3538,28 @@ impl BrowserWorker for FirefoxCompanionWorker {
             ));
         }
         Ok(accessibility_candidates(&nodes))
+    }
+
+    async fn pin_target(&self, page_id: &PageId, target: &TargetSpec) -> TargetSpec {
+        if target.css.is_some() {
+            return target.clone();
+        }
+        match self
+            .observer
+            .locate_target(&self.current_lease(), page_id, target)
+            .await
+        {
+            Ok(TargetLocation {
+                found: true,
+                ambiguous: false,
+                css_path: Some(css_path),
+                ..
+            }) => TargetSpec {
+                css: Some(css_path),
+                ..TargetSpec::default()
+            },
+            _ => target.clone(),
+        }
     }
 
     async fn evaluate_javascript(
