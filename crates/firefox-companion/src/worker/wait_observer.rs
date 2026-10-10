@@ -72,7 +72,7 @@ impl FirefoxCompanionWorker {
                                     types::ElementState::Detached => "!el.isConnected",
                                     types::ElementState::Enabled => "el.isConnected&&!el.matches(':disabled,[aria-disabled=\"true\"]')",
                                     types::ElementState::Disabled => "el.isConnected&&el.matches(':disabled,[aria-disabled=\"true\"]')",
-                                    types::ElementState::Hidden => "el.isConnected&&!el.checkVisibility()",
+                                    types::ElementState::Hidden => "!el.isConnected||!el.checkVisibility()",
                                 };
                                 let response = self.transport.send("script.callFunction", json!({
                                     "functionDeclaration": format!("function(el){{return Boolean({condition});}}"),
@@ -95,7 +95,13 @@ impl FirefoxCompanionWorker {
                                     ErrorCode::TargetNotFound | ErrorCode::ShadowRootUnavailable
                                 ) =>
                             {
-                                (matches!(state, types::ElementState::Detached), None)
+                                (
+                                    matches!(
+                                        state,
+                                        types::ElementState::Detached | types::ElementState::Hidden
+                                    ),
+                                    None,
+                                )
                             }
                             Err(error) => return Err(error),
                         }
@@ -153,7 +159,7 @@ impl FirefoxCompanionWorker {
                                 }
                                 types::ElementState::Enabled => format!("!{COMPOSED_QUERY}({selector})?.matches(':disabled,[aria-disabled=\"true\"]')"),
                                 types::ElementState::Disabled => format!("Boolean({COMPOSED_QUERY}({selector})?.matches(':disabled,[aria-disabled=\"true\"]'))"),
-                                types::ElementState::Hidden => format!("Boolean({COMPOSED_QUERY}({selector})) && !{COMPOSED_QUERY}({selector}).checkVisibility()"),
+                                types::ElementState::Hidden => format!("!{COMPOSED_QUERY}({selector}) || !{COMPOSED_QUERY}({selector}).checkVisibility()"),
                             };
                                 let response = self.transport.send("script.evaluate", json!({
                                 "expression": expression,
@@ -167,9 +173,13 @@ impl FirefoxCompanionWorker {
                                     .unwrap_or(false);
                                 (satisfied, None)
                             }
-                            Err(error) if error.code == ErrorCode::TargetNotFound => {
-                                (matches!(state, types::ElementState::Detached), None)
-                            }
+                            Err(error) if error.code == ErrorCode::TargetNotFound => (
+                                matches!(
+                                    state,
+                                    types::ElementState::Detached | types::ElementState::Hidden
+                                ),
+                                None,
+                            ),
                             Err(error) => return Err(error),
                         }
                     }

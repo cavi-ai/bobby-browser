@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- An element wait for `hidden` holds once the element is removed, not only once it is invisible.
 - `intent_dismiss_obstruction` completes once the clicked control is gone, even when another control with the same name appears.
 - On Chromium, `type_text` types into every control with real key input, fields without an id included, and each line break is the Enter key, as on Firefox.
 - On Chromium, a scoped snapshot numbers duplicate targets page-wide, so its targets act on the elements it shows.

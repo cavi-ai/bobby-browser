@@ -54,6 +54,7 @@ macro_rules! every_case {
             actions_wait_for_a_late_target,
             actions_fail_a_missing_target_within_one_bound,
             click_refuses_a_covered_target,
+            hidden_state_holds_for_a_removed_control,
             dismiss_completes_when_a_same_named_control_appears,
             shadow_root_controls_act_from_snapshot_targets,
             navigate_waits_for_late_scripts,
@@ -2322,6 +2323,41 @@ pub async fn dismiss_completes_when_a_same_named_control_appears(rig: &Rig) {
         banner["status"], "completed",
         "the banner did not appear after the close: {banner}"
     );
+    live.close().await;
+}
+
+/// An expected `hidden` state holds once the control is removed, as well as
+/// once it is hidden.
+pub async fn hidden_state_holds_for_a_removed_control(rig: &Rig) {
+    let body = r#"<main><button id="more">Show more</button>
+        <button id="panel">Hide panel</button></main>
+        <script>
+          document.getElementById("more").addEventListener("click", (event) => event.target.remove());
+          document.getElementById("panel").addEventListener("click", (event) => {
+            event.target.style.display = "none";
+          });
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/home", Route::Html(page("Home", body)))]).await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    for name in ["Show more", "Hide panel"] {
+        let followed = live
+            .call(
+                "intent_follow",
+                json!({
+                    "purpose":"activate the control",
+                    "hints":{"role":"button","accessibleName":name},
+                    "expectedState":{
+                        "condition":{"kind":"element","target":{"role":"button","accessibleName":name},"state":"hidden"},
+                        "timeoutMs":3000
+                    }
+                }),
+            )
+            .await;
+        assert_eq!(
+            followed["status"], "completed",
+            "{name} did not reach the hidden state: {followed}"
+        );
+    }
     live.close().await;
 }
 
