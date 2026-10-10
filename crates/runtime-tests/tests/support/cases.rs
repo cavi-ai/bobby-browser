@@ -55,6 +55,7 @@ macro_rules! every_case {
             actions_wait_for_a_late_target,
             actions_fail_a_missing_target_within_one_bound,
             click_refuses_a_covered_target,
+            intent_extract_reads_href_and_attributes,
             hidden_state_holds_for_a_removed_control,
             intent_follow_reports_a_dialog_that_opened,
             dismiss_completes_when_a_same_named_control_appears,
@@ -2480,6 +2481,50 @@ pub async fn snapshot_targets_cover_widget_items(rig: &Rig) {
             "click {target} did not reach {reached}: {after}"
         );
     }
+    live.close().await;
+}
+
+/// `intent_extract` reads a link's href and a named attribute off the
+/// controls it resolves.
+pub async fn intent_extract_reads_href_and_attributes(rig: &Rig) {
+    let body = r#"<main><a href="/profile/42" data-user-id="42">View profile</a></main>"#;
+    let site = FixtureSite::spawn(vec![("/home", Route::Html(page("Home", body)))]).await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let extracted = live
+        .call(
+            "intent_extract",
+            json!({
+                "purpose":"read the profile link",
+                "fields":[
+                    {"name":"link","purpose":"profile link",
+                     "hints":{"role":"link","accessibleName":"View profile"},"value":{"kind":"href"}},
+                    {"name":"user","purpose":"profile user id",
+                     "hints":{"role":"link","accessibleName":"View profile"},
+                     "value":{"kind":"attribute","attribute":"data-user-id"}}
+                ]
+            }),
+        )
+        .await;
+    let value = |field: &str| {
+        extracted["evidence"]
+            .as_array()
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item["kind"] == "extraction" && item["field"] == field)
+            })
+            .map(|item| item["value"].clone())
+    };
+    assert_eq!(
+        value("link"),
+        Some(json!("/profile/42")),
+        "href extraction: {extracted}"
+    );
+    assert_eq!(
+        value("user"),
+        Some(json!("42")),
+        "attribute extraction: {extracted}"
+    );
     live.close().await;
 }
 

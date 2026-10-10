@@ -358,6 +358,17 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
             .await
     }
 
+    async fn read_attribute(
+        &self,
+        page_id: &PageId,
+        target: &TargetSpec,
+        attribute: &str,
+    ) -> Result<Option<String>, CommandError> {
+        worker_pool::observation_or_default(self.lease.worker().observation())
+            .read_attribute(page_id, target, attribute)
+            .await
+    }
+
     async fn upload_files(
         &self,
         page_id: &PageId,
