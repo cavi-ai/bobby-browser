@@ -823,6 +823,7 @@ pub struct FirefoxCompanionWorker {
     upload_roots: Vec<PathBuf>,
     downloads_dir: Option<PathBuf>,
     session_random: TaskMutex<SessionRandom>,
+    upload_cache: Arc<AsyncMutex<worker_pool::upload::UploadCache>>,
     mouse_simulator: BezierMouseSimulator,
     typing_simulator: TypingSimulator,
     scroll_simulator: ScrollSimulator,
@@ -852,6 +853,7 @@ struct WorkerShutdownResources {
     cleanup_failure: Arc<TaskMutex<Option<CommandError>>>,
     cleanup_task: Arc<TaskMutex<Option<JoinHandle<()>>>>,
     renewal_task: Arc<TaskMutex<Option<JoinHandle<()>>>>,
+    upload_cache: Arc<AsyncMutex<worker_pool::upload::UploadCache>>,
 }
 
 #[derive(Clone)]
@@ -1679,6 +1681,7 @@ impl FirefoxCompanionWorker {
             upload_roots: Vec::new(),
             downloads_dir: None,
             session_random,
+            upload_cache: Arc::new(AsyncMutex::new(worker_pool::upload::UploadCache::default())),
             mouse_simulator,
             typing_simulator,
             scroll_simulator,
@@ -1706,6 +1709,7 @@ impl FirefoxCompanionWorker {
             cleanup_failure: Arc::clone(&self.cleanup_failure),
             cleanup_task: Arc::clone(&self.cleanup_task),
             renewal_task: Arc::clone(&self.renewal_task),
+            upload_cache: Arc::clone(&self.upload_cache),
         };
         let shutdown = Arc::clone(&self.shutdown);
         let runtime = shutdown.runtime.clone();
@@ -4375,7 +4379,6 @@ impl BrowserWorker for FirefoxCompanionWorker {
             download_dir.as_deref(),
         )
         .await?;
-        let paths = &resolved_uploads.paths;
         let context = self.context(page_id).await?;
         let (context, selector) = self
             .resolve_input_target(
@@ -4427,10 +4430,15 @@ impl BrowserWorker for FirefoxCompanionWorker {
         // `input.setFiles` selects the files and fires trusted `input` and
         // `change` events whether or not the input is rendered.
         let shared_id = self.resolve_element(&context, &selector, true).await?;
+        let mut upload_cache = self.upload_cache.lock().await;
+        let resolved_uploads = upload_cache.prepare(resolved_uploads)?;
+        let paths = &resolved_uploads.paths;
+        let file_count = paths.len();
         let files = paths
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
+        upload_cache.commit(resolved_uploads);
         self.transport
             .send(
                 "input.setFiles",
@@ -4453,7 +4461,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 }),
             )
             .await?;
-        if verified.pointer("/result/value").and_then(Value::as_u64) != Some(paths.len() as u64) {
+        if verified.pointer("/result/value").and_then(Value::as_u64) != Some(file_count as u64) {
             return Err(driver_error(
                 ErrorCode::VerificationFailed,
                 "Firefox file selection count did not match",
@@ -6012,6 +6020,7 @@ async fn run_worker_shutdown(resources: WorkerShutdownResources) -> Result<(), C
         failures.extend(cleanup.run().await);
     }
     resources.pages.write().await.clear();
+    resources.upload_cache.lock().await.clear();
     for slot in [&resources.cleanup_task, &resources.renewal_task] {
         if let Some(task) = slot.lock().expect("worker task mutex poisoned").take() {
             task.abort();

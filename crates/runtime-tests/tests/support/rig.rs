@@ -62,6 +62,35 @@ fn config(root: &std::path::Path, upload_roots: Vec<std::path::PathBuf>) -> AppC
 }
 
 impl Rig {
+    /// Test-owned storage for corruption and materialization cleanup assertions.
+    pub fn storage_root(&self) -> &std::path::Path {
+        self._root.path()
+    }
+
+    pub async fn seed_artifact(
+        &self,
+        session_id: &Value,
+        page_id: &Value,
+        bytes: &[u8],
+    ) -> artifact_store::ArtifactRecord {
+        let config = config(self._root.path(), vec![]);
+        artifact_store::ArtifactStore::new(
+            config.browser.artifacts_dir,
+            config.browser.max_artifact_bytes,
+            config.browser.max_screenshot_dimension,
+        )
+        .put(
+            &serde_json::from_value(session_id.clone()).unwrap(),
+            &serde_json::from_value(page_id.clone()).unwrap(),
+            "application/octet-stream",
+            "bin",
+            bytes,
+            config.browser.max_artifact_bytes,
+        )
+        .await
+        .expect("seed session-owned artifact")
+    }
+
     pub fn is_firefox(&self) -> bool {
         self._firefox.is_some()
     }

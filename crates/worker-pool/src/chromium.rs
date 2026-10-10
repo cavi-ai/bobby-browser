@@ -429,6 +429,7 @@ impl WorkerFactory for ChromiumWorkerFactory {
             debug_ws_url: Some(browser.websocket_address().clone()),
             upload_roots: self.config.upload_roots.clone(),
             download_dir,
+            upload_cache: Mutex::new(crate::upload::UploadCache::default()),
             session_id: session_id.clone(),
             artifacts: ArtifactStore::new(
                 self.config.artifacts_dir.clone(),
@@ -519,6 +520,7 @@ struct ChromiumWorker {
     debug_ws_url: Option<String>,
     upload_roots: Vec<PathBuf>,
     download_dir: PathBuf,
+    upload_cache: Mutex<crate::upload::UploadCache>,
     session_id: SessionId,
     artifacts: ArtifactStore,
     max_screenshot_dimension: u32,
@@ -663,6 +665,7 @@ impl ChromiumWorker {
             task.abort();
         }
         if result.is_ok() {
+            self.upload_cache.lock().await.clear();
             if let Some(path) = &self.pid_registry_path {
                 unregister_chrome_pid(path);
             }
@@ -2199,15 +2202,18 @@ impl BrowserWorker for ChromiumWorker {
             Some(&self.download_dir),
         )
         .await?;
-        let paths = &resolved_uploads.paths;
         let page = self.page_handle(page_id).await?;
         let resolved = self
             .resolve_target(page_id, &page, &command.selector, command.target.as_ref())
             .await?;
+        let mut upload_cache = self.upload_cache.lock().await;
+        let resolved_uploads = upload_cache.prepare(resolved_uploads)?;
+        let paths = &resolved_uploads.paths;
         let path_strings = paths
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
+        upload_cache.commit(resolved_uploads);
         resolved.set_files(&page, path_strings.clone()).await?;
         Ok(vec![
             Evidence::Upload {
@@ -5180,6 +5186,7 @@ mod tests {
             debug_ws_url: None,
             upload_roots: Vec::new(),
             download_dir: root.join("downloads"),
+            upload_cache: super::Mutex::new(crate::upload::UploadCache::default()),
             session_id: SessionId::new(),
             artifacts: super::ArtifactStore::new(root.join("artifacts"), 1024, 1024),
             max_screenshot_dimension: 1024,
