@@ -519,6 +519,13 @@ impl CheckpointStore {
             )));
         }
         for receipt in &checkpoint.recovery_receipts {
+            // Attempts and pages can change after recovery, but a receipt
+            // always belongs to this workflow and its established session.
+            if receipt.identity.workflow_id != checkpoint.workflow_id
+                || receipt.identity.session_id != checkpoint.session_id
+            {
+                return Err(CheckpointStoreError::IdentityChanged);
+            }
             receipt.validate().map_err(|message| {
                 CheckpointStoreError::Serialization(serde_json::Error::io(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,

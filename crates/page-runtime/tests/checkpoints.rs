@@ -152,6 +152,46 @@ async fn persists_only_a_checkpoint_proven_by_observed_evidence() {
 }
 
 #[tokio::test]
+async fn recovery_receipt_from_another_session_is_rejected_before_persistence() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let coordinator = RecoveryCoordinator::new(store.clone());
+    let checkpoint = checkpoint();
+    store.save(&checkpoint).await.unwrap();
+    let path = checkpoint_store::checkpoint_path(root.path(), &checkpoint.workflow_id);
+    let bytes = std::fs::read(&path).unwrap();
+    let mut foreign = recovery_receipt(&checkpoint, RecoveryReceiptState::Unresolved);
+    foreign.identity.session_id = SessionId::new();
+    foreign.validate().unwrap();
+
+    assert!(matches!(
+        coordinator.persist_recovery_receipt(foreign).await,
+        Err(page_runtime::RecoveryError::Store(
+            checkpoint_store::CheckpointStoreError::IdentityChanged
+        ))
+    ));
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(
+        store.load(&checkpoint.workflow_id).await.unwrap(),
+        checkpoint
+    );
+    let permitted = recovery_receipt(&checkpoint, RecoveryReceiptState::Unresolved);
+    coordinator
+        .persist_recovery_receipt(permitted.clone())
+        .await
+        .unwrap();
+    let reopened = CheckpointStore::open(root.path()).await.unwrap();
+    assert_eq!(
+        reopened
+            .load(&checkpoint.workflow_id)
+            .await
+            .unwrap()
+            .recovery_receipts,
+        vec![permitted]
+    );
+}
+
+#[tokio::test]
 async fn recovery_receipt_creation_starts_unresolved_and_rejects_payload_overwrite() {
     let root = tempfile::tempdir().unwrap();
     let store = CheckpointStore::open(root.path()).await.unwrap();
