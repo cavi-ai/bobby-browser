@@ -363,6 +363,82 @@ async fn shadow_text_wait_firefox() {
     shadow_text_wait_contract(Engine::Firefox).await;
 }
 
+async fn shadow_native_control_contract(engine: Engine) {
+    let cases = [
+        ("textbox", "Email", "<input aria-label='Email' value='Inside'>", "Inside"),
+        ("searchbox", "Search", "<input type='search' aria-label='Search' value='Inside'>", "Inside"),
+        ("checkbox", "Terms", "<input type='checkbox' aria-label='Terms' value='Inside'>", "Inside"),
+        ("radio", "Option", "<input type='radio' aria-label='Option' value='Inside'>", "Inside"),
+        ("spinbutton", "Count", "<input type='number' aria-label='Count' value='7'>", "7"),
+        ("slider", "Level", "<input type='range' aria-label='Level' value='7'>", "7"),
+        ("combobox", "Plan", "<select aria-label='Plan'><option>Inside</option></select>", "Inside"),
+        ("listbox", "Zones", "<select multiple aria-label='Zones'><option selected>Inside</option></select>", "Inside"),
+        ("textbox", "Notes", "<label for='notes'>Notes</label><textarea id='notes'>Inside</textarea>", "Inside"),
+        ("textbox", "Local code", "<span id='code-label'>Local code</span><input role='textbox' aria-labelledby='code-label' value='Inside'>", "Inside"),
+    ];
+    let controls = cases
+        .iter()
+        .map(|(_, _, html, _)| *html)
+        .collect::<String>();
+    let document = format!(
+        "<!doctype html><title>Native shadow controls</title>\
+         <span id='code-label'>Outside code</span><input aria-label='Email' value='Outside'>\
+         <div id='shadow-host'></div>\
+         <script>document.querySelector('#shadow-host').attachShadow({{mode:'open'}}).innerHTML={};</script>",
+        json!(controls),
+    );
+    let site = FixtureSite::spawn(vec![
+        (
+            "/",
+            Route::Html(format!(
+                "{document}<iframe id='frame' src='/frame'></iframe>"
+            )),
+        ),
+        ("/frame", Route::Html(document)),
+    ])
+    .await;
+    let rig = match engine {
+        Engine::Chromium => Rig::chromium().await,
+        Engine::Firefox => Rig::firefox().await,
+    };
+    let live = Live::open(&rig, &site.url("/")).await;
+    let mut failures = Vec::new();
+    for frame_path in [json!([]), json!([{"css":"#frame"}])] {
+        for (role, name, _, value) in cases {
+            let target = json!({
+                "role":role, "accessibleName":name, "framePath":frame_path,
+                "shadowPath":[{"css":"#shadow-host"}],
+            });
+            let result = live.call("wait_for", json!({
+                "condition":{"kind":"value", "target":target, "matcher":{"kind":"exact", "value":value}},
+                "timeoutMs":1000,
+            })).await;
+            if result["status"] != "completed" {
+                failures.push(format!("{target}: {result}"));
+            } else {
+                assert_eq!(evidence(&result, "wait")["observed"], value, "{result}");
+            }
+        }
+    }
+    live.close().await;
+    assert!(
+        failures.is_empty(),
+        "native shadow controls did not resolve: {failures:#?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn shadow_native_controls_chromium() {
+    shadow_native_control_contract(Engine::Chromium).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Firefox and paired test profile"]
+async fn shadow_native_controls_firefox() {
+    shadow_native_control_contract(Engine::Firefox).await;
+}
+
 fn evidence<'a>(outcome: &'a Value, kind: &str) -> &'a Value {
     outcome["evidence"]
         .as_array()
