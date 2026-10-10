@@ -799,6 +799,30 @@ async fn worker(bidi: Arc<FakeBidi>, observer: Arc<FakeObserver>) -> FirefoxComp
 }
 
 #[tokio::test]
+async fn typed_capture_domain_preserves_firefox_unsupported_mode() {
+    let bidi = FakeBidi::new(vec![]);
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let before = bidi.calls.lock().await.len();
+    let error = worker_pool::CaptureEngine::capture_screenshot(
+        &worker,
+        &PageId::new(),
+        &types::CaptureScreenshotCommand {
+            mode: types::ScreenshotMode::FullPage,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::InvalidRequest);
+    assert_eq!(error.layer, ErrorLayer::Driver);
+    assert!(!error.retryable);
+    assert_eq!(
+        bidi.calls.lock().await.len(),
+        before,
+        "unsupported capture must not contact the page"
+    );
+}
+
+#[tokio::test]
 async fn semantic_candidate_collection_uses_firefox_accessibility_snapshot() {
     let worker = FirefoxCompanionWorker::new(
         WorkerId::new(),

@@ -3408,6 +3408,288 @@ impl BrowserWorker for FirefoxCompanionWorker {
     }
 
     async fn set_humanization_enabled(&self, enabled: bool) -> Result<(), CommandError> {
+        worker_pool::SessionSettings::set_humanization_enabled(self, enabled).await
+    }
+
+    fn humanization_enabled(&self) -> bool {
+        worker_pool::SessionSettings::humanization_enabled(self)
+    }
+
+    async fn set_fingerprint_enabled(&self, enabled: bool) -> Result<(), CommandError> {
+        worker_pool::SessionSettings::set_fingerprint_enabled(self, enabled).await
+    }
+
+    fn fingerprint_enabled(&self) -> bool {
+        worker_pool::SessionSettings::fingerprint_enabled(self)
+    }
+
+    async fn open_page(&self, page_id: PageId) -> Result<(), CommandError> {
+        worker_pool::TabsEngine::open_page(self, page_id).await
+    }
+
+    async fn collect_candidates(
+        &self,
+        page_id: &PageId,
+        target: &TargetSpec,
+    ) -> Result<Vec<Candidate>, CommandError> {
+        worker_pool::ObservationEngine::collect_candidates(self, page_id, target).await
+    }
+
+    async fn evaluate_javascript(
+        &self,
+        page_id: &PageId,
+        command: &EvaluateJavaScriptCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        worker_pool::JavaScriptEngine::evaluate_javascript(self, page_id, command).await
+    }
+
+    async fn navigate(
+        &self,
+        page_id: &PageId,
+        command: &NavigateCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        worker_pool::NavigationEngine::navigate(self, page_id, command).await
+    }
+
+    async fn settle_page(
+        &self,
+        page_id: &PageId,
+        budget: Duration,
+        requested_url: Option<&str>,
+    ) -> Option<(String, String)> {
+        worker_pool::NavigationEngine::settle_page(self, page_id, budget, requested_url).await
+    }
+
+    async fn form_snapshot(
+        &self,
+        page_id: &PageId,
+        max_controls: Option<u32>,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        worker_pool::ObservationEngine::form_snapshot(self, page_id, max_controls).await
+    }
+
+    async fn control_action(
+        &self,
+        page_id: &PageId,
+        command: &ControlActionCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        worker_pool::InputEngine::control_action(self, page_id, command).await
+    }
+
+    async fn verify_framed_typed_value(
+        &self,
+        page_id: &PageId,
+        command: &TypeTextCommand,
+        _observed: Option<&str>,
+        kind: &str,
+    ) -> Result<Option<Vec<Evidence>>, CommandError> {
+        worker_pool::InputEngine::verify_framed_typed_value(self, page_id, command, _observed, kind)
+            .await
+    }
+
+    async fn inspect(
+        &self,
+        page_id: &PageId,
+        command: &InspectCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        worker_pool::ObservationEngine::inspect(self, page_id, command).await
+    }
+
+    async fn click(
+        &self,
+        page_id: &PageId,
+        command: &ClickCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        worker_pool::InputEngine::click(self, page_id, command).await
+    }
+
+    async fn click_xy(
+        &self,
+        page_id: &PageId,
+        x: f64,
+        y: f64,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        worker_pool::InputEngine::click_xy(self, page_id, x, y).await
+    }
+
+    async fn click_and_wait_for_popup(
+        &self,
+        page_id: &PageId,
+        command: &ClickAndWaitForPopupCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        worker_pool::EventsEngine::click_and_wait_for_popup(self, page_id, command).await
+    }
+
+    async fn upload_files(
+        &self,
+        page_id: &PageId,
+        command: &UploadFilesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        worker_pool::InputEngine::upload_files(self, page_id, command).await
+    }
+
+    async fn click_and_wait_for_download(
+        &self,
+        page_id: &PageId,
+        command: &ClickAndWaitForDownloadCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        worker_pool::EventsEngine::click_and_wait_for_download(self, page_id, command).await
+    }
+
+    async fn type_text(
+        &self,
+        page_id: &PageId,
+        command: &TypeTextCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        worker_pool::InputEngine::type_text(self, page_id, command).await
+    }
+
+    async fn wait_for(
+        &self,
+        page_id: &PageId,
+        command: &WaitForCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        worker_pool::PageBehavior::wait_for(Some(self), page_id, command).await
+    }
+
+    async fn capture_screenshot(
+        &self,
+        page_id: &PageId,
+        command: &CaptureScreenshotCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        worker_pool::CaptureEngine::capture_screenshot(self, page_id, command).await
+    }
+
+    async fn open_page_command(
+        &self,
+        command: &OpenPageCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        worker_pool::TabsEngine::open_page_command(self, command).await
+    }
+
+    async fn list_pages(&self, _command: &ListPagesCommand) -> Result<Vec<Evidence>, CommandError> {
+        worker_pool::TabsEngine::list_pages(self, _command).await
+    }
+
+    async fn close_page_command(
+        &self,
+        command: &ClosePageCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        worker_pool::TabsEngine::close_page_command(self, command).await
+    }
+
+    async fn a11y_snapshot(
+        &self,
+        page_id: &PageId,
+        command: &types::AccessibilitySnapshotCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        worker_pool::ObservationEngine::a11y_snapshot(self, page_id, command).await
+    }
+
+    async fn network_log(
+        &self,
+        page_id: &PageId,
+        command: &types::NetworkLogCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        worker_pool::EventsEngine::network_log(self, page_id, command).await
+    }
+
+    async fn emulate(
+        &self,
+        page_id: &PageId,
+        command: &types::EmulateCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        worker_pool::PageConfigurationEngine::emulate(self, page_id, command).await
+    }
+
+    async fn handle_dialog(
+        &self,
+        page_id: &PageId,
+        command: &types::HandleDialogCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        worker_pool::EventsEngine::handle_dialog(self, page_id, command).await
+    }
+
+    async fn print_to_pdf(
+        &self,
+        page_id: &PageId,
+        command: &types::PrintToPdfCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        worker_pool::CaptureEngine::print_to_pdf(self, page_id, command).await
+    }
+
+    async fn get_cookies(
+        &self,
+        page_id: &PageId,
+        command: &types::GetCookiesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        worker_pool::WebStateEngine::get_cookies(self, page_id, command).await
+    }
+
+    async fn set_cookies(
+        &self,
+        page_id: &PageId,
+        command: &types::SetCookiesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        worker_pool::WebStateEngine::set_cookies(self, page_id, command).await
+    }
+
+    async fn delete_cookies(
+        &self,
+        page_id: &PageId,
+        command: &types::DeleteCookiesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        worker_pool::WebStateEngine::delete_cookies(self, page_id, command).await
+    }
+
+    async fn screenshot_bytes(&self, page_id: &PageId) -> Result<Vec<u8>, CommandError> {
+        worker_pool::CaptureEngine::screenshot_bytes(self, page_id).await
+    }
+
+    async fn activate_page(
+        &self,
+        command: &types::ActivatePageCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        worker_pool::TabsEngine::activate_page(self, command).await
+    }
+
+    async fn reconnect_live_process(&self) -> Result<Vec<Evidence>, CommandError> {
+        self.transport.reconnect_live().await?;
+        let subscription = self
+            .transport
+            .send("session.subscribe", session_subscribe_params())
+            .await?;
+        if !subscription.is_object() {
+            return Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox BiDi session.subscribe result was not an object",
+                false,
+            ));
+        }
+        tracing::info!(
+            worker_id = %self.id.0,
+            "reattached to live Firefox after BiDi transport reset; page state preserved"
+        );
+        Ok(vec![Evidence::Configuration {
+            name: "cdpReattach".into(),
+            value: "websocket reset with the browser process still alive; reattached \
+                    to the same process and page state is preserved"
+                .into(),
+        }])
+    }
+
+    async fn close(&self) -> Result<(), CommandError> {
+        {
+            let _lifecycle = self.lifecycle.lock().await;
+            self.start_shutdown();
+        }
+        self.wait_for_shutdown().await
+    }
+}
+
+#[async_trait]
+impl worker_pool::SessionSettings for FirefoxCompanionWorker {
+    async fn set_humanization_enabled(&self, enabled: bool) -> Result<(), CommandError> {
         self.humanization_enabled.store(enabled, Ordering::Relaxed);
         Ok(())
     }
@@ -3444,7 +3726,10 @@ impl BrowserWorker for FirefoxCompanionWorker {
     fn fingerprint_enabled(&self) -> bool {
         self.fingerprint_enabled.load(Ordering::Relaxed)
     }
+}
 
+#[async_trait]
+impl worker_pool::TabsEngine for FirefoxCompanionWorker {
     async fn open_page(&self, page_id: PageId) -> Result<(), CommandError> {
         self.sync_fingerprint_preload().await?;
         let guard = self.open_page_owned(page_id.clone()).await?;
@@ -3457,130 +3742,207 @@ impl BrowserWorker for FirefoxCompanionWorker {
         Ok(())
     }
 
-    async fn collect_candidates(
+    async fn open_page_command(
         &self,
-        page_id: &PageId,
-        target: &TargetSpec,
-    ) -> Result<Vec<Candidate>, CommandError> {
-        self.context(page_id).await?;
-        if !target.frame_path.is_empty() || !target.shadow_path.is_empty() {
-            return Err(driver_error(
-                ErrorCode::InvalidRequest,
-                "Firefox candidate collection does not support frame or shadow paths",
-                false,
-            ));
-        }
-        let (nodes, truncated) = self
-            .observer
-            .a11y_snapshot(
-                &self.current_lease(),
-                page_id,
-                CANDIDATE_MAX_NODES,
-                None,
-                false,
+        command: &OpenPageCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let page_id = PageId::new();
+        let guard = self.open_page_owned(page_id.clone()).await?;
+        let (url, title) = if let Some(url) = &command.url {
+            let navigation = match worker_pool::NavigationEngine::navigate(
+                self,
+                &page_id,
+                &NavigateCommand {
+                    url: url.clone(),
+                    wait_until: WaitUntil::NetworkIdle,
+                    timeout_ms: DEFAULT_NAVIGATION_TIMEOUT.as_millis() as u64,
+                },
             )
-            .await?;
-        if truncated && !accessibility_tree_has_match(&nodes, target) {
-            // The bounded snapshot never reached the target; a search that is
-            // not capped by the node budget decides whether it exists.
-            if let Ok(location) = self
-                .observer
-                .locate_target(&self.current_lease(), page_id, target)
-                .await
+            .await
             {
-                if location.ambiguous {
-                    return Err(driver_error(
-                        ErrorCode::TargetAmbiguous,
-                        "Firefox semantic target is ambiguous",
-                        false,
-                    ));
-                }
-                if let (true, 0, Some(css_path)) = (
-                    location.found,
-                    target.ordinal.unwrap_or(0),
-                    location.css_path.clone(),
-                ) {
-                    let mut candidates = accessibility_candidates(&nodes);
-                    candidates.push(located_candidate(&location, css_path));
-                    return Ok(candidates);
-                }
-            }
-            return Err(driver_error(
-                ErrorCode::ResourceExhausted,
-                format!(
-                    "the candidate set was truncated at {CANDIDATE_MAX_NODES} accessibility nodes before the target was found; narrow the target or scope the snapshot"
-                ),
-                false,
-            ));
-        }
-        Ok(accessibility_candidates(&nodes))
+                Ok(navigation) => navigation,
+                Err(error) => return Err(guard.fail(error).await),
+            };
+            navigation
+                .into_iter()
+                .find_map(|evidence| match evidence {
+                    Evidence::Navigation { url, title } => Some((url, title)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| (url.clone(), String::new()))
+        } else {
+            let title = match self.page_title(&page_id).await {
+                Ok(title) => title,
+                Err(error) => return Err(guard.fail(error).await),
+            };
+            ("about:blank".into(), title)
+        };
+        let evidence = vec![
+            Evidence::Page {
+                page_id,
+                url,
+                title,
+            },
+            self.evidence(InteractionPath::EngineNative),
+        ];
+        guard.disarm().await?;
+        Ok(evidence)
     }
 
-    async fn evaluate_javascript(
-        &self,
-        page_id: &PageId,
-        command: &EvaluateJavaScriptCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        let context = self.context(page_id).await?;
-        let timeout_ms = command.timeout_ms.clamp(1, MAX_JS_TIMEOUT_MS);
-        // Page realm (no companion sandbox) so fingerprint preload patches are visible.
-        // JSON.stringify avoids BiDi RemoteValue object graphs for collector probes.
-        let wrapped = format!(
-            "(async () => {{\n  const __bobby_v = await ({expr});\n  return JSON.stringify(__bobby_v === undefined ? null : __bobby_v);\n}})()",
-            expr = command.expression
-        );
-        let response = tokio::time::timeout(
-            Duration::from_millis(timeout_ms),
-            self.transport.send(
-                "script.evaluate",
-                json!({
-                    "expression": wrapped,
-                    "target": {"context": context},
-                    "awaitPromise": true,
-                    "resultOwnership": "none",
-                }),
-            ),
-        )
-        .await
-        .map_err(|_| {
-            driver_error(
-                ErrorCode::DeadlineExceeded,
-                format!("Firefox JavaScript evaluation exceeded {timeout_ms} ms"),
-                true,
-            )
-        })??;
-        if let Some(exception) = response.get("exceptionDetails") {
-            return Err(driver_error(
-                ErrorCode::BrowserCommandFailed,
-                format!("Firefox JavaScript evaluation failed: {exception}"),
-                false,
-            ));
-        }
-        let raw = response
-            .pointer("/result/value")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                driver_error(
-                    ErrorCode::BrowserCommandFailed,
-                    "Firefox JavaScript evaluation did not return a JSON string",
-                    false,
-                )
-            })?;
-        let truncated = raw.len() > MAX_JS_RESULT_BYTES;
-        let slice = truncate_utf8(raw, MAX_JS_RESULT_BYTES);
-        let value: Value = serde_json::from_str(slice).map_err(|error| {
+    async fn list_pages(&self, _command: &ListPagesCommand) -> Result<Vec<Evidence>, CommandError> {
+        self.ensure_active()?;
+        let tree = self
+            .transport
+            .send("browsingContext.getTree", json!({}))
+            .await?;
+        let live = live_contexts(&tree).ok_or_else(|| {
             driver_error(
                 ErrorCode::BrowserCommandFailed,
-                format!("Firefox JavaScript result was not valid JSON: {error}"),
+                "Firefox page listing returned an invalid context tree",
                 false,
             )
         })?;
+        let stale = self
+            .pages
+            .read()
+            .await
+            .values()
+            .filter_map(|page| match page {
+                PageContext::Ready { context, .. } if !live.contains(context) => {
+                    Some(context.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for context in stale {
+            let removals = mark_destroyed_context(&self.pages, &self.page_cleanups, &context).await;
+            release_removed_pages(&self.cleanup_failure, removals).await;
+        }
+        self.ensure_active()?;
+        let contexts = tree["contexts"].as_array().ok_or_else(|| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox page listing omitted root contexts",
+                false,
+            )
+        })?;
+        let urls = contexts
+            .iter()
+            .filter_map(|context| {
+                Some((
+                    context.get("context")?.as_str()?.to_owned(),
+                    context.get("url")?.as_str()?.to_owned(),
+                ))
+            })
+            .collect::<HashMap<_, _>>();
+        let tracked = self
+            .pages
+            .read()
+            .await
+            .iter()
+            .filter_map(|(page_id, page)| match page {
+                PageContext::Ready { context, .. } if live.contains(context) => {
+                    Some((page_id.clone(), context.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut listed = Vec::with_capacity(tracked.len());
+        for (page_id, context) in tracked {
+            let url = urls.get(&context).cloned().unwrap_or_default();
+            if url.len() > MAX_URL_BYTES * 4 {
+                return Err(driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox page URL exceeded its bound",
+                    false,
+                ));
+            }
+            let title = capture_context_title(&self.transport, &context).await?;
+            if title.len() > MAX_TITLE_BYTES * 4 {
+                return Err(driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox page title exceeded its bound",
+                    false,
+                ));
+            }
+            listed.push(PageEvidence {
+                page_id,
+                url,
+                title: page_title_evidence(title),
+            });
+        }
+        listed.sort_by_key(|page| page.page_id.0);
+        Ok(vec![Evidence::Pages { pages: listed }])
+    }
+
+    async fn close_page_command(
+        &self,
+        command: &ClosePageCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let context = self.context(&command.page_id).await?;
+        // The executor requires Page evidence for close commands: capture the
+        // page's identity BEFORE teardown, or a successful close records as a
+        // verification failure and agents retry a destructive op.
+        let response = self
+            .transport
+            .send(
+                "script.evaluate",
+                json!({
+                    "expression": "globalThis.location.href",
+                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                    "awaitPromise": false,
+                    "resultOwnership": "none",
+                }),
+            )
+            .await?;
+        let url = response
+            .pointer("/result/value")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let title = self.page_title(&command.page_id).await.unwrap_or_default();
+        let cleanup = self
+            .page_cleanups
+            .read()
+            .await
+            .get(&command.page_id)
+            .cloned()
+            .ok_or_else(page_missing)?;
+        let failures = cleanup.run().await;
+        if !failures.is_empty() {
+            return Err(cleanup_failures_error(&failures));
+        }
         Ok(vec![
-            Evidence::JavaScriptResult { value, truncated },
+            Evidence::Page {
+                page_id: command.page_id.clone(),
+                url,
+                title,
+            },
             self.evidence(InteractionPath::EngineNative),
         ])
     }
 
+    async fn activate_page(
+        &self,
+        command: &types::ActivatePageCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let context = self.context(&command.page_id).await?;
+        self.transport
+            .send("browsingContext.activate", json!({"context": context}))
+            .await
+            .map_err(|error| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    format!("Firefox page activation failed: {}", error.message),
+                    true,
+                )
+            })?;
+        Ok(vec![self.evidence(InteractionPath::EngineNative)])
+    }
+}
+
+#[async_trait]
+impl worker_pool::NavigationEngine for FirefoxCompanionWorker {
     async fn navigate(
         &self,
         page_id: &PageId,
@@ -3666,6 +4028,68 @@ impl BrowserWorker for FirefoxCompanionWorker {
         .await?;
         Some((url, page_title_evidence(title)))
     }
+}
+
+#[async_trait]
+impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
+    async fn collect_candidates(
+        &self,
+        page_id: &PageId,
+        target: &TargetSpec,
+    ) -> Result<Vec<Candidate>, CommandError> {
+        self.context(page_id).await?;
+        if !target.frame_path.is_empty() || !target.shadow_path.is_empty() {
+            return Err(driver_error(
+                ErrorCode::InvalidRequest,
+                "Firefox candidate collection does not support frame or shadow paths",
+                false,
+            ));
+        }
+        let (nodes, truncated) = self
+            .observer
+            .a11y_snapshot(
+                &self.current_lease(),
+                page_id,
+                CANDIDATE_MAX_NODES,
+                None,
+                false,
+            )
+            .await?;
+        if truncated && !accessibility_tree_has_match(&nodes, target) {
+            // The bounded snapshot never reached the target; a search that is
+            // not capped by the node budget decides whether it exists.
+            if let Ok(location) = self
+                .observer
+                .locate_target(&self.current_lease(), page_id, target)
+                .await
+            {
+                if location.ambiguous {
+                    return Err(driver_error(
+                        ErrorCode::TargetAmbiguous,
+                        "Firefox semantic target is ambiguous",
+                        false,
+                    ));
+                }
+                if let (true, 0, Some(css_path)) = (
+                    location.found,
+                    target.ordinal.unwrap_or(0),
+                    location.css_path.clone(),
+                ) {
+                    let mut candidates = accessibility_candidates(&nodes);
+                    candidates.push(located_candidate(&location, css_path));
+                    return Ok(candidates);
+                }
+            }
+            return Err(driver_error(
+                ErrorCode::ResourceExhausted,
+                format!(
+                    "the candidate set was truncated at {CANDIDATE_MAX_NODES} accessibility nodes before the target was found; narrow the target or scope the snapshot"
+                ),
+                false,
+            ));
+        }
+        Ok(accessibility_candidates(&nodes))
+    }
 
     async fn form_snapshot(
         &self,
@@ -3702,251 +4126,6 @@ impl BrowserWorker for FirefoxCompanionWorker {
             Evidence::FormSnapshot { snapshot },
             self.evidence(InteractionPath::EngineNative),
         ])
-    }
-
-    async fn control_action(
-        &self,
-        page_id: &PageId,
-        command: &ControlActionCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        command
-            .action
-            .validate()
-            .map_err(|message| driver_error(ErrorCode::InvalidRequest, message, false))?;
-        let target = form_control_target_spec(&command.target);
-        if !target.frame_path.is_empty()
-            && matches!(command.action, ControlAction::SelectOne { .. })
-        {
-            return Err(driver_error(
-                ErrorCode::PolicyDenied,
-                "Firefox framed select control actions require private verification",
-                false,
-            ));
-        }
-        let snapshot = self
-            .form_snapshot(page_id, None)
-            .await?
-            .into_iter()
-            .find_map(|item| match item {
-                Evidence::FormSnapshot { snapshot } => Some(snapshot),
-                _ => None,
-            })
-            .ok_or_else(|| {
-                driver_error(
-                    ErrorCode::BrowserCommandFailed,
-                    "missing form snapshot",
-                    false,
-                )
-            })?;
-        let find = |snapshot: &types::FormSnapshot| -> Option<FormControl> {
-            snapshot
-                .forms
-                .iter()
-                .flat_map(|form| form.controls.iter())
-                .chain(snapshot.unowned_controls.iter())
-                .find(|control| {
-                    control.target.as_ref().is_some_and(|target| {
-                        worker_pool::target_specs_equivalent(target, &command.target)
-                    })
-                })
-                .cloned()
-        };
-        let control = find(&snapshot).ok_or_else(|| {
-            driver_error(
-                ErrorCode::TargetNotFound,
-                "form control target was not found",
-                false,
-            )
-        })?;
-        worker_pool::validate_control_action(&control, &command.action)?;
-        let mut committed: Option<Vec<String>> = None;
-        match &command.action {
-            ControlAction::SetText { value, clear_first } => {
-                self.type_text(
-                    page_id,
-                    &TypeTextCommand {
-                        selector: String::new(),
-                        target: Some(target.clone()),
-                        value: value.clone(),
-                        clear_first: *clear_first,
-                        expected_url: None,
-                    },
-                )
-                .await?;
-            }
-            ControlAction::SelectOne { value } => {
-                committed = Some(vec![
-                    self.select_option_committed(page_id, &target, value)
-                        .await?,
-                ]);
-            }
-            ControlAction::SetChecked { checked } => {
-                self.type_text(
-                    page_id,
-                    &TypeTextCommand {
-                        selector: String::new(),
-                        target: Some(target.clone()),
-                        value: checked.to_string(),
-                        clear_first: false,
-                        expected_url: None,
-                    },
-                )
-                .await?;
-            }
-            ControlAction::SetFiles { paths } => {
-                self.upload_files(
-                    page_id,
-                    &UploadFilesCommand {
-                        selector: String::new(),
-                        target: Some(target.clone()),
-                        paths: paths.clone(),
-                    },
-                )
-                .await?;
-            }
-            ControlAction::Activate => {
-                self.click(
-                    page_id,
-                    &ClickCommand {
-                        selector: String::new(),
-                        target: Some(target.clone()),
-                        boundary: false,
-                        expected_url: None,
-                        modifiers: Vec::new(),
-                    },
-                )
-                .await?;
-            }
-            ControlAction::SelectMany { values } => {
-                self.evaluate_control_script(page_id, &target, &format!("const requested=new Set({});if(!(el instanceof HTMLSelectElement)||!el.multiple)return false;const norm=s=>s.trim().toLowerCase();const wanted=new Map();for(const value of requested){{const byValue=[...el.options].filter(option=>option.value===value);const matches=byValue.length?byValue:[...el.options].filter(option=>norm(option.label)===norm(value)||norm(option.textContent)===norm(value));if(matches.length!==1||matches[0].disabled)return false;wanted.set(matches[0].value,true)}}for(const option of el.options)option.selected=wanted.has(option.value);", serde_json::to_string(values).map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?)).await?;
-            }
-            ControlAction::Clear => {
-                self.evaluate_control_script(page_id, &target, "if(el instanceof HTMLSelectElement)for(const option of el.options)option.selected=false;else if('checked'in el)el.checked=false;else if('value'in el)el.value='';else if(el.isContentEditable)el.textContent='';else return false;").await?;
-            }
-        }
-        let after = self
-            .form_snapshot(page_id, None)
-            .await?
-            .into_iter()
-            .find_map(|item| match item {
-                Evidence::FormSnapshot { snapshot } => Some(snapshot),
-                _ => None,
-            })
-            .ok_or_else(|| {
-                driver_error(
-                    ErrorCode::BrowserCommandFailed,
-                    "missing post-action form snapshot",
-                    true,
-                )
-            })?;
-        let control = find(&after).ok_or_else(|| {
-            driver_error(
-                ErrorCode::TargetDetached,
-                "form control was replaced after dispatch",
-                true,
-            )
-        })?;
-        let mut action_evidence = worker_pool::control_action_evidence(
-            &control,
-            &command.action,
-            false,
-            committed.as_deref(),
-        )?;
-        // Conditional fields: controls that exist only after this action,
-        // surfaced so the agent need not re-snapshot to discover them.
-        let before_targets: Vec<&types::FormControlTarget> = snapshot
-            .forms
-            .iter()
-            .flat_map(|form| form.controls.iter())
-            .chain(snapshot.unowned_controls.iter())
-            .filter_map(|control| control.target.as_ref())
-            .collect();
-        action_evidence.revealed_controls = after
-            .forms
-            .iter()
-            .flat_map(|form| form.controls.iter())
-            .chain(after.unowned_controls.iter())
-            .filter(|control| {
-                control.target.as_ref().is_some_and(|target| {
-                    !before_targets
-                        .iter()
-                        .any(|before| worker_pool::target_specs_equivalent(before, target))
-                })
-            })
-            .take(8)
-            .map(|control| types::RevealedControl {
-                control_kind: control.control_kind,
-                accessible_name: control.accessible_name.clone(),
-                target: control.target.clone(),
-            })
-            .collect();
-        Ok(vec![
-            Evidence::ControlAction {
-                action: action_evidence,
-            },
-            self.evidence(InteractionPath::EngineNative),
-        ])
-    }
-
-    async fn verify_framed_typed_value(
-        &self,
-        page_id: &PageId,
-        command: &TypeTextCommand,
-        _observed: Option<&str>,
-        kind: &str,
-    ) -> Result<Option<Vec<Evidence>>, CommandError> {
-        let Some(target) = command
-            .target
-            .as_ref()
-            .filter(|target| !target.frame_path.is_empty())
-        else {
-            return Ok(None);
-        };
-        let top_context = self.context(page_id).await?;
-        let (context, selector) = self
-            .resolve_input_target(page_id, &top_context, &command.selector, Some(target))
-            .await?;
-        let selector = serde_json::to_string(&selector)
-            .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
-        let expected = serde_json::to_string(&command.value)
-            .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
-        let kind = serde_json::to_string(kind)
-            .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
-        let clear_first = command.clear_first;
-        let response = self
-            .transport
-            .send(
-                "script.evaluate",
-                json!({
-                    "expression": format!("(()=>{{const el=document.querySelector({selector});if(!el)return null;const expected={expected};const kind={kind};const actual=el instanceof HTMLInputElement&&(el.type==='checkbox'||el.type==='radio')?String(el.checked):String(el.value??'');const selected=kind==='select'&&el instanceof HTMLSelectElement?el.selectedOptions[0]:null;const norm=value=>String(value??'').trim().toLowerCase();const selectedLabelMatches=selected&&(norm(selected.label)===norm(expected)||norm(selected.textContent)===norm(expected));return actual===expected||(!{clear_first}&&kind!=='select'&&actual.endsWith(expected))||Boolean(selectedLabelMatches);}})()"),
-                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
-                    "awaitPromise": false,
-                    "resultOwnership": "none",
-                }),
-            )
-            .await?;
-        match response.pointer("/result/value").and_then(Value::as_bool) {
-            Some(true) => Ok(Some(vec![
-                Evidence::Inspection {
-                    selector: None,
-                    url: String::new(),
-                    title: String::new(),
-                    text: "[redacted]".into(),
-                    html: None,
-                },
-                self.evidence(InteractionPath::EngineNative),
-            ])),
-            Some(false) => Err(driver_error(
-                ErrorCode::VerificationFailed,
-                "typed value did not match private frame state",
-                true,
-            )),
-            None => Err(driver_error(
-                ErrorCode::TargetNotFound,
-                "Firefox framed input was unavailable for verification",
-                false,
-            )),
-        }
     }
 
     async fn inspect(
@@ -4167,6 +4346,308 @@ impl BrowserWorker for FirefoxCompanionWorker {
         ]))
     }
 
+    async fn a11y_snapshot(
+        &self,
+        page_id: &PageId,
+        command: &types::AccessibilitySnapshotCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.context(page_id).await?;
+        let max_nodes = command.max_nodes.unwrap_or(256).clamp(1, 2048);
+        let (mut nodes, truncated) = self
+            .observer
+            .a11y_snapshot(
+                &self.current_lease(),
+                page_id,
+                max_nodes,
+                command.target.as_ref(),
+                true,
+            )
+            .await?;
+        worker_pool::annotate_accessibility_targets(&mut nodes);
+        let controls_omitted = if accessibility_contains_form_control(&nodes) {
+            false
+        } else {
+            worker_pool::ObservationEngine::form_snapshot(self, page_id, Some(512))
+                .await
+                .ok()
+                .is_some_and(|evidence| {
+                    evidence.iter().any(|item| {
+                        matches!(
+                            item,
+                            Evidence::FormSnapshot { snapshot }
+                                if !snapshot.unowned_controls.is_empty()
+                                    || snapshot.forms.iter().any(|form| !form.controls.is_empty())
+                        )
+                    })
+                })
+        };
+        let mut evidence = vec![
+            Evidence::AccessibilitySnapshot {
+                page_id: page_id.clone(),
+                nodes,
+                truncated,
+            },
+            self.evidence(InteractionPath::EngineNative),
+        ];
+        if controls_omitted {
+            evidence.push(Evidence::Configuration {
+                name: "accessibilityControlsOmitted".into(),
+                value: "true: form controls exist but were absent from the accessibility tree; use form_snapshot".into(),
+            });
+        }
+        Ok(evidence)
+    }
+}
+
+#[async_trait]
+impl worker_pool::InputEngine for FirefoxCompanionWorker {
+    async fn control_action(
+        &self,
+        page_id: &PageId,
+        command: &ControlActionCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        command
+            .action
+            .validate()
+            .map_err(|message| driver_error(ErrorCode::InvalidRequest, message, false))?;
+        let target = form_control_target_spec(&command.target);
+        if !target.frame_path.is_empty()
+            && matches!(command.action, ControlAction::SelectOne { .. })
+        {
+            return Err(driver_error(
+                ErrorCode::PolicyDenied,
+                "Firefox framed select control actions require private verification",
+                false,
+            ));
+        }
+        let snapshot = worker_pool::ObservationEngine::form_snapshot(self, page_id, None)
+            .await?
+            .into_iter()
+            .find_map(|item| match item {
+                Evidence::FormSnapshot { snapshot } => Some(snapshot),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "missing form snapshot",
+                    false,
+                )
+            })?;
+        let find = |snapshot: &types::FormSnapshot| -> Option<FormControl> {
+            snapshot
+                .forms
+                .iter()
+                .flat_map(|form| form.controls.iter())
+                .chain(snapshot.unowned_controls.iter())
+                .find(|control| {
+                    control.target.as_ref().is_some_and(|target| {
+                        worker_pool::target_specs_equivalent(target, &command.target)
+                    })
+                })
+                .cloned()
+        };
+        let control = find(&snapshot).ok_or_else(|| {
+            driver_error(
+                ErrorCode::TargetNotFound,
+                "form control target was not found",
+                false,
+            )
+        })?;
+        worker_pool::validate_control_action(&control, &command.action)?;
+        let mut committed: Option<Vec<String>> = None;
+        match &command.action {
+            ControlAction::SetText { value, clear_first } => {
+                worker_pool::InputEngine::type_text(
+                    self,
+                    page_id,
+                    &TypeTextCommand {
+                        selector: String::new(),
+                        target: Some(target.clone()),
+                        value: value.clone(),
+                        clear_first: *clear_first,
+                        expected_url: None,
+                    },
+                )
+                .await?;
+            }
+            ControlAction::SelectOne { value } => {
+                committed = Some(vec![
+                    self.select_option_committed(page_id, &target, value)
+                        .await?,
+                ]);
+            }
+            ControlAction::SetChecked { checked } => {
+                worker_pool::InputEngine::type_text(
+                    self,
+                    page_id,
+                    &TypeTextCommand {
+                        selector: String::new(),
+                        target: Some(target.clone()),
+                        value: checked.to_string(),
+                        clear_first: false,
+                        expected_url: None,
+                    },
+                )
+                .await?;
+            }
+            ControlAction::SetFiles { paths } => {
+                worker_pool::InputEngine::upload_files(
+                    self,
+                    page_id,
+                    &UploadFilesCommand {
+                        selector: String::new(),
+                        target: Some(target.clone()),
+                        paths: paths.clone(),
+                    },
+                )
+                .await?;
+            }
+            ControlAction::Activate => {
+                worker_pool::InputEngine::click(
+                    self,
+                    page_id,
+                    &ClickCommand {
+                        selector: String::new(),
+                        target: Some(target.clone()),
+                        boundary: false,
+                        expected_url: None,
+                        modifiers: Vec::new(),
+                    },
+                )
+                .await?;
+            }
+            ControlAction::SelectMany { values } => {
+                self.evaluate_control_script(page_id, &target, &format!("const requested=new Set({});if(!(el instanceof HTMLSelectElement)||!el.multiple)return false;const norm=s=>s.trim().toLowerCase();const wanted=new Map();for(const value of requested){{const byValue=[...el.options].filter(option=>option.value===value);const matches=byValue.length?byValue:[...el.options].filter(option=>norm(option.label)===norm(value)||norm(option.textContent)===norm(value));if(matches.length!==1||matches[0].disabled)return false;wanted.set(matches[0].value,true)}}for(const option of el.options)option.selected=wanted.has(option.value);", serde_json::to_string(values).map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?)).await?;
+            }
+            ControlAction::Clear => {
+                self.evaluate_control_script(page_id, &target, "if(el instanceof HTMLSelectElement)for(const option of el.options)option.selected=false;else if('checked'in el)el.checked=false;else if('value'in el)el.value='';else if(el.isContentEditable)el.textContent='';else return false;").await?;
+            }
+        }
+        let after = worker_pool::ObservationEngine::form_snapshot(self, page_id, None)
+            .await?
+            .into_iter()
+            .find_map(|item| match item {
+                Evidence::FormSnapshot { snapshot } => Some(snapshot),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "missing post-action form snapshot",
+                    true,
+                )
+            })?;
+        let control = find(&after).ok_or_else(|| {
+            driver_error(
+                ErrorCode::TargetDetached,
+                "form control was replaced after dispatch",
+                true,
+            )
+        })?;
+        let mut action_evidence = worker_pool::control_action_evidence(
+            &control,
+            &command.action,
+            false,
+            committed.as_deref(),
+        )?;
+        // Conditional fields: controls that exist only after this action,
+        // surfaced so the agent need not re-snapshot to discover them.
+        let before_targets: Vec<&types::FormControlTarget> = snapshot
+            .forms
+            .iter()
+            .flat_map(|form| form.controls.iter())
+            .chain(snapshot.unowned_controls.iter())
+            .filter_map(|control| control.target.as_ref())
+            .collect();
+        action_evidence.revealed_controls = after
+            .forms
+            .iter()
+            .flat_map(|form| form.controls.iter())
+            .chain(after.unowned_controls.iter())
+            .filter(|control| {
+                control.target.as_ref().is_some_and(|target| {
+                    !before_targets
+                        .iter()
+                        .any(|before| worker_pool::target_specs_equivalent(before, target))
+                })
+            })
+            .take(8)
+            .map(|control| types::RevealedControl {
+                control_kind: control.control_kind,
+                accessible_name: control.accessible_name.clone(),
+                target: control.target.clone(),
+            })
+            .collect();
+        Ok(vec![
+            Evidence::ControlAction {
+                action: action_evidence,
+            },
+            self.evidence(InteractionPath::EngineNative),
+        ])
+    }
+
+    async fn verify_framed_typed_value(
+        &self,
+        page_id: &PageId,
+        command: &TypeTextCommand,
+        _observed: Option<&str>,
+        kind: &str,
+    ) -> Result<Option<Vec<Evidence>>, CommandError> {
+        let Some(target) = command
+            .target
+            .as_ref()
+            .filter(|target| !target.frame_path.is_empty())
+        else {
+            return Ok(None);
+        };
+        let top_context = self.context(page_id).await?;
+        let (context, selector) = self
+            .resolve_input_target(page_id, &top_context, &command.selector, Some(target))
+            .await?;
+        let selector = serde_json::to_string(&selector)
+            .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
+        let expected = serde_json::to_string(&command.value)
+            .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
+        let kind = serde_json::to_string(kind)
+            .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
+        let clear_first = command.clear_first;
+        let response = self
+            .transport
+            .send(
+                "script.evaluate",
+                json!({
+                    "expression": format!("(()=>{{const el=document.querySelector({selector});if(!el)return null;const expected={expected};const kind={kind};const actual=el instanceof HTMLInputElement&&(el.type==='checkbox'||el.type==='radio')?String(el.checked):String(el.value??'');const selected=kind==='select'&&el instanceof HTMLSelectElement?el.selectedOptions[0]:null;const norm=value=>String(value??'').trim().toLowerCase();const selectedLabelMatches=selected&&(norm(selected.label)===norm(expected)||norm(selected.textContent)===norm(expected));return actual===expected||(!{clear_first}&&kind!=='select'&&actual.endsWith(expected))||Boolean(selectedLabelMatches);}})()"),
+                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                    "awaitPromise": false,
+                    "resultOwnership": "none",
+                }),
+            )
+            .await?;
+        match response.pointer("/result/value").and_then(Value::as_bool) {
+            Some(true) => Ok(Some(vec![
+                Evidence::Inspection {
+                    selector: None,
+                    url: String::new(),
+                    title: String::new(),
+                    text: "[redacted]".into(),
+                    html: None,
+                },
+                self.evidence(InteractionPath::EngineNative),
+            ])),
+            Some(false) => Err(driver_error(
+                ErrorCode::VerificationFailed,
+                "typed value did not match private frame state",
+                true,
+            )),
+            None => Err(driver_error(
+                ErrorCode::TargetNotFound,
+                "Firefox framed input was unavailable for verification",
+                false,
+            )),
+        }
+    }
+
     async fn click(
         &self,
         page_id: &PageId,
@@ -4271,90 +4752,6 @@ impl BrowserWorker for FirefoxCompanionWorker {
             },
             self.evidence(InteractionPath::EngineNative),
         ])
-    }
-
-    async fn click_and_wait_for_popup(
-        &self,
-        page_id: &PageId,
-        command: &ClickAndWaitForPopupCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        let opener = self.context(page_id).await?;
-        let mut events = self.transport.subscribe_events().ok_or_else(|| {
-            driver_error(
-                ErrorCode::BrowserCommandFailed,
-                "Firefox BiDi transport cannot observe popup contexts",
-                false,
-            )
-        })?;
-        // Capture the discovery generation before the click creates the popup.
-        // A ticket opened afterward treats that already-known target as stale.
-        let popup_page_id = PageId::new();
-        let binding = self
-            .observer
-            .begin_page_binding(&self.current_lease(), &popup_page_id)
-            .await?;
-        let click_command = ClickCommand {
-            selector: command.selector.clone(),
-            target: command.target.clone(),
-            boundary: true,
-            expected_url: None,
-            modifiers: Vec::new(),
-        };
-        let click = self.click(page_id, &click_command);
-        // Consume contextCreated while the popup is still blank. Waiting for
-        // native click completion lets its navigation outrun the title proof.
-        let bind_popup = async {
-            let timeout = Duration::from_millis(command.timeout_ms.max(1));
-            let (popup_context, popup_url) = tokio::time::timeout(timeout, async {
-                loop {
-                    let event = events.recv().await.map_err(|_| {
-                        driver_error(
-                            ErrorCode::BrowserCommandFailed,
-                            "Firefox popup event stream closed",
-                            false,
-                        )
-                    })?;
-                    if let Some(popup) = popup_context_from_event(&event, &opener) {
-                        return Ok::<_, CommandError>(popup);
-                    }
-                }
-            })
-            .await
-            .map_err(|_| {
-                driver_error(
-                    ErrorCode::WaitConditionTimedOut,
-                    format!(
-                        "Firefox popup did not open within {} ms",
-                        command.timeout_ms
-                    ),
-                    false,
-                )
-            })??;
-            tokio::task::yield_now().await;
-            while let Ok(event) = events.try_recv() {
-                if popup_context_from_event(&event, &opener).is_some() {
-                    return Err(driver_error(
-                        ErrorCode::TargetAmbiguous,
-                        "Firefox click opened multiple popup contexts",
-                        false,
-                    ));
-                }
-            }
-            let (popup_page_id, title) = self
-                .bind_existing_popup(&popup_context, popup_page_id, binding)
-                .await?;
-            Ok::<_, CommandError>((popup_page_id, title, popup_url))
-        };
-        let (click_evidence, (popup_page_id, title, popup_url)) =
-            tokio::try_join!(click, bind_popup)?;
-        let mut evidence = vec![Evidence::Popup {
-            opener_page_id: page_id.clone(),
-            page_id: popup_page_id,
-            url: popup_url,
-            title: page_title_evidence(title),
-        }];
-        evidence.extend(click_evidence);
-        Ok(evidence)
     }
 
     async fn upload_files(
@@ -4468,220 +4865,6 @@ impl BrowserWorker for FirefoxCompanionWorker {
             },
             self.evidence(InteractionPath::EngineNative),
         ])
-    }
-
-    async fn click_and_wait_for_download(
-        &self,
-        page_id: &PageId,
-        command: &ClickAndWaitForDownloadCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        let context = self.context(page_id).await?;
-        let session = self.session_id.as_ref().ok_or_else(|| {
-            driver_error(
-                ErrorCode::InvalidRequest,
-                "Firefox download requires a runtime session",
-                false,
-            )
-        })?;
-        let artifacts = self.artifacts.as_ref().ok_or_else(|| {
-            driver_error(
-                ErrorCode::InvalidRequest,
-                "Firefox download artifact store is not configured",
-                false,
-            )
-        })?;
-        let root = self.downloads_dir.as_ref().ok_or_else(|| {
-            driver_error(
-                ErrorCode::InvalidRequest,
-                "Firefox download directory is not configured",
-                false,
-            )
-        })?;
-        let destination = root.join(session.0.to_string());
-        std::fs::create_dir_all(&destination).map_err(|_| {
-            driver_error(
-                ErrorCode::PolicyDenied,
-                "Firefox download directory is unavailable",
-                false,
-            )
-        })?;
-        let destination = std::fs::canonicalize(&destination).map_err(|_| {
-            driver_error(
-                ErrorCode::PolicyDenied,
-                "Firefox download directory is invalid",
-                false,
-            )
-        })?;
-        self.transport
-            .send(
-                "browser.setDownloadBehavior",
-                json!({
-                    "downloadBehavior": {"type": "allowed", "destinationFolder": destination},
-                }),
-            )
-            .await?;
-        let mut events = self.transport.subscribe_events().ok_or_else(|| {
-            driver_error(
-                ErrorCode::BrowserCommandFailed,
-                "Firefox BiDi transport cannot observe downloads",
-                false,
-            )
-        })?;
-        let click_evidence = self
-            .click(
-                page_id,
-                &ClickCommand {
-                    selector: command.selector.clone(),
-                    target: command.target.clone(),
-                    boundary: true,
-                    expected_url: None,
-                    modifiers: Vec::new(),
-                },
-            )
-            .await?;
-        let timeout = Duration::from_millis(command.timeout_ms.max(1));
-        let (navigation, filename) = tokio::time::timeout(timeout, async {
-            loop {
-                let event = events.recv().await.map_err(|_| {
-                    driver_error(
-                        ErrorCode::BrowserCommandFailed,
-                        "Firefox download event stream closed",
-                        false,
-                    )
-                })?;
-                if event.method == "browsingContext.downloadWillBegin"
-                    && event.params.get("context").and_then(Value::as_str) == Some(context.as_str())
-                {
-                    let navigation = event
-                        .params
-                        .get("navigation")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned);
-                    let filename = event
-                        .params
-                        .get("suggestedFilename")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| {
-                            driver_error(
-                                ErrorCode::BrowserCommandFailed,
-                                "Firefox download event has no filename",
-                                false,
-                            )
-                        })?;
-                    return Ok::<_, CommandError>((navigation, filename.to_owned()));
-                }
-            }
-        })
-        .await
-        .map_err(|_| {
-            driver_error(
-                ErrorCode::WaitConditionTimedOut,
-                "Firefox download did not begin before timeout",
-                false,
-            )
-        })??;
-        tokio::time::timeout(timeout, async {
-            loop {
-                let event = events.recv().await.map_err(|_| {
-                    driver_error(
-                        ErrorCode::BrowserCommandFailed,
-                        "Firefox download event stream closed",
-                        false,
-                    )
-                })?;
-                let event_context = event.params.get("context").and_then(Value::as_str);
-                if event.method == "browsingContext.downloadWillBegin"
-                    && event_context == Some(context.as_str())
-                {
-                    return Err(driver_error(
-                        ErrorCode::TargetAmbiguous,
-                        "Firefox click began multiple downloads",
-                        false,
-                    ));
-                }
-                if event.method == "browsingContext.downloadEnd"
-                    && event_context == Some(context.as_str())
-                    && event.params.get("navigation").and_then(Value::as_str)
-                        == navigation.as_deref()
-                {
-                    return match event.params.get("status").and_then(Value::as_str) {
-                        Some("complete") => Ok(()),
-                        _ => Err(driver_error(
-                            ErrorCode::BrowserCommandFailed,
-                            "Firefox download was canceled or failed",
-                            false,
-                        )),
-                    };
-                }
-            }
-        })
-        .await
-        .map_err(|_| {
-            driver_error(
-                ErrorCode::WaitConditionTimedOut,
-                "Firefox download did not complete before timeout",
-                false,
-            )
-        })??;
-        let safe_name = std::path::Path::new(&filename)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .filter(|name| *name == filename && !name.is_empty())
-            .ok_or_else(|| {
-                driver_error(
-                    ErrorCode::BrowserCommandFailed,
-                    "Firefox suggested an unsafe download filename",
-                    false,
-                )
-            })?;
-        let path = destination.join(safe_name);
-        let canonical = std::fs::canonicalize(&path).map_err(|_| {
-            driver_error(
-                ErrorCode::BrowserCommandFailed,
-                "Firefox completed download file is unavailable",
-                false,
-            )
-        })?;
-        if !canonical.starts_with(&destination) {
-            return Err(driver_error(
-                ErrorCode::PolicyDenied,
-                "Firefox download escaped its owned directory",
-                false,
-            ));
-        }
-        let bytes = std::fs::read(&canonical).map_err(|_| {
-            driver_error(
-                ErrorCode::BrowserCommandFailed,
-                "Firefox completed download cannot be read",
-                false,
-            )
-        })?;
-        let record = artifacts
-            .put(
-                session,
-                page_id,
-                "application/octet-stream",
-                "bin",
-                &bytes,
-                MAX_UPLOAD_BYTES as usize,
-            )
-            .await
-            .map_err(|error| {
-                driver_error(
-                    ErrorCode::BrowserCommandFailed,
-                    format!("Firefox download artifact failed: {error}"),
-                    false,
-                )
-            })?;
-        let mut evidence = vec![Evidence::Download {
-            filename: safe_name.to_owned(),
-            path: format!("artifact://{}", record.artifact_id),
-            bytes: record.bytes,
-            sha256: record.sha256,
-            saved_to: Some(safe_name.to_owned()),
-        }];
-        evidence.extend(click_evidence);
-        Ok(evidence)
     }
 
     async fn type_text(
@@ -4898,22 +5081,401 @@ impl BrowserWorker for FirefoxCompanionWorker {
         }
         Ok(self.with_redaction_diagnostics(evidence))
     }
+}
 
-    async fn wait_for(
+#[async_trait]
+impl worker_pool::EventsEngine for FirefoxCompanionWorker {
+    async fn click_and_wait_for_popup(
         &self,
         page_id: &PageId,
-        command: &WaitForCommand,
+        command: &ClickAndWaitForPopupCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::wait::poll_until(
-            command,
-            &FirefoxWaitObserver {
-                worker: self,
-                page_id,
-            },
-        )
-        .await
+        let opener = self.context(page_id).await?;
+        let mut events = self.transport.subscribe_events().ok_or_else(|| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox BiDi transport cannot observe popup contexts",
+                false,
+            )
+        })?;
+        // Capture the discovery generation before the click creates the popup.
+        // A ticket opened afterward treats that already-known target as stale.
+        let popup_page_id = PageId::new();
+        let binding = self
+            .observer
+            .begin_page_binding(&self.current_lease(), &popup_page_id)
+            .await?;
+        let click_command = ClickCommand {
+            selector: command.selector.clone(),
+            target: command.target.clone(),
+            boundary: true,
+            expected_url: None,
+            modifiers: Vec::new(),
+        };
+        let click = worker_pool::InputEngine::click(self, page_id, &click_command);
+        // Consume contextCreated while the popup is still blank. Waiting for
+        // native click completion lets its navigation outrun the title proof.
+        let bind_popup = async {
+            let timeout = Duration::from_millis(command.timeout_ms.max(1));
+            let (popup_context, popup_url) = tokio::time::timeout(timeout, async {
+                loop {
+                    let event = events.recv().await.map_err(|_| {
+                        driver_error(
+                            ErrorCode::BrowserCommandFailed,
+                            "Firefox popup event stream closed",
+                            false,
+                        )
+                    })?;
+                    if let Some(popup) = popup_context_from_event(&event, &opener) {
+                        return Ok::<_, CommandError>(popup);
+                    }
+                }
+            })
+            .await
+            .map_err(|_| {
+                driver_error(
+                    ErrorCode::WaitConditionTimedOut,
+                    format!(
+                        "Firefox popup did not open within {} ms",
+                        command.timeout_ms
+                    ),
+                    false,
+                )
+            })??;
+            tokio::task::yield_now().await;
+            while let Ok(event) = events.try_recv() {
+                if popup_context_from_event(&event, &opener).is_some() {
+                    return Err(driver_error(
+                        ErrorCode::TargetAmbiguous,
+                        "Firefox click opened multiple popup contexts",
+                        false,
+                    ));
+                }
+            }
+            let (popup_page_id, title) = self
+                .bind_existing_popup(&popup_context, popup_page_id, binding)
+                .await?;
+            Ok::<_, CommandError>((popup_page_id, title, popup_url))
+        };
+        let (click_evidence, (popup_page_id, title, popup_url)) =
+            tokio::try_join!(click, bind_popup)?;
+        let mut evidence = vec![Evidence::Popup {
+            opener_page_id: page_id.clone(),
+            page_id: popup_page_id,
+            url: popup_url,
+            title: page_title_evidence(title),
+        }];
+        evidence.extend(click_evidence);
+        Ok(evidence)
     }
 
+    async fn click_and_wait_for_download(
+        &self,
+        page_id: &PageId,
+        command: &ClickAndWaitForDownloadCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let context = self.context(page_id).await?;
+        let session = self.session_id.as_ref().ok_or_else(|| {
+            driver_error(
+                ErrorCode::InvalidRequest,
+                "Firefox download requires a runtime session",
+                false,
+            )
+        })?;
+        let artifacts = self.artifacts.as_ref().ok_or_else(|| {
+            driver_error(
+                ErrorCode::InvalidRequest,
+                "Firefox download artifact store is not configured",
+                false,
+            )
+        })?;
+        let root = self.downloads_dir.as_ref().ok_or_else(|| {
+            driver_error(
+                ErrorCode::InvalidRequest,
+                "Firefox download directory is not configured",
+                false,
+            )
+        })?;
+        let destination = root.join(session.0.to_string());
+        std::fs::create_dir_all(&destination).map_err(|_| {
+            driver_error(
+                ErrorCode::PolicyDenied,
+                "Firefox download directory is unavailable",
+                false,
+            )
+        })?;
+        let destination = std::fs::canonicalize(&destination).map_err(|_| {
+            driver_error(
+                ErrorCode::PolicyDenied,
+                "Firefox download directory is invalid",
+                false,
+            )
+        })?;
+        self.transport
+            .send(
+                "browser.setDownloadBehavior",
+                json!({
+                    "downloadBehavior": {"type": "allowed", "destinationFolder": destination},
+                }),
+            )
+            .await?;
+        let mut events = self.transport.subscribe_events().ok_or_else(|| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox BiDi transport cannot observe downloads",
+                false,
+            )
+        })?;
+        let click_evidence = worker_pool::InputEngine::click(
+            self,
+            page_id,
+            &ClickCommand {
+                selector: command.selector.clone(),
+                target: command.target.clone(),
+                boundary: true,
+                expected_url: None,
+                modifiers: Vec::new(),
+            },
+        )
+        .await?;
+        let timeout = Duration::from_millis(command.timeout_ms.max(1));
+        let (navigation, filename) = tokio::time::timeout(timeout, async {
+            loop {
+                let event = events.recv().await.map_err(|_| {
+                    driver_error(
+                        ErrorCode::BrowserCommandFailed,
+                        "Firefox download event stream closed",
+                        false,
+                    )
+                })?;
+                if event.method == "browsingContext.downloadWillBegin"
+                    && event.params.get("context").and_then(Value::as_str) == Some(context.as_str())
+                {
+                    let navigation = event
+                        .params
+                        .get("navigation")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    let filename = event
+                        .params
+                        .get("suggestedFilename")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            driver_error(
+                                ErrorCode::BrowserCommandFailed,
+                                "Firefox download event has no filename",
+                                false,
+                            )
+                        })?;
+                    return Ok::<_, CommandError>((navigation, filename.to_owned()));
+                }
+            }
+        })
+        .await
+        .map_err(|_| {
+            driver_error(
+                ErrorCode::WaitConditionTimedOut,
+                "Firefox download did not begin before timeout",
+                false,
+            )
+        })??;
+        tokio::time::timeout(timeout, async {
+            loop {
+                let event = events.recv().await.map_err(|_| {
+                    driver_error(
+                        ErrorCode::BrowserCommandFailed,
+                        "Firefox download event stream closed",
+                        false,
+                    )
+                })?;
+                let event_context = event.params.get("context").and_then(Value::as_str);
+                if event.method == "browsingContext.downloadWillBegin"
+                    && event_context == Some(context.as_str())
+                {
+                    return Err(driver_error(
+                        ErrorCode::TargetAmbiguous,
+                        "Firefox click began multiple downloads",
+                        false,
+                    ));
+                }
+                if event.method == "browsingContext.downloadEnd"
+                    && event_context == Some(context.as_str())
+                    && event.params.get("navigation").and_then(Value::as_str)
+                        == navigation.as_deref()
+                {
+                    return match event.params.get("status").and_then(Value::as_str) {
+                        Some("complete") => Ok(()),
+                        _ => Err(driver_error(
+                            ErrorCode::BrowserCommandFailed,
+                            "Firefox download was canceled or failed",
+                            false,
+                        )),
+                    };
+                }
+            }
+        })
+        .await
+        .map_err(|_| {
+            driver_error(
+                ErrorCode::WaitConditionTimedOut,
+                "Firefox download did not complete before timeout",
+                false,
+            )
+        })??;
+        let safe_name = std::path::Path::new(&filename)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| *name == filename && !name.is_empty())
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox suggested an unsafe download filename",
+                    false,
+                )
+            })?;
+        let path = destination.join(safe_name);
+        let canonical = std::fs::canonicalize(&path).map_err(|_| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox completed download file is unavailable",
+                false,
+            )
+        })?;
+        if !canonical.starts_with(&destination) {
+            return Err(driver_error(
+                ErrorCode::PolicyDenied,
+                "Firefox download escaped its owned directory",
+                false,
+            ));
+        }
+        let bytes = std::fs::read(&canonical).map_err(|_| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "Firefox completed download cannot be read",
+                false,
+            )
+        })?;
+        let record = artifacts
+            .put(
+                session,
+                page_id,
+                "application/octet-stream",
+                "bin",
+                &bytes,
+                MAX_UPLOAD_BYTES as usize,
+            )
+            .await
+            .map_err(|error| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    format!("Firefox download artifact failed: {error}"),
+                    false,
+                )
+            })?;
+        let mut evidence = vec![Evidence::Download {
+            filename: safe_name.to_owned(),
+            path: format!("artifact://{}", record.artifact_id),
+            bytes: record.bytes,
+            sha256: record.sha256,
+            saved_to: Some(safe_name.to_owned()),
+        }];
+        evidence.extend(click_evidence);
+        Ok(evidence)
+    }
+
+    async fn network_log(
+        &self,
+        page_id: &PageId,
+        command: &types::NetworkLogCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let entries = self.har_recorder.take(command.clear).await;
+        let page_url = String::new();
+        let document = worker_pool::har_document(&entries, &page_url);
+        let bytes = serde_json::to_vec(&document)
+            .map_err(|error| driver_error(ErrorCode::Internal, error.to_string(), false))?;
+        let record = self
+            .artifacts
+            .as_ref()
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox HAR artifact storage is not configured",
+                    false,
+                )
+            })?
+            .put(
+                self.session_id.as_ref().ok_or_else(page_missing)?,
+                page_id,
+                "application/json",
+                "har",
+                &bytes,
+                MAX_SCREENSHOT_BYTES,
+            )
+            .await
+            .map_err(|error| {
+                driver_error(ErrorCode::BrowserCommandFailed, error.to_string(), false)
+            })?;
+        Ok(vec![Evidence::HarArtifact {
+            artifact_id: record.artifact_id,
+            media_type: record.media_type,
+            bytes: record.bytes,
+            sha256: record.sha256,
+            entries: entries.len() as u32,
+        }])
+    }
+
+    async fn handle_dialog(
+        &self,
+        page_id: &PageId,
+        command: &types::HandleDialogCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let timeout = std::time::Duration::from_millis(
+            command.timeout_ms.unwrap_or(30_000).clamp(1, 300_000),
+        );
+        let context = self.context(page_id).await?;
+        let deadline = std::time::Instant::now() + timeout;
+        let prompt = loop {
+            let pending = self.pending_prompts.write().await.remove(&context);
+            if let Some(prompt) = pending {
+                break prompt;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(driver_error(
+                    ErrorCode::DeadlineExceeded,
+                    format!("no user prompt opened within {}ms", timeout.as_millis()),
+                    true,
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        };
+        let accept = matches!(command.action, types::DialogAction::Accept);
+        self.transport
+            .send(
+                "browsingContext.handleUserPrompt",
+                json!({"context": context, "accept": accept}),
+            )
+            .await
+            .map_err(|error| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    format!("Firefox user prompt handling failed: {}", error.message),
+                    false,
+                )
+            })?;
+        Ok(vec![Evidence::Dialog {
+            dialog_type: prompt.prompt_type,
+            message: prompt.message,
+            action: if accept {
+                "accept".into()
+            } else {
+                "dismiss".into()
+            },
+        }])
+    }
+}
+
+#[async_trait]
+impl worker_pool::CaptureEngine for FirefoxCompanionWorker {
     async fn capture_screenshot(
         &self,
         page_id: &PageId,
@@ -4992,398 +5554,6 @@ impl BrowserWorker for FirefoxCompanionWorker {
             height: record.height,
             bytes: record.bytes,
             sha256: record.sha256,
-        }])
-    }
-
-    async fn open_page_command(
-        &self,
-        command: &OpenPageCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        let page_id = PageId::new();
-        let guard = self.open_page_owned(page_id.clone()).await?;
-        let (url, title) = if let Some(url) = &command.url {
-            let navigation = match self
-                .navigate(
-                    &page_id,
-                    &NavigateCommand {
-                        url: url.clone(),
-                        wait_until: WaitUntil::NetworkIdle,
-                        timeout_ms: DEFAULT_NAVIGATION_TIMEOUT.as_millis() as u64,
-                    },
-                )
-                .await
-            {
-                Ok(navigation) => navigation,
-                Err(error) => return Err(guard.fail(error).await),
-            };
-            navigation
-                .into_iter()
-                .find_map(|evidence| match evidence {
-                    Evidence::Navigation { url, title } => Some((url, title)),
-                    _ => None,
-                })
-                .unwrap_or_else(|| (url.clone(), String::new()))
-        } else {
-            let title = match self.page_title(&page_id).await {
-                Ok(title) => title,
-                Err(error) => return Err(guard.fail(error).await),
-            };
-            ("about:blank".into(), title)
-        };
-        let evidence = vec![
-            Evidence::Page {
-                page_id,
-                url,
-                title,
-            },
-            self.evidence(InteractionPath::EngineNative),
-        ];
-        guard.disarm().await?;
-        Ok(evidence)
-    }
-
-    async fn list_pages(&self, _command: &ListPagesCommand) -> Result<Vec<Evidence>, CommandError> {
-        self.ensure_active()?;
-        let tree = self
-            .transport
-            .send("browsingContext.getTree", json!({}))
-            .await?;
-        let live = live_contexts(&tree).ok_or_else(|| {
-            driver_error(
-                ErrorCode::BrowserCommandFailed,
-                "Firefox page listing returned an invalid context tree",
-                false,
-            )
-        })?;
-        let stale = self
-            .pages
-            .read()
-            .await
-            .values()
-            .filter_map(|page| match page {
-                PageContext::Ready { context, .. } if !live.contains(context) => {
-                    Some(context.clone())
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        for context in stale {
-            let removals = mark_destroyed_context(&self.pages, &self.page_cleanups, &context).await;
-            release_removed_pages(&self.cleanup_failure, removals).await;
-        }
-        self.ensure_active()?;
-        let contexts = tree["contexts"].as_array().ok_or_else(|| {
-            driver_error(
-                ErrorCode::BrowserCommandFailed,
-                "Firefox page listing omitted root contexts",
-                false,
-            )
-        })?;
-        let urls = contexts
-            .iter()
-            .filter_map(|context| {
-                Some((
-                    context.get("context")?.as_str()?.to_owned(),
-                    context.get("url")?.as_str()?.to_owned(),
-                ))
-            })
-            .collect::<HashMap<_, _>>();
-        let tracked = self
-            .pages
-            .read()
-            .await
-            .iter()
-            .filter_map(|(page_id, page)| match page {
-                PageContext::Ready { context, .. } if live.contains(context) => {
-                    Some((page_id.clone(), context.clone()))
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let mut listed = Vec::with_capacity(tracked.len());
-        for (page_id, context) in tracked {
-            let url = urls.get(&context).cloned().unwrap_or_default();
-            if url.len() > MAX_URL_BYTES * 4 {
-                return Err(driver_error(
-                    ErrorCode::BrowserCommandFailed,
-                    "Firefox page URL exceeded its bound",
-                    false,
-                ));
-            }
-            let title = capture_context_title(&self.transport, &context).await?;
-            if title.len() > MAX_TITLE_BYTES * 4 {
-                return Err(driver_error(
-                    ErrorCode::BrowserCommandFailed,
-                    "Firefox page title exceeded its bound",
-                    false,
-                ));
-            }
-            listed.push(PageEvidence {
-                page_id,
-                url,
-                title: page_title_evidence(title),
-            });
-        }
-        listed.sort_by_key(|page| page.page_id.0);
-        Ok(vec![Evidence::Pages { pages: listed }])
-    }
-
-    async fn close_page_command(
-        &self,
-        command: &ClosePageCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        let context = self.context(&command.page_id).await?;
-        // The executor requires Page evidence for close commands: capture the
-        // page's identity BEFORE teardown, or a successful close records as a
-        // verification failure and agents retry a destructive op.
-        let response = self
-            .transport
-            .send(
-                "script.evaluate",
-                json!({
-                    "expression": "globalThis.location.href",
-                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
-                    "awaitPromise": false,
-                    "resultOwnership": "none",
-                }),
-            )
-            .await?;
-        let url = response
-            .pointer("/result/value")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        let title = self.page_title(&command.page_id).await.unwrap_or_default();
-        let cleanup = self
-            .page_cleanups
-            .read()
-            .await
-            .get(&command.page_id)
-            .cloned()
-            .ok_or_else(page_missing)?;
-        let failures = cleanup.run().await;
-        if !failures.is_empty() {
-            return Err(cleanup_failures_error(&failures));
-        }
-        Ok(vec![
-            Evidence::Page {
-                page_id: command.page_id.clone(),
-                url,
-                title,
-            },
-            self.evidence(InteractionPath::EngineNative),
-        ])
-    }
-
-    async fn a11y_snapshot(
-        &self,
-        page_id: &PageId,
-        command: &types::AccessibilitySnapshotCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        self.context(page_id).await?;
-        let max_nodes = command.max_nodes.unwrap_or(256).clamp(1, 2048);
-        let (mut nodes, truncated) = self
-            .observer
-            .a11y_snapshot(
-                &self.current_lease(),
-                page_id,
-                max_nodes,
-                command.target.as_ref(),
-                true,
-            )
-            .await?;
-        worker_pool::annotate_accessibility_targets(&mut nodes);
-        let controls_omitted = if accessibility_contains_form_control(&nodes) {
-            false
-        } else {
-            self.form_snapshot(page_id, Some(512))
-                .await
-                .ok()
-                .is_some_and(|evidence| {
-                    evidence.iter().any(|item| {
-                        matches!(
-                            item,
-                            Evidence::FormSnapshot { snapshot }
-                                if !snapshot.unowned_controls.is_empty()
-                                    || snapshot.forms.iter().any(|form| !form.controls.is_empty())
-                        )
-                    })
-                })
-        };
-        let mut evidence = vec![
-            Evidence::AccessibilitySnapshot {
-                page_id: page_id.clone(),
-                nodes,
-                truncated,
-            },
-            self.evidence(InteractionPath::EngineNative),
-        ];
-        if controls_omitted {
-            evidence.push(Evidence::Configuration {
-                name: "accessibilityControlsOmitted".into(),
-                value: "true: form controls exist but were absent from the accessibility tree; use form_snapshot".into(),
-            });
-        }
-        Ok(evidence)
-    }
-
-    async fn network_log(
-        &self,
-        page_id: &PageId,
-        command: &types::NetworkLogCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        let entries = self.har_recorder.take(command.clear).await;
-        let page_url = String::new();
-        let document = worker_pool::har_document(&entries, &page_url);
-        let bytes = serde_json::to_vec(&document)
-            .map_err(|error| driver_error(ErrorCode::Internal, error.to_string(), false))?;
-        let record = self
-            .artifacts
-            .as_ref()
-            .ok_or_else(|| {
-                driver_error(
-                    ErrorCode::BrowserCommandFailed,
-                    "Firefox HAR artifact storage is not configured",
-                    false,
-                )
-            })?
-            .put(
-                self.session_id.as_ref().ok_or_else(page_missing)?,
-                page_id,
-                "application/json",
-                "har",
-                &bytes,
-                MAX_SCREENSHOT_BYTES,
-            )
-            .await
-            .map_err(|error| {
-                driver_error(ErrorCode::BrowserCommandFailed, error.to_string(), false)
-            })?;
-        Ok(vec![Evidence::HarArtifact {
-            artifact_id: record.artifact_id,
-            media_type: record.media_type,
-            bytes: record.bytes,
-            sha256: record.sha256,
-            entries: entries.len() as u32,
-        }])
-    }
-
-    async fn emulate(
-        &self,
-        page_id: &PageId,
-        command: &types::EmulateCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        let context = self.context(page_id).await?;
-        if let Some(viewport) = command.viewport {
-            if viewport.width == 0
-                || viewport.height == 0
-                || viewport.width > 16384
-                || viewport.height > 16384
-            {
-                return Err(driver_error(
-                    ErrorCode::InvalidRequest,
-                    "viewport dimensions must be within 1..=16384",
-                    false,
-                ));
-            }
-            self.transport
-                .send(
-                    "browsingContext.setViewport",
-                    json!({
-                        "context": context,
-                        "viewport": {"width": viewport.width, "height": viewport.height},
-                    }),
-                )
-                .await?;
-        }
-        if let Some(coordinates) = command.geolocation {
-            if !coordinates.latitude.is_finite()
-                || !coordinates.longitude.is_finite()
-                || !(-90.0..=90.0).contains(&coordinates.latitude)
-                || !(-180.0..=180.0).contains(&coordinates.longitude)
-            {
-                return Err(driver_error(
-                    ErrorCode::InvalidRequest,
-                    "geolocation coordinates are out of range",
-                    false,
-                ));
-            }
-            let mut params = json!({
-                "context": context,
-                "coordinates": {
-                    "latitude": coordinates.latitude,
-                    "longitude": coordinates.longitude,
-                },
-            });
-            if let Some(accuracy) = coordinates.accuracy {
-                params["coordinates"]["accuracy"] = json!(accuracy);
-            }
-            self.transport
-                .send("session.setGeolocationOverride", params)
-                .await
-                .map_err(|error| {
-                    driver_error(
-                        ErrorCode::BrowserCommandFailed,
-                        format!(
-                            "geolocation override is not supported by this browser: {}",
-                            error.message
-                        ),
-                        false,
-                    )
-                })?;
-        }
-        Ok(vec![Evidence::Emulation {
-            viewport: command.viewport,
-            geolocation: command.geolocation,
-        }])
-    }
-
-    async fn handle_dialog(
-        &self,
-        page_id: &PageId,
-        command: &types::HandleDialogCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        let timeout = std::time::Duration::from_millis(
-            command.timeout_ms.unwrap_or(30_000).clamp(1, 300_000),
-        );
-        let context = self.context(page_id).await?;
-        let deadline = std::time::Instant::now() + timeout;
-        let prompt = loop {
-            let pending = self.pending_prompts.write().await.remove(&context);
-            if let Some(prompt) = pending {
-                break prompt;
-            }
-            if std::time::Instant::now() >= deadline {
-                return Err(driver_error(
-                    ErrorCode::DeadlineExceeded,
-                    format!("no user prompt opened within {}ms", timeout.as_millis()),
-                    true,
-                ));
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        };
-        let accept = matches!(command.action, types::DialogAction::Accept);
-        self.transport
-            .send(
-                "browsingContext.handleUserPrompt",
-                json!({"context": context, "accept": accept}),
-            )
-            .await
-            .map_err(|error| {
-                driver_error(
-                    ErrorCode::BrowserCommandFailed,
-                    format!("Firefox user prompt handling failed: {}", error.message),
-                    false,
-                )
-            })?;
-        Ok(vec![Evidence::Dialog {
-            dialog_type: prompt.prompt_type,
-            message: prompt.message,
-            action: if accept {
-                "accept".into()
-            } else {
-                "dismiss".into()
-            },
         }])
     }
 
@@ -5482,6 +5652,193 @@ impl BrowserWorker for FirefoxCompanionWorker {
         }])
     }
 
+    async fn screenshot_bytes(&self, page_id: &PageId) -> Result<Vec<u8>, CommandError> {
+        let context = self.context(page_id).await?;
+        let response = self
+            .transport
+            .send(
+                "browsingContext.captureScreenshot",
+                json!({"context": context, "origin": "viewport"}),
+            )
+            .await?;
+        let encoded = response
+            .get("data")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::ScreenshotCaptureFailed,
+                    "Firefox screenshot omitted PNG data",
+                    false,
+                )
+            })?;
+        if encoded.len() > MAX_SCREENSHOT_BYTES.saturating_mul(4) / 3 + 8 {
+            return Err(driver_error(
+                ErrorCode::ScreenshotCaptureFailed,
+                "Firefox screenshot exceeded its encoded bound",
+                false,
+            ));
+        }
+        let bytes = BASE64.decode(encoded).map_err(|_| {
+            driver_error(
+                ErrorCode::ScreenshotCaptureFailed,
+                "Firefox screenshot returned invalid base64",
+                false,
+            )
+        })?;
+        if bytes.len() > MAX_SCREENSHOT_BYTES {
+            return Err(driver_error(
+                ErrorCode::ScreenshotCaptureFailed,
+                "Firefox screenshot exceeded its byte bound",
+                false,
+            ));
+        }
+        Ok(bytes)
+    }
+}
+
+#[async_trait]
+impl worker_pool::PageConfigurationEngine for FirefoxCompanionWorker {
+    async fn emulate(
+        &self,
+        page_id: &PageId,
+        command: &types::EmulateCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let context = self.context(page_id).await?;
+        if let Some(viewport) = command.viewport {
+            if viewport.width == 0
+                || viewport.height == 0
+                || viewport.width > 16384
+                || viewport.height > 16384
+            {
+                return Err(driver_error(
+                    ErrorCode::InvalidRequest,
+                    "viewport dimensions must be within 1..=16384",
+                    false,
+                ));
+            }
+            self.transport
+                .send(
+                    "browsingContext.setViewport",
+                    json!({
+                        "context": context,
+                        "viewport": {"width": viewport.width, "height": viewport.height},
+                    }),
+                )
+                .await?;
+        }
+        if let Some(coordinates) = command.geolocation {
+            if !coordinates.latitude.is_finite()
+                || !coordinates.longitude.is_finite()
+                || !(-90.0..=90.0).contains(&coordinates.latitude)
+                || !(-180.0..=180.0).contains(&coordinates.longitude)
+            {
+                return Err(driver_error(
+                    ErrorCode::InvalidRequest,
+                    "geolocation coordinates are out of range",
+                    false,
+                ));
+            }
+            let mut params = json!({
+                "context": context,
+                "coordinates": {
+                    "latitude": coordinates.latitude,
+                    "longitude": coordinates.longitude,
+                },
+            });
+            if let Some(accuracy) = coordinates.accuracy {
+                params["coordinates"]["accuracy"] = json!(accuracy);
+            }
+            self.transport
+                .send("session.setGeolocationOverride", params)
+                .await
+                .map_err(|error| {
+                    driver_error(
+                        ErrorCode::BrowserCommandFailed,
+                        format!(
+                            "geolocation override is not supported by this browser: {}",
+                            error.message
+                        ),
+                        false,
+                    )
+                })?;
+        }
+        Ok(vec![Evidence::Emulation {
+            viewport: command.viewport,
+            geolocation: command.geolocation,
+        }])
+    }
+}
+
+#[async_trait]
+impl worker_pool::JavaScriptEngine for FirefoxCompanionWorker {
+    async fn evaluate_javascript(
+        &self,
+        page_id: &PageId,
+        command: &EvaluateJavaScriptCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let context = self.context(page_id).await?;
+        let timeout_ms = command.timeout_ms.clamp(1, MAX_JS_TIMEOUT_MS);
+        // Page realm (no companion sandbox) so fingerprint preload patches are visible.
+        // JSON.stringify avoids BiDi RemoteValue object graphs for collector probes.
+        let wrapped = format!(
+            "(async () => {{\n  const __bobby_v = await ({expr});\n  return JSON.stringify(__bobby_v === undefined ? null : __bobby_v);\n}})()",
+            expr = command.expression
+        );
+        let response = tokio::time::timeout(
+            Duration::from_millis(timeout_ms),
+            self.transport.send(
+                "script.evaluate",
+                json!({
+                    "expression": wrapped,
+                    "target": {"context": context},
+                    "awaitPromise": true,
+                    "resultOwnership": "none",
+                }),
+            ),
+        )
+        .await
+        .map_err(|_| {
+            driver_error(
+                ErrorCode::DeadlineExceeded,
+                format!("Firefox JavaScript evaluation exceeded {timeout_ms} ms"),
+                true,
+            )
+        })??;
+        if let Some(exception) = response.get("exceptionDetails") {
+            return Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                format!("Firefox JavaScript evaluation failed: {exception}"),
+                false,
+            ));
+        }
+        let raw = response
+            .pointer("/result/value")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox JavaScript evaluation did not return a JSON string",
+                    false,
+                )
+            })?;
+        let truncated = raw.len() > MAX_JS_RESULT_BYTES;
+        let slice = truncate_utf8(raw, MAX_JS_RESULT_BYTES);
+        let value: Value = serde_json::from_str(slice).map_err(|error| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                format!("Firefox JavaScript result was not valid JSON: {error}"),
+                false,
+            )
+        })?;
+        Ok(vec![
+            Evidence::JavaScriptResult { value, truncated },
+            self.evidence(InteractionPath::EngineNative),
+        ])
+    }
+}
+
+#[async_trait]
+impl worker_pool::WebStateEngine for FirefoxCompanionWorker {
     async fn get_cookies(
         &self,
         page_id: &PageId,
@@ -5580,7 +5937,8 @@ impl BrowserWorker for FirefoxCompanionWorker {
             let statement = format!("document.cookie = {}", js_string(&assignment));
             self.evaluate_page_script(&context, &statement).await?;
         }
-        self.get_cookies(
+        worker_pool::WebStateEngine::get_cookies(
+            self,
             page_id,
             &types::GetCookiesCommand {
                 urls: command
@@ -5599,14 +5957,14 @@ impl BrowserWorker for FirefoxCompanionWorker {
         command: &types::DeleteCookiesCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         let context = self.context(page_id).await?;
-        let current = self
-            .get_cookies(
-                page_id,
-                &types::GetCookiesCommand {
-                    urls: command.urls.clone(),
-                },
-            )
-            .await?;
+        let current = worker_pool::WebStateEngine::get_cookies(
+            self,
+            page_id,
+            &types::GetCookiesCommand {
+                urls: command.urls.clone(),
+            },
+        )
+        .await?;
         let Some(Evidence::CookieState { cookies, .. }) = current.first() else {
             return Ok(current);
         };
@@ -5626,7 +5984,8 @@ impl BrowserWorker for FirefoxCompanionWorker {
             )
             .await?;
         }
-        self.get_cookies(
+        worker_pool::WebStateEngine::get_cookies(
+            self,
             page_id,
             &types::GetCookiesCommand {
                 urls: command.urls.clone(),
@@ -5634,99 +5993,17 @@ impl BrowserWorker for FirefoxCompanionWorker {
         )
         .await
     }
+}
 
-    async fn screenshot_bytes(&self, page_id: &PageId) -> Result<Vec<u8>, CommandError> {
-        let context = self.context(page_id).await?;
-        let response = self
-            .transport
-            .send(
-                "browsingContext.captureScreenshot",
-                json!({"context": context, "origin": "viewport"}),
-            )
-            .await?;
-        let encoded = response
-            .get("data")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                driver_error(
-                    ErrorCode::ScreenshotCaptureFailed,
-                    "Firefox screenshot omitted PNG data",
-                    false,
-                )
-            })?;
-        if encoded.len() > MAX_SCREENSHOT_BYTES.saturating_mul(4) / 3 + 8 {
-            return Err(driver_error(
-                ErrorCode::ScreenshotCaptureFailed,
-                "Firefox screenshot exceeded its encoded bound",
-                false,
-            ));
-        }
-        let bytes = BASE64.decode(encoded).map_err(|_| {
-            driver_error(
-                ErrorCode::ScreenshotCaptureFailed,
-                "Firefox screenshot returned invalid base64",
-                false,
-            )
-        })?;
-        if bytes.len() > MAX_SCREENSHOT_BYTES {
-            return Err(driver_error(
-                ErrorCode::ScreenshotCaptureFailed,
-                "Firefox screenshot exceeded its byte bound",
-                false,
-            ));
-        }
-        Ok(bytes)
-    }
-
-    async fn activate_page(
-        &self,
-        command: &types::ActivatePageCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        let context = self.context(&command.page_id).await?;
-        self.transport
-            .send("browsingContext.activate", json!({"context": context}))
-            .await
-            .map_err(|error| {
-                driver_error(
-                    ErrorCode::BrowserCommandFailed,
-                    format!("Firefox page activation failed: {}", error.message),
-                    true,
-                )
-            })?;
-        Ok(vec![self.evidence(InteractionPath::EngineNative)])
-    }
-
-    async fn reconnect_live_process(&self) -> Result<Vec<Evidence>, CommandError> {
-        self.transport.reconnect_live().await?;
-        let subscription = self
-            .transport
-            .send("session.subscribe", session_subscribe_params())
-            .await?;
-        if !subscription.is_object() {
-            return Err(driver_error(
-                ErrorCode::BrowserCommandFailed,
-                "Firefox BiDi session.subscribe result was not an object",
-                false,
-            ));
-        }
-        tracing::info!(
-            worker_id = %self.id.0,
-            "reattached to live Firefox after BiDi transport reset; page state preserved"
-        );
-        Ok(vec![Evidence::Configuration {
-            name: "cdpReattach".into(),
-            value: "websocket reset with the browser process still alive; reattached \
-                    to the same process and page state is preserved"
-                .into(),
-        }])
-    }
-
-    async fn close(&self) -> Result<(), CommandError> {
-        {
-            let _lifecycle = self.lifecycle.lock().await;
-            self.start_shutdown();
-        }
-        self.wait_for_shutdown().await
+impl worker_pool::WaitProvider for FirefoxCompanionWorker {
+    fn observer<'a>(
+        &'a self,
+        page_id: &'a PageId,
+    ) -> Box<dyn worker_pool::wait::WaitObserver + 'a> {
+        Box::new(FirefoxWaitObserver {
+            worker: self,
+            page_id,
+        })
     }
 }
 
