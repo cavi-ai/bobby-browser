@@ -2532,6 +2532,10 @@ pub async fn omitted_controls_need_a_whole_tree(rig: &Rig) {
     assert!(
         claims(&whole),
         "a whole snapshot missed controls hidden from the tree: {whole}"
+    );
+    live.close().await;
+}
+
 /// `intent_extract` reads a link's href and a named attribute off the
 /// controls it resolves.
 pub async fn intent_extract_reads_href_and_attributes(rig: &Rig) {
