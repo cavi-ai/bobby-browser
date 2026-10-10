@@ -2087,12 +2087,7 @@ impl crate::ObservationEngine for ChromiumWorker {
                 .iter()
                 .find(|node| node.backend_dom_node_id.as_ref() == Some(&backend_id))
                 .map(|node| node.node_id.clone())
-                .ok_or_else(|| {
-                    driver_error(
-                        ErrorCode::TargetNotFound,
-                        "resolved target has no accessibility node",
-                    )
-                })?;
+                .ok_or_else(|| hidden_from_accessibility(&result.nodes))?;
             let (nodes, truncated) =
                 compact_ax_tree_from(&result.nodes, max_nodes, Some(root_id.as_ref()));
             return Ok(vec![Evidence::AccessibilitySnapshot {
@@ -4640,6 +4635,34 @@ fn compact_ax_tree(
     max_nodes: usize,
 ) -> (Vec<types::AccessibilityNode>, bool) {
     compact_ax_tree_from(raw, max_nodes, None)
+}
+
+/// The error for a resolved element the accessibility tree leaves out: an open
+/// modal dialog hides everything behind it.
+fn hidden_from_accessibility(
+    nodes: &[chromiumoxide::cdp::browser_protocol::accessibility::AxNode],
+) -> CommandError {
+    let modal_open = nodes.iter().filter(|node| !node.ignored).any(|node| {
+        node.properties.as_ref().is_some_and(|properties| {
+            properties.iter().any(|property| {
+                property.name.as_ref() == "modal"
+                    && property.value.value == Some(serde_json::Value::Bool(true))
+            })
+        })
+    });
+    if modal_open {
+        CommandError {
+            code: ErrorCode::TargetObscured,
+            message: "target is behind an open modal dialog; dismiss it first".into(),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        }
+    } else {
+        driver_error(
+            ErrorCode::TargetNotFound,
+            "resolved target is hidden from the accessibility tree",
+        )
+    }
 }
 
 /// `forced_root` scopes the output to the subtree rooted at that AX node id
