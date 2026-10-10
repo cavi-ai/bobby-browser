@@ -1,6 +1,7 @@
 #[cfg(test)]
 use crate::wait::{bound_observed, text_matches};
 use crate::wait::{is_page_scoped_text_target, WaitObservation, WaitObserver};
+use crate::worker_failure::is_closed_page_message;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Once};
@@ -65,7 +66,7 @@ use crate::{
     targeting::{
         gather_candidates, inspect_page_scoped_target, page_frame_ids,
         resolve_ambiguous_wait_values, resolve_target as resolve_browser_target,
-        resolve_target_with_visibility, TARGET_GONE_MESSAGE,
+        resolve_target_with_visibility,
     },
     BrowserWorker, WorkerFactory,
 };
@@ -3948,16 +3949,10 @@ fn element_wait_missing_observation(
         ErrorCode::TargetNotFound | ErrorCode::FrameNotFound | ErrorCode::ShadowRootUnavailable
     ) || is_missing_css_node(error)
         || is_detached_target_error(error);
-    target_missing.then_some(matches!(state, types::ElementState::Detached))
-}
-
-fn is_closed_page_message(message: &str) -> bool {
-    message.contains("receiver is gone")
-        || message.contains("session closed")
-        || message.contains("Session with given id not found")
-        || message.contains("oneshot canceled")
-        || message.contains(TARGET_GONE_MESSAGE)
-        || crate::is_firefox_bidi_transport_dead(message)
+    target_missing.then_some(matches!(
+        state,
+        types::ElementState::Detached | types::ElementState::Hidden
+    ))
 }
 
 fn wait_should_retry_replaced_context(error: &CommandError) -> bool {
@@ -4358,14 +4353,6 @@ fn reattach_failed(reason: impl std::fmt::Display) -> CommandError {
         layer: ErrorLayer::Driver,
         retryable: false,
     }
-}
-
-/// The worker's browser is gone or unreachable: dead command channel,
-/// canceled oneshot, closed session, or an explicitly closed worker. Such a
-/// worker can never serve another command, so callers may invalidate and
-/// re-lease for a fresh browser instead of surfacing a dead-end failure.
-pub fn is_dead_worker_error(error: &CommandError) -> bool {
-    is_closed_page_message(&error.message) || error.message == "browser worker is closed"
 }
 
 /// DoS clamp for `EvaluateJavaScript::timeout_ms`: bounds a caller-requested
@@ -5007,13 +4994,12 @@ mod tests {
     use super::{
         apply_state_commit, clamp_js_timeout_ms, click_dispatch_phase_for_step, compact_ax_tree,
         driver_error_is_retryable, element_wait_missing_observation,
-        ensure_automatic_download_modifier_support, iframe_hop_ordinal, is_closed_page_message,
-        is_dead_worker_error, is_document_body_inspect, is_missing_css_node,
-        should_retry_click_target_detach, should_retry_plain_click_target_drift,
-        should_retry_transient_click_loss, snapshot_cookie, text_matches,
-        unscoped_css_wait_selector, validate_clip, wait_should_retry_replaced_context,
-        ChromiumWorker, ClickDispatchPhase, HttpBridgeState, EDITABLE_CONTROL_CHECK_JS,
-        TARGET_GONE_MESSAGE,
+        ensure_automatic_download_modifier_support, iframe_hop_ordinal, is_document_body_inspect,
+        is_missing_css_node, should_retry_click_target_detach,
+        should_retry_plain_click_target_drift, should_retry_transient_click_loss, snapshot_cookie,
+        text_matches, unscoped_css_wait_selector, validate_clip,
+        wait_should_retry_replaced_context, ChromiumWorker, ClickDispatchPhase, HttpBridgeState,
+        EDITABLE_CONTROL_CHECK_JS,
     };
     use types::{
         ClickModifier, CommandError, ErrorCode, ErrorLayer, InspectCommand, PageId, SessionId,
@@ -5497,6 +5483,10 @@ mod tests {
             Some(true)
         );
         assert_eq!(
+            element_wait_missing_observation(&types::ElementState::Hidden, &error),
+            Some(true)
+        );
+        assert_eq!(
             element_wait_missing_observation(&types::ElementState::Visible, &error),
             Some(false)
         );
@@ -5546,41 +5536,6 @@ mod tests {
             retryable: false,
         };
         assert!(!wait_should_retry_replaced_context(&unrelated));
-    }
-
-    #[test]
-    fn list_pages_recognizes_a_window_closed_by_the_site() {
-        assert!(is_closed_page_message(
-            "send failed because receiver is gone"
-        ));
-        assert!(is_closed_page_message("oneshot canceled"));
-        assert!(!is_closed_page_message(
-            "connection temporarily unavailable"
-        ));
-        assert!(is_closed_page_message("Firefox BiDi connection closed"));
-        assert!(is_closed_page_message(
-            "Firefox BiDi reader disconnected: connection reset"
-        ));
-        assert!(!is_closed_page_message("Firefox BiDi client closed"));
-    }
-
-    #[test]
-    fn dead_target_error_rewritten_by_targeting_triggers_the_revive_path() {
-        let rewritten = CommandError {
-            code: ErrorCode::TargetDetached,
-            message: TARGET_GONE_MESSAGE.into(),
-            layer: ErrorLayer::Driver,
-            retryable: true,
-        };
-        assert!(is_dead_worker_error(&rewritten));
-
-        let stale_element = CommandError {
-            code: ErrorCode::TargetDetached,
-            message: "target has no live object".into(),
-            layer: ErrorLayer::Driver,
-            retryable: false,
-        };
-        assert!(!is_dead_worker_error(&stale_element));
     }
 
     #[test]

@@ -2188,18 +2188,36 @@ async fn dialogs_opened(
     target: &TargetSpec,
     before: &[types::CandidateEvidence],
 ) -> Vec<types::CandidateEvidence> {
-    let Ok(census) = browser.collect_candidates(page_id, target).await else {
-        return Vec::new();
-    };
-    let mut unmatched: Vec<&types::CandidateEvidence> = before.iter().collect();
-    locate::open_dialogs(&census)
-        .into_iter()
+    match open_dialogs_now(page_id, browser, target).await {
+        Some(now) => dialogs_not_in(&now, before),
+        None => Vec::new(),
+    }
+}
+
+async fn open_dialogs_now(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    target: &TargetSpec,
+) -> Option<Vec<types::CandidateEvidence>> {
+    let census = browser.collect_candidates(page_id, target).await.ok()?;
+    Some(locate::open_dialogs(&census))
+}
+
+/// The dialogs in `dialogs` that `other` does not hold, by role and name.
+fn dialogs_not_in(
+    dialogs: &[types::CandidateEvidence],
+    other: &[types::CandidateEvidence],
+) -> Vec<types::CandidateEvidence> {
+    let mut unmatched: Vec<&types::CandidateEvidence> = other.iter().collect();
+    dialogs
+        .iter()
         .filter(|dialog| {
             let seen = unmatched
                 .iter()
                 .position(|open| open.role == dialog.role && open.name == dialog.name);
             seen.map(|index| unmatched.swap_remove(index)).is_none()
         })
+        .cloned()
         .collect()
 }
 
@@ -2380,11 +2398,25 @@ async fn execute_dismiss_obstruction(
     target: TargetSpec,
     timeout_ms: u64,
 ) -> IntentOutcome {
-    let purpose = match intent {
-        IntentCommand::DismissObstruction(dismiss) => Some(dismiss.purpose.clone()),
-        _ => None,
+    let (purpose, hinted) = match intent {
+        IntentCommand::DismissObstruction(dismiss) => (
+            Some(dismiss.purpose.clone()),
+            dismiss.hints.role.is_some()
+                || dismiss.hints.accessible_name.is_some()
+                || dismiss.hints.near_text.is_some(),
+        ),
+        _ => (None, true),
     };
     let plan_summary = format!("{} timeout_ms={timeout_ms}", summarize_target(&target));
+    // Without hints the purpose names the control, and the dialogs open now
+    // are the obstruction a fallback or a failure is judged against.
+    let dialogs_before = if hinted {
+        Vec::new()
+    } else {
+        open_dialogs_now(page_id, browser, &target)
+            .await
+            .unwrap_or_default()
+    };
     let LocatedTarget {
         candidate,
         evidence: candidate_evidence,
@@ -2405,7 +2437,32 @@ async fn execute_dismiss_obstruction(
     .await
     {
         Ok(located) => located,
-        Err(outcome) => return outcome,
+        Err(outcome) if dialogs_before.is_empty() => return outcome,
+        Err(outcome) => {
+            let judged = judge_against_open_dialogs(
+                outcome,
+                page_id,
+                browser,
+                &target,
+                &dialogs_before,
+                timeout_ms,
+            )
+            .await;
+            return match judged {
+                Ok(outcome) => outcome,
+                Err((error, mut evidence, verification)) => {
+                    evidence.push(intent_evidence(execution_record(
+                        "dismissObstruction",
+                        purpose,
+                        plan_summary,
+                        dialogs_before,
+                        None,
+                        verification,
+                    )));
+                    IntentOutcome::Failed { error, evidence }
+                }
+            };
+        }
     };
 
     let fingerprint = fingerprint(page_id, &candidate);
@@ -2453,7 +2510,7 @@ async fn execute_dismiss_obstruction(
     if !gone {
         let mut prior_evidence = vec![resolution];
         prior_evidence.append(&mut click_evidence);
-        return stuck_outcome_with_prior_evidence(
+        let outcome = stuck_outcome_with_prior_evidence(
             StuckReport {
                 intent_kind: "dismissObstruction",
                 kind: StuckKind::ObstructionSuspected,
@@ -2469,6 +2526,23 @@ async fn execute_dismiss_obstruction(
             prior_evidence,
         )
         .await;
+        // A vision fallback completes only once the clicked control is gone.
+        return match outcome {
+            IntentOutcome::Completed { evidence }
+                if !wait_until_gone(page_id, browser, &pinned, timeout_ms).await =>
+            {
+                IntentOutcome::Failed {
+                    error: CommandError {
+                        code: ErrorCode::ObstructionSuspected,
+                        message: "obstructionPersisted; the vision fallback acted and the control is still present".into(),
+                        layer: ErrorLayer::Page,
+                        retryable: false,
+                    },
+                    evidence,
+                }
+            }
+            other => other,
+        };
     }
 
     let mut evidence = vec![resolution];
@@ -2482,6 +2556,57 @@ async fn execute_dismiss_obstruction(
         "dismissed",
     )));
     IntentOutcome::Completed { evidence }
+}
+
+/// The failure an unhinted dismissal ends in while dialogs are open, with its
+/// verification label: a vision fallback stands only once one of those
+/// dialogs closed, and a plain miss becomes `obstructionSuspected`.
+type DialogFailure = (CommandError, Vec<Evidence>, &'static str);
+
+async fn judge_against_open_dialogs(
+    outcome: IntentOutcome,
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    target: &TargetSpec,
+    dialogs_before: &[types::CandidateEvidence],
+    timeout_ms: u64,
+) -> Result<IntentOutcome, DialogFailure> {
+    match outcome {
+        IntentOutcome::Completed { evidence } => {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+            loop {
+                let Some(now) = open_dialogs_now(page_id, browser, target).await else {
+                    return Ok(IntentOutcome::Completed { evidence });
+                };
+                if !dialogs_not_in(dialogs_before, &now).is_empty() {
+                    return Ok(IntentOutcome::Completed { evidence });
+                }
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(DISMISS_POLL_INTERVAL_MS))
+                    .await;
+            }
+            let error = CommandError {
+                code: ErrorCode::ObstructionSuspected,
+                message:
+                    "obstructionPersisted; the vision fallback acted and the dialog is still open"
+                        .into(),
+                layer: ErrorLayer::Page,
+                retryable: false,
+            };
+            Err((error, evidence, "obstructionPersisted"))
+        }
+        IntentOutcome::Failed { error, evidence } if error.code == ErrorCode::TargetNotFound => {
+            let error = CommandError {
+                code: ErrorCode::ObstructionSuspected,
+                message: format!("{}; a dialog is open over the page", error.message),
+                ..error
+            };
+            Err((error, evidence, "dialogOpen"))
+        }
+        other => Ok(other),
+    }
 }
 
 /// Polls the acted-on target until it is detached or no longer visible. Both are checked in
