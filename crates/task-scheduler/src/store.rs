@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 use crate::job::{Job, JobId, JobStatus};
@@ -25,15 +25,7 @@ pub enum StoreError {
     Serialization(#[from] serde_json::Error),
 }
 
-/// Read-only health of a scheduler journal. Never truncates, compact, or creates the path.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct JournalHealth {
-    pub exists: bool,
-    pub bytes: u64,
-    pub records: usize,
-    pub torn_tail: bool,
-    pub incompatible_records: usize,
-}
+pub use workflow_journal::JournalHealth;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -474,28 +466,14 @@ async fn scan_path(path: &Path, collect_jobs: bool) -> Result<Scan, StoreError> 
         exists: true,
         ..Scan::default()
     };
-    let mut reader = BufReader::new(file);
-    let mut line = Vec::new();
-    let mut line_number = 0usize;
     let mut latest: HashMap<JobId, Job> = HashMap::new();
-    loop {
-        line.clear();
-        let read = reader.read_until(b'\n', &mut line).await?;
-        if read == 0 {
-            break;
-        }
-        scan.bytes += read as u64;
-        line_number += 1;
-        if !line.ends_with(b"\n") {
-            scan.torn_tail = true;
-            break;
-        }
-        line.pop();
-        if line.is_empty() {
-            continue;
+    let read = workflow_journal::for_each_jsonl_line(file, |line| {
+        let body = &line.bytes[..line.bytes.len() - 1];
+        if body.is_empty() {
+            return Ok(());
         }
         scan.records += 1;
-        match serde_json::from_slice::<JournalRecord>(&line) {
+        match serde_json::from_slice::<JournalRecord>(body) {
             Ok(record) => {
                 let out_of_order = scan
                     .max_sequence
@@ -503,7 +481,7 @@ async fn scan_path(path: &Path, collect_jobs: bool) -> Result<Scan, StoreError> 
                 scan.max_sequence = scan.max_sequence.max(Some(record.sequence));
                 if out_of_order || record.schema_version != JOURNAL_SCHEMA_VERSION {
                     scan.incompatible_records += 1;
-                    continue;
+                    return Ok(());
                 }
                 let event_matches_status = record.event
                     == JobEvent::from_status(&record.job.status)
@@ -511,7 +489,7 @@ async fn scan_path(path: &Path, collect_jobs: bool) -> Result<Scan, StoreError> 
                         && record.job.status == JobStatus::Pending);
                 if !record.job.has_valid_resolution() || !event_matches_status {
                     scan.incompatible_records += 1;
-                    continue;
+                    return Ok(());
                 }
                 if collect_jobs {
                     latest.insert(record.job.id.clone(), record.job);
@@ -521,14 +499,17 @@ async fn scan_path(path: &Path, collect_jobs: bool) -> Result<Scan, StoreError> 
                 // A line this build cannot decode is skipped, so the job
                 // journal never stops the runtime from starting.
                 tracing::warn!(
-                    line = line_number,
+                    line = line.number,
                     "job journal line unreadable by this build; skipped"
                 );
                 scan.incompatible_records += 1;
             }
         }
-    }
-
+        Ok(())
+    })
+    .await?;
+    scan.torn_tail = read.torn_tail;
+    scan.bytes = read.bytes_read;
     scan.jobs = latest.into_values().collect();
     Ok(scan)
 }

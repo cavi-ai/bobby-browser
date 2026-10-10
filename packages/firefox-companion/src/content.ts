@@ -292,6 +292,36 @@ function isElementHidden(element: Element, budget?: WorkBudget): boolean {
   return false;
 }
 
+// Hidden from rendering, unlike an element hidden only from assistive
+// technology with aria-hidden.
+function isRenderedHidden(element: Element): boolean {
+  let visited = 0;
+  for (let current: Element | null = element; current; current = composedParent(current)) {
+    visited += 1;
+    if (visited > MAX_ANCESTOR_VISITS) return true;
+    if (current.hasAttribute("hidden")) return true;
+    const style = current.ownerDocument.defaultView?.getComputedStyle(current);
+    if (style?.display === "none" || style?.visibility === "hidden") return true;
+  }
+  return false;
+}
+
+function modalDialogOpen(document: Document): boolean {
+  for (const dialog of Array.from(document.querySelectorAll('[aria-modal="true"], dialog')).slice(0, 64)) {
+    let modal: boolean;
+    try {
+      modal =
+        dialog.tagName === "DIALOG"
+          ? dialog.matches(":modal")
+          : ["dialog", "alertdialog"].includes(dialog.getAttribute("role") ?? "");
+    } catch {
+      modal = false;
+    }
+    if (modal && !isElementHidden(dialog)) return true;
+  }
+  return false;
+}
+
 function isSensitiveTextContext(element: Element): boolean {
   const control = element.closest(CONTROL_SELECTOR);
   if (control && isSensitiveControl(control)) return true;
@@ -1209,37 +1239,46 @@ function a11yTree(
       throw unresolvable("a11y target ordinal must be a non-negative integer");
     }
     const wanted = typeof ordinal === "number" ? ordinal : 0;
-    const matches: Element[] = [];
-    let visited = 0;
-    const walk = (element: Element, depth: number): void => {
-      visited += 1;
-      if (visited > A11Y_MAX_SCOPE_VISITS) return;
-      try {
-        if (isElementHidden(element)) return;
-        const found = semantics(element);
-        if (
-          found.role === role &&
-          (typeof accessibleName !== "string" || found.name === accessibleName)
-        ) {
-          matches.push(element);
+    // Without an ordinal a second match makes the target ambiguous, so the
+    // walk only needs to reach two matches; with one it needs ordinal + 1.
+    const needed = typeof ordinal === "number" ? wanted + 1 : 2;
+    const search = (hidden: (element: Element) => boolean): { matches: Element[]; visited: number } => {
+      const matches: Element[] = [];
+      let visited = 0;
+      const walk = (element: Element, depth: number): void => {
+        visited += 1;
+        if (visited > A11Y_MAX_SCOPE_VISITS) return;
+        try {
+          if (hidden(element)) return;
+          const found = semantics(element);
+          if (
+            found.role === role &&
+            (typeof accessibleName !== "string" || found.name === accessibleName)
+          ) {
+            matches.push(element);
+          }
+        } catch {
+          return;
         }
-      } catch {
-        return;
-      }
-      // Without an ordinal a second match makes the target ambiguous, so the
-      // walk only needs to reach two matches; with one it needs ordinal + 1.
-      const needed = typeof ordinal === "number" ? wanted + 1 : 2;
-      if (depth < A11Y_MAX_DEPTH) {
-        for (const child of composedElementChildren(element)) {
-          if (matches.length >= needed || visited > A11Y_MAX_SCOPE_VISITS) return;
-          walk(child, depth + 1);
+        if (depth < A11Y_MAX_DEPTH) {
+          for (const child of composedElementChildren(element)) {
+            if (matches.length >= needed || visited > A11Y_MAX_SCOPE_VISITS) return;
+            walk(child, depth + 1);
+          }
         }
-      }
+      };
+      walk(root, 0);
+      return { matches, visited };
     };
-    walk(root, 0);
-    const picked = matches[typeof ordinal === "number" ? wanted : 0];
+    const { matches, visited } = search(isElementHidden);
+    const picked = matches[wanted];
     if (!picked && visited > A11Y_MAX_SCOPE_VISITS) {
       throw new ContentActionError("budgetExhausted", "a11y target search exceeded its visit bound");
+    }
+    // An open modal dialog hides the rest of the page from assistive
+    // technology; a target hidden only that way is behind the dialog.
+    if (!picked && modalDialogOpen(document) && search(isRenderedHidden).matches[wanted]) {
+      throw new ContentActionError("targetObscured", "a11y target is behind an open modal dialog");
     }
     if (typeof ordinal === "number") {
       if (!picked) throw notFound();

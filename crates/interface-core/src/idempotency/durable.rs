@@ -11,7 +11,7 @@ use std::{
 };
 use tokio::{
     fs::{File, OpenOptions},
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncReadExt, AsyncWriteExt, BufReader},
     sync::Mutex,
 };
 use types::{IdempotencyKey, PrincipalId};
@@ -138,15 +138,13 @@ pub(super) fn validate(entries: &[DurableEntry]) -> Result<(), &'static str> {
 }
 
 async fn line(reader: &mut BufReader<File>) -> io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    reader
-        .take(MAX_LINE_BYTES + 1)
-        .read_until(b'\n', &mut bytes)
-        .await?;
-    if bytes.len() as u64 > MAX_LINE_BYTES {
-        return Err(invalid());
+    match workflow_journal::read_jsonl_line(reader, MAX_LINE_BYTES).await? {
+        workflow_journal::JsonlRead::Eof => Ok(Vec::new()),
+        workflow_journal::JsonlRead::Complete(bytes) | workflow_journal::JsonlRead::Torn(bytes) => {
+            Ok(bytes)
+        }
+        workflow_journal::JsonlRead::TooLong => Err(invalid()),
     }
-    Ok(bytes)
 }
 
 async fn load(path: &Path) -> io::Result<Option<Loaded>> {
