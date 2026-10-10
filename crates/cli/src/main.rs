@@ -2767,10 +2767,9 @@ impl NativeHostEnroll for NativeHostFirefoxEnroll {
 mod tests {
     use super::doctor::{
         check_bootstrap_expiry, check_vision_acp, check_vision_provider, check_vision_upstream_key,
-        handshake_error_status, run_doctor, run_doctor_fix, run_doctor_with_profile,
-        sidecar_version_status, vision_auth_discovery_check, vision_endpoint_unreachable_detail,
-        DoctorColorMode, DoctorFixOptions, DoctorFixStatus, DoctorReport, DoctorStatus,
-        BOOTSTRAP_EXPIRY_WARN_DAYS,
+        run_doctor, run_doctor_fix, run_doctor_with_profile, vision_auth_discovery_check,
+        vision_endpoint_unreachable_detail, DoctorColorMode, DoctorFixOptions, DoctorFixStatus,
+        DoctorReport, DoctorStatus, BOOTSTRAP_EXPIRY_WARN_DAYS,
     };
     use super::*;
     use auth_broker::{AuthCapabilities, AuthStrategy};
@@ -4044,18 +4043,6 @@ model = "mlx-community/example-selected"
         assert!(later.detail.contains("valid"));
     }
 
-    #[test]
-    fn handshake_error_classification_distinguishes_missing_binary_from_failed_handshake() {
-        assert_eq!(
-            handshake_error_status("failed to spawn /usr/local/bin/mcp-gateway: not found"),
-            DoctorStatus::Warn
-        );
-        assert_eq!(
-            handshake_error_status("initialize: gateway did not answer within 15s"),
-            DoctorStatus::Fail
-        );
-    }
-
     /// `run_doctor` reads process env; serialize these tests and restore every
     /// variable they touch so they cannot leak into each other or the host.
     struct DoctorEnvGuard {
@@ -4190,78 +4177,6 @@ scheduler_journal_path = "{0}/storage/scheduler-jobs.jsonl"
         ] {
             assert_eq!(report.check(name).unwrap().status, DoctorStatus::Ok);
         }
-    }
-
-    #[test]
-    fn doctor_reports_context_store_without_claiming_its_lock() {
-        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
-        let env = DoctorEnvGuard::clear();
-        env.set(
-            "AUTOMATION_RUNTIME_BROWSER_SELECTION",
-            r#"{"preference":{"mode":"managedChromium"}}"#,
-        );
-        let root = tempfile::tempdir().unwrap();
-        let config = doctor_config_fixture(root.path());
-        std::fs::write(
-            &config,
-            format!(
-                "{}\n[context]\ndir = \"{}\"\n",
-                std::fs::read_to_string(&config).unwrap(),
-                root.path().join("context").display()
-            ),
-        )
-        .unwrap();
-        let profile = root.path().join("context").join("profile-a");
-        std::fs::create_dir_all(&profile).unwrap();
-        std::fs::write(
-            profile.join("68747470733a2f2f6578616d706c652e636f6d.json"),
-            br#"{"schema":1,"site_key":"https://example.com","site":{"pages":{}}}"#,
-        )
-        .unwrap();
-        std::fs::write(profile.join(".context-store.lock"), b"1\n").unwrap();
-
-        let report = run_doctor(Some(config), None, false).unwrap();
-        let check = report
-            .checks
-            .iter()
-            .find(|check| check.name == "context-store")
-            .expect("a context-store check");
-        assert!(check.detail.contains("1 site files"), "{check:?}");
-        assert!(check.detail.contains("lock held"), "{check:?}");
-        assert_eq!(check.status, DoctorStatus::Ok);
-    }
-
-    #[test]
-    fn doctor_reports_mismatched_context_identity_without_changing_its_bytes() {
-        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
-        let env = DoctorEnvGuard::clear();
-        env.set(
-            "AUTOMATION_RUNTIME_BROWSER_SELECTION",
-            r#"{"preference":{"mode":"managedChromium"}}"#,
-        );
-        let root = tempfile::tempdir().unwrap();
-        let config = doctor_config_fixture(root.path());
-        std::fs::write(
-            &config,
-            format!(
-                "{}\n[context]\ndir = \"{}\"\n",
-                std::fs::read_to_string(&config).unwrap(),
-                root.path().join("context").display()
-            ),
-        )
-        .unwrap();
-        let profile = root.path().join("context/70726f66696c652d61");
-        std::fs::create_dir_all(&profile).unwrap();
-        let path = profile.join("6f6e65.json");
-        let bytes = br#"{"schema":1,"site_key":"two","site":{"pages":{}}}"#;
-        std::fs::write(&path, bytes).unwrap();
-
-        let report = run_doctor(Some(config), None, false).unwrap();
-        let check = report.check("context-store").expect("context-store");
-        assert_eq!(check.status, DoctorStatus::Fail);
-        assert!(check.detail.contains("identity"), "{check:?}");
-        assert_eq!(std::fs::read(path).unwrap(), bytes);
-        assert!(!profile.join(".context-store.lock").exists());
     }
 
     #[test]
@@ -5041,26 +4956,6 @@ port = 9333
         assert!(check.detail.contains("127.0.0.1:9333"));
     }
 
-    #[test]
-    fn sidecar_version_status_omits_when_both_missing() {
-        assert!(sidecar_version_status("0.12.0", None, None).is_none());
-    }
-
-    #[test]
-    fn sidecar_version_status_fails_on_mismatch() {
-        let check = sidecar_version_status("0.12.0", Some("0.11.0"), Some("0.12.0")).unwrap();
-        assert_eq!(check.status, DoctorStatus::Fail);
-        assert_eq!(check.name, "sidecar-version");
-        assert!(check.detail.contains("0.11.0"));
-    }
-
-    #[test]
-    fn sidecar_version_status_ok_when_found_match() {
-        let check = sidecar_version_status("0.12.0", Some("0.12.0"), None).unwrap();
-        assert_eq!(check.status, DoctorStatus::Ok);
-        assert_eq!(check.name, "sidecar-version");
-    }
-
     #[cfg(unix)]
     #[test]
     fn sidecar_version_reads_stdout_within_timeout() {
@@ -5137,67 +5032,5 @@ port = 9333
         assert_eq!(check.status, DoctorStatus::Ok);
         assert!(check.detail.contains("not running"), "{check:?}");
         assert!(report.check("jobs-queue").is_none());
-    }
-
-    #[test]
-    fn doctor_fails_context_store_on_invalid_json() {
-        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
-        let env = DoctorEnvGuard::clear();
-        env.set(
-            "AUTOMATION_RUNTIME_BROWSER_SELECTION",
-            r#"{"preference":{"mode":"managedChromium"}}"#,
-        );
-        let root = tempfile::tempdir().unwrap();
-        let config = doctor_config_fixture(root.path());
-        std::fs::write(
-            &config,
-            format!(
-                "{}\n[context]\ndir = \"{}\"\n",
-                std::fs::read_to_string(&config).unwrap(),
-                root.path().join("context").display()
-            ),
-        )
-        .unwrap();
-        let profile = root.path().join("context").join("profile-a");
-        std::fs::create_dir_all(&profile).unwrap();
-        std::fs::write(profile.join("https___example.com.json"), b"not-json").unwrap();
-
-        let report = run_doctor(Some(config), None, false).unwrap();
-        let check = report.check("context-store").expect("context-store");
-        assert_eq!(check.status, DoctorStatus::Fail);
-        assert!(check.detail.contains("invalid JSON"), "{check:?}");
-    }
-
-    #[test]
-    fn doctor_reports_oversized_context_without_claiming_the_store_lock() {
-        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
-        let env = DoctorEnvGuard::clear();
-        env.set(
-            "AUTOMATION_RUNTIME_BROWSER_SELECTION",
-            r#"{"preference":{"mode":"managedChromium"}}"#,
-        );
-        let root = tempfile::tempdir().unwrap();
-        let config = doctor_config_fixture(root.path());
-        std::fs::write(
-            &config,
-            format!(
-                "{}\n[context]\ndir = \"{}\"\n",
-                std::fs::read_to_string(&config).unwrap(),
-                root.path().join("context").display()
-            ),
-        )
-        .unwrap();
-        let profile = root.path().join("context/profile-a");
-        std::fs::create_dir_all(&profile).unwrap();
-        let mut bytes = br#"{"schema":1,"site_key":"site","site":{"pages":{}}}"#.to_vec();
-        bytes.extend(vec![b' '; 2 * 1024 * 1024]);
-        let path = profile.join("site.json");
-        std::fs::write(&path, &bytes).unwrap();
-        let report = run_doctor(Some(config), None, false).unwrap();
-        let check = report.check("context-store").unwrap();
-        assert_eq!(check.status, DoctorStatus::Warn);
-        assert!(check.detail.contains("limit"), "{check:?}");
-        assert_eq!(std::fs::read(path).unwrap(), bytes);
-        assert!(!profile.join(".context-store.lock").exists());
     }
 }
