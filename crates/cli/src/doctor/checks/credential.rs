@@ -76,3 +76,24 @@ pub(crate) fn check_bootstrap_expiry(expires_at: chrono::DateTime<chrono::Utc>) 
 }
 
 pub(crate) const BOOTSTRAP_EXPIRY_WARN_DAYS: i64 = 7;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn expiry_row_distinguishes_expired_expiring_and_valid_credentials() {
+        let now = chrono::Utc::now();
+        for (days, expected) in [
+            (-1, DoctorStatus::Fail),
+            (1, DoctorStatus::Warn),
+            (8, DoctorStatus::Ok),
+        ] {
+            let check = check_bootstrap_expiry(now + chrono::Duration::days(days));
+            assert_eq!(check.name, "bootstrap-expiry");
+            assert_eq!(check.status, expected);
+            if expected != DoctorStatus::Ok {
+                assert!(check.detail.contains("bobby init --force"));
+            }
+        }
+    }
+}

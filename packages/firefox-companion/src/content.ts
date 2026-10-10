@@ -922,8 +922,11 @@ function observeRoot(document: Document, root: Element, includeHtml: boolean): P
       ? undefined
       : observationString(element.getAttribute("data-testid"));
     const attributes: Record<string, string> = {};
+    // Match a11yTree and locateTarget, including omitted or invalid HTML types.
+    // The normalized native kind is structural metadata, even for redacted controls.
+    if (element.tagName === "INPUT") attributes.type = (element as HTMLInputElement).type;
     if (!sensitive) {
-      for (const name of ["name", "type", "placeholder", "autocomplete", "pattern", "min", "max", "step", "multiple"] as const) {
+      for (const name of ["name", "placeholder", "autocomplete", "pattern", "min", "max", "step", "multiple"] as const) {
         const value = observationString(element.getAttribute(name));
         if (value) attributes[name] = value;
       }
@@ -1093,6 +1096,7 @@ export type LocatedTarget = {
   ambiguous: boolean;
   cssPath?: string;
   role?: string;
+  inputType?: string;
   name?: string;
   disabled?: boolean;
 };
@@ -1106,6 +1110,7 @@ type A11yTarget = {
 
 type A11yNode = {
   role?: string;
+  inputType?: string;
   name?: string;
   target?: A11yTarget;
   value?: string;
@@ -1335,6 +1340,7 @@ function a11yTree(
         ambiguous: false,
         cssPath: cssPathValue,
         ...(role ? { role } : {}),
+        ...(element.tagName === "INPUT" ? { inputType: (element as HTMLInputElement).type } : {}),
         ...(name ? { name } : {}),
         disabled: element.hasAttribute("disabled") || element.getAttribute("aria-disabled") === "true",
       },
@@ -1504,6 +1510,7 @@ function a11yTree(
         }
         if (element.tagName === "INPUT") {
           const input = control as HTMLInputElement;
+          node.inputType = input.type;
           if (["checkbox", "radio"].includes(input.type)) node.checked = input.checked;
           const autocomplete = observationString(input.autocomplete);
           if (autocomplete) node.autocomplete = autocomplete;

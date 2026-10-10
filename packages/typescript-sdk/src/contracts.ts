@@ -211,6 +211,7 @@ export interface PrintToPdfCommand { landscape?: boolean; printBackground?: bool
 export interface AccessibilityTarget { role: string; accessibleName: string; ordinal?: number; framePath?: SemanticTargetSegment[] }
 export interface AccessibilityNode {
   role?: string;
+  inputType?: string;
   name?: string;
   target?: AccessibilityTarget;
   value?: string;

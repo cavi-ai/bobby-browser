@@ -529,6 +529,7 @@ function isAccessibilityNode(value: unknown, depth = 0): boolean {
   return isRecord(value)
     && depth <= 32
     && (value.role === undefined || isString(value.role))
+    && optional(value, "inputType", isString)
     && (value.name === undefined || isString(value.name))
     && optional(value, "target", isAccessibilityTarget)
     && optional(value, "value", isString)
@@ -543,7 +544,7 @@ function isAccessibilityNode(value: unknown, depth = 0): boolean {
     && optional(value, "valueMin", isString)
     && optional(value, "valueMax", isString)
     && (value.children === undefined || (Array.isArray(value.children) && value.children.every((child) => isAccessibilityNode(child, depth + 1))))
-    && Object.keys(value).every((key) => ["role", "name", "target", "value", "description", "required", "disabled", "readOnly", "invalid", "checked", "autocomplete", "url", "valueMin", "valueMax", "children"].includes(key));
+    && Object.keys(value).every((key) => ["role", "inputType", "name", "target", "value", "description", "required", "disabled", "readOnly", "invalid", "checked", "autocomplete", "url", "valueMin", "valueMax", "children"].includes(key));
 }
 
 function isAccessibilityTarget(value: unknown): value is AccessibilityTarget {

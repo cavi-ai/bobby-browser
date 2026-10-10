@@ -269,6 +269,14 @@ test("deep validators accept every exact public response variant", () => {
   assert.equal(isEventGap({ reason: "historyLost", earliestAvailable: 0 }), true);
 });
 
+test("accessibility evidence accepts native input metadata and rejects malformed types", () => {
+  for (const [inputType, expected] of [["file", true], [undefined, true], [true, false]] as const) {
+    assert.equal(isEvidence({ kind: "accessibilitySnapshot", pageId: ID,
+      nodes: [{ role: "button", name: "Resume", ...(inputType === undefined ? {} : { inputType }) }],
+      truncated: false }), expected);
+  }
+});
+
 test("context response validators accept hits and misses and reject malformed nested data", () => {
   assert.equal(isContextAskResponse({ answer: CONTEXT_ANSWER, hit: true }), true);
   assert.equal(isContextAskResponse({ answer: null, hit: false, reason: "notRemembered", nextStep: "a11y_snapshot" }), true);

@@ -79,3 +79,36 @@ pub(in crate::doctor) fn probe_healthz_blocking(url: &str) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_support::context;
+    use super::*;
+    use crate::doctor::DoctorStatus;
+
+    #[test]
+    fn health_row_skips_disabled_probe_and_reports_closed_loopback_service_without_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let mut context = context(root.path());
+        let mut report = DoctorReport::default();
+        health(&mut context, &mut report).unwrap();
+        assert!(report.checks.is_empty());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut config = config::AppConfig::default();
+        config.server.host = "127.0.0.1".into();
+        config.server.port = listener.local_addr().unwrap().port();
+        config.cdp.enabled = false;
+        drop(listener);
+        context.config = Some(config);
+        context.check_health = true;
+        health(&mut context, &mut report).unwrap();
+        let check = report
+            .checks
+            .iter()
+            .find(|check| check.name == "healthz")
+            .unwrap();
+        assert_eq!(check.status, DoctorStatus::Ok);
+        assert_eq!(check.detail, "not running");
+        assert_eq!(report.failures(), 0);
+    }
+}

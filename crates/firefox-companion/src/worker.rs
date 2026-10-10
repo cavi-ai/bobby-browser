@@ -197,6 +197,8 @@ pub struct TargetLocation {
     #[serde(default)]
     pub role: Option<String>,
     #[serde(default)]
+    pub input_type: Option<String>,
+    #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
     pub disabled: bool,
@@ -828,6 +830,7 @@ pub struct FirefoxCompanionWorker {
     upload_roots: Vec<PathBuf>,
     downloads_dir: Option<PathBuf>,
     session_random: TaskMutex<SessionRandom>,
+    upload_cache: Arc<AsyncMutex<worker_pool::upload::UploadCache>>,
     mouse_simulator: BezierMouseSimulator,
     typing_simulator: TypingSimulator,
     scroll_simulator: ScrollSimulator,
@@ -857,6 +860,7 @@ struct WorkerShutdownResources {
     cleanup_failure: Arc<TaskMutex<Option<CommandError>>>,
     cleanup_task: Arc<TaskMutex<Option<JoinHandle<()>>>>,
     renewal_task: Arc<TaskMutex<Option<JoinHandle<()>>>>,
+    upload_cache: Arc<AsyncMutex<worker_pool::upload::UploadCache>>,
 }
 
 #[derive(Clone)]
@@ -1684,6 +1688,7 @@ impl FirefoxCompanionWorker {
             upload_roots: Vec::new(),
             downloads_dir: None,
             session_random,
+            upload_cache: Arc::new(AsyncMutex::new(worker_pool::upload::UploadCache::default())),
             mouse_simulator,
             typing_simulator,
             scroll_simulator,
@@ -1711,6 +1716,7 @@ impl FirefoxCompanionWorker {
             cleanup_failure: Arc::clone(&self.cleanup_failure),
             cleanup_task: Arc::clone(&self.cleanup_task),
             renewal_task: Arc::clone(&self.renewal_task),
+            upload_cache: Arc::clone(&self.upload_cache),
         };
         let shutdown = Arc::clone(&self.shutdown);
         let runtime = shutdown.runtime.clone();
@@ -4380,7 +4386,6 @@ impl BrowserWorker for FirefoxCompanionWorker {
             download_dir.as_deref(),
         )
         .await?;
-        let paths = &resolved_uploads.paths;
         let context = self.context(page_id).await?;
         let (context, selector) = self
             .resolve_input_target(
@@ -4432,10 +4437,15 @@ impl BrowserWorker for FirefoxCompanionWorker {
         // `input.setFiles` selects the files and fires trusted `input` and
         // `change` events whether or not the input is rendered.
         let shared_id = self.resolve_element(&context, &selector, true).await?;
+        let mut upload_cache = self.upload_cache.lock().await;
+        let resolved_uploads = upload_cache.prepare(resolved_uploads)?;
+        let paths = &resolved_uploads.paths;
+        let file_count = paths.len();
         let files = paths
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
+        upload_cache.commit(resolved_uploads);
         self.transport
             .send(
                 "input.setFiles",
@@ -4458,7 +4468,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 }),
             )
             .await?;
-        if verified.pointer("/result/value").and_then(Value::as_u64) != Some(paths.len() as u64) {
+        if verified.pointer("/result/value").and_then(Value::as_u64) != Some(file_count as u64) {
             return Err(driver_error(
                 ErrorCode::VerificationFailed,
                 "Firefox file selection count did not match",
@@ -5769,7 +5779,11 @@ fn located_candidate(location: &TargetLocation, css_path: String) -> Candidate {
         name: location.name.clone(),
         label: None,
         text: location.name.clone().unwrap_or_default(),
-        attributes: Default::default(),
+        attributes: location
+            .input_type
+            .iter()
+            .map(|kind| ("type".into(), kind.clone()))
+            .collect(),
         state: CandidateState {
             attached: true,
             visible: true,
@@ -5797,6 +5811,9 @@ fn accessibility_candidates(nodes: &[types::AccessibilityNode]) -> Vec<Candidate
                 text.push(value);
             }
             let mut attributes = std::collections::BTreeMap::new();
+            if let Some(input_type) = &node.input_type {
+                attributes.insert("type".into(), input_type.clone());
+            }
             if node.invalid == Some(true) {
                 attributes.insert("aria-invalid".into(), "true".into());
             }
@@ -5911,6 +5928,30 @@ mod accessibility_candidate_tests {
     use super::{accessibility_candidates, accessibility_tree_contains};
 
     #[test]
+    fn native_file_input_metadata_survives_candidate_collection() {
+        let nodes: Vec<types::AccessibilityNode> = serde_json::from_value(serde_json::json!([
+            {"role":"button", "name":"Resume", "inputType":"file"},
+            {"role":"button", "name":"Resume"}
+        ]))
+        .unwrap();
+        let candidates = accessibility_candidates(&nodes);
+        assert_eq!(
+            candidates[0].attributes.get("type").map(String::as_str),
+            Some("file")
+        );
+        assert!(!candidates[1].attributes.contains_key("type"));
+        let location: super::TargetLocation = serde_json::from_value(serde_json::json!({
+            "found":true,"ambiguous":false,"role":"button","name":"Resume","inputType":"file"
+        }))
+        .unwrap();
+        let located = super::located_candidate(&location, "#upload".into());
+        assert_eq!(
+            located.attributes.get("type").map(String::as_str),
+            Some("file")
+        );
+    }
+
+    #[test]
     fn structural_wait_finds_named_navigation_inside_the_tree() {
         let nodes = [types::AccessibilityNode {
             role: Some("complementary".into()),
@@ -6017,6 +6058,7 @@ async fn run_worker_shutdown(resources: WorkerShutdownResources) -> Result<(), C
         failures.extend(cleanup.run().await);
     }
     resources.pages.write().await.clear();
+    resources.upload_cache.lock().await.clear();
     for slot in [&resources.cleanup_task, &resources.renewal_task] {
         if let Some(task) = slot.lock().expect("worker task mutex poisoned").take() {
             task.abort();
