@@ -13,6 +13,12 @@ use tokio::sync::Mutex;
 use tracing::warn;
 use types::{AttemptId, CommandEnvelope, CommandId, CommandOutcome, CommandPhase, Evidence};
 
+mod health;
+pub use health::{
+    scan_jsonl, scan_jsonl_prefetched, LedgerDecoder, LedgerHealth, LedgerIssue, LedgerIssueKind,
+    PreparedRecord, RecordObservation, ScanControl, ScanOptions, SequenceRule, SequenceVerdict,
+};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreparedResult {
