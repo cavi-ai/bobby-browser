@@ -94,12 +94,18 @@ pub(crate) fn accessibility_role_is_actionable(role: &str) -> bool {
             | "combobox"
             | "link"
             | "listbox"
+            | "menuitem"
+            | "menuitemcheckbox"
+            | "menuitemradio"
+            | "option"
             | "radio"
             | "searchbox"
             | "slider"
             | "spinbutton"
             | "switch"
+            | "tab"
             | "textbox"
+            | "treeitem"
     )
 }
 
