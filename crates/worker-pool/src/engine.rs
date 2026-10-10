@@ -127,6 +127,17 @@ pub trait ObservationEngine: Send + Sync {
         target.clone()
     }
 
+    /// The value of `attribute` on the element `target` resolves to; `None`
+    /// when the element has no such attribute.
+    async fn read_attribute(
+        &self,
+        _page_id: &PageId,
+        _target: &TargetSpec,
+        _attribute: &str,
+    ) -> Result<Option<String>, CommandError> {
+        Err(unsupported_error())
+    }
+
     /// Best-effort accessible identity of the interactive element at viewport
     /// point (x, y): role + name, matching the shape a11y candidates carry.
     /// Used by the vision corpus collector to ground a verified click back to

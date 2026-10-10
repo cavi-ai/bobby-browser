@@ -2189,6 +2189,20 @@ impl crate::ObservationEngine for ChromiumWorker {
         gather_candidates(&page, target, Some(&browser)).await
     }
 
+    async fn read_attribute(
+        &self,
+        page_id: &PageId,
+        target: &types::TargetSpec,
+        attribute: &str,
+    ) -> Result<Option<String>, CommandError> {
+        let page = self.page_handle(page_id).await?;
+        let browser = self.browser_handle().await?;
+        resolve_browser_target(page_id, &page, "", Some(target), Some(&browser))
+            .await?
+            .attribute(&page, attribute)
+            .await
+    }
+
     async fn element_at_point(
         &self,
         page_id: &PageId,

@@ -153,6 +153,17 @@ pub trait IntentBrowser: Send + Sync {
         target.clone()
     }
 
+    /// The value of `attribute` on the element `target` resolves to. Defaults
+    /// to `None`, for runtimes that cannot read the live element.
+    async fn read_attribute(
+        &self,
+        _page_id: &PageId,
+        _target: &TargetSpec,
+        _attribute: &str,
+    ) -> Result<Option<String>, CommandError> {
+        Ok(None)
+    }
+
     /// Waits until the document has stopped changing after a navigation the
     /// intent caused, with the probe `navigate` settles with. Fakes and
     /// alternate runtimes return at once.
@@ -2723,14 +2734,29 @@ async fn resolve_extract_field(
                 candidates: vec![evidence],
                 best_match_authorized,
             };
-            let value = extract_value_from_candidate(&field.value, &candidate);
+            // Candidates carry a subset of attributes; the live element has the rest.
+            let read = match (
+                extract_value_from_candidate(&field.value, &candidate),
+                extracted_attribute(&field.value),
+            ) {
+                (Some(value), _) => Ok(Some(value)),
+                (None, Some(attribute)) => {
+                    let (_, target) = action_target(&candidate, &field.target);
+                    browser.read_attribute(page_id, &target, attribute).await
+                }
+                (None, None) => Ok(None),
+            };
+            let (value, error_code) = match read {
+                Ok(value) => (value, None),
+                Err(error) => (None, Some(error.code)),
+            };
             vec![
                 resolution,
                 Evidence::Extraction {
                     field: field.name.clone(),
                     value,
                     resolution_path: IntentResolutionPath::Deterministic,
-                    error_code: None,
+                    error_code,
                 },
             ]
         }
@@ -3023,6 +3049,15 @@ fn a11y_only_role_extraction(field: &ExtractFieldPlan) -> Vec<Evidence> {
             error_code: Some(ErrorCode::InvalidRequest),
         },
     ]
+}
+
+/// The attribute an extraction reads, when it reads one.
+fn extracted_attribute(kind: &ExtractValueKind) -> Option<&str> {
+    match kind {
+        ExtractValueKind::Text => None,
+        ExtractValueKind::Attribute { attribute } => Some(attribute),
+        ExtractValueKind::Href => Some("href"),
+    }
 }
 
 fn extract_value_from_candidate(kind: &ExtractValueKind, candidate: &Candidate) -> Option<String> {
