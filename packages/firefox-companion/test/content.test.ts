@@ -146,6 +146,28 @@ test("a11yTree preserves native input types without mistaking ordinary buttons f
   assert.equal(located.inputType, "file");
 });
 
+test("input observations and accessibility targets share normalized native types", () => {
+  for (const markup of [
+    '<input aria-label="Name">',
+    '<input aria-label="Name" type="TEXT">',
+    '<input aria-label="Name" type="private-type-canary">',
+    '<input aria-label="Name" type="FILE">',
+    '<input aria-label="Password" type="password" value="private-value-canary">',
+  ]) {
+    const document = documentFor(markup);
+    const observed = observeDocument(document);
+    const tree = executeContentAction(document, "a11yTree", { maxNodes: 16 }) as {
+      nodes: Array<{ inputType?: string }>;
+    };
+    const located = executeContentAction(document, "locateTarget", { target: { css: "input" } }) as {
+      inputType?: string;
+    };
+    assert.equal(observed.controls[0]?.attributes.type, tree.nodes[0]?.inputType);
+    assert.equal(observed.controls[0]?.attributes.type, located.inputType);
+    assert.doesNotMatch(JSON.stringify(observed), /private-type-canary|private-value-canary/);
+  }
+});
+
 test("password values never enter observations", () => {
   const document = documentFor(
     '<label for="p">Password</label><input id="p" type="password" value="secret">',

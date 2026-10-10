@@ -851,8 +851,11 @@ function observeRoot(document: Document, root: Element, includeHtml: boolean): P
       ? undefined
       : observationString(element.getAttribute("data-testid"));
     const attributes: Record<string, string> = {};
+    // Match a11yTree and locateTarget, including omitted or invalid HTML types.
+    // The normalized native kind is structural metadata, even for redacted controls.
+    if (element.tagName === "INPUT") attributes.type = (element as HTMLInputElement).type;
     if (!sensitive) {
-      for (const name of ["name", "type", "placeholder", "autocomplete", "pattern", "min", "max", "step", "multiple"] as const) {
+      for (const name of ["name", "placeholder", "autocomplete", "pattern", "min", "max", "step", "multiple"] as const) {
         const value = observationString(element.getAttribute(name));
         if (value) attributes[name] = value;
       }
