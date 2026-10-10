@@ -2297,6 +2297,7 @@ dependencies = [
  "tracing",
  "types",
  "uuid",
+ "workflow-journal",
 ]
 
 [[package]]

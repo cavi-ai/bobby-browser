@@ -5,11 +5,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Once};
 use std::time::Duration;
-use std::time::Instant;
 
 use crate::navigation_settle::{
-    after_probe, navigation_settle_expression, parse_settled, trace_settle, AfterProbe, SettleExit,
-    LOAD_POLL, NAVIGATION_SETTLE_CAP,
+    navigation_settle_expression, parse_settled, run_settle, ProbeStep, SettleSession,
+    NAVIGATION_SETTLE_CAP,
 };
 use crate::secret_material::page_title_evidence;
 use artifact_store::ArtifactStore;
@@ -2801,12 +2800,7 @@ impl BrowserWorker for ChromiumWorker {
                 .iter()
                 .find(|node| node.backend_dom_node_id.as_ref() == Some(&backend_id))
                 .map(|node| node.node_id.clone())
-                .ok_or_else(|| {
-                    driver_error(
-                        ErrorCode::TargetNotFound,
-                        "resolved target has no accessibility node",
-                    )
-                })?;
+                .ok_or_else(|| hidden_from_accessibility(&result.nodes))?;
             let (nodes, truncated) =
                 compact_ax_tree_from(&result.nodes, max_nodes, Some(root_id.as_ref()));
             return Ok(vec![Evidence::AccessibilitySnapshot {
@@ -3879,18 +3873,7 @@ fn is_closed_page_message(message: &str) -> bool {
         || message.contains("Session with given id not found")
         || message.contains("oneshot canceled")
         || message.contains(TARGET_GONE_MESSAGE)
-        || is_firefox_bidi_transport_dead(message)
-}
-
-fn is_firefox_bidi_transport_dead(message: &str) -> bool {
-    message.contains("Firefox BiDi")
-        && !message.contains("client closed")
-        && (message.contains("connection closed")
-            || message.contains("connection ended")
-            || message.contains("disconnected")
-            || message.contains("command channel closed")
-            || message.contains("command capacity closed")
-            || message.contains("response channel closed"))
+        || crate::is_firefox_bidi_transport_dead(message)
 }
 
 fn wait_should_retry_replaced_context(error: &CommandError) -> bool {
@@ -3934,6 +3917,55 @@ fn redact_secret_material(value: String) -> String {
     }
 }
 
+struct ChromiumSettle<'a> {
+    page: &'a Page,
+    tracker: Option<&'a crate::network_quiet::NetworkQuietTracker>,
+}
+
+#[async_trait]
+impl SettleSession for ChromiumSettle<'_> {
+    async fn probe(&mut self, remaining: Duration, requested_url: &str) -> ProbeStep {
+        let mut params = EvaluateParams::new(navigation_settle_expression(
+            remaining.as_millis().max(1),
+            requested_url,
+        ));
+        params.await_promise = Some(true);
+        params.return_by_value = Some(true);
+        let attempt = tokio::time::timeout(
+            remaining + Duration::from_secs(1),
+            self.page.evaluate(params),
+        )
+        .await;
+        let read = if let Ok(Ok(result)) = attempt {
+            result
+                .into_value::<String>()
+                .ok()
+                .and_then(|encoded| parse_settled(&encoded))
+        } else {
+            None
+        };
+        ProbeStep::Finished(read)
+    }
+
+    async fn current_page(&mut self) -> Option<(String, String)> {
+        current_page(self.page).await
+    }
+
+    async fn landed_loads(&mut self) -> u64 {
+        match self.tracker {
+            Some(tracker) => tracker.landed_page_loads().await,
+            None => 0,
+        }
+    }
+
+    async fn pending_loads(&mut self) -> Option<usize> {
+        match self.tracker {
+            Some(tracker) => tracker.pending_page_loads().await,
+            None => Some(0),
+        }
+    }
+}
+
 /// Waits until the document has loaded, `tracker` reports no script or
 /// fetch/XHR load in flight, and the document has had no content change for
 /// the quiet window, and returns the URL and title read at that point. A redirect
@@ -3946,89 +3978,13 @@ async fn settle_document(
     requested_url: &str,
     tracker: Option<&crate::network_quiet::NetworkQuietTracker>,
 ) -> Option<(String, String)> {
-    let started = Instant::now();
-    let deadline = started + budget;
-    let mut begin = None;
-    let mut settled = None;
-    let mut churn = None;
-    let mut extra_probe_spent = false;
-    let exit = loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            settled = current_page(page).await.or(settled);
-            break if settled.is_some() {
-                SettleExit::Cap
-            } else {
-                SettleExit::Unreadable
-            };
-        }
-        let landed_before = match tracker {
-            Some(tracker) => tracker.landed_page_loads().await,
-            None => 0,
-        };
-        let mut params = EvaluateParams::new(navigation_settle_expression(
-            remaining.as_millis().max(1),
-            requested_url,
-        ));
-        params.await_promise = Some(true);
-        params.return_by_value = Some(true);
-        let attempt =
-            tokio::time::timeout(remaining + Duration::from_secs(1), page.evaluate(params)).await;
-        if let Ok(Ok(result)) = attempt {
-            if let Some(read) = result
-                .into_value::<String>()
-                .ok()
-                .and_then(|encoded| parse_settled(&encoded))
-            {
-                begin.get_or_insert(read.begin);
-                settled = Some(read.page);
-                churn = read.churn;
-                let exit = if read.quiet {
-                    SettleExit::Quiet
-                } else {
-                    SettleExit::Cap
-                };
-                // A script or fetch still loading changes the page once it
-                // lands: wait for it, then probe again. One that landed while
-                // the probe ran earns one more probe per settle.
-                let Some(tracker) = tracker else {
-                    break exit;
-                };
-                let pending = tracker.pending_page_loads().await;
-                let landed = tracker.landed_page_loads().await != landed_before;
-                match after_probe(pending, landed, &mut extra_probe_spent) {
-                    AfterProbe::Settled => break exit,
-                    AfterProbe::ProbeAgain => continue,
-                    AfterProbe::AwaitLoads => {
-                        while tracker
-                            .pending_page_loads()
-                            .await
-                            .is_some_and(|pending| pending > 0)
-                            && Instant::now() < deadline
-                        {
-                            tokio::time::sleep(LOAD_POLL).await;
-                        }
-                        continue;
-                    }
-                }
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
-    let pending = match tracker {
-        Some(tracker) => tracker.pending_page_loads().await,
-        None => Some(0),
-    };
-    trace_settle(
+    run_settle(
         "chromium",
-        exit,
-        started,
-        pending,
-        begin.as_ref(),
-        settled.as_ref(),
-        churn.as_ref(),
-    );
-    settled
+        budget,
+        requested_url,
+        &mut ChromiumSettle { page, tracker },
+    )
+    .await
 }
 
 /// The URL and title `page` shows now, `None` when it cannot be read.
@@ -4615,6 +4571,34 @@ fn compact_ax_tree(
     max_nodes: usize,
 ) -> (Vec<types::AccessibilityNode>, bool) {
     compact_ax_tree_from(raw, max_nodes, None)
+}
+
+/// The error for a resolved element the accessibility tree leaves out: an open
+/// modal dialog hides everything behind it.
+fn hidden_from_accessibility(
+    nodes: &[chromiumoxide::cdp::browser_protocol::accessibility::AxNode],
+) -> CommandError {
+    let modal_open = nodes.iter().filter(|node| !node.ignored).any(|node| {
+        node.properties.as_ref().is_some_and(|properties| {
+            properties.iter().any(|property| {
+                property.name.as_ref() == "modal"
+                    && property.value.value == Some(serde_json::Value::Bool(true))
+            })
+        })
+    });
+    if modal_open {
+        CommandError {
+            code: ErrorCode::TargetObscured,
+            message: "target is behind an open modal dialog; dismiss it first".into(),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        }
+    } else {
+        driver_error(
+            ErrorCode::TargetNotFound,
+            "resolved target is hidden from the accessibility tree",
+        )
+    }
 }
 
 /// `forced_root` scopes the output to the subtree rooted at that AX node id

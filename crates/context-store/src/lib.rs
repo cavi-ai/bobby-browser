@@ -445,6 +445,11 @@ impl ContextStore {
             }
         }
         let state = self.state.lock().await;
+        // Buffered replacements and deletions supersede older disk snapshots.
+        // Add back only the resident versions visible under current retention.
+        for key in state.dirty.keys() {
+            keys.remove(key);
+        }
         keys.extend(state.sites.iter().filter_map(|(key, entry)| {
             if state
                 .retention_cutoff
@@ -454,13 +459,6 @@ impl ContextStore {
             }
             Some(key.clone())
         }));
-        for key in state
-            .dirty
-            .keys()
-            .filter(|key| !state.sites.contains_key(*key))
-        {
-            keys.remove(key);
-        }
         keys.into_iter().collect()
     }
 

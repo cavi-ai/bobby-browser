@@ -449,7 +449,7 @@ impl Server {
     ) -> Value {
         let is_error = value.get("status").and_then(Value::as_str) != Some("completed");
         // Every `workflow_observe` result carries text read from the page
-        // (node names/labels, form values); see `PAGE_DERIVED_TOOLS`.
+        // (node names/labels, form values); the catalog marks it page-derived.
         value["pageDerived"] = json!(true);
         let mut response = if let Some(handle) = defaulted_handle {
             push_evidence(&mut value, workflow_handle_defaulted_evidence(handle));

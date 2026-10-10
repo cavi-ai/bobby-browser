@@ -522,6 +522,110 @@ impl CommandJournal for JsonlJournal {
     }
 }
 
+/// One physical JSONL read. Ledgers decide what a torn or oversized line means.
+pub enum JsonlRead {
+    Eof,
+    /// Includes the trailing newline.
+    Complete(Vec<u8>),
+    /// Bytes with no trailing newline.
+    Torn(Vec<u8>),
+    TooLong,
+}
+
+/// Reads one line, capped at `max_bytes`. A longer line is [`JsonlRead::TooLong`]
+/// and is not returned.
+pub async fn read_jsonl_line<R>(reader: &mut R, max_bytes: u64) -> std::io::Result<JsonlRead>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    read_jsonl_line_buffered(reader, max_bytes, Vec::new()).await
+}
+
+async fn read_jsonl_line_buffered<R>(
+    reader: &mut R,
+    max_bytes: u64,
+    mut bytes: Vec<u8>,
+) -> std::io::Result<JsonlRead>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    bytes.clear();
+    let read = reader
+        .take(max_bytes.saturating_add(1))
+        .read_until(b'\n', &mut bytes)
+        .await?;
+    if read == 0 && bytes.is_empty() {
+        return Ok(JsonlRead::Eof);
+    }
+    if bytes.len() as u64 > max_bytes {
+        return Ok(JsonlRead::TooLong);
+    }
+    if bytes.ends_with(b"\n") {
+        Ok(JsonlRead::Complete(bytes))
+    } else {
+        Ok(JsonlRead::Torn(bytes))
+    }
+}
+
+/// One complete JSONL line, including its trailing newline.
+pub struct JsonlLine<'a> {
+    pub offset: u64,
+    pub number: usize,
+    pub bytes: &'a [u8],
+}
+
+/// Physical read of a JSONL file. Record rules stay with each ledger.
+pub struct JsonlScan {
+    pub torn_tail: bool,
+    pub bytes_read: u64,
+}
+
+/// Visits every complete line. A line with no trailing newline sets `torn_tail`
+/// and is not visited. `bytes_read` includes that torn line.
+pub async fn for_each_jsonl_line<F>(file: File, mut visit: F) -> std::io::Result<JsonlScan>
+where
+    F: FnMut(JsonlLine<'_>) -> std::io::Result<()>,
+{
+    let mut reader = BufReader::new(file);
+    let mut offset = 0u64;
+    let mut bytes_read = 0u64;
+    let mut number = 0usize;
+    let mut buffer = Vec::new();
+    loop {
+        match read_jsonl_line_buffered(&mut reader, u64::MAX, buffer).await? {
+            JsonlRead::Eof => break,
+            JsonlRead::TooLong => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "jsonl line exceeds the reader cap",
+                ));
+            }
+            JsonlRead::Torn(bytes) => {
+                bytes_read += bytes.len() as u64;
+                return Ok(JsonlScan {
+                    torn_tail: true,
+                    bytes_read,
+                });
+            }
+            JsonlRead::Complete(bytes) => {
+                bytes_read += bytes.len() as u64;
+                number += 1;
+                visit(JsonlLine {
+                    offset,
+                    number,
+                    bytes: &bytes,
+                })?;
+                offset += bytes.len() as u64;
+                buffer = bytes;
+            }
+        }
+    }
+    Ok(JsonlScan {
+        torn_tail: false,
+        bytes_read,
+    })
+}
+
 async fn scan_path(path: &Path) -> Result<Scan, JournalError> {
     let file = match File::open(path).await {
         Ok(file) => file,
@@ -541,19 +645,12 @@ async fn scan_file(
     file: File,
     mut index: Option<&mut HashMap<CommandId, Vec<IndexedRecord>>>,
 ) -> Result<Scan, JournalError> {
-    let mut reader = BufReader::new(file);
     let mut scan = JournalScan::default();
     let mut records = 0usize;
     let mut max_sequence = None;
-    let mut offset = 0;
-    let mut line = Vec::new();
-    while reader.read_until(b'\n', &mut line).await? > 0 {
-        if !line.ends_with(b"\n") {
-            scan.torn_tail = true;
-            break;
-        }
-        if !line.iter().all(u8::is_ascii_whitespace) {
-            match serde_json::from_slice::<JournalRecord>(&line) {
+    let read = for_each_jsonl_line(file, |line| {
+        if !line.bytes.iter().all(u8::is_ascii_whitespace) {
+            match serde_json::from_slice::<JournalRecord>(line.bytes) {
                 Ok(record) => {
                     records += 1;
                     if max_sequence.is_some_and(|sequence| record.sequence <= sequence) {
@@ -564,20 +661,21 @@ async fn scan_file(
                         index
                             .entry(record.command_id)
                             .or_default()
-                            .push(IndexedRecord::new(offset, &line));
+                            .push(IndexedRecord::new(line.offset, line.bytes));
                     }
                 }
                 Err(_) => {
-                    if let Ok(probe) = serde_json::from_slice::<RecordProbe>(&line) {
+                    if let Ok(probe) = serde_json::from_slice::<RecordProbe>(line.bytes) {
                         max_sequence = max_sequence.max(probe.sequence);
                     }
                     scan.incompatible_records += 1;
                 }
             }
         }
-        offset += line.len() as u64;
-        line.clear();
-    }
+        Ok(())
+    })
+    .await?;
+    scan.torn_tail = read.torn_tail;
     Ok(Scan {
         scan,
         records,

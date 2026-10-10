@@ -3276,11 +3276,10 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::annotations::{tool_annotations, tool_title};
-    use crate::tool_meta::{
-        required_capabilities, required_operation, tool_description, WORKFLOW_OBSERVE_OPERATION,
-        WORKFLOW_OBSERVE_REQUIRED_CAPABILITIES, WORKFLOW_START_OPERATION,
-        WORKFLOW_START_REQUIRED_CAPABILITIES,
+    use crate::catalog::{
+        required_capabilities, required_operation, tool_annotations, tool_description, tool_title,
+        WORKFLOW_OBSERVE_OPERATION, WORKFLOW_OBSERVE_REQUIRED_CAPABILITIES,
+        WORKFLOW_START_OPERATION, WORKFLOW_START_REQUIRED_CAPABILITIES,
     };
     use crate::workflow_handles::WORKFLOW_SCOPE_TOOLS;
 

@@ -273,6 +273,59 @@ async fn retention_and_forget_include_evicted_sites() {
 }
 
 #[tokio::test]
+async fn listing_uses_buffered_retention_state_instead_of_an_older_disk_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let (store, _) = ContextStore::open_with_ttl(temp.path(), "profile-a", 30, 100)
+        .await
+        .unwrap();
+    let fresh = site(&["Fresh"], 100);
+    store.upsert_site("one", fresh.clone()).await;
+    store.upsert_site("other", site(&["Other"], 100)).await;
+    assert!(store.flush().await.is_empty());
+    let path = store.root().join("6f6e65.json");
+    let original = std::fs::read(&path).unwrap();
+    let mut unverified = site(&["Unverified"], 100);
+    unverified
+        .pages
+        .get_mut("/login")
+        .unwrap()
+        .forms
+        .get_mut("login")
+        .unwrap()
+        .controls[0]
+        .intents
+        .get_mut("fill")
+        .unwrap()
+        .last_verified_day = None;
+    for replacement in [site(&["Expired"], 69), SiteContext::default(), unverified] {
+        store.upsert_site("one", replacement).await;
+        assert!(store.site("one").await.is_none());
+        for _ in 0..2 {
+            assert_eq!(
+                store.list_sites().await,
+                vec!["other"],
+                "older persisted context overrode the buffered retention state"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+        }
+        store.upsert_site("one", fresh.clone()).await;
+        assert_eq!(store.site("one").await, Some(fresh.clone()));
+        assert_eq!(store.list_sites().await, vec!["one", "other"]);
+    }
+    store.upsert_site("one", site(&["Expired"], 69)).await;
+    assert_eq!(store.list_sites().await, vec!["other"]);
+    assert!(store.flush().await.is_empty());
+    drop(store);
+    let (store, _) = ContextStore::open_with_ttl(temp.path(), "profile-a", 30, 100)
+        .await
+        .unwrap();
+    assert_eq!(store.list_sites().await, vec!["other"]);
+    assert!(store.site("one").await.is_none());
+    assert_eq!(store.site("other").await, Some(site(&["Other"], 100)));
+    assert!(!path.exists());
+}
+
+#[tokio::test]
 async fn malformed_file_diagnostics_are_bounded_while_counting_every_skip() {
     let temp = tempfile::tempdir().unwrap();
     let (store, _) = ContextStore::open(temp.path(), "profile-a").await.unwrap();

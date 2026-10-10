@@ -22,7 +22,9 @@ use tokio::{
     sync::{Mutex, Notify},
 };
 
-use crate::annotations::{tool_annotations, tool_title};
+use crate::catalog::{
+    required_capabilities, required_operation, tool_annotations, tool_description, tool_title,
+};
 use crate::notify::{tools_list_changed_frame, NotificationSink};
 use crate::protocol::{
     error, negotiate_protocol_version, success, INTERFACE_ERROR, INTERNAL_ERROR, INVALID_PARAMS,
@@ -35,7 +37,6 @@ use crate::schema::{
     apply_runtime_tool_limits, validate_tool_arguments, MAX_RECOVERABLE_WORKFLOWS,
 };
 use crate::tool_args::*;
-use crate::tool_meta::{required_capabilities, required_operation, tool_description};
 use crate::workflow_handles::{WorkflowHandleError, WorkflowHandles};
 use crate::ArtifactResources;
 
