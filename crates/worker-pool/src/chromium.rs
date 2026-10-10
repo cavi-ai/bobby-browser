@@ -5,7 +5,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Once};
 use std::time::Duration;
-use std::time::Instant;
 
 use crate::navigation_settle::{
     navigation_settle_expression, parse_settled, run_settle, ProbeStep, SettleSession,
