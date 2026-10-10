@@ -84,3 +84,99 @@ pub(super) fn context_store(context: &mut DoctorContext, report: &mut DoctorRepo
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::doctor::DoctorStatus;
+
+    fn context(root: &std::path::Path) -> DoctorContext {
+        let mut context = super::super::test_support::context(root);
+        context.config = Some(config::AppConfig {
+            context: config::ContextConfig {
+                dir: Some(root.join("context")),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        context
+    }
+
+    #[test]
+    fn doctor_reports_context_store_without_claiming_its_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let mut context = context(root.path());
+        let profile = root.path().join("context").join("profile-a");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(
+            profile.join("68747470733a2f2f6578616d706c652e636f6d.json"),
+            br#"{"schema":1,"site_key":"https://example.com","site":{"pages":{}}}"#,
+        )
+        .unwrap();
+        std::fs::write(profile.join(".context-store.lock"), b"1\n").unwrap();
+
+        let mut report = DoctorReport::default();
+        context_store(&mut context, &mut report).unwrap();
+        let check = report
+            .checks
+            .iter()
+            .find(|check| check.name == "context-store")
+            .expect("a context-store check");
+        assert!(check.detail.contains("1 site files"), "{check:?}");
+        assert!(check.detail.contains("lock held"), "{check:?}");
+        assert_eq!(check.status, DoctorStatus::Ok);
+    }
+
+    #[test]
+    fn doctor_reports_mismatched_context_identity_without_changing_its_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut context = context(root.path());
+        let profile = root.path().join("context/70726f66696c652d61");
+        std::fs::create_dir_all(&profile).unwrap();
+        let path = profile.join("6f6e65.json");
+        let bytes = br#"{"schema":1,"site_key":"two","site":{"pages":{}}}"#;
+        std::fs::write(&path, bytes).unwrap();
+
+        let mut report = DoctorReport::default();
+        context_store(&mut context, &mut report).unwrap();
+        let check = report.check("context-store").expect("context-store");
+        assert_eq!(check.status, DoctorStatus::Fail);
+        assert!(check.detail.contains("identity"), "{check:?}");
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        assert!(!profile.join(".context-store.lock").exists());
+    }
+
+    #[test]
+    fn doctor_fails_context_store_on_invalid_json() {
+        let root = tempfile::tempdir().unwrap();
+        let mut context = context(root.path());
+        let profile = root.path().join("context").join("profile-a");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(profile.join("https___example.com.json"), b"not-json").unwrap();
+
+        let mut report = DoctorReport::default();
+        context_store(&mut context, &mut report).unwrap();
+        let check = report.check("context-store").expect("context-store");
+        assert_eq!(check.status, DoctorStatus::Fail);
+        assert!(check.detail.contains("invalid JSON"), "{check:?}");
+    }
+
+    #[test]
+    fn doctor_reports_oversized_context_without_claiming_the_store_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let mut context = context(root.path());
+        let profile = root.path().join("context/profile-a");
+        std::fs::create_dir_all(&profile).unwrap();
+        let mut bytes = br#"{"schema":1,"site_key":"site","site":{"pages":{}}}"#.to_vec();
+        bytes.extend(vec![b' '; 2 * 1024 * 1024]);
+        let path = profile.join("site.json");
+        std::fs::write(&path, &bytes).unwrap();
+        let mut report = DoctorReport::default();
+        context_store(&mut context, &mut report).unwrap();
+        let check = report.check("context-store").unwrap();
+        assert_eq!(check.status, DoctorStatus::Warn);
+        assert!(check.detail.contains("limit"), "{check:?}");
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        assert!(!profile.join(".context-store.lock").exists());
+    }
+}

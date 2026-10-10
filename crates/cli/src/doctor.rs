@@ -776,9 +776,6 @@ pub(crate) use checks::vision_and_gateway_configuration::vision_auth_discovery_c
 pub(crate) use checks::vision_and_gateway_configuration::check_vision_acp;
 
 #[cfg(test)]
-pub(crate) use checks::sidecars::sidecar_version_status;
-
-#[cfg(test)]
 pub(crate) use checks::credential::check_bootstrap_expiry;
 
 use checks::storage::record_idempotency_ledgers;
@@ -786,9 +783,6 @@ use checks::storage::record_idempotency_ledgers;
 use checks::storage::configured_storage_dirs;
 
 use checks::storage::block_on_inspect;
-
-#[cfg(test)]
-pub(crate) use checks::mcp_handshake::handshake_error_status;
 
 #[cfg(test)]
 pub(crate) use checks::credential::BOOTSTRAP_EXPIRY_WARN_DAYS;
