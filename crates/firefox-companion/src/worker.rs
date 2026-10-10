@@ -59,6 +59,14 @@ use crate::generate_session_seed;
 use crate::network_quiet::FirefoxNetworkQuiet;
 
 const COMPANION_SANDBOX: &str = "automation-runtime-companion";
+
+#[derive(Clone, Copy)]
+enum ShadowRead {
+    Element,
+    Text,
+    Value,
+}
+
 /// A page function returning the element a selector names. A selector joined
 /// by " >>> " names each open shadow root's host in turn, then the element.
 const COMPOSED_QUERY: &str = "((selector)=>{const parts=selector.split(' >>> ');const probe=document.createDocumentFragment();for(const part of parts)probe.querySelector(part);let root=document;for(let index=0;index<parts.length;index+=1){const found=root.querySelector(parts[index]);if(!found||index===parts.length-1)return found;root=found.shadowRoot;if(!root)return null}return null})";
@@ -2417,11 +2425,12 @@ impl FirefoxCompanionWorker {
             })
     }
 
-    async fn resolve_shadow_element(
+    async fn shadow_target_response(
         &self,
         context: &str,
         target: &types::TargetSpec,
-    ) -> Result<String, CommandError> {
+        read: ShadowRead,
+    ) -> Result<Value, CommandError> {
         if target.shadow_path.len() > MAX_FRAME_PATH_DEPTH {
             return Err(driver_error(
                 ErrorCode::InvalidRequest,
@@ -2434,20 +2443,34 @@ impl FirefoxCompanionWorker {
             .iter()
             .map(|host| shadow_target_descriptor(host))
             .collect::<Result<Vec<_>, _>>()?;
-        let target_selector = shadow_target_descriptor(target)?;
+        // The caller already descended frame_path to obtain this context.
+        let mut local_target = target.clone();
+        local_target.frame_path.clear();
+        let target_selector = shadow_target_descriptor(&local_target)?;
+        let (max_matches, finish) = match read {
+            ShadowRead::Element => (
+                2,
+                "if(matches.length!==1)return 'target-ambiguous';return matches[0];",
+            ),
+            ShadowRead::Text => (
+                10000,
+                "return JSON.stringify(matches.map(el=>el.innerText??''));",
+            ),
+            ShadowRead::Value => (
+                10000,
+                "return JSON.stringify(matches.map(el=>el.value??''));",
+            ),
+        };
         let hosts_json = serde_json::to_string(&hosts)
             .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
         let target_json = serde_json::to_string(&target_selector)
             .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
         let response = self.transport.send("script.evaluate", json!({
-            "expression": format!("(()=>{{const norm=s=>String(s??'').replace(/\\s+/g,' ').trim();const resolve=(root,spec)=>{{if(spec.selector)return [...root.querySelectorAll(spec.selector)].slice(0,2);const selector=spec.role==='button'?'button,[role=button]':spec.role==='group'?'[role=group]':'*';const nodes=root.querySelectorAll(selector);if(nodes.length>10000)return 'too-many';const matches=[];for(const el of nodes){{const role=el.getAttribute('role')||(el.tagName==='BUTTON'?'button':null);if(role!==spec.role)continue;const labelledBy=el.getAttribute('aria-labelledby');const labelled=labelledBy?labelledBy.split(/\\s+/).map(id=>el.ownerDocument.getElementById(id)?.textContent??'').join(' '):null;const name=el.getAttribute('aria-label')??labelled??el.textContent;if(norm(name)===norm(spec.name))matches.push(el);if(matches.length>1)break;}}return matches;}};let root=document;for(const spec of {hosts_json}){{const matches=resolve(root,spec);if(matches==='too-many')return 'too-many';if(matches.length===0)return 'host-missing';if(matches.length!==1)return 'host-ambiguous';if(!matches[0].shadowRoot)return 'shadow-unavailable';root=matches[0].shadowRoot;}}const matches=resolve(root,{target_json});if(matches==='too-many')return 'too-many';if(matches.length===0)return 'target-missing';if(matches.length!==1)return 'target-ambiguous';return matches[0];}})()"),
+            "expression": format!("(()=>{{const norm=s=>String(s??'').replace(/\\s+/g,' ').trim();const resolve=(root,spec,limit=2)=>{{if(spec.selector){{const nodes=root.querySelectorAll(spec.selector);if(limit>2&&nodes.length>10000)return 'too-many';return [...nodes].slice(0,limit);}}const selector=spec.role==='button'?'button,[role=button]':spec.role==='group'?'[role=group]':'*';const nodes=root.querySelectorAll(selector);if(nodes.length>10000)return 'too-many';const matches=[];for(const el of nodes){{const role=el.getAttribute('role')||(el.tagName==='BUTTON'?'button':null);if(role!==spec.role)continue;const labelledBy=el.getAttribute('aria-labelledby');const labelled=labelledBy?labelledBy.split(/\\s+/).map(id=>el.ownerDocument.getElementById(id)?.textContent??'').join(' '):null;const name=el.getAttribute('aria-label')??labelled??el.textContent;if(norm(name)===norm(spec.name))matches.push(el);if(matches.length>=limit)break;}}return matches;}};let root=document;for(const spec of {hosts_json}){{const matches=resolve(root,spec);if(matches==='too-many')return 'too-many';if(matches.length===0)return 'host-missing';if(matches.length!==1)return 'host-ambiguous';if(!matches[0].shadowRoot)return 'shadow-unavailable';root=matches[0].shadowRoot;}}const matches=resolve(root,{target_json},{max_matches});if(matches==='too-many')return 'too-many';if(matches.length===0)return 'target-missing';{finish}}})()"),
             "target": {"context": context, "sandbox": COMPANION_SANDBOX},
             "awaitPromise": false,
             "resultOwnership": "none",
         })).await?;
-        if let Some(shared_id) = response.pointer("/result/sharedId").and_then(Value::as_str) {
-            return Ok(shared_id.to_owned());
-        }
         match response.pointer("/result/value").and_then(Value::as_str) {
             Some("host-ambiguous") | Some("target-ambiguous") => Err(driver_error(
                 ErrorCode::TargetAmbiguous,
@@ -2469,12 +2492,52 @@ impl FirefoxCompanionWorker {
                 "Firefox shadow search exceeded its node bound",
                 false,
             )),
-            _ => Err(driver_error(
-                ErrorCode::BrowserCommandFailed,
-                "Firefox shadow probe returned an invalid result",
-                false,
-            )),
+            _ => Ok(response),
         }
+    }
+
+    async fn resolve_shadow_element(
+        &self,
+        context: &str,
+        target: &types::TargetSpec,
+    ) -> Result<String, CommandError> {
+        self.shadow_target_response(context, target, ShadowRead::Element)
+            .await?
+            .pointer("/result/sharedId")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox shadow probe returned an invalid result",
+                    false,
+                )
+            })
+    }
+
+    async fn read_shadow_wait_values(
+        &self,
+        context: &str,
+        target: &types::TargetSpec,
+        is_value: bool,
+    ) -> Result<Vec<String>, CommandError> {
+        let read = if is_value {
+            ShadowRead::Value
+        } else {
+            ShadowRead::Text
+        };
+        let response = self.shadow_target_response(context, target, read).await?;
+        response
+            .pointer("/result/value")
+            .and_then(Value::as_str)
+            .and_then(|value| serde_json::from_str(value).ok())
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox shadow wait returned an invalid observation",
+                    false,
+                )
+            })
     }
 
     async fn perform_pointer_click(
