@@ -70,12 +70,41 @@ impl BrowserWorker for CapacityWorker {
     fn worker_id(&self) -> WorkerId {
         self.id.clone()
     }
+
     fn profile_dir(&self) -> &Path {
         &self.profile
     }
+
+    async fn close(&self) -> Result<(), CommandError> {
+        Ok(())
+    }
+
+    fn tabs(&self) -> Option<&dyn worker_pool::TabsEngine> {
+        Some(self)
+    }
+
+    fn navigation(&self) -> Option<&dyn worker_pool::NavigationEngine> {
+        Some(self)
+    }
+
+    fn observation(&self) -> Option<&dyn worker_pool::ObservationEngine> {
+        Some(self)
+    }
+
+    fn input(&self) -> Option<&dyn worker_pool::InputEngine> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl worker_pool::TabsEngine for CapacityWorker {
     async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
         Ok(())
     }
+}
+
+#[async_trait]
+impl worker_pool::NavigationEngine for CapacityWorker {
     async fn navigate(
         &self,
         _: &PageId,
@@ -93,21 +122,27 @@ impl BrowserWorker for CapacityWorker {
             title: "capacity".into(),
         }])
     }
+}
+
+#[async_trait]
+impl worker_pool::ObservationEngine for CapacityWorker {
     async fn inspect(&self, _: &PageId, _: &InspectCommand) -> Result<Vec<Evidence>, CommandError> {
         Ok(vec![])
     }
+}
+
+#[async_trait]
+impl worker_pool::InputEngine for CapacityWorker {
     async fn click(&self, _: &PageId, _: &ClickCommand) -> Result<Vec<Evidence>, CommandError> {
         Ok(vec![])
     }
+
     async fn type_text(
         &self,
         _: &PageId,
         _: &TypeTextCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         Ok(vec![])
-    }
-    async fn close(&self) -> Result<(), CommandError> {
-        Ok(())
     }
 }
 

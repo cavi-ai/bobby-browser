@@ -34,8 +34,11 @@ async fn print_like_headless_flag_state() {
     let worker = factory.launch(&SessionId::new()).await.unwrap();
 
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
-    worker
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page,
             &types::NavigateCommand {
@@ -47,8 +50,7 @@ async fn print_like_headless_flag_state() {
         .await
         .unwrap();
 
-    let outcome = worker
-        .evaluate_javascript(
+    let outcome = worker_pool::javascript_or_default(worker.javascript()).evaluate_javascript(
             &page,
             &types::EvaluateJavaScriptCommand {
                 expression: r#"(async () => {

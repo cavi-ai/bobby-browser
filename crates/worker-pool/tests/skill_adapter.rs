@@ -13,7 +13,7 @@ use skill_runtime::{
     SkillBrowserEngine, SkillCapability, SkillEngineAdapter, SkillFailure, SkillProfileRequest,
 };
 use tokio::{sync::Semaphore, time::Duration};
-use types::{CommandError, Evidence, InspectCommand, NavigateCommand, PageId, SessionId, WorkerId};
+use types::{CommandError, SessionId, WorkerId};
 use worker_pool::{
     BrowserWorker, BrowserWorkerSelector, ChromiumSkillAdapter, EnginePreference,
     FactoryRegistration, FirefoxSkillAdapter, RequiredCapabilities, SelectedWorkerFactory,
@@ -87,42 +87,6 @@ impl BrowserWorker for NamedWorker {
 
     fn profile_dir(&self) -> &Path {
         Path::new(self.name)
-    }
-
-    async fn open_page(&self, _page_id: PageId) -> Result<(), CommandError> {
-        Ok(())
-    }
-
-    async fn navigate(
-        &self,
-        _page_id: &PageId,
-        _command: &NavigateCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-
-    async fn inspect(
-        &self,
-        _page_id: &PageId,
-        _command: &InspectCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-
-    async fn click(
-        &self,
-        _page_id: &PageId,
-        _command: &types::ClickCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-
-    async fn type_text(
-        &self,
-        _page_id: &PageId,
-        _command: &types::TypeTextCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
     }
 
     async fn close(&self) -> Result<(), CommandError> {

@@ -3,10 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use types::{
-    ClickCommand, CommandError, ErrorCode, Evidence, InspectCommand, NavigateCommand, PageId,
-    SessionId, TypeTextCommand, WorkerId,
-};
+use types::{CommandError, ErrorCode, PageId, SessionId, WorkerId};
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
 
 struct BlockingCleanupFactory {
@@ -42,37 +39,17 @@ impl BrowserWorker for BlockingCleanupWorker {
     fn worker_id(&self) -> WorkerId {
         WorkerId::new()
     }
+
     fn profile_dir(&self) -> &Path {
         Path::new("blocking-cleanup")
     }
-    async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
-        Ok(())
-    }
-    async fn navigate(
-        &self,
-        _: &PageId,
-        _: &NavigateCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-    async fn inspect(&self, _: &PageId, _: &InspectCommand) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-    async fn click(&self, _: &PageId, _: &ClickCommand) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-    async fn type_text(
-        &self,
-        _: &PageId,
-        _: &TypeTextCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
+
     async fn close(&self) -> Result<(), CommandError> {
         self.close_started.notify_one();
         self.finish_close.notified().await;
         Ok(())
     }
+
     async fn terminate(&self) -> Result<(), CommandError> {
         self.close().await
     }
@@ -89,35 +66,15 @@ impl BrowserWorker for FakeWorker {
     fn worker_id(&self) -> WorkerId {
         self.id.clone()
     }
+
     fn profile_dir(&self) -> &Path {
         &self.profile
     }
-    async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
-        Ok(())
-    }
-    async fn navigate(
-        &self,
-        _: &PageId,
-        _: &NavigateCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-    async fn inspect(&self, _: &PageId, _: &InspectCommand) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-    async fn click(&self, _: &PageId, _: &ClickCommand) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-    async fn type_text(
-        &self,
-        _: &PageId,
-        _: &TypeTextCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
+
     async fn close(&self) -> Result<(), CommandError> {
         Ok(())
     }
+
     async fn terminate(&self) -> Result<(), CommandError> {
         self.terminations.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -562,7 +519,7 @@ async fn element_at_point_default_is_unsupported_not_empty_identity() {
         profile: PathBuf::from("element-at-point"),
         terminations: Arc::new(AtomicUsize::new(0)),
     };
-    let error = worker
+    let error = worker_pool::observation_or_default(worker.observation())
         .element_at_point(&PageId::new(), 0.0, 0.0)
         .await
         .expect_err("unsupported workers must not report empty identity");

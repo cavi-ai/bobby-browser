@@ -46,7 +46,7 @@ async fn open_and_navigate(
     worker: &dyn BrowserWorker,
     url: &str,
 ) -> (types::PageId, serde_json::Value) {
-    let pages = worker
+    let pages = worker_pool::tabs_or_default(worker.tabs())
         .open_page_command(&OpenPageCommand {
             url: Some("about:blank".into()),
         })
@@ -57,7 +57,7 @@ async fn open_and_navigate(
         other => panic!("expected page evidence, got {other:?}"),
     };
 
-    worker
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_id,
             &NavigateCommand {
@@ -69,7 +69,7 @@ async fn open_and_navigate(
         .await
         .unwrap();
 
-    let result = worker
+    let result = worker_pool::javascript_or_default(worker.javascript())
         .evaluate_javascript(
             &page_id,
             &EvaluateJavaScriptCommand {
@@ -98,7 +98,9 @@ async fn chromium_fingerprint_probe_matches_session() {
     let factory = ChromiumWorkerFactory::new(chrome_config(root.path()))
         .with_fingerprint(fingerprint.clone());
     let worker = factory.launch(&SessionId::new()).await.unwrap();
-    assert!(worker.fingerprint_enabled());
+    assert!(
+        worker_pool::session_settings_or_default(worker.session_settings()).fingerprint_enabled()
+    );
 
     let (_page_id, probe) = open_and_navigate(worker.as_ref(), "https://example.com/").await;
     let session = fingerprinting::create_session(&fingerprint);
@@ -135,8 +137,13 @@ async fn chromium_fingerprint_probe_matches_session() {
         assert_eq!(level, 1.0);
     }
 
-    worker.set_fingerprint_enabled(false).await.unwrap();
-    assert!(!worker.fingerprint_enabled());
+    worker_pool::session_settings_or_default(worker.session_settings())
+        .set_fingerprint_enabled(false)
+        .await
+        .unwrap();
+    assert!(
+        !worker_pool::session_settings_or_default(worker.session_settings()).fingerprint_enabled()
+    );
 }
 
 #[tokio::test]
@@ -329,7 +336,10 @@ async fn chromium_fingerprint_toggle_navigate_new_pages() {
     assert_eq!(probe_on["userAgent"], session.user_agent);
     assert_eq!(probe_on["canvasHashStable"], true);
 
-    worker.set_fingerprint_enabled(false).await.unwrap();
+    worker_pool::session_settings_or_default(worker.session_settings())
+        .set_fingerprint_enabled(false)
+        .await
+        .unwrap();
     let (_page_off, probe_off) = open_and_navigate(worker.as_ref(), "https://example.org/").await;
     assert_eq!(
         probe_off["fingerprintApplied"], false,
@@ -340,7 +350,10 @@ async fn chromium_fingerprint_toggle_navigate_new_pages() {
         "disabled path should not force session UA"
     );
 
-    worker.set_fingerprint_enabled(true).await.unwrap();
+    worker_pool::session_settings_or_default(worker.session_settings())
+        .set_fingerprint_enabled(true)
+        .await
+        .unwrap();
     let (_page_re, probe_re) = open_and_navigate(worker.as_ref(), "https://example.net/").await;
     assert_eq!(probe_re["fingerprintApplied"], true);
     assert_eq!(probe_re["userAgent"], session.user_agent);
@@ -359,7 +372,7 @@ async fn chromium_collector_dogfood_passes() {
         ChromiumWorkerFactory::new(chrome_config(root.path())).with_fingerprint(fingerprint);
     let worker = factory.launch(&SessionId::new()).await.unwrap();
 
-    let pages = worker
+    let pages = worker_pool::tabs_or_default(worker.tabs())
         .open_page_command(&OpenPageCommand {
             url: Some("about:blank".into()),
         })
@@ -370,7 +383,7 @@ async fn chromium_collector_dogfood_passes() {
         other => panic!("expected page evidence, got {other:?}"),
     };
 
-    worker
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_id,
             &NavigateCommand {
@@ -382,7 +395,7 @@ async fn chromium_collector_dogfood_passes() {
         .await
         .unwrap();
 
-    let result = worker
+    let result = worker_pool::javascript_or_default(worker.javascript())
         .evaluate_javascript(
             &page_id,
             &EvaluateJavaScriptCommand {
@@ -426,7 +439,7 @@ async fn eval_json_ex(
     timeout_ms: u64,
     await_promise: bool,
 ) -> serde_json::Value {
-    let result = worker
+    let result = worker_pool::javascript_or_default(worker.javascript())
         .evaluate_javascript(
             page_id,
             &EvaluateJavaScriptCommand {
@@ -445,7 +458,7 @@ async fn eval_json_ex(
 }
 
 async fn navigate(worker: &dyn BrowserWorker, page_id: &types::PageId, url: &str) {
-    worker
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             page_id,
             &NavigateCommand {
@@ -459,7 +472,7 @@ async fn navigate(worker: &dyn BrowserWorker, page_id: &types::PageId, url: &str
 }
 
 async fn open_page(worker: &dyn BrowserWorker) -> types::PageId {
-    let pages = worker
+    let pages = worker_pool::tabs_or_default(worker.tabs())
         .open_page_command(&OpenPageCommand {
             url: Some("about:blank".into()),
         })

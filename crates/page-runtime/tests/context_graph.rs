@@ -43,12 +43,41 @@ impl BrowserWorker for SnapshottingWorker {
     fn worker_id(&self) -> WorkerId {
         self.id.clone()
     }
+
     fn profile_dir(&self) -> &Path {
         &self.profile
     }
+
+    async fn close(&self) -> Result<(), CommandError> {
+        Ok(())
+    }
+
+    fn tabs(&self) -> Option<&dyn worker_pool::TabsEngine> {
+        Some(self)
+    }
+
+    fn navigation(&self) -> Option<&dyn worker_pool::NavigationEngine> {
+        Some(self)
+    }
+
+    fn observation(&self) -> Option<&dyn worker_pool::ObservationEngine> {
+        Some(self)
+    }
+
+    fn input(&self) -> Option<&dyn worker_pool::InputEngine> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl worker_pool::TabsEngine for SnapshottingWorker {
     async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
         Ok(())
     }
+}
+
+#[async_trait]
+impl worker_pool::NavigationEngine for SnapshottingWorker {
     async fn navigate(
         &self,
         _: &PageId,
@@ -59,6 +88,10 @@ impl BrowserWorker for SnapshottingWorker {
             title: "Fixture".into(),
         }])
     }
+}
+
+#[async_trait]
+impl worker_pool::ObservationEngine for SnapshottingWorker {
     async fn inspect(
         &self,
         _: &PageId,
@@ -72,6 +105,7 @@ impl BrowserWorker for SnapshottingWorker {
             html: None,
         }])
     }
+
     async fn a11y_snapshot(
         &self,
         page_id: &PageId,
@@ -83,21 +117,23 @@ impl BrowserWorker for SnapshottingWorker {
             truncated: false,
         }])
     }
+}
+
+#[async_trait]
+impl worker_pool::InputEngine for SnapshottingWorker {
     async fn click(&self, _: &PageId, _: &ClickCommand) -> Result<Vec<Evidence>, CommandError> {
         Ok(vec![Evidence::Element {
             selector: "#go".into(),
             text: None,
         }])
     }
+
     async fn type_text(
         &self,
         _: &PageId,
         _: &TypeTextCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         Ok(Vec::new())
-    }
-    async fn close(&self) -> Result<(), CommandError> {
-        Ok(())
     }
 }
 

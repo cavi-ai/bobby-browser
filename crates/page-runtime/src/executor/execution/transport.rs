@@ -8,7 +8,9 @@ impl ExecutionContext<'_> {
         lease: worker_pool::WorkerLease,
         page: types::PageState,
     ) -> ExecutionResult {
-        let probe = lease.worker().list_pages(&ListPagesCommand).await;
+        let probe = worker_pool::tabs_or_default(lease.worker().tabs())
+            .list_pages(&ListPagesCommand)
+            .await;
         let probe_error = probe.as_ref().err().map(|error| error.message.clone());
         if let Ok(evidence) = probe {
             if !page_still_listed(&evidence, &page.id) {
@@ -49,7 +51,10 @@ impl ExecutionContext<'_> {
             "transport reset reattached to the live browser"
         );
         // A failed listing is not proof that the page closed.
-        let page_open = match lease.worker().list_pages(&ListPagesCommand).await {
+        let page_open = match worker_pool::tabs_or_default(lease.worker().tabs())
+            .list_pages(&ListPagesCommand)
+            .await
+        {
             Ok(evidence) => page_still_listed(&evidence, &page.id),
             Err(_) => true,
         };

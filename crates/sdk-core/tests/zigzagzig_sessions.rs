@@ -63,10 +63,40 @@ impl BrowserWorker for ChallengeWorker {
         &self.profile
     }
 
-    async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
+    async fn close(&self) -> Result<(), CommandError> {
         Ok(())
     }
 
+    fn tabs(&self) -> Option<&dyn worker_pool::TabsEngine> {
+        Some(self)
+    }
+
+    fn navigation(&self) -> Option<&dyn worker_pool::NavigationEngine> {
+        Some(self)
+    }
+
+    fn observation(&self) -> Option<&dyn worker_pool::ObservationEngine> {
+        Some(self)
+    }
+
+    fn input(&self) -> Option<&dyn worker_pool::InputEngine> {
+        Some(self)
+    }
+
+    fn capture(&self) -> Option<&dyn worker_pool::CaptureEngine> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl worker_pool::TabsEngine for ChallengeWorker {
+    async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl worker_pool::NavigationEngine for ChallengeWorker {
     async fn navigate(
         &self,
         _: &PageId,
@@ -78,7 +108,10 @@ impl BrowserWorker for ChallengeWorker {
             title: "ZigZagZig fixture".into(),
         }])
     }
+}
 
+#[async_trait]
+impl worker_pool::ObservationEngine for ChallengeWorker {
     async fn inspect(
         &self,
         _: &PageId,
@@ -93,7 +126,10 @@ impl BrowserWorker for ChallengeWorker {
             html: None,
         }])
     }
+}
 
+#[async_trait]
+impl worker_pool::InputEngine for ChallengeWorker {
     async fn click(
         &self,
         _: &PageId,
@@ -113,7 +149,10 @@ impl BrowserWorker for ChallengeWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         unreachable!("the zigzagzig fixture only executes clicks")
     }
+}
 
+#[async_trait]
+impl worker_pool::CaptureEngine for ChallengeWorker {
     async fn capture_screenshot(
         &self,
         _: &PageId,
@@ -132,10 +171,6 @@ impl BrowserWorker for ChallengeWorker {
 
     async fn screenshot_bytes(&self, _: &PageId) -> Result<Vec<u8>, CommandError> {
         Ok(b"png".to_vec())
-    }
-
-    async fn close(&self) -> Result<(), CommandError> {
-        Ok(())
     }
 }
 

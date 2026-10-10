@@ -314,8 +314,7 @@ impl RecoveryCoordinator {
             .lease(checkpoint.session_id.clone())
             .await
             .map_err(browser_error)?;
-        lease
-            .worker()
+        worker_pool::tabs_or_default(lease.worker().tabs())
             .open_page(checkpoint.page_id.clone())
             .await
             .map_err(browser_error)?;
@@ -332,8 +331,7 @@ impl RecoveryCoordinator {
             mut checkpoint,
             lease,
         } = prepared;
-        let mut evidence = lease
-            .worker()
+        let mut evidence = worker_pool::navigation_or_default(lease.worker().navigation())
             .navigate(
                 &checkpoint.page_id,
                 &NavigateCommand {
@@ -345,8 +343,7 @@ impl RecoveryCoordinator {
             .await
             .map_err(browser_error)?;
         evidence.extend(
-            lease
-                .worker()
+            worker_pool::observation_or_default(lease.worker().observation())
                 .inspect(&checkpoint.page_id, &InspectCommand::default())
                 .await
                 .map_err(browser_error)?,
@@ -356,8 +353,7 @@ impl RecoveryCoordinator {
             _ => None,
         }) {
             evidence.extend(
-                lease
-                    .worker()
+                worker_pool::observation_or_default(lease.worker().observation())
                     .inspect(
                         &checkpoint.page_id,
                         &InspectCommand {
@@ -387,8 +383,7 @@ impl RecoveryCoordinator {
             }
         } else {
             let reason = evaluation.failures.join("; ");
-            let restart_evidence = lease
-                .worker()
+            let restart_evidence = worker_pool::navigation_or_default(lease.worker().navigation())
                 .navigate(
                     &checkpoint.page_id,
                     &NavigateCommand {
@@ -465,13 +460,11 @@ impl RecoveryCoordinator {
             .lease(checkpoint.session_id.clone())
             .await
             .map_err(browser_error)?;
-        lease
-            .worker()
+        worker_pool::tabs_or_default(lease.worker().tabs())
             .open_page(checkpoint.page_id.clone())
             .await
             .map_err(browser_error)?;
-        let evidence = lease
-            .worker()
+        let evidence = worker_pool::navigation_or_default(lease.worker().navigation())
             .navigate(
                 &checkpoint.page_id,
                 &NavigateCommand {

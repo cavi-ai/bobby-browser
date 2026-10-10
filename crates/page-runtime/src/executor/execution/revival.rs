@@ -20,20 +20,21 @@ impl ExecutionContext<'_> {
             Ok(revived) => revived,
             Err(_) => return Err(self.finish(failure).await),
         };
-        let _ = revived
-            .worker()
+        let _ = worker_pool::session_settings_or_default(revived.worker().session_settings())
             .set_fingerprint_enabled(self.gate.fingerprint)
             .await;
-        let _ = revived
-            .worker()
+        let _ = worker_pool::session_settings_or_default(revived.worker().session_settings())
             .set_humanization_enabled(self.gate.humanize)
             .await;
-        if revived.worker().open_page(page.id.clone()).await.is_err() {
+        if worker_pool::tabs_or_default(revived.worker().tabs())
+            .open_page(page.id.clone())
+            .await
+            .is_err()
+        {
             return Err(self.finish(failure).await);
         }
         if let Some(url) = &page.url {
-            let _ = revived
-                .worker()
+            let _ = worker_pool::navigation_or_default(revived.worker().navigation())
                 .navigate(
                     &page.id,
                     &types::NavigateCommand {

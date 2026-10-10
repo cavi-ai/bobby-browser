@@ -54,46 +54,11 @@ impl BrowserWorker for DeadableWorker {
     fn worker_id(&self) -> WorkerId {
         self.id.clone()
     }
+
     fn profile_dir(&self) -> &Path {
         &self.profile
     }
-    async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
-        self.check()
-    }
-    async fn navigate(
-        &self,
-        _: &PageId,
-        _: &NavigateCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        self.check().map(|()| Vec::new())
-    }
-    async fn click(&self, _: &PageId, _: &ClickCommand) -> Result<Vec<Evidence>, CommandError> {
-        self.check().map(|()| Vec::new())
-    }
-    async fn type_text(
-        &self,
-        _: &PageId,
-        _: &TypeTextCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        self.check().map(|()| Vec::new())
-    }
-    async fn inspect(&self, _: &PageId, _: &InspectCommand) -> Result<Vec<Evidence>, CommandError> {
-        self.check().map(|()| Vec::new())
-    }
-    async fn a11y_snapshot(
-        &self,
-        _: &PageId,
-        _: &AccessibilitySnapshotCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        self.check().map(|()| Vec::new())
-    }
-    async fn form_snapshot(
-        &self,
-        _: &PageId,
-        _: Option<u32>,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        self.check().map(|()| Vec::new())
-    }
+
     async fn close(&self) -> Result<(), CommandError> {
         if !self.dead.load(Ordering::SeqCst) {
             return Ok(());
@@ -109,6 +74,78 @@ impl BrowserWorker for DeadableWorker {
             }),
             Death::HungClose => std::future::pending().await,
         }
+    }
+
+    fn tabs(&self) -> Option<&dyn worker_pool::TabsEngine> {
+        Some(self)
+    }
+
+    fn navigation(&self) -> Option<&dyn worker_pool::NavigationEngine> {
+        Some(self)
+    }
+
+    fn observation(&self) -> Option<&dyn worker_pool::ObservationEngine> {
+        Some(self)
+    }
+
+    fn input(&self) -> Option<&dyn worker_pool::InputEngine> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl worker_pool::TabsEngine for DeadableWorker {
+    async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
+        self.check()
+    }
+}
+
+#[async_trait]
+impl worker_pool::NavigationEngine for DeadableWorker {
+    async fn navigate(
+        &self,
+        _: &PageId,
+        _: &NavigateCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.check().map(|()| Vec::new())
+    }
+}
+
+#[async_trait]
+impl worker_pool::ObservationEngine for DeadableWorker {
+    async fn inspect(&self, _: &PageId, _: &InspectCommand) -> Result<Vec<Evidence>, CommandError> {
+        self.check().map(|()| Vec::new())
+    }
+
+    async fn a11y_snapshot(
+        &self,
+        _: &PageId,
+        _: &AccessibilitySnapshotCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.check().map(|()| Vec::new())
+    }
+
+    async fn form_snapshot(
+        &self,
+        _: &PageId,
+        _: Option<u32>,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.check().map(|()| Vec::new())
+    }
+}
+
+#[async_trait]
+impl worker_pool::InputEngine for DeadableWorker {
+    async fn click(&self, _: &PageId, _: &ClickCommand) -> Result<Vec<Evidence>, CommandError> {
+        self.check().map(|()| Vec::new())
+    }
+
+    async fn type_text(
+        &self,
+        _: &PageId,
+        _: &TypeTextCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.check().map(|()| Vec::new())
     }
 }
 

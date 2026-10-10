@@ -40,3 +40,10 @@ async fn site_regressions_hold_on_firefox() {
     }
     assert!(failures.is_empty(), "failing cases: {failures:?}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed headed Firefox and paired test profile"]
+async fn snapshot_scoped_behind_a_modal_reports_the_dialog() {
+    let rig = Rig::firefox().await;
+    cases::snapshot_scoped_behind_a_modal_reports_the_dialog(&rig).await;
+}

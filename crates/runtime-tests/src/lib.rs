@@ -354,12 +354,14 @@ pub async fn run_installed_firefox_workflow(
     .map_err(|error| workflow_error(ErrorCode::BrowserLaunchFailed, error))?;
     let worker = factory.launch(&SessionId::new()).await?;
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await?;
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await?;
 
     let mut operations = Vec::new();
     let mut retained = Vec::new();
     let operation_started = Instant::now();
-    let navigation = worker
+    let navigation = worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_id,
             &NavigateCommand {
@@ -378,7 +380,7 @@ pub async fn run_installed_firefox_workflow(
     )?);
 
     let operation_started = Instant::now();
-    let inspection = worker
+    let inspection = worker_pool::observation_or_default(worker.observation())
         .inspect(
             &page_id,
             &InspectCommand {
@@ -404,7 +406,7 @@ pub async fn run_installed_firefox_workflow(
         } else {
             format!("Bobby {action_number}")
         };
-        let action_evidence = worker
+        let action_evidence = worker_pool::input_or_default(worker.input())
             .type_text(
                 &page_id,
                 &TypeTextCommand {
@@ -416,7 +418,7 @@ pub async fn run_installed_firefox_workflow(
                 },
             )
             .await?;
-        worker
+        worker_pool::observation_or_default(worker.observation())
             .inspect(
                 &page_id,
                 &InspectCommand {
@@ -433,7 +435,7 @@ pub async fn run_installed_firefox_workflow(
     let typed_duration_ms = operation_started.elapsed().as_millis().max(1) as u64;
 
     let operation_started = Instant::now();
-    let clicked = worker
+    let clicked = worker_pool::input_or_default(worker.input())
         .click(
             &page_id,
             &ClickCommand {
@@ -573,13 +575,16 @@ pub async fn run_installed_firefox_behavioral_dogfood(
         }
     };
     let page_id = PageId::new();
-    if let Err(error) = worker.open_page(page_id.clone()).await {
+    if let Err(error) = worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+    {
         let _ = worker.close().await;
         terminate_firefox(&mut firefox).await;
         return Err(error);
     }
 
-    let navigated = worker
+    let navigated = worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_id,
             &NavigateCommand {
@@ -596,7 +601,7 @@ pub async fn run_installed_firefox_behavioral_dogfood(
     }
 
     let type_started = Instant::now();
-    let typed = worker
+    let typed = worker_pool::input_or_default(worker.input())
         .type_text(
             &page_id,
             &TypeTextCommand {
@@ -619,7 +624,7 @@ pub async fn run_installed_firefox_behavioral_dogfood(
     let type_duration_ms = type_started.elapsed().as_millis().max(1) as u64;
 
     let click_started = Instant::now();
-    let clicked = worker
+    let clicked = worker_pool::input_or_default(worker.input())
         .click(
             &page_id,
             &ClickCommand {
@@ -800,7 +805,7 @@ async fn wait_for_probe_report(
     page_id: &PageId,
 ) -> Result<serde_json::Value, CommandError> {
     for _ in 0..50 {
-        let evidence = worker
+        let evidence = worker_pool::observation_or_default(worker.observation())
             .inspect(
                 page_id,
                 &InspectCommand {
@@ -1501,7 +1506,7 @@ async fn wait_for_confirmation(
     page_id: &PageId,
 ) -> Result<(String, Vec<Evidence>), CommandError> {
     for _ in 0..50 {
-        let evidence = worker
+        let evidence = worker_pool::observation_or_default(worker.observation())
             .inspect(
                 page_id,
                 &InspectCommand {

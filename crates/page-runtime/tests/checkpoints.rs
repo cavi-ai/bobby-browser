@@ -311,12 +311,41 @@ impl BrowserWorker for RecoveryWorker {
     fn worker_id(&self) -> WorkerId {
         self.id.clone()
     }
+
     fn profile_dir(&self) -> &Path {
         &self.profile
     }
+
+    async fn close(&self) -> Result<(), CommandError> {
+        Ok(())
+    }
+
+    fn tabs(&self) -> Option<&dyn worker_pool::TabsEngine> {
+        Some(self)
+    }
+
+    fn navigation(&self) -> Option<&dyn worker_pool::NavigationEngine> {
+        Some(self)
+    }
+
+    fn observation(&self) -> Option<&dyn worker_pool::ObservationEngine> {
+        Some(self)
+    }
+
+    fn input(&self) -> Option<&dyn worker_pool::InputEngine> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl worker_pool::TabsEngine for RecoveryWorker {
     async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
         Ok(())
     }
+}
+
+#[async_trait]
+impl worker_pool::NavigationEngine for RecoveryWorker {
     async fn navigate(
         &self,
         _: &PageId,
@@ -329,6 +358,10 @@ impl BrowserWorker for RecoveryWorker {
             title: if self.matches { "Step Two" } else { "Wrong" }.into(),
         }])
     }
+}
+
+#[async_trait]
+impl worker_pool::ObservationEngine for RecoveryWorker {
     async fn inspect(
         &self,
         _: &PageId,
@@ -347,18 +380,20 @@ impl BrowserWorker for RecoveryWorker {
             html: None,
         }])
     }
+}
+
+#[async_trait]
+impl worker_pool::InputEngine for RecoveryWorker {
     async fn click(&self, _: &PageId, _: &ClickCommand) -> Result<Vec<Evidence>, CommandError> {
         Ok(Vec::new())
     }
+
     async fn type_text(
         &self,
         _: &PageId,
         _: &TypeTextCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         Ok(Vec::new())
-    }
-    async fn close(&self) -> Result<(), CommandError> {
-        Ok(())
     }
 }
 
