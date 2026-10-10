@@ -538,7 +538,18 @@ pub async fn read_jsonl_line<R>(reader: &mut R, max_bytes: u64) -> std::io::Resu
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
-    let mut bytes = Vec::new();
+    read_jsonl_line_buffered(reader, max_bytes, Vec::new()).await
+}
+
+async fn read_jsonl_line_buffered<R>(
+    reader: &mut R,
+    max_bytes: u64,
+    mut bytes: Vec<u8>,
+) -> std::io::Result<JsonlRead>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    bytes.clear();
     let read = reader
         .take(max_bytes.saturating_add(1))
         .read_until(b'\n', &mut bytes)
@@ -579,8 +590,9 @@ where
     let mut offset = 0u64;
     let mut bytes_read = 0u64;
     let mut number = 0usize;
+    let mut buffer = Vec::new();
     loop {
-        match read_jsonl_line(&mut reader, u64::MAX).await? {
+        match read_jsonl_line_buffered(&mut reader, u64::MAX, buffer).await? {
             JsonlRead::Eof => break,
             JsonlRead::TooLong => {
                 return Err(std::io::Error::new(
@@ -604,6 +616,7 @@ where
                     bytes: &bytes,
                 })?;
                 offset += bytes.len() as u64;
+                buffer = bytes;
             }
         }
     }
