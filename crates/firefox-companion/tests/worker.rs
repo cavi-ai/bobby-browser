@@ -1894,7 +1894,7 @@ fn native_element_lookups(calls: &[BidiCall]) -> usize {
             call.method == "script.evaluate"
                 && call.params["expression"]
                     .as_str()
-                    .is_some_and(|expression| expression.starts_with("document.querySelector("))
+                    .is_some_and(|expression| expression.starts_with("((selector)=>"))
         })
         .count()
 }

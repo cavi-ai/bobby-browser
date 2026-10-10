@@ -61,6 +61,96 @@ async fn round_trip_persists_site_structure() {
 }
 
 #[tokio::test]
+async fn long_site_keys_with_valid_destination_names_persist_and_remain_erasable() {
+    let temp = tempfile::tempdir().unwrap();
+    let origin = format!(
+        "https://{}.s3.dualstack.ap-southeast-2.amazonaws.com",
+        "a".repeat(63)
+    );
+    let key = context_store::site_key(&format!("{origin}/form")).unwrap();
+    assert_eq!(key, origin);
+    let name = format!("{}.json", hex::encode(key.as_bytes()));
+    assert!(name.len() <= 255);
+    assert!(
+        key.len() * 2 + 42 > 255,
+        "fixture must exceed the old temporary-name limit"
+    );
+    let (store, _) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
+    let mut expected = site(&["Fresh", "Expired"], 100);
+    expected
+        .pages
+        .get_mut("/login")
+        .unwrap()
+        .forms
+        .get_mut("login")
+        .unwrap()
+        .controls[1]
+        .intents
+        .get_mut("fill")
+        .unwrap()
+        .last_verified_day = Some(1);
+    store.upsert_site(&key, expected.clone()).await;
+    store.upsert_site("other", site(&["Other"], 100)).await;
+    assert!(
+        store.flush().await.is_empty(),
+        "a valid destination failed to persist"
+    );
+    let path = store.root().join(name);
+    assert!(context_store::inspect_site_file(&path, Default::default()).is_ok());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    drop(store);
+    let (store, report) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
+    assert_eq!(report.sites_loaded, 2);
+    assert!(report.skipped.is_empty());
+    assert_eq!(store.site(&key).await, Some(expected.clone()));
+    assert_eq!(store.sweep(30, 100).await.unwrap(), 1);
+    expected
+        .pages
+        .get_mut("/login")
+        .unwrap()
+        .forms
+        .get_mut("login")
+        .unwrap()
+        .controls
+        .pop();
+    assert_eq!(store.site(&key).await, Some(expected.clone()));
+    assert!(context_store::inspect_site_file(&path, Default::default()).is_ok());
+    store.forget(&key).await.unwrap();
+    assert!(!path.exists());
+
+    // Force a rename failure after creating the temporary file. It must be
+    // removed and the dirty update must remain retryable.
+    store.upsert_site(&key, expected.clone()).await;
+    std::fs::create_dir(&path).unwrap();
+    assert_eq!(store.flush().await, vec![key.clone()]);
+    for entry in std::fs::read_dir(store.root()).unwrap() {
+        assert_ne!(
+            entry
+                .unwrap()
+                .path()
+                .extension()
+                .and_then(|ext| ext.to_str()),
+            Some("tmp")
+        );
+    }
+    std::fs::remove_dir(&path).unwrap();
+    assert!(store.flush().await.is_empty());
+    drop(store);
+    let (store, report) = ContextStore::open(temp.path(), "profile-a").await.unwrap();
+    assert_eq!(report.sites_loaded, 2);
+    assert_eq!(store.site(&key).await, Some(expected));
+    store.forget(&key).await.unwrap();
+    assert_eq!(store.list_sites().await, vec!["other"]);
+}
+
+#[tokio::test]
 async fn corrupt_and_unsupported_files_are_skipped_and_reported() {
     let temp = tempfile::tempdir().unwrap();
     // Literal UTF-8 hex encoding of `profile-a`; keep this independent of the
