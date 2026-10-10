@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Snapshots report form controls missing from the accessibility tree only when the tree is whole and unscoped.
 - Snapshots give tabs, menu items, options and tree items targets.
 - `intent_follow` fails `obstructionSuspected` when a dialog opens instead of its expected state, and `intent_submit_and_verify` names that dialog; the evidence lists it.
 - `intent_dismiss_obstruction` completes once the clicked control is gone, even when another control with the same name appears.

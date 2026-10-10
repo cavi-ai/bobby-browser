@@ -2114,7 +2114,8 @@ impl crate::ObservationEngine for ChromiumWorker {
         if emitted < max_nodes {
             truncated |= descend_a11y_iframes(&page, &mut nodes, max_nodes - emitted).await;
         }
-        let controls_omitted = if a11y_contains_form_control(&nodes) {
+        // Only a whole tree can show that a control is missing from it.
+        let controls_omitted = if truncated || a11y_contains_form_control(&nodes) {
             false
         } else {
             match page
