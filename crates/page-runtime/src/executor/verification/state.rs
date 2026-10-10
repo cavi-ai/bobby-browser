@@ -187,3 +187,143 @@ impl CommandVerifier for State {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_support::{command, evidence, Fixture};
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn download_requires_matching_durable_byte_count_and_digest() {
+        let fixture = Fixture::new().await;
+        let command = command(
+            "downloadUrl",
+            json!({"url":"https://example.test/file", "maxBytes":1024}),
+        );
+        let download = Evidence::Download {
+            filename: "file.bin".into(),
+            path: "artifact://file".into(),
+            bytes: 7,
+            sha256: "a".repeat(64),
+            saved_to: None,
+        };
+        for (bytes, sha256, accepted) in [
+            (Some(7), Some("a".repeat(64)), true),
+            (Some(8), Some("a".repeat(64)), false),
+            (Some(7), Some("b".repeat(64)), false),
+            (None, None, false),
+        ] {
+            let execution = evidence(
+                json!({"kind":"executionPath", "path":"directHttp", "reason":"eligibleExplicitDownload",
+                "stateVersion":0, "elapsedMs":1, "bytes":bytes, "sha256":sha256}),
+            );
+            assert_eq!(
+                fixture
+                    .verify(&State, &command, vec![download.clone(), execution])
+                    .await
+                    .is_ok(),
+                accepted
+            );
+        }
+        assert!(fixture
+            .verify(&State, &command, vec![download])
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn focus_and_media_require_exact_applied_configuration() {
+        let fixture = Fixture::new().await;
+        let focus = command("setFocusEmulation", json!({"enabled":false}));
+        for (value, accepted) in [("false", true), ("true", false), ("", false)] {
+            let evidence = vec![Evidence::Configuration {
+                name: "focusEmulation".into(),
+                value: value.into(),
+            }];
+            assert_eq!(
+                fixture.verify(&State, &focus, evidence).await.is_ok(),
+                accepted
+            );
+        }
+        let media = command("setEmulatedMedia", json!({"media":"screen","features":{}}));
+        let PrimitiveCommand::SetEmulatedMedia(input) = &media else {
+            unreachable!()
+        };
+        let expected = serde_json::to_string(input).unwrap();
+        assert!(fixture
+            .verify(
+                &State,
+                &media,
+                vec![Evidence::Configuration {
+                    name: "emulatedMedia".into(),
+                    value: expected
+                }]
+            )
+            .await
+            .is_ok());
+        assert!(fixture
+            .verify(
+                &State,
+                &media,
+                vec![Evidence::Configuration {
+                    name: "emulatedMedia".into(),
+                    value: "{}".into()
+                }]
+            )
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn accessibility_and_page_state_refuse_unrelated_evidence() {
+        let fixture = Fixture::new().await;
+        for command in [
+            command("accessibilitySnapshot", json!({"maxNodes":32})),
+            command("listPages", json!(null)),
+        ] {
+            for evidence in [
+                vec![],
+                vec![Evidence::Element {
+                    selector: "button".into(),
+                    text: None,
+                }],
+            ] {
+                assert_eq!(
+                    fixture
+                        .verify(&State, &command, evidence)
+                        .await
+                        .unwrap_err()
+                        .code,
+                    ErrorCode::VerificationFailed
+                );
+            }
+        }
+        let command = command("accessibilitySnapshot", json!({"maxNodes":32}));
+        let snapshot = Evidence::AccessibilitySnapshot {
+            page_id: fixture.envelope.page_id.clone().unwrap(),
+            nodes: vec![],
+            truncated: false,
+        };
+        assert_eq!(
+            fixture
+                .verify(&State, &command, vec![snapshot.clone()])
+                .await
+                .unwrap(),
+            vec![snapshot]
+        );
+        assert!(fixture
+            .verify(
+                &State,
+                &PrimitiveCommand::WaitFor(WaitForCommand {
+                    condition: WaitCondition::Url {
+                        matcher: TextMatch::Exact("https://example.test".into())
+                    },
+                    timeout_ms: 1,
+                }),
+                vec![]
+            )
+            .await
+            .is_err());
+    }
+}

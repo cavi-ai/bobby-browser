@@ -5033,6 +5033,7 @@ fn located(found: bool, ambiguous: bool) -> TargetLocation {
         ambiguous,
         css_path: found.then(|| "main > a".to_owned()),
         role: found.then(|| "link".to_owned()),
+        input_type: None,
         name: found.then(|| "Show all".to_owned()),
         disabled: false,
     }
@@ -5103,6 +5104,49 @@ async fn observer_that_cannot_locate_keeps_the_truncation_error() {
         .await
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::ResourceExhausted);
+}
+
+#[tokio::test]
+async fn pinned_target_names_the_located_element_by_its_path() {
+    let (worker, page, _) = large_page_worker(Some(located(true, false))).await;
+    let pinned = worker_pool::observation_or_default(worker.observation())
+        .pin_target(&page, &show_all_link())
+        .await;
+    assert_eq!(pinned.css.as_deref(), Some("main > a"));
+    assert_eq!(pinned.role, None);
+    assert_eq!(pinned.accessible_name, None);
+}
+
+#[tokio::test]
+async fn css_target_candidates_come_from_the_companion() {
+    let path = TargetSpec {
+        css: Some("main > a".into()),
+        ..TargetSpec::default()
+    };
+    let (worker, page, _) = large_page_worker(Some(located(true, false))).await;
+    let candidates = worker_pool::observation_or_default(worker.observation())
+        .collect_candidates(&page, &path)
+        .await
+        .unwrap();
+    let named: Vec<_> = candidates
+        .iter()
+        .filter(|candidate| candidate.css.as_deref() == Some("main > a"))
+        .collect();
+    assert_eq!(named.len(), 1, "{candidates:?}");
+    assert!(
+        candidates.iter().any(|candidate| candidate.css.is_none()),
+        "the accessibility candidates stay in the set"
+    );
+
+    let (worker, page, _) = large_page_worker(Some(located(false, false))).await;
+    let candidates = worker_pool::observation_or_default(worker.observation())
+        .collect_candidates(&page, &path)
+        .await
+        .unwrap();
+    assert!(
+        candidates.iter().all(|candidate| candidate.css.is_none()),
+        "a hidden or detached element adds no candidate: {candidates:?}"
+    );
 }
 
 #[tokio::test]

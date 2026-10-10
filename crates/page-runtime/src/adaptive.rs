@@ -352,6 +352,12 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
             .await
     }
 
+    async fn pin_target(&self, page_id: &PageId, target: &TargetSpec) -> TargetSpec {
+        worker_pool::observation_or_default(self.lease.worker().observation())
+            .pin_target(page_id, target)
+            .await
+    }
+
     async fn upload_files(
         &self,
         page_id: &PageId,

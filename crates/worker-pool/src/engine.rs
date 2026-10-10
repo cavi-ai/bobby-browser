@@ -121,6 +121,12 @@ pub trait ObservationEngine: Send + Sync {
         Err(unsupported_error())
     }
 
+    /// A target naming only the element resolved now. Workers whose
+    /// candidates carry element identity return the original target.
+    async fn pin_target(&self, _page_id: &PageId, target: &TargetSpec) -> TargetSpec {
+        target.clone()
+    }
+
     /// Best-effort accessible identity of the interactive element at viewport
     /// point (x, y): role + name, matching the shape a11y candidates carry.
     /// Used by the vision corpus collector to ground a verified click back to

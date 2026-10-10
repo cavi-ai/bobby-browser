@@ -9,6 +9,8 @@ mod page;
 mod runtime;
 mod support;
 mod target;
+#[cfg(test)]
+mod tests;
 
 pub(super) async fn dispatch(
     connection: &CdpConnection,

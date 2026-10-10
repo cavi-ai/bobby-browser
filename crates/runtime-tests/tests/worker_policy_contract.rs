@@ -1,7 +1,7 @@
-//! One browser-policy contract through the production runtime on both engines.
+//! Shared browser-policy contracts through the production runtime on both engines.
 mod support;
 
-use serde_json::json;
+use serde_json::{json, Value};
 use std::time::Duration;
 use support::rig::{Live, Rig};
 use test_site::{FixtureSite, Route};
@@ -107,4 +107,179 @@ async fn quiet_window_chromium() {
 #[ignore = "requires installed Firefox and paired test profile"]
 async fn quiet_window_firefox() {
     quiet_window_contract(Engine::Firefox).await;
+}
+
+fn evidence<'a>(outcome: &'a Value, kind: &str) -> &'a Value {
+    outcome["evidence"]
+        .as_array()
+        .expect("command evidence")
+        .iter()
+        .find(|item| item["kind"] == kind)
+        .unwrap_or_else(|| panic!("missing {kind} evidence: {outcome}"))
+}
+
+fn assert_materialized_uploads(rig: &Rig, session_id: &Value, expected: usize) {
+    let directory = rig
+        .storage_root()
+        .join("downloads")
+        .join(session_id.as_str().unwrap())
+        .join("upload-artifacts");
+    let count = if directory.exists() {
+        std::fs::read_dir(directory).unwrap().count()
+    } else {
+        0
+    };
+    assert_eq!(count, expected, "unexpected retained artifact uploads");
+}
+
+async fn artifact_upload_contract(engine: Engine) {
+    const PAYLOAD: &str = "artifact upload contract: café\nsecond line\n";
+    let site = FixtureSite::spawn(vec![
+        ("/", Route::Html(
+            "<!doctype html><title>Artifact upload contract</title>\
+             <label>Resume<input id='file' type='file'></label>\
+             <button onclick=\"document.querySelector('#status').textContent = 'Sending'; document.querySelector('#file').files[0].text().then(body => fetch('/received', {method:'POST', body})).then(() => document.querySelector('#status').textContent = 'Uploaded').catch(error => document.querySelector('#status').textContent = 'Read failed: ' + error.message)\">Send</button>\
+             <p id='status'>Pending</p>".into(),
+        )),
+        ("/received", Route::Raw { content_type: "text/plain", body: "ok".into() }),
+    ]).await;
+    let rig = match engine {
+        Engine::Chromium => Rig::chromium().await,
+        Engine::Firefox => Rig::firefox().await,
+    };
+    let live = Live::open(&rig, &site.url("/")).await;
+    let record = rig
+        .seed_artifact(&live.session_id, &live.page_id, PAYLOAD.as_bytes())
+        .await;
+    let id = &record.artifact_id;
+    let source = format!("artifact://{id}");
+    let uploaded = live
+        .call(
+            "intent_fill",
+            json!({"purpose":"Resume", "hints":{"role":"button", "accessibleName":"Resume"},
+                "value":{"kind":"setFiles", "paths":[source]}}),
+        )
+        .await;
+    assert_eq!(uploaded["status"], "completed", "{uploaded}");
+    assert_eq!(
+        evidence(&uploaded, "upload")["paths"],
+        json!([types::upload_source_reference(&source)])
+    );
+    assert!(
+        !uploaded
+            .to_string()
+            .contains(rig.storage_root().to_str().unwrap()),
+        "upload evidence disclosed a storage path: {uploaded}"
+    );
+    assert_materialized_uploads(&rig, &live.session_id, 1);
+    let reused = live
+        .call(
+            "upload_files",
+            json!({"selector":"#file", "paths":[source]}),
+        )
+        .await;
+    assert_eq!(reused["status"], "completed", "{reused}");
+    assert_materialized_uploads(&rig, &live.session_id, 1);
+
+    let sent = live.call("click", json!({"selector":"button"})).await;
+    assert_eq!(sent["status"], "completed", "{sent}");
+    let waited = live.call("wait_for", json!({
+        "condition":{"kind":"text", "target":{"css":"#status"}, "matcher":{"kind":"regex", "value":"^(Uploaded|Read failed:.*)$"}},
+        "timeoutMs":5000
+    })).await;
+    assert_eq!(waited["status"], "completed", "{waited}");
+    let status = live.call("inspect", json!({"selector":"#status"})).await;
+    assert!(
+        status.to_string().contains("Uploaded"),
+        "browser file read failed: {status}"
+    );
+    assert_eq!(
+        site.bodies("/received"),
+        vec![PAYLOAD.as_bytes().to_vec()],
+        "the browser must transmit the exact artifact bytes after file selection returns"
+    );
+
+    // A second session on the same authenticated runtime cannot use the handle.
+    let other = Live::open(&rig, &site.url("/")).await;
+    let refused = other
+        .call(
+            "upload_files",
+            json!({"selector":"#file", "paths":[source]}),
+        )
+        .await;
+    assert_eq!(refused["status"], "policyDenied", "{refused}");
+    assert_eq!(refused["error"]["code"], "policyDenied", "{refused}");
+    assert_materialized_uploads(&rig, &other.session_id, 0);
+    other.close().await;
+
+    let secondary = rig
+        .seed_artifact(&live.session_id, &live.page_id, b"secondary artifact")
+        .await;
+    let secondary_source = format!("artifact://{}", secondary.artifact_id);
+
+    // Modify the fixture-owned artifact behind its valid manifest. Admission
+    // must re-hash bytes instead of trusting the content-addressed filename.
+    let artifact = rig
+        .storage_root()
+        .join("artifacts")
+        .join(live.session_id.as_str().unwrap())
+        .join(id);
+    let manifest: Value =
+        serde_json::from_slice(&std::fs::read(artifact.join(format!("{id}.json"))).unwrap())
+            .unwrap();
+    std::fs::write(
+        artifact.join(manifest["filename"].as_str().unwrap()),
+        b"tampered",
+    )
+    .unwrap();
+    for paths in [
+        vec![source.clone()],
+        vec![secondary_source, source.clone()],
+        vec!["artifact://../outside".into()],
+        vec![format!("artifact://{}", "0".repeat(64))],
+    ] {
+        let refused = live
+            .call("upload_files", json!({"selector":"#file", "paths":paths}))
+            .await;
+        assert_eq!(refused["status"], "policyDenied", "{refused}");
+        assert_eq!(refused["error"]["code"], "policyDenied", "{refused}");
+        assert!(
+            !refused
+                .to_string()
+                .contains(rig.storage_root().to_str().unwrap()),
+            "upload refusal disclosed a storage path: {refused}"
+        );
+        assert_materialized_uploads(&rig, &live.session_id, 1);
+    }
+    assert_eq!(
+        site.hits("/received"),
+        1,
+        "refused uploads must not submit data"
+    );
+    let sent = live.call("click", json!({"selector":"button"})).await;
+    assert_eq!(sent["status"], "completed", "{sent}");
+    let waited = live.call("wait_for", json!({
+        "condition":{"kind":"text", "target":{"css":"#status"}, "matcher":{"kind":"exact", "value":"Uploaded"}}, "timeoutMs":5000
+    })).await;
+    assert_eq!(waited["status"], "completed", "{waited}");
+    assert_eq!(
+        site.bodies("/received"),
+        vec![PAYLOAD.as_bytes().to_vec(); 2],
+        "refused sources must leave the previously selected file unchanged"
+    );
+    let session_id = live.session_id.clone();
+    live.close().await;
+    assert_materialized_uploads(&rig, &session_id, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn artifact_upload_chromium() {
+    artifact_upload_contract(Engine::Chromium).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Firefox and paired test profile"]
+async fn artifact_upload_firefox() {
+    artifact_upload_contract(Engine::Firefox).await;
 }
