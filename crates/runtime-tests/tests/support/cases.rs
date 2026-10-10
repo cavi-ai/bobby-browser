@@ -30,6 +30,7 @@ macro_rules! every_case {
             scoped_snapshot_targets_act_on_the_scoped_element,
             snapshot_scoped_behind_a_modal_reports_the_dialog,
             snapshot_targets_act_on_the_described_element,
+            snapshot_targets_cover_widget_items,
             snapshot_target_types_into_a_slot_labelled_field,
             snapshot_targets_resolve_beside_a_modal_dialog,
             type_text_enter_reports_the_settled_page,
@@ -2402,6 +2403,51 @@ pub async fn hidden_state_holds_for_a_removed_control(rig: &Rig) {
         assert_eq!(
             followed["status"], "completed",
             "{name} did not reach the hidden state: {followed}"
+        );
+    }
+    live.close().await;
+}
+
+/// Tabs, menu items, options and tree items get snapshot targets, and each
+/// target clicks the element it names.
+pub async fn snapshot_targets_cover_widget_items(rig: &Rig) {
+    let body = r##"<main>
+          <div role="tablist" aria-label="Views"><div role="tab" tabindex="0" data-id="tab">Replies</div></div>
+          <div role="menu" aria-label="Order">
+            <div role="menuitem" tabindex="-1" data-id="menuitem">Newest</div>
+            <div role="menuitemcheckbox" aria-checked="false" tabindex="-1" data-id="menuitemcheckbox">Compact</div>
+            <div role="menuitemradio" aria-checked="false" tabindex="-1" data-id="menuitemradio">Oldest</div></div>
+          <div role="listbox" aria-label="Sizes"><div role="option" aria-selected="false" data-id="option">Large</div></div>
+          <div role="tree" aria-label="Files"><div role="treeitem" data-id="treeitem">Docs</div></div>
+          <p role="status" aria-label="idle" id="status"></p></main>
+        <script>
+          document.addEventListener("click", (event) => {
+            const reached = event.target.closest("[data-id]");
+            if (reached) document.getElementById("status").setAttribute("aria-label", "acted " + reached.dataset.id);
+          }, true);
+        </script>"##;
+    let site = FixtureSite::spawn(vec![("/widgets", Route::Html(page("Widgets", body)))]).await;
+    let live = Live::open(rig, &site.url("/widgets")).await;
+    let snapshot = live.snapshot(json!({})).await;
+    for (role, name, reached) in [
+        ("tab", "Replies", "tab"),
+        ("menuitem", "Newest", "menuitem"),
+        ("menuitemcheckbox", "Compact", "menuitemcheckbox"),
+        ("menuitemradio", "Oldest", "menuitemradio"),
+        ("option", "Large", "option"),
+        ("treeitem", "Docs", "treeitem"),
+    ] {
+        let target = find_node(&snapshot, role, Some(name))
+            .and_then(|node| node.get("target"))
+            .unwrap_or_else(|| panic!("no target for {role} {name:?}: {snapshot}"))
+            .clone();
+        let clicked = live.call("click", json!({"target":target})).await;
+        assert_eq!(clicked["status"], "completed", "click {target}: {clicked}");
+        let after = live.snapshot(json!({})).await;
+        let status = format!("acted {reached}");
+        assert!(
+            find_node(&after, "status", Some(&status)).is_some(),
+            "click {target} did not reach {reached}: {after}"
         );
     }
     live.close().await;
