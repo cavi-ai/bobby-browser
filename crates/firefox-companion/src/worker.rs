@@ -4245,14 +4245,17 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
             )
             .await?;
         worker_pool::annotate_accessibility_targets(&mut nodes);
-        let controls_omitted = if accessibility_contains_form_control(&nodes) {
-            false
-        } else {
-            worker_pool::ObservationEngine::form_snapshot(self, page_id, Some(512))
-                .await
-                .ok()
-                .is_some_and(|evidence| {
-                    evidence.iter().any(|item| {
+        // Only a whole, unscoped tree can show that a control is missing from it.
+        let controls_omitted =
+            if truncated || command.target.is_some() || accessibility_contains_form_control(&nodes)
+            {
+                false
+            } else {
+                worker_pool::ObservationEngine::form_snapshot(self, page_id, Some(512))
+                    .await
+                    .ok()
+                    .is_some_and(|evidence| {
+                        evidence.iter().any(|item| {
                         matches!(
                             item,
                             Evidence::FormSnapshot { snapshot }
@@ -4260,8 +4263,8 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
                                     || snapshot.forms.iter().any(|form| !form.controls.is_empty())
                         )
                     })
-                })
-        };
+                    })
+            };
         let mut evidence = vec![
             Evidence::AccessibilitySnapshot {
                 page_id: page_id.clone(),

@@ -56,6 +56,7 @@ macro_rules! every_case {
             actions_fail_a_missing_target_within_one_bound,
             click_refuses_a_covered_target,
             covered_intent_names_the_covering_dialog,
+            omitted_controls_need_a_whole_tree,
             intent_extract_reads_href_and_attributes,
             hidden_state_holds_for_a_removed_control,
             intent_follow_reports_a_dialog_that_opened,
@@ -2520,6 +2521,57 @@ pub async fn covered_intent_names_the_covering_dialog(rig: &Rig) {
     assert!(
         followed.to_string().contains("Notice"),
         "the evidence does not name the covering dialog: {followed}"
+    );
+    live.close().await;
+}
+
+/// A snapshot reports form controls missing from the accessibility tree only
+/// when its tree is whole: never when truncated or scoped to a region.
+pub async fn omitted_controls_need_a_whole_tree(rig: &Rig) {
+    let mut links = String::new();
+    for index in 0..40 {
+        links.push_str(&format!(r##"<a href="#l{index}">Link {index}</a>"##));
+    }
+    let shown = page(
+        "Shown",
+        &format!(
+            r#"<main><nav aria-label="Links">{links}</nav>
+            <label>Language <select><option>English</option></select></label></main>"#
+        ),
+    );
+    let hidden = page(
+        "Hidden",
+        r#"<main><h1>Hidden</h1><div aria-hidden="true"><input aria-label="Code"></div></main>"#,
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/shown", Route::Html(shown)),
+        ("/hidden", Route::Html(hidden)),
+    ])
+    .await;
+    let claims = |snapshot: &Value| {
+        snapshot
+            .to_string()
+            .contains("accessibilityControlsOmitted")
+    };
+    let live = Live::open(rig, &site.url("/shown")).await;
+    let truncated = live.snapshot(json!({"maxNodes":10})).await;
+    assert!(
+        !claims(&truncated),
+        "a truncated snapshot claimed omitted controls: {truncated}"
+    );
+    let scoped = live
+        .snapshot(json!({"target":{"role":"navigation","accessibleName":"Links"}}))
+        .await;
+    assert!(
+        !claims(&scoped),
+        "a scoped snapshot claimed omitted controls: {scoped}"
+    );
+    live.close().await;
+    let live = Live::open(rig, &site.url("/hidden")).await;
+    let whole = live.snapshot(json!({})).await;
+    assert!(
+        claims(&whole),
+        "a whole snapshot missed controls hidden from the tree: {whole}"
     );
     live.close().await;
 }
