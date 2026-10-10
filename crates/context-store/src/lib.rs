@@ -801,11 +801,12 @@ impl ContextStore {
             .check_envelope(&envelope)
             .map_err(|_| ContextStoreError::ResourceLimit("site file or structure limit"))?;
         let destination = self.path(key);
-        let temporary = self.root.join(format!(
-            ".{}.{}.tmp",
-            encode_component(key),
-            uuid::Uuid::new_v4()
-        ));
+        // Keep the temporary component bounded even when the destination is
+        // close to the filesystem's filename limit. UUID + create_new keeps
+        // ownership exclusive without duplicating the encoded site key.
+        let temporary = self
+            .root
+            .join(format!(".context.{}.tmp", uuid::Uuid::new_v4()));
         let result = async {
             let mut options = OpenOptions::new();
             options.create_new(true).write(true);
