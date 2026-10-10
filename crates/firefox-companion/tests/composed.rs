@@ -379,8 +379,11 @@ async fn real_server_binding_and_worker_close_release_the_coordinator_page_id() 
         },
     );
     let worker = selected.launch(&session_id).await.unwrap();
-    worker.open_page(expected_page.clone()).await.unwrap();
-    let evidence = worker
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(expected_page.clone())
+        .await
+        .unwrap();
+    let evidence = worker_pool::observation_or_default(worker.observation())
         .inspect(
             &expected_page,
             &InspectCommand {
@@ -399,7 +402,7 @@ async fn real_server_binding_and_worker_close_release_the_coordinator_page_id() 
                 && text == "Selector scoped text"
                 && html.as_deref() == Some("<section id=\"scoped\">Selector scoped text</section>")
     )));
-    let typed = worker
+    let typed = worker_pool::input_or_default(worker.input())
         .type_text(
             &expected_page,
             &TypeTextCommand {
@@ -412,7 +415,7 @@ async fn real_server_binding_and_worker_close_release_the_coordinator_page_id() 
         )
         .await
         .unwrap();
-    let clicked = worker
+    let clicked = worker_pool::input_or_default(worker.input())
         .click(
             &expected_page,
             &ClickCommand {

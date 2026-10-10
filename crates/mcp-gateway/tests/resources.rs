@@ -48,12 +48,64 @@ impl BrowserWorker for ScreenshotWorker {
     fn worker_id(&self) -> WorkerId {
         self.id.clone()
     }
+
     fn profile_dir(&self) -> &Path {
         &self.profile
     }
+
+    async fn close(&self) -> Result<(), CommandError> {
+        Ok(())
+    }
+
+    fn tabs(&self) -> Option<&dyn worker_pool::TabsEngine> {
+        Some(self)
+    }
+
+    fn navigation(&self) -> Option<&dyn worker_pool::NavigationEngine> {
+        Some(self)
+    }
+
+    fn observation(&self) -> Option<&dyn worker_pool::ObservationEngine> {
+        Some(self)
+    }
+
+    fn input(&self) -> Option<&dyn worker_pool::InputEngine> {
+        Some(self)
+    }
+
+    fn events(&self) -> Option<&dyn worker_pool::EventsEngine> {
+        Some(self)
+    }
+
+    fn capture(&self) -> Option<&dyn worker_pool::CaptureEngine> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl worker_pool::TabsEngine for ScreenshotWorker {
     async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
         Ok(())
     }
+
+    async fn close_page_command(
+        &self,
+        command: &ClosePageCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Ok(vec![Evidence::Page {
+            page_id: command.page_id.clone(),
+            url: "about:blank".to_owned(),
+            title: "Fixture page".to_owned(),
+        }])
+    }
+
+    async fn list_pages(&self, _: &ListPagesCommand) -> Result<Vec<Evidence>, CommandError> {
+        Ok(vec![Evidence::Pages { pages: vec![] }])
+    }
+}
+
+#[async_trait]
+impl worker_pool::NavigationEngine for ScreenshotWorker {
     async fn navigate(
         &self,
         _: &PageId,
@@ -67,12 +119,21 @@ impl BrowserWorker for ScreenshotWorker {
             title: "Fixture page".to_owned(),
         }])
     }
+}
+
+#[async_trait]
+impl worker_pool::ObservationEngine for ScreenshotWorker {
     async fn inspect(&self, _: &PageId, _: &InspectCommand) -> Result<Vec<Evidence>, CommandError> {
         Ok(vec![])
     }
+}
+
+#[async_trait]
+impl worker_pool::InputEngine for ScreenshotWorker {
     async fn click(&self, _: &PageId, _: &ClickCommand) -> Result<Vec<Evidence>, CommandError> {
         Ok(vec![])
     }
+
     async fn type_text(
         &self,
         _: &PageId,
@@ -80,6 +141,27 @@ impl BrowserWorker for ScreenshotWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         Ok(vec![])
     }
+}
+
+#[async_trait]
+impl worker_pool::EventsEngine for ScreenshotWorker {
+    async fn click_and_wait_for_download(
+        &self,
+        _: &PageId,
+        _: &ClickAndWaitForDownloadCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Ok(vec![Evidence::Download {
+            filename: "fixture.txt".to_owned(),
+            path: self.download_path.to_string_lossy().into_owned(),
+            bytes: DOWNLOAD_BYTES.len() as u64,
+            sha256: hex::encode(Sha256::digest(DOWNLOAD_BYTES)),
+            saved_to: None,
+        }])
+    }
+}
+
+#[async_trait]
+impl worker_pool::CaptureEngine for ScreenshotWorker {
     async fn capture_screenshot(
         &self,
         page_id: &PageId,
@@ -102,35 +184,6 @@ impl BrowserWorker for ScreenshotWorker {
             });
         }
         Ok(evidence)
-    }
-    async fn click_and_wait_for_download(
-        &self,
-        _: &PageId,
-        _: &ClickAndWaitForDownloadCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![Evidence::Download {
-            filename: "fixture.txt".to_owned(),
-            path: self.download_path.to_string_lossy().into_owned(),
-            bytes: DOWNLOAD_BYTES.len() as u64,
-            sha256: hex::encode(Sha256::digest(DOWNLOAD_BYTES)),
-            saved_to: None,
-        }])
-    }
-    async fn close_page_command(
-        &self,
-        command: &ClosePageCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![Evidence::Page {
-            page_id: command.page_id.clone(),
-            url: "about:blank".to_owned(),
-            title: "Fixture page".to_owned(),
-        }])
-    }
-    async fn list_pages(&self, _: &ListPagesCommand) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![Evidence::Pages { pages: vec![] }])
-    }
-    async fn close(&self) -> Result<(), CommandError> {
-        Ok(())
     }
 }
 

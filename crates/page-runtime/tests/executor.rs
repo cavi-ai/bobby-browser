@@ -23,6 +23,7 @@ use workflow_journal::{
 
 #[derive(Clone, Copy)]
 enum DriverMode {
+    CookieOnly,
     Succeed,
     FailInspect,
     SlowInspect,
@@ -165,9 +166,11 @@ impl BrowserWorker for FakeWorker {
     fn worker_id(&self) -> WorkerId {
         self.id.clone()
     }
+
     fn profile_dir(&self) -> &Path {
         &self.profile
     }
+
     async fn reconnect_live_process(&self) -> Result<Vec<Evidence>, CommandError> {
         if !matches!(
             self.mode,
@@ -186,6 +189,37 @@ impl BrowserWorker for FakeWorker {
         Ok(Vec::new())
     }
 
+    async fn close(&self) -> Result<(), CommandError> {
+        Ok(())
+    }
+
+    fn tabs(&self) -> Option<&dyn worker_pool::TabsEngine> {
+        Some(self)
+    }
+
+    fn navigation(&self) -> Option<&dyn worker_pool::NavigationEngine> {
+        Some(self)
+    }
+
+    fn observation(&self) -> Option<&dyn worker_pool::ObservationEngine> {
+        Some(self)
+    }
+
+    fn input(&self) -> Option<&dyn worker_pool::InputEngine> {
+        Some(self)
+    }
+
+    fn web_state(&self) -> Option<&dyn worker_pool::WebStateEngine> {
+        Some(self)
+    }
+
+    fn wait_provider(&self) -> Option<&dyn worker_pool::WaitProvider> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl worker_pool::TabsEngine for FakeWorker {
     async fn list_pages(&self, _: &types::ListPagesCommand) -> Result<Vec<Evidence>, CommandError> {
         if matches!(self.mode, DriverMode::TransportResetReattachesPageClosed) {
             // Before reattach the transport is genuinely broken, same as
@@ -214,6 +248,7 @@ impl BrowserWorker for FakeWorker {
         }
         Err(driver_failure())
     }
+
     async fn open_page(&self, page_id: PageId) -> Result<(), CommandError> {
         if matches!(self.mode, DriverMode::DeadOnOpen) {
             return Err(CommandError {
@@ -226,6 +261,10 @@ impl BrowserWorker for FakeWorker {
         *self.known_page.lock().await = Some(page_id);
         Ok(())
     }
+}
+
+#[async_trait]
+impl worker_pool::NavigationEngine for FakeWorker {
     async fn navigate(
         &self,
         _: &PageId,
@@ -240,6 +279,10 @@ impl BrowserWorker for FakeWorker {
             title: "Fixture".into(),
         }])
     }
+}
+
+#[async_trait]
+impl worker_pool::ObservationEngine for FakeWorker {
     async fn inspect(
         &self,
         _: &PageId,
@@ -301,6 +344,46 @@ impl BrowserWorker for FakeWorker {
             html: None,
         }])
     }
+
+    async fn collect_candidates(
+        &self,
+        _: &PageId,
+        target: &TargetSpec,
+    ) -> Result<Vec<dom_engine::Candidate>, CommandError> {
+        self.events
+            .lock()
+            .await
+            .push("browser:collect_candidates".into());
+        let name = target
+            .accessible_name
+            .clone()
+            .or_else(|| match &target.text {
+                Some(TextMatch::Contains(text) | TextMatch::Exact(text)) => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "Submit".into());
+        Ok(vec![dom_engine::Candidate {
+            id: "submit".into(),
+            css: Some("#submit".into()),
+            tag: None,
+            test_id: None,
+            role: target.role.clone().or_else(|| Some("button".into())),
+            name: Some(name.clone()),
+            label: None,
+            text: name,
+            attributes: Default::default(),
+            state: dom_engine::CandidateState {
+                attached: true,
+                visible: true,
+                enabled: true,
+            },
+            frame_path: Vec::new(),
+        }])
+    }
+}
+
+#[async_trait]
+impl worker_pool::InputEngine for FakeWorker {
     async fn click(
         &self,
         _: &PageId,
@@ -360,6 +443,7 @@ impl BrowserWorker for FakeWorker {
             text: None,
         }])
     }
+
     async fn type_text(
         &self,
         _: &PageId,
@@ -390,6 +474,7 @@ impl BrowserWorker for FakeWorker {
             text: Some(command.value.clone()),
         }])
     }
+
     async fn control_action(
         &self,
         _: &PageId,
@@ -437,46 +522,90 @@ impl BrowserWorker for FakeWorker {
             },
         }])
     }
-    async fn collect_candidates(
+
+    async fn upload_files(
         &self,
         _: &PageId,
-        target: &TargetSpec,
-    ) -> Result<Vec<dom_engine::Candidate>, CommandError> {
-        self.events
-            .lock()
-            .await
-            .push("browser:collect_candidates".into());
-        let name = target
-            .accessible_name
-            .clone()
-            .or_else(|| match &target.text {
-                Some(TextMatch::Contains(text) | TextMatch::Exact(text)) => Some(text.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| "Submit".into());
-        Ok(vec![dom_engine::Candidate {
-            id: "submit".into(),
-            css: Some("#submit".into()),
-            tag: None,
-            test_id: None,
-            role: target.role.clone().or_else(|| Some("button".into())),
-            name: Some(name.clone()),
-            label: None,
-            text: name,
-            attributes: Default::default(),
-            state: dom_engine::CandidateState {
-                attached: true,
-                visible: true,
-                enabled: true,
-            },
-            frame_path: Vec::new(),
+        command: &UploadFilesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.events.lock().await.push("browser:upload_files".into());
+        Ok(vec![Evidence::Upload {
+            selector: command.selector.clone(),
+            paths: command.paths.clone(),
         }])
     }
-    async fn wait_for(
+}
+
+#[async_trait]
+impl worker_pool::WebStateEngine for FakeWorker {
+    async fn get_cookies(
         &self,
         _: &PageId,
-        command: &WaitForCommand,
+        _: &types::GetCookiesCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
+        Ok(vec![])
+    }
+
+    fn supports_http_state(&self) -> bool {
+        !matches!(self.mode, DriverMode::CookieOnly)
+    }
+
+    async fn http_state(
+        &self,
+        _: &PageId,
+    ) -> Result<network_engine::state::HttpStateSnapshot, CommandError> {
+        self.events.lock().await.push("http:state".into());
+        Ok(network_engine::state::HttpStateSnapshot {
+            version: 7,
+            current_url: self
+                .events
+                .lock()
+                .await
+                .iter()
+                .find_map(|event| event.strip_prefix("url:").map(str::to_owned))
+                .unwrap_or_else(|| "https://example.test/".into()),
+            cookies: Vec::new(),
+            cache_validators: Default::default(),
+            user_agent: "test".into(),
+            language: "en".into(),
+        })
+    }
+
+    async fn commit_http_state(
+        &self,
+        _: &PageId,
+        _: u64,
+        _: network_engine::state::ResponseStateDelta,
+    ) -> Result<(), CommandError> {
+        self.events.lock().await.push("http:commit".into());
+        if matches!(self.mode, DriverMode::CommitPause) {
+            std::future::pending::<()>().await;
+        }
+        if matches!(self.mode, DriverMode::CommitFail) {
+            return Err(CommandError {
+                code: ErrorCode::BrowserCommandFailed,
+                message: "injected state commit failure".into(),
+                layer: ErrorLayer::Driver,
+                retryable: false,
+            });
+        }
+        if matches!(self.mode, DriverMode::StateConflict) {
+            Err(CommandError {
+                code: ErrorCode::HttpStateConflict,
+                message: "injected conflict".into(),
+                layer: ErrorLayer::Driver,
+                retryable: true,
+            })
+        } else {
+            Ok(())
+        }
+    }
+}
+impl FakeWorker {
+    async fn observe_wait(
+        &self,
+        condition: &types::WaitCondition,
+    ) -> Result<worker_pool::wait::WaitObservation, CommandError> {
         self.events.lock().await.push("browser:wait_for".into());
         if matches!(self.mode, DriverMode::DeadWorkerCommands)
             || (matches!(self.mode, DriverMode::TransportResetReattaches)
@@ -514,79 +643,26 @@ impl BrowserWorker for FakeWorker {
                 retryable: false,
             });
         }
-        Ok(vec![Evidence::Wait {
-            condition: command.condition.clone(),
-            elapsed_ms: 1,
-            observations: 1,
-            excluded_classes: Vec::new(),
-            observed: None,
-        }])
+        Ok(fake_wait_observation(condition))
     }
-    async fn upload_files(
+}
+
+impl worker_pool::WaitProvider for FakeWorker {
+    fn observer<'a>(
+        &'a self,
+        _page_id: &'a types::PageId,
+    ) -> Box<dyn worker_pool::wait::WaitObserver + 'a> {
+        Box::new(FakeWorkerWaitObserver(self))
+    }
+}
+struct FakeWorkerWaitObserver<'a>(&'a FakeWorker);
+#[async_trait]
+impl worker_pool::wait::WaitObserver for FakeWorkerWaitObserver<'_> {
+    async fn observe(
         &self,
-        _: &PageId,
-        command: &UploadFilesCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        self.events.lock().await.push("browser:upload_files".into());
-        Ok(vec![Evidence::Upload {
-            selector: command.selector.clone(),
-            paths: command.paths.clone(),
-        }])
-    }
-    async fn close(&self) -> Result<(), CommandError> {
-        Ok(())
-    }
-    fn supports_http_state(&self) -> bool {
-        true
-    }
-    async fn http_state(
-        &self,
-        _: &PageId,
-    ) -> Result<network_engine::state::HttpStateSnapshot, CommandError> {
-        self.events.lock().await.push("http:state".into());
-        Ok(network_engine::state::HttpStateSnapshot {
-            version: 7,
-            current_url: self
-                .events
-                .lock()
-                .await
-                .iter()
-                .find_map(|event| event.strip_prefix("url:").map(str::to_owned))
-                .unwrap_or_else(|| "https://example.test/".into()),
-            cookies: Vec::new(),
-            cache_validators: Default::default(),
-            user_agent: "test".into(),
-            language: "en".into(),
-        })
-    }
-    async fn commit_http_state(
-        &self,
-        _: &PageId,
-        _: u64,
-        _: network_engine::state::ResponseStateDelta,
-    ) -> Result<(), CommandError> {
-        self.events.lock().await.push("http:commit".into());
-        if matches!(self.mode, DriverMode::CommitPause) {
-            std::future::pending::<()>().await;
-        }
-        if matches!(self.mode, DriverMode::CommitFail) {
-            return Err(CommandError {
-                code: ErrorCode::BrowserCommandFailed,
-                message: "injected state commit failure".into(),
-                layer: ErrorLayer::Driver,
-                retryable: false,
-            });
-        }
-        if matches!(self.mode, DriverMode::StateConflict) {
-            Err(CommandError {
-                code: ErrorCode::HttpStateConflict,
-                message: "injected conflict".into(),
-                layer: ErrorLayer::Driver,
-                retryable: true,
-            })
-        } else {
-            Ok(())
-        }
+        condition: &types::WaitCondition,
+    ) -> Result<worker_pool::wait::WaitObservation, types::CommandError> {
+        self.0.observe_wait(condition).await
     }
 }
 
@@ -3750,4 +3826,54 @@ async fn archived_history_never_authorizes_recovery_evidence_or_session_ownershi
             0
         );
     }
+}
+
+fn fake_wait_observation(condition: &types::WaitCondition) -> worker_pool::wait::WaitObservation {
+    use worker_pool::wait::WaitObservation;
+    let text = |matcher: &types::TextMatch| match matcher {
+        types::TextMatch::Exact(value) | types::TextMatch::Contains(value) => value.clone(),
+        types::TextMatch::Regex(_) => panic!("regex fixture needs an explicit observed value"),
+    };
+    match condition {
+        types::WaitCondition::Element { .. } => WaitObservation::Element(true),
+        types::WaitCondition::Text { matcher, .. }
+        | types::WaitCondition::Value { matcher, .. } => WaitObservation::Text(vec![text(matcher)]),
+        types::WaitCondition::Url { matcher } => WaitObservation::Url(text(matcher)),
+        types::WaitCondition::Document { .. } => WaitObservation::Document("complete".into()),
+        types::WaitCondition::NetworkQuiet { .. } => WaitObservation::Network {
+            in_flight: 0,
+            excluded_classes: vec![],
+        },
+    }
+}
+
+#[tokio::test]
+async fn cookie_support_does_not_enable_http_routing() {
+    let (url, requests) = counted_http_fixture().await;
+    let (runtime, session, page, events, _root) = adaptive_runtime(DriverMode::CookieOnly).await;
+    runtime
+        .set_url(&page, url.clone(), "interactive")
+        .await
+        .unwrap();
+    events.lock().await.push(format!("url:{url}"));
+    let evidence = completed_evidence(
+        runtime
+            .execute(envelope(
+                session,
+                page,
+                PrimitiveCommand::Inspect(InspectCommand::default()),
+            ))
+            .await,
+    );
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::ExecutionPath {
+            path: ExecutionPath::Browser,
+            ..
+        }
+    )));
+    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let events = events.lock().await;
+    assert!(events.contains(&"browser:inspect".to_string()));
+    assert!(!events.contains(&"http:state".to_string()));
 }

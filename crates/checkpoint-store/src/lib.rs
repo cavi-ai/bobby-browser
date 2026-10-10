@@ -409,11 +409,13 @@ impl CheckpointStore {
             Uuid::new_v4()
         ));
         let result = async {
-            let mut file = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&temporary)
-                .await?;
+            let mut options = OpenOptions::new();
+            options.create_new(true).write(true);
+            // Skill decisions carry workflow/session authority too. Restrict
+            // access at creation, before any bytes reach the temporary file.
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut file = options.open(&temporary).await?;
             file.write_all(&serde_json::to_vec(issuance)?).await?;
             file.sync_all().await?;
             drop(file);

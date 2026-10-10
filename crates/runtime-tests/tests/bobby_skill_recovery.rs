@@ -167,6 +167,29 @@ impl BrowserWorker for ReplacementWorker {
         &self.profile
     }
 
+    async fn close(&self) -> Result<(), CommandError> {
+        Ok(())
+    }
+
+    fn tabs(&self) -> Option<&dyn worker_pool::TabsEngine> {
+        Some(self)
+    }
+
+    fn navigation(&self) -> Option<&dyn worker_pool::NavigationEngine> {
+        Some(self)
+    }
+
+    fn observation(&self) -> Option<&dyn worker_pool::ObservationEngine> {
+        Some(self)
+    }
+
+    fn input(&self) -> Option<&dyn worker_pool::InputEngine> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl worker_pool::TabsEngine for ReplacementWorker {
     async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
         self.browser_events
             .lock()
@@ -174,7 +197,10 @@ impl BrowserWorker for ReplacementWorker {
             .push(("open_page", std::time::Instant::now()));
         Ok(())
     }
+}
 
+#[async_trait]
+impl worker_pool::NavigationEngine for ReplacementWorker {
     async fn navigate(
         &self,
         _: &PageId,
@@ -192,7 +218,10 @@ impl BrowserWorker for ReplacementWorker {
             title: "Recovered".into(),
         }])
     }
+}
 
+#[async_trait]
+impl worker_pool::ObservationEngine for ReplacementWorker {
     async fn inspect(
         &self,
         _: &PageId,
@@ -216,7 +245,10 @@ impl BrowserWorker for ReplacementWorker {
             html: None,
         }])
     }
+}
 
+#[async_trait]
+impl worker_pool::InputEngine for ReplacementWorker {
     async fn click(&self, _: &PageId, _: &ClickCommand) -> Result<Vec<Evidence>, CommandError> {
         Err(driver_error("unused click"))
     }
@@ -227,10 +259,6 @@ impl BrowserWorker for ReplacementWorker {
         _: &TypeTextCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         Err(driver_error("unused type"))
-    }
-
-    async fn close(&self) -> Result<(), CommandError> {
-        Ok(())
     }
 }
 

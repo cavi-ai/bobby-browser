@@ -76,12 +76,45 @@ impl BrowserWorker for TestWorker {
     fn worker_id(&self) -> WorkerId {
         self.id.clone()
     }
+
     fn profile_dir(&self) -> &Path {
         &self.profile
     }
+
+    async fn close(&self) -> Result<(), CommandError> {
+        Ok(())
+    }
+
+    fn tabs(&self) -> Option<&dyn worker_pool::TabsEngine> {
+        Some(self)
+    }
+
+    fn navigation(&self) -> Option<&dyn worker_pool::NavigationEngine> {
+        Some(self)
+    }
+
+    fn observation(&self) -> Option<&dyn worker_pool::ObservationEngine> {
+        Some(self)
+    }
+
+    fn input(&self) -> Option<&dyn worker_pool::InputEngine> {
+        Some(self)
+    }
+
+    fn web_state(&self) -> Option<&dyn worker_pool::WebStateEngine> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl worker_pool::TabsEngine for TestWorker {
     async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
         Ok(())
     }
+}
+
+#[async_trait]
+impl worker_pool::NavigationEngine for TestWorker {
     async fn navigate(
         &self,
         _: &PageId,
@@ -92,6 +125,10 @@ impl BrowserWorker for TestWorker {
             title: "fixture".into(),
         }])
     }
+}
+
+#[async_trait]
+impl worker_pool::ObservationEngine for TestWorker {
     async fn inspect(
         &self,
         _: &PageId,
@@ -105,6 +142,10 @@ impl BrowserWorker for TestWorker {
             html: None,
         }])
     }
+}
+
+#[async_trait]
+impl worker_pool::InputEngine for TestWorker {
     async fn click(
         &self,
         _: &PageId,
@@ -115,6 +156,7 @@ impl BrowserWorker for TestWorker {
             text: None,
         }])
     }
+
     async fn type_text(
         &self,
         _: &PageId,
@@ -125,9 +167,14 @@ impl BrowserWorker for TestWorker {
             text: Some(command.value.clone()),
         }])
     }
+}
+
+#[async_trait]
+impl worker_pool::WebStateEngine for TestWorker {
     fn supports_http_state(&self) -> bool {
         true
     }
+
     async fn http_state(
         &self,
         _: &PageId,
@@ -141,15 +188,13 @@ impl BrowserWorker for TestWorker {
             language: "en".into(),
         })
     }
+
     async fn commit_http_state(
         &self,
         _: &PageId,
         _: u64,
         _: network_engine::state::ResponseStateDelta,
     ) -> Result<(), CommandError> {
-        Ok(())
-    }
-    async fn close(&self) -> Result<(), CommandError> {
         Ok(())
     }
 }

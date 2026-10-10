@@ -4,10 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use types::{
-    ClickCommand, CommandError, Evidence, InspectCommand, NavigateCommand, PageId, SessionId,
-    TypeTextCommand, WorkerId,
-};
+use types::{CommandError, SessionId, WorkerId};
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool, DEFAULT_REPLACEMENT_CLEANUP_TIMEOUT};
 
 struct HangingFactory {
@@ -53,32 +50,11 @@ impl BrowserWorker for ReadyWorker {
     fn worker_id(&self) -> WorkerId {
         self.id.clone()
     }
+
     fn profile_dir(&self) -> &Path {
         Path::new("/profiles/ready")
     }
-    async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
-        Ok(())
-    }
-    async fn navigate(
-        &self,
-        _: &PageId,
-        _: &NavigateCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-    async fn inspect(&self, _: &PageId, _: &InspectCommand) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-    async fn click(&self, _: &PageId, _: &ClickCommand) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-    async fn type_text(
-        &self,
-        _: &PageId,
-        _: &TypeTextCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
+
     async fn close(&self) -> Result<(), CommandError> {
         Ok(())
     }
@@ -172,32 +148,11 @@ impl BrowserWorker for ClosingWorker {
     fn worker_id(&self) -> WorkerId {
         self.id.clone()
     }
+
     fn profile_dir(&self) -> &Path {
         Path::new("/profiles/closing")
     }
-    async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
-        Ok(())
-    }
-    async fn navigate(
-        &self,
-        _: &PageId,
-        _: &NavigateCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-    async fn inspect(&self, _: &PageId, _: &InspectCommand) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-    async fn click(&self, _: &PageId, _: &ClickCommand) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-    async fn type_text(
-        &self,
-        _: &PageId,
-        _: &TypeTextCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
+
     async fn close(&self) -> Result<(), CommandError> {
         self.closed.store(true, Ordering::SeqCst);
         Ok(())

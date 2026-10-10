@@ -82,14 +82,17 @@ async fn har_reports_request_duration_instead_of_monotonic_uptime() {
     });
     let worker = factory.launch(&session_id).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
-    worker
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::events_or_default(worker.events())
         .network_log(&page_id, &NetworkLogCommand { clear: true })
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    worker
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_id,
             &NavigateCommand {
@@ -102,7 +105,7 @@ async fn har_reports_request_duration_instead_of_monotonic_uptime() {
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    let evidence = worker
+    let evidence = worker_pool::events_or_default(worker.events())
         .network_log(&page_id, &NetworkLogCommand { clear: false })
         .await
         .unwrap();
@@ -168,14 +171,17 @@ async fn har_preserves_redirect_responses_that_reuse_a_request_id() {
     });
     let worker = factory.launch(&session_id).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
-    worker
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::events_or_default(worker.events())
         .network_log(&page_id, &NetworkLogCommand { clear: true })
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    worker
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_id,
             &NavigateCommand {
@@ -188,7 +194,7 @@ async fn har_preserves_redirect_responses_that_reuse_a_request_id() {
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    let evidence = worker
+    let evidence = worker_pool::events_or_default(worker.events())
         .network_log(&page_id, &NetworkLogCommand { clear: false })
         .await
         .unwrap();
@@ -275,10 +281,13 @@ async fn navigating_to_a_download_response_fails_fast_instead_of_hanging_to_the_
     });
     let worker = factory.launch(&session_id).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
 
     let started = std::time::Instant::now();
-    let result = worker
+    let result = worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_id,
             &NavigateCommand {
@@ -305,7 +314,7 @@ async fn navigating_to_a_download_response_fails_fast_instead_of_hanging_to_the_
     );
 
     let started = std::time::Instant::now();
-    worker
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_id,
             &NavigateCommand {
@@ -321,7 +330,7 @@ async fn navigating_to_a_download_response_fails_fast_instead_of_hanging_to_the_
         elapsed < std::time::Duration::from_secs(5),
         "the navigation after an aborted download must not wait on the freed slot, took {elapsed:?}"
     );
-    let observed = worker
+    let observed = worker_pool::observation_or_default(worker.observation())
         .inspect(
             &page_id,
             &InspectCommand {
@@ -364,9 +373,12 @@ async fn network_log_reports_networkrecordingstarted_only_on_the_attaching_call(
     });
     let worker = factory.launch(&session_id).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
 
-    let first = worker
+    let first = worker_pool::events_or_default(worker.events())
         .network_log(&page_id, &NetworkLogCommand { clear: false })
         .await
         .unwrap();
@@ -379,7 +391,7 @@ async fn network_log_reports_networkrecordingstarted_only_on_the_attaching_call(
         "the attaching call must report networkRecordingStarted: {first:?}"
     );
 
-    worker
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_id,
             &NavigateCommand {
@@ -392,7 +404,7 @@ async fn network_log_reports_networkrecordingstarted_only_on_the_attaching_call(
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    let second = worker
+    let second = worker_pool::events_or_default(worker.events())
         .network_log(&page_id, &NetworkLogCommand { clear: false })
         .await
         .unwrap();
@@ -448,8 +460,11 @@ async fn synchronizes_versioned_http_state() {
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
-    worker
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_id,
             &NavigateCommand {
@@ -461,7 +476,10 @@ async fn synchronizes_versioned_http_state() {
         .await
         .unwrap();
 
-    let snapshot = worker.http_state(&page_id).await.unwrap();
+    let snapshot = worker_pool::web_state_or_default(worker.web_state())
+        .http_state(&page_id)
+        .await
+        .unwrap();
     assert_eq!(snapshot.current_url, state_url);
     assert!(snapshot
         .cookies
@@ -478,7 +496,7 @@ async fn synchronizes_versioned_http_state() {
     let mut secure_over_http = cookie("secure", "blocked");
     secure_over_http.secure = true;
     for rejected in [unrelated, nonfinite, invalid_expiry, secure_over_http] {
-        let error = worker
+        let error = worker_pool::web_state_or_default(worker.web_state())
             .commit_http_state(
                 &page_id,
                 snapshot.version,
@@ -490,12 +508,15 @@ async fn synchronizes_versioned_http_state() {
             .await
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidRequest);
-        let unchanged = worker.http_state(&page_id).await.unwrap();
+        let unchanged = worker_pool::web_state_or_default(worker.web_state())
+            .http_state(&page_id)
+            .await
+            .unwrap();
         assert_eq!(unchanged.version, snapshot.version);
         assert_eq!(unchanged.cookies.len(), snapshot.cookies.len());
     }
 
-    worker
+    worker_pool::web_state_or_default(worker.web_state())
         .commit_http_state(
             &page_id,
             snapshot.version,
@@ -506,7 +527,10 @@ async fn synchronizes_versioned_http_state() {
         )
         .await
         .expect("empty cookie delta commits validators without invalid CDP call");
-    let snapshot = worker.http_state(&page_id).await.unwrap();
+    let snapshot = worker_pool::web_state_or_default(worker.web_state())
+        .http_state(&page_id)
+        .await
+        .unwrap();
     assert_eq!(
         snapshot.cache_validators.get("state").unwrap(),
         "fixture-v1"
@@ -514,7 +538,7 @@ async fn synchronizes_versioned_http_state() {
 
     let mut direct = cookie("direct", "beta");
     direct.source_scheme = Some("NonSecure".into());
-    worker
+    worker_pool::web_state_or_default(worker.web_state())
         .commit_http_state(
             &page_id,
             snapshot.version,
@@ -525,13 +549,16 @@ async fn synchronizes_versioned_http_state() {
         )
         .await
         .unwrap();
-    let committed = worker.http_state(&page_id).await.unwrap();
+    let committed = worker_pool::web_state_or_default(worker.web_state())
+        .http_state(&page_id)
+        .await
+        .unwrap();
     assert!(committed
         .cookies
         .iter()
         .any(|cookie| cookie.name == "direct" && cookie.value == "beta"));
 
-    let conflict = worker
+    let conflict = worker_pool::web_state_or_default(worker.web_state())
         .commit_http_state(
             &page_id,
             snapshot.version,
@@ -545,12 +572,15 @@ async fn synchronizes_versioned_http_state() {
     assert_eq!(conflict.code, ErrorCode::HttpStateConflict);
 
     for sequence in 0..16 {
-        let before = worker.http_state(&page_id).await.unwrap();
+        let before = worker_pool::web_state_or_default(worker.web_state())
+            .http_state(&page_id)
+            .await
+            .unwrap();
         let name = format!("coherent-{sequence}");
         let expected_name = name.clone();
         let (observed, committed) = tokio::join!(
-            worker.http_state(&page_id),
-            worker.commit_http_state(
+            worker_pool::web_state_or_default(worker.web_state()).http_state(&page_id),
+            worker_pool::web_state_or_default(worker.web_state()).commit_http_state(
                 &page_id,
                 before.version,
                 ResponseStateDelta {
@@ -613,8 +643,11 @@ async fn correlates_popup_and_download_before_clicking() {
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
-    worker
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_id,
             &NavigateCommand {
@@ -626,7 +659,7 @@ async fn correlates_popup_and_download_before_clicking() {
         .await
         .unwrap();
 
-    let popup = worker
+    let popup = worker_pool::events_or_default(worker.events())
         .click_and_wait_for_popup(
             &page_id,
             &ClickAndWaitForPopupCommand {
@@ -639,7 +672,7 @@ async fn correlates_popup_and_download_before_clicking() {
         .unwrap();
     println!("popup={popup:?}");
     assert!(matches!(&popup[0], types::Evidence::Popup { title, .. } if title == "Popup"));
-    let download = worker
+    let download = worker_pool::events_or_default(worker.events())
         .click_and_wait_for_download(
             &page_id,
             &ClickAndWaitForDownloadCommand {
@@ -708,9 +741,11 @@ async fn drives_a_real_chromium_page() {
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
-    worker
-        .navigate(
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation()).navigate(
             &page_id,
             &NavigateCommand {
                 url: "data:text/html,<title>Worker Proof</title><input id='name'><input id='resume' type='file'>".into(),
@@ -720,7 +755,7 @@ async fn drives_a_real_chromium_page() {
         )
         .await
         .unwrap();
-    worker
+    worker_pool::input_or_default(worker.input())
         .type_text(
             &page_id,
             &TypeTextCommand {
@@ -733,7 +768,7 @@ async fn drives_a_real_chromium_page() {
         )
         .await
         .unwrap();
-    let evidence = worker
+    let evidence = worker_pool::observation_or_default(worker.observation())
         .inspect(
             &page_id,
             &InspectCommand {
@@ -745,7 +780,7 @@ async fn drives_a_real_chromium_page() {
         .await
         .unwrap();
     assert!(format!("{evidence:?}").contains("Ada"));
-    let upload_evidence = worker
+    let upload_evidence = worker_pool::input_or_default(worker.input())
         .upload_files(
             &page_id,
             &UploadFilesCommand {
@@ -765,8 +800,7 @@ async fn drives_a_real_chromium_page() {
     assert!(!serialized
         .to_string()
         .contains(profiles.path().to_str().unwrap()));
-    let selected = worker
-        .evaluate_javascript(
+    let selected = worker_pool::javascript_or_default(worker.javascript()).evaluate_javascript(
             &page_id,
             &EvaluateJavaScriptCommand {
                 expression: "(async () => { const files = document.querySelector('#resume').files; return { count: files.length, name: files[0].name, text: await files[0].text() }; })()".into(),
@@ -783,7 +817,7 @@ async fn drives_a_real_chromium_page() {
         ),
         "unexpected selected file: {selected:?}"
     );
-    let opened = worker
+    let opened = worker_pool::tabs_or_default(worker.tabs())
         .open_page_command(&OpenPageCommand {
             url: Some("data:text/html,<title>Second Page</title>".into()),
         })
@@ -796,15 +830,21 @@ async fn drives_a_real_chromium_page() {
         }
         other => panic!("unexpected evidence: {other:?}"),
     };
-    let listed = worker.list_pages(&ListPagesCommand).await.unwrap();
+    let listed = worker_pool::tabs_or_default(worker.tabs())
+        .list_pages(&ListPagesCommand)
+        .await
+        .unwrap();
     assert!(matches!(&listed[0], types::Evidence::Pages { pages } if pages.len() == 2));
-    worker
+    worker_pool::tabs_or_default(worker.tabs())
         .close_page_command(&ClosePageCommand {
             page_id: second_page,
         })
         .await
         .unwrap();
-    let listed = worker.list_pages(&ListPagesCommand).await.unwrap();
+    let listed = worker_pool::tabs_or_default(worker.tabs())
+        .list_pages(&ListPagesCommand)
+        .await
+        .unwrap();
     assert!(matches!(&listed[0], types::Evidence::Pages { pages } if pages.len() == 1));
     worker.close().await.unwrap();
 }
@@ -832,9 +872,11 @@ async fn refuses_to_type_into_readonly_and_disabled_controls() {
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
-    worker
-        .navigate(
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation()).navigate(
             &page_id,
             &NavigateCommand {
                 url: "data:text/html,<input id=ro readonly value=ro><input id=dis disabled><input id=ok>".into(),
@@ -857,7 +899,7 @@ async fn refuses_to_type_into_readonly_and_disabled_controls() {
 
     let readonly_result = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        worker.type_text(&page_id, &type_command("#ro")),
+        worker_pool::input_or_default(worker.input()).type_text(&page_id, &type_command("#ro")),
     )
     .await
     .expect("typing into a readonly input must not hang");
@@ -867,7 +909,7 @@ async fn refuses_to_type_into_readonly_and_disabled_controls() {
 
     let disabled_result = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        worker.type_text(&page_id, &type_command("#dis")),
+        worker_pool::input_or_default(worker.input()).type_text(&page_id, &type_command("#dis")),
     )
     .await
     .expect("typing into a disabled input must not hang");
@@ -877,7 +919,7 @@ async fn refuses_to_type_into_readonly_and_disabled_controls() {
 
     tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        worker.type_text(&page_id, &type_command("#ok")),
+        worker_pool::input_or_default(worker.input()).type_text(&page_id, &type_command("#ok")),
     )
     .await
     .expect("typing into an editable input must not hang")
@@ -906,8 +948,11 @@ async fn types_unicode_and_newlines_into_a_textarea() {
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         let worker = factory.launch(&SessionId::new()).await.unwrap();
         let page_id = PageId::new();
-        worker.open_page(page_id.clone()).await.unwrap();
-        worker
+        worker_pool::tabs_or_default(worker.tabs())
+            .open_page(page_id.clone())
+            .await
+            .unwrap();
+        worker_pool::navigation_or_default(worker.navigation())
             .navigate(
                 &page_id,
                 &NavigateCommand {
@@ -919,7 +964,7 @@ async fn types_unicode_and_newlines_into_a_textarea() {
             .await
             .unwrap();
         let textarea_value = "Zoë 日本 🧪\nline2";
-        worker
+        worker_pool::input_or_default(worker.input())
             .type_text(
                 &page_id,
                 &TypeTextCommand {
@@ -933,7 +978,7 @@ async fn types_unicode_and_newlines_into_a_textarea() {
             .await
             .unwrap();
         let input_value = "naïve";
-        worker
+        worker_pool::input_or_default(worker.input())
             .type_text(
                 &page_id,
                 &TypeTextCommand {
@@ -946,7 +991,7 @@ async fn types_unicode_and_newlines_into_a_textarea() {
             )
             .await
             .unwrap();
-        let textarea_evidence = worker
+        let textarea_evidence = worker_pool::observation_or_default(worker.observation())
             .inspect(
                 &page_id,
                 &InspectCommand {
@@ -962,7 +1007,7 @@ async fn types_unicode_and_newlines_into_a_textarea() {
             other => panic!("unexpected evidence: {other:?}"),
         };
         assert_eq!(textarea_text, textarea_value);
-        let input_evidence = worker
+        let input_evidence = worker_pool::observation_or_default(worker.observation())
             .inspect(
                 &page_id,
                 &InspectCommand {
@@ -1004,9 +1049,8 @@ async fn type_text_reports_the_typed_control_kind_and_the_committed_value() {
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         let worker = factory.launch(&SessionId::new()).await.unwrap();
         let page_id = PageId::new();
-        worker.open_page(page_id.clone()).await.unwrap();
-        worker
-            .navigate(
+        worker_pool::tabs_or_default(worker.tabs()).open_page(page_id.clone()).await.unwrap();
+        worker_pool::navigation_or_default(worker.navigation()).navigate(
                 &page_id,
                 &NavigateCommand {
                     url: "data:text/html,<input id='text' value='prefilled'><input id='cb' type='checkbox'><select id='sel'><option value='basic'>Basic</option><option value='pro'>Pro plan</option></select>".into(),
@@ -1032,8 +1076,7 @@ async fn type_text_reports_the_typed_control_kind_and_the_committed_value() {
             })
         }
 
-        let text_evidence = worker
-            .type_text(
+        let text_evidence = worker_pool::input_or_default(worker.input()).type_text(
                 &page_id,
                 &TypeTextCommand {
                     selector: "#text".into(),
@@ -1051,8 +1094,7 @@ async fn type_text_reports_the_typed_control_kind_and_the_committed_value() {
         );
         assert_eq!(typed_control_kind(&text_evidence).as_deref(), Some("text"));
 
-        let checkbox_evidence = worker
-            .type_text(
+        let checkbox_evidence = worker_pool::input_or_default(worker.input()).type_text(
                 &page_id,
                 &TypeTextCommand {
                     selector: "#cb".into(),
@@ -1070,8 +1112,7 @@ async fn type_text_reports_the_typed_control_kind_and_the_committed_value() {
             Some("checkable")
         );
 
-        let select_evidence = worker
-            .type_text(
+        let select_evidence = worker_pool::input_or_default(worker.input()).type_text(
                 &page_id,
                 &TypeTextCommand {
                     selector: "#sel".into(),
@@ -1114,8 +1155,11 @@ async fn control_action_set_text_without_clear_first_still_clears_before_typing(
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
-    worker
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_id,
             &NavigateCommand {
@@ -1127,7 +1171,10 @@ async fn control_action_set_text_without_clear_first_still_clears_before_typing(
         .await
         .unwrap();
 
-    let form_snapshot = worker.form_snapshot(&page_id, None).await.unwrap();
+    let form_snapshot = worker_pool::observation_or_default(worker.observation())
+        .form_snapshot(&page_id, None)
+        .await
+        .unwrap();
     let snapshot = form_snapshot
         .iter()
         .find_map(|item| match item {
@@ -1146,7 +1193,7 @@ async fn control_action_set_text_without_clear_first_still_clears_before_typing(
     // default to replace semantics.
     let action: ControlAction =
         serde_json::from_value(serde_json::json!({"kind":"setText","value":"x"})).unwrap();
-    let evidence = worker
+    let evidence = worker_pool::input_or_default(worker.input())
         .control_action(&page_id, &ControlActionCommand { target, action })
         .await
         .unwrap();
@@ -1178,8 +1225,11 @@ async fn control_action_clear_empties_a_text_input() {
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
-    worker
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_id,
             &NavigateCommand {
@@ -1191,7 +1241,10 @@ async fn control_action_clear_empties_a_text_input() {
         .await
         .unwrap();
 
-    let form_snapshot = worker.form_snapshot(&page_id, None).await.unwrap();
+    let form_snapshot = worker_pool::observation_or_default(worker.observation())
+        .form_snapshot(&page_id, None)
+        .await
+        .unwrap();
     let snapshot = form_snapshot
         .iter()
         .find_map(|item| match item {
@@ -1208,7 +1261,7 @@ async fn control_action_clear_empties_a_text_input() {
 
     // Text inputs also expose a prototype `checked` property; clear must reach
     // the value branch, not the checkbox one.
-    let evidence = worker
+    let evidence = worker_pool::input_or_default(worker.input())
         .control_action(
             &page_id,
             &ControlActionCommand {
@@ -1247,9 +1300,11 @@ async fn semantic_targets_fail_closed_and_reresolve_after_replacement() {
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
-    worker
-        .navigate(
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation()).navigate(
             &page_id,
             &NavigateCommand {
                 url: "data:text/html,<label for='email'>Email address</label><input id='email'><button aria-label='Continue' onclick=\"this.outerHTML='<button aria-label=Continue>Continue</button>'\">old</button><button aria-label='Duplicate'>one</button><button aria-label='Duplicate'>two</button>".into(),
@@ -1260,7 +1315,7 @@ async fn semantic_targets_fail_closed_and_reresolve_after_replacement() {
         .await
         .unwrap();
 
-    let typed = worker
+    let typed = worker_pool::input_or_default(worker.input())
         .type_text(
             &page_id,
             &TypeTextCommand {
@@ -1286,7 +1341,7 @@ async fn semantic_targets_fail_closed_and_reresolve_after_replacement() {
         ..TargetSpec::default()
     };
     for _ in 0..2 {
-        worker
+        worker_pool::input_or_default(worker.input())
             .click(
                 &page_id,
                 &ClickCommand {
@@ -1301,7 +1356,7 @@ async fn semantic_targets_fail_closed_and_reresolve_after_replacement() {
             .unwrap();
     }
 
-    let error = worker
+    let error = worker_pool::input_or_default(worker.input())
         .click(
             &page_id,
             &ClickCommand {
@@ -1341,9 +1396,11 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
-    worker
-        .navigate(
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation()).navigate(
             &page_id,
             &NavigateCommand {
                 url: "data:text/html,<span id=email-label>Email address</span><input id=email aria-labelledby=email-label required pattern='[^@]+@[^@]+' autocomplete=email><label><input id=updates type=checkbox>Product updates</label><label><input id=pro type=radio name=plan value=pro>Professional</label><select id=region aria-label=Region><option value=us>United States</option><optgroup label=Blocked disabled><option value=ca>Canada</option></optgroup></select><label for=phone-home>Phone</label><input id=phone-home><label for=phone-work>Phone</label><input id=phone-work><label for=password>Password</label><input id=password type=password autocomplete=current-password value=vault-secret-92 required><form aria-label=Application><button aria-label=Apply>Apply</button><input type=button aria-label=Preview><input role=combobox aria-label=City value=Boston></form>".into(),
@@ -1354,8 +1411,7 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
         .await
         .unwrap();
 
-    worker
-        .evaluate_javascript(
+    worker_pool::javascript_or_default(worker.javascript()).evaluate_javascript(
             &page_id,
             &EvaluateJavaScriptCommand {
                 expression: "password.setCustomValidity(password.value); const input=document.createElement('input'); input.setAttribute('aria-label','😀'.repeat(700)+'\\n'); document.body.append(input); true".into(),
@@ -1366,7 +1422,10 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
         .await
         .unwrap();
 
-    let form_snapshot = worker.form_snapshot(&page_id, None).await.unwrap();
+    let form_snapshot = worker_pool::observation_or_default(worker.observation())
+        .form_snapshot(&page_id, None)
+        .await
+        .unwrap();
     let snapshot = form_snapshot
         .iter()
         .find_map(|item| match item {
@@ -1415,7 +1474,7 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
         .iter()
         .find(|control| control.accessible_name.as_deref() == Some("Product updates"))
         .unwrap();
-    let action_evidence = worker
+    let action_evidence = worker_pool::input_or_default(worker.input())
         .control_action(
             &page_id,
             &ControlActionCommand {
@@ -1435,7 +1494,7 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
     assert!(!encoded.contains("cssPath"));
     assert!(!encoded.contains("selector"));
 
-    let candidates = worker
+    let candidates = worker_pool::observation_or_default(worker.observation())
         .collect_candidates(&page_id, &TargetSpec::default())
         .await
         .unwrap();
@@ -1467,7 +1526,7 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
         Some("radio")
     );
 
-    let invalid = worker
+    let invalid = worker_pool::input_or_default(worker.input())
         .type_text(
             &page_id,
             &TypeTextCommand {
@@ -1495,7 +1554,7 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
             if name == "formControlValidationMessage" && !value.is_empty()
     )));
 
-    let snapshot = worker
+    let snapshot = worker_pool::observation_or_default(worker.observation())
         .a11y_snapshot(
             &page_id,
             &AccessibilitySnapshotCommand {
@@ -1550,7 +1609,7 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
     assert_eq!(phones[0].target.as_ref().unwrap().ordinal, Some(0));
     assert_eq!(phones[1].target.as_ref().unwrap().ordinal, Some(1));
     let work_phone = phones[1].target.as_ref().unwrap();
-    worker
+    worker_pool::input_or_default(worker.input())
         .type_text(
             &page_id,
             &TypeTextCommand {
@@ -1568,7 +1627,7 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
         )
         .await
         .unwrap();
-    let candidates = worker
+    let candidates = worker_pool::observation_or_default(worker.observation())
         .collect_candidates(&page_id, &TargetSpec::default())
         .await
         .unwrap();
@@ -1587,7 +1646,7 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
         Some("555-0102")
     );
 
-    worker
+    worker_pool::input_or_default(worker.input())
         .type_text(
             &page_id,
             &TypeTextCommand {
@@ -1604,7 +1663,7 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
         )
         .await
         .unwrap();
-    let observed = worker
+    let observed = worker_pool::observation_or_default(worker.observation())
         .inspect(
             &page_id,
             &InspectCommand {
@@ -1619,7 +1678,7 @@ async fn form_controls_have_normalized_roles_names_constraints_and_native_select
         .iter()
         .any(|item| matches!(item, Evidence::Inspection { text, .. } if text == "ca")));
     for (role, name) in [("checkbox", "Product updates"), ("radio", "Professional")] {
-        let evidence = worker
+        let evidence = worker_pool::input_or_default(worker.input())
             .type_text(
                 &page_id,
                 &TypeTextCommand {
@@ -1662,9 +1721,11 @@ async fn control_action_activates_a11y_snapshot_button_targets_outside_a_form() 
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
-    worker
-        .navigate(
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation()).navigate(
             &page_id,
             &NavigateCommand {
                 url: "data:text/html,<button id=plain>Plain</button><div role=button tabindex=0 id=divbtn>Div</div><a role=button href=%23 id=anchorbtn>Anchor</a><button aria-label=Labelled id=labelled>x</button><button id=padded> Padded </button>".into(),
@@ -1675,7 +1736,7 @@ async fn control_action_activates_a11y_snapshot_button_targets_outside_a_form() 
         .await
         .unwrap();
 
-    let snapshot = worker
+    let snapshot = worker_pool::observation_or_default(worker.observation())
         .a11y_snapshot(
             &page_id,
             &AccessibilitySnapshotCommand {
@@ -1719,7 +1780,7 @@ async fn control_action_activates_a11y_snapshot_button_targets_outside_a_form() 
             frame_path: ax_target.frame_path.clone(),
             shadow_path: Vec::new(),
         };
-        let result = worker
+        let result = worker_pool::input_or_default(worker.input())
             .control_action(
                 &page_id,
                 &ControlActionCommand {
@@ -1755,8 +1816,11 @@ async fn waits_for_dynamic_element_content_url_document_and_network_quiet() {
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
-    worker
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_id,
             &NavigateCommand {
@@ -1814,16 +1878,16 @@ async fn waits_for_dynamic_element_content_url_document_and_network_quiet() {
             ignore_long_lived: false,
         },
     ] {
-        let evidence = worker
-            .wait_for(
-                &page_id,
-                &WaitForCommand {
-                    condition,
-                    timeout_ms: 2_000,
-                },
-            )
-            .await
-            .unwrap();
+        let evidence = worker_pool::PageBehavior::wait_for(
+            worker.wait_provider(),
+            &page_id,
+            &WaitForCommand {
+                condition,
+                timeout_ms: 2_000,
+            },
+        )
+        .await
+        .unwrap();
         assert!(matches!(&evidence[0], Evidence::Wait { observations, .. } if *observations > 0));
     }
     worker.close().await.unwrap();
@@ -1850,7 +1914,10 @@ async fn wait_for_text_resolves_an_ambiguous_target_by_matcher() {
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
     // `#` is a URL fragment delimiter even inside a `data:` URI's body, so an
     // `href="#"` here would truncate the page at the first link. Use a
     // fragment-free placeholder href instead.
@@ -1863,7 +1930,7 @@ async fn wait_for_text_resolves_an_ambiguous_target_by_matcher() {
             }
         })
         .collect::<String>();
-    worker
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_id,
             &NavigateCommand {
@@ -1882,42 +1949,42 @@ async fn wait_for_text_resolves_an_ambiguous_target_by_matcher() {
         .await
         .unwrap();
 
-    let paragraph_evidence = worker
-        .wait_for(
-            &page_id,
-            &WaitForCommand {
-                condition: WaitCondition::Text {
-                    target: Box::new(TargetSpec {
-                        role: Some("paragraph".into()),
-                        ..TargetSpec::default()
-                    }),
-                    matcher: TextMatch::Contains("Step 2 of 3".into()),
-                },
-                timeout_ms: 2_000,
+    let paragraph_evidence = worker_pool::PageBehavior::wait_for(
+        worker.wait_provider(),
+        &page_id,
+        &WaitForCommand {
+            condition: WaitCondition::Text {
+                target: Box::new(TargetSpec {
+                    role: Some("paragraph".into()),
+                    ..TargetSpec::default()
+                }),
+                matcher: TextMatch::Contains("Step 2 of 3".into()),
             },
-        )
-        .await
-        .unwrap();
+            timeout_ms: 2_000,
+        },
+    )
+    .await
+    .unwrap();
     assert!(
         matches!(&paragraph_evidence[0], Evidence::Wait { observations, .. } if *observations > 0)
     );
 
-    let link_evidence = worker
-        .wait_for(
-            &page_id,
-            &WaitForCommand {
-                condition: WaitCondition::Text {
-                    target: Box::new(TargetSpec {
-                        role: Some("link".into()),
-                        ..TargetSpec::default()
-                    }),
-                    matcher: TextMatch::Contains("Download".into()),
-                },
-                timeout_ms: 2_000,
+    let link_evidence = worker_pool::PageBehavior::wait_for(
+        worker.wait_provider(),
+        &page_id,
+        &WaitForCommand {
+            condition: WaitCondition::Text {
+                target: Box::new(TargetSpec {
+                    role: Some("link".into()),
+                    ..TargetSpec::default()
+                }),
+                matcher: TextMatch::Contains("Download".into()),
             },
-        )
-        .await
-        .unwrap();
+            timeout_ms: 2_000,
+        },
+    )
+    .await
+    .unwrap();
     assert!(matches!(&link_evidence[0], Evidence::Wait { observations, .. } if *observations > 0));
 
     worker.close().await.unwrap();
@@ -1949,8 +2016,11 @@ async fn wait_for_text_survives_a_candidate_detaching_between_ranking_and_its_re
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
-    worker
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_id,
             &NavigateCommand {
@@ -1981,22 +2051,22 @@ async fn wait_for_text_survives_a_candidate_detaching_between_ranking_and_its_re
         .await
         .unwrap();
 
-    let evidence = worker
-        .wait_for(
-            &page_id,
-            &WaitForCommand {
-                condition: WaitCondition::Text {
-                    target: Box::new(TargetSpec {
-                        role: Some("paragraph".into()),
-                        ..TargetSpec::default()
-                    }),
-                    matcher: TextMatch::Contains("Step 2 of 3".into()),
-                },
-                timeout_ms: 2_000,
+    let evidence = worker_pool::PageBehavior::wait_for(
+        worker.wait_provider(),
+        &page_id,
+        &WaitForCommand {
+            condition: WaitCondition::Text {
+                target: Box::new(TargetSpec {
+                    role: Some("paragraph".into()),
+                    ..TargetSpec::default()
+                }),
+                matcher: TextMatch::Contains("Step 2 of 3".into()),
             },
-        )
-        .await
-        .unwrap();
+            timeout_ms: 2_000,
+        },
+    )
+    .await
+    .unwrap();
     match &evidence[0] {
         Evidence::Wait {
             observations,
@@ -2038,8 +2108,11 @@ async fn wait_for_text_keeps_polling_instead_of_failing_when_every_candidate_det
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
-    worker
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_id,
             &NavigateCommand {
@@ -2068,22 +2141,22 @@ async fn wait_for_text_keeps_polling_instead_of_failing_when_every_candidate_det
         .await
         .unwrap();
 
-    let error = worker
-        .wait_for(
-            &page_id,
-            &WaitForCommand {
-                condition: WaitCondition::Text {
-                    target: Box::new(TargetSpec {
-                        role: Some("paragraph".into()),
-                        ..TargetSpec::default()
-                    }),
-                    matcher: TextMatch::Contains("Step 2 of 3".into()),
-                },
-                timeout_ms: 300,
+    let error = worker_pool::PageBehavior::wait_for(
+        worker.wait_provider(),
+        &page_id,
+        &WaitForCommand {
+            condition: WaitCondition::Text {
+                target: Box::new(TargetSpec {
+                    role: Some("paragraph".into()),
+                    ..TargetSpec::default()
+                }),
+                matcher: TextMatch::Contains("Step 2 of 3".into()),
             },
-        )
-        .await
-        .unwrap_err();
+            timeout_ms: 300,
+        },
+    )
+    .await
+    .unwrap_err();
     assert_eq!(
         error.code,
         ErrorCode::WaitConditionTimedOut,
@@ -2127,7 +2200,7 @@ fn re_rendering_option_page(swap_limit: u32) -> String {
 }
 
 async fn option_click_count(worker: &dyn worker_pool::BrowserWorker, page_id: &PageId) -> String {
-    let evidence = worker
+    let evidence = worker_pool::observation_or_default(worker.observation())
         .inspect(
             page_id,
             &InspectCommand {
@@ -2180,8 +2253,11 @@ async fn click_re_resolves_a_target_detached_between_resolution_and_dispatch() {
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
-    worker
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_id,
             &NavigateCommand {
@@ -2193,7 +2269,7 @@ async fn click_re_resolves_a_target_detached_between_resolution_and_dispatch() {
         .await
         .unwrap();
 
-    worker
+    worker_pool::input_or_default(worker.input())
         .click(&page_id, &atlas_option_click())
         .await
         .expect("a target detached before dispatch must be re-resolved");
@@ -2224,8 +2300,11 @@ async fn click_fails_without_dispatch_when_the_re_resolved_target_detaches_again
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
-    worker
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_id,
             &NavigateCommand {
@@ -2237,7 +2316,7 @@ async fn click_fails_without_dispatch_when_the_re_resolved_target_detaches_again
         .await
         .unwrap();
 
-    let error = worker
+    let error = worker_pool::input_or_default(worker.input())
         .click(&page_id, &atlas_option_click())
         .await
         .unwrap_err();
@@ -2267,8 +2346,11 @@ async fn page_scoped_text_wait_sees_async_body_updates() {
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
-    worker
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_id,
             &NavigateCommand {
@@ -2295,7 +2377,7 @@ async fn page_scoped_text_wait_sees_async_body_updates() {
         )
         .await
         .unwrap();
-    worker
+    worker_pool::input_or_default(worker.input())
         .click(
             &page_id,
             &ClickCommand {
@@ -2318,19 +2400,19 @@ async fn page_scoped_text_wait_sees_async_body_updates() {
             ..TargetSpec::default()
         },
     ] {
-        let evidence = worker
-            .wait_for(
-                &page_id,
-                &WaitForCommand {
-                    condition: WaitCondition::Text {
-                        target: Box::new(target),
-                        matcher: TextMatch::Contains("Priority saved".into()),
-                    },
-                    timeout_ms: 2_000,
+        let evidence = worker_pool::PageBehavior::wait_for(
+            worker.wait_provider(),
+            &page_id,
+            &WaitForCommand {
+                condition: WaitCondition::Text {
+                    target: Box::new(target),
+                    matcher: TextMatch::Contains("Priority saved".into()),
                 },
-            )
-            .await
-            .unwrap();
+                timeout_ms: 2_000,
+            },
+        )
+        .await
+        .unwrap();
         assert!(matches!(
             &evidence[0],
             Evidence::Wait {
@@ -2361,9 +2443,11 @@ async fn click_modifiers_reach_chromium_native_mouse_events() {
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
-    worker
-        .navigate(
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation()).navigate(
             &page_id,
             &NavigateCommand {
                 url: concat!(
@@ -2379,7 +2463,7 @@ async fn click_modifiers_reach_chromium_native_mouse_events() {
         .await
         .unwrap();
 
-    worker
+    worker_pool::input_or_default(worker.input())
         .click(
             &page_id,
             &ClickCommand {
@@ -2392,7 +2476,7 @@ async fn click_modifiers_reach_chromium_native_mouse_events() {
         )
         .await
         .unwrap();
-    let evidence = worker
+    let evidence = worker_pool::observation_or_default(worker.observation())
         .inspect(
             &page_id,
             &InspectCommand {
@@ -2436,8 +2520,11 @@ async fn click_returns_when_a_dialog_opens_and_dialog_accepts_it() {
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
-    worker
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_id,
             &NavigateCommand {
@@ -2455,7 +2542,7 @@ async fn click_returns_when_a_dialog_opens_and_dialog_accepts_it() {
 
     let click_evidence = tokio::time::timeout(
         std::time::Duration::from_secs(20),
-        worker.click(
+        worker_pool::input_or_default(worker.input()).click(
             &page_id,
             &ClickCommand {
                 selector: "#a".into(),
@@ -2477,7 +2564,7 @@ async fn click_returns_when_a_dialog_opens_and_dialog_accepts_it() {
         "click evidence missing dialogOpened: {click_evidence:?}"
     );
 
-    let dialog_evidence = worker
+    let dialog_evidence = worker_pool::events_or_default(worker.events())
         .handle_dialog(
             &page_id,
             &HandleDialogCommand {
@@ -2494,7 +2581,7 @@ async fn click_returns_when_a_dialog_opens_and_dialog_accepts_it() {
         "dialog evidence missing the alert message: {dialog_evidence:?}"
     );
 
-    worker
+    worker_pool::observation_or_default(worker.observation())
         .inspect(
             &page_id,
             &InspectCommand {
@@ -2528,8 +2615,11 @@ async fn plain_click_completes_on_a_background_page() {
     let worker = factory.launch(&SessionId::new()).await.unwrap();
 
     let page_a = PageId::new();
-    worker.open_page(page_a.clone()).await.unwrap();
-    worker
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_a.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_a,
             &NavigateCommand {
@@ -2548,8 +2638,11 @@ async fn plain_click_completes_on_a_background_page() {
 
     // Backgrounds page A: opening a second page brings it to the front.
     let page_b = PageId::new();
-    worker.open_page(page_b.clone()).await.unwrap();
-    worker
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_b.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_b,
             &NavigateCommand {
@@ -2563,7 +2656,7 @@ async fn plain_click_completes_on_a_background_page() {
 
     tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        worker.click(
+        worker_pool::input_or_default(worker.input()).click(
             &page_a,
             &ClickCommand {
                 selector: "#b".into(),
@@ -2578,7 +2671,7 @@ async fn plain_click_completes_on_a_background_page() {
     .expect("plain click on a backgrounded page must not hang until the envelope deadline")
     .expect("plain click on a backgrounded page must succeed");
 
-    let inspect_evidence = worker
+    let inspect_evidence = worker_pool::observation_or_default(worker.observation())
         .inspect(
             &page_a,
             &InspectCommand {
@@ -2620,8 +2713,11 @@ async fn network_quiet_respects_url_and_long_lived_ignores() {
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
-    worker
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_id,
             &NavigateCommand {
@@ -2632,57 +2728,57 @@ async fn network_quiet_respects_url_and_long_lived_ignores() {
         )
         .await
         .unwrap();
-    worker
-        .wait_for(
-            &page_id,
-            &WaitForCommand {
-                condition: WaitCondition::Text {
-                    target: Box::new(TargetSpec {
-                        css: Some("#status".into()),
-                        ..TargetSpec::default()
-                    }),
-                    matcher: TextMatch::Exact("armed".into()),
-                },
-                timeout_ms: 5_000,
+    worker_pool::PageBehavior::wait_for(
+        worker.wait_provider(),
+        &page_id,
+        &WaitForCommand {
+            condition: WaitCondition::Text {
+                target: Box::new(TargetSpec {
+                    css: Some("#status".into()),
+                    ..TargetSpec::default()
+                }),
+                matcher: TextMatch::Exact("armed".into()),
             },
-        )
-        .await
-        .unwrap();
+            timeout_ms: 5_000,
+        },
+    )
+    .await
+    .unwrap();
 
-    let without_ignores = worker
-        .wait_for(
-            &page_id,
-            &WaitForCommand {
-                condition: WaitCondition::NetworkQuiet {
-                    idle_ms: 50,
-                    max_in_flight: 0,
-                    ignore_url_substrings: Vec::new(),
-                    ignore_resource_types: Vec::new(),
-                    ignore_long_lived: false,
-                },
-                timeout_ms: 750,
+    let without_ignores = worker_pool::PageBehavior::wait_for(
+        worker.wait_provider(),
+        &page_id,
+        &WaitForCommand {
+            condition: WaitCondition::NetworkQuiet {
+                idle_ms: 50,
+                max_in_flight: 0,
+                ignore_url_substrings: Vec::new(),
+                ignore_resource_types: Vec::new(),
+                ignore_long_lived: false,
             },
-        )
-        .await
-        .unwrap_err();
+            timeout_ms: 750,
+        },
+    )
+    .await
+    .unwrap_err();
     assert_eq!(without_ignores.code, ErrorCode::WaitConditionTimedOut);
 
-    let evidence = worker
-        .wait_for(
-            &page_id,
-            &WaitForCommand {
-                condition: WaitCondition::NetworkQuiet {
-                    idle_ms: 50,
-                    max_in_flight: 0,
-                    ignore_url_substrings: vec!["analytics".into()],
-                    ignore_resource_types: Vec::new(),
-                    ignore_long_lived: true,
-                },
-                timeout_ms: 5_000,
+    let evidence = worker_pool::PageBehavior::wait_for(
+        worker.wait_provider(),
+        &page_id,
+        &WaitForCommand {
+            condition: WaitCondition::NetworkQuiet {
+                idle_ms: 50,
+                max_in_flight: 0,
+                ignore_url_substrings: vec!["analytics".into()],
+                ignore_resource_types: Vec::new(),
+                ignore_long_lived: true,
             },
-        )
-        .await
-        .unwrap();
+            timeout_ms: 5_000,
+        },
+    )
+    .await
+    .unwrap();
     let Evidence::Wait {
         excluded_classes, ..
     } = &evidence[0]
@@ -2724,9 +2820,11 @@ async fn captures_viewport_full_page_element_and_clip_as_private_artifacts() {
     });
     let worker = factory.launch(&session_id).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
-    worker
-        .navigate(
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation()).navigate(
             &page_id,
             &NavigateCommand {
                 url: "data:text/html,<main style='height:1200px'><button aria-label=Capture>proof</button></main>".into(),
@@ -2754,7 +2852,7 @@ async fn captures_viewport_full_page_element_and_clip_as_private_artifacts() {
         },
     ];
     for mode in modes {
-        let evidence = worker
+        let evidence = worker_pool::capture_or_default(worker.capture())
             .capture_screenshot(&page_id, &CaptureScreenshotCommand { mode })
             .await
             .unwrap();
@@ -2803,9 +2901,11 @@ async fn corpus_capture_masks_editable_content_and_restores_the_page() {
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
-    worker
-        .navigate(
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation()).navigate(
             &page_id,
             &NavigateCommand {
                 url: "data:text/html,<body style='background:white'><input id=secret value='vault-secret-92' style='margin:80px;width:240px;height:40px;font-size:24px'></body>".into(),
@@ -2816,12 +2916,20 @@ async fn corpus_capture_masks_editable_content_and_restores_the_page() {
         .await
         .unwrap();
 
-    let raw = worker.screenshot_bytes(&page_id).await.unwrap();
-    let sanitized = worker.sanitized_screenshot_bytes(&page_id).await.unwrap();
+    let raw = worker_pool::capture_or_default(worker.capture())
+        .screenshot_bytes(&page_id)
+        .await
+        .unwrap();
+    let sanitized = worker_pool::PageBehavior::sanitized_screenshot_bytes(
+        worker.capture(),
+        worker.javascript(),
+        &page_id,
+    )
+    .await
+    .unwrap();
     assert_ne!(raw, sanitized);
 
-    let evidence = worker
-        .evaluate_javascript(
+    let evidence = worker_pool::javascript_or_default(worker.javascript()).evaluate_javascript(
             &page_id,
             &EvaluateJavaScriptCommand {
                 expression: "({value:document.querySelector('#secret').value,masks:document.querySelectorAll('[data-bobby-corpus-mask]').length})".into(),
@@ -2862,8 +2970,11 @@ async fn resolves_nested_cross_origin_frames_and_open_shadow_roots() {
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
-    worker
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_id,
             &NavigateCommand {
@@ -2887,7 +2998,7 @@ async fn resolves_nested_cross_origin_frames_and_open_shadow_roots() {
             ..TargetSpec::default()
         }),
     ];
-    worker
+    worker_pool::input_or_default(worker.input())
         .type_text(
             &page_id,
             &TypeTextCommand {
@@ -2905,7 +3016,7 @@ async fn resolves_nested_cross_origin_frames_and_open_shadow_roots() {
         .await
         .unwrap();
 
-    worker
+    worker_pool::input_or_default(worker.input())
         .click(
             &page_id,
             &ClickCommand {
@@ -2926,7 +3037,7 @@ async fn resolves_nested_cross_origin_frames_and_open_shadow_roots() {
         )
         .await
         .unwrap();
-    let evidence = worker
+    let evidence = worker_pool::observation_or_default(worker.observation())
         .inspect(
             &page_id,
             &InspectCommand {
@@ -2962,8 +3073,11 @@ async fn resolves_ambient_and_explicit_closed_shadow_roots() {
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
-    worker
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_id,
             &NavigateCommand {
@@ -2976,7 +3090,7 @@ async fn resolves_ambient_and_explicit_closed_shadow_roots() {
         .unwrap();
 
     // Ambient purpose-based match inside a closed root (no shadow_path).
-    worker
+    worker_pool::input_or_default(worker.input())
         .click(
             &page_id,
             &ClickCommand {
@@ -2993,7 +3107,7 @@ async fn resolves_ambient_and_explicit_closed_shadow_roots() {
         )
         .await
         .unwrap();
-    let evidence = worker
+    let evidence = worker_pool::observation_or_default(worker.observation())
         .inspect(
             &page_id,
             &InspectCommand {
@@ -3007,7 +3121,7 @@ async fn resolves_ambient_and_explicit_closed_shadow_roots() {
     assert!(format!("{evidence:?}").contains("closed-shadow-clicked"));
 
     // Explicit shadow_path into a closed root.
-    worker
+    worker_pool::input_or_default(worker.input())
         .click(
             &page_id,
             &ClickCommand {
@@ -3030,7 +3144,7 @@ async fn resolves_ambient_and_explicit_closed_shadow_roots() {
         .unwrap();
 
     // Mixed open-then-closed nesting via explicit shadow_path.
-    worker
+    worker_pool::input_or_default(worker.input())
         .click(
             &page_id,
             &ClickCommand {
@@ -3057,7 +3171,7 @@ async fn resolves_ambient_and_explicit_closed_shadow_roots() {
         )
         .await
         .unwrap();
-    let evidence = worker
+    let evidence = worker_pool::observation_or_default(worker.observation())
         .inspect(
             &page_id,
             &InspectCommand {
@@ -3089,7 +3203,10 @@ async fn shuts_down_a_stopped_owned_browser(terminate: bool) {
     );
     let session_id = SessionId::new();
     let worker = factory.launch(&session_id).await.unwrap();
-    worker.open_page(PageId::new()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(PageId::new())
+        .await
+        .unwrap();
     let registration = registry.join(format!("{}.pid", worker.worker_id().0));
     let pid = worker_pool::process_registry::read_registered_pid(&registration).unwrap();
     let pid = i32::try_from(pid).unwrap();
@@ -3117,7 +3234,10 @@ async fn shuts_down_a_stopped_owned_browser(terminate: bool) {
     );
     // Forced shutdown must release the profile, not just return to the caller.
     let replacement = factory.launch(&session_id).await.unwrap();
-    replacement.open_page(PageId::new()).await.unwrap();
+    worker_pool::tabs_or_default(replacement.tabs())
+        .open_page(PageId::new())
+        .await
+        .unwrap();
     replacement.close().await.unwrap();
 }
 
@@ -3156,9 +3276,12 @@ async fn evaluates_javascript_bounds_the_result_and_classifies_errors() {
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
     eprintln!("javascript evaluation fixture: open page");
-    worker.open_page(page_id.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
     eprintln!("javascript evaluation fixture: navigate");
-    worker
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_id,
             &NavigateCommand {
@@ -3172,7 +3295,7 @@ async fn evaluates_javascript_bounds_the_result_and_classifies_errors() {
 
     // A small result passes through untouched.
     eprintln!("javascript evaluation fixture: small result");
-    let evidence = worker
+    let evidence = worker_pool::javascript_or_default(worker.javascript())
         .evaluate_javascript(
             &page_id,
             &EvaluateJavaScriptCommand {
@@ -3193,7 +3316,7 @@ async fn evaluates_javascript_bounds_the_result_and_classifies_errors() {
 
     // A result larger than `max_js_result_bytes` (16 above) is truncated and flagged.
     eprintln!("javascript evaluation fixture: bounded result");
-    let evidence = worker
+    let evidence = worker_pool::javascript_or_default(worker.javascript())
         .evaluate_javascript(
             &page_id,
             &EvaluateJavaScriptCommand {
@@ -3214,7 +3337,7 @@ async fn evaluates_javascript_bounds_the_result_and_classifies_errors() {
 
     // await_promise=true resolves an awaited promise's value.
     eprintln!("javascript evaluation fixture: resolved promise");
-    let evidence = worker
+    let evidence = worker_pool::javascript_or_default(worker.javascript())
         .evaluate_javascript(
             &page_id,
             &EvaluateJavaScriptCommand {
@@ -3235,7 +3358,7 @@ async fn evaluates_javascript_bounds_the_result_and_classifies_errors() {
 
     // A JS exception surfaces as a failed (non-panicking) CommandError, not a panic.
     eprintln!("javascript evaluation fixture: exception");
-    let error = worker
+    let error = worker_pool::javascript_or_default(worker.javascript())
         .evaluate_javascript(
             &page_id,
             &EvaluateJavaScriptCommand {
@@ -3250,7 +3373,7 @@ async fn evaluates_javascript_bounds_the_result_and_classifies_errors() {
 
     // A near-zero timeout classifies as a deadline-exceeded, retryable error.
     eprintln!("javascript evaluation fixture: unresolved promise deadline");
-    let error = worker
+    let error = worker_pool::javascript_or_default(worker.javascript())
         .evaluate_javascript(
             &page_id,
             &EvaluateJavaScriptCommand {
@@ -3288,11 +3411,13 @@ async fn humanized_input_reaches_the_page_with_synthesized_timing() {
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
     // The probe counts keydowns and clicks: synthesized input that never
     // reaches the page fails here, not in a Rust-side assertion.
-    worker
-        .navigate(
+    worker_pool::navigation_or_default(worker.navigation()).navigate(
             &page_id,
             &NavigateCommand {
                 url: "data:text/html,<title>Humanize</title><input id='name'><button id='go'>Go</button><script>window.keydowns=0;window.repeats=0;window.lastkey='';window.clicks=0;document.addEventListener('keydown',(e)=>{window.keydowns++;if(e.repeat)window.repeats++;window.lastkey=e.key;if(!window.t0)window.t0=e.timeStamp;window.t1=e.timeStamp;const b=Math.floor(e.timeStamp/50)*50;window.hist[b]=(window.hist[b]||0)+1;});document.getElementById('go').addEventListener('click',()=>window.clicks++);</script>".into(),
@@ -3302,10 +3427,13 @@ async fn humanized_input_reaches_the_page_with_synthesized_timing() {
         )
         .await
         .unwrap();
-    worker.set_humanization_enabled(true).await.unwrap();
+    worker_pool::session_settings_or_default(worker.session_settings())
+        .set_humanization_enabled(true)
+        .await
+        .unwrap();
 
     let started = std::time::Instant::now();
-    let evidence = worker
+    let evidence = worker_pool::input_or_default(worker.input())
         .type_text(
             &page_id,
             &TypeTextCommand {
@@ -3332,7 +3460,7 @@ async fn humanized_input_reaches_the_page_with_synthesized_timing() {
         "typing three characters with clear finished in {typed_ms}ms; a human burst cannot be instant"
     );
 
-    worker
+    worker_pool::input_or_default(worker.input())
         .click(
             &page_id,
             &ClickCommand {
@@ -3346,8 +3474,7 @@ async fn humanized_input_reaches_the_page_with_synthesized_timing() {
         .await
         .unwrap();
 
-    let evidence = worker
-        .evaluate_javascript(
+    let evidence = worker_pool::javascript_or_default(worker.javascript()).evaluate_javascript(
             &page_id,
             &EvaluateJavaScriptCommand {
                 expression: "JSON.stringify({keydowns: window.keydowns, clicks: window.clicks, value: document.getElementById('name').value})".into(),
@@ -3374,8 +3501,11 @@ async fn humanized_input_reaches_the_page_with_synthesized_timing() {
     assert_eq!(probe["value"].as_str().unwrap_or_default(), "Ada");
 
     // Off means off: no Humanization evidence and direct input speed.
-    worker.set_humanization_enabled(false).await.unwrap();
-    let direct = worker
+    worker_pool::session_settings_or_default(worker.session_settings())
+        .set_humanization_enabled(false)
+        .await
+        .unwrap();
+    let direct = worker_pool::input_or_default(worker.input())
         .type_text(
             &page_id,
             &TypeTextCommand {
@@ -3419,9 +3549,11 @@ async fn dogfood_humanized_stream_biometrics() {
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
-    worker
-        .navigate(
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation()).navigate(
             &page_id,
             &NavigateCommand {
                 url: "data:text/html,<title>Dogfood</title><input id='f' style='position:absolute;left:400px;top:300px;width:200px'><script>window.keys=[];window.moves=[];document.addEventListener('keydown',e=>window.keys.push({k:e.key,t:e.timeStamp}));document.addEventListener('mousemove',e=>window.moves.push({x:e.clientX,y:e.clientY,t:e.timeStamp}));</script>".into(),
@@ -3431,11 +3563,14 @@ async fn dogfood_humanized_stream_biometrics() {
         )
         .await
         .unwrap();
-    worker.set_humanization_enabled(true).await.unwrap();
+    worker_pool::session_settings_or_default(worker.session_settings())
+        .set_humanization_enabled(true)
+        .await
+        .unwrap();
     // Pool several rounds: per-round statistics are small-sample flaky, a
     // detector's cadence check is only meaningful on a pooled stream.
     for value in ["stream", "behavior", "input", "human"] {
-        worker
+        worker_pool::input_or_default(worker.input())
             .type_text(
                 &page_id,
                 &TypeTextCommand {
@@ -3449,7 +3584,7 @@ async fn dogfood_humanized_stream_biometrics() {
             .await
             .unwrap();
     }
-    worker
+    worker_pool::input_or_default(worker.input())
         .click(
             &page_id,
             &ClickCommand {
@@ -3462,7 +3597,7 @@ async fn dogfood_humanized_stream_biometrics() {
         )
         .await
         .unwrap();
-    let evidence = worker
+    let evidence = worker_pool::javascript_or_default(worker.javascript())
         .evaluate_javascript(
             &page_id,
             &EvaluateJavaScriptCommand {
@@ -3591,8 +3726,11 @@ async fn implicit_roles_from_the_dom_collector_match_the_a11y_snapshot() {
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         let worker = factory.launch(&SessionId::new()).await.unwrap();
         let page_id = PageId::new();
-        worker.open_page(page_id.clone()).await.unwrap();
-        worker
+        worker_pool::tabs_or_default(worker.tabs())
+            .open_page(page_id.clone())
+            .await
+            .unwrap();
+        worker_pool::navigation_or_default(worker.navigation())
             .navigate(
                 &page_id,
                 &NavigateCommand {
@@ -3606,7 +3744,7 @@ async fn implicit_roles_from_the_dom_collector_match_the_a11y_snapshot() {
             )
             .await
             .unwrap();
-        let snapshot = worker
+        let snapshot = worker_pool::observation_or_default(worker.observation())
             .a11y_snapshot(
                 &page_id,
                 &AccessibilitySnapshotCommand {
@@ -3636,7 +3774,7 @@ async fn implicit_roles_from_the_dom_collector_match_the_a11y_snapshot() {
                 accessible_name: node.name.clone(),
                 ..TargetSpec::default()
             };
-            worker
+            worker_pool::observation_or_default(worker.observation())
                 .inspect(
                     &page_id,
                     &InspectCommand {
@@ -3679,8 +3817,11 @@ async fn a_css_selector_matching_nothing_is_reported_as_no_matching_element() {
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         let worker = factory.launch(&SessionId::new()).await.unwrap();
         let page_id = PageId::new();
-        worker.open_page(page_id.clone()).await.unwrap();
-        worker
+        worker_pool::tabs_or_default(worker.tabs())
+            .open_page(page_id.clone())
+            .await
+            .unwrap();
+        worker_pool::navigation_or_default(worker.navigation())
             .navigate(
                 &page_id,
                 &NavigateCommand {
@@ -3691,7 +3832,7 @@ async fn a_css_selector_matching_nothing_is_reported_as_no_matching_element() {
             )
             .await
             .unwrap();
-        let error = worker
+        let error = worker_pool::observation_or_default(worker.observation())
             .inspect(
                 &page_id,
                 &InspectCommand {
@@ -3730,9 +3871,11 @@ async fn descends_unnamed_srcdoc_iframes_and_resolves_the_stamped_ordinal_hop() 
     });
     let worker = factory.launch(&SessionId::new()).await.unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
-    worker
-        .navigate(
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation()).navigate(
             &page_id,
             &NavigateCommand {
                 url: "data:text/html,<iframe srcdoc='<button>One</button>'></iframe><iframe srcdoc='<button>Two</button>'></iframe>".into(),
@@ -3743,7 +3886,7 @@ async fn descends_unnamed_srcdoc_iframes_and_resolves_the_stamped_ordinal_hop() 
         .await
         .unwrap();
 
-    let snapshot = worker
+    let snapshot = worker_pool::observation_or_default(worker.observation())
         .a11y_snapshot(
             &page_id,
             &AccessibilitySnapshotCommand {
@@ -3806,7 +3949,7 @@ async fn descends_unnamed_srcdoc_iframes_and_resolves_the_stamped_ordinal_hop() 
     let value = serde_json::to_value(ax_target).expect("serialize accessibility target");
     let verbatim_target: TargetSpec =
         serde_json::from_value(value).expect("deserialize accessibility target as TargetSpec");
-    worker
+    worker_pool::input_or_default(worker.input())
         .click(
             &page_id,
             &ClickCommand {
@@ -3833,7 +3976,7 @@ async fn descends_unnamed_srcdoc_iframes_and_resolves_the_stamped_ordinal_hop() 
         })],
         ..TargetSpec::default()
     };
-    worker
+    worker_pool::observation_or_default(worker.observation())
         .inspect(
             &page_id,
             &InspectCommand {
@@ -3871,8 +4014,11 @@ async fn a_hung_click_and_wait_for_popup_does_not_block_other_pages() {
     let worker = factory.launch(&SessionId::new()).await.unwrap();
 
     let page_a = PageId::new();
-    worker.open_page(page_a.clone()).await.unwrap();
-    worker
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_a.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page_a,
             &NavigateCommand {
@@ -3884,7 +4030,7 @@ async fn a_hung_click_and_wait_for_popup_does_not_block_other_pages() {
         .await
         .unwrap();
 
-    let opened = worker
+    let opened = worker_pool::tabs_or_default(worker.tabs())
         .open_page_command(&OpenPageCommand {
             url: Some("data:text/html,<title>Page B</title><button id='b'>B</button>".into()),
         })
@@ -3899,7 +4045,7 @@ async fn a_hung_click_and_wait_for_popup_does_not_block_other_pages() {
     let popup_worker = worker.clone();
     let popup_page = page_a.clone();
     let popup_task = tokio::spawn(async move {
-        popup_worker
+        worker_pool::events_or_default(popup_worker.events())
             .click_and_wait_for_popup(
                 &popup_page,
                 &ClickAndWaitForPopupCommand {
@@ -3917,7 +4063,7 @@ async fn a_hung_click_and_wait_for_popup_does_not_block_other_pages() {
     // mutex; a whole-page inspect never does and would pass either way.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     let started = std::time::Instant::now();
-    worker
+    worker_pool::observation_or_default(worker.observation())
         .inspect(
             &page_b,
             &InspectCommand {

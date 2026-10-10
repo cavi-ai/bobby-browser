@@ -383,6 +383,7 @@ async fn reveal_field(
         candidate,
         evidence: candidate_evidence,
         best_match_authorized,
+        ..
     } = match locate(
         page_id,
         browser,
@@ -856,6 +857,7 @@ async fn execute_locate(
         candidate,
         evidence: candidate_evidence,
         best_match_authorized,
+        ..
     } = match locate(
         page_id,
         browser,
@@ -1468,6 +1470,7 @@ async fn execute_fill(
         candidate,
         evidence: candidate_evidence,
         best_match_authorized,
+        ..
     } = match locate(
         page_id,
         browser,
@@ -1831,6 +1834,7 @@ async fn execute_submit_and_verify(
         candidate,
         evidence: candidate_evidence,
         best_match_authorized,
+        open_dialogs,
     } = match locate(
         page_id,
         browser,
@@ -1959,19 +1963,32 @@ async fn execute_submit_and_verify(
             // "the submit failed" and invite a blind resubmit that duplicates
             // the POST. Rewrap so the effect and the safe next step are
             // explicit.
+            let opened = dialogs_opened(page_id, browser, &target, &open_dialogs).await;
             let error = CommandError {
                 code: ErrorCode::VerificationFailed,
                 message: format!(
-                    "submit click landed but the expected post-state did not hold ({}): {}. \
+                    "submit click landed but the expected post-state did not hold ({}): {}{}. \
                      Do not resubmit blindly — inspect the page for a server rejection or \
                      confirmation, then re-verify with intent_wait_for_state or correct the \
                      rejected fields",
                     wait_condition_kind(&expected_state.condition),
-                    error.message
+                    error.message,
+                    if opened.is_empty() {
+                        ""
+                    } else {
+                        "; a dialog opened over the page"
+                    }
                 ),
                 layer: error.layer,
                 retryable: false,
             };
+            let verification = if opened.is_empty() {
+                "verifyFailed"
+            } else {
+                "dialogOpened"
+            };
+            let mut candidates = vec![candidate_evidence];
+            candidates.extend(opened);
             return IntentOutcome::Failed {
                 error,
                 evidence: {
@@ -1981,9 +1998,9 @@ async fn execute_submit_and_verify(
                         "submitAndVerify",
                         purpose,
                         plan_summary,
-                        vec![candidate_evidence],
+                        candidates,
                         None,
-                        "verifyFailed",
+                        verification,
                     )));
                     evidence
                 },
@@ -2153,6 +2170,28 @@ fn disambiguate_submit_by_purpose(
 /// the original message, so a repair reader sees "landed, unverified" instead
 /// of "ambiguous, retry". Any other code (e.g. a real command failure) passes
 /// through unchanged.
+/// Dialogs open now that were not open when the target resolved.
+async fn dialogs_opened(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    target: &TargetSpec,
+    before: &[types::CandidateEvidence],
+) -> Vec<types::CandidateEvidence> {
+    let Ok(census) = browser.collect_candidates(page_id, target).await else {
+        return Vec::new();
+    };
+    let mut unmatched: Vec<&types::CandidateEvidence> = before.iter().collect();
+    locate::open_dialogs(&census)
+        .into_iter()
+        .filter(|dialog| {
+            let seen = unmatched
+                .iter()
+                .position(|open| open.role == dialog.role && open.name == dialog.name);
+            seen.map(|index| unmatched.swap_remove(index)).is_none()
+        })
+        .collect()
+}
+
 fn recode_postclick_verification_error(error: CommandError, prefix: &str) -> CommandError {
     match error.code {
         ErrorCode::TargetAmbiguous | ErrorCode::TargetNotFound | ErrorCode::InvalidRequest => {
@@ -2189,6 +2228,7 @@ async fn execute_follow(
         candidate,
         evidence: candidate_evidence,
         best_match_authorized,
+        open_dialogs,
     } = match locate(
         page_id,
         browser,
@@ -2252,10 +2292,28 @@ async fn execute_follow(
             // post-state could not be verified. Reporting it verbatim reads
             // as a retryable ambiguity and invites re-clicking a control that
             // already fired.
-            let error = recode_postclick_verification_error(
-                error,
-                "activation landed; expectedState could not be verified",
-            );
+            let opened = dialogs_opened(page_id, browser, &target, &open_dialogs).await;
+            let (error, verification) = if opened.is_empty() {
+                (
+                    recode_postclick_verification_error(
+                        error,
+                        "activation landed; expectedState could not be verified",
+                    ),
+                    "verifyFailed",
+                )
+            } else {
+                (
+                    CommandError {
+                        code: ErrorCode::ObstructionSuspected,
+                        message: "activation landed; a dialog opened over the page instead of the expectedState".into(),
+                        layer: ErrorLayer::Page,
+                        retryable: false,
+                    },
+                    "dialogOpened",
+                )
+            };
+            let mut candidates = vec![candidate_evidence];
+            candidates.extend(opened);
             return IntentOutcome::Failed {
                 error,
                 evidence: {
@@ -2265,9 +2323,9 @@ async fn execute_follow(
                         "follow",
                         purpose,
                         plan_summary,
-                        vec![candidate_evidence],
+                        candidates,
                         None,
-                        "verifyFailed",
+                        verification,
                     )));
                     evidence
                 },
@@ -2320,6 +2378,7 @@ async fn execute_dismiss_obstruction(
         candidate,
         evidence: candidate_evidence,
         best_match_authorized,
+        ..
     } = match locate(
         page_id,
         browser,

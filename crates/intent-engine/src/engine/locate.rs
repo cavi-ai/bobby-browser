@@ -80,6 +80,27 @@ pub(super) struct LocatedTarget {
     pub candidate: Box<Candidate>,
     pub evidence: types::CandidateEvidence,
     pub best_match_authorized: bool,
+    /// The dialogs open when the target resolved.
+    pub open_dialogs: Vec<types::CandidateEvidence>,
+}
+
+/// Each visible dialog in a candidate census, by role and name.
+pub(super) fn open_dialogs(census: &[Candidate]) -> Vec<types::CandidateEvidence> {
+    census
+        .iter()
+        .filter(|candidate| {
+            candidate.state.visible
+                && candidate.role.as_deref().is_some_and(|role| {
+                    role.eq_ignore_ascii_case("dialog") || role.eq_ignore_ascii_case("alertdialog")
+                })
+        })
+        .map(|candidate| types::CandidateEvidence {
+            role: candidate.role.clone(),
+            name: candidate.name.clone(),
+            score: 0,
+            reasons: vec!["openDialog".into()],
+        })
+        .collect()
 }
 
 pub(super) async fn locate(
@@ -172,6 +193,7 @@ pub(super) async fn locate(
                 candidate,
                 evidence,
                 best_match_authorized,
+                open_dialogs: open_dialogs(&census),
             });
         }
         ResolutionDecision::NotFound => {

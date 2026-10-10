@@ -1191,43 +1191,38 @@ impl BrowserWorker for MinimalWorker {
     fn worker_id(&self) -> types::WorkerId {
         types::WorkerId::new()
     }
+
     fn profile_dir(&self) -> &std::path::Path {
         &self.profile
     }
+
+    async fn close(&self) -> Result<(), types::CommandError> {
+        Ok(())
+    }
+
+    fn tabs(&self) -> Option<&dyn worker_pool::TabsEngine> {
+        Some(self)
+    }
+
+    fn navigation(&self) -> Option<&dyn worker_pool::NavigationEngine> {
+        Some(self)
+    }
+
+    fn observation(&self) -> Option<&dyn worker_pool::ObservationEngine> {
+        Some(self)
+    }
+
+    fn input(&self) -> Option<&dyn worker_pool::InputEngine> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl worker_pool::TabsEngine for MinimalWorker {
     async fn open_page(&self, _: types::PageId) -> Result<(), types::CommandError> {
         Ok(())
     }
-    async fn navigate(
-        &self,
-        _: &types::PageId,
-        _: &types::NavigateCommand,
-    ) -> Result<Vec<Evidence>, types::CommandError> {
-        Ok(Vec::new())
-    }
-    async fn inspect(
-        &self,
-        _: &types::PageId,
-        _: &types::InspectCommand,
-    ) -> Result<Vec<Evidence>, types::CommandError> {
-        Ok(Vec::new())
-    }
-    async fn click(
-        &self,
-        _: &types::PageId,
-        _: &types::ClickCommand,
-    ) -> Result<Vec<Evidence>, types::CommandError> {
-        Ok(Vec::new())
-    }
-    async fn type_text(
-        &self,
-        _: &types::PageId,
-        _: &types::TypeTextCommand,
-    ) -> Result<Vec<Evidence>, types::CommandError> {
-        Ok(Vec::new())
-    }
-    // Overridden because the trait default is `Err(unsupported)`. A `ListPages`
-    // outcome must carry `Evidence::Pages` to verify as completed, so the marker
-    // string lives in that variant's `url`/`title` fields.
+
     async fn list_pages(
         &self,
         _: &types::ListPagesCommand,
@@ -1241,8 +1236,46 @@ impl BrowserWorker for MinimalWorker {
             }],
         }])
     }
-    async fn close(&self) -> Result<(), types::CommandError> {
-        Ok(())
+}
+
+#[async_trait]
+impl worker_pool::NavigationEngine for MinimalWorker {
+    async fn navigate(
+        &self,
+        _: &types::PageId,
+        _: &types::NavigateCommand,
+    ) -> Result<Vec<Evidence>, types::CommandError> {
+        Ok(Vec::new())
+    }
+}
+
+#[async_trait]
+impl worker_pool::ObservationEngine for MinimalWorker {
+    async fn inspect(
+        &self,
+        _: &types::PageId,
+        _: &types::InspectCommand,
+    ) -> Result<Vec<Evidence>, types::CommandError> {
+        Ok(Vec::new())
+    }
+}
+
+#[async_trait]
+impl worker_pool::InputEngine for MinimalWorker {
+    async fn click(
+        &self,
+        _: &types::PageId,
+        _: &types::ClickCommand,
+    ) -> Result<Vec<Evidence>, types::CommandError> {
+        Ok(Vec::new())
+    }
+
+    async fn type_text(
+        &self,
+        _: &types::PageId,
+        _: &types::TypeTextCommand,
+    ) -> Result<Vec<Evidence>, types::CommandError> {
+        Ok(Vec::new())
     }
 }
 

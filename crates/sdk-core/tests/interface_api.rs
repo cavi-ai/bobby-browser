@@ -152,10 +152,37 @@ impl BrowserWorker for LifecycleWorker {
         &self.profile
     }
 
-    async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
+    async fn close(&self) -> Result<(), CommandError> {
+        self.closes.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
+    fn tabs(&self) -> Option<&dyn worker_pool::TabsEngine> {
+        Some(self)
+    }
+
+    fn navigation(&self) -> Option<&dyn worker_pool::NavigationEngine> {
+        Some(self)
+    }
+
+    fn observation(&self) -> Option<&dyn worker_pool::ObservationEngine> {
+        Some(self)
+    }
+
+    fn input(&self) -> Option<&dyn worker_pool::InputEngine> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl worker_pool::TabsEngine for LifecycleWorker {
+    async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl worker_pool::NavigationEngine for LifecycleWorker {
     async fn navigate(
         &self,
         _: &PageId,
@@ -163,20 +190,11 @@ impl BrowserWorker for LifecycleWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         Ok(Vec::new())
     }
+}
 
+#[async_trait]
+impl worker_pool::ObservationEngine for LifecycleWorker {
     async fn inspect(&self, _: &PageId, _: &InspectCommand) -> Result<Vec<Evidence>, CommandError> {
-        Ok(Vec::new())
-    }
-
-    async fn click(&self, _: &PageId, _: &ClickCommand) -> Result<Vec<Evidence>, CommandError> {
-        Ok(Vec::new())
-    }
-
-    async fn type_text(
-        &self,
-        _: &PageId,
-        _: &TypeTextCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
         Ok(Vec::new())
     }
 
@@ -187,10 +205,20 @@ impl BrowserWorker for LifecycleWorker {
     ) -> Result<Vec<dom_engine::Candidate>, CommandError> {
         Ok(Vec::new())
     }
+}
 
-    async fn close(&self) -> Result<(), CommandError> {
-        self.closes.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+#[async_trait]
+impl worker_pool::InputEngine for LifecycleWorker {
+    async fn click(&self, _: &PageId, _: &ClickCommand) -> Result<Vec<Evidence>, CommandError> {
+        Ok(Vec::new())
+    }
+
+    async fn type_text(
+        &self,
+        _: &PageId,
+        _: &TypeTextCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Ok(Vec::new())
     }
 }
 
@@ -217,10 +245,36 @@ impl BrowserWorker for BlockingNavigateWorker {
         &self.profile
     }
 
-    async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
+    async fn close(&self) -> Result<(), CommandError> {
         Ok(())
     }
 
+    fn tabs(&self) -> Option<&dyn worker_pool::TabsEngine> {
+        Some(self)
+    }
+
+    fn navigation(&self) -> Option<&dyn worker_pool::NavigationEngine> {
+        Some(self)
+    }
+
+    fn observation(&self) -> Option<&dyn worker_pool::ObservationEngine> {
+        Some(self)
+    }
+
+    fn input(&self) -> Option<&dyn worker_pool::InputEngine> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl worker_pool::TabsEngine for BlockingNavigateWorker {
+    async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl worker_pool::NavigationEngine for BlockingNavigateWorker {
     async fn navigate(
         &self,
         _: &PageId,
@@ -230,20 +284,11 @@ impl BrowserWorker for BlockingNavigateWorker {
         self.release.notified().await;
         Ok(Vec::new())
     }
+}
 
+#[async_trait]
+impl worker_pool::ObservationEngine for BlockingNavigateWorker {
     async fn inspect(&self, _: &PageId, _: &InspectCommand) -> Result<Vec<Evidence>, CommandError> {
-        Ok(Vec::new())
-    }
-
-    async fn click(&self, _: &PageId, _: &ClickCommand) -> Result<Vec<Evidence>, CommandError> {
-        Ok(Vec::new())
-    }
-
-    async fn type_text(
-        &self,
-        _: &PageId,
-        _: &TypeTextCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
         Ok(Vec::new())
     }
 
@@ -254,9 +299,20 @@ impl BrowserWorker for BlockingNavigateWorker {
     ) -> Result<Vec<dom_engine::Candidate>, CommandError> {
         Ok(Vec::new())
     }
+}
 
-    async fn close(&self) -> Result<(), CommandError> {
-        Ok(())
+#[async_trait]
+impl worker_pool::InputEngine for BlockingNavigateWorker {
+    async fn click(&self, _: &PageId, _: &ClickCommand) -> Result<Vec<Evidence>, CommandError> {
+        Ok(Vec::new())
+    }
+
+    async fn type_text(
+        &self,
+        _: &PageId,
+        _: &TypeTextCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Ok(Vec::new())
     }
 }
 

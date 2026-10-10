@@ -52,8 +52,7 @@ async fn navigate(
     url: &str,
 ) -> Vec<Evidence> {
     let lease = pool.lease(session_id.clone()).await.unwrap();
-    lease
-        .worker()
+    worker_pool::navigation_or_default(lease.worker().navigation())
         .navigate(
             page_id,
             &NavigateCommand {
@@ -104,7 +103,10 @@ async fn replaces_chrome_then_resumes_or_restarts_from_verified_state() {
     let page_id = PageId::new();
     let first = pool.lease(session_id.clone()).await.unwrap();
     let first_worker_id = first.worker_id();
-    first.worker().open_page(page_id.clone()).await.unwrap();
+    worker_pool::tabs_or_default(first.worker().tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
     // `WorkerPool::lease` hands out a fresh semaphore permit on every call
     // (the pool is capacity-1 here), while the underlying worker stays warm
     // in the pool's session entry regardless of how many leases are
@@ -160,8 +162,7 @@ async fn replaces_chrome_then_resumes_or_restarts_from_verified_state() {
     };
     let replacement = pool.lease(session_id.clone()).await.unwrap();
     assert_ne!(replacement.worker_id(), second_worker_id);
-    let final_state = replacement
-        .worker()
+    let final_state = worker_pool::observation_or_default(replacement.worker().observation())
         .inspect(&page_id, &InspectCommand::default())
         .await
         .unwrap();

@@ -28,6 +28,77 @@ fn archived_journal(path: &std::path::Path) -> std::path::PathBuf {
 // ===== Job tests =====
 
 #[test]
+fn job_invalid_schema_keeps_high_water_without_applying_payload() {
+    runtime().block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.jsonl");
+        let store = JournalJobStore::open(&path).await.unwrap();
+        let job = Job::new(
+            "original".into(),
+            serde_json::json!({"owner":"original"}),
+            JobPriority::Normal,
+        );
+        store.put(&job).await.unwrap();
+        drop(store);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let mut record: task_scheduler::JournalRecord = serde_json::from_slice(&bytes).unwrap();
+        for (schema, sequence) in [(99, 10), (1, 9)] {
+            record.schema_version = schema;
+            record.sequence = sequence;
+            record.job.payload = serde_json::json!({"owner":"conflicting"});
+            serde_json::to_writer(&mut bytes, &record).unwrap();
+            bytes.push(b'\n');
+        }
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            JournalJobStore::inspect(&path)
+                .await
+                .unwrap()
+                .incompatible_records,
+            2
+        );
+        let recovered = JournalJobStore::open(&path).await.unwrap();
+        assert_eq!(
+            recovered.get(&job.id).await.unwrap().unwrap().payload,
+            serde_json::json!({"owner":"original"})
+        );
+    });
+}
+
+#[test]
+fn duplicate_job_sequence_cannot_replace_recovery_payload() {
+    runtime().block_on(async {
+        for sequence in [0, 1] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("jobs.jsonl");
+            let store = JournalJobStore::open(&path).await.unwrap();
+            let mut job = Job::new(
+                "original".into(),
+                serde_json::json!({"owner":"original"}),
+                JobPriority::Normal,
+            );
+            store.put(&job).await.unwrap();
+            job.start();
+            store.update(&job, JobEvent::Started).await.unwrap();
+            drop(store);
+            let mut original = std::fs::read(&path).unwrap();
+            let mut stale: task_scheduler::JournalRecord =
+                serde_json::from_slice(original.split(|b| *b == b'\n').next().unwrap()).unwrap();
+            stale.sequence = sequence;
+            stale.job.payload = serde_json::json!({"owner":"conflicting"});
+            serde_json::to_writer(&mut original, &stale).unwrap();
+            original.push(b'\n');
+            std::fs::write(&path, &original).unwrap();
+            let recovered = JournalJobStore::open(&path).await.unwrap();
+            let actual = recovered.get(&job.id).await.unwrap().unwrap();
+            assert_eq!(actual.payload, serde_json::json!({"owner":"original"}));
+            assert_eq!(actual.status, JobStatus::ReconciliationRequired);
+            assert_eq!(std::fs::read(archived_journal(&path)).unwrap(), original);
+        }
+    });
+}
+
+#[test]
 fn job_new_has_pending_status() {
     let job = Job::new(
         "test".to_string(),

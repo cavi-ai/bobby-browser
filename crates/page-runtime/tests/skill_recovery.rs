@@ -61,10 +61,36 @@ impl BrowserWorker for BoundaryWorker {
         &self.profile
     }
 
-    async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
+    async fn close(&self) -> Result<(), CommandError> {
         Ok(())
     }
 
+    fn tabs(&self) -> Option<&dyn worker_pool::TabsEngine> {
+        Some(self)
+    }
+
+    fn navigation(&self) -> Option<&dyn worker_pool::NavigationEngine> {
+        Some(self)
+    }
+
+    fn observation(&self) -> Option<&dyn worker_pool::ObservationEngine> {
+        Some(self)
+    }
+
+    fn input(&self) -> Option<&dyn worker_pool::InputEngine> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl worker_pool::TabsEngine for BoundaryWorker {
+    async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl worker_pool::NavigationEngine for BoundaryWorker {
     async fn navigate(
         &self,
         _: &PageId,
@@ -76,7 +102,10 @@ impl BrowserWorker for BoundaryWorker {
             title: "Boundary fixture".into(),
         }])
     }
+}
 
+#[async_trait]
+impl worker_pool::ObservationEngine for BoundaryWorker {
     async fn inspect(
         &self,
         _: &PageId,
@@ -94,7 +123,10 @@ impl BrowserWorker for BoundaryWorker {
             html: None,
         }])
     }
+}
 
+#[async_trait]
+impl worker_pool::InputEngine for BoundaryWorker {
     async fn click(&self, _: &PageId, _: &ClickCommand) -> Result<Vec<Evidence>, CommandError> {
         self.mutations.fetch_add(1, Ordering::SeqCst);
         *self.current_url.lock().await = "https://example.test/done".into();
@@ -112,10 +144,6 @@ impl BrowserWorker for BoundaryWorker {
         _: &TypeTextCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         unreachable!("the boundary fixture only executes clicks")
-    }
-
-    async fn close(&self) -> Result<(), CommandError> {
-        Ok(())
     }
 }
 
@@ -198,10 +226,36 @@ impl BrowserWorker for RetryWorker {
         &self.profile
     }
 
-    async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
+    async fn close(&self) -> Result<(), CommandError> {
         Ok(())
     }
 
+    fn tabs(&self) -> Option<&dyn worker_pool::TabsEngine> {
+        Some(self)
+    }
+
+    fn navigation(&self) -> Option<&dyn worker_pool::NavigationEngine> {
+        Some(self)
+    }
+
+    fn observation(&self) -> Option<&dyn worker_pool::ObservationEngine> {
+        Some(self)
+    }
+
+    fn input(&self) -> Option<&dyn worker_pool::InputEngine> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl worker_pool::TabsEngine for RetryWorker {
+    async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl worker_pool::NavigationEngine for RetryWorker {
     async fn navigate(
         &self,
         _: &PageId,
@@ -213,7 +267,10 @@ impl BrowserWorker for RetryWorker {
             title: "Retry fixture".into(),
         }])
     }
+}
 
+#[async_trait]
+impl worker_pool::ObservationEngine for RetryWorker {
     async fn inspect(
         &self,
         _: &PageId,
@@ -227,7 +284,10 @@ impl BrowserWorker for RetryWorker {
             html: None,
         }])
     }
+}
 
+#[async_trait]
+impl worker_pool::InputEngine for RetryWorker {
     async fn click(
         &self,
         _: &PageId,
@@ -252,10 +312,6 @@ impl BrowserWorker for RetryWorker {
         _: &TypeTextCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         unreachable!("the retry fixture only executes clicks")
-    }
-
-    async fn close(&self) -> Result<(), CommandError> {
-        Ok(())
     }
 }
 
@@ -810,10 +866,40 @@ impl BrowserWorker for ChallengeWorker {
         &self.profile
     }
 
-    async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
+    async fn close(&self) -> Result<(), CommandError> {
         Ok(())
     }
 
+    fn tabs(&self) -> Option<&dyn worker_pool::TabsEngine> {
+        Some(self)
+    }
+
+    fn navigation(&self) -> Option<&dyn worker_pool::NavigationEngine> {
+        Some(self)
+    }
+
+    fn observation(&self) -> Option<&dyn worker_pool::ObservationEngine> {
+        Some(self)
+    }
+
+    fn input(&self) -> Option<&dyn worker_pool::InputEngine> {
+        Some(self)
+    }
+
+    fn capture(&self) -> Option<&dyn worker_pool::CaptureEngine> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl worker_pool::TabsEngine for ChallengeWorker {
+    async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl worker_pool::NavigationEngine for ChallengeWorker {
     async fn navigate(
         &self,
         _: &PageId,
@@ -825,7 +911,10 @@ impl BrowserWorker for ChallengeWorker {
             title: "Challenge fixture".into(),
         }])
     }
+}
 
+#[async_trait]
+impl worker_pool::ObservationEngine for ChallengeWorker {
     async fn inspect(
         &self,
         _: &PageId,
@@ -839,7 +928,10 @@ impl BrowserWorker for ChallengeWorker {
             html: None,
         }])
     }
+}
 
+#[async_trait]
+impl worker_pool::InputEngine for ChallengeWorker {
     async fn click(
         &self,
         _: &PageId,
@@ -858,7 +950,10 @@ impl BrowserWorker for ChallengeWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         unreachable!("the challenge fixture only executes clicks")
     }
+}
 
+#[async_trait]
+impl worker_pool::CaptureEngine for ChallengeWorker {
     async fn capture_screenshot(
         &self,
         _: &PageId,
@@ -877,10 +972,6 @@ impl BrowserWorker for ChallengeWorker {
 
     async fn screenshot_bytes(&self, _: &PageId) -> Result<Vec<u8>, CommandError> {
         Ok(b"png".to_vec())
-    }
-
-    async fn close(&self) -> Result<(), CommandError> {
-        Ok(())
     }
 }
 

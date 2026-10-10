@@ -147,12 +147,41 @@ impl BrowserWorker for NoBrowserWorker {
     fn worker_id(&self) -> types::WorkerId {
         types::WorkerId::new()
     }
+
     fn profile_dir(&self) -> &std::path::Path {
         &self.profile
     }
+
+    async fn close(&self) -> Result<(), types::CommandError> {
+        Ok(())
+    }
+
+    fn tabs(&self) -> Option<&dyn worker_pool::TabsEngine> {
+        Some(self)
+    }
+
+    fn navigation(&self) -> Option<&dyn worker_pool::NavigationEngine> {
+        Some(self)
+    }
+
+    fn observation(&self) -> Option<&dyn worker_pool::ObservationEngine> {
+        Some(self)
+    }
+
+    fn input(&self) -> Option<&dyn worker_pool::InputEngine> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl worker_pool::TabsEngine for NoBrowserWorker {
     async fn open_page(&self, _: types::PageId) -> Result<(), types::CommandError> {
         Ok(())
     }
+}
+
+#[async_trait]
+impl worker_pool::NavigationEngine for NoBrowserWorker {
     async fn navigate(
         &self,
         _: &types::PageId,
@@ -160,6 +189,10 @@ impl BrowserWorker for NoBrowserWorker {
     ) -> Result<Vec<types::Evidence>, types::CommandError> {
         Ok(Vec::new())
     }
+}
+
+#[async_trait]
+impl worker_pool::ObservationEngine for NoBrowserWorker {
     async fn inspect(
         &self,
         _: &types::PageId,
@@ -167,6 +200,10 @@ impl BrowserWorker for NoBrowserWorker {
     ) -> Result<Vec<types::Evidence>, types::CommandError> {
         Ok(Vec::new())
     }
+}
+
+#[async_trait]
+impl worker_pool::InputEngine for NoBrowserWorker {
     async fn click(
         &self,
         _: &types::PageId,
@@ -174,15 +211,13 @@ impl BrowserWorker for NoBrowserWorker {
     ) -> Result<Vec<types::Evidence>, types::CommandError> {
         Ok(Vec::new())
     }
+
     async fn type_text(
         &self,
         _: &types::PageId,
         _: &types::TypeTextCommand,
     ) -> Result<Vec<types::Evidence>, types::CommandError> {
         Ok(Vec::new())
-    }
-    async fn close(&self) -> Result<(), types::CommandError> {
-        Ok(())
     }
 }
 

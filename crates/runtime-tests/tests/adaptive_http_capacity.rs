@@ -220,8 +220,11 @@ async fn eight_inspections_complete_with_a_peak_of_four_and_no_browser_dispatch(
     let factory = ChromiumWorkerFactory::new(config(&root).browser);
     let chromium = factory.launch(&SessionId::new()).await.unwrap();
     let chromium_page = PageId::new();
-    chromium.open_page(chromium_page.clone()).await.unwrap();
-    chromium
+    worker_pool::tabs_or_default(chromium.tabs())
+        .open_page(chromium_page.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(chromium.navigation())
         .navigate(
             &chromium_page,
             &NavigateCommand {
@@ -232,14 +235,14 @@ async fn eight_inspections_complete_with_a_peak_of_four_and_no_browser_dispatch(
         )
         .await
         .unwrap();
-    chromium
+    worker_pool::observation_or_default(chromium.observation())
         .inspect(&chromium_page, &InspectCommand::default())
         .await
         .unwrap();
     let mut chromium_wall_clock = Vec::new();
     for _ in 0..7 {
         let started = Instant::now();
-        chromium
+        worker_pool::navigation_or_default(chromium.navigation())
             .navigate(
                 &chromium_page,
                 &NavigateCommand {
@@ -250,7 +253,7 @@ async fn eight_inspections_complete_with_a_peak_of_four_and_no_browser_dispatch(
             )
             .await
             .unwrap();
-        chromium
+        worker_pool::observation_or_default(chromium.observation())
             .inspect(&chromium_page, &InspectCommand::default())
             .await
             .unwrap();
