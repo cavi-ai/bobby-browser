@@ -29,6 +29,8 @@ struct FakeBrowser {
     click_evidence: Vec<Evidence>,
     screenshot_png: Vec<u8>,
     click_xy_calls: Arc<AtomicUsize>,
+    /// The candidates once a vision click has landed, when it changes them.
+    candidates_after_vision_click: Option<Vec<Candidate>>,
 }
 
 #[async_trait]
@@ -66,6 +68,9 @@ impl IntentBrowser for FakeBrowser {
         _y: f64,
     ) -> Result<Vec<Evidence>, CommandError> {
         self.click_xy_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(after) = &self.candidates_after_vision_click {
+            *self.candidate_sequence.lock().expect("sequence") = VecDeque::from([after.clone()]);
+        }
         Ok(vec![Evidence::Configuration {
             name: "visionClick".into(),
             value: "ok".into(),
@@ -394,6 +399,7 @@ async fn dismiss_still_present_after_click_escalates_to_vision_and_preserves_pri
         }],
         screenshot_png: b"png".to_vec(),
         click_xy_calls: click_xy_calls.clone(),
+        candidates_after_vision_click: Some(Vec::new()),
     };
     let assist = Arc::new(FakeVision {
         proposal: VisionProposal {
@@ -444,4 +450,133 @@ async fn dismiss_still_present_after_click_escalates_to_vision_and_preserves_pri
     let record = record.expect("IntentExecution evidence");
     assert_eq!(record.resolution_path, IntentResolutionPath::VisionFallback);
     assert_eq!(record.verification, "visionFallback");
+}
+
+fn vision_clicking() -> VisionContext {
+    VisionContext {
+        session_ok: true,
+        capability_ok: true,
+        assist: Some(Arc::new(FakeVision {
+            proposal: VisionProposal {
+                confidence: 0.9,
+                action: VisionAction::Click { x: 5.0, y: 6.0 },
+            },
+        })),
+        proposals: None,
+        defer_escalation: false,
+        prompt_context: None,
+        corpus: None,
+        context_store: None,
+    }
+}
+
+fn sign_in_dialog() -> Candidate {
+    Candidate {
+        id: "dialog".into(),
+        css: None,
+        role: Some("dialog".into()),
+        name: Some("Sign in".into()),
+        text: "Sign in".into(),
+        ..overlay_close_button()
+    }
+}
+
+fn failure(outcome: IntentOutcome) -> (CommandError, types::ExecutionRecord) {
+    let IntentOutcome::Failed { error, evidence } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    let record = evidence
+        .into_iter()
+        .rev()
+        .find_map(|item| match item {
+            Evidence::IntentExecution { record } => Some(record),
+            _ => None,
+        })
+        .expect("IntentExecution evidence");
+    (error, record)
+}
+
+#[tokio::test]
+async fn vision_fallback_that_leaves_the_control_fails_obstruction_suspected() {
+    let browser = FakeBrowser {
+        candidate_sequence: Arc::new(Mutex::new(VecDeque::from([vec![still_present()]]))),
+        screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
+    };
+    let outcome = IntentEngine::execute(
+        &dismiss(CLOSE_BUTTON_PURPOSE, Some("button"), 60),
+        &PageId::new(),
+        &browser,
+        &vision_clicking(),
+    )
+    .await;
+    let (error, _) = failure(outcome);
+    assert_eq!(error.code, ErrorCode::ObstructionSuspected);
+    assert_eq!(browser.click_xy_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn unhinted_dismiss_names_the_dialog_its_purpose_missed() {
+    let browser = FakeBrowser {
+        candidate_sequence: Arc::new(Mutex::new(VecDeque::from([vec![sign_in_dialog()]]))),
+        ..FakeBrowser::default()
+    };
+    let outcome = IntentEngine::execute(
+        &dismiss("close the popup", None, 60),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+    let (error, record) = failure(outcome);
+    assert_eq!(error.code, ErrorCode::ObstructionSuspected);
+    assert_eq!(record.verification, "dialogOpen");
+    assert!(
+        record.candidates.iter().any(|candidate| {
+            candidate.role.as_deref() == Some("dialog")
+                && candidate.name.as_deref() == Some("Sign in")
+        }),
+        "{:?}",
+        record.candidates
+    );
+}
+
+#[tokio::test]
+async fn unhinted_vision_dismiss_completes_once_the_dialog_closed() {
+    let browser = FakeBrowser {
+        candidate_sequence: Arc::new(Mutex::new(VecDeque::from([vec![sign_in_dialog()]]))),
+        screenshot_png: b"png".to_vec(),
+        candidates_after_vision_click: Some(Vec::new()),
+        ..FakeBrowser::default()
+    };
+    let outcome = IntentEngine::execute(
+        &dismiss("close the popup", None, 60),
+        &PageId::new(),
+        &browser,
+        &vision_clicking(),
+    )
+    .await;
+    assert!(
+        matches!(outcome, IntentOutcome::Completed { .. }),
+        "expected Completed, got {outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn unhinted_vision_dismiss_fails_while_the_dialog_stays_open() {
+    let browser = FakeBrowser {
+        candidate_sequence: Arc::new(Mutex::new(VecDeque::from([vec![sign_in_dialog()]]))),
+        screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
+    };
+    let outcome = IntentEngine::execute(
+        &dismiss("close the popup", None, 60),
+        &PageId::new(),
+        &browser,
+        &vision_clicking(),
+    )
+    .await;
+    let (error, record) = failure(outcome);
+    assert_eq!(error.code, ErrorCode::ObstructionSuspected);
+    assert_eq!(record.verification, "obstructionPersisted");
 }
