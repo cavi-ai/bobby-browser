@@ -5,6 +5,7 @@
 ### Fixed
 
 - A missed target's near-miss list marks a control that exists but is hidden as `hidden`, not `noMatch`.
+- An intent that fails `targetObscured` lists the dialogs open over the page in its evidence.
 - Snapshots report form controls missing from the accessibility tree only when the tree is whole and unscoped.
 - `intent_extract` reads `href` and named attributes on Firefox, and attributes Chromium's candidates do not carry.
 - An action called with an `idempotencyKey` returns its `postState` instead of `postStateStatus: idempotencyConflict`.

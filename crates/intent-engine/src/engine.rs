@@ -1486,7 +1486,7 @@ async fn execute_fill(
         candidate,
         evidence: candidate_evidence,
         best_match_authorized,
-        ..
+        open_dialogs,
     } = match locate(
         page_id,
         browser,
@@ -1548,6 +1548,7 @@ async fn execute_fill(
     let mut act_evidence = match act_fill(page_id, browser, &candidate, &target, &value).await {
         Ok(evidence) => evidence,
         Err(error) => {
+            let candidates = act_failure_candidates(&error, candidate_evidence, open_dialogs);
             return IntentOutcome::Failed {
                 error,
                 evidence: vec![
@@ -1556,7 +1557,7 @@ async fn execute_fill(
                         "fill",
                         purpose,
                         plan_summary,
-                        vec![candidate_evidence],
+                        candidates,
                         None,
                         "actFailed",
                     )),
@@ -1954,6 +1955,7 @@ async fn execute_submit_and_verify(
             }]
         }
         Err(error) => {
+            let candidates = act_failure_candidates(&error, candidate_evidence, open_dialogs);
             return IntentOutcome::Failed {
                 error,
                 evidence: vec![
@@ -1962,7 +1964,7 @@ async fn execute_submit_and_verify(
                         "submitAndVerify",
                         purpose,
                         plan_summary,
-                        vec![candidate_evidence],
+                        candidates,
                         None,
                         "actFailed",
                     )),
@@ -2186,6 +2188,20 @@ fn disambiguate_submit_by_purpose(
 /// the original message, so a repair reader sees "landed, unverified" instead
 /// of "ambiguous, retry". Any other code (e.g. a real command failure) passes
 /// through unchanged.
+/// The candidates an act failure reports: the target, and the dialogs open
+/// when it resolved if something covered it.
+fn act_failure_candidates(
+    error: &CommandError,
+    target: types::CandidateEvidence,
+    open_dialogs: Vec<types::CandidateEvidence>,
+) -> Vec<types::CandidateEvidence> {
+    let mut candidates = vec![target];
+    if error.code == ErrorCode::TargetObscured {
+        candidates.extend(open_dialogs);
+    }
+    candidates
+}
+
 /// Dialogs open now that were not open when the target resolved.
 async fn dialogs_opened(
     page_id: &PageId,
@@ -2300,6 +2316,7 @@ async fn execute_follow(
     let mut click_evidence = match browser.click(page_id, &click).await {
         Ok(evidence) => evidence,
         Err(error) => {
+            let candidates = act_failure_candidates(&error, candidate_evidence, open_dialogs);
             return IntentOutcome::Failed {
                 error,
                 evidence: vec![
@@ -2308,7 +2325,7 @@ async fn execute_follow(
                         "follow",
                         purpose,
                         plan_summary,
-                        vec![candidate_evidence],
+                        candidates,
                         None,
                         "actFailed",
                     )),
@@ -2426,7 +2443,7 @@ async fn execute_dismiss_obstruction(
         candidate,
         evidence: candidate_evidence,
         best_match_authorized,
-        ..
+        open_dialogs,
     } = match locate(
         page_id,
         browser,
@@ -2494,6 +2511,7 @@ async fn execute_dismiss_obstruction(
     let mut click_evidence = match browser.click(page_id, &click).await {
         Ok(evidence) => evidence,
         Err(error) => {
+            let candidates = act_failure_candidates(&error, candidate_evidence, open_dialogs);
             return IntentOutcome::Failed {
                 error,
                 evidence: vec![
@@ -2502,7 +2520,7 @@ async fn execute_dismiss_obstruction(
                         "dismissObstruction",
                         purpose,
                         plan_summary,
-                        vec![candidate_evidence],
+                        candidates,
                         None,
                         "actFailed",
                     )),

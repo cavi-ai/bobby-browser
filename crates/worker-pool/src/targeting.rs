@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::pointer_hit::{parse_pointer_hit, pointer_hit_function, PointerHit};
 use chromiumoxide::browser::BrowserHandle;
 use chromiumoxide::cdp::browser_protocol::accessibility::QueryAxTreeParams;
 #[cfg(test)]
@@ -155,23 +156,18 @@ impl ResolvedTarget {
             .next())
     }
 
-    /// Whether a pointer at the target's center reaches the target or one of
-    /// its descendants, rather than an element drawn over it.
-    pub async fn receives_pointer(&self, page: &Page) -> Result<bool, CommandError> {
-        self.eval(
-            page,
-            "return ((target)=>{\
-             const rect=target.getBoundingClientRect();\
-             const width=document.documentElement.clientWidth;\
-             const height=document.documentElement.clientHeight;\
-             const x=Math.min(Math.max(rect.left+rect.width/2,0),width-1);\
-             const y=Math.min(Math.max(rect.top+rect.height/2,0),height-1);\
-             const owner=target.getRootNode();\
-             const hit=typeof owner.elementFromPoint==='function'\
-               ?owner.elementFromPoint(x,y):document.elementFromPoint(x,y);\
-             return hit!==null&&(hit===target||target.contains(hit));})(el);",
-        )
-        .await
+    /// Classifies a pointer at the target's center: reachable, covered,
+    /// outside the viewport, or detached.
+    pub async fn receives_pointer(&self, page: &Page) -> Result<PointerHit, CommandError> {
+        let verdict: String = self
+            .eval(page, &format!("return ({})(el);", pointer_hit_function()))
+            .await?;
+        parse_pointer_hit(&verdict).ok_or_else(|| {
+            target_error(
+                ErrorCode::BrowserCommandFailed,
+                "pointer hit check returned an invalid result",
+            )
+        })
     }
 
     /// Scrolls the target into view. A coordinate-based click dispatch
@@ -560,7 +556,7 @@ pub async fn resolve_target(
 /// An empty string in a target field can never resolve — an exact match
 /// against "" — but a wait condition would poll for it until the deadline,
 /// reporting a timeout instead of the real mistake. Reject it up front.
-fn validate_target_spec(target: &TargetSpec) -> Result<(), CommandError> {
+pub fn validate_target_spec(target: &TargetSpec) -> Result<(), CommandError> {
     validate_target_spec_hop(target, false)
 }
 
@@ -1172,26 +1168,61 @@ async fn align_with_accessibility(
     let (Some(role), Some(name)) = (&target.role, &target.accessible_name) else {
         return Ok(raw);
     };
-    let gathered_match = |candidate: &BrowserCandidate| {
-        candidate
-            .role
-            .as_deref()
-            .is_some_and(|actual| actual.eq_ignore_ascii_case(role))
-            && candidate.name.as_deref().map(str::trim) == Some(name.trim())
-    };
-    if target.ordinal.is_none() && raw.iter().filter(|c| gathered_match(c)).count() == 1 {
+    if accessibility_alignment_unnecessary(&raw, role, name, target.ordinal) {
         return Ok(raw);
     }
     let exposed = accessibility_matches(page, role, name).await?;
-    if exposed.is_empty() {
-        return Ok(raw);
-    }
-    raw.retain(|candidate| exposed.contains(&candidate.id) || !gathered_match(candidate));
-    for candidate in raw.iter_mut().filter(|c| exposed.contains(&c.id)) {
-        candidate.role = Some(role.clone());
-        candidate.name = Some(name.clone());
-    }
+    apply_accessibility_alignment(&mut raw, role, name, &exposed);
     Ok(raw)
+}
+
+fn gathered_name_match(candidate: &BrowserCandidate, role: &str, name: &str) -> bool {
+    candidate
+        .role
+        .as_deref()
+        .is_some_and(|actual| actual.eq_ignore_ascii_case(role))
+        && candidate.name.as_deref().map(str::trim) == Some(name.trim())
+}
+
+/// One gathered match and no ordinal already agrees with the accessibility
+/// tree, so the tree probe can be skipped.
+fn accessibility_alignment_unnecessary(
+    raw: &[BrowserCandidate],
+    role: &str,
+    name: &str,
+    ordinal: Option<usize>,
+) -> bool {
+    ordinal.is_none()
+        && raw
+            .iter()
+            .filter(|candidate| gathered_name_match(candidate, role, name))
+            .count()
+            == 1
+}
+
+/// Keeps candidates the accessibility tree exposes for `role` and `name`,
+/// and rewrites those candidates' names to the tree's. An empty exposure
+/// leaves the gathered set alone. Gathered matches the tree does not expose
+/// drop out; other gathered candidates stay.
+fn apply_accessibility_alignment(
+    raw: &mut Vec<BrowserCandidate>,
+    role: &str,
+    name: &str,
+    exposed: &[String],
+) {
+    if exposed.is_empty() {
+        return;
+    }
+    raw.retain(|candidate| {
+        exposed.iter().any(|id| id == &candidate.id) || !gathered_name_match(candidate, role, name)
+    });
+    for candidate in raw
+        .iter_mut()
+        .filter(|candidate| exposed.iter().any(|id| id == &candidate.id))
+    {
+        candidate.role = Some(role.to_owned());
+        candidate.name = Some(name.to_owned());
+    }
 }
 
 /// The gathered ids of the elements Chrome's accessibility tree exposes with
@@ -2289,6 +2320,81 @@ mod tests {
         })
         .expect_err("empty nested css must fail");
         assert!(err.message.contains("css"));
+    }
+
+    #[test]
+    fn unnamed_iframe_hop_may_carry_an_empty_accessible_name() {
+        validate_target_spec(&TargetSpec {
+            frame_path: vec![Box::new(TargetSpec {
+                role: Some("iframe".into()),
+                accessible_name: Some(String::new()),
+                ..TargetSpec::default()
+            })],
+            ..TargetSpec::default()
+        })
+        .expect("unnamed iframe hop");
+
+        let err = validate_target_spec(&TargetSpec {
+            shadow_path: vec![Box::new(TargetSpec {
+                role: Some("group".into()),
+                accessible_name: Some(String::new()),
+                ..TargetSpec::default()
+            })],
+            ..TargetSpec::default()
+        })
+        .expect_err("shadow hop stays strict");
+        assert!(err.message.contains("accessibleName"));
+    }
+
+    fn named_candidate(id: &str, role: &str, name: &str) -> BrowserCandidate {
+        BrowserCandidate {
+            id: id.into(),
+            role: Some(role.into()),
+            name: Some(name.into()),
+            ..browser_candidate(None, BTreeMap::new())
+        }
+    }
+
+    #[test]
+    fn accessibility_alignment_rewrites_exposed_names_and_drops_covered_matches() {
+        let mut raw = vec![
+            named_candidate("slotted", "generic", "label text"),
+            named_candidate("covered", "button", "Save"),
+            named_candidate("other", "link", "Docs"),
+        ];
+        apply_accessibility_alignment(&mut raw, "button", "Save", &["slotted".into()]);
+        assert_eq!(
+            raw.iter()
+                .map(|candidate| candidate.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["slotted", "other"]
+        );
+        assert_eq!(raw[0].role.as_deref(), Some("button"));
+        assert_eq!(raw[0].name.as_deref(), Some("Save"));
+    }
+
+    #[test]
+    fn one_gathered_match_skips_the_accessibility_probe() {
+        let raw = vec![
+            named_candidate("only", "button", "Save"),
+            named_candidate("other", "link", "Docs"),
+        ];
+        assert!(accessibility_alignment_unnecessary(
+            &raw, "button", "Save", None
+        ));
+        assert!(!accessibility_alignment_unnecessary(
+            &raw,
+            "button",
+            "Save",
+            Some(0)
+        ));
+    }
+
+    #[test]
+    fn empty_accessibility_exposure_keeps_gathered_candidates() {
+        let mut raw = vec![named_candidate("a", "button", "Save")];
+        apply_accessibility_alignment(&mut raw, "button", "Save", &[]);
+        assert_eq!(raw.len(), 1);
     }
 
     #[test]
