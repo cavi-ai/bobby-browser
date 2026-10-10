@@ -6,7 +6,18 @@ use super::{
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use types::{CommandError, ErrorCode, PageId, WaitCondition};
-use worker_pool::wait::{is_page_scoped_text_target, WaitObservation, WaitObserver};
+use worker_pool::wait::{
+    is_page_scoped_text_target, WaitObservation, WaitObserver, ELEMENT_VISIBILITY_SCRIPT,
+};
+
+fn visibility_predicate(hidden: bool) -> String {
+    if hidden {
+        format!("!el||!el.isConnected||!(()=>{{{ELEMENT_VISIBILITY_SCRIPT}}})()")
+    } else {
+        format!("Boolean(el)&&el.isConnected&&(()=>{{{ELEMENT_VISIBILITY_SCRIPT}}})()")
+    }
+}
+
 pub(super) struct FirefoxWaitObserver<'a> {
     pub(super) worker: &'a FirefoxCompanionWorker,
     pub(super) page_id: &'a PageId,
@@ -67,12 +78,12 @@ impl FirefoxCompanionWorker {
                         match self.resolve_shadow_element(&context, target).await {
                             Ok(shared_id) => {
                                 let condition = match state {
-                                    types::ElementState::Attached => "el.isConnected",
-                                    types::ElementState::Visible => "el.isConnected&&el.checkVisibility()",
-                                    types::ElementState::Detached => "!el.isConnected",
-                                    types::ElementState::Enabled => "el.isConnected&&!el.matches(':disabled,[aria-disabled=\"true\"]')",
-                                    types::ElementState::Disabled => "el.isConnected&&el.matches(':disabled,[aria-disabled=\"true\"]')",
-                                    types::ElementState::Hidden => "!el.isConnected||!el.checkVisibility()",
+                                    types::ElementState::Attached => "el.isConnected".into(),
+                                    types::ElementState::Visible => visibility_predicate(false),
+                                    types::ElementState::Detached => "!el.isConnected".into(),
+                                    types::ElementState::Enabled => "el.isConnected&&!el.matches(':disabled,[aria-disabled=\"true\"]')".into(),
+                                    types::ElementState::Disabled => "el.isConnected&&el.matches(':disabled,[aria-disabled=\"true\"]')".into(),
+                                    types::ElementState::Hidden => visibility_predicate(true),
                                 };
                                 let response = self.transport.send("script.callFunction", json!({
                                     "functionDeclaration": format!("function(el){{return Boolean({condition});}}"),
@@ -151,15 +162,18 @@ impl FirefoxCompanionWorker {
                                         )
                                     })?;
                                 let expression = match state {
-                                types::ElementState::Attached | types::ElementState::Visible => {
+                                types::ElementState::Attached => {
                                     format!("Boolean({COMPOSED_QUERY}({selector}))")
+                                }
+                                types::ElementState::Visible | types::ElementState::Hidden => {
+                                    let predicate = visibility_predicate(*state == types::ElementState::Hidden);
+                                    format!("(()=>{{const el={COMPOSED_QUERY}({selector});return {predicate};}})()")
                                 }
                                 types::ElementState::Detached => {
                                     format!("!{COMPOSED_QUERY}({selector})")
                                 }
                                 types::ElementState::Enabled => format!("!{COMPOSED_QUERY}({selector})?.matches(':disabled,[aria-disabled=\"true\"]')"),
                                 types::ElementState::Disabled => format!("Boolean({COMPOSED_QUERY}({selector})?.matches(':disabled,[aria-disabled=\"true\"]'))"),
-                                types::ElementState::Hidden => format!("!{COMPOSED_QUERY}({selector}) || !{COMPOSED_QUERY}({selector}).checkVisibility()"),
                             };
                                 let response = self.transport.send("script.evaluate", json!({
                                 "expression": expression,
