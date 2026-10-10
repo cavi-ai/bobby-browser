@@ -5,6 +5,7 @@
 ### Fixed
 
 - An intent that fails `targetObscured` lists the dialogs open over the page in its evidence.
+- `intent_extract` reads `href` and named attributes on Firefox, and attributes Chromium's candidates do not carry.
 - An action called with an `idempotencyKey` returns its `postState` instead of `postStateStatus: idempotencyConflict`.
 - On Firefox, an action on a control an open modal dialog hides fails `targetObscured` instead of `targetNotFound`.
 - An element wait for `hidden` holds once the element is removed, not only once it is invisible.

@@ -400,8 +400,12 @@ impl CheckpointStore {
         workflow_id: &WorkflowId,
         issuance: &SkillIssuedDecision,
     ) -> Result<(), CheckpointStoreError> {
+        Self::validate_skill_issuance_identity(workflow_id, issuance)?;
         let lock = self.workflow_lock(workflow_id).await;
         let _guard = lock.lock().await;
+        // Preserve unreadable or misfiled authority until explicit repair,
+        // matching checkpoint replacement semantics.
+        self.read_skill_issuance_unlocked(workflow_id).await?;
         let destination = self.issuance_path(workflow_id);
         let temporary = self.root.join(format!(
             ".{}.{}.issuance.tmp",
@@ -436,11 +440,38 @@ impl CheckpointStore {
     ) -> Result<Option<SkillIssuedDecision>, CheckpointStoreError> {
         let lock = self.workflow_lock(workflow_id).await;
         let _guard = lock.lock().await;
+        self.read_skill_issuance_unlocked(workflow_id).await
+    }
+
+    async fn read_skill_issuance_unlocked(
+        &self,
+        workflow_id: &WorkflowId,
+    ) -> Result<Option<SkillIssuedDecision>, CheckpointStoreError> {
         match tokio::fs::read(self.issuance_path(workflow_id)).await {
-            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+            Ok(bytes) => {
+                let issuance = serde_json::from_slice(&bytes)?;
+                Self::validate_skill_issuance_identity(workflow_id, &issuance)?;
+                Ok(Some(issuance))
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error.into()),
         }
+    }
+
+    fn validate_skill_issuance_identity(
+        workflow_id: &WorkflowId,
+        issuance: &SkillIssuedDecision,
+    ) -> Result<(), CheckpointStoreError> {
+        // Legacy decisions have no command identity. Keep their wire format
+        // readable; command recovery still requires its full identity match.
+        if issuance
+            .command_identity
+            .as_ref()
+            .is_some_and(|identity| identity.workflow_id != *workflow_id)
+        {
+            return Err(CheckpointStoreError::IdentityChanged);
+        }
+        Ok(())
     }
 
     pub async fn remove_skill_issuance(
