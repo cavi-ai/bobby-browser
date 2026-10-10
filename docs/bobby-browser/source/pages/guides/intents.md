@@ -132,7 +132,7 @@ A second submit in the same workflow fails with `boundaryAlreadyExecuted` unless
 
 ## Wait conditions
 
-`waitForState` and the `wait_for` tool share one condition shape. See the table in [MCP tools](../surfaces/mcp-tools.md#reading-a-page). `state` is one of `attached`, `detached`, `visible`, `hidden`, `enabled`, `disabled`. `ready` is one of `commit`, `domContentLoaded`, `interactive`, `networkIdle`.
+`waitForState` and the `wait_for` tool share one condition shape. See the table in [MCP tools](../surfaces/mcp-tools.md#reading-a-page). `state` is one of `attached`, `detached`, `visible`, `hidden`, `enabled`, `disabled`. `hidden` holds once the element is invisible or gone; `detached` only once it is gone. `ready` is one of `commit`, `domContentLoaded`, `interactive`, `networkIdle`.
 
 ## Follow
 
