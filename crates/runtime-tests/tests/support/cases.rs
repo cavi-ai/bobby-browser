@@ -2520,6 +2520,10 @@ pub async fn covered_intent_names_the_covering_dialog(rig: &Rig) {
     assert!(
         followed.to_string().contains("Notice"),
         "the evidence does not name the covering dialog: {followed}"
+    );
+    live.close().await;
+}
+
 /// `intent_extract` reads a link's href and a named attribute off the
 /// controls it resolves.
 pub async fn intent_extract_reads_href_and_attributes(rig: &Rig) {
