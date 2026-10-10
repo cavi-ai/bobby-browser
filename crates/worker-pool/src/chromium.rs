@@ -2213,7 +2213,7 @@ impl BrowserWorker for ChromiumWorker {
         Ok(vec![
             Evidence::Upload {
                 selector: command.selector.clone(),
-                paths: crate::upload::opaque_upload_paths(paths),
+                paths: crate::upload::opaque_upload_paths(&command.paths),
             },
             resolved.evidence,
         ])

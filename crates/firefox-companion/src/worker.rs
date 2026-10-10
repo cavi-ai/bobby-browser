@@ -4488,7 +4488,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 false,
             ));
         }
-        let opaque = worker_pool::upload::opaque_upload_paths(paths);
+        let opaque = worker_pool::upload::opaque_upload_paths(&command.paths);
         Ok(vec![
             Evidence::Upload {
                 selector: command.selector.clone(),

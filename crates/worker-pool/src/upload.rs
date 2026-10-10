@@ -139,15 +139,10 @@ pub async fn resolve_upload_sources(
     Ok(result)
 }
 
-pub fn opaque_upload_paths(paths: &[PathBuf]) -> Vec<String> {
-    paths
+pub fn opaque_upload_paths(sources: &[String]) -> Vec<String> {
+    sources
         .iter()
-        .map(|path| {
-            format!(
-                "upload://sha256/{}",
-                hex::encode(Sha256::digest(path.as_os_str().as_encoded_bytes()))
-            )
-        })
+        .map(|source| types::upload_source_reference(source))
         .collect()
 }
 
@@ -216,13 +211,18 @@ mod tests {
             .code,
             ErrorCode::PolicyDenied
         );
-        let resolved =
-            resolve_upload_sources(&[source], &[], Some(&store), Some(&owner), Some(dir.path()))
-                .await
-                .unwrap();
+        let resolved = resolve_upload_sources(
+            std::slice::from_ref(&source),
+            &[],
+            Some(&store),
+            Some(&owner),
+            Some(dir.path()),
+        )
+        .await
+        .unwrap();
         let path = resolved.paths[0].clone();
         assert_eq!(std::fs::read(&path).unwrap(), b"payload");
-        assert!(!opaque_upload_paths(&resolved.paths)[0].contains(dir.path().to_str().unwrap()));
+        assert!(!opaque_upload_paths(&[source])[0].contains(dir.path().to_str().unwrap()));
         drop(resolved);
         assert!(!path.exists());
     }
