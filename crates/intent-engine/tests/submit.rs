@@ -18,6 +18,8 @@ struct CallLog {
     inspection_evidence: Vec<Evidence>,
     validation_issues: Vec<types::FormValidationIssue>,
     post_settlement_calls: Vec<&'static str>,
+    /// The page's candidates once a click has landed, when it changes.
+    candidates_after_click: Option<Vec<Candidate>>,
 }
 
 struct FakeBrowser {
@@ -36,7 +38,11 @@ impl IntentBrowser for FakeBrowser {
         _page_id: &PageId,
         _target: &TargetSpec,
     ) -> Result<Vec<Candidate>, CommandError> {
-        Ok((*self.candidates).clone())
+        let log = self.calls.lock().expect("call log");
+        match &log.candidates_after_click {
+            Some(after) if !log.clicks.is_empty() => Ok(after.clone()),
+            _ => Ok((*self.candidates).clone()),
+        }
     }
 
     async fn click(
@@ -759,6 +765,71 @@ async fn submit_and_verify_wait_timeout_after_landed_click_is_not_a_resubmit_inv
     assert_eq!(log.clicks.len(), 1);
     // Element conditions get a pre-check wait plus the post-act wait.
     assert_eq!(log.waits.len(), 2);
+}
+
+/// A dialog that opens instead of the expected state is named in the
+/// verification failure, which still never invites a resubmit.
+#[tokio::test]
+async fn submit_and_verify_names_a_dialog_that_opened_instead_of_the_expected_state() {
+    let calls = Arc::new(Mutex::new(CallLog {
+        candidates_after_click: Some(vec![
+            button("Submit"),
+            Candidate {
+                role: Some("dialog".into()),
+                css: None,
+                ..button("Confirm")
+            },
+        ]),
+        ..CallLog::default()
+    }));
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![button("Submit")]),
+        calls: Arc::clone(&calls),
+        click_evidence: Vec::new(),
+        click_error: None,
+        wait_evidence: Vec::new(),
+        wait_error: Some(CommandError {
+            code: ErrorCode::WaitConditionTimedOut,
+            message: "condition did not hold within 1000ms".into(),
+            layer: types::ErrorLayer::Page,
+            retryable: true,
+        }),
+    };
+
+    let outcome = IntentEngine::execute(
+        &submit("Submit", Some("button"), thanks_wait()),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    let IntentOutcome::Failed { error, evidence } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::VerificationFailed);
+    assert!(error.message.contains("a dialog opened"), "{error:?}");
+    assert!(
+        error.message.contains("Do not resubmit blindly"),
+        "{error:?}"
+    );
+    let record = evidence
+        .iter()
+        .find_map(|item| match item {
+            Evidence::IntentExecution { record } => Some(record),
+            _ => None,
+        })
+        .expect("IntentExecution");
+    assert_eq!(record.verification, "dialogOpened");
+    assert!(
+        record
+            .candidates
+            .iter()
+            .any(|candidate| candidate.role.as_deref() == Some("dialog")),
+        "{:?}",
+        record.candidates
+    );
+    assert_eq!(calls.lock().expect("call log").clicks.len(), 1);
 }
 
 /// An ambiguous post-act wait target after the click landed is

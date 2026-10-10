@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- `intent_follow` fails `obstructionSuspected` when a dialog opens instead of its expected state, and `intent_submit_and_verify` names that dialog; the evidence lists it.
 - On Chromium, `type_text` types into every control with real key input, fields without an id included, and each line break is the Enter key, as on Firefox.
 - On Chromium, a scoped snapshot numbers duplicate targets page-wide, so its targets act on the elements it shows.
 - On Firefox, controls and text inside open shadow roots appear in snapshots and observations, and their targets act.
