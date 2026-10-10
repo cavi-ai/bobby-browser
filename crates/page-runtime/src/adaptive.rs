@@ -346,6 +346,10 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         self.lease.worker().element_at_point(page_id, x, y).await
     }
 
+    async fn pin_target(&self, page_id: &PageId, target: &TargetSpec) -> TargetSpec {
+        self.lease.worker().pin_target(page_id, target).await
+    }
+
     async fn upload_files(
         &self,
         page_id: &PageId,

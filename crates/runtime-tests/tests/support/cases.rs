@@ -55,6 +55,7 @@ macro_rules! every_case {
             actions_fail_a_missing_target_within_one_bound,
             click_refuses_a_covered_target,
             intent_follow_reports_a_dialog_that_opened,
+            dismiss_completes_when_a_same_named_control_appears,
             shadow_root_controls_act_from_snapshot_targets,
             navigate_waits_for_late_scripts,
             page_titles_withhold_disclosed_credentials,
@@ -2326,6 +2327,46 @@ pub async fn intent_follow_reports_a_dialog_that_opened(rig: &Rig) {
     assert!(
         followed.to_string().contains("Notice"),
         "the evidence does not name the dialog: {followed}"
+    );
+    live.close().await;
+}
+
+/// Closing a modal reveals a banner with its own Close button: dismiss
+/// completes because the clicked control is gone, whatever else shares its name.
+pub async fn dismiss_completes_when_a_same_named_control_appears(rig: &Rig) {
+    let home = page(
+        "Home",
+        r#"<main><h1>Home</h1></main>
+        <div role="region" aria-label="Banner" hidden>
+            <button aria-label="Close" data-action="close-banner">x</button></div>
+        <div role="dialog" aria-modal="true" aria-label="Notice"
+             style="position:fixed;inset:0;background:#fff">
+            <button aria-label="Close" data-action="close-dialog">x</button></div>
+        <script>
+        document.querySelector('[data-action="close-dialog"]').addEventListener('click', () => {
+            document.querySelector('[role="dialog"]').remove();
+            document.querySelector('[aria-label="Banner"]').hidden = false;
+        });
+        </script>"#,
+    );
+    let site = FixtureSite::spawn(vec![("/home", Route::Html(home))]).await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let dismissed = live
+        .call(
+            "intent_dismiss_obstruction",
+            json!({"purpose":"close the notice","hints":{"role":"button","accessibleName":"Close"}}),
+        )
+        .await;
+    assert_eq!(
+        dismissed["status"], "completed",
+        "dismiss beside a same-named control: {dismissed}"
+    );
+    let banner = live
+        .snapshot(json!({"target":{"role":"region","accessibleName":"Banner"}}))
+        .await;
+    assert_eq!(
+        banner["status"], "completed",
+        "the banner did not appear after the close: {banner}"
     );
     live.close().await;
 }

@@ -147,6 +147,12 @@ pub trait IntentBrowser: Send + Sync {
     /// alternate runtimes return at once.
     async fn await_target(&self, _page_id: &PageId, _target: &TargetSpec) {}
 
+    /// A target naming only the element `target` resolves to now, so a later
+    /// poll follows that element. Defaults to `target` itself.
+    async fn pin_target(&self, _page_id: &PageId, target: &TargetSpec) -> TargetSpec {
+        target.clone()
+    }
+
     /// Waits until the document has stopped changing after a navigation the
     /// intent caused, with the probe `navigate` settles with. Fakes and
     /// alternate runtimes return at once.
@@ -2399,10 +2405,13 @@ async fn execute_dismiss_obstruction(
         best_match_authorized,
     };
 
-    let (selector, action_target) = action_target(&candidate, &target);
+    let (selector, clicked) = action_target(&candidate, &target);
+    // Polled after the click: a control with the same role and name may
+    // surface once the obstruction closes.
+    let pinned = browser.pin_target(page_id, &clicked).await;
     let click = ClickCommand {
         selector,
-        target: Some(action_target),
+        target: Some(clicked),
         // DismissObstructionIntent is always CommandClass::Reconciliable, so the act needs
         // no pre-established checkpoint and takes no caller-supplied boundary flag.
         boundary: false,
@@ -2429,7 +2438,7 @@ async fn execute_dismiss_obstruction(
         }
     };
 
-    let gone = wait_until_gone(page_id, browser, &target, timeout_ms).await;
+    let gone = wait_until_gone(page_id, browser, &pinned, timeout_ms).await;
     if !gone {
         let mut prior_evidence = vec![resolution];
         prior_evidence.append(&mut click_evidence);
