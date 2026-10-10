@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Snapshots report form controls missing from the accessibility tree only when the tree is whole and unscoped.
 - `intent_extract` reads `href` and named attributes on Firefox, and attributes Chromium's candidates do not carry.
 - An action called with an `idempotencyKey` returns its `postState` instead of `postStateStatus: idempotencyConflict`.
 - On Firefox, an action on a control an open modal dialog hides fails `targetObscured` instead of `targetNotFound`.
