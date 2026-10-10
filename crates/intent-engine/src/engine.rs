@@ -976,7 +976,12 @@ fn ranked_near_miss_window(
             role: candidate.role.clone(),
             name: candidate.name.clone(),
             score: 0,
-            reasons: vec!["noMatch".into()],
+            // A control that exists but is not visible cannot match; say so.
+            reasons: vec![if candidate.state.visible {
+                "noMatch".into()
+            } else {
+                "hidden".into()
+            }],
         })
         .collect()
 }
