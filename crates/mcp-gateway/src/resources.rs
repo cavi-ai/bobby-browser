@@ -549,27 +549,10 @@ Each bearer token grants a set of capability strings (`Capability`, `crates/type
 A tool is advertised in `tools/list` and callable only when the bearer holds
 every capability `required_capabilities` names for it (`crates/mcp-gateway/src/server.rs`).
 
-- `session:read` -- read-only visibility into runtime and session state.
-  Gates `runtime_info`, `session_list`, `events_read`.
-- `session:write` -- create and close sessions. Gates `session_create`,
-  `session_close`.
-- `page:read` -- read retained page context or a page's form-control inventory.
-  Gates `context_ask` and `form_snapshot`.
-- `page:write` -- open a page in an owned session. Gates `page_open`.
-  `page_open` also requires `browser:mutate`, checked only at call time, when
-  the same call navigates the new page to a URL.
-- `browser:mutate` -- the base capability for acting on or reading a page.
-  Gates on its own: `navigate`, `click`, `type_text`, `inspect`, `screenshot`,
-  `wait_for`, `page_list`, `page_close`, `page_activate`, `a11y_snapshot`,
-  `pdf`, `dialog`, `emulate`, `network_log`, `cookie_get`, `cookie_set`,
-  `cookie_delete`, and `control_action` for every action except `setFiles`.
-  Required alongside one more capability for `extract_structured`
-  (+ `vision:assist`), `download_url` and `click_and_wait_for_download`
-  (+ `file:download`), `upload_files`
-  (+ `file:upload`), `control_action` with a `setFiles` action
-  (+ `file:upload`), `evaluate_javascript` (+ `javascript:evaluate`), and all
-  ten `intent_*` tools (+ `intent:execute`; the two challenge intents also
-  require `vision:assist` -- see `intent:execute` below).
+The tool capability index below is generated from the same descriptors
+that enforce tool admission. It lists static requirements; dynamic command,
+session-policy, navigation, and evidence requirements are explained below.
+
 - Note: `command_execute` is a tool name, not a capability string -- it is
   advertised in `tools/list` on `browser:mutate` alone, but that is not a way
   around the gates above. Whatever extra capability the *wrapped* command
@@ -587,28 +570,10 @@ every capability `required_capabilities` names for it (`crates/mcp-gateway/src/s
     `vision:assist` -- a principal without the vision capability can never
     complete them, so the gate carries it instead of failing at the engine.
   - every other primitive: nothing beyond `browser:mutate`.
-- `file:upload` -- gates `upload_files` (with `browser:mutate`), among
-  others: `control_action` with a `setFiles` action and file-carrying intent
-  fields need it too -- see above.
-- `file:download` -- gates `download_url` and `click_and_wait_for_download`
-  (with `browser:mutate`).
-- `javascript:evaluate` -- gates `evaluate_javascript` (with `browser:mutate`).
-- `intent:execute` -- gates `intent_locate`, `intent_fill`,
-  `intent_complete_form`, `intent_submit_and_verify`, `intent_wait_for_state`,
-  `intent_follow`, `intent_dismiss_obstruction`, `intent_extract`
-  (`intent_detect_challenge` and `intent_solve_challenge` also require
-  `vision:assist`; the challenge tools also gate on the session's
-  `executionPolicy.visionAssist` at the engine) -- each also with
-  `browser:mutate`. See `bobby://intents` for what each one does.
-- `vision:assist` -- gates `extract_structured` (with `browser:mutate`) up
-  front. It is also half of a deny-by-default double gate on the
-  vision-fallback resolution path inside every `intent_*` tool: holding the
-  capability is necessary but not sufficient on its own -- the session must
-  also opt in and a vision provider must be configured. The configured
-  endpoint must be reachable at runtime (for local OpenAI, run
-  `bobby vision-proxy` and point `[vision].endpoint_url` at it). That
-  escalation-time check runs per stuck resolution, not per tool call, so it is
-  not part of `required_capabilities`.
+- `vision:assist` is also half of a deny-by-default double gate on intent
+  vision fallback: the session must opt in and a provider must be configured
+  and reachable. This escalation-time check runs per stuck resolution.
+
 - `artifact:read` -- required to list or read live `artifact://` resources.
   The static `bobby://` documents (this taxonomy, capabilities, intents,
   primitives) are deliberately NOT gated: an agent that just hit
@@ -1088,18 +1053,7 @@ Ten `IntentCommand` variants (`crates/types/src/commands.rs`) sit above the
 primitive browser actions. Each MCP `intent_*` tool wraps exactly one
 variant; `IntentCommand::class` fixes its recovery behavior.
 
-| Intent | Tool | Class |
-|---|---|---|
-| `Locate` | `intent_locate` | Replayable |
-| `WaitForState` | `intent_wait_for_state` | Replayable |
-| `Extract` | `intent_extract` | Replayable |
-| `Fill` | `intent_fill` | Reconciliable |
-| `CompleteForm` | `intent_complete_form` | Reconciliable |
-| `DismissObstruction` | `intent_dismiss_obstruction` | Reconciliable |
-| `DetectChallenge` | `intent_detect_challenge` | Replayable |
-| `SolveChallenge` | `intent_solve_challenge` | Reconciliable |
-| `SubmitAndVerify` | `intent_submit_and_verify` | Boundary |
-| `Follow` | `intent_follow` | Boundary if `boundary: true`, else Reconciliable |
+{{INTENT_TABLE}}
 
 The two challenge intents are the captcha path:
 `intent_detect_challenge` is read-only classification (screenshot in,
@@ -1424,11 +1378,65 @@ pub(crate) fn static_resources() -> &'static [(&'static str, &'static str, &'sta
 
 pub(crate) fn static_resource_body(uri: &str) -> Option<&'static str> {
     match uri {
-        CAPABILITIES_URI => Some(CAPABILITIES_BODY),
+        CAPABILITIES_URI => Some(capabilities_body()),
         FAILURE_TAXONOMY_URI => Some(FAILURE_TAXONOMY_BODY),
-        INTENTS_URI => Some(INTENTS_BODY),
+        INTENTS_URI => Some(intents_body()),
         PRIMITIVES_URI => Some(PRIMITIVES_BODY),
         JOB_HANDLERS_URI => Some(JOB_HANDLERS_BODY),
         _ => None,
+    }
+}
+
+fn capabilities_body() -> &'static str {
+    static BODY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BODY.get_or_init(|| {
+        let mut body = CAPABILITIES_BODY.to_owned();
+        body.push_str(
+            "\n## Tool capability index\n\n| Tool | Required capabilities |\n|---|---|\n",
+        );
+        for descriptor in crate::catalog::DESCRIPTORS {
+            let capabilities = descriptor
+                .capabilities
+                .iter()
+                .map(|capability| format!("`{}`", capability.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            body.push_str(&format!("| `{}` | {} |\n", descriptor.name, capabilities));
+        }
+        body
+    })
+}
+
+fn intents_body() -> &'static str {
+    static BODY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BODY.get_or_init(|| {
+        let mut table = String::from("| Intent | Tool | Class |\n|---|---|---|\n");
+        for descriptor in crate::catalog::DESCRIPTORS {
+            if let Some((variant, recovery)) = descriptor.intent {
+                table.push_str(&format!(
+                    "| `{variant}` | `{}` | {recovery} |\n",
+                    descriptor.name
+                ));
+            }
+        }
+        INTENTS_BODY.replace("{{INTENT_TABLE}}", &table)
+    })
+}
+
+#[cfg(test)]
+mod catalog_resource_tests {
+    #[test]
+    fn each_tool_has_exactly_one_capability_index_row() {
+        let body = super::static_resource_body(super::CAPABILITIES_URI).unwrap();
+        let index = body
+            .split("## Tool capability index")
+            .nth(1)
+            .expect("catalog index");
+        for descriptor in crate::catalog::DESCRIPTORS {
+            assert_eq!(
+                index.matches(&format!("| `{}` |", descriptor.name)).count(),
+                1
+            );
+        }
     }
 }

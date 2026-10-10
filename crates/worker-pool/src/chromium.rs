@@ -1,3 +1,6 @@
+#[cfg(test)]
+use crate::wait::{bound_observed, text_matches};
+use crate::wait::{is_page_scoped_text_target, WaitObservation, WaitObserver};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Once};
@@ -55,7 +58,7 @@ use types::{
     ErrorLayer, EvaluateJavaScriptCommand, Evidence, FormControl, FormControlTarget,
     InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand, PageEvidence, PageId,
     ScreenshotMode, SessionId, SetEmulatedMediaCommand, SetFocusEmulationCommand, TargetSpec,
-    TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WaitUntil, WorkerId,
+    TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WorkerId,
 };
 
 use crate::{
@@ -2189,8 +2192,15 @@ impl BrowserWorker for ChromiumWorker {
         page_id: &PageId,
         command: &UploadFilesCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let requested = command.paths.iter().map(PathBuf::from).collect::<Vec<_>>();
-        let paths = resolve_upload_paths(&self.upload_roots, &requested)?;
+        let resolved_uploads = crate::upload::resolve_upload_sources(
+            &command.paths,
+            &self.upload_roots,
+            Some(&self.artifacts),
+            Some(&self.session_id),
+            Some(&self.download_dir),
+        )
+        .await?;
+        let paths = &resolved_uploads.paths;
         let page = self.page_handle(page_id).await?;
         let resolved = self
             .resolve_target(page_id, &page, &command.selector, command.target.as_ref())
@@ -2203,7 +2213,7 @@ impl BrowserWorker for ChromiumWorker {
         Ok(vec![
             Evidence::Upload {
                 selector: command.selector.clone(),
-                paths: path_strings,
+                paths: crate::upload::opaque_upload_paths(&command.paths),
             },
             resolved.evidence,
         ])
@@ -3081,76 +3091,14 @@ impl BrowserWorker for ChromiumWorker {
         page_id: &PageId,
         command: &WaitForCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let started = Instant::now();
-        let deadline = started + Duration::from_millis(command.timeout_ms);
-        let mut observations = 0;
-        let mut quiet_window = crate::policy::QuietWindow::default();
-        loop {
-            observations += 1;
-            let tracker = self.network_trackers.lock().await.get(page_id).cloned();
-            let page = self.page_handle(page_id).await?;
-            let poll = match wait_condition_satisfied(
-                &self.browser,
+        crate::wait::poll_until(
+            command,
+            &ChromiumWaitObserver {
+                worker: self,
                 page_id,
-                &page,
-                tracker.as_deref(),
-                &command.condition,
-                &mut quiet_window,
-            )
-            .await
-            {
-                Ok(poll) => poll,
-                // A frame or document navigation can replace its execution
-                // context between target resolution and observation. Waits
-                // are read-only and already bounded, so reacquire the frame
-                // on the next poll instead of converting a successful submit
-                // into an immediate false failure.
-                Err(error) if wait_should_retry_replaced_context(&error) => {
-                    WaitPoll::matched(false)
-                }
-                Err(error) => return Err(error),
-            };
-            if poll.satisfied {
-                return Ok(vec![Evidence::Wait {
-                    condition: command.condition.clone(),
-                    elapsed_ms: started.elapsed().as_millis() as u64,
-                    observations,
-                    excluded_classes: poll.excluded_classes,
-                    observed: poll.observed.map(|value| bound_observed(&value)),
-                }]);
-            }
-            if Instant::now() >= deadline {
-                // Page-scoped text waits often race an async UI confirmation
-                // (fetch-then-append). One last body read before timing out.
-                if let types::WaitCondition::Text { target, matcher } = &command.condition {
-                    if is_page_scoped_text_target(target) {
-                        if let Ok(value) =
-                            read_page_scoped_text(&self.browser, page_id, &page, target).await
-                        {
-                            if text_matches(matcher, &value).unwrap_or(false) {
-                                return Ok(vec![Evidence::Wait {
-                                    condition: command.condition.clone(),
-                                    elapsed_ms: started.elapsed().as_millis() as u64,
-                                    observations,
-                                    excluded_classes: Vec::new(),
-                                    observed: Some(bound_observed(&value)),
-                                }]);
-                            }
-                        }
-                    }
-                }
-                return Err(CommandError {
-                    code: ErrorCode::WaitConditionTimedOut,
-                    message: format!(
-                        "wait condition was not satisfied within {}ms",
-                        command.timeout_ms
-                    ),
-                    layer: ErrorLayer::Driver,
-                    retryable: false,
-                });
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+            },
+        )
+        .await
     }
 
     async fn collect_candidates(
@@ -3701,44 +3649,35 @@ fn http_equivalence_unproven(message: impl Into<String>) -> CommandError {
     }
 }
 
-/// Truncates a wait observation on a character boundary.
-///
-/// Byte-index truncation panics inside a multi-byte codepoint, which is how
-/// extraction used to die on any non-ASCII page.
-fn bound_observed(value: &str) -> String {
-    match value.char_indices().nth(types::MAX_WAIT_OBSERVED_CHARS) {
-        Some((index, _)) => value[..index].to_owned(),
-        None => value.to_owned(),
-    }
+struct ChromiumWaitObserver<'a> {
+    worker: &'a ChromiumWorker,
+    page_id: &'a PageId,
 }
 
-/// What one wait poll saw.
-///
-/// `observed` is the value the condition's matcher ran against, so a satisfied
-/// wait can report it instead of throwing it away. Only the conditions that
-/// read a value carry one: `Text`, `Value`, `Url`, and `Document`. `Element`
-/// and `NetworkQuiet` match on presence and counts, not on a value, so theirs
-/// stays `None` rather than inventing a string.
-struct WaitPoll {
-    satisfied: bool,
-    excluded_classes: Vec<String>,
-    observed: Option<String>,
-}
-
-impl WaitPoll {
-    fn matched(satisfied: bool) -> Self {
-        Self {
-            satisfied,
-            excluded_classes: Vec::new(),
-            observed: None,
-        }
-    }
-
-    fn saw(satisfied: bool, observed: impl Into<String>) -> Self {
-        Self {
-            satisfied,
-            excluded_classes: Vec::new(),
-            observed: Some(observed.into()),
+#[async_trait]
+impl WaitObserver for ChromiumWaitObserver<'_> {
+    async fn observe(&self, condition: &WaitCondition) -> Result<WaitObservation, CommandError> {
+        let tracker = self
+            .worker
+            .network_trackers
+            .lock()
+            .await
+            .get(self.page_id)
+            .cloned();
+        let page = self.worker.page_handle(self.page_id).await?;
+        match wait_condition_satisfied(
+            &self.worker.browser,
+            self.page_id,
+            &page,
+            tracker.as_deref(),
+            condition,
+        )
+        .await
+        {
+            Err(error) if wait_should_retry_replaced_context(&error) => {
+                Ok(WaitObservation::Pending)
+            }
+            result => result,
         }
     }
 }
@@ -3749,8 +3688,7 @@ async fn wait_condition_satisfied(
     page: &Page,
     tracker: Option<&crate::network_quiet::NetworkQuietTracker>,
     condition: &WaitCondition,
-    quiet_window: &mut crate::policy::QuietWindow,
-) -> Result<WaitPoll, CommandError> {
+) -> Result<WaitObservation, CommandError> {
     match condition {
         WaitCondition::Element { target, state } => {
             let resolved = if let Some(selector) = unscoped_css_wait_selector(target) {
@@ -3776,7 +3714,7 @@ async fn wait_condition_satisfied(
                 Ok(resolved) => resolved,
                 Err(error) => {
                     if let Some(satisfied) = element_wait_missing_observation(state, &error) {
-                        return Ok(WaitPoll::matched(satisfied));
+                        return Ok(WaitObservation::Element(satisfied));
                     }
                     return Err(error);
                 }
@@ -3809,16 +3747,16 @@ async fn wait_condition_satisfied(
                     }
                 }
             };
-            Ok(WaitPoll::matched(observation))
+            Ok(WaitObservation::Element(observation))
         }
-        WaitCondition::Text { target, matcher } | WaitCondition::Value { target, matcher } => {
+        WaitCondition::Text { target, .. } | WaitCondition::Value { target, .. } => {
             let is_value = matches!(condition, WaitCondition::Value { .. });
             // a11y / landmark page-scoped roles (and css:body) are not a single
             // node; read live document.body.innerText via evaluate so polls see
             // async UI updates the same way a whole-page inspect does.
             if !is_value && is_page_scoped_text_target(target) {
                 let value = read_page_scoped_text(browser, page_id, page, target).await?;
-                return Ok(WaitPoll::saw(text_matches(matcher, &value)?, value));
+                return Ok(WaitObservation::Text(vec![value]));
             }
             let handle = browser.lock().await.as_ref().map(Browser::handle);
             let resolved = match handle {
@@ -3830,7 +3768,7 @@ async fn wait_condition_satisfied(
             let resolved = match resolved {
                 Ok(resolved) => resolved,
                 Err(error) if matches!(error.code, ErrorCode::TargetNotFound) => {
-                    return Ok(WaitPoll::matched(false))
+                    return Ok(WaitObservation::Pending)
                 }
                 // The click already landed; a matcher-satisfying candidate
                 // among several is still a match, not an ambiguity the
@@ -3840,16 +3778,7 @@ async fn wait_condition_satisfied(
                     let values =
                         resolve_ambiguous_wait_values(page, target, is_value, handle.as_ref())
                             .await?;
-                    let mut satisfied = false;
-                    let mut observed = String::new();
-                    for value in values {
-                        observed = value;
-                        if text_matches(matcher, &observed)? {
-                            satisfied = true;
-                            break;
-                        }
-                    }
-                    return Ok(WaitPoll::saw(satisfied, observed));
+                    return Ok(WaitObservation::Text(values));
                 }
                 Err(error) => return Err(error),
             };
@@ -3858,40 +3787,31 @@ async fn wait_condition_satisfied(
             } else {
                 resolved.inner_text(page).await?.unwrap_or_default()
             };
-            Ok(WaitPoll::saw(text_matches(matcher, &value)?, value))
+            Ok(WaitObservation::Text(vec![value]))
         }
-        WaitCondition::Url { matcher } => {
+        WaitCondition::Url { .. } => {
             let url = page
                 .url()
                 .await
                 .map_err(command_failed)?
                 .unwrap_or_default();
-            Ok(WaitPoll::saw(text_matches(matcher, &url)?, url))
+            Ok(WaitObservation::Url(url))
         }
-        WaitCondition::Document { ready } => {
+        WaitCondition::Document { .. } => {
             let state: String = page
                 .evaluate("document.readyState")
                 .await
                 .map_err(command_failed)?
                 .into_value()
                 .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
-            Ok(WaitPoll::saw(
-                match ready {
-                    WaitUntil::Commit => true,
-                    WaitUntil::DomContentLoaded | WaitUntil::Interactive => {
-                        state == "interactive" || state == "complete"
-                    }
-                    WaitUntil::NetworkIdle => state == "complete",
-                },
-                state,
-            ))
+            Ok(WaitObservation::Document(state))
         }
+
         WaitCondition::NetworkQuiet {
-            idle_ms,
-            max_in_flight,
             ignore_url_substrings,
             ignore_resource_types,
             ignore_long_lived,
+            ..
         } => {
             let tracker = tracker.ok_or_else(|| {
                 driver_error(
@@ -3905,15 +3825,9 @@ async fn wait_condition_satisfied(
                 ignore_long_lived: *ignore_long_lived,
             };
             let (in_flight, excluded_classes) = tracker.snapshot(&filters).await;
-            Ok(WaitPoll {
-                satisfied: quiet_window.observe(
-                    Instant::now(),
-                    in_flight,
-                    *max_in_flight,
-                    Duration::from_millis(*idle_ms),
-                ),
+            Ok(WaitObservation::Network {
+                in_flight,
                 excluded_classes,
-                observed: None,
             })
         }
     }
@@ -3979,13 +3893,6 @@ fn wait_should_retry_replaced_context(error: &CommandError) -> bool {
         || message.contains("execution context was destroyed")
 }
 
-fn nonempty_field(value: &Option<String>) -> Option<&str> {
-    value
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-}
-
 fn is_page_scoped_css(css: &str) -> bool {
     matches!(css.to_ascii_lowercase().as_str(), "body" | "html" | ":root")
 }
@@ -4005,43 +3912,9 @@ fn is_document_body_inspect(command: &InspectCommand) -> bool {
     }
 }
 
-fn is_page_scoped_role(role: &str) -> bool {
-    [
-        "RootWebArea",
-        "document",
-        "main",
-        "body",
-        "application",
-        "generic",
-    ]
-    .iter()
-    .any(|name| role.eq_ignore_ascii_case(name))
-}
-
 /// a11y `RootWebArea` / `document` / bare landmarks, and `css: body|html|:root`,
 /// mean "page text" — not a single resolvable node. Empty optional fields are
 /// treated as absent so agents that send `""` still hit the body-text path.
-fn is_page_scoped_text_target(target: &types::TargetSpec) -> bool {
-    if nonempty_field(&target.test_id).is_some()
-        || nonempty_field(&target.accessible_name).is_some()
-        || nonempty_field(&target.label).is_some()
-        || target.text.is_some()
-        || !target.attributes.is_empty()
-        || !target.shadow_path.is_empty()
-        || target.ordinal.is_some()
-    {
-        return false;
-    }
-    let role = nonempty_field(&target.role);
-    let css = nonempty_field(&target.css);
-    match (role, css) {
-        (Some(role), None) => is_page_scoped_role(role),
-        (None, Some(css)) => is_page_scoped_css(css),
-        (Some(role), Some(css)) => is_page_scoped_role(role) && is_page_scoped_css(css),
-        (None, None) => false,
-    }
-}
-
 /// Page text that discloses a credential never reaches the agent: the whole
 /// string is replaced, as the Firefox content script does for node names.
 fn redact_secret_material(value: String) -> String {
@@ -4184,24 +4057,6 @@ async fn read_page_scoped_text(
     inspect_page_scoped_target(page_id, page, target, false, Some(&handle))
         .await
         .map(|(text, _, _)| text)
-}
-
-fn text_matches(matcher: &types::TextMatch, value: &str) -> Result<bool, CommandError> {
-    match matcher {
-        types::TextMatch::Exact(expected) => Ok(value == expected),
-        types::TextMatch::Contains(expected) => Ok(value.contains(expected)),
-        types::TextMatch::Regex(pattern) => {
-            if pattern.len() > 256 {
-                return Err(driver_error(
-                    ErrorCode::InvalidRequest,
-                    "wait regular expression exceeds configured limit",
-                ));
-            }
-            regex::Regex::new(pattern)
-                .map(|regex| regex.is_match(value))
-                .map_err(|error| driver_error(ErrorCode::InvalidRequest, error))
-        }
-    }
 }
 
 async fn page_evidence(page_id: PageId, page: &Page) -> Result<PageEvidence, CommandError> {

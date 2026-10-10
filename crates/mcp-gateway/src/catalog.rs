@@ -42,6 +42,7 @@ pub(crate) struct ToolDescriptor {
     pub phases: u8,
     pub scope: Option<WorkflowScope>,
     pub group: DispatchGroup,
+    pub intent: Option<(&'static str, &'static str)>,
     pub read_only: bool,
     pub destructive: bool,
     pub idempotent: bool,
@@ -60,6 +61,7 @@ macro_rules! tools {
         capabilities: $caps:expr, operation: $operation:expr,
         schema: $schema:ident, args: $args:ty, phases: $phases:expr,
         $(scope: $scope:ident,)? group: $group:ident,
+        $(intent: ($variant:literal, $recovery:literal),)?
         hints: ($read:expr, $destructive:expr, $idempotent:expr, $open:expr) } )*) => {
         pub const EVERY_TOOL: &[&str] = &[$(stringify!($name)),*];
         #[cfg(test)]
@@ -71,9 +73,12 @@ macro_rules! tools {
             capabilities: $caps, operation: $operation,
             schema: crate::schema::$schema, #[cfg(test)] parse: parse::<$args>, phases: $phases,
             scope: tools!(@scope $($scope)?), group: DispatchGroup::$group,
+            intent: tools!(@intent $($variant, $recovery)?),
             read_only: $read, destructive: $destructive, idempotent: $idempotent, open_world: $open,
         }),*];
     };
+    (@intent $variant:literal, $recovery:literal) => { Some(($variant, $recovery)) };
+    (@intent) => { None };
     (@scope $scope:ident) => { Some(WorkflowScope::$scope) };
     (@scope) => { None };
 }
@@ -163,63 +168,63 @@ tools! {
             types::Capability::BrowserMutate,
             types::Capability::IntentExecute,
         ], operation: Some(types::InterfaceOperation::SubmitCommand), schema: intent_complete_form_schema, args: IntentCompleteFormArgs,
-        phases: EXPLORE | INTENT, scope: SessionPageWorkflow, group: Intents, hints: (false, false, false, false) }
+        phases: EXPLORE | INTENT, scope: SessionPageWorkflow, group: Intents, intent: ("CompleteForm", "Reconciliable"), hints: (false, false, false, false) }
     intent_detect_challenge { order: 12, title: "Detect challenge", description: "Classify a captcha or verification challenge without acting (Replayable). Requires browser:mutate, intent:execute, and vision:assist (plus visionAssist policy). Produces challengeDetection evidence: type, confidence, blocking; a clean page is a first-class answer. visionAssistDenied: enable the session policy first; else snapshot after the page changes.",
         capabilities: &[
             types::Capability::BrowserMutate,
             types::Capability::IntentExecute,
             types::Capability::VisionAssist,
         ], operation: None, schema: intent_detect_challenge_schema, args: IntentDetectChallengeArgs,
-        phases: INTENT, scope: SessionPageWorkflow, group: Intents, hints: (true, false, false, false) }
+        phases: INTENT, scope: SessionPageWorkflow, group: Intents, intent: ("DetectChallenge", "Replayable"), hints: (true, false, false, false) }
     intent_dismiss_obstruction { order: 13, title: "Dismiss obstruction", description: "Dismiss a popup, overlay, or cookie banner blocking the page (Reconciliable). Requires browser:mutate and intent:execute. Produces resolution and dismissal evidence. On failure with obstructionSuspected, the obstruction is still present after the attempt -- take a fresh a11y_snapshot to find another dismissal control.",
         capabilities: &[
             types::Capability::BrowserMutate,
             types::Capability::IntentExecute,
         ], operation: Some(types::InterfaceOperation::SubmitCommand), schema: intent_dismiss_obstruction_schema, args: IntentDismissObstructionArgs,
-        phases: INTENT, scope: SessionPageWorkflow, group: Intents, hints: (false, false, false, false) }
+        phases: INTENT, scope: SessionPageWorkflow, group: Intents, intent: ("DismissObstruction", "Reconciliable"), hints: (false, false, false, false) }
     intent_extract { order: 14, title: "Extract fields", description: "Read named fields off the page without mutating it (Replayable). Requires browser:mutate and intent:execute. Produces one extraction result per named field, with a resolution path and error code for any that failed. On failure with notFound, the session or page id is stale -- call page_list; a single unresolved field is reported per field, not as a call failure.",
         capabilities: &[
             types::Capability::BrowserMutate,
             types::Capability::IntentExecute,
         ], operation: Some(types::InterfaceOperation::SubmitCommand), schema: intent_extract_schema, args: IntentExtractArgs,
-        phases: INTENT, scope: SessionPageWorkflow, group: Intents, hints: (true, false, false, false) }
+        phases: INTENT, scope: SessionPageWorkflow, group: Intents, intent: ("Extract", "Replayable"), hints: (true, false, false, false) }
     intent_fill { order: 15, title: "Fill control", description: "Fill one described form control and verify the value (Reconciliable). Requires browser:mutate and intent:execute. accessibleName may be a controlId from form_snapshot. Produces fill evidence carrying the browser's own validity state. On failure with verificationFailed, read the retained validation message and re-fill; on targetNotFound, take a fresh a11y_snapshot and pass the new target.",
         capabilities: &[
             types::Capability::BrowserMutate,
             types::Capability::IntentExecute,
         ], operation: Some(types::InterfaceOperation::SubmitCommand), schema: intent_fill_schema, args: IntentFillArgs,
-        phases: INTENT, scope: SessionPageWorkflow, group: Intents, hints: (false, false, false, false) }
+        phases: INTENT, scope: SessionPageWorkflow, group: Intents, intent: ("Fill", "Reconciliable"), hints: (false, false, false, false) }
     intent_follow { order: 16, title: "Follow link", description: "Activate and verify a described control. Prefer over click plus wait_for. Requires browser:mutate and intent:execute. Defaults evidenceDetail=compact. On failure with needsReconciliation, do not retry; call recovery_status.",
         capabilities: &[
             types::Capability::BrowserMutate,
             types::Capability::IntentExecute,
         ], operation: Some(types::InterfaceOperation::SubmitCommand), schema: intent_follow_schema, args: IntentFollowArgs,
-        phases: EXPLORE | INTENT, scope: SessionPageWorkflow, group: Intents, hints: (false, true, false, true) }
+        phases: EXPLORE | INTENT, scope: SessionPageWorkflow, group: Intents, intent: ("Follow", "Boundary if `boundary: true`, else Reconciliable"), hints: (false, true, false, true) }
     intent_locate { order: 17, title: "Locate element", description: "Locate an element by described purpose and hints, without acting on it (Replayable). Requires browser:mutate and intent:execute. Produces resolution evidence with the matched target's fingerprint. On failure with targetNotFound or targetAmbiguous, narrow the purpose or hints and retry.",
         capabilities: &[
             types::Capability::BrowserMutate,
             types::Capability::IntentExecute,
         ], operation: Some(types::InterfaceOperation::SubmitCommand), schema: intent_locate_schema, args: IntentLocateArgs,
-        phases: INTENT, scope: SessionPageWorkflow, group: Intents, hints: (true, false, false, false) }
+        phases: INTENT, scope: SessionPageWorkflow, group: Intents, intent: ("Locate", "Replayable"), hints: (true, false, false, false) }
     intent_solve_challenge { order: 18, title: "Solve challenge", description: "Drive the vision solve loop until the challenge is cleared or timeoutMs elapses (Reconciliable). Requires browser:mutate, intent:execute, and vision:assist (plus visionAssist policy). Detect first when the kind is unclear. On failure with visionAssistFailed, retry once, then surface to the operator; the runtime never bypasses a challenge.",
         capabilities: &[
             types::Capability::BrowserMutate,
             types::Capability::IntentExecute,
             types::Capability::VisionAssist,
         ], operation: None, schema: intent_detect_challenge_schema, args: IntentSolveChallengeArgs,
-        phases: INTENT, scope: SessionPageWorkflow, group: Intents, hints: (false, false, false, false) }
+        phases: INTENT, scope: SessionPageWorkflow, group: Intents, intent: ("SolveChallenge", "Reconciliable"), hints: (false, false, false, false) }
     intent_submit_and_verify { order: 19, title: "Submit and verify", description: "Submit once and verify post-state. Pass workflowHandle. Requires browser:mutate and intent:execute. networkQuiet returns submitSettlement=settled|validationRejected; on rejection, do not inspect or blindly resubmit. On failure with needsReconciliation, call recovery_status.",
         capabilities: &[
             types::Capability::BrowserMutate,
             types::Capability::IntentExecute,
         ], operation: Some(types::InterfaceOperation::SubmitCommand), schema: intent_submit_and_verify_schema, args: IntentSubmitAndVerifyArgs,
-        phases: EXPLORE | INTENT, scope: SessionPageWorkflow, group: Intents, hints: (false, true, false, true) }
+        phases: EXPLORE | INTENT, scope: SessionPageWorkflow, group: Intents, intent: ("SubmitAndVerify", "Boundary"), hints: (false, true, false, true) }
     intent_wait_for_state { order: 20, title: "Wait for state", description: "Wait for a described page state to hold (Replayable). Requires browser:mutate and intent:execute. On failure with waitConditionTimedOut, retry with a longer timeout.",
         capabilities: &[
             types::Capability::BrowserMutate,
             types::Capability::IntentExecute,
         ], operation: Some(types::InterfaceOperation::SubmitCommand), schema: intent_wait_for_state_schema, args: IntentWaitForStateArgs,
-        phases: INTENT, scope: SessionPageWorkflow, group: Intents, hints: (true, false, false, false) }
+        phases: INTENT, scope: SessionPageWorkflow, group: Intents, intent: ("WaitForState", "Replayable"), hints: (true, false, false, false) }
     job_cancel { order: 27, title: "Cancel job", description: "Cancel one owned job by id. Requires job:cancel. Same as DELETE /v1/jobs/{job}. On failure with notFound, the id is unknown or not owned.",
         capabilities: &[types::Capability::JobCancel], operation: Some(types::InterfaceOperation::CancelJob), schema: job_cancel_schema, args: JobIdArgs,
         phases: ACT | VERIFY, group: Workflow, hints: (false, true, false, false) }

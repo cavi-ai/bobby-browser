@@ -491,20 +491,8 @@ async fn wait_for_revealed_field(
     let deadline =
         tokio::time::Instant::now() + std::time::Duration::from_millis(REVEAL_WAIT_TIMEOUT_MS);
     loop {
-        let gathered = browser.collect_candidates(page_id, field_target).await?;
-        let compatible_candidates = gathered
-            .iter()
-            .filter(|candidate| compatible(field_value, candidate))
-            .cloned()
-            .collect::<Vec<_>>();
-        let candidates = if compatible_candidates.is_empty() {
-            gathered
-        } else {
-            compatible_candidates
-        };
-        if let Ok(ResolutionDecision::Resolved { .. }) =
-            resolve_candidates(field_target, &candidates, &ResolutionPolicy::default())
-        {
+        let decision = locate::decide(page_id, browser, field_target, Some(field_value)).await?;
+        if let Ok(ResolutionDecision::Resolved { .. }) = decision.resolution {
             return Ok(Vec::new());
         }
         if tokio::time::Instant::now() >= deadline {
@@ -820,22 +808,11 @@ async fn prefill_candidates(
     browser: &dyn IntentBrowser,
     field: &CompleteFormFieldPlan,
 ) -> Option<(StuckKind, Vec<types::CandidateEvidence>)> {
-    let candidates = browser
-        .collect_candidates(page_id, &field.target)
+    let decision = locate::decide(page_id, browser, &field.target, Some(&field.value))
         .await
         .ok()?;
-    let window_candidates = candidates.clone();
-    let compatible_candidates = candidates
-        .iter()
-        .filter(|candidate| compatible(&field.value, candidate))
-        .cloned()
-        .collect::<Vec<_>>();
-    let candidates = if compatible_candidates.is_empty() {
-        candidates
-    } else {
-        compatible_candidates
-    };
-    match resolve_candidates(&field.target, &candidates, &ResolutionPolicy::default()).ok()? {
+    let window_candidates = decision.census;
+    match decision.resolution.ok()? {
         ResolutionDecision::Resolved { .. } => None,
         ResolutionDecision::NotFound => {
             if !matches!(field.value, ControlAction::SetFiles { .. })
@@ -1462,12 +1439,8 @@ fn targets_file_control(target: &TargetSpec, candidates: &[Candidate]) -> bool {
     if file_candidates.is_empty() {
         return false;
     }
-    let policy = ResolutionPolicy {
-        require_visible: false,
-        ..ResolutionPolicy::default()
-    };
     matches!(
-        resolve_candidates(target, &file_candidates, &policy),
+        locate::decide_file_candidates(target, &file_candidates),
         Ok(ResolutionDecision::Resolved { .. })
     )
 }
@@ -2454,10 +2427,10 @@ async fn wait_until_gone(
 }
 
 async fn is_gone(page_id: &PageId, browser: &dyn IntentBrowser, target: &TargetSpec) -> bool {
-    let Ok(candidates) = browser.collect_candidates(page_id, target).await else {
+    let Ok(decision) = locate::decide(page_id, browser, target, None).await else {
         return false;
     };
-    match resolve_candidates(target, &candidates, &ResolutionPolicy::default()) {
+    match decision.resolution {
         Ok(ResolutionDecision::NotFound) => true,
         Ok(ResolutionDecision::Resolved { candidate, .. }) => !candidate.state.visible,
         _ => false,
@@ -2525,10 +2498,11 @@ async fn resolve_extract_field(
     vision: &VisionContext,
     field: &ExtractFieldPlan,
 ) -> Vec<Evidence> {
-    let candidates = match browser.collect_candidates(page_id, &field.target).await {
-        Ok(candidates) => candidates,
+    let located = match locate::decide(page_id, browser, &field.target, None).await {
+        Ok(located) => located,
         Err(error) => return vec![missing_extraction(&field.name, Some(error.code))],
     };
+    let candidates = located.census;
 
     // An `a11y_snapshot` node passed verbatim can name a role the element
     // collector never emits (`StaticText` and friends). Fail typed when the
@@ -2536,7 +2510,7 @@ async fn resolve_extract_field(
     // reports a generic not-found that would send the agent
     // re-snapshotting, or worse, a green `completed` with a silently
     // missing field.
-    let decision = resolve_candidates(&field.target, &candidates, &ResolutionPolicy::default());
+    let decision = located.resolution;
     if field.target.role.as_deref().is_some_and(a11y_only_role)
         && !matches!(decision, Ok(ResolutionDecision::Resolved { .. }))
     {
