@@ -27,6 +27,7 @@ macro_rules! every_case {
             type_text_reaches_the_visible_duplicate,
             intent_follow_clicks_the_visible_duplicate,
             snapshot_scopes_to_a_named_list,
+            scoped_snapshot_targets_act_on_the_scoped_element,
             snapshot_scoped_behind_a_modal_reports_the_dialog,
             snapshot_targets_act_on_the_described_element,
             snapshot_target_types_into_a_slot_labelled_field,
@@ -623,6 +624,41 @@ pub async fn intent_follow_clicks_the_visible_duplicate(rig: &Rig) {
         )
         .await;
     assert_eq!(followed["status"], "completed", "intent_follow: {followed}");
+    live.close().await;
+}
+
+/// A link in a list shares its name with a link before the list: a snapshot
+/// scoped to the list gives a target that clicks the list's link.
+pub async fn scoped_snapshot_targets_act_on_the_scoped_element(rig: &Rig) {
+    let body = r#"<header><a href="/top" data-id="top">Home</a></header>
+        <main><ul aria-label="Results"><li><a href="/item" data-id="item">Home</a></li></ul>
+        <p role="status" aria-label="idle" id="status"></p></main>
+        <script>
+          document.addEventListener("click", (event) => {
+            const reached = event.target.closest("[data-id]");
+            if (reached) document.getElementById("status").setAttribute("aria-label", "acted " + reached.dataset.id);
+            event.preventDefault();
+          }, true);
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/links", Route::Html(page("Links", body)))]).await;
+    let live = Live::open(rig, &site.url("/links")).await;
+    let scoped = live
+        .snapshot(json!({"target":{"role":"list","accessibleName":"Results"}}))
+        .await;
+    let mut targets = Vec::new();
+    targets_under(&scoped, &mut targets);
+    let link = targets
+        .iter()
+        .find(|(role, target)| *role == "link" && target["accessibleName"] == "Home")
+        .map(|(_, target)| (*target).clone())
+        .unwrap_or_else(|| panic!("no Home link target in the scoped snapshot: {scoped}"));
+    let clicked = live.call("click", json!({"target":link})).await;
+    assert_eq!(clicked["status"], "completed", "click {link}: {clicked}");
+    let after = live.snapshot(json!({})).await;
+    assert!(
+        find_node(&after, "status", Some("acted item")).is_some(),
+        "the scoped target {link} clicked another link: {after}"
+    );
     live.close().await;
 }
 

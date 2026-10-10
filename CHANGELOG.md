@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- On Chromium, a scoped snapshot numbers duplicate targets page-wide, so its targets act on the elements it shows.
 - On Firefox, controls and text inside open shadow roots appear in snapshots and observations, and their targets act.
 - A snapshot scoped to a region an open modal dialog hides fails `targetObscured` instead of `targetNotFound`.
 - On Chromium, action targets and intent hints resolve the way snapshots report them: names from slotted label content match, and controls hidden behind a modal dialog do not.
