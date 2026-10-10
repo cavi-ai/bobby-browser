@@ -72,7 +72,7 @@ The class tells you how to retry. A Replayable intent is safe to repeat. A Recon
 | `framePath`, `shadowPath` | Paths into frames and shadow roots |
 | `allowBestMatch` | Accept a best-effort match |
 
-Copy a snapshot node's `target` into hints so `ordinal` is kept. In TypeScript, use `intentHintsFromAccessibilityTarget(node.target)`. With `role` and exact `nearText`, `nearText` is the accessible name and `purpose` stays a free-text task description. A `purpose` is required and bounded. With no hints, `submitAndVerify` targets the button named by `purpose`.
+Copy a snapshot node's `target` into hints so `ordinal` is kept. In TypeScript, use `intentHintsFromAccessibilityTarget(node.target)`. With `role` and exact `nearText`, `nearText` is the accessible name and `purpose` stays a free-text task description. A `purpose` is required and bounded. With no hints, `submitAndVerify` targets the button named by `purpose`. With no hints and no control matching `purpose`, `dismissObstruction` fails `obstructionSuspected` naming the open dialog; with `visionAssist` on, vision closes it and the dialog must close for the intent to complete.
 
 ## Fill values
 
