@@ -231,9 +231,38 @@ function observationUrlString(value: string): string {
   return bounded && !isExtensionSafeUrl(bounded) ? REDACTED : bounded;
 }
 
+// An element's children in the rendered tree: a host's open shadow root
+// content, a slot's assigned nodes or else its fallback content.
+function composedChildren(element: Element): Node[] {
+  const shadow = element.shadowRoot;
+  if (shadow) return Array.from(shadow.childNodes);
+  if (element.tagName === "SLOT") {
+    const assigned = (element as HTMLSlotElement).assignedNodes({ flatten: true });
+    if (assigned.length) return assigned;
+  }
+  return Array.from(element.childNodes);
+}
+
+function composedElementChildren(element: Element): Element[] {
+  return composedChildren(element).filter((node): node is Element => node.nodeType === 1);
+}
+
+// An element's parent in the rendered tree: its slot, its parent, or the host
+// of the shadow root it sits at the top of.
+function composedParent(element: Element): Element | null {
+  if (element.assignedSlot) return element.assignedSlot;
+  if (element.parentElement) return element.parentElement;
+  const parent = element.parentNode;
+  return parent && parent.nodeType === 11 ? ((parent as ShadowRoot).host ?? null) : null;
+}
+
+// Joins the selectors of each shadow host and the element, each in its own
+// root, into one selector the action side resolves through open shadow roots.
+const SHADOW_HOP = " >>> ";
+
 function isElementHidden(element: Element, budget?: WorkBudget): boolean {
   let visited = 0;
-  for (let current: Element | null = element; current; current = current.parentElement) {
+  for (let current: Element | null = element; current; current = composedParent(current)) {
     visited += 1;
     if (visited > MAX_ANCESTOR_VISITS || !takeWork(budget)) return true;
     if (current.hasAttribute("hidden") || current.getAttribute("aria-hidden") === "true") {
@@ -327,7 +356,7 @@ function safeStableAttribute(element: Element): { name: string; value: string } 
 // the action that other element.
 function selectsOnly(element: Element, selector: string): boolean {
   try {
-    return element.ownerDocument.querySelector(selector) === element;
+    return (element.getRootNode() as Document | ShadowRoot).querySelector(selector) === element;
   } catch {
     return false;
   }
@@ -404,6 +433,25 @@ function cssPath(
   return byteLength(path) <= MAX_SELECTOR_LENGTH && selectsOnly(element, path) ? path : undefined;
 }
 
+// A selector that reaches `element` through each open shadow root around it.
+function composedCssPath(
+  element: Element,
+  budget: WorkBudget,
+  siblingPositions: WeakMap<Element, number>,
+  allowStableMetadata = true,
+): string | undefined {
+  const parts: string[] = [];
+  for (let current: Element | undefined = element; current; ) {
+    const path = cssPath(current, budget, siblingPositions, allowStableMetadata);
+    if (!path) return undefined;
+    parts.unshift(path);
+    const root = current.getRootNode();
+    current = root.nodeType === 11 ? (root as ShadowRoot).host : undefined;
+  }
+  const joined = parts.join(SHADOW_HOP);
+  return byteLength(joined) <= MAX_SELECTOR_LENGTH ? joined : undefined;
+}
+
 function implicitRole(element: Element, allowExplicit = true): string | undefined {
   const explicit = allowExplicit
     ? observationString(element.getAttribute("role"), MAX_ROLE_LENGTH)
@@ -439,7 +487,7 @@ function labelledByText(element: Element, budget: WorkBudget): string | undefine
     const separatorBytes = output ? 1 : 0;
     const remaining = MAX_CONTROL_FIELD_LENGTH - outputBytes - separatorBytes;
     if (remaining <= 0) break;
-    const referenced = element.ownerDocument.getElementById(id);
+    const referenced = (element.getRootNode() as Document | ShadowRoot).getElementById(id);
     const text = referenced ? boundedElementText(referenced, remaining, budget) : undefined;
     if (!text) continue;
     output += `${output ? " " : ""}${text}`;
@@ -508,7 +556,7 @@ function boundedElementText(
       }
     }
     if (depth >= MAX_NAME_CONTENT_DEPTH) return true;
-    for (const next of Array.from(child.childNodes).slice(0, 256)) {
+    for (const next of composedChildren(child).slice(0, 256)) {
       if (!visit(next, depth + 1)) return false;
     }
     return true;
@@ -745,7 +793,10 @@ function observeRoot(document: Document, root: Element, includeHtml: boolean): P
   // that is not inside a rejected subtree, which keeps sibling positions exact.
   let filterCalls = 0;
   let controlsTruncated = false;
-  const walker = document.createTreeWalker(root, 1, {
+  // Each open shadow root met on the way is walked after the tree holding it.
+  const roots: Node[] = [root];
+  if (root.shadowRoot) roots.push(root.shadowRoot);
+  const filter = {
     acceptNode: (node: Node): number => {
       const element = node as Element;
       filterCalls += 1;
@@ -776,25 +827,29 @@ function observeRoot(document: Document, root: Element, includeHtml: boolean): P
       }
       return 1;
     },
-  });
+  };
   let visited = 0;
-  while (visited < MAX_CONTROL_VISITED_NODES && takeWork(helperBudget)) {
-    const node = walker.nextNode();
-    if (!node) break;
-    visited += 1;
-    const element = node as Element;
-    if (element.tagName === "LABEL") {
-      const controlId = element.getAttribute("for");
-      if (
-        controlId &&
-        byteLength(controlId) <= MAX_SELECTOR_LENGTH &&
-        !labelsByControlId.has(controlId)
-      ) {
-        labelsByControlId.set(controlId, element);
+  for (let index = 0; index < roots.length; index += 1) {
+    const walker = document.createTreeWalker(roots[index]!, 1, filter);
+    while (visited < MAX_CONTROL_VISITED_NODES && takeWork(helperBudget)) {
+      const node = walker.nextNode();
+      if (!node) break;
+      visited += 1;
+      const element = node as Element;
+      if (element.shadowRoot) roots.push(element.shadowRoot);
+      if (element.tagName === "LABEL") {
+        const controlId = element.getAttribute("for");
+        if (
+          controlId &&
+          byteLength(controlId) <= MAX_SELECTOR_LENGTH &&
+          !labelsByControlId.has(controlId)
+        ) {
+          labelsByControlId.set(controlId, element);
+        }
       }
-    }
-    if (element.matches(CONTROL_SELECTOR)) {
-      candidateControls.push(element);
+      if (element.matches(CONTROL_SELECTOR)) {
+        candidateControls.push(element);
+      }
     }
   }
   if (visited >= MAX_CONTROL_VISITED_NODES || helperBudget.remaining <= 0) controlsTruncated = true;
@@ -805,7 +860,7 @@ function observeRoot(document: Document, root: Element, includeHtml: boolean): P
     }
     if (isElementHidden(element, helperBudget)) continue;
     const sensitive = isSensitiveControl(element, helperBudget);
-    const observedPath = cssPath(element, helperBudget, siblingPositions, !sensitive);
+    const observedPath = composedCssPath(element, helperBudget, siblingPositions, !sensitive);
     if (!observedPath) continue;
     const observedLabel = labelText(element, labelsByControlId, helperBudget);
     const observedName = accessibleName(
@@ -1159,7 +1214,7 @@ function a11yTree(
       // walk only needs to reach two matches; with one it needs ordinal + 1.
       const needed = typeof ordinal === "number" ? wanted + 1 : 2;
       if (depth < A11Y_MAX_DEPTH) {
-        for (const child of Array.from(element.children)) {
+        for (const child of composedElementChildren(element)) {
           if (matches.length >= needed || visited > A11Y_MAX_SCOPE_VISITS) return;
           walk(child, depth + 1);
         }
@@ -1215,7 +1270,7 @@ function a11yTree(
         }
       }
     }
-    const cssPathValue = cssPath(element, { remaining: A11Y_MAX_SCOPE_VISITS }, siblingPositions, !sensitive);
+    const cssPathValue = composedCssPath(element, { remaining: A11Y_MAX_SCOPE_VISITS }, siblingPositions, !sensitive);
     if (!cssPathValue) return { nodes: [], truncated: false, located: { found: false, ambiguous: false } };
     return {
       nodes: [],
@@ -1254,7 +1309,7 @@ function a11yTree(
       return;
     }
     if (depth < A11Y_MAX_DEPTH) {
-      for (const child of Array.from(element.children).slice(0, 256)) {
+      for (const child of composedElementChildren(element).slice(0, 256)) {
         countTargets(child, depth + 1);
       }
     }
@@ -1357,9 +1412,12 @@ function a11yTree(
     const childLevel = role ? level + 1 : level;
     const children: A11yNode[] = [];
     if (depth < A11Y_MAX_DEPTH) {
-      if (element.children.length > A11Y_MAX_CHILDREN) state.truncated = true;
+      const childNodes = composedChildren(element);
+      if (childNodes.filter((child) => child.nodeType === 1).length > A11Y_MAX_CHILDREN) {
+        state.truncated = true;
+      }
       let elements = 0;
-      for (const child of Array.from(element.childNodes)) {
+      for (const child of childNodes) {
         if (state.remaining <= 0) {
           state.truncated = true;
           break;

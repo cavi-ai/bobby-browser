@@ -49,6 +49,7 @@ macro_rules! every_case {
             actions_wait_for_a_late_target,
             actions_fail_a_missing_target_within_one_bound,
             click_refuses_a_covered_target,
+            shadow_root_controls_act_from_snapshot_targets,
             navigate_waits_for_late_scripts,
             page_titles_withhold_disclosed_credentials,
             observation_carries_each_text_once,
@@ -1983,6 +1984,80 @@ pub async fn actions_fail_a_missing_target_within_one_bound(rig: &Rig) {
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");
+    live.close().await;
+}
+
+/// Controls inside open shadow roots, one nested in another: the snapshot
+/// lists them and its targets type, click and follow as on any other control.
+pub async fn shadow_root_controls_act_from_snapshot_targets(rig: &Rig) {
+    let home = page(
+        "Home",
+        r#"<main><outer-part></outer-part><p role="status" aria-label="idle" id="status"></p></main>
+        <script>
+          customElements.define("inner-part", class extends HTMLElement {
+            constructor() {
+              super();
+              this.attachShadow({mode: "open"}).innerHTML =
+                '<button data-id="deep">Deep button</button>';
+            }
+          });
+          customElements.define("outer-part", class extends HTMLElement {
+            constructor() {
+              super();
+              this.attachShadow({mode: "open"}).innerHTML =
+                '<a href="/inside">Inside link</a><input aria-label="Inside field"><inner-part></inner-part>';
+            }
+          });
+          document.addEventListener("click", (event) => {
+            const reached = event.composedPath()[0];
+            if (reached.dataset && reached.dataset.id) {
+              document.getElementById("status").setAttribute("aria-label", "acted " + reached.dataset.id);
+            }
+          }, true);
+        </script>"#,
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/home", Route::Html(home)),
+        ("/inside", Route::Html(page("Inside", "<h1>Inside</h1>"))),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let snapshot = live.snapshot(json!({})).await;
+    let mut targets = Vec::new();
+    targets_under(&snapshot, &mut targets);
+    let target = |role: &str, name: &str| {
+        targets
+            .iter()
+            .find(|(found, target)| *found == role && target["accessibleName"] == name)
+            .map(|(_, target)| (*target).clone())
+            .unwrap_or_else(|| panic!("no {role} \"{name}\" target in the snapshot: {snapshot}"))
+    };
+    let field = target("textbox", "Inside field");
+    let deep = target("button", "Deep button");
+    let link = target("link", "Inside link");
+    let typed = live
+        .call("type_text", json!({"target":field,"value":"query"}))
+        .await;
+    assert_eq!(typed["status"], "completed", "type_text {field}: {typed}");
+    let clicked = live.call("click", json!({"target":deep})).await;
+    assert_eq!(clicked["status"], "completed", "click {deep}: {clicked}");
+    let after = live.snapshot(json!({})).await;
+    assert!(
+        find_node(&after, "status", Some("acted deep")).is_some(),
+        "the click did not reach the nested button: {after}"
+    );
+    let followed = live
+        .call(
+            "intent_follow",
+            json!({"purpose":"Open the inside page","hints":link,
+                   "expectedState":{"condition":{"kind":"url","matcher":{"kind":"contains","value":"/inside"}},
+                                    "timeoutMs":10000}}),
+        )
+        .await;
+    assert_eq!(
+        followed["status"], "completed",
+        "intent_follow {link}: {followed}"
+    );
     live.close().await;
 }
 
