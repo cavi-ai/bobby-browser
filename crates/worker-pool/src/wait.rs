@@ -189,7 +189,7 @@ fn match_observation(
 /// the deadline, including page text; evidence counts every actual poll.
 pub async fn poll_until(
     command: &WaitForCommand,
-    observer: &impl WaitObserver,
+    observer: &(impl WaitObserver + ?Sized),
 ) -> Result<Vec<Evidence>, CommandError> {
     if command.timeout_ms == 0 {
         return Err(error(

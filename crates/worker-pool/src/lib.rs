@@ -1,4 +1,8 @@
 mod chromium;
+mod engine;
+mod page_behavior;
+pub use engine::*;
+pub use page_behavior::PageBehavior;
 mod fingerprint_host;
 mod form_snapshot;
 mod har;
