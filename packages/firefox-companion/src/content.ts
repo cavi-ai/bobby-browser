@@ -260,6 +260,22 @@ function composedParent(element: Element): Element | null {
 // root, into one selector the action side resolves through open shadow roots.
 const SHADOW_HOP = " >>> ";
 
+// The element a selector names, entering each host's open shadow root in turn.
+// Throws, as querySelector does, on an invalid part.
+function composedQuery(document: Document, selector: string): Element | null {
+  const parts = selector.split(SHADOW_HOP);
+  const probe = document.createDocumentFragment();
+  for (const part of parts) probe.querySelector(part);
+  let root: Document | ShadowRoot = document;
+  for (let index = 0; index < parts.length; index += 1) {
+    const found: Element | null = root.querySelector(parts[index]!);
+    if (!found || index === parts.length - 1) return found;
+    if (!found.shadowRoot) return null;
+    root = found.shadowRoot;
+  }
+  return null;
+}
+
 function isElementHidden(element: Element, budget?: WorkBudget): boolean {
   let visited = 0;
   for (let current: Element | null = element; current; current = composedParent(current)) {
@@ -975,7 +991,7 @@ function inspectionRoot(document: Document, input: Record<string, unknown>): Ele
   if (!selector) return document.body ?? document.documentElement;
   let root: Element | null;
   try {
-    root = document.querySelector(selector);
+    root = composedQuery(document, selector);
   } catch {
     throw unresolvable("observe selector is invalid");
   }
@@ -995,7 +1011,7 @@ function target(document: Document, input: Record<string, unknown>): Element {
   }
   let element: Element | null;
   try {
-    element = document.querySelector(input.cssPath);
+    element = composedQuery(document, input.cssPath);
   } catch {
     throw new ContentActionError("invalidInput", "content action cssPath is invalid");
   }
@@ -1172,7 +1188,7 @@ function a11yTree(
       if (byteLength(selector) > MAX_SELECTOR_LENGTH) throw unresolvable("a11y target selector must be bounded");
       let found: Element | null;
       try {
-        found = document.querySelector(selector);
+        found = composedQuery(document, selector);
       } catch {
         throw unresolvable("a11y target selector is invalid");
       }

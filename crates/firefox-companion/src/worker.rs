@@ -54,9 +54,9 @@ use crate::network_quiet::FirefoxNetworkQuiet;
 const COMPANION_SANDBOX: &str = "automation-runtime-companion";
 /// A page function returning the element a selector names. A selector joined
 /// by " >>> " names each open shadow root's host in turn, then the element.
-const COMPOSED_QUERY: &str = "((selector)=>{const parts=selector.split(' >>> ');let root=document;for(let index=0;index<parts.length;index+=1){const found=root.querySelector(parts[index]);if(!found||index===parts.length-1)return found;root=found.shadowRoot;if(!root)return null}return null})";
+const COMPOSED_QUERY: &str = "((selector)=>{const parts=selector.split(' >>> ');const probe=document.createDocumentFragment();for(const part of parts)probe.querySelector(part);let root=document;for(let index=0;index<parts.length;index+=1){const found=root.querySelector(parts[index]);if(!found||index===parts.length-1)return found;root=found.shadowRoot;if(!root)return null}return null})";
 /// [`COMPOSED_QUERY`] returning every element the last part matches.
-const COMPOSED_QUERY_ALL: &str = "((selector)=>{const parts=selector.split(' >>> ');let root=document;for(let index=0;index<parts.length-1;index+=1){const host=root.querySelector(parts[index]);root=host&&host.shadowRoot;if(!root)return []}return [...root.querySelectorAll(parts[parts.length-1])]})";
+const COMPOSED_QUERY_ALL: &str = "((selector)=>{const parts=selector.split(' >>> ');const probe=document.createDocumentFragment();for(const part of parts)probe.querySelector(part);let root=document;for(let index=0;index<parts.length-1;index+=1){const host=root.querySelector(parts[index]);root=host&&host.shadowRoot;if(!root)return []}return [...root.querySelectorAll(parts[parts.length-1])]})";
 
 /// Accessibility nodes read to build intent candidates.
 const CANDIDATE_MAX_NODES: u32 = 1024;
