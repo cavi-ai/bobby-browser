@@ -631,7 +631,8 @@ pub async fn gather_candidates(
         scope.scope_id,
     )
     .await?;
-    let raw = align_with_accessibility(&scope.execution_page, target, raw).await?;
+    let raw =
+        align_with_accessibility(&scope.execution_page, scope.context_id, target, raw).await?;
     let mut candidates: Vec<Candidate> = raw.into_iter().map(into_candidate).collect();
     // Auto-descend one level into iframes for main-frame intents: agents
     // cannot name a framePath for content they cannot see, so without this
@@ -1023,7 +1024,8 @@ pub async fn resolve_target_with_visibility(
         scope.scope_id,
     )
     .await?;
-    let raw = align_with_accessibility(&scope.execution_page, target, raw).await?;
+    let raw =
+        align_with_accessibility(&scope.execution_page, scope.context_id, target, raw).await?;
     let (candidate, evidence, best_match_authorized) = choose(target, raw, require_visible)?;
     let owner = owners.get(&candidate.id).cloned();
     // A candidate gathered from a closed shadow root must be located relative
@@ -1162,6 +1164,7 @@ pub async fn resolve_ambiguous_wait_values(
 /// tree leaves out, such as controls hidden behind a modal dialog, drop out.
 async fn align_with_accessibility(
     page: &Page,
+    context_id: Option<ExecutionContextId>,
     target: &TargetSpec,
     mut raw: Vec<BrowserCandidate>,
 ) -> Result<Vec<BrowserCandidate>, CommandError> {
@@ -1171,7 +1174,7 @@ async fn align_with_accessibility(
     if accessibility_alignment_unnecessary(&raw, role, name, target.ordinal) {
         return Ok(raw);
     }
-    let exposed = accessibility_matches(page, role, name).await?;
+    let exposed = accessibility_matches(page, context_id, role, name).await?;
     apply_accessibility_alignment(&mut raw, role, name, &exposed);
     Ok(raw)
 }
@@ -1229,6 +1232,7 @@ fn apply_accessibility_alignment(
 /// `role` and `name`.
 async fn accessibility_matches(
     page: &Page,
+    context_id: Option<ExecutionContextId>,
     role: &str,
     name: &str,
 ) -> Result<Vec<String>, CommandError> {
@@ -1238,10 +1242,18 @@ async fn accessibility_matches(
         .map_err(cdp_error)?
         .result
         .root;
+    let backend_node_id = if context_id.is_some() {
+        let object_id = scope_root_object_id(page, &LocatorScope::Context(context_id), &[]).await?;
+        element_from_remote_object(page, object_id)
+            .await?
+            .backend_node_id
+    } else {
+        document.backend_node_id
+    };
     let nodes = page
         .execute(
             QueryAxTreeParams::builder()
-                .backend_node_id(document.backend_node_id)
+                .backend_node_id(backend_node_id)
                 .accessible_name(name)
                 .role(role)
                 .build(),
@@ -1534,6 +1546,11 @@ async fn element_from_remote_object(
     page: &Page,
     object_id: RemoteObjectId,
 ) -> Result<Element, CommandError> {
+    // Initialize the DOM domain's document before requesting a frontend node.
+    // Script-based resolution can reach this path before any DOM query.
+    page.execute(GetDocumentParams::builder().depth(0).build())
+        .await
+        .map_err(cdp_error)?;
     let node_id = page
         .execute(RequestNodeParams::new(object_id))
         .await
