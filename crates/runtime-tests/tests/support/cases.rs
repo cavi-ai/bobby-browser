@@ -58,6 +58,7 @@ macro_rules! every_case {
             hidden_state_holds_for_a_removed_control,
             intent_follow_reports_a_dialog_that_opened,
             dismiss_completes_when_a_same_named_control_appears,
+            unhinted_dismiss_names_the_open_dialog,
             shadow_root_controls_act_from_snapshot_targets,
             navigate_waits_for_late_scripts,
             page_titles_withhold_disclosed_credentials,
@@ -2329,6 +2330,35 @@ pub async fn intent_follow_reports_a_dialog_that_opened(rig: &Rig) {
     assert!(
         followed.to_string().contains("Notice"),
         "the evidence does not name the dialog: {followed}"
+    );
+    live.close().await;
+}
+
+/// A dismissal without hints whose purpose names no control while a dialog
+/// is open fails `obstructionSuspected` and names the dialog.
+pub async fn unhinted_dismiss_names_the_open_dialog(rig: &Rig) {
+    let home = page(
+        "Home",
+        r#"<main><h1>Home</h1></main>
+        <div role="dialog" aria-modal="true" aria-label="Notice"
+             style="position:fixed;inset:0;background:#fff">
+            <button aria-label="Close">x</button></div>"#,
+    );
+    let site = FixtureSite::spawn(vec![("/home", Route::Html(home))]).await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let dismissed = live
+        .call(
+            "intent_dismiss_obstruction",
+            json!({"purpose":"close the popup","timeoutMs":1000}),
+        )
+        .await;
+    assert_eq!(
+        dismissed["error"]["code"], "obstructionSuspected",
+        "unhinted dismiss beside an open dialog: {dismissed}"
+    );
+    assert!(
+        dismissed.to_string().contains("Notice"),
+        "the evidence does not name the dialog: {dismissed}"
     );
     live.close().await;
 }
