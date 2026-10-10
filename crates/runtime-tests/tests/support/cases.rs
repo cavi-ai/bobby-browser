@@ -55,6 +55,7 @@ macro_rules! every_case {
             actions_wait_for_a_late_target,
             actions_fail_a_missing_target_within_one_bound,
             click_refuses_a_covered_target,
+            covered_intent_names_the_covering_dialog,
             intent_follow_reports_a_dialog_that_opened,
             dismiss_completes_when_a_same_named_control_appears,
             shadow_root_controls_act_from_snapshot_targets,
@@ -2414,6 +2415,45 @@ pub async fn snapshot_targets_cover_widget_items(rig: &Rig) {
             "click {target} did not reach {reached}: {after}"
         );
     }
+    live.close().await;
+}
+
+/// An intent whose control a dialog covers fails `targetObscured` and its
+/// evidence names the dialog.
+pub async fn covered_intent_names_the_covering_dialog(rig: &Rig) {
+    let home = page(
+        "Home",
+        r#"<main><a href="/next">Next</a></main>
+        <div role="dialog" aria-label="Notice"
+             style="position:fixed;inset:0;background:#fff"><button>Close</button></div>"#,
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/home", Route::Html(home)),
+        ("/next", Route::Html(page("Next", "<h1>Next</h1>"))),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let followed = live
+        .call(
+            "intent_follow",
+            json!({
+                "purpose":"Open the next page",
+                "hints":{"role":"link","accessibleName":"Next"},
+                "expectedDestination":{
+                    "condition":{"kind":"url","matcher":{"kind":"contains","value":"/next"}},
+                    "timeoutMs":3000
+                }
+            }),
+        )
+        .await;
+    assert_eq!(
+        followed["error"]["code"], "targetObscured",
+        "follow under a dialog: {followed}"
+    );
+    assert!(
+        followed.to_string().contains("Notice"),
+        "the evidence does not name the covering dialog: {followed}"
+    );
     live.close().await;
 }
 
