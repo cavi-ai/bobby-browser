@@ -4746,6 +4746,7 @@ fn compact_ax_tree_from(
             .flatten();
         Some(types::AccessibilityNode {
             role,
+            input_type: None,
             name,
             target: None,
             value,

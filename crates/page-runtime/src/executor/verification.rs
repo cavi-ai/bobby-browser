@@ -3,6 +3,8 @@ use super::*;
 mod navigation;
 mod pointer;
 mod state;
+#[cfg(test)]
+mod test_support;
 mod text;
 
 struct VerificationContext<'a> {

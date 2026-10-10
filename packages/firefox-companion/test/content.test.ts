@@ -133,6 +133,19 @@ test("observe action scopes selector and target output and only includes sanitiz
   assert.equal("html" in targeted, false);
 });
 
+test("a11yTree preserves native input types without mistaking ordinary buttons for file inputs", () => {
+  const document = documentFor('<label>Resume<input id="upload" type="file"></label><button>Resume</button><input type="private-type-canary">');
+  const tree = executeContentAction(document, "a11yTree", { maxNodes: 32 }) as {
+    nodes: Array<{ role?: string; inputType?: string }>;
+  };
+  assert.equal(tree.nodes[0]?.inputType, "file");
+  assert.equal(tree.nodes[1]?.inputType, undefined);
+  assert.equal(tree.nodes[2]?.inputType, "text");
+  assert.equal(JSON.stringify(tree).includes("private-type-canary"), false);
+  const located = executeContentAction(document, "locateTarget", { target: { css: "#upload" } }) as { inputType?: string };
+  assert.equal(located.inputType, "file");
+});
+
 test("password values never enter observations", () => {
   const document = documentFor(
     '<label for="p">Password</label><input id="p" type="password" value="secret">',

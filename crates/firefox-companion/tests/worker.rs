@@ -4754,6 +4754,7 @@ fn located(found: bool, ambiguous: bool) -> TargetLocation {
         ambiguous,
         css_path: found.then(|| "main > a".to_owned()),
         role: found.then(|| "link".to_owned()),
+        input_type: None,
         name: found.then(|| "Show all".to_owned()),
         disabled: false,
     }

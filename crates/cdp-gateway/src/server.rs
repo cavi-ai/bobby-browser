@@ -2016,9 +2016,9 @@ mod playwright_semantic_click {
 
     use crate::{CdpConnection, CdpRequest, MethodRegistry};
 
-    struct CapturingRuntime {
-        sessions: Vec<SessionState>,
-        submitted: Mutex<Vec<PrimitiveCommand>>,
+    pub(super) struct CapturingRuntime {
+        pub(super) sessions: Vec<SessionState>,
+        pub(super) submitted: Mutex<Vec<PrimitiveCommand>>,
     }
 
     #[async_trait]
@@ -2117,7 +2117,9 @@ mod playwright_semantic_click {
         }
     }
 
-    async fn attached_connection(runtime: Arc<CapturingRuntime>) -> (CdpConnection, String) {
+    pub(super) async fn attached_connection(
+        runtime: Arc<CapturingRuntime>,
+    ) -> (CdpConnection, String) {
         let authority = AuthorityStore::in_memory();
         let token = authority
             .issue(

@@ -155,8 +155,9 @@ async fn artifact_upload_contract(engine: Engine) {
     let source = format!("artifact://{id}");
     let uploaded = live
         .call(
-            "upload_files",
-            json!({"selector":"#file", "paths":[source]}),
+            "intent_fill",
+            json!({"purpose":"Resume", "hints":{"role":"button", "accessibleName":"Resume"},
+                "value":{"kind":"setFiles", "paths":[source]}}),
         )
         .await;
     assert_eq!(uploaded["status"], "completed", "{uploaded}");

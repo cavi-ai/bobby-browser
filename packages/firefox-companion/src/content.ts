@@ -1022,6 +1022,7 @@ export type LocatedTarget = {
   ambiguous: boolean;
   cssPath?: string;
   role?: string;
+  inputType?: string;
   name?: string;
   disabled?: boolean;
 };
@@ -1035,6 +1036,7 @@ type A11yTarget = {
 
 type A11yNode = {
   role?: string;
+  inputType?: string;
   name?: string;
   target?: A11yTarget;
   value?: string;
@@ -1264,6 +1266,7 @@ function a11yTree(
         ambiguous: false,
         cssPath: cssPathValue,
         ...(role ? { role } : {}),
+        ...(element.tagName === "INPUT" ? { inputType: (element as HTMLInputElement).type } : {}),
         ...(name ? { name } : {}),
         disabled: element.hasAttribute("disabled") || element.getAttribute("aria-disabled") === "true",
       },
@@ -1430,6 +1433,7 @@ function a11yTree(
         }
         if (element.tagName === "INPUT") {
           const input = control as HTMLInputElement;
+          node.inputType = input.type;
           if (["checkbox", "radio"].includes(input.type)) node.checked = input.checked;
           const autocomplete = observationString(input.autocomplete);
           if (autocomplete) node.autocomplete = autocomplete;

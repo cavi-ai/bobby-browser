@@ -192,6 +192,8 @@ pub struct TargetLocation {
     #[serde(default)]
     pub role: Option<String>,
     #[serde(default)]
+    pub input_type: Option<String>,
+    #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
     pub disabled: bool,
@@ -5772,7 +5774,11 @@ fn located_candidate(location: &TargetLocation, css_path: String) -> Candidate {
         name: location.name.clone(),
         label: None,
         text: location.name.clone().unwrap_or_default(),
-        attributes: Default::default(),
+        attributes: location
+            .input_type
+            .iter()
+            .map(|kind| ("type".into(), kind.clone()))
+            .collect(),
         state: CandidateState {
             attached: true,
             visible: true,
@@ -5800,6 +5806,9 @@ fn accessibility_candidates(nodes: &[types::AccessibilityNode]) -> Vec<Candidate
                 text.push(value);
             }
             let mut attributes = std::collections::BTreeMap::new();
+            if let Some(input_type) = &node.input_type {
+                attributes.insert("type".into(), input_type.clone());
+            }
             if node.invalid == Some(true) {
                 attributes.insert("aria-invalid".into(), "true".into());
             }
@@ -5912,6 +5921,30 @@ mod observation_redaction_tests {
 #[cfg(test)]
 mod accessibility_candidate_tests {
     use super::{accessibility_candidates, accessibility_tree_contains};
+
+    #[test]
+    fn native_file_input_metadata_survives_candidate_collection() {
+        let nodes: Vec<types::AccessibilityNode> = serde_json::from_value(serde_json::json!([
+            {"role":"button", "name":"Resume", "inputType":"file"},
+            {"role":"button", "name":"Resume"}
+        ]))
+        .unwrap();
+        let candidates = accessibility_candidates(&nodes);
+        assert_eq!(
+            candidates[0].attributes.get("type").map(String::as_str),
+            Some("file")
+        );
+        assert!(!candidates[1].attributes.contains_key("type"));
+        let location: super::TargetLocation = serde_json::from_value(serde_json::json!({
+            "found":true,"ambiguous":false,"role":"button","name":"Resume","inputType":"file"
+        }))
+        .unwrap();
+        let located = super::located_candidate(&location, "#upload".into());
+        assert_eq!(
+            located.attributes.get("type").map(String::as_str),
+            Some("file")
+        );
+    }
 
     #[test]
     fn structural_wait_finds_named_navigation_inside_the_tree() {

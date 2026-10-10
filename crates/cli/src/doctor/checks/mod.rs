@@ -6,6 +6,8 @@ use crate::{resolve_bootstrap_path, resolve_config_path};
 use anyhow::{Context, Result};
 use config::AppConfig;
 use std::path::PathBuf;
+#[cfg(test)]
+mod test_support;
 
 struct DoctorContext {
     config_path: PathBuf,

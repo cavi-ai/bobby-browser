@@ -316,6 +316,9 @@ impl ContextSiteResponse {
 pub struct AccessibilityNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// Normalized native input type, used to distinguish file controls from buttons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
