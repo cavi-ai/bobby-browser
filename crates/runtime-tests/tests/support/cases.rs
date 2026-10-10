@@ -28,7 +28,6 @@ macro_rules! every_case {
             intent_follow_clicks_the_visible_duplicate,
             snapshot_scopes_to_a_named_list,
             snapshot_targets_act_on_the_described_element,
-            snapshot_target_types_into_a_slot_labelled_field,
             snapshot_targets_resolve_beside_a_modal_dialog,
             type_text_enter_reports_the_settled_page,
             type_text_enter_accepts_a_reformatted_landed_field,

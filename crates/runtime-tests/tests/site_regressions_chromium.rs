@@ -17,4 +17,8 @@ macro_rules! chromium_cases {
     )+};
 }
 
-cases::every_case!(chromium_cases);
+// Shadow-root content is outside the Firefox companion's snapshot.
+cases::every_case!(
+    chromium_cases,
+    snapshot_target_types_into_a_slot_labelled_field
+);
