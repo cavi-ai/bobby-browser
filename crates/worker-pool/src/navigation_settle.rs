@@ -2,6 +2,8 @@
 
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
+
 /// Longest a navigation waits for the document to stop changing.
 pub const NAVIGATION_SETTLE_CAP: Duration = Duration::from_secs(5);
 /// Time without a content change that counts as settled.
@@ -261,6 +263,94 @@ pub fn trace_settle(
     );
 }
 
+/// A probe finished, or the document moved underneath it.
+pub enum ProbeStep {
+    /// The document changed while the probe was in flight. Probe again immediately.
+    Replaced,
+    /// The probe returned. `None` when the page could not be read.
+    Finished(Option<ProbeRead>),
+}
+
+/// What an engine adapter supplies to the shared settle loop.
+#[async_trait]
+pub trait SettleSession: Send {
+    async fn probe(&mut self, remaining: Duration, requested_url: &str) -> ProbeStep;
+    async fn current_page(&mut self) -> Option<(String, String)>;
+    async fn landed_loads(&mut self) -> u64;
+    async fn pending_loads(&mut self) -> Option<usize>;
+}
+
+/// Runs the settle loop. Adapters only read the page and report loads in flight.
+pub async fn run_settle(
+    engine: &'static str,
+    budget: Duration,
+    requested_url: &str,
+    session: &mut impl SettleSession,
+) -> Option<(String, String)> {
+    let started = Instant::now();
+    let deadline = started + budget;
+    let mut begin = None;
+    let mut settled = None;
+    let mut churn = None;
+    let mut extra_probe_spent = false;
+    let exit = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            settled = session.current_page().await.or(settled);
+            break if settled.is_some() {
+                SettleExit::Cap
+            } else {
+                SettleExit::Unreadable
+            };
+        }
+        let landed_before = session.landed_loads().await;
+        match session.probe(remaining, requested_url).await {
+            ProbeStep::Replaced => continue,
+            ProbeStep::Finished(None) => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            ProbeStep::Finished(Some(read)) => {
+                begin.get_or_insert(read.begin);
+                settled = Some(read.page);
+                churn = read.churn;
+                let exit = if read.quiet {
+                    SettleExit::Quiet
+                } else {
+                    SettleExit::Cap
+                };
+                let pending = session.pending_loads().await;
+                let landed = session.landed_loads().await != landed_before;
+                match after_probe(pending, landed, &mut extra_probe_spent) {
+                    AfterProbe::Settled => break exit,
+                    AfterProbe::ProbeAgain => continue,
+                    AfterProbe::AwaitLoads => {
+                        while session
+                            .pending_loads()
+                            .await
+                            .is_some_and(|pending| pending > 0)
+                            && Instant::now() < deadline
+                        {
+                            tokio::time::sleep(LOAD_POLL).await;
+                        }
+                        continue;
+                    }
+                }
+            }
+        }
+    };
+    let pending = session.pending_loads().await;
+    trace_settle(
+        engine,
+        exit,
+        started,
+        pending,
+        begin.as_ref(),
+        settled.as_ref(),
+        churn.as_ref(),
+    );
+    settled
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,5 +472,95 @@ mod tests {
             after_probe(Some(1), true, &mut spent),
             AfterProbe::AwaitLoads
         );
+    }
+
+    struct Scripted {
+        probes: Vec<ProbeStep>,
+        current: Option<(String, String)>,
+        pending: Option<usize>,
+        landed: u64,
+    }
+
+    #[async_trait]
+    impl SettleSession for Scripted {
+        async fn probe(&mut self, _remaining: Duration, _requested_url: &str) -> ProbeStep {
+            self.probes.remove(0)
+        }
+
+        async fn current_page(&mut self) -> Option<(String, String)> {
+            self.current.clone()
+        }
+
+        async fn landed_loads(&mut self) -> u64 {
+            self.landed
+        }
+
+        async fn pending_loads(&mut self) -> Option<usize> {
+            self.pending
+        }
+    }
+
+    fn quiet_page() -> ProbeRead {
+        ProbeRead {
+            page: ("https://a.test/b".into(), "B".into()),
+            quiet: true,
+            begin: ("https://a.test/a".into(), "A".into()),
+            churn: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_quiet_probe_with_no_pending_loads_returns_the_page() {
+        let mut session = Scripted {
+            probes: vec![ProbeStep::Finished(Some(quiet_page()))],
+            current: None,
+            pending: Some(0),
+            landed: 0,
+        };
+        let settled = run_settle(
+            "test",
+            Duration::from_secs(1),
+            "https://a.test/a",
+            &mut session,
+        )
+        .await
+        .expect("page");
+        assert_eq!(settled, ("https://a.test/b".into(), "B".into()));
+        assert!(session.probes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_replaced_document_probes_again_without_ending() {
+        let mut session = Scripted {
+            probes: vec![ProbeStep::Replaced, ProbeStep::Finished(Some(quiet_page()))],
+            current: None,
+            pending: Some(0),
+            landed: 0,
+        };
+        let settled = run_settle(
+            "test",
+            Duration::from_secs(1),
+            "https://a.test/a",
+            &mut session,
+        )
+        .await
+        .expect("page");
+        assert_eq!(settled.0, "https://a.test/b");
+        assert!(session.probes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_budget_returns_the_current_page() {
+        let mut session = Scripted {
+            probes: Vec::new(),
+            current: Some(("https://a.test/now".into(), "Now".into())),
+            pending: Some(0),
+            landed: 0,
+        };
+        let settled = run_settle("test", Duration::ZERO, "https://a.test/a", &mut session)
+            .await
+            .expect("page");
+        assert_eq!(settled, ("https://a.test/now".into(), "Now".into()));
+        assert!(session.probes.is_empty());
     }
 }

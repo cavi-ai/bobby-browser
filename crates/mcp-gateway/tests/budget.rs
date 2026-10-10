@@ -380,8 +380,8 @@ const OPEN_WORLD: &[&str] = &[
 // only tools that converge regardless of any key belong here.
 const IDEMPOTENT: &[&str] = &["checkpoint_save", "emulate"];
 
-/// `tool_title`'s wildcard arm (`annotations.rs`) returns this for any name with no explicit
-/// arm. It must never fire for an advertised tool.
+/// `tool_title` returns this for a name the catalog does not know.
+/// It must never fire for an advertised tool.
 const UNTITLED_FALLBACK: &str = "Untitled tool";
 
 #[tokio::test]
@@ -392,7 +392,7 @@ async fn every_tool_carries_a_title_and_annotations() {
         assert_ne!(
             tool["title"],
             serde_json::json!(UNTITLED_FALLBACK),
-            "{name} fell through to tool_title's fallback arm — add a real title in annotations.rs"
+            "{name} fell through to tool_title's fallback — add a real title in the catalog"
         );
         assert!(tool["annotations"].is_object(), "{name} has no annotations");
     }
