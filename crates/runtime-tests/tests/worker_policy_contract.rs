@@ -161,6 +161,23 @@ async fn element_visibility_contract(engine: Engine) {
             );
             assert_eq!(result["error"]["code"], "waitConditionTimedOut", "{result}");
         }
+        let mut missing = scope.clone();
+        missing["css"] = json!("#missing");
+        for (state, status) in [("hidden", "completed"), ("visible", "failed")] {
+            let result = live
+                .call(
+                    "wait_for",
+                    json!({"condition":{"kind":"element", "target":missing, "state":state}, "timeoutMs":200}),
+                )
+                .await;
+            assert_eq!(
+                result["status"], status,
+                "{scope} missing {state}: {result}"
+            );
+            if status == "failed" {
+                assert_eq!(result["error"]["code"], "waitConditionTimedOut", "{result}");
+            }
+        }
         let mut target = scope;
         target["css"] = json!("#visible");
         let visible = live

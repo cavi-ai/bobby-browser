@@ -55,8 +55,10 @@ macro_rules! every_case {
             actions_wait_for_a_late_target,
             actions_fail_a_missing_target_within_one_bound,
             click_refuses_a_covered_target,
+            hidden_state_holds_for_a_removed_control,
             intent_follow_reports_a_dialog_that_opened,
             dismiss_completes_when_a_same_named_control_appears,
+            unhinted_dismiss_names_the_open_dialog,
             shadow_root_controls_act_from_snapshot_targets,
             navigate_waits_for_late_scripts,
             page_titles_withhold_disclosed_credentials,
@@ -2332,6 +2334,35 @@ pub async fn intent_follow_reports_a_dialog_that_opened(rig: &Rig) {
     live.close().await;
 }
 
+/// A dismissal without hints whose purpose names no control while a dialog
+/// is open fails `obstructionSuspected` and names the dialog.
+pub async fn unhinted_dismiss_names_the_open_dialog(rig: &Rig) {
+    let home = page(
+        "Home",
+        r#"<main><h1>Home</h1></main>
+        <div role="dialog" aria-modal="true" aria-label="Notice"
+             style="position:fixed;inset:0;background:#fff">
+            <button aria-label="Close">x</button></div>"#,
+    );
+    let site = FixtureSite::spawn(vec![("/home", Route::Html(home))]).await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let dismissed = live
+        .call(
+            "intent_dismiss_obstruction",
+            json!({"purpose":"close the popup","timeoutMs":1000}),
+        )
+        .await;
+    assert_eq!(
+        dismissed["error"]["code"], "obstructionSuspected",
+        "unhinted dismiss beside an open dialog: {dismissed}"
+    );
+    assert!(
+        dismissed.to_string().contains("Notice"),
+        "the evidence does not name the dialog: {dismissed}"
+    );
+    live.close().await;
+}
+
 /// Closing a modal reveals a banner with its own Close button: dismiss
 /// completes because the clicked control is gone, whatever else shares its name.
 pub async fn dismiss_completes_when_a_same_named_control_appears(rig: &Rig) {
@@ -2369,6 +2400,41 @@ pub async fn dismiss_completes_when_a_same_named_control_appears(rig: &Rig) {
         banner["status"], "completed",
         "the banner did not appear after the close: {banner}"
     );
+    live.close().await;
+}
+
+/// An expected `hidden` state holds once the control is removed, as well as
+/// once it is hidden.
+pub async fn hidden_state_holds_for_a_removed_control(rig: &Rig) {
+    let body = r#"<main><button id="more">Show more</button>
+        <button id="panel">Hide panel</button></main>
+        <script>
+          document.getElementById("more").addEventListener("click", (event) => event.target.remove());
+          document.getElementById("panel").addEventListener("click", (event) => {
+            event.target.style.display = "none";
+          });
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/home", Route::Html(page("Home", body)))]).await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    for name in ["Show more", "Hide panel"] {
+        let followed = live
+            .call(
+                "intent_follow",
+                json!({
+                    "purpose":"activate the control",
+                    "hints":{"role":"button","accessibleName":name},
+                    "expectedState":{
+                        "condition":{"kind":"element","target":{"role":"button","accessibleName":name},"state":"hidden"},
+                        "timeoutMs":3000
+                    }
+                }),
+            )
+            .await;
+        assert_eq!(
+            followed["status"], "completed",
+            "{name} did not reach the hidden state: {followed}"
+        );
+    }
     live.close().await;
 }
 
@@ -2414,6 +2480,27 @@ pub async fn snapshot_targets_cover_widget_items(rig: &Rig) {
             "click {target} did not reach {reached}: {after}"
         );
     }
+    live.close().await;
+}
+
+/// Typing into a field an open modal dialog hides fails `targetObscured`,
+/// not `targetNotFound`. Firefox only.
+pub async fn typing_behind_a_modal_reports_the_dialog(rig: &Rig) {
+    let body = r#"<main aria-hidden="true"><input aria-label="Keywords"></main>
+        <div role="dialog" aria-modal="true" aria-label="Notice"
+             style="position:fixed;inset:0;background:#fff"><button>Close</button></div>"#;
+    let site = FixtureSite::spawn(vec![("/home", Route::Html(page("Home", body)))]).await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let typed = live
+        .call(
+            "type_text",
+            json!({"target":{"role":"textbox","accessibleName":"Keywords"},"value":"rust"}),
+        )
+        .await;
+    assert_eq!(
+        typed["error"]["code"], "targetObscured",
+        "typing behind a modal: {typed}"
+    );
     live.close().await;
 }
 

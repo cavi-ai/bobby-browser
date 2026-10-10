@@ -11,8 +11,11 @@ use worker_pool::wait::{
 };
 
 fn visibility_predicate(hidden: bool) -> String {
-    let negate = if hidden { "!" } else { "" };
-    format!("el.isConnected&&{negate}(()=>{{{ELEMENT_VISIBILITY_SCRIPT}}})()")
+    if hidden {
+        format!("!el||!el.isConnected||!(()=>{{{ELEMENT_VISIBILITY_SCRIPT}}})()")
+    } else {
+        format!("Boolean(el)&&el.isConnected&&(()=>{{{ELEMENT_VISIBILITY_SCRIPT}}})()")
+    }
 }
 
 pub(super) struct FirefoxWaitObserver<'a> {
@@ -103,7 +106,13 @@ impl FirefoxCompanionWorker {
                                     ErrorCode::TargetNotFound | ErrorCode::ShadowRootUnavailable
                                 ) =>
                             {
-                                (matches!(state, types::ElementState::Detached), None)
+                                (
+                                    matches!(
+                                        state,
+                                        types::ElementState::Detached | types::ElementState::Hidden
+                                    ),
+                                    None,
+                                )
                             }
                             Err(error) => return Err(error),
                         }
@@ -158,7 +167,7 @@ impl FirefoxCompanionWorker {
                                 }
                                 types::ElementState::Visible | types::ElementState::Hidden => {
                                     let predicate = visibility_predicate(*state == types::ElementState::Hidden);
-                                    format!("(()=>{{const el={COMPOSED_QUERY}({selector});return Boolean(el)&&({predicate});}})()")
+                                    format!("(()=>{{const el={COMPOSED_QUERY}({selector});return {predicate};}})()")
                                 }
                                 types::ElementState::Detached => {
                                     format!("!{COMPOSED_QUERY}({selector})")
@@ -178,9 +187,13 @@ impl FirefoxCompanionWorker {
                                     .unwrap_or(false);
                                 (satisfied, None)
                             }
-                            Err(error) if error.code == ErrorCode::TargetNotFound => {
-                                (matches!(state, types::ElementState::Detached), None)
-                            }
+                            Err(error) if error.code == ErrorCode::TargetNotFound => (
+                                matches!(
+                                    state,
+                                    types::ElementState::Detached | types::ElementState::Hidden
+                                ),
+                                None,
+                            ),
                             Err(error) => return Err(error),
                         }
                     }
