@@ -1,6 +1,6 @@
-//! Domain handlers behind the reserved dispatch authorization boundary.
+//! One exhaustive routing table behind reserved-dispatch authorization.
+//! Each method owns validation, identifier resolution, execution, and shaping.
 use super::*;
-
 mod automation;
 mod browser;
 mod emulation;
@@ -17,47 +17,108 @@ pub(super) async fn dispatch(
     handler: Handler,
 ) -> CdpResponse {
     match handler {
-        Handler::AuditsEnable
-        | Handler::PerformanceEnable
-        | Handler::LogEnable
-        | Handler::NetworkEnable
-        | Handler::RuntimeRunIfWaiting => connection.dispatch_support(request, ctx, handler).await,
-        Handler::NetworkSetUserAgent => connection.dispatch_network(request, ctx, handler).await,
-        Handler::TargetGetBrowserContexts
-        | Handler::TargetCreateBrowserContext
-        | Handler::TargetSetDiscoverTargets
-        | Handler::TargetCreateTarget
-        | Handler::TargetGetTargets
-        | Handler::TargetGetTargetInfo
-        | Handler::TargetAttachToBrowserTarget
-        | Handler::TargetDetachFromTarget
-        | Handler::TargetSetAutoAttach => connection.dispatch_target(request, ctx, handler).await,
-        Handler::BrowserGetVersion | Handler::BrowserSetDownloadBehavior => {
-            connection.dispatch_browser(request, ctx, handler).await
+        Handler::AutomationCheckpointSave => {
+            connection
+                .handle_automation_checkpoint_save(request, ctx)
+                .await
         }
-        Handler::PageGetFrameTree
-        | Handler::PageGetLayoutMetrics
-        | Handler::PageCaptureScreenshot
-        | Handler::PageAddScript
-        | Handler::PageCreateIsolatedWorld
-        | Handler::PageNavigate
-        | Handler::PageSetLifecycle
-        | Handler::PageEnable => connection.dispatch_page(request, ctx, handler).await,
-        Handler::AutomationCheckpointSave
-        | Handler::AutomationRecoveryInspect
-        | Handler::AutomationEventsRead
-        | Handler::AutomationProtocolInventory => {
-            connection.dispatch_automation(request, ctx, handler).await
+        Handler::AutomationRecoveryInspect => {
+            connection
+                .handle_automation_recovery_inspect(request, ctx)
+                .await
         }
-        Handler::RuntimeEnable
-        | Handler::RuntimeEvaluate
-        | Handler::RuntimeReleaseObject
-        | Handler::RuntimeCallFunctionOn => {
-            connection.dispatch_runtime(request, ctx, handler).await
+        Handler::AutomationEventsRead => {
+            connection.handle_automation_events_read(request, ctx).await
         }
-        Handler::EmulationSetFocus
-        | Handler::EmulationSetMedia
-        | Handler::EmulationSetDeviceMetrics
-        | Handler::EmulationSetTouch => connection.dispatch_emulation(request, ctx, handler).await,
+        Handler::AutomationProtocolInventory => {
+            connection
+                .handle_automation_protocol_inventory(request, ctx)
+                .await
+        }
+        Handler::BrowserGetVersion => connection.handle_browser_get_version(request, ctx).await,
+        Handler::BrowserSetDownloadBehavior => {
+            connection
+                .handle_browser_set_download_behavior(request, ctx)
+                .await
+        }
+        Handler::EmulationSetFocus => connection.handle_emulation_set_focus(request, ctx).await,
+        Handler::EmulationSetMedia => connection.handle_emulation_set_media(request, ctx).await,
+        Handler::EmulationSetDeviceMetrics => {
+            connection
+                .handle_emulation_set_device_metrics(request, ctx)
+                .await
+        }
+        Handler::EmulationSetTouch => connection.handle_emulation_set_touch(request, ctx).await,
+        Handler::NetworkSetUserAgent => {
+            connection.handle_network_set_user_agent(request, ctx).await
+        }
+        Handler::PageGetFrameTree => connection.handle_page_get_frame_tree(request, ctx).await,
+        Handler::PageGetLayoutMetrics => {
+            connection
+                .handle_page_get_layout_metrics(request, ctx)
+                .await
+        }
+        Handler::PageCaptureScreenshot => {
+            connection
+                .handle_page_capture_screenshot(request, ctx)
+                .await
+        }
+        Handler::PageAddScript => connection.handle_page_add_script(request, ctx).await,
+        Handler::PageCreateIsolatedWorld => {
+            connection
+                .handle_page_create_isolated_world(request, ctx)
+                .await
+        }
+        Handler::PageNavigate => connection.handle_page_navigate(request, ctx).await,
+        Handler::PageSetLifecycle => connection.handle_page_set_lifecycle(request, ctx).await,
+        Handler::PageEnable => connection.handle_page_enable(request, ctx).await,
+        Handler::RuntimeEnable => connection.handle_runtime_enable(request, ctx).await,
+        Handler::RuntimeEvaluate => connection.handle_runtime_evaluate(request, ctx).await,
+        Handler::RuntimeReleaseObject => {
+            connection.handle_runtime_release_object(request, ctx).await
+        }
+        Handler::RuntimeCallFunctionOn => {
+            connection
+                .handle_runtime_call_function_on(request, ctx)
+                .await
+        }
+        Handler::AuditsEnable => connection.handle_audits_enable(request, ctx).await,
+        Handler::PerformanceEnable => connection.handle_audits_enable(request, ctx).await,
+        Handler::LogEnable => connection.handle_log_enable(request, ctx).await,
+        Handler::NetworkEnable => connection.handle_log_enable(request, ctx).await,
+        Handler::RuntimeRunIfWaiting => connection.handle_log_enable(request, ctx).await,
+        Handler::TargetGetBrowserContexts => {
+            connection
+                .handle_target_get_browser_contexts(request, ctx)
+                .await
+        }
+        Handler::TargetCreateBrowserContext => {
+            connection
+                .handle_target_create_browser_context(request, ctx)
+                .await
+        }
+        Handler::TargetSetDiscoverTargets => {
+            connection
+                .handle_target_set_discover_targets(request, ctx)
+                .await
+        }
+        Handler::TargetCreateTarget => connection.handle_target_create_target(request, ctx).await,
+        Handler::TargetGetTargets => connection.handle_target_get_targets(request, ctx).await,
+        Handler::TargetGetTargetInfo => {
+            connection.handle_target_get_target_info(request, ctx).await
+        }
+        Handler::TargetAttachToBrowserTarget => {
+            connection
+                .handle_target_attach_to_browser_target(request, ctx)
+                .await
+        }
+        Handler::TargetDetachFromTarget => {
+            connection
+                .handle_target_detach_from_target(request, ctx)
+                .await
+        }
+        Handler::TargetSetAutoAttach => {
+            connection.handle_target_set_auto_attach(request, ctx).await
+        }
     }
 }

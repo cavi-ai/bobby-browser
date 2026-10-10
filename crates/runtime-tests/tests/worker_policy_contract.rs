@@ -12,13 +12,17 @@ enum Engine {
 }
 
 async fn quiet_window_contract(engine: Engine) {
+    let uploads = tempfile::tempdir().unwrap();
+    let upload_path = uploads.path().join("contract.txt");
+    std::fs::write(&upload_path, "policy contract").unwrap();
     let site = FixtureSite::spawn(vec![
         ("/", Route::Html(
             "<!doctype html><title>Quiet window contract</title>\
              <label>Name<input aria-label='Name'></label>\
              <button onclick=\"fetch('/slow').then(() => document.querySelector('#status').textContent = 'Finished')\">Start request</button>\
-             <p id='status'>Pending</p>".into(),
+             <p id='status'>Pending</p><input id='file' type='file'><iframe src='/frame'></iframe>".into(),
         )),
+        ("/frame", Route::Html("<!doctype html><body>Frame ready</body>".into())),
         ("/slow", Route::Delayed {
             delay: Duration::from_secs(1),
             content_type: "text/plain",
@@ -26,8 +30,8 @@ async fn quiet_window_contract(engine: Engine) {
         }),
     ]).await;
     let rig = match engine {
-        Engine::Chromium => Rig::chromium().await,
-        Engine::Firefox => Rig::firefox().await,
+        Engine::Chromium => Rig::chromium_with_upload_roots(vec![uploads.path().into()]).await,
+        Engine::Firefox => Rig::firefox_with_upload_roots(vec![uploads.path().into()]).await,
     };
     let live = Live::open(&rig, &site.url("/")).await;
     let fill = live
@@ -52,6 +56,37 @@ async fn quiet_window_contract(engine: Engine) {
         )
         .await;
     assert_eq!(wait["status"], "completed", "{wait}");
+    for condition in [
+        json!({"kind":"url", "matcher":{"kind":"contains", "value":"/"}}),
+        json!({"kind":"element", "target":{"css":"#status"}, "state":"visible"}),
+        json!({"kind":"text", "target":{"css":"body"}, "matcher":{"kind":"contains", "value":"Finished"}}),
+        json!({"kind":"value", "target":{"css":"input[aria-label='Name']"}, "matcher":{"kind":"exact", "value":"contract"}}),
+        json!({"kind":"document", "ready":"interactive"}),
+        json!({"kind":"text", "target":{"css":"body", "framePath":[{"css":"iframe"}]}, "matcher":{"kind":"contains", "value":"Frame ready"}}),
+    ] {
+        let outcome = live
+            .call("wait_for", json!({"condition":condition, "timeoutMs":1000}))
+            .await;
+        assert_eq!(outcome["status"], "completed", "{outcome}");
+        assert!(outcome.to_string().contains("observations"), "{outcome}");
+    }
+    let uploaded = live
+        .call(
+            "upload_files",
+            json!({"selector":"#file", "paths":[upload_path]}),
+        )
+        .await;
+    assert_eq!(uploaded["status"], "completed", "{uploaded}");
+    assert!(
+        uploaded.to_string().contains("upload://sha256/"),
+        "{uploaded}"
+    );
+    assert!(
+        !uploaded
+            .to_string()
+            .contains(uploads.path().to_str().unwrap()),
+        "upload evidence disclosed a local path: {uploaded}"
+    );
     assert_eq!(site.hits("/slow"), 1);
     let inspection = live.call("inspect", json!({"selector":"#status"})).await;
     assert_eq!(inspection["status"], "completed", "{inspection}");

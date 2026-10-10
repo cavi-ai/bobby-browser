@@ -29,6 +29,7 @@ mod recovery;
 mod skills;
 #[path = "../../bobby-browser-client/src/state.rs"]
 mod state;
+mod upload;
 
 pub use auth::*;
 pub use candidate_actions::*;
@@ -43,3 +44,4 @@ pub use presets::{capability_effect, CapabilityPreset};
 pub use recovery::*;
 pub use skills::*;
 pub use state::*;
+pub use upload::upload_source_reference;

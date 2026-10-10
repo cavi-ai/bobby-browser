@@ -1,3 +1,4 @@
+mod wait_observer;
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
@@ -7,6 +8,8 @@ use std::{
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use wait_observer::FirefoxWaitObserver;
+use worker_pool::wait::text_matches as bounded_text_matches;
 
 use artifact_store::ArtifactStore;
 use async_trait::async_trait;
@@ -29,7 +32,6 @@ use fingerprinting::FingerprintApplyPlan;
 use fingerprinting::FingerprintConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use tokio::{
     runtime::Handle,
     sync::{watch, Mutex as AsyncMutex, RwLock},
@@ -41,11 +43,11 @@ use types::{
     ClickCommand, ClosePageCommand, CommandError, CommandId, ControlAction, ControlActionCommand,
     ErrorCode, ErrorLayer, EvaluateJavaScriptCommand, Evidence, FormControl, FormControlTarget,
     InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand, PageEvidence, PageId,
-    ScreenshotMode, SessionId, TargetSpec, TextMatch, TypeTextCommand, UploadFilesCommand,
-    WaitCondition, WaitForCommand, WaitUntil, WorkerId,
+    ScreenshotMode, SessionId, TargetSpec, TypeTextCommand, UploadFilesCommand, WaitForCommand,
+    WaitUntil, WorkerId,
 };
 use url::Url;
-use worker_pool::{resolve_upload_paths, BrowserWorker, WorkerFactory};
+use worker_pool::{BrowserWorker, WorkerFactory};
 
 use crate::bidi::{BidiClient, BidiEvent, BidiTransport, SharedBiDiTransport};
 use crate::generate_session_seed;
@@ -153,8 +155,7 @@ fn form_control_target_spec(target: &FormControlTarget) -> TargetSpec {
         ..Default::default()
     }
 }
-const MAX_UPLOAD_FILES: usize = 32;
-const MAX_UPLOAD_BYTES: u64 = 256 * 1024 * 1024;
+use worker_pool::upload::MAX_UPLOAD_BYTES;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -295,14 +296,6 @@ pub trait ExtensionObserver: Send + Sync {
             "attachment lease renewal is not supported by this observer",
             false,
         ))
-    }
-}
-
-/// Truncates a wait observation on a character boundary, matching Chromium.
-fn bound_observed(value: &str) -> String {
-    match value.char_indices().nth(types::MAX_WAIT_OBSERVED_CHARS) {
-        Some((index, _)) => value[..index].to_owned(),
-        None => value.to_owned(),
     }
 }
 
@@ -4397,117 +4390,20 @@ impl BrowserWorker for FirefoxCompanionWorker {
         page_id: &PageId,
         command: &UploadFilesCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        if command.paths.is_empty() || command.paths.len() > MAX_UPLOAD_FILES {
-            return Err(driver_error(
-                ErrorCode::InvalidRequest,
-                format!("Firefox upload requires 1..={MAX_UPLOAD_FILES} files"),
-                false,
-            ));
-        }
-        let mut paths = Vec::with_capacity(command.paths.len());
-        for source in &command.paths {
-            if let Some(artifact_id) = source.strip_prefix("artifact://") {
-                if artifact_id.len() != 64
-                    || !artifact_id.bytes().all(|byte| byte.is_ascii_hexdigit())
-                {
-                    return Err(driver_error(
-                        ErrorCode::PolicyDenied,
-                        "upload artifact reference is malformed",
-                        false,
-                    ));
-                }
-                let session = self.session_id.as_ref().ok_or_else(|| {
-                    driver_error(
-                        ErrorCode::PolicyDenied,
-                        "upload artifact has no owning runtime session",
-                        false,
-                    )
-                })?;
-                let store = self.artifacts.as_ref().ok_or_else(|| {
-                    driver_error(
-                        ErrorCode::PolicyDenied,
-                        "upload artifact store is not configured",
-                        false,
-                    )
-                })?;
-                let bytes = store.get(session, artifact_id).await.map_err(|_| {
-                    driver_error(
-                        ErrorCode::PolicyDenied,
-                        "upload artifact is unavailable",
-                        false,
-                    )
-                })?;
-                if hex::encode(Sha256::digest(&bytes)) != artifact_id.to_ascii_lowercase() {
-                    return Err(driver_error(
-                        ErrorCode::PolicyDenied,
-                        "upload artifact digest verification failed",
-                        false,
-                    ));
-                }
-                let root = self.downloads_dir.as_ref().ok_or_else(|| {
-                    driver_error(
-                        ErrorCode::PolicyDenied,
-                        "upload artifact materialization is not configured",
-                        false,
-                    )
-                })?;
-                let directory = root.join(session.0.to_string()).join("upload-artifacts");
-                std::fs::create_dir_all(&directory).map_err(|_| {
-                    driver_error(
-                        ErrorCode::PolicyDenied,
-                        "upload artifact materialization failed",
-                        false,
-                    )
-                })?;
-                let path = directory.join(format!("{artifact_id}.bin"));
-                std::fs::write(&path, &bytes).map_err(|_| {
-                    driver_error(
-                        ErrorCode::PolicyDenied,
-                        "upload artifact materialization failed",
-                        false,
-                    )
-                })?;
-                paths.push(std::fs::canonicalize(path).map_err(|_| {
-                    driver_error(
-                        ErrorCode::PolicyDenied,
-                        "upload artifact materialization failed",
-                        false,
-                    )
-                })?);
-            } else {
-                let resolved = resolve_upload_paths(&self.upload_roots, &[PathBuf::from(source)])?;
-                paths.extend(resolved);
-            }
-        }
-        let mut total_bytes = 0_u64;
-        for path in &paths {
-            total_bytes = total_bytes
-                .checked_add(
-                    std::fs::metadata(path)
-                        .map_err(|_| {
-                            driver_error(
-                                ErrorCode::PolicyDenied,
-                                "approved upload file is unavailable",
-                                false,
-                            )
-                        })?
-                        .len(),
-                )
-                .ok_or_else(|| {
-                    driver_error(
-                        ErrorCode::InvalidRequest,
-                        "upload byte count overflowed",
-                        false,
-                    )
-                })?;
-        }
-        if total_bytes > MAX_UPLOAD_BYTES {
-            return Err(driver_error(
-                ErrorCode::InvalidRequest,
-                format!("Firefox upload exceeds the {MAX_UPLOAD_BYTES} byte bound"),
-                false,
-            ));
-        }
+        let download_dir = self
+            .downloads_dir
+            .as_ref()
+            .zip(self.session_id.as_ref())
+            .map(|(root, session)| worker_pool::session_download_dir(root, session));
+        let resolved_uploads = worker_pool::upload::resolve_upload_sources(
+            &command.paths,
+            &self.upload_roots,
+            self.artifacts.as_ref(),
+            self.session_id.as_ref(),
+            download_dir.as_deref(),
+        )
+        .await?;
+        let paths = &resolved_uploads.paths;
         let context = self.context(page_id).await?;
         let (context, selector) = self
             .resolve_input_target(
@@ -4592,15 +4488,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 false,
             ));
         }
-        let opaque = paths
-            .iter()
-            .map(|path| {
-                format!(
-                    "upload://sha256/{}",
-                    hex::encode(Sha256::digest(path.as_os_str().as_encoded_bytes()))
-                )
-            })
-            .collect();
+        let opaque = worker_pool::upload::opaque_upload_paths(&command.paths);
         Ok(vec![
             Evidence::Upload {
                 selector: command.selector.clone(),
@@ -5044,379 +4932,14 @@ impl BrowserWorker for FirefoxCompanionWorker {
         page_id: &PageId,
         command: &WaitForCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        if command.timeout_ms == 0 {
-            return Err(driver_error(
-                ErrorCode::InvalidRequest,
-                "Firefox wait timeout must be positive",
-                false,
-            ));
-        }
-        let started = Instant::now();
-        let deadline = started + Duration::from_millis(command.timeout_ms);
-        let mut observations = 0;
-        let mut quiet_window = worker_pool::policy::QuietWindow::default();
-        loop {
-            observations += 1;
-            // Parity with Chromium: a Url wait reports what it read, an
-            // Element wait matches on presence and has no value to report.
-            let mut excluded_classes = Vec::new();
-            let (satisfied, observed) = match &command.condition {
-                WaitCondition::Url { matcher } => {
-                    let context = self.context(page_id).await?;
-                    let response = self
-                        .transport
-                        .send(
-                            "script.evaluate",
-                            json!({
-                                "expression": "globalThis.location.href",
-                                "target": {"context": context, "sandbox": COMPANION_SANDBOX},
-                                "awaitPromise": false,
-                                "resultOwnership": "none",
-                            }),
-                        )
-                        .await?;
-                    let url = response
-                        .pointer("/result/value")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| {
-                            driver_error(
-                                ErrorCode::BrowserCommandFailed,
-                                "Firefox URL wait returned no location",
-                                false,
-                            )
-                        })?;
-                    if url.len() > MAX_URL_BYTES * 4 {
-                        return Err(driver_error(
-                            ErrorCode::BrowserCommandFailed,
-                            "Firefox URL wait exceeded its bound",
-                            false,
-                        ));
-                    }
-                    (
-                        bounded_text_matches(matcher, url)?,
-                        Some(bound_observed(url)),
-                    )
-                }
-                WaitCondition::Element { target, state } => {
-                    if !target.shadow_path.is_empty() {
-                        let top_context = self.context(page_id).await?;
-                        let context = self.resolve_input_context(&top_context, target).await?;
-                        match self.resolve_shadow_element(&context, target).await {
-                            Ok(shared_id) => {
-                                let condition = match state {
-                                    types::ElementState::Attached => "el.isConnected",
-                                    types::ElementState::Visible => "el.isConnected&&el.checkVisibility()",
-                                    types::ElementState::Detached => "!el.isConnected",
-                                    types::ElementState::Enabled => "el.isConnected&&!el.matches(':disabled,[aria-disabled=\"true\"]')",
-                                    types::ElementState::Disabled => "el.isConnected&&el.matches(':disabled,[aria-disabled=\"true\"]')",
-                                    types::ElementState::Hidden => "el.isConnected&&!el.checkVisibility()",
-                                };
-                                let response = self.transport.send("script.callFunction", json!({
-                                    "functionDeclaration": format!("function(el){{return Boolean({condition});}}"),
-                                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
-                                    "arguments": [{"sharedId": shared_id}],
-                                    "awaitPromise": false,
-                                    "resultOwnership": "none",
-                                })).await?;
-                                (
-                                    response
-                                        .pointer("/result/value")
-                                        .and_then(Value::as_bool)
-                                        .unwrap_or(false),
-                                    None,
-                                )
-                            }
-                            Err(error)
-                                if matches!(
-                                    error.code,
-                                    ErrorCode::TargetNotFound | ErrorCode::ShadowRootUnavailable
-                                ) =>
-                            {
-                                (matches!(state, types::ElementState::Detached), None)
-                            }
-                            Err(error) => return Err(error),
-                        }
-                    } else if *state == types::ElementState::Visible
-                        && target.css.is_none()
-                        && target.test_id.is_none()
-                        && target.frame_path.is_empty()
-                        && target.shadow_path.is_empty()
-                        && target.attributes.is_empty()
-                        && target.ordinal.is_none()
-                        && target.accessible_name.is_some()
-                        && matches!(
-                            target.role.as_deref(),
-                            Some(
-                                "navigation"
-                                    | "main"
-                                    | "region"
-                                    | "heading"
-                                    | "banner"
-                                    | "complementary"
-                                    | "contentinfo"
-                                    | "form"
-                                    | "dialog"
-                                    | "alert"
-                                    | "status"
-                            )
-                        )
-                    {
-                        let (nodes, _) = self
-                            .observer
-                            .a11y_snapshot(&self.current_lease(), page_id, 256, None, false)
-                            .await?;
-                        (accessibility_tree_contains(&nodes, target), None)
-                    } else {
-                        let context = self.context(page_id).await?;
-                        let resolved = self
-                            .resolve_input_target(page_id, &context, "", Some(target))
-                            .await;
-                        match resolved {
-                            Ok((context, selector)) => {
-                                let selector =
-                                    serde_json::to_string(&selector).map_err(|error| {
-                                        driver_error(
-                                            ErrorCode::InvalidRequest,
-                                            error.to_string(),
-                                            false,
-                                        )
-                                    })?;
-                                let expression = match state {
-                                types::ElementState::Attached | types::ElementState::Visible => {
-                                    format!("Boolean(document.querySelector({selector}))")
-                                }
-                                types::ElementState::Detached => {
-                                    format!("!document.querySelector({selector})")
-                                }
-                                types::ElementState::Enabled => format!("!document.querySelector({selector})?.matches(':disabled,[aria-disabled=\"true\"]')"),
-                                types::ElementState::Disabled => format!("Boolean(document.querySelector({selector})?.matches(':disabled,[aria-disabled=\"true\"]'))"),
-                                types::ElementState::Hidden => format!("Boolean(document.querySelector({selector})) && !document.querySelector({selector}).checkVisibility()"),
-                            };
-                                let response = self.transport.send("script.evaluate", json!({
-                                "expression": expression,
-                                "target": {"context": context, "sandbox": COMPANION_SANDBOX},
-                                "awaitPromise": false,
-                                "resultOwnership": "none",
-                            })).await?;
-                                let satisfied = response
-                                    .pointer("/result/value")
-                                    .and_then(Value::as_bool)
-                                    .unwrap_or(false);
-                                (satisfied, None)
-                            }
-                            Err(error) if error.code == ErrorCode::TargetNotFound => {
-                                (matches!(state, types::ElementState::Detached), None)
-                            }
-                            Err(error) => return Err(error),
-                        }
-                    }
-                }
-                WaitCondition::Text { target, matcher }
-                | WaitCondition::Value { target, matcher } => {
-                    let is_value = matches!(command.condition, WaitCondition::Value { .. });
-                    if !is_value && is_page_scoped_text_target(target) {
-                        let context = self.context(page_id).await?;
-                        let response = self.transport.send("script.evaluate", json!({
-                            "expression": "document.body ? (document.body.innerText || '') : ''",
-                            "target": {"context": context, "sandbox": COMPANION_SANDBOX},
-                            "awaitPromise": false,
-                            "resultOwnership": "none",
-                        })).await?;
-                        let value = response
-                            .pointer("/result/value")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_owned();
-                        (
-                            bounded_text_matches(matcher, &value)?,
-                            Some(bound_observed(&value)),
-                        )
-                    } else {
-                        let context = self.context(page_id).await?;
-                        let resolved = self
-                            .resolve_input_target(page_id, &context, "", Some(target))
-                            .await;
-                        match resolved {
-                            Ok((context, selector)) => {
-                                let selector =
-                                    serde_json::to_string(&selector).map_err(|error| {
-                                        driver_error(
-                                            ErrorCode::InvalidRequest,
-                                            error.to_string(),
-                                            false,
-                                        )
-                                    })?;
-                                let read = if is_value {
-                                    format!("document.querySelector({selector})?.value ?? ''")
-                                } else {
-                                    format!("document.querySelector({selector})?.innerText ?? ''")
-                                };
-                                let response = self.transport.send("script.evaluate", json!({
-                                "expression": read,
-                                "target": {"context": context, "sandbox": COMPANION_SANDBOX},
-                                "awaitPromise": false,
-                                "resultOwnership": "none",
-                            })).await?;
-                                let value = response
-                                    .pointer("/result/value")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or_default()
-                                    .to_owned();
-                                (
-                                    bounded_text_matches(matcher, &value)?,
-                                    Some(bound_observed(&value)),
-                                )
-                            }
-                            Err(error) if error.code == ErrorCode::TargetNotFound => (false, None),
-                            // The click already landed; a matcher-satisfying
-                            // candidate among several is still a match, not
-                            // an ambiguity the caller must narrow before the
-                            // wait can even be evaluated.
-                            Err(error) if error.code == ErrorCode::TargetAmbiguous => {
-                                let selectors = self
-                                    .resolve_ambiguous_wait_selectors(page_id, &context, target)
-                                    .await?;
-                                let mut satisfied = false;
-                                let mut observed = String::new();
-                                for (selector_context, selector) in selectors {
-                                    let selector_json =
-                                        serde_json::to_string(&selector).map_err(|error| {
-                                            driver_error(
-                                                ErrorCode::InvalidRequest,
-                                                error.to_string(),
-                                                false,
-                                            )
-                                        })?;
-                                    let read = if is_value {
-                                        format!(
-                                            "document.querySelector({selector_json})?.value ?? ''"
-                                        )
-                                    } else {
-                                        format!(
-                                            "document.querySelector({selector_json})?.innerText ?? ''"
-                                        )
-                                    };
-                                    let response = match self.transport.send("script.evaluate", json!({
-                                        "expression": read,
-                                        "target": {"context": selector_context, "sandbox": COMPANION_SANDBOX},
-                                        "awaitPromise": false,
-                                        "resultOwnership": "none",
-                                    })).await {
-                                        Ok(response) => response,
-                                        // A candidate that matched at
-                                        // collection time can detach (or the
-                                        // page can re-render it away) before
-                                        // its value is read on this same
-                                        // poll. That is "this candidate did
-                                        // not match on this poll", not a
-                                        // wait failure: skip it and let the
-                                        // remaining selectors — or the next
-                                        // poll, if every selector here
-                                        // failed — decide.
-                                        Err(error) => {
-                                            tracing::debug!(
-                                                selector = %selector,
-                                                error = %error.message,
-                                                "skipping ambiguous wait selector that failed to read"
-                                            );
-                                            continue;
-                                        }
-                                    };
-                                    observed = response
-                                        .pointer("/result/value")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or_default()
-                                        .to_owned();
-                                    if bounded_text_matches(matcher, &observed)? {
-                                        satisfied = true;
-                                        break;
-                                    }
-                                }
-                                (satisfied, Some(bound_observed(&observed)))
-                            }
-                            Err(error) => return Err(error),
-                        }
-                    }
-                }
-                WaitCondition::Document { ready } => {
-                    let context = self.context(page_id).await?;
-                    let response = self
-                        .transport
-                        .send(
-                            "script.evaluate",
-                            json!({
-                                "expression": "document.readyState",
-                                "target": {"context": context, "sandbox": COMPANION_SANDBOX},
-                                "awaitPromise": false,
-                                "resultOwnership": "none",
-                            }),
-                        )
-                        .await?;
-                    let state = response
-                        .pointer("/result/value")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned();
-                    (
-                        match ready {
-                            types::WaitUntil::Commit => true,
-                            types::WaitUntil::DomContentLoaded | types::WaitUntil::Interactive => {
-                                state == "interactive" || state == "complete"
-                            }
-                            types::WaitUntil::NetworkIdle => state == "complete",
-                        },
-                        Some(bound_observed(&state)),
-                    )
-                }
-                WaitCondition::NetworkQuiet {
-                    idle_ms,
-                    max_in_flight,
-                    ignore_url_substrings,
-                    ignore_resource_types,
-                    ignore_long_lived,
-                } => {
-                    let context = self.context(page_id).await?;
-                    let filters = worker_pool::NetworkQuietFilters {
-                        ignore_url_substrings,
-                        ignore_resource_types,
-                        ignore_long_lived: *ignore_long_lived,
-                    };
-                    let (in_flight, excluded) =
-                        self.network_quiet.lock().await.snapshot(&context, &filters);
-                    excluded_classes = excluded;
-                    (
-                        quiet_window.observe(
-                            Instant::now(),
-                            in_flight,
-                            *max_in_flight,
-                            Duration::from_millis(*idle_ms),
-                        ),
-                        None,
-                    )
-                }
-            };
-            if satisfied {
-                return Ok(vec![Evidence::Wait {
-                    condition: command.condition.clone(),
-                    elapsed_ms: started.elapsed().as_millis() as u64,
-                    observations,
-                    excluded_classes,
-                    observed,
-                }]);
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                return Err(driver_error(
-                    ErrorCode::WaitConditionTimedOut,
-                    format!(
-                        "wait condition was not satisfied within {}ms",
-                        command.timeout_ms
-                    ),
-                    false,
-                ));
-            }
-            tokio::time::sleep((deadline - now).min(Duration::from_millis(25))).await;
-        }
+        worker_pool::wait::poll_until(
+            command,
+            &FirefoxWaitObserver {
+                worker: self,
+                page_id,
+            },
+        )
+        .await
     }
 
     async fn capture_screenshot(
@@ -6932,23 +6455,6 @@ fn nonempty_field(value: &Option<String>) -> Option<&str> {
         .filter(|value| !value.is_empty())
 }
 
-fn is_page_scoped_css(css: &str) -> bool {
-    matches!(css.to_ascii_lowercase().as_str(), "body" | "html" | ":root")
-}
-
-fn is_page_scoped_role(role: &str) -> bool {
-    [
-        "RootWebArea",
-        "document",
-        "main",
-        "body",
-        "application",
-        "generic",
-    ]
-    .iter()
-    .any(|name| role.eq_ignore_ascii_case(name))
-}
-
 fn is_text_only_inspect_target(target: &types::TargetSpec) -> bool {
     target.text.is_some()
         && nonempty_field(&target.css).is_none()
@@ -6961,53 +6467,16 @@ fn is_text_only_inspect_target(target: &types::TargetSpec) -> bool {
         && target.shadow_path.is_empty()
 }
 
-fn is_page_scoped_text_target(target: &types::TargetSpec) -> bool {
-    if nonempty_field(&target.test_id).is_some()
-        || nonempty_field(&target.accessible_name).is_some()
-        || nonempty_field(&target.label).is_some()
-        || target.text.is_some()
-        || !target.attributes.is_empty()
-        || !target.frame_path.is_empty()
-        || !target.shadow_path.is_empty()
-        || target.ordinal.is_some()
-    {
-        return false;
+#[cfg(test)]
+mod wait_scope_contract {
+    #[test]
+    fn body_text_target_keeps_its_selected_frame() {
+        let target: types::TargetSpec = serde_json::from_value(serde_json::json!({
+            "css": "body", "framePath": [{"css": "iframe"}]
+        }))
+        .unwrap();
+        assert!(worker_pool::wait::is_page_scoped_text_target(&target));
     }
-    let role = nonempty_field(&target.role);
-    let css = nonempty_field(&target.css);
-    match (role, css) {
-        (Some(role), None) => is_page_scoped_role(role),
-        (None, Some(css)) => is_page_scoped_css(css),
-        (Some(role), Some(css)) => is_page_scoped_role(role) && is_page_scoped_css(css),
-        (None, None) => false,
-    }
-}
-
-fn bounded_text_matches(matcher: &TextMatch, value: &str) -> Result<bool, CommandError> {
-    let target = types::TargetSpec {
-        text: Some(matcher.clone()),
-        ..Default::default()
-    };
-    let candidate = Candidate {
-        id: "wait-value".into(),
-        css: None,
-        tag: None,
-        test_id: None,
-        role: None,
-        name: None,
-        label: None,
-        text: value.to_owned(),
-        attributes: Default::default(),
-        state: CandidateState {
-            attached: true,
-            visible: true,
-            enabled: true,
-        },
-        frame_path: Vec::new(),
-    };
-    resolve_candidates(&target, &[candidate], &ResolutionPolicy::default())
-        .map(|decision| matches!(decision, ResolutionDecision::Resolved { .. }))
-        .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))
 }
 
 fn pointer_action_sequence(shared_id: &str) -> Vec<Value> {
