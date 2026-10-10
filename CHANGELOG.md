@@ -5,9 +5,11 @@
 ### Fixed
 
 - A missed target's near-miss list marks a control that exists but is hidden as `hidden`, not `noMatch`.
+- On Firefox, an action on a control an open modal dialog hides fails `targetObscured` instead of `targetNotFound`.
+- An element wait for `hidden` holds once the element is removed, not only once it is invisible.
 - Snapshots give tabs, menu items, options and tree items targets.
 - `intent_follow` fails `obstructionSuspected` when a dialog opens instead of its expected state, and `intent_submit_and_verify` names that dialog; the evidence lists it.
-- `intent_dismiss_obstruction` completes once the clicked control is gone, even when another control with the same name appears.
+- `intent_dismiss_obstruction` completes once the clicked control is gone, even when another control with the same name appears; a vision fallback completes only once the obstruction closes, and a purpose without hints that names no control fails `obstructionSuspected` naming the open dialog.
 - On Chromium, `type_text` types into every control with real key input, fields without an id included, and each line break is the Enter key, as on Firefox.
 - On Chromium, a scoped snapshot numbers duplicate targets page-wide, so its targets act on the elements it shows.
 - On Firefox, controls and text inside open shadow roots appear in snapshots and observations, and their targets act.
