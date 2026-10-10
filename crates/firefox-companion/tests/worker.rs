@@ -4824,6 +4824,41 @@ async fn observer_that_cannot_locate_keeps_the_truncation_error() {
 }
 
 #[tokio::test]
+async fn pinned_target_names_the_located_element_by_its_path() {
+    let (worker, page, _) = large_page_worker(Some(located(true, false))).await;
+    let pinned = worker.pin_target(&page, &show_all_link()).await;
+    assert_eq!(pinned.css.as_deref(), Some("main > a"));
+    assert_eq!(pinned.role, None);
+    assert_eq!(pinned.accessible_name, None);
+}
+
+#[tokio::test]
+async fn css_target_candidates_come_from_the_companion() {
+    let path = TargetSpec {
+        css: Some("main > a".into()),
+        ..TargetSpec::default()
+    };
+    let (worker, page, _) = large_page_worker(Some(located(true, false))).await;
+    let candidates = worker.collect_candidates(&page, &path).await.unwrap();
+    let named: Vec<_> = candidates
+        .iter()
+        .filter(|candidate| candidate.css.as_deref() == Some("main > a"))
+        .collect();
+    assert_eq!(named.len(), 1, "{candidates:?}");
+    assert!(
+        candidates.iter().any(|candidate| candidate.css.is_none()),
+        "the accessibility candidates stay in the set"
+    );
+
+    let (worker, page, _) = large_page_worker(Some(located(false, false))).await;
+    let candidates = worker.collect_candidates(&page, &path).await.unwrap();
+    assert!(
+        candidates.iter().all(|candidate| candidate.css.is_none()),
+        "a hidden or detached element adds no candidate: {candidates:?}"
+    );
+}
+
+#[tokio::test]
 async fn click_on_a_target_past_the_control_walk_uses_the_located_selector() {
     let (worker, page, bidi) = large_page_worker(Some(located(true, false))).await;
     let _ = worker
