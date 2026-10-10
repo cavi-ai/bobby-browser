@@ -2417,6 +2417,27 @@ pub async fn snapshot_targets_cover_widget_items(rig: &Rig) {
     live.close().await;
 }
 
+/// Typing into a field an open modal dialog hides fails `targetObscured`,
+/// not `targetNotFound`. Firefox only.
+pub async fn typing_behind_a_modal_reports_the_dialog(rig: &Rig) {
+    let body = r#"<main aria-hidden="true"><input aria-label="Keywords"></main>
+        <div role="dialog" aria-modal="true" aria-label="Notice"
+             style="position:fixed;inset:0;background:#fff"><button>Close</button></div>"#;
+    let site = FixtureSite::spawn(vec![("/home", Route::Html(page("Home", body)))]).await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let typed = live
+        .call(
+            "type_text",
+            json!({"target":{"role":"textbox","accessibleName":"Keywords"},"value":"rust"}),
+        )
+        .await;
+    assert_eq!(
+        typed["error"]["code"], "targetObscured",
+        "typing behind a modal: {typed}"
+    );
+    live.close().await;
+}
+
 /// A form whose submit handler comes from a script fetched after the load
 /// event (which a slow script holds back): navigate returns once that script
 /// has run, so an immediate Enter hits the handler, not a native submit.
