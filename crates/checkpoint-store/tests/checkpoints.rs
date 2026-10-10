@@ -66,6 +66,62 @@ async fn established_workflow_rejects_rebinding_to_another_session() {
 }
 
 #[tokio::test]
+async fn locked_snapshot_rejects_session_rebinding_without_changing_authority() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let original = checkpoint(WorkflowId::new(), "https://example.test/original");
+    store.save(&original).await.unwrap();
+    assert_eq!(
+        store
+            .list_for_session(&original.session_id, 10)
+            .await
+            .unwrap(),
+        vec![original.clone()]
+    );
+    let path = checkpoint_store::checkpoint_path(root.path(), &original.workflow_id);
+    let original_bytes = std::fs::read(&path).unwrap();
+    let mut snapshot = store.lock_snapshot(&original.workflow_id).await.unwrap();
+    let authority_digest = snapshot.digest().to_owned();
+    let content_digest = snapshot.content_digest().to_owned();
+    let mut foreign = original.clone();
+    foreign.session_id = SessionId::new();
+
+    assert!(matches!(
+        snapshot.save_if_unchanged(&foreign).await,
+        Err(CheckpointStoreError::IdentityChanged)
+    ));
+    assert_eq!(snapshot.checkpoint(), &original);
+    assert_eq!(snapshot.digest(), authority_digest);
+    assert_eq!(snapshot.content_digest(), content_digest);
+    assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+    snapshot.verify_unchanged().await.unwrap();
+    assert!(store
+        .list_for_session(&foreign.session_id, 10)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store
+            .list_for_session(&original.session_id, 10)
+            .await
+            .unwrap(),
+        vec![original.clone()]
+    );
+
+    let mut permitted = original.clone();
+    permitted.current_url = "https://example.test/resumed".into();
+    snapshot.save_if_unchanged(&permitted).await.unwrap();
+    snapshot.verify_unchanged().await.unwrap();
+    assert_eq!(snapshot.checkpoint(), &permitted);
+    drop(snapshot);
+    let reopened = CheckpointStore::open(root.path()).await.unwrap();
+    assert_eq!(
+        reopened.load(&original.workflow_id).await.unwrap(),
+        permitted
+    );
+}
+
+#[tokio::test]
 async fn mismatched_workflow_identity_is_rejected_without_hiding_other_checkpoints() {
     let root = tempfile::tempdir().unwrap();
     let store = CheckpointStore::open(root.path()).await.unwrap();

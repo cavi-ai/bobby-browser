@@ -65,6 +65,9 @@ impl LockedCheckpointSnapshot {
         if checkpoint.workflow_id != self.checkpoint.workflow_id {
             return Err(CheckpointStoreError::SnapshotChanged);
         }
+        if checkpoint.session_id != self.checkpoint.session_id {
+            return Err(CheckpointStoreError::IdentityChanged);
+        }
         self.store.validate_schema(checkpoint)?;
         self.store.write_unlocked(checkpoint).await?;
         let bytes = serde_json::to_vec(checkpoint)?;
