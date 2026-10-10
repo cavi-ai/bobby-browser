@@ -2531,6 +2531,10 @@ pub async fn omitted_controls_need_a_whole_tree(rig: &Rig) {
     assert!(
         claims(&whole),
         "a whole snapshot missed controls hidden from the tree: {whole}"
+    );
+    live.close().await;
+}
+
 /// Typing into a field an open modal dialog hides fails `targetObscured`,
 /// not `targetNotFound`. Firefox only.
 pub async fn typing_behind_a_modal_reports_the_dialog(rig: &Rig) {

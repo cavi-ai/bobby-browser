@@ -236,7 +236,7 @@ impl ResolvedTarget {
     }
 
     pub async fn visible(&self, page: &Page) -> Result<bool, CommandError> {
-        self.eval(page, "const s=getComputedStyle(el),r=el.getBoundingClientRect(); return s.visibility!=='hidden'&&s.display!=='none'&&r.width>0&&r.height>0")
+        self.eval(page, crate::wait::ELEMENT_VISIBILITY_SCRIPT)
             .await
     }
 

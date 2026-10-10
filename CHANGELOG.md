@@ -5,6 +5,7 @@
 ### Fixed
 
 - Snapshots report form controls missing from the accessibility tree only when the tree is whole and unscoped.
+- An action called with an `idempotencyKey` returns its `postState` instead of `postStateStatus: idempotencyConflict`.
 - On Firefox, an action on a control an open modal dialog hides fails `targetObscured` instead of `targetNotFound`.
 - An element wait for `hidden` holds once the element is removed, not only once it is invisible.
 - Snapshots give tabs, menu items, options and tree items targets.
