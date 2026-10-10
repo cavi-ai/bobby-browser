@@ -169,6 +169,168 @@ async fn misfiled_recovery_receipts_are_preserved_without_hiding_healthy_workflo
 }
 
 #[tokio::test]
+#[cfg(unix)]
+async fn checkpoint_reads_and_replacements_reject_symbolic_links() {
+    let root = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let checkpoint = checkpoint(WorkflowId::new(), "https://example.test/linked");
+    let bytes = serde_json::to_vec(&checkpoint).unwrap();
+    let target = external.path().join("original.json");
+    std::fs::write(&target, &bytes).unwrap();
+    let path = checkpoint_store::checkpoint_path(root.path(), &checkpoint.workflow_id);
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+
+    assert!(matches!(
+        store.load(&checkpoint.workflow_id).await,
+        Err(CheckpointStoreError::Io(_))
+    ));
+    assert!(matches!(
+        store.lock_snapshot(&checkpoint.workflow_id).await,
+        Err(CheckpointStoreError::Io(_))
+    ));
+    assert!(matches!(
+        store.save(&checkpoint).await,
+        Err(CheckpointStoreError::Io(_))
+    ));
+    assert!(std::fs::symlink_metadata(&path)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(std::fs::read(&target).unwrap(), bytes);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn session_listing_skips_symbolic_links_without_hiding_regular_checkpoints() {
+    let root = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let healthy = checkpoint(WorkflowId::new(), "https://example.test/healthy");
+    let mut linked = checkpoint(WorkflowId::new(), "https://example.test/linked");
+    linked.session_id = healthy.session_id.clone();
+    store.save(&healthy).await.unwrap();
+    let target = external.path().join("original.json");
+    std::fs::write(&target, serde_json::to_vec(&linked).unwrap()).unwrap();
+    let path = checkpoint_store::checkpoint_path(root.path(), &linked.workflow_id);
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+    for store in [store, CheckpointStore::open(root.path()).await.unwrap()] {
+        assert_eq!(
+            store
+                .list_for_session(&healthy.session_id, 10)
+                .await
+                .unwrap(),
+            vec![healthy.clone()]
+        );
+    }
+    assert!(std::fs::symlink_metadata(&path)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn fifo_entries_cannot_block_checkpoint_or_issuance_operations() {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::FileTypeExt;
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let bad = checkpoint(WorkflowId::new(), "https://example.test/fifo");
+    let healthy = checkpoint(WorkflowId::new(), "https://example.test/healthy");
+    let path = checkpoint_store::checkpoint_path(root.path(), &bad.workflow_id);
+    let issuance_path = root
+        .path()
+        .join(format!("{}.skill-issuance.json", bad.workflow_id.0));
+    for path in [&path, &issuance_path] {
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // The CString stays alive throughout the syscall; no writer is opened.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    }
+    let budget = Duration::from_secs(2);
+    assert!(matches!(
+        timeout(budget, store.load(&bad.workflow_id)).await.unwrap(),
+        Err(CheckpointStoreError::Io(_))
+    ));
+    assert!(matches!(
+        timeout(budget, store.lock_snapshot(&bad.workflow_id))
+            .await
+            .unwrap(),
+        Err(CheckpointStoreError::Io(_))
+    ));
+    assert!(matches!(
+        timeout(budget, store.save(&bad)).await.unwrap(),
+        Err(CheckpointStoreError::Io(_))
+    ));
+    assert!(matches!(
+        timeout(budget, store.load_skill_issuance(&bad.workflow_id))
+            .await
+            .unwrap(),
+        Err(CheckpointStoreError::Io(_))
+    ));
+    let issuance = skill_issuance(bad.workflow_id.clone());
+    assert!(matches!(
+        timeout(
+            budget,
+            store.save_skill_issuance(&bad.workflow_id, &issuance)
+        )
+        .await
+        .unwrap(),
+        Err(CheckpointStoreError::Io(_))
+    ));
+
+    store.save(&healthy).await.unwrap();
+    for store in [store, CheckpointStore::open(root.path()).await.unwrap()] {
+        assert_eq!(
+            timeout(budget, store.list_for_session(&healthy.session_id, 10))
+                .await
+                .unwrap()
+                .unwrap(),
+            vec![healthy.clone()]
+        );
+    }
+    for path in [&path, &issuance_path] {
+        assert!(std::fs::symlink_metadata(path)
+            .unwrap()
+            .file_type()
+            .is_fifo());
+    }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn skill_issuance_reads_and_replacements_reject_symbolic_links() {
+    let root = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let workflow = WorkflowId::new();
+    let issuance = skill_issuance(workflow.clone());
+    let target = external.path().join("original.json");
+    let bytes = serde_json::to_vec(&issuance).unwrap();
+    std::fs::write(&target, &bytes).unwrap();
+    let path = root
+        .path()
+        .join(format!("{}.skill-issuance.json", workflow.0));
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+    assert!(matches!(
+        store.load_skill_issuance(&workflow).await,
+        Err(CheckpointStoreError::Io(_))
+    ));
+    assert!(matches!(
+        store.save_skill_issuance(&workflow, &issuance).await,
+        Err(CheckpointStoreError::Io(_))
+    ));
+    assert!(std::fs::symlink_metadata(&path)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(std::fs::read(&target).unwrap(), bytes);
+}
+
+#[tokio::test]
 async fn saves_loads_and_atomically_replaces_a_workflow_checkpoint() {
     let root = tempfile::tempdir().unwrap();
     let store = CheckpointStore::open(root.path()).await.unwrap();
