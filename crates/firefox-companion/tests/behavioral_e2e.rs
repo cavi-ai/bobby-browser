@@ -395,9 +395,12 @@ async fn click_emits_curved_pointer_path_with_hover_dwell() {
     ]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    let evidence = worker
+    let evidence = worker_pool::input_or_default(worker.input())
         .click(
             &page,
             &ClickCommand {
@@ -477,9 +480,12 @@ async fn type_text_emits_select_all_clear_and_inter_key_pauses() {
     ]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    worker
+    worker_pool::input_or_default(worker.input())
         .type_text(
             &page,
             &TypeTextCommand {
@@ -546,9 +552,12 @@ async fn scroll_into_view_emits_wheel_stream_when_needed() {
     bidi.set_scroll_needed(true).await;
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    worker
+    worker_pool::input_or_default(worker.input())
         .click(
             &page,
             &ClickCommand {

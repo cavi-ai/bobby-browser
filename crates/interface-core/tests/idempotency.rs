@@ -19,6 +19,126 @@ fn key(value: &str) -> IdempotencyKey {
     IdempotencyKey::try_from(value).unwrap()
 }
 
+#[tokio::test]
+async fn legacy_snapshot_whitespace_and_missing_newline_remain_supported() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("idempotency.json");
+    let bytes = b"{\n  \"schemaVersion\": 1,\n  \"entries\": []\n}";
+    std::fs::write(&path, bytes).unwrap();
+    let health = interface_core::inspect_idempotency_ledger(&path)
+        .await
+        .unwrap();
+    assert_eq!(health.format, Some(1));
+    assert!(health.integrity_issue.is_none());
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[tokio::test]
+async fn v2_torn_header_remains_unreadable() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("idempotency.json");
+    let snapshot = serde_json::json!({"schemaVersion":2,"entries":[]});
+    let bytes = serde_json::to_vec(&serde_json::json!({"schemaVersion":2,"entries":[],"sha256":canonical_sha256(&snapshot).unwrap()})).unwrap();
+    std::fs::write(&path, &bytes).unwrap();
+    assert_eq!(
+        interface_core::inspect_idempotency_ledger(&path)
+            .await
+            .unwrap()
+            .integrity_issue,
+        Some("unreadableLedger")
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[tokio::test]
+async fn invalid_v2_sequence_never_publishes_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("idempotency.json");
+    let owner = principal("10000000-0000-0000-0000-000000000001");
+    let store = IdempotencyStore::open_durable(&path, |_| async { Ok(None) })
+        .await
+        .unwrap();
+    let acquired = reserve(
+        &store,
+        owner.clone(),
+        key("pending"),
+        [1; 32],
+        CorrelationId::new(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(acquired, IdempotencyReservation::Acquired(_)));
+    drop(acquired);
+    drop(store);
+    let original = std::fs::read(&path).unwrap();
+    let lines: Vec<_> = original.split_inclusive(|b| *b == b'\n').collect();
+    for damage in ["sequence", "previousSha256", "sha256"] {
+        let mut record: serde_json::Value = serde_json::from_slice(lines.last().unwrap()).unwrap();
+        match damage {
+            "sequence" => record["change"]["sequence"] = 9.into(),
+            "previousSha256" => {
+                record["change"]["previousSha256"] = serde_json::to_value([0_u8; 32]).unwrap()
+            }
+            _ => record["sha256"] = serde_json::to_value([0_u8; 32]).unwrap(),
+        }
+        if damage != "sha256" {
+            record["sha256"] =
+                serde_json::to_value(canonical_sha256(&record["change"]).unwrap()).unwrap();
+        }
+        let mut bytes = original[..original.len() - lines.last().unwrap().len()].to_vec();
+        serde_json::to_writer(&mut bytes, &record).unwrap();
+        bytes.push(b'\n');
+        std::fs::write(&path, &bytes).unwrap();
+        let reopened = IdempotencyStore::open_durable(&path, |_| async { Ok(None) })
+            .await
+            .unwrap();
+        assert_eq!(reopened.integrity_issue(), Some("unreadableLedger"));
+        assert!(
+            reserve(
+                &reopened,
+                owner.clone(),
+                key("fresh"),
+                [2; 32],
+                CorrelationId::new()
+            )
+            .await
+            .unwrap_err()
+            .reconciliation_required
+        );
+        drop(reopened);
+        assert!(interface_core::downgrade_idempotency_ledger(&path)
+            .await
+            .is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+}
+
+#[tokio::test]
+async fn ledger_inspection_preserves_file_and_lock_inventory() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("idempotency.json");
+    assert!(
+        !interface_core::inspect_idempotency_ledger(&path)
+            .await
+            .unwrap()
+            .exists
+    );
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    std::fs::write(&path, b"").unwrap();
+    std::fs::write(path.with_extension("lock"), b"").unwrap();
+    assert_eq!(
+        interface_core::inspect_idempotency_ledger(&path)
+            .await
+            .unwrap()
+            .integrity_issue,
+        Some("unreadableLedger")
+    );
+    assert!(std::fs::read(&path).unwrap().is_empty());
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+}
+
 fn completed(command_id: CommandId) -> CommandOutcome {
     CommandOutcome::Completed {
         command_id,

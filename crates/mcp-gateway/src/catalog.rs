@@ -249,7 +249,7 @@ tools! {
             types::Capability::IntentExecute,
         ], operation: Some(types::InterfaceOperation::SubmitCommand), schema: intent_fill_schema, args: IntentFillArgs,
         phases: INTENT, scope: SessionPageWorkflow, group: Intents, intent: ("Fill", "Reconciliable"), hints: (false, false, false, false) }
-    intent_follow { order: 16, title: "Follow link", description: "Activate and verify a described control. Prefer over click plus wait_for. Requires browser:mutate and intent:execute. Defaults evidenceDetail=compact. On failure with needsReconciliation, do not retry; call recovery_status.",
+    intent_follow { order: 16, title: "Follow link", description: "Activate and verify a described control. Prefer over click plus wait_for. Requires browser:mutate and intent:execute. Defaults evidenceDetail=compact. On failure with needsReconciliation, do not retry; call recovery_status. On obstructionSuspected, a dialog opened instead: dismiss it, then retry.",
         capabilities: &[
             types::Capability::BrowserMutate,
             types::Capability::IntentExecute,

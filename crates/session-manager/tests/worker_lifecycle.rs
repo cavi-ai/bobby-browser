@@ -4,10 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use session_manager::SessionManager;
-use types::{
-    ClickCommand, CommandError, CreateSessionRequest, Evidence, InspectCommand, NavigateCommand,
-    PageId, SessionId, TypeTextCommand, WorkerId,
-};
+use types::{CommandError, CreateSessionRequest, SessionId, WorkerId};
 use worker_pool::{BrowserWorker, WorkerFactory, WorkerPool};
 
 struct LifecycleWorker {
@@ -21,32 +18,11 @@ impl BrowserWorker for LifecycleWorker {
     fn worker_id(&self) -> WorkerId {
         self.id.clone()
     }
+
     fn profile_dir(&self) -> &Path {
         &self.profile
     }
-    async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
-        Ok(())
-    }
-    async fn navigate(
-        &self,
-        _: &PageId,
-        _: &NavigateCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-    async fn inspect(&self, _: &PageId, _: &InspectCommand) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-    async fn click(&self, _: &PageId, _: &ClickCommand) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-    async fn type_text(
-        &self,
-        _: &PageId,
-        _: &TypeTextCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
+
     async fn close(&self) -> Result<(), CommandError> {
         self.closed.store(true, Ordering::SeqCst);
         Ok(())
@@ -139,32 +115,11 @@ impl BrowserWorker for FailingCloseWorker {
     fn worker_id(&self) -> WorkerId {
         self.id.clone()
     }
+
     fn profile_dir(&self) -> &Path {
         Path::new("/profiles/failing")
     }
-    async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
-        Ok(())
-    }
-    async fn navigate(
-        &self,
-        _: &PageId,
-        _: &NavigateCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-    async fn inspect(&self, _: &PageId, _: &InspectCommand) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-    async fn click(&self, _: &PageId, _: &ClickCommand) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-    async fn type_text(
-        &self,
-        _: &PageId,
-        _: &TypeTextCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
+
     async fn close(&self) -> Result<(), CommandError> {
         Err(CommandError {
             code: types::ErrorCode::BrowserCommandFailed,

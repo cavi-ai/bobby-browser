@@ -713,6 +713,23 @@ async fn inspection_counts_decodable_records_without_hiding_integrity_damage() {
 }
 
 #[tokio::test]
+async fn command_decode_failure_sequence_hint_stays_high_water() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("commands.jsonl");
+    let id = CommandId::new();
+    let mut entry = record(&id, CommandPhase::Accepted);
+    entry.sequence = 8;
+    let mut bytes = b"{\"sequence\":9}\n".to_vec();
+    serde_json::to_writer(&mut bytes, &entry).unwrap();
+    bytes.push(b'\n');
+    tokio::fs::write(&path, &bytes).await.unwrap();
+    let health = JsonlJournal::inspect(&path).await.unwrap();
+    assert_eq!(health.records, 1);
+    assert_eq!(health.incompatible_records, 2);
+    assert_eq!(tokio::fs::read(&path).await.unwrap(), bytes);
+}
+
+#[tokio::test]
 async fn serializes_concurrent_appends_with_unique_sequences() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("commands.jsonl");

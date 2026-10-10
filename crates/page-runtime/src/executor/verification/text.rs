@@ -28,8 +28,7 @@ impl CommandVerifier for Text {
                         _ => None,
                     })
                     .unwrap_or("text");
-                if let Some(verification) = lease
-                    .worker()
+                if let Some(verification) = worker_pool::input_or_default(lease.worker().input())
                     .verify_framed_typed_value(
                         page_id.expect("validated page id"),
                         command,
@@ -67,8 +66,7 @@ impl CommandVerifier for Text {
                 let inspected_control = if read_before_submit {
                     Ok(Vec::new())
                 } else {
-                    lease
-                        .worker()
+                    worker_pool::observation_or_default(lease.worker().observation())
                         .inspect(
                             page_id,
                             &InspectCommand {
@@ -156,12 +154,12 @@ impl CommandVerifier for Text {
                         let mut landed: Option<(String, String)>;
                         let mut navigated: bool;
                         loop {
-                            landed = lease
-                                .worker()
-                                .inspect(page_id, &page_inspect)
-                                .await
-                                .ok()
-                                .and_then(read_page);
+                            landed =
+                                worker_pool::observation_or_default(lease.worker().observation())
+                                    .inspect(page_id, &page_inspect)
+                                    .await
+                                    .ok()
+                                    .and_then(read_page);
                             navigated = match (&landed, &typed_on) {
                                 (Some((url, _)), Some(typed_on)) => url != typed_on,
                                 (Some(_), None) => true,
@@ -173,37 +171,36 @@ impl CommandVerifier for Text {
                             tokio::task::yield_now().await;
                         }
                         if navigated {
-                            let _ = lease
-                                .worker()
-                                .wait_for(
-                                    page_id,
-                                    &WaitForCommand {
-                                        condition: WaitCondition::Document {
-                                            ready: types::WaitUntil::Interactive,
-                                        },
-                                        timeout_ms: 5_000,
+                            let _ = worker_pool::PageBehavior::wait_for(
+                                lease.worker().wait_provider(),
+                                page_id,
+                                &WaitForCommand {
+                                    condition: WaitCondition::Document {
+                                        ready: types::WaitUntil::Interactive,
                                     },
-                                )
-                                .await;
+                                    timeout_ms: 5_000,
+                                },
+                            )
+                            .await;
                         }
                         let settle_budget = (envelope.deadline - Utc::now())
                             .to_std()
                             .unwrap_or_default()
                             .min(worker_pool::navigation_settle::NAVIGATION_SETTLE_CAP);
-                        match lease
-                            .worker()
+                        match worker_pool::navigation_or_default(lease.worker().navigation())
                             .settle_page(page_id, settle_budget, None)
                             .await
                         {
                             Some(settled) => landed = Some(settled),
                             None if navigated => {
-                                landed = lease
-                                    .worker()
-                                    .inspect(page_id, &page_inspect)
-                                    .await
-                                    .ok()
-                                    .and_then(read_page)
-                                    .or(landed);
+                                landed = worker_pool::observation_or_default(
+                                    lease.worker().observation(),
+                                )
+                                .inspect(page_id, &page_inspect)
+                                .await
+                                .ok()
+                                .and_then(read_page)
+                                .or(landed);
                             }
                             None => {}
                         }

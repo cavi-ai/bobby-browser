@@ -173,15 +173,72 @@ async fn issued_skill_decision_survives_store_reopen_until_explicitly_cleared() 
         .save_skill_issuance(&workflow_id, &issuance)
         .await
         .unwrap();
+    #[cfg(unix)]
+    let path = root
+        .path()
+        .join(format!("{}.skill-issuance.json", workflow_id.0));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
     let reopened = CheckpointStore::open(root.path()).await.unwrap();
+    assert_eq!(
+        reopened.load_skill_issuance(&workflow_id).await.unwrap(),
+        Some(issuance.clone())
+    );
+    // A replacement must also secure an existing file from older binaries.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    reopened
+        .save_skill_issuance(&workflow_id, &issuance)
+        .await
+        .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
     assert_eq!(
         reopened.load_skill_issuance(&workflow_id).await.unwrap(),
         Some(issuance)
     );
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
     reopened.remove_skill_issuance(&workflow_id).await.unwrap();
     assert_eq!(
         reopened.load_skill_issuance(&workflow_id).await.unwrap(),
         None
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn issued_skill_decision_is_private_with_permissive_umask() {
+    // Isolate the process-wide umask from the parallel test runner.
+    let output = std::process::Command::new("sh")
+        .args(["-c", "umask 000; exec \"$@\"", "sh"])
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "issued_skill_decision_survives_store_reopen_until_explicitly_cleared",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

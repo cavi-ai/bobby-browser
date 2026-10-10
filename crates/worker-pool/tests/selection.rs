@@ -8,9 +8,7 @@ use std::{
 
 use async_trait::async_trait;
 use companion_protocol::{BrowserEngine, CompanionCapabilities};
-use types::{
-    CommandError, Evidence, InspectCommand, NavigateCommand, PageId, ProfileId, SessionId, WorkerId,
-};
+use types::{CommandError, ProfileId, SessionId, WorkerId};
 use worker_pool::{
     BrowserWorker, BrowserWorkerSelector, EnginePreference, FactoryRegistration,
     RequiredCapabilities, SelectedWorkerFactory, WorkerFactory, WorkerPool,
@@ -81,40 +79,11 @@ impl BrowserWorker for NamedWorker {
     fn worker_id(&self) -> WorkerId {
         self.id.clone()
     }
+
     fn profile_dir(&self) -> &Path {
         Path::new(self.name)
     }
-    async fn open_page(&self, _page_id: PageId) -> Result<(), CommandError> {
-        Ok(())
-    }
-    async fn navigate(
-        &self,
-        _page_id: &PageId,
-        _command: &NavigateCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-    async fn inspect(
-        &self,
-        _page_id: &PageId,
-        _command: &InspectCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-    async fn click(
-        &self,
-        _page_id: &PageId,
-        _command: &types::ClickCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-    async fn type_text(
-        &self,
-        _page_id: &PageId,
-        _command: &types::TypeTextCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
+
     async fn close(&self) -> Result<(), CommandError> {
         Ok(())
     }

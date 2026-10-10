@@ -8,8 +8,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::fs::{File, OpenOptions};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
+use workflow_journal::{
+    JsonlLine, LedgerDecoder, LedgerIssueKind, PreparedRecord, RecordObservation, ScanControl,
+    ScanOptions, SequenceRule, SequenceVerdict,
+};
 
 use crate::job::{Job, JobId, JobStatus};
 
@@ -462,54 +466,98 @@ async fn scan_path(path: &Path, collect_jobs: bool) -> Result<Scan, StoreError> 
         }
         Err(error) => return Err(error.into()),
     };
-    let mut scan = Scan {
-        exists: true,
-        ..Scan::default()
+    let mut decoder = JobDecoder {
+        latest: HashMap::new(),
+        collect_jobs,
+        records: 0,
     };
-    let mut latest: HashMap<JobId, Job> = HashMap::new();
-    let read = workflow_journal::for_each_jsonl_line(file, |line| {
+    let health = workflow_journal::scan_jsonl(
+        &mut BufReader::new(file),
+        ScanOptions {
+            max_line_bytes: u64::MAX,
+            sequence_rule: SequenceRule::Increasing,
+        },
+        &mut decoder,
+    )
+    .await?;
+    Ok(Scan {
+        exists: true,
+        bytes: health.bytes_observed,
+        records: decoder.records,
+        max_sequence: health.max_observed_sequence,
+        torn_tail: health.issue_count(LedgerIssueKind::TornTail) > 0,
+        incompatible_records: health.incompatible_records,
+        jobs: decoder.latest.into_values().collect(),
+    })
+}
+
+struct JobDecoder {
+    latest: HashMap<JobId, Job>,
+    collect_jobs: bool,
+    records: usize,
+}
+
+impl LedgerDecoder for JobDecoder {
+    type Record = JournalRecord;
+    fn decode(&mut self, line: &JsonlLine<'_>) -> std::io::Result<PreparedRecord<JournalRecord>> {
         let body = &line.bytes[..line.bytes.len() - 1];
         if body.is_empty() {
-            return Ok(());
+            return Ok(PreparedRecord {
+                observation: RecordObservation::Skip,
+                record: None,
+            });
         }
-        scan.records += 1;
-        match serde_json::from_slice::<JournalRecord>(body) {
-            Ok(record) => {
-                let out_of_order = scan
-                    .max_sequence
-                    .is_some_and(|sequence| record.sequence <= sequence);
-                scan.max_sequence = scan.max_sequence.max(Some(record.sequence));
-                if out_of_order || record.schema_version != JOURNAL_SCHEMA_VERSION {
-                    scan.incompatible_records += 1;
-                    return Ok(());
-                }
-                let event_matches_status = record.event
-                    == JobEvent::from_status(&record.job.status)
-                    || (record.event == JobEvent::Submitted
-                        && record.job.status == JobStatus::Pending);
-                if !record.job.has_valid_resolution() || !event_matches_status {
-                    scan.incompatible_records += 1;
-                    return Ok(());
-                }
-                if collect_jobs {
-                    latest.insert(record.job.id.clone(), record.job);
-                }
-            }
+        self.records += 1;
+        let record = match serde_json::from_slice::<JournalRecord>(body) {
+            Ok(record) => record,
             Err(_) => {
-                // A line this build cannot decode is skipped, so the job
-                // journal never stops the runtime from starting.
                 tracing::warn!(
                     line = line.number,
                     "job journal line unreadable by this build; skipped"
                 );
-                scan.incompatible_records += 1;
+                return Ok(PreparedRecord {
+                    observation: RecordObservation::Rejected {
+                        sequence_hint: None,
+                        kind: LedgerIssueKind::Decode,
+                    },
+                    record: None,
+                });
+            }
+        };
+        let event_matches_status = record.event == JobEvent::from_status(&record.job.status)
+            || (record.event == JobEvent::Submitted && record.job.status == JobStatus::Pending);
+        let issue = if record.schema_version != JOURNAL_SCHEMA_VERSION {
+            Some(LedgerIssueKind::Schema)
+        } else if !record.job.has_valid_resolution() || !event_matches_status {
+            Some(LedgerIssueKind::InvalidState)
+        } else {
+            None
+        };
+        Ok(PreparedRecord {
+            observation: match issue {
+                Some(kind) => RecordObservation::Rejected {
+                    sequence_hint: Some(record.sequence),
+                    kind,
+                },
+                None => RecordObservation::Accepted {
+                    sequence: Some(record.sequence),
+                },
+            },
+            record: Some(record),
+        })
+    }
+
+    fn apply(
+        &mut self,
+        _line: &JsonlLine<'_>,
+        prepared: PreparedRecord<JournalRecord>,
+        verdict: SequenceVerdict,
+    ) -> std::io::Result<ScanControl> {
+        if self.collect_jobs && verdict == SequenceVerdict::Valid {
+            if let Some(record) = prepared.record {
+                self.latest.insert(record.job.id.clone(), record.job);
             }
         }
-        Ok(())
-    })
-    .await?;
-    scan.torn_tail = read.torn_tail;
-    scan.bytes = read.bytes_read;
-    scan.jobs = latest.into_values().collect();
-    Ok(scan)
+        Ok(ScanControl::Continue)
+    }
 }

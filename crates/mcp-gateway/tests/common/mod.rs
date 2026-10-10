@@ -146,6 +146,65 @@ impl BrowserWorker for LiveWorker {
         &self.profile
     }
 
+    async fn reconnect_live_process(&self) -> Result<Vec<Evidence>, CommandError> {
+        // Real Chrome's revival path takes this branch when the browser
+        // process is still alive and only a single target closed (the
+        // closed-page rule's own scenario) -- the process reattach the
+        // executor tries first, before ever falling back to a full
+        // relaunch. Succeeding here keeps the fake on the same branch
+        // production takes instead of exercising a relaunch the fake was
+        // never built to simulate.
+        Ok(Vec::new())
+    }
+
+    async fn close(&self) -> Result<(), CommandError> {
+        self.probe.worker_closes.fetch_add(1, Ordering::SeqCst);
+        self.probe.delete_entered.notify_one();
+        if self.block_delete {
+            self.probe.delete_release.notified().await;
+        }
+        if consume_failure(&self.probe.delete_failures_remaining) {
+            return Err(CommandError {
+                code: ErrorCode::BrowserCommandFailed,
+                message: "injected live-harness session deletion failure".into(),
+                layer: ErrorLayer::Driver,
+                retryable: true,
+            });
+        }
+        Ok(())
+    }
+
+    fn tabs(&self) -> Option<&dyn worker_pool::TabsEngine> {
+        Some(self)
+    }
+
+    fn navigation(&self) -> Option<&dyn worker_pool::NavigationEngine> {
+        Some(self)
+    }
+
+    fn observation(&self) -> Option<&dyn worker_pool::ObservationEngine> {
+        Some(self)
+    }
+
+    fn input(&self) -> Option<&dyn worker_pool::InputEngine> {
+        Some(self)
+    }
+
+    fn events(&self) -> Option<&dyn worker_pool::EventsEngine> {
+        Some(self)
+    }
+
+    fn web_state(&self) -> Option<&dyn worker_pool::WebStateEngine> {
+        Some(self)
+    }
+
+    fn wait_provider(&self) -> Option<&dyn worker_pool::WaitProvider> {
+        Some(self)
+    }
+}
+
+#[async_trait::async_trait]
+impl worker_pool::TabsEngine for LiveWorker {
     async fn open_page(&self, page_id: PageId) -> Result<(), CommandError> {
         *self
             .probe
@@ -167,115 +226,6 @@ impl BrowserWorker for LiveWorker {
             }
         }
         Ok(())
-    }
-
-    async fn navigate(
-        &self,
-        _: &PageId,
-        command: &NavigateCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        *self
-            .probe
-            .current_url
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(command.url.clone());
-        self.probe.navigation_entered.notify_one();
-        if matches!(
-            command.url.as_str(),
-            "https://live-harness.test/block" | "https://live-harness.test/block-fail"
-        ) {
-            self.probe.navigation_release.notified().await;
-        }
-        if matches!(
-            command.url.as_str(),
-            "https://live-harness.test/fail" | "https://live-harness.test/block-fail"
-        ) {
-            return Err(CommandError {
-                code: ErrorCode::BrowserCommandFailed,
-                message: "injected live-harness navigation failure".into(),
-                layer: ErrorLayer::Driver,
-                retryable: false,
-            });
-        }
-        Ok(vec![Evidence::Navigation {
-            url: command.url.clone(),
-            title: "live-harness".into(),
-        }])
-    }
-
-    async fn inspect(
-        &self,
-        _: &PageId,
-        command: &InspectCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        let text = self
-            .probe
-            .last_typed_text
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-            .unwrap_or_else(|| "live-harness-text".into());
-        Ok(vec![Evidence::Inspection {
-            selector: command.selector.clone(),
-            url: "https://live-harness.test/".into(),
-            title: "live-harness".into(),
-            text,
-            html: None,
-        }])
-    }
-
-    async fn click(
-        &self,
-        _: &PageId,
-        command: &ClickCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        self.probe.click_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(vec![Evidence::Element {
-            selector: command.selector.clone(),
-            text: None,
-        }])
-    }
-
-    async fn click_and_wait_for_popup(
-        &self,
-        page_id: &PageId,
-        _command: &ClickAndWaitForPopupCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![Evidence::Popup {
-            opener_page_id: page_id.clone(),
-            page_id: PageId::new(),
-            url: "https://live-harness.test/popup".into(),
-            title: "live-harness-popup".into(),
-        }])
-    }
-
-    async fn reconnect_live_process(&self) -> Result<Vec<Evidence>, CommandError> {
-        // Real Chrome's revival path takes this branch when the browser
-        // process is still alive and only a single target closed (the
-        // closed-page rule's own scenario) -- the process reattach the
-        // executor tries first, before ever falling back to a full
-        // relaunch. Succeeding here keeps the fake on the same branch
-        // production takes instead of exercising a relaunch the fake was
-        // never built to simulate.
-        Ok(Vec::new())
-    }
-
-    async fn type_text(
-        &self,
-        page_id: &PageId,
-        command: &TypeTextCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        self.probe.type_text_calls.fetch_add(1, Ordering::SeqCst);
-        self.reject_if_closed(page_id)?;
-        *self
-            .probe
-            .last_typed_text
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(command.value.clone());
-        Ok(vec![Evidence::Element {
-            selector: command.selector.clone(),
-            text: Some(command.value.clone()),
-        }])
     }
 
     async fn list_pages(&self, _: &ListPagesCommand) -> Result<Vec<Evidence>, CommandError> {
@@ -309,44 +259,66 @@ impl BrowserWorker for LiveWorker {
             title: "live-harness".into(),
         }])
     }
+}
 
-    async fn network_log(
+#[async_trait::async_trait]
+impl worker_pool::NavigationEngine for LiveWorker {
+    async fn navigate(
         &self,
         _: &PageId,
-        _: &types::NetworkLogCommand,
+        command: &NavigateCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![Evidence::HarArtifact {
-            artifact_id: "live-harness-har".into(),
-            media_type: "application/json".into(),
-            bytes: 2,
-            sha256: "a".repeat(64),
-            entries: 0,
+        *self
+            .probe
+            .current_url
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(command.url.clone());
+        self.probe.navigation_entered.notify_one();
+        if matches!(
+            command.url.as_str(),
+            "https://live-harness.test/block" | "https://live-harness.test/block-fail"
+        ) {
+            self.probe.navigation_release.notified().await;
+        }
+        if matches!(
+            command.url.as_str(),
+            "https://live-harness.test/fail" | "https://live-harness.test/block-fail"
+        ) {
+            return Err(CommandError {
+                code: ErrorCode::BrowserCommandFailed,
+                message: "injected live-harness navigation failure".into(),
+                layer: ErrorLayer::Driver,
+                retryable: false,
+            });
+        }
+        Ok(vec![Evidence::Navigation {
+            url: command.url.clone(),
+            title: "live-harness".into(),
         }])
     }
+}
 
-    async fn wait_for(
+#[async_trait::async_trait]
+impl worker_pool::ObservationEngine for LiveWorker {
+    async fn inspect(
         &self,
-        _page_id: &PageId,
-        command: &types::WaitForCommand,
+        _: &PageId,
+        command: &InspectCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        if self.probe.satisfy_wait.load(Ordering::SeqCst) {
-            return Ok(vec![Evidence::Wait {
-                condition: command.condition.clone(),
-                elapsed_ms: 0,
-                observations: 1,
-                excluded_classes: Vec::new(),
-                observed: None,
-            }]);
-        }
-        // No real page behind the fake to poll -- unsupported by default,
-        // exactly like the worker-pool trait's own default body, unless a
-        // test opted in above.
-        Err(CommandError {
-            code: ErrorCode::BrowserCommandFailed,
-            message: "browser primitive is not supported by this worker".into(),
-            layer: ErrorLayer::Driver,
-            retryable: false,
-        })
+        let text = self
+            .probe
+            .last_typed_text
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_else(|| "live-harness-text".into());
+        Ok(vec![Evidence::Inspection {
+            selector: command.selector.clone(),
+            url: "https://live-harness.test/".into(),
+            title: "live-harness".into(),
+            text,
+            html: None,
+        }])
     }
 
     async fn a11y_snapshot(
@@ -443,7 +415,73 @@ impl BrowserWorker for LiveWorker {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone())
     }
+}
 
+#[async_trait::async_trait]
+impl worker_pool::InputEngine for LiveWorker {
+    async fn click(
+        &self,
+        _: &PageId,
+        command: &ClickCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.probe.click_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![Evidence::Element {
+            selector: command.selector.clone(),
+            text: None,
+        }])
+    }
+
+    async fn type_text(
+        &self,
+        page_id: &PageId,
+        command: &TypeTextCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        self.probe.type_text_calls.fetch_add(1, Ordering::SeqCst);
+        self.reject_if_closed(page_id)?;
+        *self
+            .probe
+            .last_typed_text
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(command.value.clone());
+        Ok(vec![Evidence::Element {
+            selector: command.selector.clone(),
+            text: Some(command.value.clone()),
+        }])
+    }
+}
+
+#[async_trait::async_trait]
+impl worker_pool::EventsEngine for LiveWorker {
+    async fn click_and_wait_for_popup(
+        &self,
+        page_id: &PageId,
+        _command: &ClickAndWaitForPopupCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Ok(vec![Evidence::Popup {
+            opener_page_id: page_id.clone(),
+            page_id: PageId::new(),
+            url: "https://live-harness.test/popup".into(),
+            title: "live-harness-popup".into(),
+        }])
+    }
+
+    async fn network_log(
+        &self,
+        _: &PageId,
+        _: &types::NetworkLogCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Ok(vec![Evidence::HarArtifact {
+            artifact_id: "live-harness-har".into(),
+            media_type: "application/json".into(),
+            bytes: 2,
+            sha256: "a".repeat(64),
+            entries: 0,
+        }])
+    }
+}
+
+#[async_trait::async_trait]
+impl worker_pool::WebStateEngine for LiveWorker {
     fn supports_http_state(&self) -> bool {
         true
     }
@@ -476,22 +514,43 @@ impl BrowserWorker for LiveWorker {
     ) -> Result<(), CommandError> {
         Ok(())
     }
+}
+impl LiveWorker {
+    async fn observe_wait(
+        &self,
+        condition: &types::WaitCondition,
+    ) -> Result<worker_pool::wait::WaitObservation, CommandError> {
+        if self.probe.satisfy_wait.load(Ordering::SeqCst) {
+            return Ok(fake_wait_observation(condition));
+        }
+        // No real page behind the fake to poll -- unsupported by default,
+        // exactly like the worker-pool trait's own default body, unless a
+        // test opted in above.
+        Err(CommandError {
+            code: ErrorCode::BrowserCommandFailed,
+            message: "browser primitive is not supported by this worker".into(),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        })
+    }
+}
 
-    async fn close(&self) -> Result<(), CommandError> {
-        self.probe.worker_closes.fetch_add(1, Ordering::SeqCst);
-        self.probe.delete_entered.notify_one();
-        if self.block_delete {
-            self.probe.delete_release.notified().await;
-        }
-        if consume_failure(&self.probe.delete_failures_remaining) {
-            return Err(CommandError {
-                code: ErrorCode::BrowserCommandFailed,
-                message: "injected live-harness session deletion failure".into(),
-                layer: ErrorLayer::Driver,
-                retryable: true,
-            });
-        }
-        Ok(())
+impl worker_pool::WaitProvider for LiveWorker {
+    fn observer<'a>(
+        &'a self,
+        _page_id: &'a types::PageId,
+    ) -> Box<dyn worker_pool::wait::WaitObserver + 'a> {
+        Box::new(LiveWorkerWaitObserver(self))
+    }
+}
+struct LiveWorkerWaitObserver<'a>(&'a LiveWorker);
+#[async_trait::async_trait]
+impl worker_pool::wait::WaitObserver for LiveWorkerWaitObserver<'_> {
+    async fn observe(
+        &self,
+        condition: &types::WaitCondition,
+    ) -> Result<worker_pool::wait::WaitObservation, types::CommandError> {
+        self.0.observe_wait(condition).await
     }
 }
 
@@ -1037,4 +1096,23 @@ fn consume_failure(counter: &AtomicUsize) -> bool {
         }
     }
     false
+}
+
+fn fake_wait_observation(condition: &types::WaitCondition) -> worker_pool::wait::WaitObservation {
+    use worker_pool::wait::WaitObservation;
+    let text = |matcher: &types::TextMatch| match matcher {
+        types::TextMatch::Exact(value) | types::TextMatch::Contains(value) => value.clone(),
+        types::TextMatch::Regex(_) => panic!("regex fixture needs an explicit observed value"),
+    };
+    match condition {
+        types::WaitCondition::Element { .. } => WaitObservation::Element(true),
+        types::WaitCondition::Text { matcher, .. }
+        | types::WaitCondition::Value { matcher, .. } => WaitObservation::Text(vec![text(matcher)]),
+        types::WaitCondition::Url { matcher } => WaitObservation::Url(text(matcher)),
+        types::WaitCondition::Document { .. } => WaitObservation::Document("complete".into()),
+        types::WaitCondition::NetworkQuiet { .. } => WaitObservation::Network {
+            in_flight: 0,
+            excluded_classes: vec![],
+        },
+    }
 }

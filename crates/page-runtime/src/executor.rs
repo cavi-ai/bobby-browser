@@ -210,16 +210,20 @@ impl PageRuntime {
         // Apply the session's policy to the worker before it runs anything.
         // Workers are pooled and re-leased across sessions, so both flags must
         // be written on every lease or one session's opt-in leaks into the next.
-        if let Err(error) = lease
-            .worker()
-            .set_fingerprint_enabled(gate.fingerprint)
-            .await
+        if let Err(error) =
+            worker_pool::session_settings_or_default(lease.worker().session_settings())
+                .set_fingerprint_enabled(gate.fingerprint)
+                .await
         {
             return self
                 .finish_failure(&envelope, classify_failure(&envelope, error, Vec::new()))
                 .await;
         }
-        if let Err(error) = lease.worker().set_humanization_enabled(gate.humanize).await {
+        if let Err(error) =
+            worker_pool::session_settings_or_default(lease.worker().session_settings())
+                .set_humanization_enabled(gate.humanize)
+                .await
+        {
             return self
                 .finish_failure(&envelope, classify_failure(&envelope, error, Vec::new()))
                 .await;
@@ -253,7 +257,8 @@ impl PageRuntime {
                     .unwrap_or(StdDuration::ZERO);
                 tokio::time::timeout(
                     budget,
-                    lease.worker().inspect(page_id, &InspectCommand::default()),
+                    worker_pool::observation_or_default(lease.worker().observation())
+                        .inspect(page_id, &InspectCommand::default()),
                 )
                 .await
                 .ok()
@@ -351,16 +356,19 @@ impl PageRuntime {
                     );
                 }
             }
-            if let Err(error) = lease_slot
-                .as_ref()
-                .expect("lease survives to state commit")
-                .worker()
-                .commit_http_state(
-                    envelope.page_id.as_ref().expect("validated page id"),
-                    prepared.state_version,
-                    prepared.state,
-                )
-                .await
+            if let Err(error) = worker_pool::web_state_or_default(
+                lease_slot
+                    .as_ref()
+                    .expect("lease survives to state commit")
+                    .worker()
+                    .web_state(),
+            )
+            .commit_http_state(
+                envelope.page_id.as_ref().expect("validated page id"),
+                prepared.state_version,
+                prepared.state,
+            )
+            .await
             {
                 let (outcome, terminal_durable) = self
                     .finish_failure_durable(

@@ -93,16 +93,19 @@ impl BrowserWorker for Worker {
     fn profile_dir(&self) -> &Path {
         Path::new("verifier-fixture")
     }
-    async fn open_page(&self, _: types::PageId) -> Result<(), CommandError> {
+    fn observation(&self) -> Option<&dyn worker_pool::ObservationEngine> {
+        Some(self)
+    }
+    fn wait_provider(&self) -> Option<&dyn worker_pool::WaitProvider> {
+        Some(self)
+    }
+    async fn close(&self) -> Result<(), CommandError> {
         Ok(())
     }
-    async fn navigate(
-        &self,
-        _: &types::PageId,
-        _: &types::NavigateCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        panic!("verifier must not navigate")
-    }
+}
+
+#[async_trait::async_trait]
+impl worker_pool::ObservationEngine for Worker {
     async fn inspect(
         &self,
         _: &types::PageId,
@@ -110,29 +113,24 @@ impl BrowserWorker for Worker {
     ) -> Result<Vec<Evidence>, CommandError> {
         Ok(self.inspection.lock().unwrap().clone())
     }
-    async fn click(
-        &self,
-        _: &types::PageId,
-        _: &types::ClickCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        panic!("verifier must not click")
+}
+
+impl worker_pool::WaitProvider for Worker {
+    fn observer<'a>(
+        &'a self,
+        _: &'a types::PageId,
+    ) -> Box<dyn worker_pool::wait::WaitObserver + 'a> {
+        Box::new(self)
     }
-    async fn type_text(
+}
+
+#[async_trait::async_trait]
+impl worker_pool::wait::WaitObserver for &Worker {
+    async fn observe(
         &self,
-        _: &types::PageId,
-        _: &types::TypeTextCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        panic!("verifier must not type")
-    }
-    async fn wait_for(
-        &self,
-        _: &types::PageId,
-        _: &WaitForCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
+        _: &types::WaitCondition,
+    ) -> Result<worker_pool::wait::WaitObservation, CommandError> {
         self.waits.fetch_add(1, Ordering::SeqCst);
         Err(verification_error("fixture settle timeout"))
-    }
-    async fn close(&self) -> Result<(), CommandError> {
-        Ok(())
     }
 }

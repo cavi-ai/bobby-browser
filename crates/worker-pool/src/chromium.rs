@@ -57,7 +57,7 @@ use types::{
     ErrorLayer, EvaluateJavaScriptCommand, Evidence, FormControl, FormControlTarget,
     InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand, PageEvidence, PageId,
     ScreenshotMode, SessionId, SetEmulatedMediaCommand, SetFocusEmulationCommand, TargetSpec,
-    TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WorkerId,
+    TypeTextCommand, UploadFilesCommand, WaitCondition, WorkerId,
 };
 
 use crate::{
@@ -1689,6 +1689,65 @@ impl BrowserWorker for ChromiumWorker {
         &self.profile_dir
     }
 
+    async fn close(&self) -> Result<(), CommandError> {
+        self.shutdown().await
+    }
+
+    async fn terminate(&self) -> Result<(), CommandError> {
+        self.shutdown().await
+    }
+
+    async fn reconnect_live_process(&self) -> Result<Vec<Evidence>, CommandError> {
+        self.reconnect_live_process_impl().await
+    }
+
+    fn session_settings(&self) -> Option<&dyn crate::SessionSettings> {
+        Some(self)
+    }
+
+    fn tabs(&self) -> Option<&dyn crate::TabsEngine> {
+        Some(self)
+    }
+
+    fn navigation(&self) -> Option<&dyn crate::NavigationEngine> {
+        Some(self)
+    }
+
+    fn observation(&self) -> Option<&dyn crate::ObservationEngine> {
+        Some(self)
+    }
+
+    fn input(&self) -> Option<&dyn crate::InputEngine> {
+        Some(self)
+    }
+
+    fn events(&self) -> Option<&dyn crate::EventsEngine> {
+        Some(self)
+    }
+
+    fn capture(&self) -> Option<&dyn crate::CaptureEngine> {
+        Some(self)
+    }
+
+    fn page_configuration(&self) -> Option<&dyn crate::PageConfigurationEngine> {
+        Some(self)
+    }
+
+    fn javascript(&self) -> Option<&dyn crate::JavaScriptEngine> {
+        Some(self)
+    }
+
+    fn web_state(&self) -> Option<&dyn crate::WebStateEngine> {
+        Some(self)
+    }
+
+    fn wait_provider(&self) -> Option<&dyn crate::WaitProvider> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl crate::SessionSettings for ChromiumWorker {
     async fn set_fingerprint_enabled(&self, enabled: bool) -> Result<(), CommandError> {
         self.fingerprint_enabled
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
@@ -1712,7 +1771,10 @@ impl BrowserWorker for ChromiumWorker {
         self.humanization_enabled
             .load(std::sync::atomic::Ordering::Relaxed)
     }
+}
 
+#[async_trait]
+impl crate::TabsEngine for ChromiumWorker {
     async fn open_page(&self, page_id: PageId) -> Result<(), CommandError> {
         let browser = self.browser_handle().await?;
         let page = browser
@@ -1722,6 +1784,92 @@ impl BrowserWorker for ChromiumWorker {
         self.register_page(page_id, page).await
     }
 
+    async fn open_page_command(
+        &self,
+        command: &OpenPageCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let page_id = PageId::new();
+        let browser = self.browser_handle().await?;
+        // Always start blank so init scripts register before first real document.
+        let page = browser
+            .new_page("about:blank")
+            .await
+            .map_err(command_failed)?;
+        self.register_page(page_id.clone(), page).await?;
+        if let Some(url) = command.url.as_deref() {
+            let page = self.page_handle(&page_id).await?;
+            page.goto(url).await.map_err(command_failed)?;
+        }
+        let page = self.page_handle(&page_id).await?;
+        let evidence = page_evidence(page_id, &page).await?;
+        Ok(vec![Evidence::Page {
+            page_id: evidence.page_id,
+            url: evidence.url,
+            title: evidence.title,
+        }])
+    }
+
+    async fn list_pages(&self, _command: &ListPagesCommand) -> Result<Vec<Evidence>, CommandError> {
+        self.sync_untracked_pages().await?;
+        let handles: Vec<(PageId, Page)> = self
+            .pages
+            .lock()
+            .await
+            .iter()
+            .map(|(page_id, page)| (page_id.clone(), page.clone()))
+            .collect();
+        let mut listed = Vec::with_capacity(handles.len());
+        for (page_id, page) in handles {
+            match page_evidence(page_id.clone(), &page).await {
+                Ok(evidence) => listed.push(evidence),
+                Err(error) if is_closed_page_message(&error.message) => {
+                    self.unregister_page(&page_id).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        listed.sort_by_key(|page| page.page_id.0);
+        Ok(vec![Evidence::Pages { pages: listed }])
+    }
+
+    async fn close_page_command(
+        &self,
+        command: &ClosePageCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let page = self
+            .unregister_page(&command.page_id)
+            .await
+            .ok_or_else(page_missing)?;
+        let evidence = page_evidence(command.page_id.clone(), &page).await?;
+        self.closed_targets
+            .lock()
+            .await
+            .insert(page.target_id().clone());
+        page.close().await.map_err(command_failed)?;
+        Ok(vec![Evidence::Page {
+            page_id: evidence.page_id,
+            url: evidence.url,
+            title: evidence.title,
+        }])
+    }
+
+    async fn activate_page(
+        &self,
+        command: &types::ActivatePageCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let page = self.page_handle(&command.page_id).await?;
+        page.activate().await.map_err(command_failed)?;
+        let evidence = page_evidence(command.page_id.clone(), &page).await?;
+        Ok(vec![Evidence::Page {
+            page_id: evidence.page_id,
+            url: evidence.url,
+            title: evidence.title,
+        }])
+    }
+}
+
+#[async_trait]
+impl crate::NavigationEngine for ChromiumWorker {
     async fn navigate(
         &self,
         page_id: &PageId,
@@ -1781,7 +1929,10 @@ impl BrowserWorker for ChromiumWorker {
         .await?;
         Some((url, page_title_evidence(title)))
     }
+}
 
+#[async_trait]
+impl crate::ObservationEngine for ChromiumWorker {
     async fn inspect(
         &self,
         page_id: &PageId,
@@ -1858,6 +2009,245 @@ impl BrowserWorker for ChromiumWorker {
         Ok(evidence)
     }
 
+    async fn a11y_snapshot(
+        &self,
+        page_id: &PageId,
+        command: &types::AccessibilitySnapshotCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let page = self.page_handle(page_id).await?;
+        let max_nodes = command
+            .max_nodes
+            .unwrap_or(DEFAULT_A11Y_MAX_NODES)
+            .clamp(1, MAX_A11Y_NODES) as usize;
+        if let Some(target) = &command.target {
+            // Scoped: resolve the target, fetch the AX tree of the frame it
+            // lives in, and compact only its subtree.
+            let resolved = {
+                let browser = self.browser_handle().await?;
+                crate::targeting::resolve_target(page_id, &page, "", Some(target), Some(&browser))
+                    .await?
+            };
+            let backend_id = resolved.backend_node_id(&page).await?;
+            // Scoping to the iframe element itself must return the frame's
+            // content — the main-frame AX subtree of an iframe node is empty,
+            // and the agent asked for what is inside.
+            let owner_frame = page
+                .execute(
+                    chromiumoxide::cdp::browser_protocol::dom::DescribeNodeParams::builder()
+                        .backend_node_id(backend_id)
+                        .build(),
+                )
+                .await
+                .map_err(command_failed)?
+                .result
+                .node
+                .frame_id;
+            if let Some(content_frame) = owner_frame {
+                let result = page
+                    .execute(
+                        chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::builder()
+                            .frame_id(content_frame)
+                            .build(),
+                    )
+                    .await
+                    .map_err(command_failed)?
+                    .result;
+                let (mut nodes, truncated) = compact_ax_tree(&result.nodes, max_nodes);
+                // Stamp targets with the hop that re-resolves the iframe
+                // element, so in-frame targets pass to control_action
+                // verbatim like the full-tree descent's do.
+                let hop_name = match &resolved.evidence {
+                    Evidence::Resolution { fingerprint, .. } => fingerprint.name.clone(),
+                    _ => None,
+                };
+                if let Some(name) = hop_name {
+                    let segment = types::SemanticTargetSegment {
+                        role: "iframe".into(),
+                        accessible_name: name,
+                        ordinal: None,
+                    };
+                    stamp_a11y_frame_path(&mut nodes, &segment);
+                }
+                return Ok(vec![Evidence::AccessibilitySnapshot {
+                    page_id: page_id.clone(),
+                    nodes,
+                    truncated,
+                }]);
+            }
+            let params = match resolved.frame_id() {
+                Some(frame_id) => {
+                    chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::builder()
+                        .frame_id(frame_id.clone())
+                        .build()
+                }
+                None => {
+                    chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::default()
+                }
+            };
+            let result = page.execute(params).await.map_err(command_failed)?.result;
+            let root_id = result
+                .nodes
+                .iter()
+                .find(|node| node.backend_dom_node_id.as_ref() == Some(&backend_id))
+                .map(|node| node.node_id.clone())
+                .ok_or_else(|| hidden_from_accessibility(&result.nodes))?;
+            let (nodes, truncated) =
+                compact_ax_tree_from(&result.nodes, max_nodes, Some(root_id.as_ref()));
+            return Ok(vec![Evidence::AccessibilitySnapshot {
+                page_id: page_id.clone(),
+                nodes,
+                truncated,
+            }]);
+        }
+        let result = page
+            .execute(
+                chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::default(),
+            )
+            .await
+            .map_err(command_failed)?
+            .result;
+        let (mut nodes, mut truncated) = compact_ax_tree(&result.nodes, max_nodes);
+        // The main-frame AX tree stops at `Iframe` nodes; descend one level
+        // (cap 8, same-process frames) so in-frame controls are visible and
+        // their targets carry the frame hop control_action can re-resolve.
+        let emitted = count_a11y_nodes(&nodes);
+        if emitted < max_nodes {
+            truncated |= descend_a11y_iframes(&page, &mut nodes, max_nodes - emitted).await;
+        }
+        let controls_omitted = if a11y_contains_form_control(&nodes) {
+            false
+        } else {
+            match page
+                .evaluate(crate::form_snapshot_expression(page_id))
+                .await
+            {
+                Ok(remote) => {
+                    let value: Result<serde_json::Value, _> = remote.into_value();
+                    value
+                        .ok()
+                        .and_then(|value| value.as_str().map(str::to_owned))
+                        .and_then(|encoded| {
+                            crate::decode_form_snapshot(page_id.clone(), &encoded, 512).ok()
+                        })
+                        .is_some_and(|snapshot| {
+                            !snapshot.unowned_controls.is_empty()
+                                || snapshot.forms.iter().any(|form| !form.controls.is_empty())
+                        })
+                }
+                Err(_) => false,
+            }
+        };
+        let mut evidence = vec![Evidence::AccessibilitySnapshot {
+            page_id: page_id.clone(),
+            nodes,
+            truncated,
+        }];
+        if controls_omitted {
+            evidence.push(Evidence::Configuration {
+                name: "accessibilityControlsOmitted".into(),
+                value: "true: form controls exist but were absent from the accessibility tree; use form_snapshot".into(),
+            });
+        }
+        Ok(evidence)
+    }
+
+    async fn form_snapshot(
+        &self,
+        page_id: &PageId,
+        max_controls: Option<u32>,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let max_controls = max_controls.unwrap_or(512) as usize;
+        let page = self.page_handle(page_id).await?;
+        let value: serde_json::Value = page
+            .evaluate(crate::form_snapshot_expression_with_limit(
+                page_id,
+                max_controls,
+            ))
+            .await
+            .map_err(command_failed)?
+            .into_value()
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        let encoded = value.as_str().ok_or_else(|| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "form snapshot returned non-text JSON",
+            )
+        })?;
+        let snapshot = crate::decode_form_snapshot(page_id.clone(), encoded, max_controls)?;
+        Ok(vec![Evidence::FormSnapshot { snapshot }])
+    }
+
+    async fn collect_candidates(
+        &self,
+        page_id: &PageId,
+        target: &types::TargetSpec,
+    ) -> Result<Vec<dom_engine::Candidate>, CommandError> {
+        let page = self.page_handle(page_id).await?;
+        let browser = self.browser_handle().await?;
+        gather_candidates(&page, target, Some(&browser)).await
+    }
+
+    async fn element_at_point(
+        &self,
+        page_id: &PageId,
+        x: f64,
+        y: f64,
+    ) -> Result<Option<(String, String)>, CommandError> {
+        let page = self.page_handle(page_id).await?;
+        let expression = format!(
+            r#"(() => {{
+const INTERACTIVE = "a,button,input,select,textarea,[role],[tabindex]";
+const IMPLICIT = {{a:"link",button:"button",input:"textbox",select:"combobox",textarea:"textbox"}};
+let el = document.elementFromPoint({x}, {y});
+if (!el) return null;
+const host = el.closest(INTERACTIVE) || el;
+let role = host.getAttribute("role") || IMPLICIT[host.tagName.toLowerCase()] || "";
+if (host.tagName === "INPUT" && !host.getAttribute("role")) {{
+  const t = (host.getAttribute("type") || "text").toLowerCase();
+  if (["button","submit","reset"].includes(t)) role = "button";
+  else if (t === "checkbox") role = "checkbox";
+  else if (t === "radio") role = "radio";
+  else if (t === "range") role = "slider";
+  else if (t === "search") role = "searchbox";
+}}
+let name = host.getAttribute("aria-label") || "";
+if (!name && host.hasAttribute("aria-labelledby")) {{
+  name = host.getAttribute("aria-labelledby").split(/\s+/).map(id => {{
+    const n = document.getElementById(id);
+    return n ? n.textContent.trim() : "";
+  }}).filter(Boolean).join(" ");
+}}
+if (!name && host.id) {{
+  const label = document.querySelector(`label[for="${{host.id}}"]`);
+  if (label) name = label.textContent.trim();
+}}
+if (!name) name = host.getAttribute("placeholder") || "";
+if (!name) name = host.getAttribute("title") || "";
+if (!name) name = (host.innerText || host.value || "").trim();
+if (!role && !name) return null;
+return [role, name.slice(0, 200)];
+}})()"#
+        );
+        let mut params = EvaluateParams::new(expression);
+        params.return_by_value = Some(true);
+        let value: serde_json::Value =
+            tokio::time::timeout(Duration::from_millis(2_000), page.evaluate(params))
+                .await
+                .map_err(|_| timeout_error(2_000))?
+                .map_err(command_failed)?
+                .into_value()
+                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        if value.is_null() {
+            return Ok(None);
+        }
+        let pair: (String, String) = serde_json::from_value(value)
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        Ok(Some(pair))
+    }
+}
+
+#[async_trait]
+impl crate::InputEngine for ChromiumWorker {
     async fn click(
         &self,
         page_id: &PageId,
@@ -1920,16 +2310,16 @@ impl BrowserWorker for ChromiumWorker {
             match resolved.is_download_link(&page).await {
                 Ok(true) => {
                     ensure_automatic_download_modifier_support(&command.modifiers)?;
-                    return self
-                        .click_and_wait_for_download(
-                            page_id,
-                            &ClickAndWaitForDownloadCommand {
-                                selector: command.selector.clone(),
-                                target: command.target.clone(),
-                                timeout_ms: 30_000,
-                            },
-                        )
-                        .await;
+                    return crate::EventsEngine::click_and_wait_for_download(
+                        self,
+                        page_id,
+                        &ClickAndWaitForDownloadCommand {
+                            selector: command.selector.clone(),
+                            target: command.target.clone(),
+                            timeout_ms: 30_000,
+                        },
+                    )
+                    .await;
                 }
                 Ok(false) => {}
                 Err(error)
@@ -1947,7 +2337,7 @@ impl BrowserWorker for ChromiumWorker {
             }
             let text = resolved.inner_text(&page).await.ok().flatten();
             self.bring_page_to_front(&page).await;
-            let humanized = self.humanization_enabled();
+            let humanized = crate::SessionSettings::humanization_enabled(self);
             if !humanized {
                 // A coordinate-based dispatch needs the target on-screen;
                 // best-effort, like `bring_page_to_front` above -- this only
@@ -2129,7 +2519,7 @@ impl BrowserWorker for ChromiumWorker {
                 resolved.select_option(&page, &command.value).await?,
                 "select",
             )
-        } else if self.humanization_enabled() {
+        } else if crate::SessionSettings::humanization_enabled(self) {
             let synthesized = self
                 .humanized_type_text(&page, &resolved, &command.value, command.clear_first)
                 .await?;
@@ -2356,76 +2746,10 @@ impl BrowserWorker for ChromiumWorker {
             .collect();
         Ok(vec![Evidence::ControlAction { action: evidence }])
     }
+}
 
-    async fn open_page_command(
-        &self,
-        command: &OpenPageCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        let page_id = PageId::new();
-        let browser = self.browser_handle().await?;
-        // Always start blank so init scripts register before first real document.
-        let page = browser
-            .new_page("about:blank")
-            .await
-            .map_err(command_failed)?;
-        self.register_page(page_id.clone(), page).await?;
-        if let Some(url) = command.url.as_deref() {
-            let page = self.page_handle(&page_id).await?;
-            page.goto(url).await.map_err(command_failed)?;
-        }
-        let page = self.page_handle(&page_id).await?;
-        let evidence = page_evidence(page_id, &page).await?;
-        Ok(vec![Evidence::Page {
-            page_id: evidence.page_id,
-            url: evidence.url,
-            title: evidence.title,
-        }])
-    }
-
-    async fn list_pages(&self, _command: &ListPagesCommand) -> Result<Vec<Evidence>, CommandError> {
-        self.sync_untracked_pages().await?;
-        let handles: Vec<(PageId, Page)> = self
-            .pages
-            .lock()
-            .await
-            .iter()
-            .map(|(page_id, page)| (page_id.clone(), page.clone()))
-            .collect();
-        let mut listed = Vec::with_capacity(handles.len());
-        for (page_id, page) in handles {
-            match page_evidence(page_id.clone(), &page).await {
-                Ok(evidence) => listed.push(evidence),
-                Err(error) if is_closed_page_message(&error.message) => {
-                    self.unregister_page(&page_id).await;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        listed.sort_by_key(|page| page.page_id.0);
-        Ok(vec![Evidence::Pages { pages: listed }])
-    }
-
-    async fn close_page_command(
-        &self,
-        command: &ClosePageCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        let page = self
-            .unregister_page(&command.page_id)
-            .await
-            .ok_or_else(page_missing)?;
-        let evidence = page_evidence(command.page_id.clone(), &page).await?;
-        self.closed_targets
-            .lock()
-            .await
-            .insert(page.target_id().clone());
-        page.close().await.map_err(command_failed)?;
-        Ok(vec![Evidence::Page {
-            page_id: evidence.page_id,
-            url: evidence.url,
-            title: evidence.title,
-        }])
-    }
-
+#[async_trait]
+impl crate::EventsEngine for ChromiumWorker {
     async fn network_log(
         &self,
         page_id: &PageId,
@@ -2464,56 +2788,6 @@ impl BrowserWorker for ChromiumWorker {
             });
         }
         Ok(evidence)
-    }
-
-    async fn emulate(
-        &self,
-        page_id: &PageId,
-        command: &types::EmulateCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        let page = self.page_handle(page_id).await?;
-        if let Some(viewport) = command.viewport {
-            if viewport.width == 0
-                || viewport.height == 0
-                || viewport.width > 16384
-                || viewport.height > 16384
-            {
-                return Err(driver_error(
-                    ErrorCode::InvalidRequest,
-                    "viewport dimensions must be within 1..=16384",
-                ));
-            }
-            let params = chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams::builder()
-                .width(viewport.width as i64)
-                .height(viewport.height as i64)
-                .device_scale_factor(1.0)
-                .mobile(command.mobile.unwrap_or(false))
-                .build()
-                .map_err(|error| driver_error(ErrorCode::InvalidRequest, error))?;
-            bounded_cdp(page.execute(params), command_failed).await?;
-        }
-        if let Some(coordinates) = command.geolocation {
-            if !coordinates.latitude.is_finite()
-                || !coordinates.longitude.is_finite()
-                || !(-90.0..=90.0).contains(&coordinates.latitude)
-                || !(-180.0..=180.0).contains(&coordinates.longitude)
-            {
-                return Err(driver_error(
-                    ErrorCode::InvalidRequest,
-                    "geolocation coordinates are out of range",
-                ));
-            }
-            let params = chromiumoxide::cdp::browser_protocol::emulation::SetGeolocationOverrideParams::builder()
-                .latitude(coordinates.latitude)
-                .longitude(coordinates.longitude)
-                .accuracy(coordinates.accuracy.unwrap_or(1.0))
-                .build();
-            bounded_cdp(page.execute(params), command_failed).await?;
-        }
-        Ok(vec![Evidence::Emulation {
-            viewport: command.viewport,
-            geolocation: command.geolocation,
-        }])
     }
 
     async fn handle_dialog(
@@ -2563,347 +2837,6 @@ impl BrowserWorker for ChromiumWorker {
             } else {
                 "dismiss".into()
             },
-        }])
-    }
-
-    async fn print_to_pdf(
-        &self,
-        page_id: &PageId,
-        command: &types::PrintToPdfCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        let page = self.page_handle(page_id).await?;
-        if let Some(scale) = command.scale {
-            if !(0.1..=2.0).contains(&scale) {
-                return Err(driver_error(
-                    ErrorCode::InvalidRequest,
-                    "PDF scale must be within 0.1..=2.0",
-                ));
-            }
-        }
-        let params = chromiumoxide::cdp::browser_protocol::page::PrintToPdfParams {
-            landscape: Some(command.landscape),
-            print_background: Some(command.print_background),
-            scale: command.scale,
-            page_ranges: command.page_ranges.clone(),
-            ..Default::default()
-        };
-        let bytes = page.pdf(params).await.map_err(screenshot_error)?;
-        let record = self
-            .artifacts
-            .put(
-                &self.session_id,
-                page_id,
-                "application/pdf",
-                "pdf",
-                &bytes,
-                MAX_VISION_SCREENSHOT_BYTES,
-            )
-            .await
-            .map_err(|error| driver_error(ErrorCode::ScreenshotCaptureFailed, error))?;
-        Ok(vec![Evidence::PdfArtifact {
-            artifact_id: record.artifact_id,
-            media_type: record.media_type,
-            bytes: record.bytes,
-            sha256: record.sha256,
-        }])
-    }
-
-    async fn get_cookies(
-        &self,
-        page_id: &PageId,
-        command: &types::GetCookiesCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        let page = self.page_handle(page_id).await?;
-        let mut params = chromiumoxide::cdp::browser_protocol::network::GetCookiesParams::default();
-        if !command.urls.is_empty() {
-            params.urls = Some(command.urls.clone());
-        }
-        let result = bounded_cdp(page.execute(params), command_failed)
-            .await?
-            .result;
-        Ok(vec![Evidence::CookieState {
-            page_id: Some(page_id.clone()),
-            cookies: result.cookies.into_iter().map(cookie_record).collect(),
-        }])
-    }
-
-    async fn set_cookies(
-        &self,
-        page_id: &PageId,
-        command: &types::SetCookiesCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        // Clone the page handle and drop the pages guard before any browser
-        // I/O: the read-back below locks the same (non-reentrant) mutex, so
-        // holding it here deadlocks every cookie_set.
-        let page = self.page_handle(page_id).await?;
-        if command.cookies.len() > 128 {
-            return Err(driver_error(
-                ErrorCode::InvalidRequest,
-                "cookie set exceeds the 128-cookie bound",
-            ));
-        }
-        let params = chromiumoxide::cdp::browser_protocol::network::SetCookiesParams {
-            cookies: command.cookies.iter().map(set_cookie_param).collect(),
-        };
-        bounded_cdp(page.execute(params), command_failed).await?;
-        self.get_cookies(
-            page_id,
-            &types::GetCookiesCommand {
-                urls: command
-                    .cookies
-                    .iter()
-                    .map(|cookie| cookie.url.clone())
-                    .collect(),
-            },
-        )
-        .await
-    }
-
-    async fn delete_cookies(
-        &self,
-        page_id: &PageId,
-        command: &types::DeleteCookiesCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        // Same deadlock avoidance as set_cookies: take the handle, drop the
-        // guard, then do I/O (both get_cookies calls lock pages again).
-        let page = self.page_handle(page_id).await?;
-        let current = self
-            .get_cookies(
-                page_id,
-                &types::GetCookiesCommand {
-                    urls: command.urls.clone(),
-                },
-            )
-            .await?;
-        let Some(Evidence::CookieState { cookies, .. }) = current.first() else {
-            return Ok(current);
-        };
-        for cookie in cookies {
-            if !command.names.is_empty() && !command.names.contains(&cookie.name) {
-                continue;
-            }
-            let mut params =
-                chromiumoxide::cdp::browser_protocol::network::DeleteCookiesParams::new(
-                    &cookie.name,
-                );
-            params.url = command.urls.first().cloned().or_else(|| {
-                Some(format!(
-                    "https://{}{}",
-                    cookie.domain.trim_start_matches('.'),
-                    cookie.path
-                ))
-            });
-            params.domain = Some(cookie.domain.clone());
-            params.path = Some(cookie.path.clone());
-            bounded_cdp(page.execute(params), command_failed).await?;
-        }
-        self.get_cookies(
-            page_id,
-            &types::GetCookiesCommand {
-                urls: command.urls.clone(),
-            },
-        )
-        .await
-    }
-
-    async fn screenshot_bytes(&self, page_id: &PageId) -> Result<Vec<u8>, CommandError> {
-        let page = self.page_handle(page_id).await?;
-        let bytes = page
-            .screenshot(
-                ScreenshotParams::builder()
-                    .format(CaptureScreenshotFormat::Png)
-                    .build(),
-            )
-            .await
-            .map_err(screenshot_error)?;
-        if bytes.len() > MAX_VISION_SCREENSHOT_BYTES {
-            return Err(driver_error(
-                ErrorCode::ScreenshotCaptureFailed,
-                "screenshot exceeded the vision byte bound",
-            ));
-        }
-        Ok(bytes)
-    }
-
-    async fn a11y_snapshot(
-        &self,
-        page_id: &PageId,
-        command: &types::AccessibilitySnapshotCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        let page = self.page_handle(page_id).await?;
-        let max_nodes = command
-            .max_nodes
-            .unwrap_or(DEFAULT_A11Y_MAX_NODES)
-            .clamp(1, MAX_A11Y_NODES) as usize;
-        if let Some(target) = &command.target {
-            // Scoped: resolve the target, fetch the AX tree of the frame it
-            // lives in, and compact only its subtree.
-            let resolved = {
-                let browser = self.browser_handle().await?;
-                crate::targeting::resolve_target(page_id, &page, "", Some(target), Some(&browser))
-                    .await?
-            };
-            let backend_id = resolved.backend_node_id(&page).await?;
-            // Scoping to the iframe element itself must return the frame's
-            // content — the main-frame AX subtree of an iframe node is empty,
-            // and the agent asked for what is inside.
-            let owner_frame = page
-                .execute(
-                    chromiumoxide::cdp::browser_protocol::dom::DescribeNodeParams::builder()
-                        .backend_node_id(backend_id)
-                        .build(),
-                )
-                .await
-                .map_err(command_failed)?
-                .result
-                .node
-                .frame_id;
-            if let Some(content_frame) = owner_frame {
-                let result = page
-                    .execute(
-                        chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::builder()
-                            .frame_id(content_frame)
-                            .build(),
-                    )
-                    .await
-                    .map_err(command_failed)?
-                    .result;
-                let (mut nodes, truncated) = compact_ax_tree(&result.nodes, max_nodes);
-                // Stamp targets with the hop that re-resolves the iframe
-                // element, so in-frame targets pass to control_action
-                // verbatim like the full-tree descent's do.
-                let hop_name = match &resolved.evidence {
-                    Evidence::Resolution { fingerprint, .. } => fingerprint.name.clone(),
-                    _ => None,
-                };
-                if let Some(name) = hop_name {
-                    let segment = types::SemanticTargetSegment {
-                        role: "iframe".into(),
-                        accessible_name: name,
-                        ordinal: None,
-                    };
-                    stamp_a11y_frame_path(&mut nodes, &segment);
-                }
-                return Ok(vec![Evidence::AccessibilitySnapshot {
-                    page_id: page_id.clone(),
-                    nodes,
-                    truncated,
-                }]);
-            }
-            let params = match resolved.frame_id() {
-                Some(frame_id) => {
-                    chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::builder()
-                        .frame_id(frame_id.clone())
-                        .build()
-                }
-                None => {
-                    chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::default()
-                }
-            };
-            let result = page.execute(params).await.map_err(command_failed)?.result;
-            let root_id = result
-                .nodes
-                .iter()
-                .find(|node| node.backend_dom_node_id.as_ref() == Some(&backend_id))
-                .map(|node| node.node_id.clone())
-                .ok_or_else(|| hidden_from_accessibility(&result.nodes))?;
-            let (nodes, truncated) =
-                compact_ax_tree_from(&result.nodes, max_nodes, Some(root_id.as_ref()));
-            return Ok(vec![Evidence::AccessibilitySnapshot {
-                page_id: page_id.clone(),
-                nodes,
-                truncated,
-            }]);
-        }
-        let result = page
-            .execute(
-                chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::default(),
-            )
-            .await
-            .map_err(command_failed)?
-            .result;
-        let (mut nodes, mut truncated) = compact_ax_tree(&result.nodes, max_nodes);
-        // The main-frame AX tree stops at `Iframe` nodes; descend one level
-        // (cap 8, same-process frames) so in-frame controls are visible and
-        // their targets carry the frame hop control_action can re-resolve.
-        let emitted = count_a11y_nodes(&nodes);
-        if emitted < max_nodes {
-            truncated |= descend_a11y_iframes(&page, &mut nodes, max_nodes - emitted).await;
-        }
-        let controls_omitted = if a11y_contains_form_control(&nodes) {
-            false
-        } else {
-            match page
-                .evaluate(crate::form_snapshot_expression(page_id))
-                .await
-            {
-                Ok(remote) => {
-                    let value: Result<serde_json::Value, _> = remote.into_value();
-                    value
-                        .ok()
-                        .and_then(|value| value.as_str().map(str::to_owned))
-                        .and_then(|encoded| {
-                            crate::decode_form_snapshot(page_id.clone(), &encoded, 512).ok()
-                        })
-                        .is_some_and(|snapshot| {
-                            !snapshot.unowned_controls.is_empty()
-                                || snapshot.forms.iter().any(|form| !form.controls.is_empty())
-                        })
-                }
-                Err(_) => false,
-            }
-        };
-        let mut evidence = vec![Evidence::AccessibilitySnapshot {
-            page_id: page_id.clone(),
-            nodes,
-            truncated,
-        }];
-        if controls_omitted {
-            evidence.push(Evidence::Configuration {
-                name: "accessibilityControlsOmitted".into(),
-                value: "true: form controls exist but were absent from the accessibility tree; use form_snapshot".into(),
-            });
-        }
-        Ok(evidence)
-    }
-
-    async fn form_snapshot(
-        &self,
-        page_id: &PageId,
-        max_controls: Option<u32>,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        let max_controls = max_controls.unwrap_or(512) as usize;
-        let page = self.page_handle(page_id).await?;
-        let value: serde_json::Value = page
-            .evaluate(crate::form_snapshot_expression_with_limit(
-                page_id,
-                max_controls,
-            ))
-            .await
-            .map_err(command_failed)?
-            .into_value()
-            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
-        let encoded = value.as_str().ok_or_else(|| {
-            driver_error(
-                ErrorCode::BrowserCommandFailed,
-                "form snapshot returned non-text JSON",
-            )
-        })?;
-        let snapshot = crate::decode_form_snapshot(page_id.clone(), encoded, max_controls)?;
-        Ok(vec![Evidence::FormSnapshot { snapshot }])
-    }
-
-    async fn activate_page(
-        &self,
-        command: &types::ActivatePageCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        let page = self.page_handle(&command.page_id).await?;
-        page.activate().await.map_err(command_failed)?;
-        let evidence = page_evidence(command.page_id.clone(), &page).await?;
-        Ok(vec![Evidence::Page {
-            page_id: evidence.page_id,
-            url: evidence.url,
-            title: evidence.title,
         }])
     }
 
@@ -2980,6 +2913,7 @@ impl BrowserWorker for ChromiumWorker {
             resolved.evidence,
         ])
     }
+
     async fn click_and_wait_for_download(
         &self,
         page_id: &PageId,
@@ -3094,30 +3028,69 @@ impl BrowserWorker for ChromiumWorker {
             resolved.evidence,
         ])
     }
+}
 
-    async fn wait_for(
+#[async_trait]
+impl crate::CaptureEngine for ChromiumWorker {
+    async fn print_to_pdf(
         &self,
         page_id: &PageId,
-        command: &WaitForCommand,
+        command: &types::PrintToPdfCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        crate::wait::poll_until(
-            command,
-            &ChromiumWaitObserver {
-                worker: self,
+        let page = self.page_handle(page_id).await?;
+        if let Some(scale) = command.scale {
+            if !(0.1..=2.0).contains(&scale) {
+                return Err(driver_error(
+                    ErrorCode::InvalidRequest,
+                    "PDF scale must be within 0.1..=2.0",
+                ));
+            }
+        }
+        let params = chromiumoxide::cdp::browser_protocol::page::PrintToPdfParams {
+            landscape: Some(command.landscape),
+            print_background: Some(command.print_background),
+            scale: command.scale,
+            page_ranges: command.page_ranges.clone(),
+            ..Default::default()
+        };
+        let bytes = page.pdf(params).await.map_err(screenshot_error)?;
+        let record = self
+            .artifacts
+            .put(
+                &self.session_id,
                 page_id,
-            },
-        )
-        .await
+                "application/pdf",
+                "pdf",
+                &bytes,
+                MAX_VISION_SCREENSHOT_BYTES,
+            )
+            .await
+            .map_err(|error| driver_error(ErrorCode::ScreenshotCaptureFailed, error))?;
+        Ok(vec![Evidence::PdfArtifact {
+            artifact_id: record.artifact_id,
+            media_type: record.media_type,
+            bytes: record.bytes,
+            sha256: record.sha256,
+        }])
     }
 
-    async fn collect_candidates(
-        &self,
-        page_id: &PageId,
-        target: &types::TargetSpec,
-    ) -> Result<Vec<dom_engine::Candidate>, CommandError> {
+    async fn screenshot_bytes(&self, page_id: &PageId) -> Result<Vec<u8>, CommandError> {
         let page = self.page_handle(page_id).await?;
-        let browser = self.browser_handle().await?;
-        gather_candidates(&page, target, Some(&browser)).await
+        let bytes = page
+            .screenshot(
+                ScreenshotParams::builder()
+                    .format(CaptureScreenshotFormat::Png)
+                    .build(),
+            )
+            .await
+            .map_err(screenshot_error)?;
+        if bytes.len() > MAX_VISION_SCREENSHOT_BYTES {
+            return Err(driver_error(
+                ErrorCode::ScreenshotCaptureFailed,
+                "screenshot exceeded the vision byte bound",
+            ));
+        }
+        Ok(bytes)
     }
 
     async fn capture_screenshot(
@@ -3205,6 +3178,59 @@ impl BrowserWorker for ChromiumWorker {
         }
         Ok(evidence)
     }
+}
+
+#[async_trait]
+impl crate::PageConfigurationEngine for ChromiumWorker {
+    async fn emulate(
+        &self,
+        page_id: &PageId,
+        command: &types::EmulateCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let page = self.page_handle(page_id).await?;
+        if let Some(viewport) = command.viewport {
+            if viewport.width == 0
+                || viewport.height == 0
+                || viewport.width > 16384
+                || viewport.height > 16384
+            {
+                return Err(driver_error(
+                    ErrorCode::InvalidRequest,
+                    "viewport dimensions must be within 1..=16384",
+                ));
+            }
+            let params = chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams::builder()
+                .width(viewport.width as i64)
+                .height(viewport.height as i64)
+                .device_scale_factor(1.0)
+                .mobile(command.mobile.unwrap_or(false))
+                .build()
+                .map_err(|error| driver_error(ErrorCode::InvalidRequest, error))?;
+            bounded_cdp(page.execute(params), command_failed).await?;
+        }
+        if let Some(coordinates) = command.geolocation {
+            if !coordinates.latitude.is_finite()
+                || !coordinates.longitude.is_finite()
+                || !(-90.0..=90.0).contains(&coordinates.latitude)
+                || !(-180.0..=180.0).contains(&coordinates.longitude)
+            {
+                return Err(driver_error(
+                    ErrorCode::InvalidRequest,
+                    "geolocation coordinates are out of range",
+                ));
+            }
+            let params = chromiumoxide::cdp::browser_protocol::emulation::SetGeolocationOverrideParams::builder()
+                .latitude(coordinates.latitude)
+                .longitude(coordinates.longitude)
+                .accuracy(coordinates.accuracy.unwrap_or(1.0))
+                .build();
+            bounded_cdp(page.execute(params), command_failed).await?;
+        }
+        Ok(vec![Evidence::Emulation {
+            viewport: command.viewport,
+            geolocation: command.geolocation,
+        }])
+    }
 
     async fn set_focus_emulation(
         &self,
@@ -3245,14 +3271,10 @@ impl BrowserWorker for ChromiumWorker {
                 .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?,
         }])
     }
+}
 
-    // SECURITY(F4): the two authoritative deny-by-default gates for JS
-    // evaluation, the token capability check (`AuthenticatedRuntime::submit`)
-    // and the per-session `ExecutionPolicy` check (`RuntimeService::submit`),
-    // are enforced upstream; both land before `execute()` reaches a
-    // `BrowserWorker`. There is deliberately no worker-level backstop:
-    // `WorkerFactory::launch(&SessionId)` gives this worker no access to the
-    // session's `ExecutionPolicy`.
+#[async_trait]
+impl crate::JavaScriptEngine for ChromiumWorker {
     async fn evaluate_javascript(
         &self,
         page_id: &PageId,
@@ -3281,63 +3303,108 @@ impl BrowserWorker for ChromiumWorker {
         .await
         .map_err(|_| timeout_error(timeout_ms))?
     }
+}
 
-    async fn element_at_point(
+#[async_trait]
+impl crate::WebStateEngine for ChromiumWorker {
+    async fn get_cookies(
         &self,
         page_id: &PageId,
-        x: f64,
-        y: f64,
-    ) -> Result<Option<(String, String)>, CommandError> {
+        command: &types::GetCookiesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
         let page = self.page_handle(page_id).await?;
-        let expression = format!(
-            r#"(() => {{
-const INTERACTIVE = "a,button,input,select,textarea,[role],[tabindex]";
-const IMPLICIT = {{a:"link",button:"button",input:"textbox",select:"combobox",textarea:"textbox"}};
-let el = document.elementFromPoint({x}, {y});
-if (!el) return null;
-const host = el.closest(INTERACTIVE) || el;
-let role = host.getAttribute("role") || IMPLICIT[host.tagName.toLowerCase()] || "";
-if (host.tagName === "INPUT" && !host.getAttribute("role")) {{
-  const t = (host.getAttribute("type") || "text").toLowerCase();
-  if (["button","submit","reset"].includes(t)) role = "button";
-  else if (t === "checkbox") role = "checkbox";
-  else if (t === "radio") role = "radio";
-  else if (t === "range") role = "slider";
-  else if (t === "search") role = "searchbox";
-}}
-let name = host.getAttribute("aria-label") || "";
-if (!name && host.hasAttribute("aria-labelledby")) {{
-  name = host.getAttribute("aria-labelledby").split(/\s+/).map(id => {{
-    const n = document.getElementById(id);
-    return n ? n.textContent.trim() : "";
-  }}).filter(Boolean).join(" ");
-}}
-if (!name && host.id) {{
-  const label = document.querySelector(`label[for="${{host.id}}"]`);
-  if (label) name = label.textContent.trim();
-}}
-if (!name) name = host.getAttribute("placeholder") || "";
-if (!name) name = host.getAttribute("title") || "";
-if (!name) name = (host.innerText || host.value || "").trim();
-if (!role && !name) return null;
-return [role, name.slice(0, 200)];
-}})()"#
-        );
-        let mut params = EvaluateParams::new(expression);
-        params.return_by_value = Some(true);
-        let value: serde_json::Value =
-            tokio::time::timeout(Duration::from_millis(2_000), page.evaluate(params))
-                .await
-                .map_err(|_| timeout_error(2_000))?
-                .map_err(command_failed)?
-                .into_value()
-                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
-        if value.is_null() {
-            return Ok(None);
+        let mut params = chromiumoxide::cdp::browser_protocol::network::GetCookiesParams::default();
+        if !command.urls.is_empty() {
+            params.urls = Some(command.urls.clone());
         }
-        let pair: (String, String) = serde_json::from_value(value)
-            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
-        Ok(Some(pair))
+        let result = bounded_cdp(page.execute(params), command_failed)
+            .await?
+            .result;
+        Ok(vec![Evidence::CookieState {
+            page_id: Some(page_id.clone()),
+            cookies: result.cookies.into_iter().map(cookie_record).collect(),
+        }])
+    }
+
+    async fn set_cookies(
+        &self,
+        page_id: &PageId,
+        command: &types::SetCookiesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        // Clone the page handle and drop the pages guard before any browser
+        // I/O: the read-back below locks the same (non-reentrant) mutex, so
+        // holding it here deadlocks every cookie_set.
+        let page = self.page_handle(page_id).await?;
+        if command.cookies.len() > 128 {
+            return Err(driver_error(
+                ErrorCode::InvalidRequest,
+                "cookie set exceeds the 128-cookie bound",
+            ));
+        }
+        let params = chromiumoxide::cdp::browser_protocol::network::SetCookiesParams {
+            cookies: command.cookies.iter().map(set_cookie_param).collect(),
+        };
+        bounded_cdp(page.execute(params), command_failed).await?;
+        crate::WebStateEngine::get_cookies(
+            self,
+            page_id,
+            &types::GetCookiesCommand {
+                urls: command
+                    .cookies
+                    .iter()
+                    .map(|cookie| cookie.url.clone())
+                    .collect(),
+            },
+        )
+        .await
+    }
+
+    async fn delete_cookies(
+        &self,
+        page_id: &PageId,
+        command: &types::DeleteCookiesCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        // Same deadlock avoidance as set_cookies: take the handle, drop the
+        // guard, then do I/O (both get_cookies calls lock pages again).
+        let page = self.page_handle(page_id).await?;
+        let current = crate::WebStateEngine::get_cookies(
+            self,
+            page_id,
+            &types::GetCookiesCommand {
+                urls: command.urls.clone(),
+            },
+        )
+        .await?;
+        let Some(Evidence::CookieState { cookies, .. }) = current.first() else {
+            return Ok(current);
+        };
+        for cookie in cookies {
+            if !command.names.is_empty() && !command.names.contains(&cookie.name) {
+                continue;
+            }
+            let mut params =
+                chromiumoxide::cdp::browser_protocol::network::DeleteCookiesParams::new(
+                    &cookie.name,
+                );
+            params.url = command.urls.first().cloned().or_else(|| {
+                Some(format!(
+                    "https://{}{}",
+                    cookie.domain.trim_start_matches('.'),
+                    cookie.path
+                ))
+            });
+            params.domain = Some(cookie.domain.clone());
+            params.path = Some(cookie.path.clone());
+            bounded_cdp(page.execute(params), command_failed).await?;
+        }
+        crate::WebStateEngine::get_cookies(
+            self,
+            page_id,
+            &types::GetCookiesCommand {
+                urls: command.urls.clone(),
+            },
+        )
+        .await
     }
 
     fn supports_http_state(&self) -> bool {
@@ -3422,17 +3489,14 @@ return [role, name.slice(0, 200)];
         .map_err(command_failed)?;
         Ok(())
     }
+}
 
-    async fn close(&self) -> Result<(), CommandError> {
-        self.shutdown().await
-    }
-
-    async fn terminate(&self) -> Result<(), CommandError> {
-        self.shutdown().await
-    }
-
-    async fn reconnect_live_process(&self) -> Result<Vec<Evidence>, CommandError> {
-        self.reconnect_live_process_impl().await
+impl crate::WaitProvider for ChromiumWorker {
+    fn observer<'a>(&'a self, page_id: &'a PageId) -> Box<dyn crate::wait::WaitObserver + 'a> {
+        Box::new(ChromiumWaitObserver {
+            worker: self,
+            page_id,
+        })
     }
 }
 
@@ -5182,7 +5246,7 @@ mod tests {
         let held_pages = worker.pages.lock().await;
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            crate::BrowserWorker::evaluate_javascript(
+            crate::JavaScriptEngine::evaluate_javascript(
                 &worker,
                 &PageId::new(),
                 &types::EvaluateJavaScriptCommand {
