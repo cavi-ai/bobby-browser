@@ -12,10 +12,7 @@ use context_store::{
 };
 use intent_engine::{VisionAssist, VisionProposal, VisionProposeRequest};
 use sdk_core::RuntimeService;
-use types::{
-    CommandError, CreateSessionRequest, Evidence, InspectCommand, NavigateCommand, PageId,
-    SessionId, WorkerId,
-};
+use types::{CommandError, CreateSessionRequest, SessionId, WorkerId};
 use worker_pool::{BrowserWorker, WorkerFactory};
 
 struct CountingFactory(Arc<AtomicUsize>);
@@ -48,40 +45,11 @@ impl BrowserWorker for Worker {
     fn worker_id(&self) -> WorkerId {
         self.0.clone()
     }
+
     fn profile_dir(&self) -> &Path {
         Path::new("injected")
     }
-    async fn open_page(&self, _page_id: PageId) -> Result<(), CommandError> {
-        Ok(())
-    }
-    async fn navigate(
-        &self,
-        _page_id: &PageId,
-        _command: &NavigateCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-    async fn inspect(
-        &self,
-        _page_id: &PageId,
-        _command: &InspectCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-    async fn click(
-        &self,
-        _page_id: &PageId,
-        _command: &types::ClickCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
-    async fn type_text(
-        &self,
-        _page_id: &PageId,
-        _command: &types::TypeTextCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Ok(vec![])
-    }
+
     async fn close(&self) -> Result<(), CommandError> {
         Ok(())
     }

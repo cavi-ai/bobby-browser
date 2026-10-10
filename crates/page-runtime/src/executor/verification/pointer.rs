@@ -20,28 +20,27 @@ impl CommandVerifier for Pointer {
                     // inspect below is the real verification, but it must be
                     // logged -- a silently skipped wait reads as a fast,
                     // flaky expected-URL failure.
-                    if let Err(error) = lease
-                        .worker()
-                        .wait_for(
-                            page_id,
-                            &WaitForCommand {
-                                condition: WaitCondition::Url {
-                                    matcher: TextMatch::Exact(expected_url.clone()),
-                                },
-                                timeout_ms: 5_000,
+                    if let Err(error) = worker_pool::PageBehavior::wait_for(
+                        lease.worker().wait_provider(),
+                        page_id,
+                        &WaitForCommand {
+                            condition: WaitCondition::Url {
+                                matcher: TextMatch::Exact(expected_url.clone()),
                             },
-                        )
-                        .await
+                            timeout_ms: 5_000,
+                        },
+                    )
+                    .await
                     {
                         tracing::warn!(
                             error = %error.message,
                             "expected-URL settle wait failed before click verification"
                         );
                     }
-                    let verification = lease
-                        .worker()
-                        .inspect(page_id, &InspectCommand::default())
-                        .await?;
+                    let verification =
+                        worker_pool::observation_or_default(lease.worker().observation())
+                            .inspect(page_id, &InspectCommand::default())
+                            .await?;
                     let matches = verification.iter().any(|item| {
                         matches!(item, Evidence::Inspection { url, .. } if url == expected_url)
                     });

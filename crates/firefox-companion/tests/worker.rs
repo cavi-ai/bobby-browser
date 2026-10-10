@@ -7,6 +7,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use worker_pool::TabsEngine;
 
 use artifact_store::ArtifactStore;
 use async_trait::async_trait;
@@ -834,9 +835,12 @@ async fn semantic_candidate_collection_uses_firefox_accessibility_snapshot() {
     .await
     .unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
 
-    let candidates = worker
+    let candidates = worker_pool::observation_or_default(worker.observation())
         .collect_candidates(
             &page_id,
             &TargetSpec {
@@ -869,9 +873,12 @@ async fn accessibility_snapshot_asks_the_extension_for_page_text() {
     .await
     .unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
 
-    let evidence = worker
+    let evidence = worker_pool::observation_or_default(worker.observation())
         .a11y_snapshot(
             &page_id,
             &types::AccessibilitySnapshotCommand {
@@ -904,7 +911,10 @@ async fn semantic_candidate_collection_rejects_unsupported_scoped_paths() {
     .await
     .unwrap();
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
 
     for target in [
         TargetSpec {
@@ -922,7 +932,7 @@ async fn semantic_candidate_collection_rejects_unsupported_scoped_paths() {
             ..TargetSpec::default()
         },
     ] {
-        let error = worker
+        let error = worker_pool::observation_or_default(worker.observation())
             .collect_candidates(&page_id, &target)
             .await
             .unwrap_err();
@@ -940,9 +950,15 @@ async fn vision_coordinate_click_uses_firefox_viewport_pointer_actions() {
     let bidi = FakeBidi::new(Vec::new());
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
 
-    let evidence = worker.click_xy(&page_id, 245.5, 171.25).await.unwrap();
+    let evidence = worker_pool::input_or_default(worker.input())
+        .click_xy(&page_id, 245.5, 171.25)
+        .await
+        .unwrap();
 
     let calls = bidi.calls().await;
     let pointer = calls
@@ -1102,7 +1118,7 @@ async fn context_destroyed_while_binding_cannot_be_exposed_as_ready() {
     }));
     assert_eq!(bidi.closed_titles().await, vec!["Original tab title"]);
     assert_eq!(
-        worker
+        worker_pool::navigation_or_default(worker.navigation())
             .navigate(
                 &page_id,
                 &NavigateCommand {
@@ -1176,7 +1192,10 @@ async fn a_slow_page_release_does_not_drop_later_events() {
     )
     .await
     .unwrap();
-    worker.open_page(PageId::new()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(PageId::new())
+        .await
+        .unwrap();
 
     bidi.emit(
         "browsingContext.contextDestroyed",
@@ -1217,7 +1236,7 @@ async fn open_page_uses_a_transient_binding_title_and_restores_the_exact_origina
     let observer = FakeObserver::new(observation());
     let worker = worker(bidi.clone(), observer.clone()).await;
 
-    let evidence = worker
+    let evidence = worker_pool::tabs_or_default(worker.tabs())
         .open_page_command(&OpenPageCommand { url: None })
         .await
         .unwrap();
@@ -1313,9 +1332,15 @@ async fn form_snapshot_deserializes_the_shared_projection_over_bidi() {
         Ok(json!({"result": {"type": "string", "value": encoded}})),
     ]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
-    worker.open_page(page_id.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
 
-    let evidence = worker.form_snapshot(&page_id, None).await.unwrap();
+    let evidence = worker_pool::observation_or_default(worker.observation())
+        .form_snapshot(&page_id, None)
+        .await
+        .unwrap();
     assert!(evidence.iter().any(|item| matches!(
         item,
         Evidence::FormSnapshot { snapshot }
@@ -1441,10 +1466,17 @@ async fn aborting_open_at_each_remote_stage_cleans_context_and_preserves_full_ca
         assert_eq!(release_count.load(Ordering::SeqCst), 1);
 
         for _ in 0..MAX_TRACKED_PAGES {
-            worker.open_page(PageId::new()).await.unwrap();
+            worker_pool::tabs_or_default(worker.tabs())
+                .open_page(PageId::new())
+                .await
+                .unwrap();
         }
         assert_eq!(
-            worker.open_page(PageId::new()).await.unwrap_err().code,
+            worker_pool::tabs_or_default(worker.tabs())
+                .open_page(PageId::new())
+                .await
+                .unwrap_err()
+                .code,
             ErrorCode::ResourceExhausted,
             "{stage:?} cancellation consumed one of the 256 page slots"
         );
@@ -1491,10 +1523,17 @@ async fn aborting_open_page_command_during_navigation_cleans_owned_page_and_capa
     assert_eq!(bidi.closed_titles().await, vec!["Original tab title"]);
 
     for _ in 0..MAX_TRACKED_PAGES {
-        worker.open_page(PageId::new()).await.unwrap();
+        worker_pool::tabs_or_default(worker.tabs())
+            .open_page(PageId::new())
+            .await
+            .unwrap();
     }
     assert_eq!(
-        worker.open_page(PageId::new()).await.unwrap_err().code,
+        worker_pool::tabs_or_default(worker.tabs())
+            .open_page(PageId::new())
+            .await
+            .unwrap_err()
+            .code,
         ErrorCode::ResourceExhausted
     );
 }
@@ -1607,9 +1646,12 @@ async fn open_page_and_navigate_map_to_bidi_context_commands() {
     ]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    let complete = worker
+    let complete = worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page,
             &NavigateCommand {
@@ -1620,7 +1662,7 @@ async fn open_page_and_navigate_map_to_bidi_context_commands() {
         )
         .await
         .unwrap();
-    let interactive = worker
+    let interactive = worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page,
             &NavigateCommand {
@@ -1678,7 +1720,7 @@ async fn open_page_command_returns_page_and_browser_execution_evidence() {
     ]);
     let worker = worker(bidi, FakeObserver::new(observation())).await;
 
-    let evidence = worker
+    let evidence = worker_pool::tabs_or_default(worker.tabs())
         .open_page_command(&OpenPageCommand {
             url: Some("https://example.test/".into()),
         })
@@ -1701,9 +1743,12 @@ async fn inspect_evaluates_in_isolated_realm_and_uses_extension_observation() {
     let observer = FakeObserver::new(observation());
     let worker = worker(bidi.clone(), observer.clone()).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    let evidence = worker
+    let evidence = worker_pool::observation_or_default(worker.observation())
         .inspect(
             &page,
             &InspectCommand {
@@ -1747,9 +1792,12 @@ async fn inspect_reads_only_bounded_inert_json_script_receipts() {
     let observer = FakeObserver::new(observation());
     let worker = worker(bidi, observer.clone()).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    let evidence = worker
+    let evidence = worker_pool::observation_or_default(worker.observation())
         .inspect(
             &page,
             &InspectCommand {
@@ -1776,9 +1824,12 @@ async fn click_uses_native_pointer_actions_and_engine_native_evidence() {
     ]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    let evidence = worker
+    let evidence = worker_pool::input_or_default(worker.input())
         .click(
             &page,
             &ClickCommand {
@@ -1856,9 +1907,12 @@ async fn native_click_scrolls_and_revalidates_a_below_fold_element_before_pointe
     .await;
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    worker
+    worker_pool::input_or_default(worker.input())
         .click(
             &page,
             &ClickCommand {
@@ -1940,9 +1994,12 @@ async fn native_click_re_resolves_a_target_detached_before_pointer_input() {
     .await;
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    worker
+    worker_pool::input_or_default(worker.input())
         .click(
             &page,
             &ClickCommand {
@@ -1990,9 +2047,12 @@ async fn native_click_never_repeats_pointer_input_that_failed_after_dispatch() {
     ]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    let error = worker
+    let error = worker_pool::input_or_default(worker.input())
         .click(
             &page,
             &ClickCommand {
@@ -2036,9 +2096,12 @@ async fn native_click_fails_typed_without_pointer_input_when_target_detaches_aft
     bidi.set_preflight(vec![detached(), detached()]).await;
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    let error = worker
+    let error = worker_pool::input_or_default(worker.input())
         .click(
             &page,
             &ClickCommand {
@@ -2077,9 +2140,12 @@ async fn native_click_fails_typed_for_obscured_and_out_of_bounds_targets() {
         .await;
         let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
         let page = PageId::new();
-        worker.open_page(page.clone()).await.unwrap();
+        worker_pool::tabs_or_default(worker.tabs())
+            .open_page(page.clone())
+            .await
+            .unwrap();
 
-        let error = worker
+        let error = worker_pool::input_or_default(worker.input())
             .click(
                 &page,
                 &ClickCommand {
@@ -2111,9 +2177,12 @@ async fn semantic_click_resolves_test_id_to_verified_css_before_native_input() {
     ]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    worker
+    worker_pool::input_or_default(worker.input())
         .click(
             &page,
             &ClickCommand {
@@ -2162,9 +2231,12 @@ async fn semantic_click_missing_live_node_is_typed_as_target_drift_input() {
     ]);
     let worker = worker(bidi, FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    let error = worker
+    let error = worker_pool::input_or_default(worker.input())
         .click(
             &page,
             &ClickCommand {
@@ -2204,9 +2276,12 @@ async fn semantic_click_descends_exact_test_id_frame_before_native_input() {
     .await;
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    worker
+    worker_pool::input_or_default(worker.input())
         .click(
             &page,
             &ClickCommand {
@@ -2260,9 +2335,12 @@ async fn semantic_frame_path_rejects_missing_ambiguous_and_non_frame_segments() 
         ]);
         let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
         let page = PageId::new();
-        worker.open_page(page.clone()).await.unwrap();
+        worker_pool::tabs_or_default(worker.tabs())
+            .open_page(page.clone())
+            .await
+            .unwrap();
 
-        let error = worker
+        let error = worker_pool::input_or_default(worker.input())
             .click(
                 &page,
                 &ClickCommand {
@@ -2307,9 +2385,12 @@ async fn semantic_frame_path_rejects_ambiguous_live_frame_candidates() {
     ]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    let error = worker
+    let error = worker_pool::input_or_default(worker.input())
         .click(
             &page,
             &ClickCommand {
@@ -2363,9 +2444,12 @@ async fn frame_candidate_boundary_rejects_unsanitized_credential_metadata() {
         ]);
         let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
         let page = PageId::new();
-        worker.open_page(page.clone()).await.unwrap();
+        worker_pool::tabs_or_default(worker.tabs())
+            .open_page(page.clone())
+            .await
+            .unwrap();
 
-        let error = worker
+        let error = worker_pool::input_or_default(worker.input())
             .click(
                 &page,
                 &ClickCommand {
@@ -2411,9 +2495,12 @@ async fn framed_typed_value_is_verified_without_returning_payment_value() {
     .await;
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    let evidence = worker
+    let evidence = worker_pool::input_or_default(worker.input())
         .verify_framed_typed_value(
             &page,
             &TypeTextCommand {
@@ -2472,7 +2559,10 @@ async fn framed_select_label_is_verified_privately_when_option_value_differs() {
     .await;
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
     let command = TypeTextCommand {
         selector: String::new(),
         target: Some(TargetSpec {
@@ -2487,7 +2577,7 @@ async fn framed_select_label_is_verified_privately_when_option_value_differs() {
         clear_first: true,
         expected_url: None,
     };
-    let evidence = worker
+    let evidence = worker_pool::input_or_default(worker.input())
         .verify_framed_typed_value(&page, &command, Some("[redacted]"), "select")
         .await
         .unwrap()
@@ -2518,9 +2608,12 @@ async fn framed_select_control_action_is_denied_before_dispatch() {
     let bidi = FakeBidi::new(vec![Ok(json!({"context": "context-1"}))]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
     let before = bidi.calls().await.len();
-    let error = worker
+    let error = worker_pool::input_or_default(worker.input())
         .control_action(
             &page,
             &ControlActionCommand {
@@ -2567,9 +2660,12 @@ async fn framed_inspection_redacts_all_form_values_including_short_unlabelled_se
         .await;
         let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
         let page = PageId::new();
-        worker.open_page(page.clone()).await.unwrap();
+        worker_pool::tabs_or_default(worker.tabs())
+            .open_page(page.clone())
+            .await
+            .unwrap();
 
-        let evidence = worker
+        let evidence = worker_pool::observation_or_default(worker.observation())
             .inspect(
                 &page,
                 &InspectCommand {
@@ -2628,9 +2724,12 @@ async fn framed_typing_never_reads_the_control_value_over_bidi() {
     .await;
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    let evidence = worker
+    let evidence = worker_pool::input_or_default(worker.input())
         .type_text(
             &page,
             &TypeTextCommand {
@@ -2676,9 +2775,12 @@ async fn semantic_click_descends_exact_open_shadow_root_before_native_input() {
     .await;
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    worker
+    worker_pool::input_or_default(worker.input())
         .click(
             &page,
             &ClickCommand {
@@ -2737,8 +2839,11 @@ async fn semantic_shadow_path_rejects_missing_closed_and_ambiguous_roots() {
         ]);
         let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
         let page = PageId::new();
-        worker.open_page(page.clone()).await.unwrap();
-        let error = worker
+        worker_pool::tabs_or_default(worker.tabs())
+            .open_page(page.clone())
+            .await
+            .unwrap();
+        let error = worker_pool::input_or_default(worker.input())
             .click(
                 &page,
                 &ClickCommand {
@@ -2792,22 +2897,25 @@ async fn semantic_shadow_path_resolves_exact_role_and_name_for_wait_and_click() 
     .await;
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
-
-    worker
-        .wait_for(
-            &page,
-            &WaitForCommand {
-                condition: WaitCondition::Element {
-                    target: Box::new(target.clone()),
-                    state: types::ElementState::Visible,
-                },
-                timeout_ms: 100,
-            },
-        )
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
         .await
         .unwrap();
-    worker
+
+    worker_pool::PageBehavior::wait_for(
+        worker.wait_provider(),
+        &page,
+        &WaitForCommand {
+            condition: WaitCondition::Element {
+                target: Box::new(target.clone()),
+                state: types::ElementState::Visible,
+            },
+            timeout_ms: 100,
+        },
+    )
+    .await
+    .unwrap();
+    worker_pool::input_or_default(worker.input())
         .click(
             &page,
             &ClickCommand {
@@ -2851,12 +2959,15 @@ async fn popup_subscription_precedes_one_native_click_and_registers_the_new_page
     ]);
     let worker = Arc::new(worker(bidi.clone(), FakeObserver::new(observation())).await);
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
     let operation = {
         let worker = Arc::clone(&worker);
         let page = page.clone();
         tokio::spawn(async move {
-            worker
+            worker_pool::events_or_default(worker.events())
                 .click_and_wait_for_popup(
                     &page,
                     &ClickAndWaitForPopupCommand {
@@ -2903,7 +3014,7 @@ async fn popup_subscription_precedes_one_native_click_and_registers_the_new_page
             _ => None,
         })
         .unwrap();
-    worker
+    worker_pool::observation_or_default(worker.observation())
         .inspect(&popup_page, &InspectCommand::default())
         .await
         .unwrap();
@@ -2926,8 +3037,11 @@ async fn popup_timeout_never_replays_the_boundary_click() {
     ]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
-    let error = worker
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
+    let error = worker_pool::events_or_default(worker.events())
         .click_and_wait_for_popup(
             &page,
             &ClickAndWaitForPopupCommand {
@@ -2957,20 +3071,29 @@ async fn list_pages_excludes_a_closed_context_and_releases_its_binding() {
     let bidi = FakeBidi::new(vec![Ok(json!({"context": "context-1"}))]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
     bidi.set_tree(json!({"contexts": [{
         "context": "context-1", "url": "https://example.test/live", "children": []
     }]}))
     .await;
-    let live = worker.list_pages(&ListPagesCommand).await.unwrap();
+    let live = worker_pool::tabs_or_default(worker.tabs())
+        .list_pages(&ListPagesCommand)
+        .await
+        .unwrap();
     assert!(
         matches!(&live[0], Evidence::Pages { pages } if pages.len() == 1 && pages[0].page_id == page)
     );
 
     bidi.set_tree(json!({"contexts": []})).await;
-    let closed = worker.list_pages(&ListPagesCommand).await.unwrap();
+    let closed = worker_pool::tabs_or_default(worker.tabs())
+        .list_pages(&ListPagesCommand)
+        .await
+        .unwrap();
     assert!(matches!(&closed[0], Evidence::Pages { pages } if pages.is_empty()));
-    assert!(worker
+    assert!(worker_pool::observation_or_default(worker.observation())
         .inspect(&page, &InspectCommand::default())
         .await
         .is_err());
@@ -2986,12 +3109,15 @@ async fn popup_capture_ignores_unrelated_contexts_and_handles_event_during_click
     let click = bidi.block_once("input.performActions", None).await;
     let worker = Arc::new(worker(bidi.clone(), FakeObserver::new(observation())).await);
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
     let operation = {
         let worker = Arc::clone(&worker);
         let page = page.clone();
         tokio::spawn(async move {
-            worker
+            worker_pool::events_or_default(worker.events())
                 .click_and_wait_for_popup(
                     &page,
                     &ClickAndWaitForPopupCommand {
@@ -3033,12 +3159,15 @@ async fn a_popup_opened_by_the_page_can_be_closed_like_any_page() {
     let click = bidi.block_once("input.performActions", None).await;
     let worker = Arc::new(worker(bidi.clone(), FakeObserver::new(observation())).await);
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
     let operation = {
         let worker = Arc::clone(&worker);
         let page = page.clone();
         tokio::spawn(async move {
-            worker
+            worker_pool::events_or_default(worker.events())
                 .click_and_wait_for_popup(
                     &page,
                     &ClickAndWaitForPopupCommand {
@@ -3072,7 +3201,7 @@ async fn a_popup_opened_by_the_page_can_be_closed_like_any_page() {
         })
         .unwrap();
 
-    worker
+    worker_pool::tabs_or_default(worker.tabs())
         .close_page_command(&ClosePageCommand {
             page_id: popup_page.clone(),
         })
@@ -3083,7 +3212,7 @@ async fn a_popup_opened_by_the_page_can_be_closed_like_any_page() {
         call.method == "browsingContext.close" && call.params["context"] == "popup-context"
     }));
     assert_eq!(
-        worker
+        worker_pool::observation_or_default(worker.observation())
             .inspect(&popup_page, &InspectCommand::default())
             .await
             .unwrap_err()
@@ -3107,8 +3236,11 @@ async fn hidden_upload(count: u64) -> (Result<Vec<Evidence>, CommandError>, Vec<
         .await
         .with_upload_roots(vec![root.path().to_path_buf()]);
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
-    let result = worker
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
+    let result = worker_pool::input_or_default(worker.input())
         .upload_files(
             &page,
             &UploadFilesCommand {
@@ -3176,9 +3308,12 @@ async fn upload_uses_bidi_set_files_and_returns_only_opaque_evidence() {
         .await
         .with_upload_roots(vec![root.path().to_path_buf()]);
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    let evidence = worker
+    let evidence = worker_pool::input_or_default(worker.input())
         .upload_files(
             &page,
             &UploadFilesCommand {
@@ -3223,12 +3358,15 @@ async fn download_correlates_bidi_events_after_one_click_and_returns_artifact_re
             .with_runtime_storage(session.clone(), artifacts, downloads.clone()),
     );
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
     let operation = {
         let worker = Arc::clone(&worker);
         let page = page.clone();
         tokio::spawn(async move {
-            worker
+            worker_pool::events_or_default(worker.events())
                 .click_and_wait_for_download(
                     &page,
                     &ClickAndWaitForDownloadCommand {
@@ -3280,7 +3418,7 @@ async fn download_correlates_bidi_events_after_one_click_and_returns_artifact_re
             _ => None,
         })
         .unwrap();
-    let upload = worker
+    let upload = worker_pool::input_or_default(worker.input())
         .upload_files(
             &page,
             &UploadFilesCommand {
@@ -3320,9 +3458,12 @@ async fn semantic_type_text_resolves_exact_label_before_native_input() {
         .insert("required".into(), "true".into());
     let worker = worker(bidi.clone(), FakeObserver::new(observed)).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    worker
+    worker_pool::input_or_default(worker.input())
         .type_text(
             &page,
             &TypeTextCommand {
@@ -3371,9 +3512,12 @@ async fn semantic_inspect_resolves_label_and_returns_sanitized_control_value() {
     let observer = FakeObserver::new(observed);
     let worker = worker(bidi, observer.clone()).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    let evidence = worker
+    let evidence = worker_pool::observation_or_default(worker.observation())
         .inspect(
             &page,
             &InspectCommand {
@@ -3404,9 +3548,12 @@ async fn semantic_inspect_text_contains_matches_visible_page_text() {
     let observer = FakeObserver::new(observed);
     let worker = worker(bidi, observer).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    let evidence = worker
+    let evidence = worker_pool::observation_or_default(worker.observation())
         .inspect(
             &page,
             &InspectCommand {
@@ -3437,9 +3584,12 @@ async fn semantic_inspect_text_contains_misses_when_visible_page_text_lacks_matc
     observed.controls.clear();
     let worker = worker(bidi, FakeObserver::new(observed)).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    let error = worker
+    let error = worker_pool::observation_or_default(worker.observation())
         .inspect(
             &page,
             &InspectCommand {
@@ -3469,9 +3619,12 @@ async fn raw_css_select_inspect_prefers_machine_value_over_visible_option_label(
     observed.controls[0].value = Some("pro".into());
     let worker = worker(bidi, FakeObserver::new(observed)).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    let evidence = worker
+    let evidence = worker_pool::observation_or_default(worker.observation())
         .inspect(
             &page,
             &InspectCommand {
@@ -3498,20 +3651,23 @@ async fn wait_for_url_uses_exact_bounded_matcher_semantics() {
     ]);
     let worker = worker(bidi, FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
-
-    let evidence = worker
-        .wait_for(
-            &page,
-            &WaitForCommand {
-                condition: WaitCondition::Url {
-                    matcher: TextMatch::Contains("/page".into()),
-                },
-                timeout_ms: 100,
-            },
-        )
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
         .await
         .unwrap();
+
+    let evidence = worker_pool::PageBehavior::wait_for(
+        worker.wait_provider(),
+        &page,
+        &WaitForCommand {
+            condition: WaitCondition::Url {
+                matcher: TextMatch::Contains("/page".into()),
+            },
+            timeout_ms: 100,
+        },
+    )
+    .await
+    .unwrap();
 
     assert!(matches!(
         evidence.as_slice(),
@@ -3565,24 +3721,27 @@ async fn wait_for_text_skips_an_ambiguous_candidate_whose_read_fails() {
     ];
     let worker = worker(bidi, FakeObserver::new(ambiguous)).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
-
-    let evidence = worker
-        .wait_for(
-            &page,
-            &WaitForCommand {
-                condition: WaitCondition::Text {
-                    target: Box::new(TargetSpec {
-                        role: Some("status".into()),
-                        ..TargetSpec::default()
-                    }),
-                    matcher: TextMatch::Contains("Step 2 of 3".into()),
-                },
-                timeout_ms: 100,
-            },
-        )
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
         .await
         .unwrap();
+
+    let evidence = worker_pool::PageBehavior::wait_for(
+        worker.wait_provider(),
+        &page,
+        &WaitForCommand {
+            condition: WaitCondition::Text {
+                target: Box::new(TargetSpec {
+                    role: Some("status".into()),
+                    ..TargetSpec::default()
+                }),
+                matcher: TextMatch::Contains("Step 2 of 3".into()),
+            },
+            timeout_ms: 100,
+        },
+    )
+    .await
+    .unwrap();
 
     match &evidence[0] {
         Evidence::Wait { observed, .. } => {
@@ -3610,24 +3769,27 @@ async fn wait_for_text_times_out_instead_of_failing_when_every_ambiguous_candida
     ];
     let worker = worker(bidi, FakeObserver::new(ambiguous)).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
-
-    let error = worker
-        .wait_for(
-            &page,
-            &WaitForCommand {
-                condition: WaitCondition::Text {
-                    target: Box::new(TargetSpec {
-                        role: Some("status".into()),
-                        ..TargetSpec::default()
-                    }),
-                    matcher: TextMatch::Contains("Step 2 of 3".into()),
-                },
-                timeout_ms: 60,
-            },
-        )
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
         .await
-        .unwrap_err();
+        .unwrap();
+
+    let error = worker_pool::PageBehavior::wait_for(
+        worker.wait_provider(),
+        &page,
+        &WaitForCommand {
+            condition: WaitCondition::Text {
+                target: Box::new(TargetSpec {
+                    role: Some("status".into()),
+                    ..TargetSpec::default()
+                }),
+                matcher: TextMatch::Contains("Step 2 of 3".into()),
+            },
+            timeout_ms: 60,
+        },
+    )
+    .await
+    .unwrap_err();
     assert_eq!(
         error.code,
         ErrorCode::WaitConditionTimedOut,
@@ -3653,7 +3815,10 @@ async fn wait_for_network_quiet_times_out_while_a_page_request_is_in_flight() {
     let bidi = FakeBidi::new(vec![Ok(json!({"context": "ctx-quiet"}))]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
     bidi.emit(
         "network.beforeRequestSent",
@@ -3669,10 +3834,13 @@ async fn wait_for_network_quiet_times_out_while_a_page_request_is_in_flight() {
     );
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    let error = worker
-        .wait_for(&page, &network_quiet_wait(120))
-        .await
-        .expect_err("in-flight fetch must block networkQuiet");
+    let error = worker_pool::PageBehavior::wait_for(
+        worker.wait_provider(),
+        &page,
+        &network_quiet_wait(120),
+    )
+    .await
+    .expect_err("in-flight fetch must block networkQuiet");
     assert_eq!(error.code, ErrorCode::WaitConditionTimedOut);
 }
 
@@ -3681,7 +3849,10 @@ async fn wait_for_network_quiet_settles_after_the_in_flight_request_completes() 
     let bidi = FakeBidi::new(vec![Ok(json!({"context": "ctx-quiet"}))]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
     bidi.emit(
         "network.beforeRequestSent",
@@ -3705,10 +3876,13 @@ async fn wait_for_network_quiet_settles_after_the_in_flight_request_completes() 
     );
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    let evidence = worker
-        .wait_for(&page, &network_quiet_wait(200))
-        .await
-        .expect("completed fetch must allow networkQuiet");
+    let evidence = worker_pool::PageBehavior::wait_for(
+        worker.wait_provider(),
+        &page,
+        &network_quiet_wait(200),
+    )
+    .await
+    .expect("completed fetch must allow networkQuiet");
     assert!(matches!(
         evidence.as_slice(),
         [Evidence::Wait {
@@ -3723,7 +3897,10 @@ async fn wait_for_network_quiet_ignores_filtered_in_flight_urls() {
     let bidi = FakeBidi::new(vec![Ok(json!({"context": "ctx-quiet"}))]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
     bidi.emit(
         "network.beforeRequestSent",
@@ -3739,22 +3916,22 @@ async fn wait_for_network_quiet_ignores_filtered_in_flight_urls() {
     );
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    let evidence = worker
-        .wait_for(
-            &page,
-            &WaitForCommand {
-                condition: WaitCondition::NetworkQuiet {
-                    idle_ms: 20,
-                    max_in_flight: 0,
-                    ignore_url_substrings: vec!["analytics".into()],
-                    ignore_resource_types: Vec::new(),
-                    ignore_long_lived: false,
-                },
-                timeout_ms: 200,
+    let evidence = worker_pool::PageBehavior::wait_for(
+        worker.wait_provider(),
+        &page,
+        &WaitForCommand {
+            condition: WaitCondition::NetworkQuiet {
+                idle_ms: 20,
+                max_in_flight: 0,
+                ignore_url_substrings: vec!["analytics".into()],
+                ignore_resource_types: Vec::new(),
+                ignore_long_lived: false,
             },
-        )
-        .await
-        .expect("ignored analytics request must not block networkQuiet");
+            timeout_ms: 200,
+        },
+    )
+    .await
+    .expect("ignored analytics request must not block networkQuiet");
     assert!(matches!(&evidence[0], Evidence::Wait { .. }));
 }
 
@@ -3766,7 +3943,10 @@ async fn reconnect_live_process_resubscribes_and_keeps_the_page() {
     ]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
     bidi.kill();
 
     let evidence = BrowserWorker::reconnect_live_process(&worker)
@@ -3777,18 +3957,18 @@ async fn reconnect_live_process_resubscribes_and_keeps_the_page() {
         Evidence::Configuration { name, .. } if name == "cdpReattach"
     )));
 
-    let wait = worker
-        .wait_for(
-            &page,
-            &WaitForCommand {
-                condition: WaitCondition::Url {
-                    matcher: TextMatch::Contains("/kept".into()),
-                },
-                timeout_ms: 100,
+    let wait = worker_pool::PageBehavior::wait_for(
+        worker.wait_provider(),
+        &page,
+        &WaitForCommand {
+            condition: WaitCondition::Url {
+                matcher: TextMatch::Contains("/kept".into()),
             },
-        )
-        .await
-        .expect("page state must survive BiDi reattach");
+            timeout_ms: 100,
+        },
+    )
+    .await
+    .expect("page state must survive BiDi reattach");
     assert!(matches!(&wait[0], Evidence::Wait { .. }));
 
     let subscribes = bidi
@@ -3814,9 +3994,12 @@ async fn type_text_uses_native_focus_clear_and_key_sequences_and_reads_typed_val
     ]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    let evidence = worker
+    let evidence = worker_pool::input_or_default(worker.input())
         .type_text(
             &page,
             &TypeTextCommand {
@@ -3875,9 +4058,12 @@ async fn type_text_selects_an_exact_option_value_without_keyboard_input() {
     ]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    let evidence = worker
+    let evidence = worker_pool::input_or_default(worker.input())
         .type_text(
             &page,
             &TypeTextCommand {
@@ -3936,9 +4122,12 @@ async fn type_text_select_reports_missing_disabled_and_ambiguous_options() {
         ]);
         let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
         let page = PageId::new();
-        worker.open_page(page.clone()).await.unwrap();
+        worker_pool::tabs_or_default(worker.tabs())
+            .open_page(page.clone())
+            .await
+            .unwrap();
 
-        let error = worker
+        let error = worker_pool::input_or_default(worker.input())
             .type_text(
                 &page,
                 &TypeTextCommand {
@@ -3966,7 +4155,7 @@ async fn missing_page_context_is_not_found_without_transport_calls() {
     let bidi = FakeBidi::new(vec![]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
 
-    let error = worker
+    let error = worker_pool::input_or_default(worker.input())
         .click(
             &PageId::new(),
             &ClickCommand {
@@ -4007,9 +4196,12 @@ async fn native_input_failure_does_not_fall_back_to_dom_click() {
     ]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    let error = worker
+    let error = worker_pool::input_or_default(worker.input())
         .click(
             &page,
             &ClickCommand {
@@ -4061,21 +4253,27 @@ async fn closed_and_destroyed_contexts_are_removed_from_the_page_map() {
     let releases = Arc::clone(&observer.releases);
     let worker = worker(bidi.clone(), observer).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
-    worker
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
         .close_page_command(&ClosePageCommand {
             page_id: page.clone(),
         })
         .await
         .unwrap();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
     bidi.emit(
         "browsingContext.contextDestroyed",
         json!({"context": "context-2"}),
     );
     wait_for_release_count(&releases, 2).await;
-    let error = worker
+    let error = worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page,
             &NavigateCommand {
@@ -4098,8 +4296,14 @@ async fn worker_close_cleans_ready_pages_once_and_prevents_reopening() {
     let releases = Arc::new(AtomicUsize::new(0));
     let observer = FakeObserver::with_release_counter(observation(), Arc::clone(&releases));
     let worker = worker(bidi.clone(), observer).await;
-    worker.open_page(PageId::new()).await.unwrap();
-    worker.open_page(PageId::new()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(PageId::new())
+        .await
+        .unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(PageId::new())
+        .await
+        .unwrap();
 
     worker.close().await.unwrap();
     assert_eq!(
@@ -4111,7 +4315,7 @@ async fn worker_close_cleans_ready_pages_once_and_prevents_reopening() {
         2
     );
     assert_eq!(releases.load(Ordering::SeqCst), 2);
-    let error = worker
+    let error = worker_pool::tabs_or_default(worker.tabs())
         .open_page(PageId::new())
         .await
         .expect_err("a closed worker must not create another context");
@@ -4177,8 +4381,14 @@ async fn cancelled_close_waiter_and_worker_drop_do_not_cancel_owned_shutdown() {
     let releases = Arc::new(AtomicUsize::new(0));
     let observer = FakeObserver::with_release_counter(observation(), Arc::clone(&releases));
     let worker = Arc::new(worker(bidi.clone(), observer).await);
-    worker.open_page(PageId::new()).await.unwrap();
-    worker.open_page(PageId::new()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(PageId::new())
+        .await
+        .unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(PageId::new())
+        .await
+        .unwrap();
 
     let close_worker = Arc::clone(&worker);
     let close_waiter = tokio::spawn(async move { close_worker.close().await });
@@ -4221,8 +4431,14 @@ async fn lagged_context_events_resynchronize_and_prune_missing_contexts() {
     let worker = worker(bidi.clone(), observer).await;
     let stale = PageId::new();
     let live = PageId::new();
-    worker.open_page(stale.clone()).await.unwrap();
-    worker.open_page(live.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(stale.clone())
+        .await
+        .unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(live.clone())
+        .await
+        .unwrap();
     bidi.set_tree(json!({
         "contexts": [{"context": "context-live", "children": []}]
     }))
@@ -4235,7 +4451,7 @@ async fn lagged_context_events_resynchronize_and_prune_missing_contexts() {
     tokio::task::yield_now().await;
     wait_for_release_count(&releases, 1).await;
 
-    let stale_error = worker
+    let stale_error = worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &stale,
             &NavigateCommand {
@@ -4247,7 +4463,7 @@ async fn lagged_context_events_resynchronize_and_prune_missing_contexts() {
         .await
         .unwrap_err();
     assert_eq!(stale_error.code, ErrorCode::NotFound);
-    worker
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &live,
             &NavigateCommand {
@@ -4281,7 +4497,10 @@ async fn failed_async_binding_release_retries_boundedly_and_fails_the_worker_clo
     );
     let worker = worker(bidi.clone(), observer).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
     bidi.emit(
         "browsingContext.contextDestroyed",
@@ -4289,7 +4508,7 @@ async fn failed_async_binding_release_retries_boundedly_and_fails_the_worker_clo
     );
     wait_for_release_count(&releases, 3).await;
 
-    let error = worker
+    let error = worker_pool::tabs_or_default(worker.tabs())
         .open_page(PageId::new())
         .await
         .expect_err("cleanup failure must fail the worker closed");
@@ -4322,8 +4541,14 @@ async fn hung_binding_release_times_out_each_attempt_and_does_not_stall_later_cl
     .unwrap();
     let hung_page = PageId::new();
     let later_page = PageId::new();
-    worker.open_page(hung_page.clone()).await.unwrap();
-    worker.open_page(later_page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(hung_page.clone())
+        .await
+        .unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(later_page.clone())
+        .await
+        .unwrap();
 
     bidi.emit(
         "browsingContext.contextDestroyed",
@@ -4351,7 +4576,7 @@ async fn hung_binding_release_times_out_each_attempt_and_does_not_stall_later_cl
     // The last hung attempt records its failure once its 10 ms deadline passes.
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(attempts.load(Ordering::SeqCst), 4);
-    let error = worker
+    let error = worker_pool::tabs_or_default(worker.tabs())
         .open_page(PageId::new())
         .await
         .expect_err("exhausted release deadlines must fail the worker closed");
@@ -4386,7 +4611,7 @@ async fn failed_open_navigation_rolls_back_context_and_preserves_primary_error()
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
 
     for _ in 0..attempts {
-        let error = worker
+        let error = worker_pool::tabs_or_default(worker.tabs())
             .open_page_command(&OpenPageCommand {
                 url: Some("https://example.test/fail".into()),
             })
@@ -4400,7 +4625,10 @@ async fn failed_open_navigation_rolls_back_context_and_preserves_primary_error()
         assert!(error.message.contains("close rejected"));
     }
 
-    worker.open_page(PageId::new()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(PageId::new())
+        .await
+        .unwrap();
     assert_eq!(
         bidi.calls()
             .await
@@ -4416,10 +4644,16 @@ async fn page_context_map_rejects_growth_beyond_its_bound() {
     let bidi = FakeBidi::new(vec![]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     for _ in 0..MAX_TRACKED_PAGES {
-        worker.open_page(PageId::new()).await.unwrap();
+        worker_pool::tabs_or_default(worker.tabs())
+            .open_page(PageId::new())
+            .await
+            .unwrap();
     }
 
-    let error = worker.open_page(PageId::new()).await.unwrap_err();
+    let error = worker_pool::tabs_or_default(worker.tabs())
+        .open_page(PageId::new())
+        .await
+        .unwrap_err();
     assert_eq!(error.code, ErrorCode::ResourceExhausted);
     let calls = bidi.calls().await;
     assert_eq!(calls[0].method, "session.subscribe");
@@ -4505,9 +4739,12 @@ async fn activate_page_sends_bidi_activation_for_the_pages_context() {
     let bidi = FakeBidi::new(vec![]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
 
-    worker
+    worker_pool::tabs_or_default(worker.tabs())
         .activate_page(&types::ActivatePageCommand {
             page_id: page_id.clone(),
         })
@@ -4522,7 +4759,7 @@ async fn activate_page_sends_bidi_activation_for_the_pages_context() {
         "{calls:?}"
     );
 
-    let missing = worker
+    let missing = worker_pool::tabs_or_default(worker.tabs())
         .activate_page(&types::ActivatePageCommand {
             page_id: PageId::new(),
         })
@@ -4535,9 +4772,12 @@ async fn type_text_with_mismatched_expected_url_fails_before_any_native_input() 
     let bidi = FakeBidi::new(vec![]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
 
-    let error = worker
+    let error = worker_pool::input_or_default(worker.input())
         .type_text(
             &page_id,
             &types::TypeTextCommand {
@@ -4567,12 +4807,15 @@ async fn handle_dialog_waits_for_and_accepts_a_user_prompt() {
     let bidi = FakeBidi::new(vec![Ok(json!({"context": "context-1"}))]);
     let worker = Arc::new(worker(bidi.clone(), FakeObserver::new(observation())).await);
     let page_id = PageId::new();
-    worker.open_page(page_id.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
 
     let handle = tokio::spawn({
         let worker = Arc::clone(&worker);
         async move {
-            worker
+            worker_pool::events_or_default(worker.events())
                 .handle_dialog(
                     &page_id,
                     &types::HandleDialogCommand {
@@ -4622,7 +4865,10 @@ async fn fingerprint_toggle_adds_and_removes_preload_script() {
         "worker init must attempt emulation overrides"
     );
 
-    worker.set_fingerprint_enabled(false).await.unwrap();
+    worker_pool::session_settings_or_default(worker.session_settings())
+        .set_fingerprint_enabled(false)
+        .await
+        .unwrap();
     assert!(
         bidi.calls()
             .await
@@ -4631,7 +4877,10 @@ async fn fingerprint_toggle_adds_and_removes_preload_script() {
         "disable must remove preload script"
     );
 
-    worker.set_fingerprint_enabled(true).await.unwrap();
+    worker_pool::session_settings_or_default(worker.session_settings())
+        .set_fingerprint_enabled(true)
+        .await
+        .unwrap();
     let add_count = bidi
         .calls()
         .await
@@ -4641,7 +4890,10 @@ async fn fingerprint_toggle_adds_and_removes_preload_script() {
     assert_eq!(add_count, 2, "re-enable must add preload script again");
 
     let calls_before_open = bidi.calls().await.len();
-    worker.open_page(PageId::new()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(PageId::new())
+        .await
+        .unwrap();
     let new_calls = &bidi.calls().await[calls_before_open..];
     let new_adds = new_calls
         .iter()
@@ -4669,9 +4921,12 @@ async fn close_page_returns_page_evidence_captured_before_teardown() {
     ]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
 
-    let evidence = worker
+    let evidence = worker_pool::tabs_or_default(worker.tabs())
         .close_page_command(&ClosePageCommand {
             page_id: page.clone(),
         })
@@ -4797,14 +5052,17 @@ async fn large_page_worker(
     .await
     .unwrap();
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
     (worker, page, bidi)
 }
 
 #[tokio::test]
 async fn truncated_snapshot_still_yields_a_target_the_page_holds() {
     let (worker, page, _) = large_page_worker(Some(located(true, false))).await;
-    let candidates = worker
+    let candidates = worker_pool::observation_or_default(worker.observation())
         .collect_candidates(&page, &show_all_link())
         .await
         .unwrap();
@@ -4819,7 +5077,7 @@ async fn truncated_snapshot_still_yields_a_target_the_page_holds() {
 #[tokio::test]
 async fn truncated_snapshot_without_the_target_reports_resource_exhausted() {
     let (worker, page, _) = large_page_worker(Some(located(false, false))).await;
-    let error = worker
+    let error = worker_pool::observation_or_default(worker.observation())
         .collect_candidates(&page, &show_all_link())
         .await
         .unwrap_err();
@@ -4830,7 +5088,7 @@ async fn truncated_snapshot_without_the_target_reports_resource_exhausted() {
 #[tokio::test]
 async fn truncated_snapshot_with_an_ambiguous_target_reports_ambiguity() {
     let (worker, page, _) = large_page_worker(Some(located(false, true))).await;
-    let error = worker
+    let error = worker_pool::observation_or_default(worker.observation())
         .collect_candidates(&page, &show_all_link())
         .await
         .unwrap_err();
@@ -4840,7 +5098,7 @@ async fn truncated_snapshot_with_an_ambiguous_target_reports_ambiguity() {
 #[tokio::test]
 async fn observer_that_cannot_locate_keeps_the_truncation_error() {
     let (worker, page, _) = large_page_worker(None).await;
-    let error = worker
+    let error = worker_pool::observation_or_default(worker.observation())
         .collect_candidates(&page, &show_all_link())
         .await
         .unwrap_err();
@@ -4850,7 +5108,7 @@ async fn observer_that_cannot_locate_keeps_the_truncation_error() {
 #[tokio::test]
 async fn click_on_a_target_past_the_control_walk_uses_the_located_selector() {
     let (worker, page, bidi) = large_page_worker(Some(located(true, false))).await;
-    let _ = worker
+    let _ = worker_pool::input_or_default(worker.input())
         .click(
             &page,
             &ClickCommand {
@@ -4893,7 +5151,10 @@ async fn navigate_reports_the_document_a_script_redirect_settles_on() {
         .await;
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
     let flipper = {
         let bidi = bidi.clone();
         tokio::spawn(async move {
@@ -4905,7 +5166,7 @@ async fn navigate_reports_the_document_a_script_redirect_settles_on() {
         })
     };
 
-    let evidence = worker
+    let evidence = worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page,
             &NavigateCommand {

@@ -36,10 +36,13 @@ async fn fingerprint_screen_metrics_are_consistent_across_channels() {
     let worker = factory.launch(&SessionId::new()).await.unwrap();
 
     let page = PageId::new();
-    worker.open_page(page.clone()).await.unwrap();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
     // The fingerprint init script is a preload: it runs on the next document
     // load, so navigate after opening for it to take effect.
-    worker
+    worker_pool::navigation_or_default(worker.navigation())
         .navigate(
             &page,
             &types::NavigateCommand {
@@ -50,8 +53,7 @@ async fn fingerprint_screen_metrics_are_consistent_across_channels() {
         )
         .await
         .unwrap();
-    let outcome = worker
-        .evaluate_javascript(
+    let outcome = worker_pool::javascript_or_default(worker.javascript()).evaluate_javascript(
             &page,
             &types::EvaluateJavaScriptCommand {
                 expression: r#"({

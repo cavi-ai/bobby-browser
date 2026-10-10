@@ -152,19 +152,18 @@ async fn await_target(
     if timeout_ms == 0 {
         return;
     }
-    let _ = lease
-        .worker()
-        .wait_for(
-            page_id,
-            &WaitForCommand {
-                condition: WaitCondition::Element {
-                    target: Box::new(target),
-                    state: ElementState::Attached,
-                },
-                timeout_ms,
+    let _ = worker_pool::PageBehavior::wait_for(
+        lease.worker().wait_provider(),
+        page_id,
+        &WaitForCommand {
+            condition: WaitCondition::Element {
+                target: Box::new(target),
+                state: ElementState::Attached,
             },
-        )
-        .await;
+            timeout_ms,
+        },
+    )
+    .await;
 }
 
 /// The target an action primitive resolves before it acts.
@@ -306,8 +305,7 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         page_id: &PageId,
         target: &TargetSpec,
     ) -> Result<Vec<dom_engine::Candidate>, CommandError> {
-        self.lease
-            .worker()
+        worker_pool::observation_or_default(self.lease.worker().observation())
             .collect_candidates(page_id, target)
             .await
     }
@@ -317,7 +315,9 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         page_id: &PageId,
         command: &ClickCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        self.lease.worker().click(page_id, command).await
+        worker_pool::input_or_default(self.lease.worker().input())
+            .click(page_id, command)
+            .await
     }
 
     async fn click_xy(
@@ -326,7 +326,9 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         x: f64,
         y: f64,
     ) -> Result<Vec<Evidence>, CommandError> {
-        self.lease.worker().click_xy(page_id, x, y).await
+        worker_pool::input_or_default(self.lease.worker().input())
+            .click_xy(page_id, x, y)
+            .await
     }
 
     async fn type_text(
@@ -334,7 +336,9 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         page_id: &PageId,
         command: &TypeTextCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        self.lease.worker().type_text(page_id, command).await
+        worker_pool::input_or_default(self.lease.worker().input())
+            .type_text(page_id, command)
+            .await
     }
 
     async fn element_at_point(
@@ -343,7 +347,9 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         x: f64,
         y: f64,
     ) -> Result<Option<(String, String)>, CommandError> {
-        self.lease.worker().element_at_point(page_id, x, y).await
+        worker_pool::observation_or_default(self.lease.worker().observation())
+            .element_at_point(page_id, x, y)
+            .await
     }
 
     async fn upload_files(
@@ -351,7 +357,9 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         page_id: &PageId,
         command: &UploadFilesCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        self.lease.worker().upload_files(page_id, command).await
+        worker_pool::input_or_default(self.lease.worker().input())
+            .upload_files(page_id, command)
+            .await
     }
 
     async fn control_action(
@@ -359,7 +367,9 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         page_id: &PageId,
         command: &ControlActionCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        self.lease.worker().control_action(page_id, command).await
+        worker_pool::input_or_default(self.lease.worker().input())
+            .control_action(page_id, command)
+            .await
     }
 
     async fn wait_for(
@@ -367,12 +377,12 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         page_id: &PageId,
         command: &WaitForCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        self.lease.worker().wait_for(page_id, command).await
+        worker_pool::PageBehavior::wait_for(self.lease.worker().wait_provider(), page_id, command)
+            .await
     }
 
     async fn inspect_settled_page(&self, page_id: &PageId) -> Result<Vec<Evidence>, CommandError> {
-        self.lease
-            .worker()
+        worker_pool::observation_or_default(self.lease.worker().observation())
             .inspect(page_id, &types::InspectCommand::default())
             .await
     }
@@ -398,9 +408,7 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
     async fn settle_page(&self, page_id: &PageId, requested_url: Option<&str>) {
         let budget = wait_budget(self.deadline, NAVIGATION_SETTLE_CAP);
         if !budget.is_zero() {
-            let _ = self
-                .lease
-                .worker()
+            let _ = worker_pool::navigation_or_default(self.lease.worker().navigation())
                 .settle_page(page_id, budget, requested_url)
                 .await;
         }
@@ -410,18 +418,14 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         &self,
         page_id: &PageId,
     ) -> Result<Vec<types::FormValidationIssue>, CommandError> {
-        let evidence = self
-            .lease
-            .worker()
+        let evidence = worker_pool::observation_or_default(self.lease.worker().observation())
             .form_snapshot(page_id, Some(512))
             .await?;
         let probe = TargetSpec {
             css: Some("[aria-invalid='true']".into()),
             ..TargetSpec::default()
         };
-        let candidates = self
-            .lease
-            .worker()
+        let candidates = worker_pool::observation_or_default(self.lease.worker().observation())
             .collect_candidates(page_id, &probe)
             .await?;
         Ok(settlement_validation_issues(&evidence, &candidates))
@@ -435,15 +439,11 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         // Real PNG bytes when the worker supports them. Workers without byte plumbing
         // stay artifact-only, and vision providers get an empty frame, which their own
         // confidence floor rejects.
-        let bytes = self
-            .lease
-            .worker()
+        let bytes = worker_pool::capture_or_default(self.lease.worker().capture())
             .screenshot_bytes(page_id)
             .await
             .unwrap_or_default();
-        let evidence = self
-            .lease
-            .worker()
+        let evidence = worker_pool::capture_or_default(self.lease.worker().capture())
             .capture_screenshot(page_id, command)
             .await?;
         Ok((bytes, evidence))
@@ -453,10 +453,12 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         &self,
         page_id: &PageId,
     ) -> Result<Vec<u8>, CommandError> {
-        self.lease
-            .worker()
-            .sanitized_screenshot_bytes(page_id)
-            .await
+        worker_pool::PageBehavior::sanitized_screenshot_bytes(
+            self.lease.worker().capture(),
+            self.lease.worker().javascript(),
+            page_id,
+        )
+        .await
     }
 }
 
@@ -1245,11 +1247,9 @@ impl AdaptivePageEngine {
         // A worker without that mirror (the Firefox companion) can still serve every
         // eligible command through the browser, so treat it exactly like an unconfigured
         // direct path rather than letting `http_state` fail the command outright.
-        let Some(direct) = self
-            .direct
-            .as_ref()
-            .filter(|_| lease.worker().supports_http_state())
-        else {
+        let Some(direct) = self.direct.as_ref().filter(|_| {
+            worker_pool::web_state_or_default(lease.worker().web_state()).supports_http_state()
+        }) else {
             return browser_execute(
                 envelope,
                 lease,
@@ -1324,7 +1324,9 @@ impl AdaptivePageEngine {
                     _ => None,
                 };
                 let page_id = envelope.page_id.as_ref().expect("validated page id");
-                let snapshot = lease.worker().http_state(page_id).await?;
+                let snapshot = worker_pool::web_state_or_default(lease.worker().web_state())
+                    .http_state(page_id)
+                    .await?;
                 let version = snapshot.version;
                 let candidate = match command {
                     PrimitiveCommand::Inspect(command) => {
@@ -1724,148 +1726,147 @@ async fn browser_execute(
     }
     let mut evidence = match command {
         PrimitiveCommand::Navigate(command) => {
-            lease
-                .worker()
+            worker_pool::navigation_or_default(lease.worker().navigation())
                 .navigate(page_id.expect("validated page id"), command)
                 .await?
         }
         PrimitiveCommand::Inspect(command) => {
-            lease
-                .worker()
+            worker_pool::observation_or_default(lease.worker().observation())
                 .inspect(page_id.expect("validated page id"), command)
                 .await?
         }
         PrimitiveCommand::Click(command) => {
-            lease
-                .worker()
+            worker_pool::input_or_default(lease.worker().input())
                 .click(page_id.expect("validated page id"), command)
                 .await?
         }
         PrimitiveCommand::TypeText(command) => {
-            lease
-                .worker()
+            worker_pool::input_or_default(lease.worker().input())
                 .type_text(page_id.expect("validated page id"), command)
                 .await?
         }
         PrimitiveCommand::ControlAction(command) => {
-            lease
-                .worker()
+            worker_pool::input_or_default(lease.worker().input())
                 .control_action(page_id.expect("validated page id"), command)
                 .await?
         }
         PrimitiveCommand::UploadFiles(command) => {
-            lease
-                .worker()
+            worker_pool::input_or_default(lease.worker().input())
                 .upload_files(page_id.expect("validated page id"), command)
                 .await?
         }
         PrimitiveCommand::UploadAndConfirm(command) => {
             let page_id = page_id.expect("validated page id");
-            let mut evidence = lease
-                .worker()
+            let mut evidence = worker_pool::input_or_default(lease.worker().input())
                 .upload_files(page_id, &command.upload)
                 .await?;
             evidence.extend(
-                lease
-                    .worker()
-                    .wait_for(page_id, &command.expected_state)
-                    .await?,
+                worker_pool::PageBehavior::wait_for(
+                    lease.worker().wait_provider(),
+                    page_id,
+                    &command.expected_state,
+                )
+                .await?,
             );
             evidence
         }
-        PrimitiveCommand::OpenPage(command) => lease.worker().open_page_command(command).await?,
-        PrimitiveCommand::ListPages(command) => lease.worker().list_pages(command).await?,
-        PrimitiveCommand::ClosePage(command) => lease.worker().close_page_command(command).await?,
-        PrimitiveCommand::ActivatePage(command) => lease.worker().activate_page(command).await?,
+        PrimitiveCommand::OpenPage(command) => {
+            worker_pool::tabs_or_default(lease.worker().tabs())
+                .open_page_command(command)
+                .await?
+        }
+        PrimitiveCommand::ListPages(command) => {
+            worker_pool::tabs_or_default(lease.worker().tabs())
+                .list_pages(command)
+                .await?
+        }
+        PrimitiveCommand::ClosePage(command) => {
+            worker_pool::tabs_or_default(lease.worker().tabs())
+                .close_page_command(command)
+                .await?
+        }
+        PrimitiveCommand::ActivatePage(command) => {
+            worker_pool::tabs_or_default(lease.worker().tabs())
+                .activate_page(command)
+                .await?
+        }
         PrimitiveCommand::AccessibilitySnapshot(command) => {
-            lease
-                .worker()
+            worker_pool::observation_or_default(lease.worker().observation())
                 .a11y_snapshot(page_id.expect("validated page id"), command)
                 .await?
         }
         PrimitiveCommand::ClickAndWaitForPopup(command) => {
-            lease
-                .worker()
+            worker_pool::events_or_default(lease.worker().events())
                 .click_and_wait_for_popup(page_id.expect("validated page id"), command)
                 .await?
         }
         PrimitiveCommand::ClickAndWaitForDownload(command) => {
-            lease
-                .worker()
+            worker_pool::events_or_default(lease.worker().events())
                 .click_and_wait_for_download(page_id.expect("validated page id"), command)
                 .await?
         }
         PrimitiveCommand::WaitFor(command) => {
-            lease
-                .worker()
-                .wait_for(page_id.expect("validated page id"), command)
-                .await?
+            worker_pool::PageBehavior::wait_for(
+                lease.worker().wait_provider(),
+                page_id.expect("validated page id"),
+                command,
+            )
+            .await?
         }
         PrimitiveCommand::CaptureScreenshot(command) => {
-            lease
-                .worker()
+            worker_pool::capture_or_default(lease.worker().capture())
                 .capture_screenshot(page_id.expect("validated page id"), command)
                 .await?
         }
         PrimitiveCommand::SetFocusEmulation(command) => {
-            lease
-                .worker()
+            worker_pool::page_configuration_or_default(lease.worker().page_configuration())
                 .set_focus_emulation(page_id.expect("validated page id"), command)
                 .await?
         }
         PrimitiveCommand::SetEmulatedMedia(command) => {
-            lease
-                .worker()
+            worker_pool::page_configuration_or_default(lease.worker().page_configuration())
                 .set_emulated_media(page_id.expect("validated page id"), command)
                 .await?
         }
         // Only ChromiumWorker::evaluate_javascript executes the JS; other workers
         // return the default unsupported CommandError.
         PrimitiveCommand::EvaluateJavaScript(command) => {
-            lease
-                .worker()
+            worker_pool::javascript_or_default(lease.worker().javascript())
                 .evaluate_javascript(page_id.expect("validated page id"), command)
                 .await?
         }
         PrimitiveCommand::NetworkLog(command) => {
-            lease
-                .worker()
+            worker_pool::events_or_default(lease.worker().events())
                 .network_log(page_id.expect("validated page id"), command)
                 .await?
         }
         PrimitiveCommand::Emulate(command) => {
-            lease
-                .worker()
+            worker_pool::page_configuration_or_default(lease.worker().page_configuration())
                 .emulate(page_id.expect("validated page id"), command)
                 .await?
         }
         PrimitiveCommand::HandleDialog(command) => {
-            lease
-                .worker()
+            worker_pool::events_or_default(lease.worker().events())
                 .handle_dialog(page_id.expect("validated page id"), command)
                 .await?
         }
         PrimitiveCommand::PrintToPdf(command) => {
-            lease
-                .worker()
+            worker_pool::capture_or_default(lease.worker().capture())
                 .print_to_pdf(page_id.expect("validated page id"), command)
                 .await?
         }
         PrimitiveCommand::GetCookies(command) => {
-            lease
-                .worker()
+            worker_pool::web_state_or_default(lease.worker().web_state())
                 .get_cookies(page_id.expect("validated page id"), command)
                 .await?
         }
         PrimitiveCommand::SetCookies(command) => {
-            lease
-                .worker()
+            worker_pool::web_state_or_default(lease.worker().web_state())
                 .set_cookies(page_id.expect("validated page id"), command)
                 .await?
         }
         PrimitiveCommand::DeleteCookies(command) => {
-            lease
-                .worker()
+            worker_pool::web_state_or_default(lease.worker().web_state())
                 .delete_cookies(page_id.expect("validated page id"), command)
                 .await?
         }
@@ -1958,8 +1959,7 @@ async fn extract_structured(
     })?;
 
     let page_id = envelope.page_id.as_ref().expect("validated page id");
-    let mut evidence = lease
-        .worker()
+    let mut evidence = worker_pool::observation_or_default(lease.worker().observation())
         .inspect(page_id, &types::InspectCommand::default())
         .await?;
     let content = evidence

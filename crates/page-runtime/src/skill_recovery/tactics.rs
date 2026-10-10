@@ -903,7 +903,9 @@ impl SkillRecoveryCoordinator {
             },
             _ => InspectCommand::default(),
         };
-        let evidence = lease.worker().inspect(&page.id, &inspect).await?;
+        let evidence = worker_pool::observation_or_default(lease.worker().observation())
+            .inspect(&page.id, &inspect)
+            .await?;
         let matched = match &envelope.command {
             RuntimeCommand::Primitive(PrimitiveCommand::Navigate(command)) => evidence.iter().any(
                 |item| matches!(item, Evidence::Inspection { url, .. } if url == &command.url),

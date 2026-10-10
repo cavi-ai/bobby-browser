@@ -43,8 +43,8 @@ use types::{
     ClickCommand, ClosePageCommand, CommandError, CommandId, ControlAction, ControlActionCommand,
     ErrorCode, ErrorLayer, EvaluateJavaScriptCommand, Evidence, FormControl, FormControlTarget,
     InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand, PageEvidence, PageId,
-    ScreenshotMode, SessionId, TargetSpec, TypeTextCommand, UploadFilesCommand, WaitForCommand,
-    WaitUntil, WorkerId,
+    ScreenshotMode, SessionId, TargetSpec, TypeTextCommand, UploadFilesCommand, WaitUntil,
+    WorkerId,
 };
 use url::Url;
 use worker_pool::navigation_settle::{
@@ -3407,252 +3407,6 @@ impl BrowserWorker for FirefoxCompanionWorker {
         &self.profile_dir
     }
 
-    async fn set_humanization_enabled(&self, enabled: bool) -> Result<(), CommandError> {
-        worker_pool::SessionSettings::set_humanization_enabled(self, enabled).await
-    }
-
-    fn humanization_enabled(&self) -> bool {
-        worker_pool::SessionSettings::humanization_enabled(self)
-    }
-
-    async fn set_fingerprint_enabled(&self, enabled: bool) -> Result<(), CommandError> {
-        worker_pool::SessionSettings::set_fingerprint_enabled(self, enabled).await
-    }
-
-    fn fingerprint_enabled(&self) -> bool {
-        worker_pool::SessionSettings::fingerprint_enabled(self)
-    }
-
-    async fn open_page(&self, page_id: PageId) -> Result<(), CommandError> {
-        worker_pool::TabsEngine::open_page(self, page_id).await
-    }
-
-    async fn collect_candidates(
-        &self,
-        page_id: &PageId,
-        target: &TargetSpec,
-    ) -> Result<Vec<Candidate>, CommandError> {
-        worker_pool::ObservationEngine::collect_candidates(self, page_id, target).await
-    }
-
-    async fn evaluate_javascript(
-        &self,
-        page_id: &PageId,
-        command: &EvaluateJavaScriptCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::JavaScriptEngine::evaluate_javascript(self, page_id, command).await
-    }
-
-    async fn navigate(
-        &self,
-        page_id: &PageId,
-        command: &NavigateCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::NavigationEngine::navigate(self, page_id, command).await
-    }
-
-    async fn settle_page(
-        &self,
-        page_id: &PageId,
-        budget: Duration,
-        requested_url: Option<&str>,
-    ) -> Option<(String, String)> {
-        worker_pool::NavigationEngine::settle_page(self, page_id, budget, requested_url).await
-    }
-
-    async fn form_snapshot(
-        &self,
-        page_id: &PageId,
-        max_controls: Option<u32>,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::ObservationEngine::form_snapshot(self, page_id, max_controls).await
-    }
-
-    async fn control_action(
-        &self,
-        page_id: &PageId,
-        command: &ControlActionCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::InputEngine::control_action(self, page_id, command).await
-    }
-
-    async fn verify_framed_typed_value(
-        &self,
-        page_id: &PageId,
-        command: &TypeTextCommand,
-        _observed: Option<&str>,
-        kind: &str,
-    ) -> Result<Option<Vec<Evidence>>, CommandError> {
-        worker_pool::InputEngine::verify_framed_typed_value(self, page_id, command, _observed, kind)
-            .await
-    }
-
-    async fn inspect(
-        &self,
-        page_id: &PageId,
-        command: &InspectCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::ObservationEngine::inspect(self, page_id, command).await
-    }
-
-    async fn click(
-        &self,
-        page_id: &PageId,
-        command: &ClickCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::InputEngine::click(self, page_id, command).await
-    }
-
-    async fn click_xy(
-        &self,
-        page_id: &PageId,
-        x: f64,
-        y: f64,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::InputEngine::click_xy(self, page_id, x, y).await
-    }
-
-    async fn click_and_wait_for_popup(
-        &self,
-        page_id: &PageId,
-        command: &ClickAndWaitForPopupCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::EventsEngine::click_and_wait_for_popup(self, page_id, command).await
-    }
-
-    async fn upload_files(
-        &self,
-        page_id: &PageId,
-        command: &UploadFilesCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::InputEngine::upload_files(self, page_id, command).await
-    }
-
-    async fn click_and_wait_for_download(
-        &self,
-        page_id: &PageId,
-        command: &ClickAndWaitForDownloadCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::EventsEngine::click_and_wait_for_download(self, page_id, command).await
-    }
-
-    async fn type_text(
-        &self,
-        page_id: &PageId,
-        command: &TypeTextCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::InputEngine::type_text(self, page_id, command).await
-    }
-
-    async fn wait_for(
-        &self,
-        page_id: &PageId,
-        command: &WaitForCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::PageBehavior::wait_for(Some(self), page_id, command).await
-    }
-
-    async fn capture_screenshot(
-        &self,
-        page_id: &PageId,
-        command: &CaptureScreenshotCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::CaptureEngine::capture_screenshot(self, page_id, command).await
-    }
-
-    async fn open_page_command(
-        &self,
-        command: &OpenPageCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::TabsEngine::open_page_command(self, command).await
-    }
-
-    async fn list_pages(&self, _command: &ListPagesCommand) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::TabsEngine::list_pages(self, _command).await
-    }
-
-    async fn close_page_command(
-        &self,
-        command: &ClosePageCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::TabsEngine::close_page_command(self, command).await
-    }
-
-    async fn a11y_snapshot(
-        &self,
-        page_id: &PageId,
-        command: &types::AccessibilitySnapshotCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::ObservationEngine::a11y_snapshot(self, page_id, command).await
-    }
-
-    async fn network_log(
-        &self,
-        page_id: &PageId,
-        command: &types::NetworkLogCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::EventsEngine::network_log(self, page_id, command).await
-    }
-
-    async fn emulate(
-        &self,
-        page_id: &PageId,
-        command: &types::EmulateCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::PageConfigurationEngine::emulate(self, page_id, command).await
-    }
-
-    async fn handle_dialog(
-        &self,
-        page_id: &PageId,
-        command: &types::HandleDialogCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::EventsEngine::handle_dialog(self, page_id, command).await
-    }
-
-    async fn print_to_pdf(
-        &self,
-        page_id: &PageId,
-        command: &types::PrintToPdfCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::CaptureEngine::print_to_pdf(self, page_id, command).await
-    }
-
-    async fn get_cookies(
-        &self,
-        page_id: &PageId,
-        command: &types::GetCookiesCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::WebStateEngine::get_cookies(self, page_id, command).await
-    }
-
-    async fn set_cookies(
-        &self,
-        page_id: &PageId,
-        command: &types::SetCookiesCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::WebStateEngine::set_cookies(self, page_id, command).await
-    }
-
-    async fn delete_cookies(
-        &self,
-        page_id: &PageId,
-        command: &types::DeleteCookiesCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::WebStateEngine::delete_cookies(self, page_id, command).await
-    }
-
-    async fn screenshot_bytes(&self, page_id: &PageId) -> Result<Vec<u8>, CommandError> {
-        worker_pool::CaptureEngine::screenshot_bytes(self, page_id).await
-    }
-
-    async fn activate_page(
-        &self,
-        command: &types::ActivatePageCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::TabsEngine::activate_page(self, command).await
-    }
-
     async fn reconnect_live_process(&self) -> Result<Vec<Evidence>, CommandError> {
         self.transport.reconnect_live().await?;
         let subscription = self
@@ -3684,6 +3438,50 @@ impl BrowserWorker for FirefoxCompanionWorker {
             self.start_shutdown();
         }
         self.wait_for_shutdown().await
+    }
+
+    fn session_settings(&self) -> Option<&dyn worker_pool::SessionSettings> {
+        Some(self)
+    }
+
+    fn tabs(&self) -> Option<&dyn worker_pool::TabsEngine> {
+        Some(self)
+    }
+
+    fn navigation(&self) -> Option<&dyn worker_pool::NavigationEngine> {
+        Some(self)
+    }
+
+    fn observation(&self) -> Option<&dyn worker_pool::ObservationEngine> {
+        Some(self)
+    }
+
+    fn input(&self) -> Option<&dyn worker_pool::InputEngine> {
+        Some(self)
+    }
+
+    fn events(&self) -> Option<&dyn worker_pool::EventsEngine> {
+        Some(self)
+    }
+
+    fn capture(&self) -> Option<&dyn worker_pool::CaptureEngine> {
+        Some(self)
+    }
+
+    fn page_configuration(&self) -> Option<&dyn worker_pool::PageConfigurationEngine> {
+        Some(self)
+    }
+
+    fn javascript(&self) -> Option<&dyn worker_pool::JavaScriptEngine> {
+        Some(self)
+    }
+
+    fn web_state(&self) -> Option<&dyn worker_pool::WebStateEngine> {
+        Some(self)
+    }
+
+    fn wait_provider(&self) -> Option<&dyn worker_pool::WaitProvider> {
+        Some(self)
     }
 }
 

@@ -20,19 +20,11 @@ pub mod wait;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
-use network_engine::state::{HttpStateSnapshot, ResponseStateDelta};
 use tokio::sync::{Mutex, OnceCell, OwnedRwLockReadGuard, OwnedSemaphorePermit, RwLock, Semaphore};
-use types::{
-    CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
-    ClickCommand, ClosePageCommand, CommandError, EvaluateJavaScriptCommand, Evidence,
-    InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand, PageId, SessionId,
-    SetEmulatedMediaCommand, SetFocusEmulationCommand, TargetSpec, TypeTextCommand,
-    UploadFilesCommand, WaitForCommand, WorkerId,
-};
+use types::{CommandError, Evidence, SessionId, WorkerId};
 
 pub use chromium::{is_dead_worker_error, ChromiumWorkerFactory};
 
@@ -219,356 +211,61 @@ fn policy_error(message: impl Into<String>) -> CommandError {
 #[async_trait]
 pub trait BrowserWorker: Send + Sync {
     fn worker_id(&self) -> WorkerId;
+
     fn profile_dir(&self) -> &Path;
-    /// Toggle fingerprint spoofing. Implementations that register preload
-    /// scripts should apply/remove them immediately (not only on next page).
-    async fn set_fingerprint_enabled(&self, _enabled: bool) -> Result<(), CommandError> {
-        Ok(())
-    }
-    /// Whether fingerprint spoofing is currently enabled.
-    fn fingerprint_enabled(&self) -> bool {
-        false
-    }
-    /// Toggle human-like input synthesis (`behavioral-engine`). Engines with no
-    /// synthesizer accept the call and stay direct (the default below), so the
-    /// executor can write session policy onto any worker.
-    async fn set_humanization_enabled(&self, _enabled: bool) -> Result<(), CommandError> {
-        Ok(())
-    }
-    /// Whether human-like input synthesis is currently enabled.
-    fn humanization_enabled(&self) -> bool {
-        false
-    }
-    async fn open_page(&self, page_id: PageId) -> Result<(), CommandError>;
-    async fn navigate(
-        &self,
-        page_id: &PageId,
-        command: &NavigateCommand,
-    ) -> Result<Vec<Evidence>, CommandError>;
-    async fn inspect(
-        &self,
-        page_id: &PageId,
-        command: &InspectCommand,
-    ) -> Result<Vec<Evidence>, CommandError>;
-    /// Verify a typed value inside a private frame without returning its
-    /// contents to the runtime. Workers without this capability use Inspect.
-    async fn verify_framed_typed_value(
-        &self,
-        _page_id: &PageId,
-        _command: &TypeTextCommand,
-        _observed: Option<&str>,
-        _kind: &str,
-    ) -> Result<Option<Vec<Evidence>>, CommandError> {
-        Ok(None)
-    }
-    async fn click(
-        &self,
-        page_id: &PageId,
-        command: &ClickCommand,
-    ) -> Result<Vec<Evidence>, CommandError>;
-    /// Coordinate click used by vision fallback proposals.
-    async fn click_xy(
-        &self,
-        _page_id: &PageId,
-        _x: f64,
-        _y: f64,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported_error())
-    }
-    async fn type_text(
-        &self,
-        page_id: &PageId,
-        command: &TypeTextCommand,
-    ) -> Result<Vec<Evidence>, CommandError>;
-    async fn upload_files(
-        &self,
-        _page_id: &PageId,
-        _command: &UploadFilesCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported_error())
-    }
-    async fn control_action(
-        &self,
-        _page_id: &PageId,
-        _command: &types::ControlActionCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported_error())
-    }
-    async fn open_page_command(
-        &self,
-        _command: &OpenPageCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported_error())
-    }
-    async fn list_pages(&self, _command: &ListPagesCommand) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported_error())
-    }
-    /// In-memory viewport PNG for machine consumers (vision assist). Unlike
-    /// `capture_screenshot`, no artifact is persisted and no evidence emitted.
-    async fn network_log(
-        &self,
-        _page_id: &PageId,
-        _command: &types::NetworkLogCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported_error())
-    }
 
-    async fn emulate(
-        &self,
-        _page_id: &PageId,
-        _command: &types::EmulateCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported_error())
-    }
-
-    async fn handle_dialog(
-        &self,
-        _page_id: &PageId,
-        _command: &types::HandleDialogCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported_error())
-    }
-
-    async fn print_to_pdf(
-        &self,
-        _page_id: &PageId,
-        _command: &types::PrintToPdfCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported_error())
-    }
-
-    async fn get_cookies(
-        &self,
-        _page_id: &PageId,
-        _command: &types::GetCookiesCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported_error())
-    }
-
-    async fn set_cookies(
-        &self,
-        _page_id: &PageId,
-        _command: &types::SetCookiesCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported_error())
-    }
-
-    async fn delete_cookies(
-        &self,
-        _page_id: &PageId,
-        _command: &types::DeleteCookiesCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported_error())
-    }
-
-    async fn screenshot_bytes(&self, _page_id: &PageId) -> Result<Vec<u8>, CommandError> {
-        Err(unsupported_error())
-    }
-
-    /// Captures a privacy-minimized viewport while preserving control geometry.
-    /// Editable and credential-marked regions are temporarily covered in the
-    /// page realm, then restored even when capture fails.
-    async fn sanitized_screenshot_bytes(&self, page_id: &PageId) -> Result<Vec<u8>, CommandError> {
-        static MASK_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-        let token = format!(
-            "bobby-corpus-mask-{}",
-            MASK_SEQUENCE.fetch_add(1, AtomicOrdering::Relaxed)
-        );
-        let install = corpus_mask_install_script(&token);
-        let install_result = self
-            .evaluate_javascript(
-                page_id,
-                &EvaluateJavaScriptCommand {
-                    expression: install,
-                    timeout_ms: 5_000,
-                    await_promise: false,
-                },
-            )
-            .await;
-        if let Err(error) = install_result {
-            let _ = self
-                .evaluate_javascript(
-                    page_id,
-                    &EvaluateJavaScriptCommand {
-                        expression: corpus_mask_cleanup_script(&token),
-                        timeout_ms: 5_000,
-                        await_promise: false,
-                    },
-                )
-                .await;
-            return Err(error);
-        }
-        let capture = self.screenshot_bytes(page_id).await;
-        let cleanup = self
-            .evaluate_javascript(
-                page_id,
-                &EvaluateJavaScriptCommand {
-                    expression: corpus_mask_cleanup_script(&token),
-                    timeout_ms: 5_000,
-                    await_promise: false,
-                },
-            )
-            .await;
-        match (capture, cleanup) {
-            (Ok(bytes), Ok(_)) => Ok(bytes),
-            (Err(error), _) => Err(error),
-            (Ok(_), Err(error)) => Err(error),
-        }
-    }
-
-    async fn a11y_snapshot(
-        &self,
-        _page_id: &PageId,
-        _command: &types::AccessibilitySnapshotCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported_error())
-    }
-
-    /// The page's URL and title once its document has stopped changing,
-    /// read by the probe `navigate` settles with and bounded by `budget`; at
-    /// the budget, the URL and title the page shows then. `requested_url` is
-    /// the URL the caller expects, when it has one. `None` when the worker
-    /// cannot settle a page or the page cannot be read.
-    async fn settle_page(
-        &self,
-        _page_id: &PageId,
-        _budget: std::time::Duration,
-        _requested_url: Option<&str>,
-    ) -> Option<(String, String)> {
-        None
-    }
-
-    async fn form_snapshot(
-        &self,
-        _page_id: &PageId,
-        _max_controls: Option<u32>,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported_error())
-    }
-
-    async fn activate_page(
-        &self,
-        _command: &types::ActivatePageCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported_error())
-    }
-
-    async fn close_page_command(
-        &self,
-        _command: &ClosePageCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported_error())
-    }
-    async fn click_and_wait_for_popup(
-        &self,
-        _page_id: &PageId,
-        _command: &ClickAndWaitForPopupCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported_error())
-    }
-    async fn click_and_wait_for_download(
-        &self,
-        _page_id: &PageId,
-        _command: &ClickAndWaitForDownloadCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported_error())
-    }
-    async fn wait_for(
-        &self,
-        _page_id: &PageId,
-        _command: &WaitForCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported_error())
-    }
-    async fn collect_candidates(
-        &self,
-        _page_id: &PageId,
-        _target: &TargetSpec,
-    ) -> Result<Vec<dom_engine::Candidate>, CommandError> {
-        Err(unsupported_error())
-    }
-    async fn capture_screenshot(
-        &self,
-        _page_id: &PageId,
-        _command: &CaptureScreenshotCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported_error())
-    }
-    /// Best-effort accessible identity of the interactive element at viewport
-    /// point (x, y): role + name, matching the shape a11y candidates carry.
-    /// Used by the vision corpus collector to ground a verified click back to
-    /// the candidate list. Runs on the worker's internal DOM channel (the same
-    /// path as the targeting bounds probes), never through the policy-gated
-    /// `evaluate_javascript` primitive. Default: unsupported — not `Ok(None)`,
-    /// which would look like "nothing at this point."
-    async fn element_at_point(
-        &self,
-        _page_id: &PageId,
-        _x: f64,
-        _y: f64,
-    ) -> Result<Option<(String, String)>, CommandError> {
-        Err(unsupported_error())
-    }
-    async fn set_focus_emulation(
-        &self,
-        _page_id: &PageId,
-        _command: &SetFocusEmulationCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported_error())
-    }
-    async fn set_emulated_media(
-        &self,
-        _page_id: &PageId,
-        _command: &SetEmulatedMediaCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported_error())
-    }
-    // ChromiumWorker overrides this via chromiumoxide EvaluateParams, bounded by
-    // `timeout_ms` and result-shaped through `js_engine::bound_result`. Every other
-    // worker keeps this default and refuses JS execution.
-    async fn evaluate_javascript(
-        &self,
-        _page_id: &PageId,
-        _command: &EvaluateJavaScriptCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        Err(unsupported_error())
-    }
-    /// Whether this worker mirrors page HTTP state, and can therefore serve the
-    /// direct-HTTP execution path. Workers that keep the `http_state` default below
-    /// must report `false`, so the adaptive executor routes the command through the
-    /// browser instead of failing it on an unsupported primitive.
-    fn supports_http_state(&self) -> bool {
-        false
-    }
-    async fn http_state(&self, _page_id: &PageId) -> Result<HttpStateSnapshot, CommandError> {
-        Err(unsupported_error())
-    }
-    async fn commit_http_state(
-        &self,
-        _page_id: &PageId,
-        _expected_version: u64,
-        _delta: ResponseStateDelta,
-    ) -> Result<(), CommandError> {
-        Err(unsupported_error())
-    }
     async fn close(&self) -> Result<(), CommandError>;
+
     async fn terminate(&self) -> Result<(), CommandError> {
         self.close().await
     }
-    /// Try to reconnect to the SAME browser process after the CDP or Firefox
-    /// BiDi transport died without the process dying (websocket resets where
-    /// Chrome's DevTools endpoint is still serving, or Firefox RemoteAgent
-    /// kept the WebDriver session). Firefox must reconnect the socket without
-    /// `session.new` or it hits the one-session limit. A worker that reattaches
-    /// avoids the destructive alternative — retire worker, relaunch browser,
-    /// reopen page — which loses all page state (typed form values, scroll,
-    /// cookies the page set). Default: unsupported.
-    ///
-    /// Returns `cdpReattach` evidence when the worker now holds a live
-    /// connection to the same browser process, with previously tracked pages
-    /// reattached so a retried command lands on the page it targeted.
+
     async fn reconnect_live_process(&self) -> Result<Vec<Evidence>, CommandError> {
         Err(unsupported_error())
+    }
+
+    fn session_settings(&self) -> Option<&dyn SessionSettings> {
+        None
+    }
+
+    fn tabs(&self) -> Option<&dyn TabsEngine> {
+        None
+    }
+
+    fn navigation(&self) -> Option<&dyn NavigationEngine> {
+        None
+    }
+
+    fn observation(&self) -> Option<&dyn ObservationEngine> {
+        None
+    }
+
+    fn input(&self) -> Option<&dyn InputEngine> {
+        None
+    }
+
+    fn events(&self) -> Option<&dyn EventsEngine> {
+        None
+    }
+
+    fn capture(&self) -> Option<&dyn CaptureEngine> {
+        None
+    }
+
+    fn page_configuration(&self) -> Option<&dyn PageConfigurationEngine> {
+        None
+    }
+
+    fn javascript(&self) -> Option<&dyn JavaScriptEngine> {
+        None
+    }
+
+    fn web_state(&self) -> Option<&dyn WebStateEngine> {
+        None
+    }
+
+    fn wait_provider(&self) -> Option<&dyn WaitProvider> {
+        None
     }
 }
 

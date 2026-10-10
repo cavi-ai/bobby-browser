@@ -57,7 +57,7 @@ use types::{
     ErrorLayer, EvaluateJavaScriptCommand, Evidence, FormControl, FormControlTarget,
     InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand, PageEvidence, PageId,
     ScreenshotMode, SessionId, SetEmulatedMediaCommand, SetFocusEmulationCommand, TargetSpec,
-    TypeTextCommand, UploadFilesCommand, WaitCondition, WaitForCommand, WorkerId,
+    TypeTextCommand, UploadFilesCommand, WaitCondition, WorkerId,
 };
 
 use crate::{
@@ -1686,283 +1686,6 @@ impl BrowserWorker for ChromiumWorker {
         &self.profile_dir
     }
 
-    async fn set_fingerprint_enabled(&self, enabled: bool) -> Result<(), CommandError> {
-        crate::SessionSettings::set_fingerprint_enabled(self, enabled).await
-    }
-
-    fn fingerprint_enabled(&self) -> bool {
-        crate::SessionSettings::fingerprint_enabled(self)
-    }
-
-    async fn set_humanization_enabled(&self, enabled: bool) -> Result<(), CommandError> {
-        crate::SessionSettings::set_humanization_enabled(self, enabled).await
-    }
-
-    fn humanization_enabled(&self) -> bool {
-        crate::SessionSettings::humanization_enabled(self)
-    }
-
-    async fn open_page(&self, page_id: PageId) -> Result<(), CommandError> {
-        crate::TabsEngine::open_page(self, page_id).await
-    }
-
-    async fn navigate(
-        &self,
-        page_id: &PageId,
-        command: &NavigateCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        crate::NavigationEngine::navigate(self, page_id, command).await
-    }
-
-    async fn settle_page(
-        &self,
-        page_id: &PageId,
-        budget: Duration,
-        requested_url: Option<&str>,
-    ) -> Option<(String, String)> {
-        crate::NavigationEngine::settle_page(self, page_id, budget, requested_url).await
-    }
-
-    async fn inspect(
-        &self,
-        page_id: &PageId,
-        command: &InspectCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        crate::ObservationEngine::inspect(self, page_id, command).await
-    }
-
-    async fn click(
-        &self,
-        page_id: &PageId,
-        command: &ClickCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        crate::InputEngine::click(self, page_id, command).await
-    }
-
-    async fn click_xy(
-        &self,
-        page_id: &PageId,
-        x: f64,
-        y: f64,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        crate::InputEngine::click_xy(self, page_id, x, y).await
-    }
-
-    async fn type_text(
-        &self,
-        page_id: &PageId,
-        command: &TypeTextCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        crate::InputEngine::type_text(self, page_id, command).await
-    }
-
-    async fn upload_files(
-        &self,
-        page_id: &PageId,
-        command: &UploadFilesCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        crate::InputEngine::upload_files(self, page_id, command).await
-    }
-
-    async fn control_action(
-        &self,
-        page_id: &PageId,
-        command: &ControlActionCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        crate::InputEngine::control_action(self, page_id, command).await
-    }
-
-    async fn open_page_command(
-        &self,
-        command: &OpenPageCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        crate::TabsEngine::open_page_command(self, command).await
-    }
-
-    async fn list_pages(&self, _command: &ListPagesCommand) -> Result<Vec<Evidence>, CommandError> {
-        crate::TabsEngine::list_pages(self, _command).await
-    }
-
-    async fn close_page_command(
-        &self,
-        command: &ClosePageCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        crate::TabsEngine::close_page_command(self, command).await
-    }
-
-    async fn network_log(
-        &self,
-        page_id: &PageId,
-        command: &types::NetworkLogCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        crate::EventsEngine::network_log(self, page_id, command).await
-    }
-
-    async fn emulate(
-        &self,
-        page_id: &PageId,
-        command: &types::EmulateCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        crate::PageConfigurationEngine::emulate(self, page_id, command).await
-    }
-
-    async fn handle_dialog(
-        &self,
-        page_id: &PageId,
-        command: &types::HandleDialogCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        crate::EventsEngine::handle_dialog(self, page_id, command).await
-    }
-
-    async fn print_to_pdf(
-        &self,
-        page_id: &PageId,
-        command: &types::PrintToPdfCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        crate::CaptureEngine::print_to_pdf(self, page_id, command).await
-    }
-
-    async fn get_cookies(
-        &self,
-        page_id: &PageId,
-        command: &types::GetCookiesCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        crate::WebStateEngine::get_cookies(self, page_id, command).await
-    }
-
-    async fn set_cookies(
-        &self,
-        page_id: &PageId,
-        command: &types::SetCookiesCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        crate::WebStateEngine::set_cookies(self, page_id, command).await
-    }
-
-    async fn delete_cookies(
-        &self,
-        page_id: &PageId,
-        command: &types::DeleteCookiesCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        crate::WebStateEngine::delete_cookies(self, page_id, command).await
-    }
-
-    async fn screenshot_bytes(&self, page_id: &PageId) -> Result<Vec<u8>, CommandError> {
-        crate::CaptureEngine::screenshot_bytes(self, page_id).await
-    }
-
-    async fn a11y_snapshot(
-        &self,
-        page_id: &PageId,
-        command: &types::AccessibilitySnapshotCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        crate::ObservationEngine::a11y_snapshot(self, page_id, command).await
-    }
-
-    async fn form_snapshot(
-        &self,
-        page_id: &PageId,
-        max_controls: Option<u32>,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        crate::ObservationEngine::form_snapshot(self, page_id, max_controls).await
-    }
-
-    async fn activate_page(
-        &self,
-        command: &types::ActivatePageCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        crate::TabsEngine::activate_page(self, command).await
-    }
-
-    async fn click_and_wait_for_popup(
-        &self,
-        page_id: &PageId,
-        command: &ClickAndWaitForPopupCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        crate::EventsEngine::click_and_wait_for_popup(self, page_id, command).await
-    }
-
-    async fn click_and_wait_for_download(
-        &self,
-        page_id: &PageId,
-        command: &ClickAndWaitForDownloadCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        crate::EventsEngine::click_and_wait_for_download(self, page_id, command).await
-    }
-
-    async fn wait_for(
-        &self,
-        page_id: &PageId,
-        command: &WaitForCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        crate::PageBehavior::wait_for(Some(self), page_id, command).await
-    }
-
-    async fn collect_candidates(
-        &self,
-        page_id: &PageId,
-        target: &types::TargetSpec,
-    ) -> Result<Vec<dom_engine::Candidate>, CommandError> {
-        crate::ObservationEngine::collect_candidates(self, page_id, target).await
-    }
-
-    async fn capture_screenshot(
-        &self,
-        page_id: &PageId,
-        command: &CaptureScreenshotCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        crate::CaptureEngine::capture_screenshot(self, page_id, command).await
-    }
-
-    async fn set_focus_emulation(
-        &self,
-        page_id: &PageId,
-        command: &SetFocusEmulationCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        crate::PageConfigurationEngine::set_focus_emulation(self, page_id, command).await
-    }
-
-    async fn set_emulated_media(
-        &self,
-        page_id: &PageId,
-        command: &SetEmulatedMediaCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        crate::PageConfigurationEngine::set_emulated_media(self, page_id, command).await
-    }
-
-    async fn evaluate_javascript(
-        &self,
-        page_id: &PageId,
-        command: &EvaluateJavaScriptCommand,
-    ) -> Result<Vec<Evidence>, CommandError> {
-        crate::JavaScriptEngine::evaluate_javascript(self, page_id, command).await
-    }
-
-    async fn element_at_point(
-        &self,
-        page_id: &PageId,
-        x: f64,
-        y: f64,
-    ) -> Result<Option<(String, String)>, CommandError> {
-        crate::ObservationEngine::element_at_point(self, page_id, x, y).await
-    }
-
-    fn supports_http_state(&self) -> bool {
-        crate::WebStateEngine::supports_http_state(self)
-    }
-
-    async fn http_state(&self, page_id: &PageId) -> Result<HttpStateSnapshot, CommandError> {
-        crate::WebStateEngine::http_state(self, page_id).await
-    }
-
-    async fn commit_http_state(
-        &self,
-        page_id: &PageId,
-        expected_version: u64,
-        delta: ResponseStateDelta,
-    ) -> Result<(), CommandError> {
-        crate::WebStateEngine::commit_http_state(self, page_id, expected_version, delta).await
-    }
-
     async fn close(&self) -> Result<(), CommandError> {
         self.shutdown().await
     }
@@ -1973,6 +1696,50 @@ impl BrowserWorker for ChromiumWorker {
 
     async fn reconnect_live_process(&self) -> Result<Vec<Evidence>, CommandError> {
         self.reconnect_live_process_impl().await
+    }
+
+    fn session_settings(&self) -> Option<&dyn crate::SessionSettings> {
+        Some(self)
+    }
+
+    fn tabs(&self) -> Option<&dyn crate::TabsEngine> {
+        Some(self)
+    }
+
+    fn navigation(&self) -> Option<&dyn crate::NavigationEngine> {
+        Some(self)
+    }
+
+    fn observation(&self) -> Option<&dyn crate::ObservationEngine> {
+        Some(self)
+    }
+
+    fn input(&self) -> Option<&dyn crate::InputEngine> {
+        Some(self)
+    }
+
+    fn events(&self) -> Option<&dyn crate::EventsEngine> {
+        Some(self)
+    }
+
+    fn capture(&self) -> Option<&dyn crate::CaptureEngine> {
+        Some(self)
+    }
+
+    fn page_configuration(&self) -> Option<&dyn crate::PageConfigurationEngine> {
+        Some(self)
+    }
+
+    fn javascript(&self) -> Option<&dyn crate::JavaScriptEngine> {
+        Some(self)
+    }
+
+    fn web_state(&self) -> Option<&dyn crate::WebStateEngine> {
+        Some(self)
+    }
+
+    fn wait_provider(&self) -> Option<&dyn crate::WaitProvider> {
+        Some(self)
     }
 }
 
@@ -5425,7 +5192,7 @@ mod tests {
         let held_pages = worker.pages.lock().await;
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            crate::BrowserWorker::evaluate_javascript(
+            crate::JavaScriptEngine::evaluate_javascript(
                 &worker,
                 &PageId::new(),
                 &types::EvaluateJavaScriptCommand {

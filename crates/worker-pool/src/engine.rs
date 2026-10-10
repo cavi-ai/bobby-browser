@@ -347,3 +347,94 @@ pub trait WaitProvider: Send + Sync {
 pub fn require_domain<T: ?Sized>(domain: Option<&T>) -> Result<&T, CommandError> {
     domain.ok_or_else(unsupported_error)
 }
+
+struct DefaultDomains;
+#[async_trait]
+impl TabsEngine for DefaultDomains {
+    async fn open_page(&self, _: PageId) -> Result<(), CommandError> {
+        Err(unsupported_error())
+    }
+}
+#[async_trait]
+impl NavigationEngine for DefaultDomains {
+    async fn navigate(
+        &self,
+        _: &PageId,
+        _: &NavigateCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+}
+#[async_trait]
+impl ObservationEngine for DefaultDomains {
+    async fn inspect(&self, _: &PageId, _: &InspectCommand) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+}
+#[async_trait]
+impl InputEngine for DefaultDomains {
+    async fn click(&self, _: &PageId, _: &ClickCommand) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+    async fn type_text(
+        &self,
+        _: &PageId,
+        _: &TypeTextCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(unsupported_error())
+    }
+}
+#[async_trait]
+impl SessionSettings for DefaultDomains {}
+/// Preserve the existing defaults when the entire domain is absent.
+pub fn session_settings_or_default(domain: Option<&dyn SessionSettings>) -> &dyn SessionSettings {
+    domain.unwrap_or(&DefaultDomains)
+}
+/// Preserve the existing defaults when the entire domain is absent.
+pub fn tabs_or_default(domain: Option<&dyn TabsEngine>) -> &dyn TabsEngine {
+    domain.unwrap_or(&DefaultDomains)
+}
+/// Preserve the existing defaults when the entire domain is absent.
+pub fn navigation_or_default(domain: Option<&dyn NavigationEngine>) -> &dyn NavigationEngine {
+    domain.unwrap_or(&DefaultDomains)
+}
+/// Preserve the existing defaults when the entire domain is absent.
+pub fn observation_or_default(domain: Option<&dyn ObservationEngine>) -> &dyn ObservationEngine {
+    domain.unwrap_or(&DefaultDomains)
+}
+/// Preserve the existing defaults when the entire domain is absent.
+pub fn input_or_default(domain: Option<&dyn InputEngine>) -> &dyn InputEngine {
+    domain.unwrap_or(&DefaultDomains)
+}
+#[async_trait]
+impl EventsEngine for DefaultDomains {}
+/// Preserve the existing defaults when the entire domain is absent.
+pub fn events_or_default(domain: Option<&dyn EventsEngine>) -> &dyn EventsEngine {
+    domain.unwrap_or(&DefaultDomains)
+}
+#[async_trait]
+impl CaptureEngine for DefaultDomains {}
+/// Preserve the existing defaults when the entire domain is absent.
+pub fn capture_or_default(domain: Option<&dyn CaptureEngine>) -> &dyn CaptureEngine {
+    domain.unwrap_or(&DefaultDomains)
+}
+#[async_trait]
+impl PageConfigurationEngine for DefaultDomains {}
+/// Preserve the existing defaults when the entire domain is absent.
+pub fn page_configuration_or_default(
+    domain: Option<&dyn PageConfigurationEngine>,
+) -> &dyn PageConfigurationEngine {
+    domain.unwrap_or(&DefaultDomains)
+}
+#[async_trait]
+impl JavaScriptEngine for DefaultDomains {}
+/// Preserve the existing defaults when the entire domain is absent.
+pub fn javascript_or_default(domain: Option<&dyn JavaScriptEngine>) -> &dyn JavaScriptEngine {
+    domain.unwrap_or(&DefaultDomains)
+}
+#[async_trait]
+impl WebStateEngine for DefaultDomains {}
+/// Preserve the existing defaults when the entire domain is absent.
+pub fn web_state_or_default(domain: Option<&dyn WebStateEngine>) -> &dyn WebStateEngine {
+    domain.unwrap_or(&DefaultDomains)
+}
