@@ -3867,6 +3867,39 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
         }
     }
 
+    async fn read_attribute(
+        &self,
+        page_id: &PageId,
+        target: &TargetSpec,
+        attribute: &str,
+    ) -> Result<Option<String>, CommandError> {
+        let top_context = self.context(page_id).await?;
+        let (context, selector) = self
+            .resolve_input_target(page_id, &top_context, "", Some(target))
+            .await?;
+        let json = |value: &str| {
+            serde_json::to_string(value)
+                .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))
+        };
+        let (selector, attribute) = (json(&selector)?, json(attribute)?);
+        let response = self
+            .transport
+            .send(
+                "script.evaluate",
+                json!({
+                    "expression": format!("{COMPOSED_QUERY}({selector})?.getAttribute({attribute}) ?? null"),
+                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                    "awaitPromise": false,
+                    "resultOwnership": "none",
+                }),
+            )
+            .await?;
+        Ok(response
+            .pointer("/result/value")
+            .and_then(Value::as_str)
+            .map(str::to_owned))
+    }
+
     async fn collect_candidates(
         &self,
         page_id: &PageId,
@@ -4212,14 +4245,17 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
             )
             .await?;
         worker_pool::annotate_accessibility_targets(&mut nodes);
-        let controls_omitted = if accessibility_contains_form_control(&nodes) {
-            false
-        } else {
-            worker_pool::ObservationEngine::form_snapshot(self, page_id, Some(512))
-                .await
-                .ok()
-                .is_some_and(|evidence| {
-                    evidence.iter().any(|item| {
+        // Only a whole, unscoped tree can show that a control is missing from it.
+        let controls_omitted =
+            if truncated || command.target.is_some() || accessibility_contains_form_control(&nodes)
+            {
+                false
+            } else {
+                worker_pool::ObservationEngine::form_snapshot(self, page_id, Some(512))
+                    .await
+                    .ok()
+                    .is_some_and(|evidence| {
+                        evidence.iter().any(|item| {
                         matches!(
                             item,
                             Evidence::FormSnapshot { snapshot }
@@ -4227,8 +4263,8 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
                                     || snapshot.forms.iter().any(|form| !form.controls.is_empty())
                         )
                     })
-                })
-        };
+                    })
+            };
         let mut evidence = vec![
             Evidence::AccessibilitySnapshot {
                 page_id: page_id.clone(),

@@ -56,6 +56,8 @@ macro_rules! every_case {
             actions_fail_a_missing_target_within_one_bound,
             click_refuses_a_covered_target,
             locate_miss_marks_a_hidden_control,
+            omitted_controls_need_a_whole_tree,
+            intent_extract_reads_href_and_attributes,
             hidden_state_holds_for_a_removed_control,
             intent_follow_reports_a_dialog_that_opened,
             dismiss_completes_when_a_same_named_control_appears,
@@ -2516,6 +2518,101 @@ pub async fn locate_miss_marks_a_hidden_control(rig: &Rig) {
     assert!(
         !mislabelled,
         "the hidden control was reported as a mismatch: {located}"
+    );
+    live.close().await;
+}
+
+/// A snapshot reports form controls missing from the accessibility tree only
+/// when its tree is whole: never when truncated or scoped to a region.
+pub async fn omitted_controls_need_a_whole_tree(rig: &Rig) {
+    let mut links = String::new();
+    for index in 0..40 {
+        links.push_str(&format!(r##"<a href="#l{index}">Link {index}</a>"##));
+    }
+    let shown = page(
+        "Shown",
+        &format!(
+            r#"<main><nav aria-label="Links">{links}</nav>
+            <label>Language <select><option>English</option></select></label></main>"#
+        ),
+    );
+    let hidden = page(
+        "Hidden",
+        r#"<main><h1>Hidden</h1><div aria-hidden="true"><input aria-label="Code"></div></main>"#,
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/shown", Route::Html(shown)),
+        ("/hidden", Route::Html(hidden)),
+    ])
+    .await;
+    let claims = |snapshot: &Value| {
+        snapshot
+            .to_string()
+            .contains("accessibilityControlsOmitted")
+    };
+    let live = Live::open(rig, &site.url("/shown")).await;
+    let truncated = live.snapshot(json!({"maxNodes":10})).await;
+    assert!(
+        !claims(&truncated),
+        "a truncated snapshot claimed omitted controls: {truncated}"
+    );
+    let scoped = live
+        .snapshot(json!({"target":{"role":"navigation","accessibleName":"Links"}}))
+        .await;
+    assert!(
+        !claims(&scoped),
+        "a scoped snapshot claimed omitted controls: {scoped}"
+    );
+    live.close().await;
+    let live = Live::open(rig, &site.url("/hidden")).await;
+    let whole = live.snapshot(json!({})).await;
+    assert!(
+        claims(&whole),
+        "a whole snapshot missed controls hidden from the tree: {whole}"
+    );
+    live.close().await;
+}
+
+/// `intent_extract` reads a link's href and a named attribute off the
+/// controls it resolves.
+pub async fn intent_extract_reads_href_and_attributes(rig: &Rig) {
+    let body = r#"<main><a href="/profile/42" data-user-id="42">View profile</a></main>"#;
+    let site = FixtureSite::spawn(vec![("/home", Route::Html(page("Home", body)))]).await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let extracted = live
+        .call(
+            "intent_extract",
+            json!({
+                "purpose":"read the profile link",
+                "fields":[
+                    {"name":"link","purpose":"profile link",
+                     "hints":{"role":"link","accessibleName":"View profile"},"value":{"kind":"href"}},
+                    {"name":"user","purpose":"profile user id",
+                     "hints":{"role":"link","accessibleName":"View profile"},
+                     "value":{"kind":"attribute","attribute":"data-user-id"}}
+                ]
+            }),
+        )
+        .await;
+    let value = |field: &str| {
+        extracted["evidence"]
+            .as_array()
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item["kind"] == "extraction" && item["field"] == field)
+            })
+            .map(|item| item["value"].clone())
+    };
+    assert_eq!(
+        value("link"),
+        Some(json!("/profile/42")),
+        "href extraction: {extracted}"
+    );
+    assert_eq!(
+        value("user"),
+        Some(json!("42")),
+        "attribute extraction: {extracted}"
     );
     live.close().await;
 }

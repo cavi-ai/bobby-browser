@@ -109,6 +109,100 @@ async fn quiet_window_firefox() {
     quiet_window_contract(Engine::Firefox).await;
 }
 
+async fn element_visibility_contract(engine: Engine) {
+    const CONTROLS: &str = "<button id='visible'>Visible</button>\
+        <button id='display-none' style='display:none'>Hidden</button>\
+        <button id='visibility-hidden' style='visibility:hidden'>Hidden</button>\
+        <div id='zero-area' style='width:0;height:0;overflow:hidden'></div>";
+    let site = FixtureSite::spawn(vec![
+        ("/", Route::Html(format!(
+            "<!doctype html><title>Element visibility contract</title>{CONTROLS}\
+             <iframe id='frame' src='/frame'></iframe><div id='shadow-host'></div>\
+             <script>document.querySelector('#shadow-host').attachShadow({{mode:'open'}}).innerHTML={};</script>",
+            json!(CONTROLS),
+        ))),
+        ("/frame", Route::Html(format!("<!doctype html><title>Frame</title>{CONTROLS}"))),
+    ])
+    .await;
+    let rig = match engine {
+        Engine::Chromium => Rig::chromium().await,
+        Engine::Firefox => Rig::firefox().await,
+    };
+    let live = Live::open(&rig, &site.url("/")).await;
+    for scope in [
+        json!({}),
+        json!({"framePath":[{"css":"#frame"}]}),
+        json!({"shadowPath":[{"css":"#shadow-host"}]}),
+    ] {
+        for selector in ["#display-none", "#visibility-hidden", "#zero-area"] {
+            let mut target = scope.clone();
+            target["css"] = json!(selector);
+            for state in ["attached", "hidden"] {
+                let condition = json!({"kind":"element", "target":target, "state":state});
+                let result = live
+                    .call("wait_for", json!({"condition":condition, "timeoutMs":1000}))
+                    .await;
+                assert_eq!(
+                    result["status"], "completed",
+                    "{scope} {selector} {state}: {result}"
+                );
+                let expected: types::WaitCondition = serde_json::from_value(condition).unwrap();
+                assert_eq!(evidence(&result, "wait")["condition"], json!(expected));
+            }
+            let result = live
+                .call(
+                    "wait_for",
+                    json!({"condition":{"kind":"element", "target":target, "state":"visible"}, "timeoutMs":200}),
+                )
+                .await;
+            assert_eq!(
+                result["status"], "failed",
+                "hidden element reported visible: {result}"
+            );
+            assert_eq!(result["error"]["code"], "waitConditionTimedOut", "{result}");
+        }
+        let mut missing = scope.clone();
+        missing["css"] = json!("#missing");
+        for (state, status) in [("hidden", "completed"), ("visible", "failed")] {
+            let result = live
+                .call(
+                    "wait_for",
+                    json!({"condition":{"kind":"element", "target":missing, "state":state}, "timeoutMs":200}),
+                )
+                .await;
+            assert_eq!(
+                result["status"], status,
+                "{scope} missing {state}: {result}"
+            );
+            if status == "failed" {
+                assert_eq!(result["error"]["code"], "waitConditionTimedOut", "{result}");
+            }
+        }
+        let mut target = scope;
+        target["css"] = json!("#visible");
+        let visible = live
+            .call(
+                "wait_for",
+                json!({"condition":{"kind":"element", "target":target, "state":"visible"}, "timeoutMs":1000}),
+            )
+            .await;
+        assert_eq!(visible["status"], "completed", "{visible}");
+    }
+    live.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn element_visibility_chromium() {
+    element_visibility_contract(Engine::Chromium).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Firefox and paired test profile"]
+async fn element_visibility_firefox() {
+    element_visibility_contract(Engine::Firefox).await;
+}
+
 fn evidence<'a>(outcome: &'a Value, kind: &str) -> &'a Value {
     outcome["evidence"]
         .as_array()

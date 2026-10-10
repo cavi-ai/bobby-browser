@@ -2115,7 +2115,8 @@ impl crate::ObservationEngine for ChromiumWorker {
         if emitted < max_nodes {
             truncated |= descend_a11y_iframes(&page, &mut nodes, max_nodes - emitted).await;
         }
-        let controls_omitted = if a11y_contains_form_control(&nodes) {
+        // Only a whole tree can show that a control is missing from it.
+        let controls_omitted = if truncated || a11y_contains_form_control(&nodes) {
             false
         } else {
             match page
@@ -2186,6 +2187,20 @@ impl crate::ObservationEngine for ChromiumWorker {
         let page = self.page_handle(page_id).await?;
         let browser = self.browser_handle().await?;
         gather_candidates(&page, target, Some(&browser)).await
+    }
+
+    async fn read_attribute(
+        &self,
+        page_id: &PageId,
+        target: &types::TargetSpec,
+        attribute: &str,
+    ) -> Result<Option<String>, CommandError> {
+        let page = self.page_handle(page_id).await?;
+        let browser = self.browser_handle().await?;
+        resolve_browser_target(page_id, &page, "", Some(target), Some(&browser))
+            .await?
+            .attribute(&page, attribute)
+            .await
     }
 
     async fn element_at_point(
