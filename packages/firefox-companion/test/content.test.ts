@@ -75,6 +75,39 @@ test("observeDocument returns page identity, visible text, labels, roles, and st
   assert.equal(observed.controls[1]?.name, "Continue");
 });
 
+// Resolves a composed selector the way the runtime does: each part names a
+// host in its root, the last names the element.
+function composedQuery(document: Document, selector: string): Element | null {
+  const parts = selector.split(" >>> ");
+  let root: Document | ShadowRoot = document;
+  for (let index = 0; index < parts.length; index += 1) {
+    const found: Element | null = root.querySelector(parts[index]!);
+    if (!found || index === parts.length - 1) return found;
+    if (!found.shadowRoot) return null;
+    root = found.shadowRoot;
+  }
+  return null;
+}
+
+test("controls inside open shadow roots are observed with selectors through each host", () => {
+  const document = documentFor(`<outer-part id="outer"><span slot="scope" aria-label="Within this section"></span></outer-part>`);
+  const outer = document.getElementById("outer")!;
+  const outerRoot = outer.attachShadow({ mode: "open" });
+  outerRoot.innerHTML =
+    '<label><slot name="scope"></slot><textarea placeholder="Search"></textarea></label><inner-part id="inner"></inner-part>';
+  const inner = outerRoot.getElementById("inner")!;
+  inner.attachShadow({ mode: "open" }).innerHTML = '<button data-testid="deep">Deep button</button>';
+
+  const observed = observeDocument(document);
+
+  const field = observed.controls.find((control) => control.role === "textbox");
+  const deep = observed.controls.find((control) => control.name === "Deep button");
+  assert.equal(field?.name, "Within this section");
+  assert.equal(composedQuery(document, field!.cssPath), outerRoot.querySelector("textarea"));
+  assert.equal(deep?.cssPath, '#outer >>> #inner >>> [data-testid="deep"]');
+  assert.equal(composedQuery(document, deep!.cssPath), inner.shadowRoot!.querySelector("button"));
+});
+
 test("named iframes are observable targets", () => {
   const document = documentFor('<iframe title="Card details"></iframe>');
   const observed = observeDocument(document);
