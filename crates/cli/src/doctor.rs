@@ -1,6 +1,8 @@
 //! `bobby doctor` checks and report rendering.
 
 mod checks;
+#[cfg(unix)]
+mod skill_permissions;
 
 use std::{
     io::{IsTerminal, Write},
@@ -385,6 +387,8 @@ pub(crate) fn run_doctor_fix(options: DoctorFixOptions) -> Result<DoctorFixRepor
                 }),
             }
         }
+        #[cfg(unix)]
+        actions.push(skill_permissions::repair(&config.storage.checkpoints_dir));
     }
 
     let post_fix = run_doctor_with_profile(
