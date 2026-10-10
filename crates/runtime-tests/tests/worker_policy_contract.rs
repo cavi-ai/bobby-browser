@@ -203,6 +203,85 @@ async fn element_visibility_firefox() {
     element_visibility_contract(Engine::Firefox).await;
 }
 
+async fn empty_wait_target_contract(engine: Engine) {
+    const CONTROLS: &str = "<p id='empty-text' style='width:100px;height:20px'></p>\
+        <input id='empty-value' value=''>";
+    let site = FixtureSite::spawn(vec![
+        ("/", Route::Html(format!(
+            "<!doctype html><title>Empty wait target contract</title>{CONTROLS}\
+             <iframe id='frame' src='/frame'></iframe><div id='shadow-host'></div>\
+             <script>document.querySelector('#shadow-host').attachShadow({{mode:'open'}}).innerHTML={};</script>",
+            json!(CONTROLS),
+        ))),
+        ("/frame", Route::Html(format!("<!doctype html><title>Frame</title>{CONTROLS}"))),
+    ])
+    .await;
+    let rig = match engine {
+        Engine::Chromium => Rig::chromium().await,
+        Engine::Firefox => Rig::firefox().await,
+    };
+    let live = Live::open(&rig, &site.url("/")).await;
+    let mut failures = Vec::new();
+    for scope in [
+        json!({}),
+        json!({"framePath":[{"css":"#frame"}]}),
+        json!({"shadowPath":[{"css":"#shadow-host"}]}),
+    ] {
+        for (kind, present) in [("text", "#empty-text"), ("value", "#empty-value")] {
+            for matcher in [
+                json!({"kind":"exact", "value":""}),
+                json!({"kind":"regex", "value":"^$"}),
+            ] {
+                let mut target = scope.clone();
+                target["css"] = json!(present);
+                let result = live
+                    .call(
+                        "wait_for",
+                        json!({
+                            "condition":{"kind":kind, "target":target, "matcher":matcher},
+                            "timeoutMs":1000,
+                        }),
+                    )
+                    .await;
+                assert_eq!(result["status"], "completed", "{scope} {kind}: {result}");
+                assert_eq!(evidence(&result, "wait")["observed"], "", "{result}");
+                target["css"] = json!("#missing");
+                let result = live
+                    .call(
+                        "wait_for",
+                        json!({
+                            "condition":{"kind":kind, "target":target, "matcher":matcher},
+                            "timeoutMs":200,
+                        }),
+                    )
+                    .await;
+                if result["status"] != "failed"
+                    || result["error"]["code"] != "waitConditionTimedOut"
+                {
+                    failures.push(format!("{scope} missing {kind} {matcher}: {result}"));
+                }
+            }
+        }
+    }
+    live.close().await;
+    assert!(
+        failures.is_empty(),
+        "missing targets matched empty text: {failures:#?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn empty_wait_target_chromium() {
+    empty_wait_target_contract(Engine::Chromium).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Firefox and paired test profile"]
+async fn empty_wait_target_firefox() {
+    empty_wait_target_contract(Engine::Firefox).await;
+}
+
 fn evidence<'a>(outcome: &'a Value, kind: &str) -> &'a Value {
     outcome["evidence"]
         .as_array()

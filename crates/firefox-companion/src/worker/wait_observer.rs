@@ -18,6 +18,12 @@ fn visibility_predicate(hidden: bool) -> String {
     }
 }
 
+fn text_read_script(selector: &str, is_value: bool) -> String {
+    let property = if is_value { "value" } else { "innerText" };
+    // Absence is a pending observation, distinct from a present empty control.
+    format!("(()=>{{const el={COMPOSED_QUERY}({selector});return el?(el.{property}??''):null;}})()")
+}
+
 pub(super) struct FirefoxWaitObserver<'a> {
     pub(super) worker: &'a FirefoxCompanionWorker,
     pub(super) page_id: &'a PageId,
@@ -227,23 +233,18 @@ impl FirefoxCompanionWorker {
                             let selector = serde_json::to_string(&selector).map_err(|error| {
                                 driver_error(ErrorCode::InvalidRequest, error.to_string(), false)
                             })?;
-                            let read = if is_value {
-                                format!("{COMPOSED_QUERY}({selector})?.value ?? ''")
-                            } else {
-                                format!("{COMPOSED_QUERY}({selector})?.innerText ?? ''")
-                            };
+                            let read = text_read_script(&selector, is_value);
                             let response = self.transport.send("script.evaluate", json!({
                                 "expression": read,
                                 "target": {"context": context, "sandbox": COMPANION_SANDBOX},
                                 "awaitPromise": false,
                                 "resultOwnership": "none",
                             })).await?;
-                            let value = response
-                                .pointer("/result/value")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default()
-                                .to_owned();
-                            Ok(WaitObservation::Text(vec![value]))
+                            let value = response.pointer("/result/value").and_then(Value::as_str);
+                            Ok(match value {
+                                Some(value) => WaitObservation::Text(vec![value.to_owned()]),
+                                None => WaitObservation::Pending,
+                            })
                         }
                         Err(error) if error.code == ErrorCode::TargetNotFound => {
                             Ok(WaitObservation::Pending)
@@ -266,11 +267,7 @@ impl FirefoxCompanionWorker {
                                             false,
                                         )
                                     })?;
-                                let read = if is_value {
-                                    format!("{COMPOSED_QUERY}({selector_json})?.value ?? ''")
-                                } else {
-                                    format!("{COMPOSED_QUERY}({selector_json})?.innerText ?? ''")
-                                };
+                                let read = text_read_script(&selector_json, is_value);
                                 let response = match self.transport.send("script.evaluate", json!({
                                         "expression": read,
                                         "target": {"context": selector_context, "sandbox": COMPANION_SANDBOX},
@@ -297,12 +294,11 @@ impl FirefoxCompanionWorker {
                                             continue;
                                         }
                                     };
-                                let observed = response
-                                    .pointer("/result/value")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or_default()
-                                    .to_owned();
-                                values.push(observed);
+                                if let Some(observed) =
+                                    response.pointer("/result/value").and_then(Value::as_str)
+                                {
+                                    values.push(observed.to_owned());
+                                }
                             }
                             Ok(WaitObservation::Text(values))
                         }
