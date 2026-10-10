@@ -3863,6 +3863,39 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
         }
     }
 
+    async fn read_attribute(
+        &self,
+        page_id: &PageId,
+        target: &TargetSpec,
+        attribute: &str,
+    ) -> Result<Option<String>, CommandError> {
+        let top_context = self.context(page_id).await?;
+        let (context, selector) = self
+            .resolve_input_target(page_id, &top_context, "", Some(target))
+            .await?;
+        let json = |value: &str| {
+            serde_json::to_string(value)
+                .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))
+        };
+        let (selector, attribute) = (json(&selector)?, json(attribute)?);
+        let response = self
+            .transport
+            .send(
+                "script.evaluate",
+                json!({
+                    "expression": format!("{COMPOSED_QUERY}({selector})?.getAttribute({attribute}) ?? null"),
+                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                    "awaitPromise": false,
+                    "resultOwnership": "none",
+                }),
+            )
+            .await?;
+        Ok(response
+            .pointer("/result/value")
+            .and_then(Value::as_str)
+            .map(str::to_owned))
+    }
+
     async fn collect_candidates(
         &self,
         page_id: &PageId,

@@ -228,6 +228,13 @@ impl ResolvedTarget {
         self.eval(page, "return el.value || ''").await.map(Some)
     }
 
+    pub async fn attribute(&self, page: &Page, name: &str) -> Result<Option<String>, CommandError> {
+        let name = serde_json::to_string(name)
+            .map_err(|error| target_error(ErrorCode::InvalidRequest, error))?;
+        self.eval(page, &format!("return el.getAttribute({name})"))
+            .await
+    }
+
     pub async fn outer_html(&self, page: &Page) -> Result<Option<String>, CommandError> {
         if let Some(element) = &self.native {
             return element.outer_html().await.map_err(cdp_error);
