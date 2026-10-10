@@ -7192,6 +7192,7 @@ fn content_failure_code(code: &str, fallback: ErrorCode) -> ErrorCode {
     match code {
         "targetNotFound" => ErrorCode::TargetNotFound,
         "targetAmbiguous" => ErrorCode::TargetAmbiguous,
+        "targetObscured" => ErrorCode::TargetObscured,
         "scopeUnresolvable" | "invalidInput" => ErrorCode::InvalidRequest,
         "budgetExhausted" => ErrorCode::ResourceExhausted,
         "scriptException" => ErrorCode::BrowserCommandFailed,
@@ -7313,6 +7314,7 @@ mod content_failure_tests {
         for (code, expected) in [
             ("targetNotFound", ErrorCode::TargetNotFound),
             ("targetAmbiguous", ErrorCode::TargetAmbiguous),
+            ("targetObscured", ErrorCode::TargetObscured),
             ("scopeUnresolvable", ErrorCode::InvalidRequest),
             ("invalidInput", ErrorCode::InvalidRequest),
             ("budgetExhausted", ErrorCode::ResourceExhausted),

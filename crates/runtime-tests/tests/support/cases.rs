@@ -27,7 +27,7 @@ macro_rules! every_case {
             type_text_reaches_the_visible_duplicate,
             intent_follow_clicks_the_visible_duplicate,
             snapshot_scopes_to_a_named_list,
-            snapshot_scoped_behind_a_modal_names_the_dialog,
+            snapshot_scoped_behind_a_modal_reports_the_dialog,
             snapshot_targets_act_on_the_described_element,
             type_text_enter_reports_the_settled_page,
             type_text_enter_accepts_a_reformatted_landed_field,
@@ -623,27 +623,25 @@ pub async fn intent_follow_clicks_the_visible_duplicate(rig: &Rig) {
     live.close().await;
 }
 
-/// A snapshot scoped to a region an open modal dialog hides either returns
-/// the region or fails targetObscured naming the dialog, never targetNotFound.
-pub async fn snapshot_scoped_behind_a_modal_names_the_dialog(rig: &Rig) {
+/// A snapshot scoped to a region an open modal dialog hides fails
+/// targetObscured saying a modal dialog is in the way, not targetNotFound.
+pub async fn snapshot_scoped_behind_a_modal_reports_the_dialog(rig: &Rig) {
     let body = r#"<main aria-hidden="true"><h1>Page</h1></main>
         <div role="dialog" aria-modal="true" aria-label="Notice"
              style="position:fixed;inset:0;background:#fff"><button>Close</button></div>"#;
     let site = FixtureSite::spawn(vec![("/modal", Route::Html(page("Modal", body)))]).await;
     let live = Live::open(rig, &site.url("/modal")).await;
     let scoped = live.snapshot(json!({"target":{"role":"main"}})).await;
-    if scoped["status"] != "completed" {
-        assert_eq!(
-            scoped["error"]["code"], "targetObscured",
-            "scoped snapshot behind a modal: {scoped}"
-        );
-        assert!(
-            scoped["error"]["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("\"Notice\"")),
-            "the error does not name the dialog: {scoped}"
-        );
-    }
+    assert_eq!(
+        scoped["error"]["code"], "targetObscured",
+        "scoped snapshot behind a modal: {scoped}"
+    );
+    assert!(
+        scoped["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("modal dialog")),
+        "the error does not say a modal dialog is in the way: {scoped}"
+    );
     live.close().await;
 }
 

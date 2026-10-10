@@ -4753,14 +4753,12 @@ fn compact_ax_tree(
     compact_ax_tree_from(raw, max_nodes, None)
 }
 
-/// `forced_root` scopes the output to the subtree rooted at that AX node id
-/// (a scoped `a11y_snapshot`); `None` compacts the whole tree.
-/// The error for a resolved element the accessibility tree leaves out. An open
-/// modal dialog hides everything behind it, so the error names that dialog.
+/// The error for a resolved element the accessibility tree leaves out: an open
+/// modal dialog hides everything behind it.
 fn hidden_from_accessibility(
     nodes: &[chromiumoxide::cdp::browser_protocol::accessibility::AxNode],
 ) -> CommandError {
-    let modal = nodes.iter().filter(|node| !node.ignored).find(|node| {
+    let modal_open = nodes.iter().filter(|node| !node.ignored).any(|node| {
         node.properties.as_ref().is_some_and(|properties| {
             properties.iter().any(|property| {
                 property.name.as_ref() == "modal"
@@ -4768,28 +4766,23 @@ fn hidden_from_accessibility(
             })
         })
     });
-    match modal {
-        Some(dialog) => CommandError {
+    if modal_open {
+        CommandError {
             code: ErrorCode::TargetObscured,
-            message: format!(
-                "target is behind the open dialog \"{}\"; dismiss it first",
-                dialog
-                    .name
-                    .as_ref()
-                    .and_then(|name| name.value.as_ref())
-                    .and_then(|name| name.as_str())
-                    .unwrap_or_default()
-            ),
+            message: "target is behind an open modal dialog; dismiss it first".into(),
             layer: ErrorLayer::Driver,
             retryable: false,
-        },
-        None => driver_error(
+        }
+    } else {
+        driver_error(
             ErrorCode::TargetNotFound,
             "resolved target is hidden from the accessibility tree",
-        ),
+        )
     }
 }
 
+/// `forced_root` scopes the output to the subtree rooted at that AX node id
+/// (a scoped `a11y_snapshot`); `None` compacts the whole tree.
 fn compact_ax_tree_from(
     raw: &[chromiumoxide::cdp::browser_protocol::accessibility::AxNode],
     max_nodes: usize,

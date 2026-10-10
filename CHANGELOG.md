@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- On Chromium, a snapshot scoped to a region an open modal dialog hides fails `targetObscured` naming the dialog.
+- A snapshot scoped to a region an open modal dialog hides fails `targetObscured` instead of `targetNotFound`.
 - On Chromium, clicking an element covered by another fails `targetObscured`, as on Firefox, instead of clicking the covering element.
 - On Firefox, a new session starts with no tabs and gets only the pages it opens, so concurrent sessions never take each other's pages.
 - On Linux, Chrome keeps shared memory in `/dev/shm` unless it is smaller than 1 GiB.
