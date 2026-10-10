@@ -220,7 +220,7 @@ pub(crate) fn repair_for_code(code: &str) -> Option<Value> {
             "Re-check the control's real role or kind and match the action to it."
         }
         "obstructionSuspected" => {
-            "Take a fresh a11y_snapshot; there may be another dismissal control, or the wrong thing was dismissed."
+            "Something covers the page: a11y_snapshot with target {role: \"dialog\"} shows it; close it with intent_dismiss_obstruction using a control from that snapshot, then retry."
         }
         "visionAssistDenied" => {
             "The message leads with the deterministic stuck reason (targetNotFound, targetAmbiguous, obstructionSuspected); repair that first (fresh a11y_snapshot, narrower target); enabling visionAssist on the session or granting vision:assist only adds the vision fallback."

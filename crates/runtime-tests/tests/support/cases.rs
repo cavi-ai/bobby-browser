@@ -54,6 +54,7 @@ macro_rules! every_case {
             actions_wait_for_a_late_target,
             actions_fail_a_missing_target_within_one_bound,
             click_refuses_a_covered_target,
+            intent_follow_reports_a_dialog_that_opened,
             dismiss_completes_when_a_same_named_control_appears,
             shadow_root_controls_act_from_snapshot_targets,
             navigate_waits_for_late_scripts,
@@ -2281,6 +2282,51 @@ pub async fn click_refuses_a_covered_target(rig: &Rig) {
         listed_url,
         site.url("/home").as_str(),
         "the click followed another link"
+    );
+    live.close().await;
+}
+
+/// A link whose click opens a dialog instead of its destination: the follow
+/// fails `obstructionSuspected` and its evidence names the dialog.
+pub async fn intent_follow_reports_a_dialog_that_opened(rig: &Rig) {
+    let home = page(
+        "Home",
+        r#"<main><a href="/next" id="next">Next</a></main>
+        <div role="dialog" aria-modal="true" aria-label="Notice" hidden
+             style="position:fixed;inset:0;background:#fff"><button>Close</button></div>
+        <script>
+        document.getElementById('next').addEventListener('click', (event) => {
+            event.preventDefault();
+            document.querySelector('[role="dialog"]').hidden = false;
+        });
+        </script>"#,
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/home", Route::Html(home)),
+        ("/next", Route::Html(page("Next", "<h1>Next</h1>"))),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let followed = live
+        .call(
+            "intent_follow",
+            json!({
+                "purpose":"Open the next page",
+                "hints":{"role":"link","accessibleName":"Next"},
+                "expectedDestination":{
+                    "condition":{"kind":"url","matcher":{"kind":"contains","value":"/next"}},
+                    "timeoutMs":3000
+                }
+            }),
+        )
+        .await;
+    assert_eq!(
+        followed["error"]["code"], "obstructionSuspected",
+        "follow that opened a dialog: {followed}"
+    );
+    assert!(
+        followed.to_string().contains("Notice"),
+        "the evidence does not name the dialog: {followed}"
     );
     live.close().await;
 }
