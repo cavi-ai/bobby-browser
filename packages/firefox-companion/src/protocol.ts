@@ -6,6 +6,7 @@ export const MAX_COMPANION_PAYLOAD_BYTES = 1024 * 1024;
 export const CONTENT_FAILURE_MESSAGES = {
   targetNotFound: "the target was not found on the page",
   targetAmbiguous: "the target matches more than one element; add an ordinal",
+  targetObscured: "the target is behind an open modal dialog; dismiss it first",
   scopeUnresolvable: "the target cannot select an element: invalid or unbounded selector, or no role",
   invalidInput: "the content action input was invalid",
   budgetExhausted: "the page search stopped at its visit bound before reaching the target",

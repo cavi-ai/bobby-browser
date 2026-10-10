@@ -28,6 +28,7 @@ macro_rules! every_case {
             intent_follow_clicks_the_visible_duplicate,
             snapshot_scopes_to_a_named_list,
             scoped_snapshot_targets_act_on_the_scoped_element,
+            snapshot_scoped_behind_a_modal_reports_the_dialog,
             snapshot_targets_act_on_the_described_element,
             snapshot_targets_resolve_beside_a_modal_dialog,
             type_text_enter_reports_the_settled_page,
@@ -655,6 +656,28 @@ pub async fn scoped_snapshot_targets_act_on_the_scoped_element(rig: &Rig) {
     assert!(
         find_node(&after, "status", Some("acted item")).is_some(),
         "the scoped target {link} clicked another link: {after}"
+    );
+    live.close().await;
+}
+
+/// A snapshot scoped to a region an open modal dialog hides fails
+/// targetObscured saying a modal dialog is in the way, not targetNotFound.
+pub async fn snapshot_scoped_behind_a_modal_reports_the_dialog(rig: &Rig) {
+    let body = r#"<main aria-hidden="true"><h1>Page</h1></main>
+        <div role="dialog" aria-modal="true" aria-label="Notice"
+             style="position:fixed;inset:0;background:#fff"><button>Close</button></div>"#;
+    let site = FixtureSite::spawn(vec![("/modal", Route::Html(page("Modal", body)))]).await;
+    let live = Live::open(rig, &site.url("/modal")).await;
+    let scoped = live.snapshot(json!({"target":{"role":"main"}})).await;
+    assert_eq!(
+        scoped["error"]["code"], "targetObscured",
+        "scoped snapshot behind a modal: {scoped}"
+    );
+    assert!(
+        scoped["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("modal dialog")),
+        "the error does not say a modal dialog is in the way: {scoped}"
     );
     live.close().await;
 }

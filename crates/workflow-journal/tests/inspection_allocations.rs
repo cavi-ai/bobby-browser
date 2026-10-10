@@ -87,6 +87,14 @@ fn inspection_and_archived_reads_avoid_unrelated_history_allocations() {
     }
     drop(file);
     let bytes = std::fs::metadata(&path).unwrap().len();
+    let original_bytes = std::fs::read(&path).unwrap();
+    let longest_record = original_bytes
+        .split(|byte| *byte == b'\n')
+        .map(|line| line.len() + 1)
+        .max()
+        .unwrap();
+    RECORD_ALLOCATION_SIZE.store(longest_record, Ordering::Relaxed);
+    RECORD_ALLOCATIONS.store(0, Ordering::Relaxed);
 
     TRACKING.store(true, Ordering::Relaxed);
     let health = runtime.block_on(JsonlJournal::inspect(&path)).unwrap();
@@ -102,13 +110,12 @@ fn inspection_and_archived_reads_avoid_unrelated_history_allocations() {
         largest < 128 * 1024,
         "inspection allocated {largest} bytes at once"
     );
+    let record_allocations = RECORD_ALLOCATIONS.load(Ordering::Relaxed);
+    assert!(
+        record_allocations < 64,
+        "inspecting 2048 records made {record_allocations} record-sized allocations"
+    );
 
-    let original_bytes = std::fs::read(&path).unwrap();
-    let longest_record = original_bytes
-        .split(|byte| *byte == b'\n')
-        .map(|line| line.len() + 1)
-        .max()
-        .unwrap();
     let live = runtime.block_on(JsonlJournal::open(&path)).unwrap();
     RECORD_ALLOCATION_SIZE.store(longest_record, Ordering::Relaxed);
     RECORD_ALLOCATIONS.store(0, Ordering::Relaxed);
