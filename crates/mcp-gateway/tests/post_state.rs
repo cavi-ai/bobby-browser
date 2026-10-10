@@ -341,6 +341,45 @@ async fn intent_submit_and_verify_carries_post_state_on_success_and_omits_it_on_
 }
 
 #[tokio::test]
+async fn post_state_is_observed_when_the_action_carries_an_idempotency_key() {
+    let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+    let mut next_id = 0u64;
+    let (session, page) = create_session_and_page(&live.server, &mut next_id).await;
+    let session_id = session.0.to_string();
+    let page_id = page.0.to_string();
+    live.probe
+        .candidates
+        .lock()
+        .expect("candidates lock")
+        .push(clickable_candidate());
+    live.probe.satisfy_wait.store(true, Ordering::SeqCst);
+    next_id += 1;
+    let completed = call_tool(
+        &live.server,
+        next_id,
+        "intent_submit_and_verify",
+        json!({
+            "sessionId":session_id,"pageId":page_id,
+            "purpose":"submit the application",
+            "hints":{"role":"button","accessibleName":"Continue"},
+            "expectedState":{
+                "condition":{"kind":"url","matcher":{"kind":"contains","value":""}},
+                "timeoutMs":2000
+            },
+            "autoCheckpoint":false,
+            "idempotencyKey":"submit-application-1"
+        }),
+    )
+    .await;
+    assert_eq!(
+        completed["result"]["structuredContent"]["status"], "completed",
+        "{completed}"
+    );
+    assert_post_state_matches_fresh_observe(&live, &completed, &session_id, &page_id, &mut next_id)
+        .await;
+}
+
+#[tokio::test]
 async fn intent_complete_form_carries_post_state_on_success_and_omits_it_on_failure() {
     let live = live_with_capabilities(Capability::ALL.to_vec()).await;
     let mut next_id = 0u64;
