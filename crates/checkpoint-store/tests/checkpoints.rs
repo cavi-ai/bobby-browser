@@ -1,9 +1,10 @@
 use checkpoint_store::{CheckpointStore, CheckpointStoreError};
 use chrono::{Duration, Utc};
 use types::{
-    AttemptId, CheckpointId, CommandClass, CommandId, PageId, RecoveryDecision, RecoveryRecord,
-    SessionId, SkillCommandIdentity, SkillDecision, SkillFailure, SkillIssuedDecision, SkillTactic,
-    WorkflowCheckpoint, WorkflowId,
+    AttemptId, CheckpointId, CommandClass, CommandId, CommandOutcome, PageId,
+    RecoveryCommandIdentity, RecoveryDecision, RecoveryReceipt, RecoveryReceiptState,
+    RecoveryRecord, SessionId, SkillCommandIdentity, SkillDecision, SkillFailure,
+    SkillIssuedDecision, SkillOutcome, SkillTactic, WorkflowCheckpoint, WorkflowId,
 };
 
 fn checkpoint(workflow_id: WorkflowId, current_url: &str) -> WorkflowCheckpoint {
@@ -26,6 +27,307 @@ fn checkpoint(workflow_id: WorkflowId, current_url: &str) -> WorkflowCheckpoint 
         recovery_receipts: Vec::new(),
         created_at: Utc::now(),
     }
+}
+
+fn recovery_receipt(checkpoint: &WorkflowCheckpoint) -> RecoveryReceipt {
+    let command_id = CommandId::new();
+    RecoveryReceipt::new(
+        command_id.clone(),
+        RecoveryCommandIdentity::new(
+            command_id.clone(),
+            checkpoint.workflow_id.clone(),
+            checkpoint.attempt_id.clone(),
+            checkpoint.session_id.clone(),
+            Some(checkpoint.page_id.clone()),
+            checkpoint.recovery_class,
+            "a".repeat(64),
+        )
+        .unwrap(),
+        RecoveryReceiptState::Unresolved,
+        CommandId::new(),
+        SkillDecision::new(
+            SkillTactic::ObserveAgain,
+            SkillFailure::DeadlineExceeded,
+            "observed postcondition",
+            100,
+            100,
+            None,
+            None,
+        )
+        .unwrap(),
+        CommandOutcome::Completed {
+            command_id,
+            evidence: Vec::new(),
+        },
+        SkillOutcome::failed(SkillFailure::DeadlineExceeded, Vec::new()).unwrap(),
+        Vec::new(),
+        Utc::now(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn foreign_recovery_receipts_cannot_create_or_replace_checkpoints() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let mut original = checkpoint(WorkflowId::new(), "https://example.test/original");
+    original.recovery_receipts.push(recovery_receipt(&original));
+    // A receipt belongs to its workflow/session across later attempts and pages.
+    original.attempt_id = AttemptId::new();
+    original.page_id = PageId::new();
+    let path = checkpoint_store::checkpoint_path(root.path(), &original.workflow_id);
+    let mut wrong_workflow = original.clone();
+    wrong_workflow.recovery_receipts[0].identity.workflow_id = WorkflowId::new();
+    let mut wrong_session = original.clone();
+    wrong_session.recovery_receipts[0].identity.session_id = SessionId::new();
+    for foreign in [&wrong_workflow, &wrong_session] {
+        foreign.recovery_receipts[0].validate().unwrap();
+        assert!(matches!(
+            store.save(foreign).await,
+            Err(CheckpointStoreError::IdentityChanged)
+        ));
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+    store.save(&original).await.unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let mut snapshot = store.lock_snapshot(&original.workflow_id).await.unwrap();
+    let digest = snapshot.content_digest().to_owned();
+    for foreign in [&wrong_workflow, &wrong_session] {
+        assert!(matches!(
+            snapshot.save_if_unchanged(foreign).await,
+            Err(CheckpointStoreError::IdentityChanged)
+        ));
+        assert_eq!(snapshot.checkpoint(), &original);
+        assert_eq!(snapshot.content_digest(), digest);
+    }
+    drop(snapshot);
+    for foreign in [&wrong_workflow, &wrong_session] {
+        assert!(matches!(
+            store.save(foreign).await,
+            Err(CheckpointStoreError::IdentityChanged)
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+    assert_eq!(
+        CheckpointStore::open(root.path())
+            .await
+            .unwrap()
+            .load(&original.workflow_id)
+            .await
+            .unwrap(),
+        original
+    );
+}
+
+#[tokio::test]
+async fn misfiled_recovery_receipts_are_preserved_without_hiding_healthy_workflows() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let mut original = checkpoint(WorkflowId::new(), "https://example.test/original");
+    original.recovery_receipts.push(recovery_receipt(&original));
+    let mut healthy = checkpoint(WorkflowId::new(), "https://example.test/healthy");
+    healthy.session_id = original.session_id.clone();
+    store.save(&original).await.unwrap();
+    store.save(&healthy).await.unwrap();
+    let path = checkpoint_store::checkpoint_path(root.path(), &original.workflow_id);
+    for change_workflow in [true, false] {
+        let mut corrupted = original.clone();
+        if change_workflow {
+            corrupted.recovery_receipts[0].identity.workflow_id = healthy.workflow_id.clone();
+        } else {
+            corrupted.recovery_receipts[0].identity.session_id = SessionId::new();
+        }
+        let bytes = serde_json::to_vec(&corrupted).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        for store in [
+            store.clone(),
+            CheckpointStore::open(root.path()).await.unwrap(),
+        ] {
+            assert!(matches!(
+                store.load(&original.workflow_id).await,
+                Err(CheckpointStoreError::IdentityChanged)
+            ));
+            assert!(matches!(
+                store.lock_snapshot(&original.workflow_id).await,
+                Err(CheckpointStoreError::IdentityChanged)
+            ));
+            assert!(matches!(
+                store.save(&original).await,
+                Err(CheckpointStoreError::IdentityChanged)
+            ));
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert_eq!(
+                store
+                    .list_for_session(&original.session_id, 10)
+                    .await
+                    .unwrap(),
+                vec![healthy.clone()]
+            );
+            assert_eq!(store.load(&healthy.workflow_id).await.unwrap(), healthy);
+        }
+    }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn checkpoint_reads_and_replacements_reject_symbolic_links() {
+    let root = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let checkpoint = checkpoint(WorkflowId::new(), "https://example.test/linked");
+    let bytes = serde_json::to_vec(&checkpoint).unwrap();
+    let target = external.path().join("original.json");
+    std::fs::write(&target, &bytes).unwrap();
+    let path = checkpoint_store::checkpoint_path(root.path(), &checkpoint.workflow_id);
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+
+    assert!(matches!(
+        store.load(&checkpoint.workflow_id).await,
+        Err(CheckpointStoreError::Io(_))
+    ));
+    assert!(matches!(
+        store.lock_snapshot(&checkpoint.workflow_id).await,
+        Err(CheckpointStoreError::Io(_))
+    ));
+    assert!(matches!(
+        store.save(&checkpoint).await,
+        Err(CheckpointStoreError::Io(_))
+    ));
+    assert!(std::fs::symlink_metadata(&path)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(std::fs::read(&target).unwrap(), bytes);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn session_listing_skips_symbolic_links_without_hiding_regular_checkpoints() {
+    let root = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let healthy = checkpoint(WorkflowId::new(), "https://example.test/healthy");
+    let mut linked = checkpoint(WorkflowId::new(), "https://example.test/linked");
+    linked.session_id = healthy.session_id.clone();
+    store.save(&healthy).await.unwrap();
+    let target = external.path().join("original.json");
+    std::fs::write(&target, serde_json::to_vec(&linked).unwrap()).unwrap();
+    let path = checkpoint_store::checkpoint_path(root.path(), &linked.workflow_id);
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+    for store in [store, CheckpointStore::open(root.path()).await.unwrap()] {
+        assert_eq!(
+            store
+                .list_for_session(&healthy.session_id, 10)
+                .await
+                .unwrap(),
+            vec![healthy.clone()]
+        );
+    }
+    assert!(std::fs::symlink_metadata(&path)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn fifo_entries_cannot_block_checkpoint_or_issuance_operations() {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::FileTypeExt;
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let bad = checkpoint(WorkflowId::new(), "https://example.test/fifo");
+    let healthy = checkpoint(WorkflowId::new(), "https://example.test/healthy");
+    let path = checkpoint_store::checkpoint_path(root.path(), &bad.workflow_id);
+    let issuance_path = root
+        .path()
+        .join(format!("{}.skill-issuance.json", bad.workflow_id.0));
+    for path in [&path, &issuance_path] {
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // The CString stays alive throughout the syscall; no writer is opened.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    }
+    let budget = Duration::from_secs(2);
+    assert!(matches!(
+        timeout(budget, store.load(&bad.workflow_id)).await.unwrap(),
+        Err(CheckpointStoreError::Io(_))
+    ));
+    assert!(matches!(
+        timeout(budget, store.lock_snapshot(&bad.workflow_id))
+            .await
+            .unwrap(),
+        Err(CheckpointStoreError::Io(_))
+    ));
+    assert!(matches!(
+        timeout(budget, store.save(&bad)).await.unwrap(),
+        Err(CheckpointStoreError::Io(_))
+    ));
+    assert!(matches!(
+        timeout(budget, store.load_skill_issuance(&bad.workflow_id))
+            .await
+            .unwrap(),
+        Err(CheckpointStoreError::Io(_))
+    ));
+    let issuance = skill_issuance(bad.workflow_id.clone());
+    assert!(matches!(
+        timeout(
+            budget,
+            store.save_skill_issuance(&bad.workflow_id, &issuance)
+        )
+        .await
+        .unwrap(),
+        Err(CheckpointStoreError::Io(_))
+    ));
+
+    store.save(&healthy).await.unwrap();
+    for store in [store, CheckpointStore::open(root.path()).await.unwrap()] {
+        assert_eq!(
+            timeout(budget, store.list_for_session(&healthy.session_id, 10))
+                .await
+                .unwrap()
+                .unwrap(),
+            vec![healthy.clone()]
+        );
+    }
+    for path in [&path, &issuance_path] {
+        assert!(std::fs::symlink_metadata(path)
+            .unwrap()
+            .file_type()
+            .is_fifo());
+    }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn skill_issuance_reads_and_replacements_reject_symbolic_links() {
+    let root = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let workflow = WorkflowId::new();
+    let issuance = skill_issuance(workflow.clone());
+    let target = external.path().join("original.json");
+    let bytes = serde_json::to_vec(&issuance).unwrap();
+    std::fs::write(&target, &bytes).unwrap();
+    let path = root
+        .path()
+        .join(format!("{}.skill-issuance.json", workflow.0));
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+    assert!(matches!(
+        store.load_skill_issuance(&workflow).await,
+        Err(CheckpointStoreError::Io(_))
+    ));
+    assert!(matches!(
+        store.save_skill_issuance(&workflow, &issuance).await,
+        Err(CheckpointStoreError::Io(_))
+    ));
+    assert!(std::fs::symlink_metadata(&path)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(std::fs::read(&target).unwrap(), bytes);
 }
 
 #[tokio::test]
@@ -63,6 +365,62 @@ async fn established_workflow_rejects_rebinding_to_another_session() {
 
     assert!(matches!(error, CheckpointStoreError::IdentityChanged));
     assert_eq!(store.load(&workflow_id).await.unwrap(), first);
+}
+
+#[tokio::test]
+async fn locked_snapshot_rejects_session_rebinding_without_changing_authority() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let original = checkpoint(WorkflowId::new(), "https://example.test/original");
+    store.save(&original).await.unwrap();
+    assert_eq!(
+        store
+            .list_for_session(&original.session_id, 10)
+            .await
+            .unwrap(),
+        vec![original.clone()]
+    );
+    let path = checkpoint_store::checkpoint_path(root.path(), &original.workflow_id);
+    let original_bytes = std::fs::read(&path).unwrap();
+    let mut snapshot = store.lock_snapshot(&original.workflow_id).await.unwrap();
+    let authority_digest = snapshot.digest().to_owned();
+    let content_digest = snapshot.content_digest().to_owned();
+    let mut foreign = original.clone();
+    foreign.session_id = SessionId::new();
+
+    assert!(matches!(
+        snapshot.save_if_unchanged(&foreign).await,
+        Err(CheckpointStoreError::IdentityChanged)
+    ));
+    assert_eq!(snapshot.checkpoint(), &original);
+    assert_eq!(snapshot.digest(), authority_digest);
+    assert_eq!(snapshot.content_digest(), content_digest);
+    assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+    snapshot.verify_unchanged().await.unwrap();
+    assert!(store
+        .list_for_session(&foreign.session_id, 10)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store
+            .list_for_session(&original.session_id, 10)
+            .await
+            .unwrap(),
+        vec![original.clone()]
+    );
+
+    let mut permitted = original.clone();
+    permitted.current_url = "https://example.test/resumed".into();
+    snapshot.save_if_unchanged(&permitted).await.unwrap();
+    snapshot.verify_unchanged().await.unwrap();
+    assert_eq!(snapshot.checkpoint(), &permitted);
+    drop(snapshot);
+    let reopened = CheckpointStore::open(root.path()).await.unwrap();
+    assert_eq!(
+        reopened.load(&original.workflow_id).await.unwrap(),
+        permitted
+    );
 }
 
 #[tokio::test]

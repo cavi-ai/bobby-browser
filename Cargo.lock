@@ -832,6 +832,7 @@ version = "0.19.1"
 dependencies = [
  "chrono",
  "hex",
+ "libc",
  "serde_json",
  "sha2",
  "tempfile",
