@@ -288,14 +288,15 @@ impl JsonlJournal {
 
     pub async fn inspect(path: impl AsRef<Path>) -> Result<JournalHealth, JournalError> {
         let path = path.as_ref();
-        let metadata = match tokio::fs::metadata(path).await {
-            Ok(metadata) => metadata,
+        let file = match File::open(path).await {
+            Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(JournalHealth::default())
             }
             Err(error) => return Err(error.into()),
         };
-        let Scan { scan, records, .. } = scan_path(path).await?;
+        let metadata = file.metadata().await?;
+        let Scan { scan, records, .. } = scan_file(file, None).await?;
         Ok(JournalHealth {
             exists: true,
             bytes: metadata.len(),
@@ -588,103 +589,118 @@ pub struct JsonlScan {
 
 /// Visits every complete line. A line with no trailing newline sets `torn_tail`
 /// and is not visited. `bytes_read` includes that torn line.
-pub async fn for_each_jsonl_line<F>(file: File, mut visit: F) -> std::io::Result<JsonlScan>
+pub async fn for_each_jsonl_line<F>(file: File, visit: F) -> std::io::Result<JsonlScan>
 where
     F: FnMut(JsonlLine<'_>) -> std::io::Result<()>,
 {
-    let mut reader = BufReader::new(file);
-    let mut offset = 0u64;
-    let mut bytes_read = 0u64;
-    let mut number = 0usize;
-    let mut buffer = Vec::new();
-    loop {
-        match read_jsonl_line_buffered(&mut reader, u64::MAX, buffer).await? {
-            JsonlRead::Eof => break,
-            JsonlRead::TooLong => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "jsonl line exceeds the reader cap",
-                ));
-            }
-            JsonlRead::Torn(bytes) => {
-                bytes_read += bytes.len() as u64;
-                return Ok(JsonlScan {
-                    torn_tail: true,
-                    bytes_read,
-                });
-            }
-            JsonlRead::Complete(bytes) => {
-                bytes_read += bytes.len() as u64;
-                number += 1;
-                visit(JsonlLine {
-                    offset,
-                    number,
-                    bytes: &bytes,
-                })?;
-                offset += bytes.len() as u64;
-                buffer = bytes;
-            }
+    struct Visitor<F>(F);
+    impl<F: FnMut(JsonlLine<'_>) -> std::io::Result<()>> LedgerDecoder for Visitor<F> {
+        type Record = ();
+        fn decode(&mut self, _line: &JsonlLine<'_>) -> std::io::Result<PreparedRecord<()>> {
+            Ok(PreparedRecord {
+                observation: RecordObservation::Accepted { sequence: None },
+                record: None,
+            })
+        }
+        fn apply(
+            &mut self,
+            line: &JsonlLine<'_>,
+            _prepared: PreparedRecord<()>,
+            _verdict: SequenceVerdict,
+        ) -> std::io::Result<ScanControl> {
+            (self.0)(JsonlLine {
+                offset: line.offset,
+                number: line.number,
+                bytes: line.bytes,
+            })?;
+            Ok(ScanControl::Continue)
         }
     }
+    let health = scan_jsonl(
+        &mut BufReader::new(file),
+        ScanOptions {
+            max_line_bytes: u64::MAX,
+            sequence_rule: SequenceRule::None,
+        },
+        &mut Visitor(visit),
+    )
+    .await?;
     Ok(JsonlScan {
-        torn_tail: false,
-        bytes_read,
+        torn_tail: health.issue_count(LedgerIssueKind::TornTail) > 0,
+        bytes_read: health.bytes_observed,
     })
 }
 
-async fn scan_path(path: &Path) -> Result<Scan, JournalError> {
-    let file = match File::open(path).await {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Scan {
-                scan: JournalScan::default(),
-                records: 0,
-                max_sequence: None,
-            })
+struct CommandDecoder<'a> {
+    index: Option<&'a mut HashMap<CommandId, Vec<IndexedRecord>>>,
+}
+
+impl LedgerDecoder for CommandDecoder<'_> {
+    type Record = JournalRecord;
+
+    fn decode(&mut self, line: &JsonlLine<'_>) -> std::io::Result<PreparedRecord<JournalRecord>> {
+        if line.bytes.iter().all(u8::is_ascii_whitespace) {
+            return Ok(PreparedRecord {
+                observation: RecordObservation::Skip,
+                record: None,
+            });
         }
-        Err(error) => return Err(error.into()),
-    };
-    scan_file(file, None).await
+        Ok(match serde_json::from_slice::<JournalRecord>(line.bytes) {
+            Ok(record) => PreparedRecord {
+                observation: RecordObservation::Accepted {
+                    sequence: Some(record.sequence),
+                },
+                record: Some(record),
+            },
+            Err(_) => PreparedRecord {
+                observation: RecordObservation::Rejected {
+                    sequence_hint: serde_json::from_slice::<RecordProbe>(line.bytes)
+                        .ok()
+                        .and_then(|probe| probe.sequence),
+                    kind: LedgerIssueKind::Decode,
+                },
+                record: None,
+            },
+        })
+    }
+
+    fn apply(
+        &mut self,
+        line: &JsonlLine<'_>,
+        prepared: PreparedRecord<JournalRecord>,
+        _verdict: SequenceVerdict,
+    ) -> std::io::Result<ScanControl> {
+        // Invalid sequence records retain diagnostic identity, never replay authority.
+        if let (Some(index), Some(record)) = (self.index.as_deref_mut(), prepared.record) {
+            index
+                .entry(record.command_id)
+                .or_default()
+                .push(IndexedRecord::new(line.offset, line.bytes));
+        }
+        Ok(ScanControl::Continue)
+    }
 }
 
 async fn scan_file(
     file: File,
-    mut index: Option<&mut HashMap<CommandId, Vec<IndexedRecord>>>,
+    index: Option<&mut HashMap<CommandId, Vec<IndexedRecord>>>,
 ) -> Result<Scan, JournalError> {
-    let mut scan = JournalScan::default();
-    let mut records = 0usize;
-    let mut max_sequence = None;
-    let read = for_each_jsonl_line(file, |line| {
-        if !line.bytes.iter().all(u8::is_ascii_whitespace) {
-            match serde_json::from_slice::<JournalRecord>(line.bytes) {
-                Ok(record) => {
-                    records += 1;
-                    if max_sequence.is_some_and(|sequence| record.sequence <= sequence) {
-                        scan.incompatible_records += 1;
-                    }
-                    max_sequence = max_sequence.max(Some(record.sequence));
-                    if let Some(index) = index.as_deref_mut() {
-                        index
-                            .entry(record.command_id)
-                            .or_default()
-                            .push(IndexedRecord::new(line.offset, line.bytes));
-                    }
-                }
-                Err(_) => {
-                    if let Ok(probe) = serde_json::from_slice::<RecordProbe>(line.bytes) {
-                        max_sequence = max_sequence.max(probe.sequence);
-                    }
-                    scan.incompatible_records += 1;
-                }
-            }
-        }
-        Ok(())
-    })
+    let health = scan_jsonl(
+        &mut BufReader::new(file),
+        ScanOptions {
+            max_line_bytes: u64::MAX,
+            sequence_rule: SequenceRule::Increasing,
+        },
+        &mut CommandDecoder { index },
+    )
     .await?;
-    scan.torn_tail = read.torn_tail;
     Ok(Scan {
-        scan,
-        records,
-        max_sequence,
+        scan: JournalScan {
+            torn_tail: health.issue_count(LedgerIssueKind::TornTail) > 0,
+            incompatible_records: health.incompatible_records,
+            ..JournalScan::default()
+        },
+        records: health.decoded_records,
+        max_sequence: health.max_observed_sequence,
     })
 }
