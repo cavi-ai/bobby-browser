@@ -11,6 +11,7 @@ use crate::navigation_settle::{
     navigation_settle_expression, parse_settled, run_settle, ProbeStep, SettleSession,
     NAVIGATION_SETTLE_CAP,
 };
+use crate::pointer_hit::PointerHit;
 use crate::secret_material::page_title_evidence;
 use artifact_store::ArtifactStore;
 use async_trait::async_trait;
@@ -893,9 +894,7 @@ impl ChromiumWorker {
                 "target has no clickable point",
             )
         })?;
-        if !resolved.receives_pointer(page).await? {
-            return Err(obscured_click_target());
-        }
+        pointer_miss(resolved.receives_pointer(page).await?)?;
         self.dispatch_click(page, target, &command.modifiers)
             .await
             .map_err(|(_, error)| error)
@@ -1651,11 +1650,32 @@ fn should_retry_plain_click_target_drift(
 /// re-rendered the node away after resolution; the CDP evaluate surfaces
 /// that throw as `BrowserCommandFailed` carrying the message.
 fn is_detached_target_error(error: &CommandError) -> bool {
-    error.code == ErrorCode::BrowserCommandFailed
-        && error
-            .message
-            .to_ascii_lowercase()
-            .contains("target detached")
+    matches!(
+        error.code,
+        ErrorCode::TargetDetached | ErrorCode::BrowserCommandFailed
+    ) && error
+        .message
+        .to_ascii_lowercase()
+        .contains("target detached")
+}
+
+fn pointer_miss(hit: PointerHit) -> Result<(), CommandError> {
+    match hit {
+        PointerHit::Reachable => Ok(()),
+        PointerHit::Obscured => Err(obscured_click_target()),
+        PointerHit::OutOfBounds => Err(CommandError {
+            code: ErrorCode::TargetOutOfBounds,
+            message: "click target is outside the viewport".into(),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        }),
+        PointerHit::Detached => Err(CommandError {
+            code: ErrorCode::TargetDetached,
+            message: "target detached before click".into(),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        }),
+    }
 }
 
 /// A click whose resolved node detached before any input was dispatched
@@ -2397,8 +2417,15 @@ impl crate::InputEngine for ChromiumWorker {
                 Err(error) => return Err(error),
             };
             match resolved.receives_pointer(&page).await {
-                Ok(true) => {}
-                Ok(false) => return Err(obscured_click_target()),
+                Ok(hit) => {
+                    if let Err(error) = pointer_miss(hit) {
+                        if should_retry_click_target_detach(detach_retried, &error) {
+                            detach_retried = true;
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                }
                 Err(error) if should_retry_click_target_detach(detach_retried, &error) => {
                     detach_retried = true;
                     continue;
@@ -5201,6 +5228,16 @@ mod tests {
 
         assert!(should_retry_click_target_detach(false, &detached));
         assert!(!should_retry_click_target_detach(true, &detached));
+        let preflight_detached = super::pointer_miss(super::PointerHit::Detached).unwrap_err();
+        assert!(should_retry_click_target_detach(false, &preflight_detached));
+        assert!(!should_retry_click_target_detach(true, &preflight_detached));
+        let page_lost = types::CommandError {
+            code: ErrorCode::TargetDetached,
+            message: "the browser target is gone (crashed or closed)".into(),
+            layer: types::ErrorLayer::Driver,
+            retryable: true,
+        };
+        assert!(!should_retry_click_target_detach(false, &page_lost));
         assert!(!should_retry_click_target_detach(false, &dispatch_failure));
         // A stale node is the bounded drift retry's case, not this one.
         assert!(!should_retry_click_target_detach(false, &stale));

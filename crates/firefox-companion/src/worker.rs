@@ -1972,32 +1972,24 @@ impl FirefoxCompanionWorker {
                 false,
             ));
         }
-        // Parity with the Chromium resolver: empty string fields can never
-        // resolve, and a wait would poll for them until the deadline.
-        for (field, value) in [
-            ("css", &target.css),
-            ("testId", &target.test_id),
-            ("role", &target.role),
-            ("accessibleName", &target.accessible_name),
-            ("label", &target.label),
-        ] {
-            if let Some(value) = value {
-                if value.trim().is_empty() {
-                    return Err(driver_error(
-                        ErrorCode::InvalidRequest,
-                        format!("target field {field} is empty and can never resolve"),
-                        false,
-                    ));
-                }
-            }
-        }
+        worker_pool::validate_target_spec(target)?;
         let mut context = top_context.to_owned();
         for frame in &target.frame_path {
             let frame_selector = if let Some(selector) = direct_target_selector(frame) {
                 selector
             } else {
                 let candidates = self.gather_bidi_context_candidates(&context).await?;
-                match resolve_candidates(frame, &candidates, &ResolutionPolicy::default()) {
+                // Snapshot-stamped unnamed frame hops carry an empty name.
+                // Match Chromium's frame normalization before ranking.
+                let mut normalized_frame = (**frame).clone();
+                if normalized_frame.accessible_name.as_deref() == Some("") {
+                    normalized_frame.accessible_name = None;
+                }
+                match resolve_candidates(
+                    &normalized_frame,
+                    &candidates,
+                    &ResolutionPolicy::default(),
+                ) {
                     Ok(ResolutionDecision::Resolved { candidate, .. }) => {
                         candidate.css.ok_or_else(|| {
                             driver_error(
@@ -2758,12 +2750,16 @@ impl FirefoxCompanionWorker {
         context: &str,
         shared_id: &str,
     ) -> Result<String, CommandError> {
+        let function_declaration = format!(
+            "async(element)=>{{if(!(element instanceof Element)||!element.isConnected)return 'detached';element.scrollIntoView({{block:'center',inline:'center'}});await new Promise(resolve=>requestAnimationFrame(()=>resolve()));const verdict=({})(element);if(verdict!=='ok')return verdict;return element;}}",
+            worker_pool::pointer_hit_function(),
+        );
         let response = self
             .transport
             .send(
                 "script.callFunction",
                 json!({
-                    "functionDeclaration": "async(element)=>{if(!(element instanceof Element)||!element.isConnected)return 'detached';element.scrollIntoView({block:'center',inline:'center'});await new Promise(resolve=>requestAnimationFrame(()=>resolve()));if(!element.isConnected)return 'detached';const rect=element.getBoundingClientRect();const width=document.documentElement.clientWidth;const height=document.documentElement.clientHeight;if(rect.width<=0||rect.height<=0||rect.right<=0||rect.bottom<=0||rect.left>=width||rect.top>=height)return 'out-of-bounds';const x=Math.min(Math.max(rect.left+rect.width/2,0),width-1);const y=Math.min(Math.max(rect.top+rect.height/2,0),height-1);const root=element.getRootNode();const hit=typeof root.elementFromPoint==='function'?root.elementFromPoint(x,y):document.elementFromPoint(x,y);if(hit===null||(hit!==element&&!element.contains(hit)))return 'obscured';return element;}",
+                    "functionDeclaration": function_declaration,
                     "target": {"context": context, "sandbox": COMPANION_SANDBOX},
                     "arguments": [{"sharedId": shared_id}],
                     "awaitPromise": true,

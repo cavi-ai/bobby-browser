@@ -24,6 +24,89 @@ use worker_pool::{
     resolve_upload_paths, session_download_dir, ChromiumWorkerFactory, WorkerFactory,
 };
 
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn shared_pointer_classifier_reports_live_dom_verdicts() {
+    let root = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: root.path().join("profiles"),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![root.path().to_path_buf()],
+        downloads_dir: root.path().join("downloads"),
+        artifacts_dir: root.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation())
+        .navigate(
+            &page,
+            &NavigateCommand {
+                url: "data:text/html,<!doctype html><title>Pointer fixture</title>".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            },
+        )
+        .await
+        .unwrap();
+    let expression = r#"(() => {
+        document.body.innerHTML = `<style>
+          button {position:fixed;width:80px;height:40px;top:20px}
+          #reachable {left:20px} #covered {left:120px}
+          #outside {left:-200px} #partial {left:-20px;top:80px}
+          #cover {position:fixed;left:120px;top:20px;width:80px;height:40px;z-index:2}
+          #zero {left:220px;width:0;height:0;padding:0;border:0}
+          #reachable span {display:block;width:100%;height:100%}
+        </style><button id=reachable><span>Child</span></button>
+        <button id=covered>Covered</button><div id=cover></div>
+        <button id=outside>Outside</button><button id=partial>Partial</button>
+        <button id=zero></button>`;
+        const classify = CLASSIFIER;
+        return ['reachable', 'covered', 'outside', 'partial', 'zero']
+          .map(id => classify(document.getElementById(id)))
+          .concat(classify(document.createElement('button')));
+    })()"#
+        .replace("CLASSIFIER", worker_pool::pointer_hit_function());
+    let result = worker_pool::javascript_or_default(worker.javascript())
+        .evaluate_javascript(
+            &page,
+            &EvaluateJavaScriptCommand {
+                expression,
+                timeout_ms: 5_000,
+                await_promise: false,
+            },
+        )
+        .await
+        .unwrap();
+    match result.as_slice() {
+        [Evidence::JavaScriptResult { value, truncated }] => {
+            assert!(!truncated);
+            assert_eq!(
+                value,
+                &serde_json::json!([
+                    "ok",
+                    "obscured",
+                    "out-of-bounds",
+                    "ok",
+                    "out-of-bounds",
+                    "detached"
+                ])
+            );
+        }
+        other => panic!("expected classifier results, got {other:?}"),
+    }
+    worker.close().await.unwrap();
+}
+
 fn cookie(name: &str, value: &str) -> HttpCookie {
     HttpCookie {
         name: name.into(),
