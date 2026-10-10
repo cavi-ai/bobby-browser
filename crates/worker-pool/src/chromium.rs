@@ -2787,12 +2787,7 @@ impl BrowserWorker for ChromiumWorker {
                 .iter()
                 .find(|node| node.backend_dom_node_id.as_ref() == Some(&backend_id))
                 .map(|node| node.node_id.clone())
-                .ok_or_else(|| {
-                    driver_error(
-                        ErrorCode::TargetNotFound,
-                        "resolved target has no accessibility node",
-                    )
-                })?;
+                .ok_or_else(|| hidden_from_accessibility(&result.nodes))?;
             let (nodes, truncated) =
                 compact_ax_tree_from(&result.nodes, max_nodes, Some(root_id.as_ref()));
             return Ok(vec![Evidence::AccessibilitySnapshot {
@@ -4760,6 +4755,41 @@ fn compact_ax_tree(
 
 /// `forced_root` scopes the output to the subtree rooted at that AX node id
 /// (a scoped `a11y_snapshot`); `None` compacts the whole tree.
+/// The error for a resolved element the accessibility tree leaves out. An open
+/// modal dialog hides everything behind it, so the error names that dialog.
+fn hidden_from_accessibility(
+    nodes: &[chromiumoxide::cdp::browser_protocol::accessibility::AxNode],
+) -> CommandError {
+    let modal = nodes.iter().filter(|node| !node.ignored).find(|node| {
+        node.properties.as_ref().is_some_and(|properties| {
+            properties.iter().any(|property| {
+                property.name.as_ref() == "modal"
+                    && property.value.value == Some(serde_json::Value::Bool(true))
+            })
+        })
+    });
+    match modal {
+        Some(dialog) => CommandError {
+            code: ErrorCode::TargetObscured,
+            message: format!(
+                "target is behind the open dialog \"{}\"; dismiss it first",
+                dialog
+                    .name
+                    .as_ref()
+                    .and_then(|name| name.value.as_ref())
+                    .and_then(|name| name.as_str())
+                    .unwrap_or_default()
+            ),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        },
+        None => driver_error(
+            ErrorCode::TargetNotFound,
+            "resolved target is hidden from the accessibility tree",
+        ),
+    }
+}
+
 fn compact_ax_tree_from(
     raw: &[chromiumoxide::cdp::browser_protocol::accessibility::AxNode],
     max_nodes: usize,
