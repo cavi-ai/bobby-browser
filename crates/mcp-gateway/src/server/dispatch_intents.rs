@@ -7,20 +7,6 @@
 
 use super::*;
 
-#[cfg(test)]
-pub(super) const TOOLS: &[&str] = &[
-    "intent_locate",
-    "intent_fill",
-    "intent_complete_form",
-    "intent_submit_and_verify",
-    "intent_wait_for_state",
-    "intent_follow",
-    "intent_dismiss_obstruction",
-    "intent_extract",
-    "intent_solve_challenge",
-    "intent_detect_challenge",
-];
-
 impl Server {
     pub(super) async fn dispatch_intents(
         &self,
@@ -775,7 +761,11 @@ mod tests {
     /// hints to receive it either).
     #[test]
     fn intent_schema_properties_all_parse_into_the_tool_args_struct() {
-        for name in TOOLS.iter().copied() {
+        for descriptor in crate::catalog::DESCRIPTORS
+            .iter()
+            .filter(|descriptor| descriptor.group == crate::catalog::DispatchGroup::Intents)
+        {
+            let name = descriptor.name;
             let schema = crate::schema::tool_schema(name);
             let properties = schema["properties"]
                 .as_object()

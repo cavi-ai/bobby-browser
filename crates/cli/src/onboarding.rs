@@ -1266,6 +1266,17 @@ fn apply_vision_install(config_path: &Path, state: &VisionInstallState) -> Resul
 
 /// `bobby install`: the one-command setup. Non-interactive when flags name
 /// the work; otherwise a checklist the operator toggles.
+pub(crate) fn install(
+    path: Option<std::path::PathBuf>,
+    options: InstallOptions,
+) -> anyhow::Result<()> {
+    let path = match path {
+        Some(path) => path,
+        None => crate::bootstrap_local::default_bootstrap_path()?,
+    };
+    run_install(&path, options)
+}
+
 pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()> {
     let InstallOptions {
         hosts,

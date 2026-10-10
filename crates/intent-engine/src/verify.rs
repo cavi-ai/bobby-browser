@@ -351,22 +351,101 @@ fn verify_upload_paths(expected: &[String], evidence: &[Evidence]) -> Result<(),
             observed.len()
         ));
     }
+    let mut remaining: Vec<&String> = observed.iter().collect();
     for path in expected {
+        let reference = types::upload_source_reference(path);
         let expected_name = Path::new(path).file_name().and_then(|name| name.to_str());
-        let matched = observed.iter().any(|uploaded| {
-            if uploaded == path {
+        let matched = remaining.iter().position(|uploaded| {
+            if **uploaded == reference || *uploaded == path {
                 return true;
+            }
+            // Retain legacy filename evidence from injected worker adapters.
+            // Opaque evidence must match source identity, never only its count.
+            if uploaded.starts_with("upload://") {
+                return false;
             }
             let uploaded_name = Path::new(uploaded)
                 .file_name()
                 .and_then(|name| name.to_str());
             expected_name.is_some() && expected_name == uploaded_name
         });
-        if !matched {
-            return Err(format!(
-                "upload path missing: expected {path:?} among {observed:?}"
-            ));
-        }
+        let Some(index) = matched else {
+            return Err("upload evidence does not match requested sources".into());
+        };
+        remaining.remove(index);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod upload_tests {
+    use super::*;
+
+    fn upload(paths: Vec<String>) -> Vec<Evidence> {
+        vec![Evidence::Upload {
+            selector: "#file".into(),
+            paths,
+        }]
+    }
+
+    #[test]
+    fn verifies_opaque_local_and_artifact_sources() {
+        for (source, digest) in [
+            (
+                "/private/uploads/resume.txt".to_owned(),
+                "547015d2bd89ec8f12aa216850c3b51612399c11464982827840ff0b4f6ca70a",
+            ),
+            (
+                format!("artifact://{}", "a".repeat(64)),
+                "7852e148369f2410da877c4ea16dfc20f1fe4f2f13821e82ca852b2f8a228b2b",
+            ),
+        ] {
+            assert!(verify_upload_paths(
+                &[source],
+                &upload(vec![format!("upload://sha256/{digest}")])
+            )
+            .is_ok());
+        }
+    }
+
+    #[test]
+    fn upload_mismatch_diagnostics_do_not_disclose_sources() {
+        let source = "/private/uploads/resume.txt".to_owned();
+        let observed = "/another/private/file.txt".to_owned();
+        let error = verify_upload_paths(
+            std::slice::from_ref(&source),
+            &upload(vec![observed.clone()]),
+        )
+        .unwrap_err();
+        assert!(!error.contains(&source), "{error}");
+        assert!(!error.contains(&observed), "{error}");
+        assert!(!error.contains("resume.txt"), "{error}");
+    }
+
+    #[test]
+    fn refuses_missing_malformed_wrong_and_duplicate_upload_evidence() {
+        let expected = vec!["/private/uploads/resume.txt".to_owned()];
+        assert!(verify_upload_paths(&expected, &[]).is_err());
+        for observed in [
+            vec![],
+            vec!["upload://sha256/not-a-digest".into()],
+            vec![format!("upload://sha256/{}", "0".repeat(64))],
+        ] {
+            assert!(verify_upload_paths(&expected, &upload(observed)).is_err());
+        }
+        let expected = vec!["/first/resume.txt".into(), "/second/other.txt".into()];
+        assert!(verify_upload_paths(
+            &expected,
+            &upload(vec!["resume.txt".into(), "resume.txt".into()])
+        )
+        .is_err());
+        let expected = vec![
+            "/private/uploads/resume.txt".into(),
+            format!("artifact://{}", "a".repeat(64)),
+        ];
+        let first =
+            "upload://sha256/547015d2bd89ec8f12aa216850c3b51612399c11464982827840ff0b4f6ca70a"
+                .to_owned();
+        assert!(verify_upload_paths(&expected, &upload(vec![first.clone(), first])).is_err());
+    }
 }
