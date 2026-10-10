@@ -1,7 +1,7 @@
 //! Firefox observations for the shared wait policy.
 use super::{
     accessibility_tree_contains, driver_error, FirefoxCompanionWorker, COMPANION_SANDBOX,
-    MAX_URL_BYTES,
+    COMPOSED_QUERY, MAX_URL_BYTES,
 };
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -146,14 +146,14 @@ impl FirefoxCompanionWorker {
                                     })?;
                                 let expression = match state {
                                 types::ElementState::Attached | types::ElementState::Visible => {
-                                    format!("Boolean(document.querySelector({selector}))")
+                                    format!("Boolean({COMPOSED_QUERY}({selector}))")
                                 }
                                 types::ElementState::Detached => {
-                                    format!("!document.querySelector({selector})")
+                                    format!("!{COMPOSED_QUERY}({selector})")
                                 }
-                                types::ElementState::Enabled => format!("!document.querySelector({selector})?.matches(':disabled,[aria-disabled=\"true\"]')"),
-                                types::ElementState::Disabled => format!("Boolean(document.querySelector({selector})?.matches(':disabled,[aria-disabled=\"true\"]'))"),
-                                types::ElementState::Hidden => format!("Boolean(document.querySelector({selector})) && !document.querySelector({selector}).checkVisibility()"),
+                                types::ElementState::Enabled => format!("!{COMPOSED_QUERY}({selector})?.matches(':disabled,[aria-disabled=\"true\"]')"),
+                                types::ElementState::Disabled => format!("Boolean({COMPOSED_QUERY}({selector})?.matches(':disabled,[aria-disabled=\"true\"]'))"),
+                                types::ElementState::Hidden => format!("Boolean({COMPOSED_QUERY}({selector})) && !{COMPOSED_QUERY}({selector}).checkVisibility()"),
                             };
                                 let response = self.transport.send("script.evaluate", json!({
                                 "expression": expression,
@@ -204,9 +204,9 @@ impl FirefoxCompanionWorker {
                                 driver_error(ErrorCode::InvalidRequest, error.to_string(), false)
                             })?;
                             let read = if is_value {
-                                format!("document.querySelector({selector})?.value ?? ''")
+                                format!("{COMPOSED_QUERY}({selector})?.value ?? ''")
                             } else {
-                                format!("document.querySelector({selector})?.innerText ?? ''")
+                                format!("{COMPOSED_QUERY}({selector})?.innerText ?? ''")
                             };
                             let response = self.transport.send("script.evaluate", json!({
                                 "expression": read,
@@ -243,11 +243,9 @@ impl FirefoxCompanionWorker {
                                         )
                                     })?;
                                 let read = if is_value {
-                                    format!("document.querySelector({selector_json})?.value ?? ''")
+                                    format!("{COMPOSED_QUERY}({selector_json})?.value ?? ''")
                                 } else {
-                                    format!(
-                                        "document.querySelector({selector_json})?.innerText ?? ''"
-                                    )
+                                    format!("{COMPOSED_QUERY}({selector_json})?.innerText ?? ''")
                                 };
                                 let response = match self.transport.send("script.evaluate", json!({
                                         "expression": read,

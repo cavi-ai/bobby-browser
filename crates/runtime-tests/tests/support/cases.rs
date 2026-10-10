@@ -27,9 +27,13 @@ macro_rules! every_case {
             type_text_reaches_the_visible_duplicate,
             intent_follow_clicks_the_visible_duplicate,
             snapshot_scopes_to_a_named_list,
+            scoped_snapshot_targets_act_on_the_scoped_element,
+            snapshot_scoped_behind_a_modal_reports_the_dialog,
             snapshot_targets_act_on_the_described_element,
+            snapshot_target_types_into_a_slot_labelled_field,
             snapshot_targets_resolve_beside_a_modal_dialog,
             type_text_enter_reports_the_settled_page,
+            type_text_types_into_a_field_that_takes_only_real_input,
             type_text_enter_accepts_a_reformatted_landed_field,
             intent_follow_post_state_shows_the_settled_page,
             type_text_enter_reports_the_rewritten_url,
@@ -50,6 +54,7 @@ macro_rules! every_case {
             actions_wait_for_a_late_target,
             actions_fail_a_missing_target_within_one_bound,
             click_refuses_a_covered_target,
+            shadow_root_controls_act_from_snapshot_targets,
             navigate_waits_for_late_scripts,
             page_titles_withhold_disclosed_credentials,
             observation_carries_each_text_once,
@@ -623,6 +628,63 @@ pub async fn intent_follow_clicks_the_visible_duplicate(rig: &Rig) {
     live.close().await;
 }
 
+/// A link in a list shares its name with a link before the list: a snapshot
+/// scoped to the list gives a target that clicks the list's link.
+pub async fn scoped_snapshot_targets_act_on_the_scoped_element(rig: &Rig) {
+    let body = r#"<header><a href="/top" data-id="top">Home</a></header>
+        <main><ul aria-label="Results"><li><a href="/item" data-id="item">Home</a></li></ul>
+        <p role="status" aria-label="idle" id="status"></p></main>
+        <script>
+          document.addEventListener("click", (event) => {
+            const reached = event.target.closest("[data-id]");
+            if (reached) document.getElementById("status").setAttribute("aria-label", "acted " + reached.dataset.id);
+            event.preventDefault();
+          }, true);
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/links", Route::Html(page("Links", body)))]).await;
+    let live = Live::open(rig, &site.url("/links")).await;
+    let scoped = live
+        .snapshot(json!({"target":{"role":"list","accessibleName":"Results"}}))
+        .await;
+    let mut targets = Vec::new();
+    targets_under(&scoped, &mut targets);
+    let link = targets
+        .iter()
+        .find(|(role, target)| *role == "link" && target["accessibleName"] == "Home")
+        .map(|(_, target)| (*target).clone())
+        .unwrap_or_else(|| panic!("no Home link target in the scoped snapshot: {scoped}"));
+    let clicked = live.call("click", json!({"target":link})).await;
+    assert_eq!(clicked["status"], "completed", "click {link}: {clicked}");
+    let after = live.snapshot(json!({})).await;
+    assert!(
+        find_node(&after, "status", Some("acted item")).is_some(),
+        "the scoped target {link} clicked another link: {after}"
+    );
+    live.close().await;
+}
+
+/// A snapshot scoped to a region an open modal dialog hides fails
+/// targetObscured saying a modal dialog is in the way, not targetNotFound.
+pub async fn snapshot_scoped_behind_a_modal_reports_the_dialog(rig: &Rig) {
+    let body = r#"<main aria-hidden="true"><h1>Page</h1></main>
+        <div role="dialog" aria-modal="true" aria-label="Notice"
+             style="position:fixed;inset:0;background:#fff"><button>Close</button></div>"#;
+    let site = FixtureSite::spawn(vec![("/modal", Route::Html(page("Modal", body)))]).await;
+    let live = Live::open(rig, &site.url("/modal")).await;
+    let scoped = live.snapshot(json!({"target":{"role":"main"}})).await;
+    assert_eq!(
+        scoped["error"]["code"], "targetObscured",
+        "scoped snapshot behind a modal: {scoped}"
+    );
+    assert!(
+        scoped["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("modal dialog")),
+        "the error does not say a modal dialog is in the way: {scoped}"
+    );
+    live.close().await;
+}
+
 /// A snapshot scoped to a list named by `aria-label` returns that list, not
 /// a hidden list of the same name.
 pub async fn snapshot_scopes_to_a_named_list(rig: &Rig) {
@@ -834,6 +896,42 @@ fn objects_of_kind<'a>(value: &'a Value, kind: &str, out: &mut Vec<&'a Value>) {
         }
         _ => {}
     }
+}
+
+/// A text area with no id keeps its own value, taken only from real typing,
+/// and submits on Enter: type_text types into it and Enter submits.
+pub async fn type_text_types_into_a_field_that_takes_only_real_input(rig: &Rig) {
+    let body = r#"<main><textarea rows="1" aria-label="Query"></textarea>
+        <p role="status" aria-label="idle" id="status"></p></main>
+        <script>
+          const area = document.querySelector("textarea");
+          const status = document.getElementById("status");
+          let typed = "";
+          area.addEventListener("input", (event) => {
+            if (event instanceof InputEvent) typed = area.value;
+            area.value = typed;
+          });
+          area.addEventListener("keydown", (event) => {
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            status.setAttribute("aria-label", "submitted " + typed);
+          });
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/field", Route::Html(page("Field", body)))]).await;
+    let live = Live::open(rig, &site.url("/field")).await;
+    let typed = live
+        .call(
+            "type_text",
+            json!({"target":{"role":"textbox","accessibleName":"Query"},"value":"query\n"}),
+        )
+        .await;
+    assert_eq!(typed["status"], "completed", "type_text: {typed}");
+    let after = live.snapshot(json!({})).await;
+    assert!(
+        find_node(&after, "status", Some("submitted query")).is_some(),
+        "the field did not take the typed text and Enter: {after}"
+    );
+    live.close().await;
 }
 
 /// Enter in a single-line input that pushState-navigates to a URL with a
@@ -2073,6 +2171,80 @@ pub async fn actions_fail_a_missing_target_within_one_bound(rig: &Rig) {
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");
+    live.close().await;
+}
+
+/// Controls inside open shadow roots, one nested in another: the snapshot
+/// lists them and its targets type, click and follow as on any other control.
+pub async fn shadow_root_controls_act_from_snapshot_targets(rig: &Rig) {
+    let home = page(
+        "Home",
+        r#"<main><outer-part></outer-part><p role="status" aria-label="idle" id="status"></p></main>
+        <script>
+          customElements.define("inner-part", class extends HTMLElement {
+            constructor() {
+              super();
+              this.attachShadow({mode: "open"}).innerHTML =
+                '<button data-id="deep">Deep button</button>';
+            }
+          });
+          customElements.define("outer-part", class extends HTMLElement {
+            constructor() {
+              super();
+              this.attachShadow({mode: "open"}).innerHTML =
+                '<a href="/inside">Inside link</a><input aria-label="Inside field"><inner-part></inner-part>';
+            }
+          });
+          document.addEventListener("click", (event) => {
+            const reached = event.composedPath()[0];
+            if (reached.dataset && reached.dataset.id) {
+              document.getElementById("status").setAttribute("aria-label", "acted " + reached.dataset.id);
+            }
+          }, true);
+        </script>"#,
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/home", Route::Html(home)),
+        ("/inside", Route::Html(page("Inside", "<h1>Inside</h1>"))),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let snapshot = live.snapshot(json!({})).await;
+    let mut targets = Vec::new();
+    targets_under(&snapshot, &mut targets);
+    let target = |role: &str, name: &str| {
+        targets
+            .iter()
+            .find(|(found, target)| *found == role && target["accessibleName"] == name)
+            .map(|(_, target)| (*target).clone())
+            .unwrap_or_else(|| panic!("no {role} \"{name}\" target in the snapshot: {snapshot}"))
+    };
+    let field = target("textbox", "Inside field");
+    let deep = target("button", "Deep button");
+    let link = target("link", "Inside link");
+    let typed = live
+        .call("type_text", json!({"target":field,"value":"query"}))
+        .await;
+    assert_eq!(typed["status"], "completed", "type_text {field}: {typed}");
+    let clicked = live.call("click", json!({"target":deep})).await;
+    assert_eq!(clicked["status"], "completed", "click {deep}: {clicked}");
+    let after = live.snapshot(json!({})).await;
+    assert!(
+        find_node(&after, "status", Some("acted deep")).is_some(),
+        "the click did not reach the nested button: {after}"
+    );
+    let followed = live
+        .call(
+            "intent_follow",
+            json!({"purpose":"Open the inside page","hints":link,
+                   "expectedState":{"condition":{"kind":"url","matcher":{"kind":"contains","value":"/inside"}},
+                                    "timeoutMs":10000}}),
+        )
+        .await;
+    assert_eq!(
+        followed["status"], "completed",
+        "intent_follow {link}: {followed}"
+    );
     live.close().await;
 }
 

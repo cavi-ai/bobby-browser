@@ -2521,21 +2521,15 @@ impl crate::InputEngine for ChromiumWorker {
                 resolved.select_option(&page, &command.value).await?,
                 "select",
             )
-        } else {
-            if crate::SessionSettings::humanization_enabled(self) {
-                let synthesized = self
-                    .humanized_type_text(&page, &resolved, &command.value, command.clear_first)
-                    .await?;
-                humanization_evidence = Some(Evidence::Humanization {
-                    engine: "behavioral-engine".to_owned(),
-                    actions: synthesized.0,
-                    synthesized_ms: synthesized.1,
-                });
-            } else {
-                resolved
-                    .type_text(&page, &command.value, command.clear_first)
-                    .await?;
-            }
+        } else if crate::SessionSettings::humanization_enabled(self) {
+            let synthesized = self
+                .humanized_type_text(&page, &resolved, &command.value, command.clear_first)
+                .await?;
+            humanization_evidence = Some(Evidence::Humanization {
+                engine: "behavioral-engine".to_owned(),
+                actions: synthesized.0,
+                synthesized_ms: synthesized.1,
+            });
             // Enter in the text submits the form; when the page navigates
             // the control is gone and cannot be read back.
             let submitted_with_enter = command.value.contains(['\n', '\r']);
@@ -2544,6 +2538,16 @@ impl crate::InputEngine for ChromiumWorker {
                 Err(_) if submitted_with_enter => command.value.replace(['\n', '\r'], ""),
                 Err(error) => return Err(error),
             };
+            (observed, "text")
+        } else {
+            // The field is read before a trailing Enter, which may submit
+            // and replace the page.
+            let text = command.value.trim_end_matches(['\n', '\r']);
+            resolved.type_text(&page, text, command.clear_first).await?;
+            let observed = resolved.value(&page).await?.unwrap_or_default();
+            for _ in text.len()..command.value.len() {
+                resolved.press_enter(&page).await?;
+            }
             (observed, "text")
         };
         let validity = match resolved.form_control_validity(&page).await {
@@ -4692,19 +4696,18 @@ fn compact_ax_tree_from(
         })
     }
 
+    // The role and name a node's action target carries, when it gets one.
+    let target_key = |node: &AxNode| -> Option<(String, String)> {
+        let (role, name) = (text(&node.role)?, name_text(&node.name)?);
+        (!node.ignored
+            && super::accessibility_role_is_actionable(&role)
+            && !name.is_empty()
+            && name != "[redacted]")
+            .then_some((role, name))
+    };
     let mut target_totals = std::collections::BTreeMap::new();
-    for node in raw {
-        let role = text(&node.role);
-        let name = name_text(&node.name);
-        if let (Some(role), Some(name)) = (role, name) {
-            if !node.ignored
-                && super::accessibility_role_is_actionable(&role)
-                && !name.is_empty()
-                && name != "[redacted]"
-            {
-                *target_totals.entry((role, name)).or_default() += 1;
-            }
-        }
+    for key in raw.iter().filter_map(target_key) {
+        *target_totals.entry(key).or_default() += 1;
     }
 
     let by_id: HashMap<&str, &AxNode> = raw
@@ -4802,17 +4805,38 @@ fn compact_ax_tree_from(
         lifted.push(node);
     }
 
+    let tree_roots: Vec<&str> = raw
+        .iter()
+        .filter(|node| {
+            node.parent_id
+                .as_ref()
+                .is_none_or(|parent| !by_id.contains_key(parent.as_ref()))
+        })
+        .map(|node| node.node_id.as_ref())
+        .collect();
+    // A scoped tree numbers its targets as the full tree does: the targets
+    // before the scope root in tree order are counted first.
+    let mut preceding = std::collections::BTreeMap::new();
+    if let Some(root) = forced_root {
+        let mut stack: Vec<&str> = tree_roots.iter().rev().copied().collect();
+        while let Some(id) = stack.pop() {
+            if id == root {
+                break;
+            }
+            let Some(node) = by_id.get(id) else {
+                continue;
+            };
+            if let Some(key) = target_key(node) {
+                *preceding.entry(key).or_default() += 1;
+            }
+            if let Some(children) = &node.child_ids {
+                stack.extend(children.iter().rev().map(|child| child.as_ref()));
+            }
+        }
+    }
     let roots: Vec<&str> = match forced_root {
         Some(root) => vec![root],
-        None => raw
-            .iter()
-            .filter(|node| {
-                node.parent_id
-                    .as_ref()
-                    .is_none_or(|parent| !by_id.contains_key(parent.as_ref()))
-            })
-            .map(|node| node.node_id.as_ref())
-            .collect(),
+        None => tree_roots,
     };
     let mut roots_built: Vec<types::AccessibilityNode> = Vec::new();
     for root in &roots {
@@ -4826,7 +4850,7 @@ fn compact_ax_tree_from(
         }
     }
     let truncated = budget == 0 && (forced_root.is_some() || raw.len() > max_nodes);
-    super::annotate_accessibility_targets_with_totals(&mut roots_built, &target_totals);
+    super::annotate_accessibility_targets_with_totals(&mut roots_built, &target_totals, preceding);
     (roots_built, truncated)
 }
 

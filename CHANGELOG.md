@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- On Chromium, `type_text` types into every control with real key input, fields without an id included, and each line break is the Enter key, as on Firefox.
+- On Chromium, a scoped snapshot numbers duplicate targets page-wide, so its targets act on the elements it shows.
+- On Firefox, controls and text inside open shadow roots appear in snapshots and observations, and their targets act.
+- A snapshot scoped to a region an open modal dialog hides fails `targetObscured` instead of `targetNotFound`.
 - On Chromium, action targets and intent hints resolve the way snapshots report them: names from slotted label content match, and controls hidden behind a modal dialog do not.
 - On Chromium, clicking an element covered by another fails `targetObscured`, as on Firefox, instead of clicking the covering element.
 - On Firefox, a new session starts with no tabs and gets only the pages it opens, so concurrent sessions never take each other's pages.

@@ -51,7 +51,21 @@ impl CommandVerifier for Text {
                     command.value.clone()
                 };
                 let page_id = page_id.expect("validated page id");
-                let inspected_control =
+                // A field the worker read before the Enter that submits it
+                // shows the typed text; reading it again races the submit.
+                let read_before_submit = submitted_with_enter
+                    && observed.is_some_and(|observed| {
+                        typed_value_verified(
+                            &typed_text,
+                            command.clear_first,
+                            observed,
+                            Some(observed),
+                            kind,
+                        )
+                    });
+                let inspected_control = if read_before_submit {
+                    Ok(Vec::new())
+                } else {
                     worker_pool::observation_or_default(lease.worker().observation())
                         .inspect(
                             page_id,
@@ -62,7 +76,8 @@ impl CommandVerifier for Text {
                                 include_html: false,
                             },
                         )
-                        .await;
+                        .await
+                };
                 let verification = match inspected_control {
                     Ok(verification) => verification,
                     Err(error)
