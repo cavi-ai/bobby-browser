@@ -2208,25 +2208,29 @@ impl FirefoxCompanionWorker {
             .gather_candidates_for_context(page_id, top_context, &context)
             .await?;
         let resolution = resolve_candidates(target, &candidates, &ResolutionPolicy::default());
-        if truncated && matches!(resolution, Ok(ResolutionDecision::NotFound)) {
-            // The bounded control walk stopped before the end of the page; a
-            // search that is not capped by the control budget finds the
-            // target if it exists.
-            if let Ok(location) = self
+        if matches!(resolution, Ok(ResolutionDecision::NotFound)) {
+            // The control walk leaves out what an open modal dialog hides, and
+            // a bounded walk can stop early; the companion's own search finds
+            // the target either way, or reports it obscured.
+            match self
                 .observer
                 .locate_target(&self.current_lease(), page_id, target)
                 .await
             {
-                if location.ambiguous {
-                    return Err(driver_error(
-                        ErrorCode::TargetAmbiguous,
-                        "Firefox semantic target is ambiguous",
-                        false,
-                    ));
+                Err(error) if error.code == ErrorCode::TargetObscured => return Err(error),
+                Ok(location) if truncated => {
+                    if location.ambiguous {
+                        return Err(driver_error(
+                            ErrorCode::TargetAmbiguous,
+                            "Firefox semantic target is ambiguous",
+                            false,
+                        ));
+                    }
+                    if let (true, Some(css_path)) = (location.found, location.css_path) {
+                        return Ok((context, css_path));
+                    }
                 }
-                if let (true, Some(css_path)) = (location.found, location.css_path) {
-                    return Ok((context, css_path));
-                }
+                _ => {}
             }
         }
         match resolution {

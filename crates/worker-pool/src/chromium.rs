@@ -3935,7 +3935,10 @@ fn element_wait_missing_observation(
         ErrorCode::TargetNotFound | ErrorCode::FrameNotFound | ErrorCode::ShadowRootUnavailable
     ) || is_missing_css_node(error)
         || is_detached_target_error(error);
-    target_missing.then_some(matches!(state, types::ElementState::Detached))
+    target_missing.then_some(matches!(
+        state,
+        types::ElementState::Detached | types::ElementState::Hidden
+    ))
 }
 
 fn is_closed_page_message(message: &str) -> bool {
@@ -5481,6 +5484,10 @@ mod tests {
 
         assert_eq!(
             element_wait_missing_observation(&types::ElementState::Detached, &error),
+            Some(true)
+        );
+        assert_eq!(
+            element_wait_missing_observation(&types::ElementState::Hidden, &error),
             Some(true)
         );
         assert_eq!(

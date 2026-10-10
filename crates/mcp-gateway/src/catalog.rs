@@ -231,7 +231,7 @@ tools! {
             types::Capability::VisionAssist,
         ], operation: None, schema: intent_detect_challenge_schema, args: IntentDetectChallengeArgs,
         phases: INTENT, scope: SessionPageWorkflow, group: Intents, intent: ("DetectChallenge", "Replayable"), hints: (true, false, false, false) }
-    intent_dismiss_obstruction { order: 13, title: "Dismiss obstruction", description: "Dismiss a popup, overlay, or cookie banner blocking the page (Reconciliable). Requires browser:mutate and intent:execute. Produces resolution and dismissal evidence. On failure with obstructionSuspected, the obstruction is still present after the attempt -- take a fresh a11y_snapshot to find another dismissal control.",
+    intent_dismiss_obstruction { order: 13, title: "Dismiss obstruction", description: "Dismiss a popup, overlay, or cookie banner blocking the page (Reconciliable). Requires browser:mutate and intent:execute. Produces resolution and dismissal evidence. On failure with obstructionSuspected, the obstruction is still present -- the evidence names any open dialog; snapshot it for a dismissal control. Without hints, visionAssist closes an open dialog.",
         capabilities: &[
             types::Capability::BrowserMutate,
             types::Capability::IntentExecute,
