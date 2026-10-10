@@ -103,7 +103,7 @@ impl BidiTransport for BindingBidi {
             "script.evaluate"
                 if params["expression"]
                     .as_str()
-                    .is_some_and(|value| value.starts_with("document.querySelector(")) =>
+                    .is_some_and(|value| value.starts_with("((selector)=>")) =>
             {
                 Ok(json!({"result": {"type": "node", "sharedId": "native-target"}}))
             }

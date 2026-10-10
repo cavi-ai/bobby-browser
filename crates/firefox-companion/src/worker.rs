@@ -59,6 +59,11 @@ use crate::generate_session_seed;
 use crate::network_quiet::FirefoxNetworkQuiet;
 
 const COMPANION_SANDBOX: &str = "automation-runtime-companion";
+/// A page function returning the element a selector names. A selector joined
+/// by " >>> " names each open shadow root's host in turn, then the element.
+const COMPOSED_QUERY: &str = "((selector)=>{const parts=selector.split(' >>> ');const probe=document.createDocumentFragment();for(const part of parts)probe.querySelector(part);let root=document;for(let index=0;index<parts.length;index+=1){const found=root.querySelector(parts[index]);if(!found||index===parts.length-1)return found;root=found.shadowRoot;if(!root)return null}return null})";
+/// [`COMPOSED_QUERY`] returning every element the last part matches.
+const COMPOSED_QUERY_ALL: &str = "((selector)=>{const parts=selector.split(' >>> ');const probe=document.createDocumentFragment();for(const part of parts)probe.querySelector(part);let root=document;for(let index=0;index<parts.length-1;index+=1){const host=root.querySelector(parts[index]);root=host&&host.shadowRoot;if(!root)return []}return [...root.querySelectorAll(parts[parts.length-1])]})";
 
 /// Accessibility nodes read to build intent candidates.
 const CANDIDATE_MAX_NODES: u32 = 1024;
@@ -1918,7 +1923,7 @@ impl FirefoxCompanionWorker {
             .send(
                 "script.evaluate",
                 json!({
-                    "expression": format!("document.querySelector({selector})"),
+                    "expression": format!("{COMPOSED_QUERY}({selector})"),
                     "target": {"context": context, "sandbox": COMPANION_SANDBOX},
                     "awaitPromise": false,
                     "resultOwnership": "none",
@@ -2292,7 +2297,7 @@ impl FirefoxCompanionWorker {
         let value_json = serde_json::to_string(value)
             .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
         let response = self.transport.send("script.evaluate", json!({
-            "expression": format!("(()=>{{const el=document.querySelector({selector});if(!(el instanceof HTMLSelectElement)||el.multiple)return null;const wanted={value_json};const norm=s=>s.trim().toLowerCase();const byValue=[...el.options].filter(option=>option.value===wanted);const matches=byValue.length?byValue:[...el.options].filter(option=>norm(option.label)===norm(wanted)||norm(option.textContent)===norm(wanted));if(matches.length!==1||matches[0].disabled)return null;el.value=matches[0].value;el.dispatchEvent(new Event('input',{{bubbles:true}}));el.dispatchEvent(new Event('change',{{bubbles:true}}));return el.value}})()"),
+            "expression": format!("(()=>{{const el={COMPOSED_QUERY}({selector});if(!(el instanceof HTMLSelectElement)||el.multiple)return null;const wanted={value_json};const norm=s=>s.trim().toLowerCase();const byValue=[...el.options].filter(option=>option.value===wanted);const matches=byValue.length?byValue:[...el.options].filter(option=>norm(option.label)===norm(wanted)||norm(option.textContent)===norm(wanted));if(matches.length!==1||matches[0].disabled)return null;el.value=matches[0].value;el.dispatchEvent(new Event('input',{{bubbles:true}}));el.dispatchEvent(new Event('change',{{bubbles:true}}));return el.value}})()"),
             "target": {"context": context, "sandbox": COMPANION_SANDBOX},
             "awaitPromise": false,
             "resultOwnership": "none",
@@ -2323,7 +2328,7 @@ impl FirefoxCompanionWorker {
         let selector = serde_json::to_string(&selector)
             .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
         let response = self.transport.send("script.evaluate", json!({
-            "expression": format!("(()=>{{const el=document.querySelector({selector});if(!el)return false;{body}el.dispatchEvent(new Event('input',{{bubbles:true}}));el.dispatchEvent(new Event('change',{{bubbles:true}}));return true}})()"),
+            "expression": format!("(()=>{{const el={COMPOSED_QUERY}({selector});if(!el)return false;{body}el.dispatchEvent(new Event('input',{{bubbles:true}}));el.dispatchEvent(new Event('change',{{bubbles:true}}));return true}})()"),
             "target": {"context": context, "sandbox": COMPANION_SANDBOX},
             "awaitPromise": false,
             "resultOwnership": "none",
@@ -2346,7 +2351,7 @@ impl FirefoxCompanionWorker {
         let selector_json = serde_json::to_string(selector)
             .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
         let probe = self.transport.send("script.evaluate", json!({
-            "expression": format!("(()=>{{const matches=[...document.querySelectorAll({selector_json})];if(matches.length===0)return 'missing';if(matches.length!==1)return 'ambiguous';const frame=matches[0];if(!(frame instanceof HTMLIFrameElement||frame instanceof HTMLFrameElement))return 'non-frame';return `index:${{[...document.querySelectorAll('iframe,frame')].indexOf(frame)}}`;}})()"),
+            "expression": format!("(()=>{{const matches={COMPOSED_QUERY_ALL}({selector_json});if(matches.length===0)return 'missing';if(matches.length!==1)return 'ambiguous';const frame=matches[0];if(!(frame instanceof HTMLIFrameElement||frame instanceof HTMLFrameElement))return 'non-frame';return `index:${{[...document.querySelectorAll('iframe,frame')].indexOf(frame)}}`;}})()"),
             "target": {"context": context, "sandbox": COMPANION_SANDBOX},
             "awaitPromise": false,
             "resultOwnership": "none",
@@ -3243,7 +3248,7 @@ async fn read_typed_control_value(
         .send(
             "script.evaluate",
             json!({
-                "expression": format!("(()=>{{const el=document.querySelector({selector_json});if(!el)throw new Error('target detached');const typed=el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement?el.value:(el.isContentEditable?String(el.innerText||el.textContent||''):(typeof el.value==='string'?el.value:''));return JSON.stringify({{automationTypedControlValue:String(typed).slice(0,8192)}});}})()"),
+                "expression": format!("(()=>{{const el={COMPOSED_QUERY}({selector_json});if(!el)throw new Error('target detached');const typed=el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement?el.value:(el.isContentEditable?String(el.innerText||el.textContent||''):(typeof el.value==='string'?el.value:''));return JSON.stringify({{automationTypedControlValue:String(typed).slice(0,8192)}});}})()"),
                 "target": {"context": context, "sandbox": COMPANION_SANDBOX},
                 "awaitPromise": false,
                 "resultOwnership": "none",
@@ -3289,7 +3294,7 @@ async fn form_control_validity_evidence(
         .send(
             "script.evaluate",
             json!({
-                "expression": format!("(()=>{{const el=document.querySelector({selector_json});if(!el)throw new Error('target detached');const validates=typeof el.willValidate==='boolean'&&el.willValidate;return JSON.stringify({{valid:!validates||el.validity.valid,message:validates&&!el.validity.valid?el.validationMessage.slice(0,1024):''}});}})()"),
+                "expression": format!("(()=>{{const el={COMPOSED_QUERY}({selector_json});if(!el)throw new Error('target detached');const validates=typeof el.willValidate==='boolean'&&el.willValidate;return JSON.stringify({{valid:!validates||el.validity.valid,message:validates&&!el.validity.valid?el.validationMessage.slice(0,1024):''}});}})()"),
                 "target": {"context": context, "sandbox": COMPANION_SANDBOX},
                 "awaitPromise": false,
                 "resultOwnership": "none",
@@ -3918,7 +3923,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
             .send(
                 "script.evaluate",
                 json!({
-                    "expression": format!("(()=>{{const el=document.querySelector({selector});if(!el)return null;const expected={expected};const kind={kind};const actual=el instanceof HTMLInputElement&&(el.type==='checkbox'||el.type==='radio')?String(el.checked):String(el.value??'');const selected=kind==='select'&&el instanceof HTMLSelectElement?el.selectedOptions[0]:null;const norm=value=>String(value??'').trim().toLowerCase();const selectedLabelMatches=selected&&(norm(selected.label)===norm(expected)||norm(selected.textContent)===norm(expected));return actual===expected||(!{clear_first}&&kind!=='select'&&actual.endsWith(expected))||Boolean(selectedLabelMatches);}})()"),
+                    "expression": format!("(()=>{{const el={COMPOSED_QUERY}({selector});if(!el)return null;const expected={expected};const kind={kind};const actual=el instanceof HTMLInputElement&&(el.type==='checkbox'||el.type==='radio')?String(el.checked):String(el.value??'');const selected=kind==='select'&&el instanceof HTMLSelectElement?el.selectedOptions[0]:null;const norm=value=>String(value??'').trim().toLowerCase();const selectedLabelMatches=selected&&(norm(selected.label)===norm(expected)||norm(selected.textContent)===norm(expected));return actual===expected||(!{clear_first}&&kind!=='select'&&actual.endsWith(expected))||Boolean(selectedLabelMatches);}})()"),
                     "target": {"context": context, "sandbox": COMPANION_SANDBOX},
                     "awaitPromise": false,
                     "resultOwnership": "none",
@@ -3978,7 +3983,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 .send(
                     "script.evaluate",
                     json!({
-                        "expression": format!("(()=>{{const node=document.querySelector({selector_json});return node instanceof HTMLScriptElement && node.type==='application/json' ? node.textContent : null;}})()"),
+                        "expression": format!("(()=>{{const node={COMPOSED_QUERY}({selector_json});return node instanceof HTMLScriptElement && node.type==='application/json' ? node.textContent : null;}})()"),
                         "target": {"context": context, "sandbox": COMPANION_SANDBOX},
                         "awaitPromise": false,
                         "resultOwnership": "none",
@@ -4024,7 +4029,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
                 driver_error(ErrorCode::InvalidRequest, error.to_string(), false)
             })?;
             let response = self.transport.send("script.evaluate", json!({
-                "expression": format!("(()=>{{const el=document.querySelector({selector_json});if(!el)return null;if(el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement||el instanceof HTMLSelectElement)return '[redacted]';const value=String(el.innerText||el.textContent||'');const secret=/(?:authorization|authentication|bearer|token|secret|password|passwd|api[-_]?key|credential|card|cvc|cvv|otp|one[-_]?time|expiry|challenge|code)/i;const credentialShape=/(?:\\d[ -]?){{12,19}}|[a-zA-Z0-9_-]{{32,}}/;const sensitive=Array.from(el.attributes).some(attribute=>secret.test(attribute.name)||secret.test(attribute.value)||credentialShape.test(attribute.value))||credentialShape.test(value);return sensitive?'[redacted]':value.slice(0,8192);}})()"),
+                "expression": format!("(()=>{{const el={COMPOSED_QUERY}({selector_json});if(!el)return null;if(el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement||el instanceof HTMLSelectElement)return '[redacted]';const value=String(el.innerText||el.textContent||'');const secret=/(?:authorization|authentication|bearer|token|secret|password|passwd|api[-_]?key|credential|card|cvc|cvv|otp|one[-_]?time|expiry|challenge|code)/i;const credentialShape=/(?:\\d[ -]?){{12,19}}|[a-zA-Z0-9_-]{{32,}}/;const sensitive=Array.from(el.attributes).some(attribute=>secret.test(attribute.name)||secret.test(attribute.value)||credentialShape.test(attribute.value))||credentialShape.test(value);return sensitive?'[redacted]':value.slice(0,8192);}})()"),
                 "target": {"context": frame_context, "sandbox": COMPANION_SANDBOX},
                 "awaitPromise": false,
                 "resultOwnership": "none",
@@ -4388,7 +4393,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
         let selector_json = serde_json::to_string(&selector)
             .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
         let probe = self.transport.send("script.evaluate", json!({
-            "expression": format!("(()=>{{const matches=[...document.querySelectorAll({selector_json})];if(matches.length===0)return 'missing';if(matches.length!==1)return 'ambiguous';const input=matches[0];if(!(input instanceof HTMLInputElement)||input.type!=='file')return 'non-file';if(input.disabled)return 'disabled';return 'valid';}})()"),
+            "expression": format!("(()=>{{const matches={COMPOSED_QUERY_ALL}({selector_json});if(matches.length===0)return 'missing';if(matches.length!==1)return 'ambiguous';const input=matches[0];if(!(input instanceof HTMLInputElement)||input.type!=='file')return 'non-file';if(input.disabled)return 'disabled';return 'valid';}})()"),
             "target": {"context": context, "sandbox": COMPANION_SANDBOX},
             "awaitPromise": false,
             "resultOwnership": "none",
@@ -4446,7 +4451,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
             .send(
                 "script.evaluate",
                 json!({
-                    "expression": format!("document.querySelector({selector_json})?.files?.length ?? -1"),
+                    "expression": format!("{COMPOSED_QUERY}({selector_json})?.files?.length ?? -1"),
                     "target": {"context": context, "sandbox": COMPANION_SANDBOX},
                     "awaitPromise": false,
                     "resultOwnership": "none",
@@ -4734,7 +4739,7 @@ impl BrowserWorker for FirefoxCompanionWorker {
             .as_ref()
             .is_some_and(|target| !target.frame_path.is_empty());
         let selection = self.transport.send("script.evaluate", json!({
-            "expression": format!("(()=>{{const element=document.querySelector({selector_json});if(element instanceof HTMLInputElement&&(element.type==='checkbox'||element.type==='radio')){{if({value_json}!=='true'&&{value_json}!=='false')return 'invalid-checked';const checked={value_json}==='true';if(element.type==='radio'&&!checked)return 'radio-uncheck';if(element.checked!==checked)element.click();return `checked:${{element.checked}}`;}}if(!(element instanceof HTMLSelectElement))return 'not-select';const wanted={value_json};const norm=s=>s.trim().toLowerCase();const byValue=[...element.options].filter(option=>option.value===wanted);const options=byValue.length?byValue:[...element.options].filter(option=>norm(option.label)===norm(wanted)||norm(option.textContent)===norm(wanted));if(options.length===0)return 'missing';if(options.length!==1)return 'ambiguous';if(options[0].disabled)return 'disabled';element.value=options[0].value;element.dispatchEvent(new Event('input',{{bubbles:true}}));element.dispatchEvent(new Event('change',{{bubbles:true}}));return element.value===options[0].value?({private_frame}?'selected:[redacted]':`selected:${{element.value}}`):'missing';}})()"),
+            "expression": format!("(()=>{{const element={COMPOSED_QUERY}({selector_json});if(element instanceof HTMLInputElement&&(element.type==='checkbox'||element.type==='radio')){{if({value_json}!=='true'&&{value_json}!=='false')return 'invalid-checked';const checked={value_json}==='true';if(element.type==='radio'&&!checked)return 'radio-uncheck';if(element.checked!==checked)element.click();return `checked:${{element.checked}}`;}}if(!(element instanceof HTMLSelectElement))return 'not-select';const wanted={value_json};const norm=s=>s.trim().toLowerCase();const byValue=[...element.options].filter(option=>option.value===wanted);const options=byValue.length?byValue:[...element.options].filter(option=>norm(option.label)===norm(wanted)||norm(option.textContent)===norm(wanted));if(options.length===0)return 'missing';if(options.length!==1)return 'ambiguous';if(options[0].disabled)return 'disabled';element.value=options[0].value;element.dispatchEvent(new Event('input',{{bubbles:true}}));element.dispatchEvent(new Event('change',{{bubbles:true}}));return element.value===options[0].value?({private_frame}?'selected:[redacted]':`selected:${{element.value}}`):'missing';}})()"),
             "target": {"context": context, "sandbox": COMPANION_SANDBOX},
             "awaitPromise": false,
             "resultOwnership": "none",
