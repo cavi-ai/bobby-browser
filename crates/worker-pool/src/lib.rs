@@ -10,6 +10,8 @@ pub mod secret_material;
 mod selection;
 mod skill_adapter;
 mod targeting;
+pub mod upload;
+pub mod wait;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};

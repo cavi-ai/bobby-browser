@@ -28,6 +28,7 @@ macro_rules! every_case {
             intent_follow_clicks_the_visible_duplicate,
             snapshot_scopes_to_a_named_list,
             snapshot_targets_act_on_the_described_element,
+            snapshot_targets_resolve_beside_a_modal_dialog,
             type_text_enter_reports_the_settled_page,
             type_text_enter_accepts_a_reformatted_landed_field,
             intent_follow_post_state_shows_the_settled_page,
@@ -48,6 +49,7 @@ macro_rules! every_case {
             type_text_enter_reports_a_keydown_navigation_at_once,
             actions_wait_for_a_late_target,
             actions_fail_a_missing_target_within_one_bound,
+            click_refuses_a_covered_target,
             navigate_waits_for_late_scripts,
             page_titles_withhold_disclosed_credentials,
             observation_carries_each_text_once,
@@ -722,6 +724,95 @@ pub async fn snapshot_targets_act_on_the_described_element(rig: &Rig) {
             "click {target} did not reach {reached}: {after}"
         );
     }
+    live.close().await;
+}
+
+/// A text field inside a shadow root, labelled through a slotted element
+/// that carries its own name: the snapshot's target for the field types into it.
+pub async fn snapshot_target_types_into_a_slot_labelled_field(rig: &Rig) {
+    let body = r#"<main><search-field><span slot="scope" aria-label="Within this section"></span></search-field></main>
+        <script>
+          customElements.define("search-field", class extends HTMLElement {
+            constructor() {
+              super();
+              this.attachShadow({mode: "open"}).innerHTML =
+                '<label><slot name="scope"></slot><textarea rows="1" placeholder="Search"></textarea></label>';
+            }
+          });
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/field", Route::Html(page("Field", body)))]).await;
+    let live = Live::open(rig, &site.url("/field")).await;
+    let snapshot = live.snapshot(json!({})).await;
+    let mut targets = Vec::new();
+    targets_under(&snapshot, &mut targets);
+    let field = targets
+        .iter()
+        .find(|(role, _)| *role == "textbox")
+        .map(|(_, target)| (*target).clone())
+        .unwrap_or_else(|| panic!("no textbox target in the snapshot: {snapshot}"));
+    let typed = live
+        .call("type_text", json!({"target":field,"value":"query"}))
+        .await;
+    assert_eq!(typed["status"], "completed", "type_text {field}: {typed}");
+    let located = live
+        .call(
+            "intent_locate",
+            json!({"purpose":"Find the search field",
+                   "hints":{"role":field["role"],"accessibleName":field["accessibleName"]}}),
+        )
+        .await;
+    assert_eq!(
+        located["status"], "completed",
+        "intent_locate {field}: {located}"
+    );
+    live.close().await;
+}
+
+/// A modal dialog over a page, hidden from assistive technology, that has a
+/// control with the same role and name: the snapshot's targets for that name
+/// resolve, and one reaches the dialog's.
+pub async fn snapshot_targets_resolve_beside_a_modal_dialog(rig: &Rig) {
+    let body = r#"<main aria-hidden="true"><button data-id="page">Close</button></main>
+        <div role="dialog" aria-modal="true" aria-label="Notice"
+             style="position:fixed;inset:0;background:#fff">
+          <button data-id="dialog">Close</button>
+          <p role="status" aria-label="idle" id="status"></p>
+        </div>
+        <script>
+          document.addEventListener("click", (event) => {
+            const reached = event.target.closest("[data-id]");
+            if (reached) document.getElementById("status").setAttribute("aria-label", "acted " + reached.dataset.id);
+          }, true);
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/modal", Route::Html(page("Modal", body)))]).await;
+    let live = Live::open(rig, &site.url("/modal")).await;
+    let snapshot = live.snapshot(json!({})).await;
+    let mut targets = Vec::new();
+    targets_under(&snapshot, &mut targets);
+    let closes: Vec<Value> = targets
+        .iter()
+        .filter(|(role, target)| *role == "button" && target["accessibleName"] == "Close")
+        .map(|(_, target)| (*target).clone())
+        .collect();
+    assert!(
+        !closes.is_empty(),
+        "no Close target in the snapshot: {snapshot}"
+    );
+    let mut reached_dialog = false;
+    for target in closes {
+        let clicked = live.call("click", json!({"target":target})).await;
+        let code = clicked["error"]["code"].as_str().unwrap_or_default();
+        assert!(
+            code != "targetAmbiguous" && code != "targetNotFound",
+            "snapshot target {target} did not resolve: {clicked}"
+        );
+        let after = live.snapshot(json!({})).await;
+        reached_dialog |= find_node(&after, "status", Some("acted dialog")).is_some();
+    }
+    assert!(
+        reached_dialog,
+        "no Close target reached the dialog's button"
+    );
     live.close().await;
 }
 
@@ -1982,6 +2073,42 @@ pub async fn actions_fail_a_missing_target_within_one_bound(rig: &Rig) {
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");
+    live.close().await;
+}
+
+/// A link drawn under another link that covers its whole container: click
+/// fails targetObscured and never follows the covering link.
+pub async fn click_refuses_a_covered_target(rig: &Rig) {
+    let home = page(
+        "Home",
+        r#"<main><div style="position:relative;width:480px;height:120px">
+            <a href="/over" aria-label="Over" style="position:absolute;inset:0;z-index:2"></a>
+            <a href="/under" style="position:relative;z-index:1">Under</a>
+        </div></main>"#,
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/home", Route::Html(home)),
+        ("/over", Route::Html(page("Over", "<h1>Over</h1>"))),
+        ("/under", Route::Html(page("Under", "<h1>Under</h1>"))),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let clicked = live
+        .call(
+            "click",
+            json!({"target":{"role":"link","accessibleName":"Under"}}),
+        )
+        .await;
+    assert_eq!(
+        clicked["error"]["code"], "targetObscured",
+        "click on a covered link: {clicked}"
+    );
+    let (listed_url, _) = listed_page(&live).await;
+    assert_eq!(
+        listed_url,
+        site.url("/home").as_str(),
+        "the click followed another link"
+    );
     live.close().await;
 }
 

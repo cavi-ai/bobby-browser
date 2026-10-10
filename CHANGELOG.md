@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- On Chromium, action targets and intent hints resolve the way snapshots report them: names from slotted label content match, and controls hidden behind a modal dialog do not.
+- On Chromium, clicking an element covered by another fails `targetObscured`, as on Firefox, instead of clicking the covering element.
 - On Firefox, a new session starts with no tabs and gets only the pages it opens, so concurrent sessions never take each other's pages.
 - On Linux, Chrome keeps shared memory in `/dev/shm` unless it is smaller than 1 GiB.
 - On Firefox, a command that misses its deadline fails alone; other sessions and runtime restarts keep the running Firefox.

@@ -756,7 +756,33 @@ async fn drives_a_real_chromium_page() {
         )
         .await
         .unwrap();
-    assert!(format!("{upload_evidence:?}").contains("resume.txt"));
+    let serialized = serde_json::to_value(&upload_evidence).unwrap();
+    let reference = serialized[0]["paths"][0].as_str().unwrap();
+    let digest = reference.strip_prefix("upload://sha256/").unwrap();
+    assert_eq!(digest.len(), 64);
+    assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert!(!serialized.to_string().contains("resume.txt"));
+    assert!(!serialized
+        .to_string()
+        .contains(profiles.path().to_str().unwrap()));
+    let selected = worker
+        .evaluate_javascript(
+            &page_id,
+            &EvaluateJavaScriptCommand {
+                expression: "(async () => { const files = document.querySelector('#resume').files; return { count: files.length, name: files[0].name, text: await files[0].text() }; })()".into(),
+                timeout_ms: 5_000,
+                await_promise: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(selected.as_slice(),
+            [Evidence::JavaScriptResult { value, truncated: false }]
+            if value == &serde_json::json!({"count": 1, "name": "resume.txt", "text": "Ada Lovelace"})
+        ),
+        "unexpected selected file: {selected:?}"
+    );
     let opened = worker
         .open_page_command(&OpenPageCommand {
             url: Some("data:text/html,<title>Second Page</title>".into()),

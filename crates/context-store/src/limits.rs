@@ -1,6 +1,6 @@
 use crate::{SiteContext, SiteEnvelope};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, io, mem::size_of};
+use std::{borrow::Borrow, collections::BTreeMap, io, mem::size_of};
 
 /// Per-profile limits. Byte accounting includes owned capacities and a
 /// conservative allocation allowance for every B-tree entry; it is not RSS.
@@ -53,8 +53,12 @@ impl ContextLimits {
         Ok(())
     }
 
-    pub(crate) fn check_envelope(&self, envelope: &SiteEnvelope) -> Result<(), String> {
-        self.check_site(&envelope.site).map_err(str::to_string)?;
+    pub(crate) fn check_envelope<Site: Serialize + Borrow<SiteContext>>(
+        &self,
+        envelope: &SiteEnvelope<Site>,
+    ) -> Result<(), String> {
+        self.check_site(envelope.site.borrow())
+            .map_err(str::to_string)?;
         serde_json::to_writer(BudgetWriter(self.max_file_bytes), envelope)
             .map_err(|_| "context site exceeds file byte limit".to_string())
     }
