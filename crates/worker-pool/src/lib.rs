@@ -70,7 +70,7 @@ pub use skill_adapter::{
 pub fn annotate_accessibility_targets(nodes: &mut [types::AccessibilityNode]) {
     let mut totals = BTreeMap::new();
     count_accessibility_targets(nodes, &mut totals);
-    annotate_accessibility_targets_with_totals(nodes, &totals);
+    annotate_accessibility_targets_with_totals(nodes, &totals, BTreeMap::new());
 }
 
 pub(crate) fn accessibility_role_is_actionable(role: &str) -> bool {
@@ -104,9 +104,12 @@ fn count_accessibility_targets(
     }
 }
 
+/// `preceding` counts the targets of each role and name that come before
+/// `nodes` in the page, so ordinals stay page-wide in a scoped tree.
 pub(crate) fn annotate_accessibility_targets_with_totals(
     nodes: &mut [types::AccessibilityNode],
     totals: &BTreeMap<(String, String), usize>,
+    preceding: BTreeMap<(String, String), usize>,
 ) {
     fn annotate(
         nodes: &mut [types::AccessibilityNode],
@@ -137,7 +140,8 @@ pub(crate) fn annotate_accessibility_targets_with_totals(
         }
     }
 
-    annotate(nodes, totals, &mut BTreeMap::new());
+    let mut seen = preceding;
+    annotate(nodes, totals, &mut seen);
 }
 
 pub fn session_download_dir(root: &Path, session_id: &SessionId) -> PathBuf {

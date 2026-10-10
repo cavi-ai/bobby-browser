@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- On Chromium, a scoped snapshot numbers duplicate targets page-wide, so its targets act on the elements it shows.
 - On Chromium, action targets and intent hints resolve the way snapshots report them: names from slotted label content match, and controls hidden behind a modal dialog do not.
 - On Chromium, clicking an element covered by another fails `targetObscured`, as on Firefox, instead of clicking the covering element.
 - On Firefox, a new session starts with no tabs and gets only the pages it opens, so concurrent sessions never take each other's pages.
