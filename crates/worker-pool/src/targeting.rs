@@ -255,76 +255,67 @@ impl ResolvedTarget {
         .await
     }
 
+    /// Presses Enter on the focused control.
+    pub async fn press_enter(&self, page: &Page) -> Result<(), CommandError> {
+        self.execution_page(page)
+            .press_key("Enter")
+            .await
+            .map_err(cdp_error)?;
+        Ok(())
+    }
+
     pub async fn type_text(
         &self,
         page: &Page,
         value: &str,
         clear_first: bool,
     ) -> Result<(), CommandError> {
-        if let Some(element) = &self.native {
-            element.click().await.map_err(cdp_error)?;
-            if clear_first {
-                element
-                    .call_js_fn(
-                        "function() { this.value = ''; this.dispatchEvent(new Event('input', { bubbles: true })); }",
-                        false,
-                    )
+        // Keys go to the focused control: a native target is clicked into, any
+        // other is focused through its locator.
+        match &self.native {
+            Some(element) => {
+                element.click().await.map_err(cdp_error)?;
+            }
+            None => {
+                self.eval::<bool>(page, "el.focus(); return true").await?;
+            }
+        }
+        if clear_first {
+            self.eval::<bool>(
+                page,
+                "el.value = ''; el.dispatchEvent(new Event('input', { bubbles: true })); return true",
+            )
+            .await?;
+        }
+        // Runs of chars the US keyboard layout key-presses, runs that need a
+        // caret-level insert (Unicode outside the US map), and line breaks,
+        // each the Enter key: it submits a single-line input and, unless the
+        // page handles it, breaks the line elsewhere.
+        let keyboard = self.execution_page(page);
+        let mut runs: Vec<(u8, String)> = Vec::new();
+        for ch in value.chars() {
+            let kind = if ch == '\n' || ch == '\r' {
+                2
+            } else {
+                u8::from(get_key_definition(ch.to_string()).is_some())
+            };
+            match runs.last_mut() {
+                Some((run_kind, run)) if *run_kind == kind && kind != 2 => run.push(ch),
+                _ => runs.push((kind, ch.to_string())),
+            }
+        }
+        for (kind, run) in runs {
+            if kind == 2 {
+                self.press_enter(page).await?;
+            } else if kind == 1 {
+                keyboard.type_str(run).await.map_err(cdp_error)?;
+            } else {
+                keyboard
+                    .execute(InsertTextParams::new(run))
                     .await
                     .map_err(cdp_error)?;
             }
-            // Split into runs of chars the US keyboard layout can key-press
-            // versus runs that need a caret-level insert (Unicode outside
-            // the US map, or newlines, which type_str cannot key-press).
-            //
-            // In a single-line `<input>` a newline is the Enter key: it
-            // submits the form, as an agent typing "query\n" expects. Text
-            // areas and editable regions keep the newline as text.
-            let single_line: bool = self
-                .eval(page, "return el instanceof HTMLInputElement")
-                .await?;
-            let mut runs: Vec<(u8, String)> = Vec::new();
-            for ch in value.chars() {
-                let line_break = ch == '\n' || ch == '\r';
-                let kind = if line_break && single_line {
-                    2
-                } else {
-                    u8::from(!line_break && get_key_definition(ch.to_string()).is_some())
-                };
-                match runs.last_mut() {
-                    Some((run_kind, run)) if *run_kind == kind && kind != 2 => run.push(ch),
-                    _ => runs.push((kind, ch.to_string())),
-                }
-            }
-            for (kind, run) in runs {
-                if kind == 2 {
-                    element.press_key("Enter").await.map_err(cdp_error)?;
-                } else if kind == 1 {
-                    element.type_str(run).await.map_err(cdp_error)?;
-                } else {
-                    page.execute(InsertTextParams::new(run))
-                        .await
-                        .map_err(cdp_error)?;
-                }
-            }
-            return Ok(());
         }
-        let value = serde_json::to_string(value).map_err(|error| {
-            target_error(
-                ErrorCode::InvalidRequest,
-                format!("invalid input value: {error}"),
-            )
-        })?;
-        let clear = if clear_first { "el.value=''" } else { "" };
-        // A newline typed into a single-line `<input>` is the Enter key: the
-        // text lands without it and the form is submitted, as a key press
-        // would. Elsewhere the newline stays part of the text.
-        let enter = "const single=el instanceof HTMLInputElement;const text=single?String(raw).replace(/[\\r\\n]/g,''):raw;const pressed=single&&/[\\r\\n]/.test(raw);";
-        let submit = "if(pressed){const key={key:'Enter',code:'Enter',keyCode:13,which:13,bubbles:true,cancelable:true};const down=el.dispatchEvent(new KeyboardEvent('keydown',key));el.dispatchEvent(new KeyboardEvent('keypress',key));el.dispatchEvent(new KeyboardEvent('keyup',key));if(down&&el.form){el.form.requestSubmit()}}";
-        self.eval::<bool>(
-            page,
-            &format!("const raw={value};{enter}{clear}; el.focus(); el.value += text; el.dispatchEvent(new Event('input',{{bubbles:true}})); el.dispatchEvent(new Event('change',{{bubbles:true}})); {submit} return true"),
-        )
-        .await?;
         Ok(())
     }
 

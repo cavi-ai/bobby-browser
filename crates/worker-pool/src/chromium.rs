@@ -2127,21 +2127,15 @@ impl BrowserWorker for ChromiumWorker {
                 resolved.select_option(&page, &command.value).await?,
                 "select",
             )
-        } else {
-            if self.humanization_enabled() {
-                let synthesized = self
-                    .humanized_type_text(&page, &resolved, &command.value, command.clear_first)
-                    .await?;
-                humanization_evidence = Some(Evidence::Humanization {
-                    engine: "behavioral-engine".to_owned(),
-                    actions: synthesized.0,
-                    synthesized_ms: synthesized.1,
-                });
-            } else {
-                resolved
-                    .type_text(&page, &command.value, command.clear_first)
-                    .await?;
-            }
+        } else if self.humanization_enabled() {
+            let synthesized = self
+                .humanized_type_text(&page, &resolved, &command.value, command.clear_first)
+                .await?;
+            humanization_evidence = Some(Evidence::Humanization {
+                engine: "behavioral-engine".to_owned(),
+                actions: synthesized.0,
+                synthesized_ms: synthesized.1,
+            });
             // Enter in the text submits the form; when the page navigates
             // the control is gone and cannot be read back.
             let submitted_with_enter = command.value.contains(['\n', '\r']);
@@ -2150,6 +2144,16 @@ impl BrowserWorker for ChromiumWorker {
                 Err(_) if submitted_with_enter => command.value.replace(['\n', '\r'], ""),
                 Err(error) => return Err(error),
             };
+            (observed, "text")
+        } else {
+            // The field is read before a trailing Enter, which may submit
+            // and replace the page.
+            let text = command.value.trim_end_matches(['\n', '\r']);
+            resolved.type_text(&page, text, command.clear_first).await?;
+            let observed = resolved.value(&page).await?.unwrap_or_default();
+            for _ in text.len()..command.value.len() {
+                resolved.press_enter(&page).await?;
+            }
             (observed, "text")
         };
         let validity = match resolved.form_control_validity(&page).await {

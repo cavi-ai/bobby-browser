@@ -501,6 +501,18 @@ impl Page {
     /// selector.
     ///
     /// Execute a query selector on the document's node.
+    /// Types each character as a key press into the focused element.
+    pub async fn type_str(&self, input: impl AsRef<str>) -> Result<&Self> {
+        self.inner.type_str(input).await?;
+        Ok(self)
+    }
+
+    /// Presses the named key on the focused element.
+    pub async fn press_key(&self, key: impl AsRef<str>) -> Result<&Self> {
+        self.inner.press_key(key).await?;
+        Ok(self)
+    }
+
     pub async fn find_element(&self, selector: impl Into<String>) -> Result<Element> {
         let root = self.get_document().await?.node_id;
         let node_id = self.inner.find_element(selector, root).await?;

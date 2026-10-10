@@ -30,6 +30,7 @@ macro_rules! every_case {
             snapshot_targets_act_on_the_described_element,
             snapshot_targets_resolve_beside_a_modal_dialog,
             type_text_enter_reports_the_settled_page,
+            type_text_types_into_a_field_that_takes_only_real_input,
             type_text_enter_accepts_a_reformatted_landed_field,
             intent_follow_post_state_shows_the_settled_page,
             type_text_enter_reports_the_rewritten_url,
@@ -834,6 +835,42 @@ fn objects_of_kind<'a>(value: &'a Value, kind: &str, out: &mut Vec<&'a Value>) {
         }
         _ => {}
     }
+}
+
+/// A text area with no id keeps its own value, taken only from real typing,
+/// and submits on Enter: type_text types into it and Enter submits.
+pub async fn type_text_types_into_a_field_that_takes_only_real_input(rig: &Rig) {
+    let body = r#"<main><textarea rows="1" aria-label="Query"></textarea>
+        <p role="status" aria-label="idle" id="status"></p></main>
+        <script>
+          const area = document.querySelector("textarea");
+          const status = document.getElementById("status");
+          let typed = "";
+          area.addEventListener("input", (event) => {
+            if (event instanceof InputEvent) typed = area.value;
+            area.value = typed;
+          });
+          area.addEventListener("keydown", (event) => {
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            status.setAttribute("aria-label", "submitted " + typed);
+          });
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/field", Route::Html(page("Field", body)))]).await;
+    let live = Live::open(rig, &site.url("/field")).await;
+    let typed = live
+        .call(
+            "type_text",
+            json!({"target":{"role":"textbox","accessibleName":"Query"},"value":"query\n"}),
+        )
+        .await;
+    assert_eq!(typed["status"], "completed", "type_text: {typed}");
+    let after = live.snapshot(json!({})).await;
+    assert!(
+        find_node(&after, "status", Some("submitted query")).is_some(),
+        "the field did not take the typed text and Enter: {after}"
+    );
+    live.close().await;
 }
 
 /// Enter in a single-line input that pushState-navigates to a URL with a
