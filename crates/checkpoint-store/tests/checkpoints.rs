@@ -131,10 +131,7 @@ async fn mismatched_workflow_identity_is_rejected_without_hiding_other_checkpoin
     );
 }
 
-#[tokio::test]
-async fn issued_skill_decision_survives_store_reopen_until_explicitly_cleared() {
-    let root = tempfile::tempdir().unwrap();
-    let workflow_id = WorkflowId::new();
+fn skill_issuance(workflow_id: WorkflowId) -> SkillIssuedDecision {
     let session_id = SessionId::new();
     let now = Utc::now();
     let identity = SkillCommandIdentity::new(
@@ -147,7 +144,7 @@ async fn issued_skill_decision_survives_store_reopen_until_explicitly_cleared() 
         "a".repeat(64),
     )
     .unwrap();
-    let issuance = SkillIssuedDecision::new_for_command(
+    SkillIssuedDecision::new_for_command(
         CommandId::new(),
         session_id,
         identity,
@@ -165,7 +162,14 @@ async fn issued_skill_decision_survives_store_reopen_until_explicitly_cleared() 
         now,
         now + Duration::seconds(1),
     )
-    .unwrap();
+    .unwrap()
+}
+
+#[tokio::test]
+async fn issued_skill_decision_survives_store_reopen_until_explicitly_cleared() {
+    let root = tempfile::tempdir().unwrap();
+    let workflow_id = WorkflowId::new();
+    let issuance = skill_issuance(workflow_id.clone());
 
     CheckpointStore::open(root.path())
         .await
@@ -239,6 +243,129 @@ fn issued_skill_decision_is_private_with_permissive_umask() {
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test]
+async fn foreign_skill_issuance_cannot_create_or_replace_a_workflows_file() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let left = WorkflowId::new();
+    let right = WorkflowId::new();
+    let original = skill_issuance(left.clone());
+    let foreign = skill_issuance(right.clone());
+    assert!(matches!(
+        store.save_skill_issuance(&left, &foreign).await,
+        Err(CheckpointStoreError::IdentityChanged)
+    ));
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    store.save_skill_issuance(&left, &original).await.unwrap();
+    let path = root.path().join(format!("{}.skill-issuance.json", left.0));
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(matches!(
+        store.save_skill_issuance(&left, &foreign).await,
+        Err(CheckpointStoreError::IdentityChanged)
+    ));
+    assert_eq!(std::fs::read(path).unwrap(), bytes);
+    store.save_skill_issuance(&right, &foreign).await.unwrap();
+    assert_eq!(
+        store.load_skill_issuance(&right).await.unwrap(),
+        Some(foreign)
+    );
+}
+
+#[tokio::test]
+async fn mismatched_skill_issuance_is_preserved_without_blocking_healthy_workflows() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let original = skill_issuance(WorkflowId::new());
+    let neighbor = skill_issuance(WorkflowId::new());
+    let left = original
+        .command_identity
+        .as_ref()
+        .unwrap()
+        .workflow_id
+        .clone();
+    let right = neighbor
+        .command_identity
+        .as_ref()
+        .unwrap()
+        .workflow_id
+        .clone();
+    store.save_skill_issuance(&left, &original).await.unwrap();
+    store.save_skill_issuance(&right, &neighbor).await.unwrap();
+    let path = root.path().join(format!("{}.skill-issuance.json", left.0));
+    let damaged = serde_json::to_vec(&neighbor).unwrap();
+    std::fs::write(&path, &damaged).unwrap();
+
+    for store in [store, CheckpointStore::open(root.path()).await.unwrap()] {
+        assert!(matches!(
+            store.load_skill_issuance(&left).await,
+            Err(CheckpointStoreError::IdentityChanged)
+        ));
+        assert!(matches!(
+            store.save_skill_issuance(&left, &original).await,
+            Err(CheckpointStoreError::IdentityChanged)
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), damaged);
+        assert_eq!(
+            store.load_skill_issuance(&right).await.unwrap(),
+            Some(neighbor.clone())
+        );
+        let fresh_id = WorkflowId::new();
+        let fresh = skill_issuance(fresh_id.clone());
+        store.save_skill_issuance(&fresh_id, &fresh).await.unwrap();
+        assert_eq!(
+            store.load_skill_issuance(&fresh_id).await.unwrap(),
+            Some(fresh)
+        );
+    }
+    // Explicit repair restores the normal lifecycle without discarding evidence.
+    std::fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    store.save_skill_issuance(&left, &original).await.unwrap();
+    assert_eq!(
+        store.load_skill_issuance(&left).await.unwrap(),
+        Some(original)
+    );
+    store.remove_skill_issuance(&left).await.unwrap();
+    assert_eq!(store.load_skill_issuance(&left).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn unreadable_skill_issuance_is_not_overwritten_by_an_ordinary_save() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let workflow_id = WorkflowId::new();
+    let path = root
+        .path()
+        .join(format!("{}.skill-issuance.json", workflow_id.0));
+    let damaged = b"not-json\n";
+    std::fs::write(&path, damaged).unwrap();
+    assert!(matches!(
+        store
+            .save_skill_issuance(&workflow_id, &skill_issuance(workflow_id.clone()))
+            .await,
+        Err(CheckpointStoreError::Serialization(_))
+    ));
+    assert_eq!(std::fs::read(path).unwrap(), damaged);
+}
+
+#[tokio::test]
+async fn legacy_skill_issuance_without_command_identity_still_round_trips() {
+    let root = tempfile::tempdir().unwrap();
+    let workflow_id = WorkflowId::new();
+    let mut legacy = skill_issuance(workflow_id.clone());
+    legacy.command_identity = None;
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    store
+        .save_skill_issuance(&workflow_id, &legacy)
+        .await
+        .unwrap();
+    let reopened = CheckpointStore::open(root.path()).await.unwrap();
+    assert_eq!(
+        reopened.load_skill_issuance(&workflow_id).await.unwrap(),
+        Some(legacy)
     );
 }
 
