@@ -55,6 +55,7 @@ macro_rules! every_case {
             actions_wait_for_a_late_target,
             actions_fail_a_missing_target_within_one_bound,
             click_refuses_a_covered_target,
+            typing_under_a_dialog_reports_obscured,
             locate_miss_marks_a_hidden_control,
             covered_intent_names_the_covering_dialog,
             omitted_controls_need_a_whole_tree,
@@ -2289,6 +2290,37 @@ pub async fn click_refuses_a_covered_target(rig: &Rig) {
         listed_url,
         site.url("/home").as_str(),
         "the click followed another link"
+    );
+    live.close().await;
+}
+
+/// A text field an open dialog covers: typing into it fails targetObscured,
+/// and a field inside the dialog still takes text.
+pub async fn typing_under_a_dialog_reports_obscured(rig: &Rig) {
+    let body = r#"<main><input aria-label="Keywords"></main>
+        <div role="dialog" aria-label="Notice"
+             style="position:fixed;inset:0;background:#fff"><input aria-label="Email"></div>"#;
+    let site = FixtureSite::spawn(vec![("/home", Route::Html(page("Home", body)))]).await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let covered = live
+        .call(
+            "type_text",
+            json!({"target":{"role":"textbox","accessibleName":"Keywords"},"value":"rust"}),
+        )
+        .await;
+    assert_eq!(
+        covered["error"]["code"], "targetObscured",
+        "typing under a dialog: {covered}"
+    );
+    let inside = live
+        .call(
+            "type_text",
+            json!({"target":{"role":"textbox","accessibleName":"Email"},"value":"ada"}),
+        )
+        .await;
+    assert_eq!(
+        inside["status"], "completed",
+        "typing inside the dialog: {inside}"
     );
     live.close().await;
 }
