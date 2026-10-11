@@ -25,8 +25,8 @@ use companion_protocol::{
     ActionRequest, BrowserEngine, CompanionEvent, InteractionPath, PROTOCOL_VERSION,
 };
 use dom_engine::{
-    rank_candidates, resolve_candidates, Candidate, CandidateState, ResolutionDecision,
-    ResolutionPolicy,
+    accessibility_candidates, rank_candidates, resolve_candidates, Candidate, CandidateState,
+    ResolutionDecision, ResolutionPolicy,
 };
 use fingerprinting::FingerprintApplyPlan;
 use fingerprinting::FingerprintConfig;
@@ -59,6 +59,14 @@ use crate::generate_session_seed;
 use crate::network_quiet::FirefoxNetworkQuiet;
 
 const COMPANION_SANDBOX: &str = "automation-runtime-companion";
+
+#[derive(Clone, Copy)]
+enum ShadowRead {
+    Element,
+    Text,
+    Value,
+}
+
 /// A page function returning the element a selector names. A selector joined
 /// by " >>> " names each open shadow root's host in turn, then the element.
 const COMPOSED_QUERY: &str = "((selector)=>{const parts=selector.split(' >>> ');const probe=document.createDocumentFragment();for(const part of parts)probe.querySelector(part);let root=document;for(let index=0;index<parts.length;index+=1){const found=root.querySelector(parts[index]);if(!found||index===parts.length-1)return found;root=found.shadowRoot;if(!root)return null}return null})";
@@ -1972,32 +1980,24 @@ impl FirefoxCompanionWorker {
                 false,
             ));
         }
-        // Parity with the Chromium resolver: empty string fields can never
-        // resolve, and a wait would poll for them until the deadline.
-        for (field, value) in [
-            ("css", &target.css),
-            ("testId", &target.test_id),
-            ("role", &target.role),
-            ("accessibleName", &target.accessible_name),
-            ("label", &target.label),
-        ] {
-            if let Some(value) = value {
-                if value.trim().is_empty() {
-                    return Err(driver_error(
-                        ErrorCode::InvalidRequest,
-                        format!("target field {field} is empty and can never resolve"),
-                        false,
-                    ));
-                }
-            }
-        }
+        worker_pool::validate_target_spec(target)?;
         let mut context = top_context.to_owned();
         for frame in &target.frame_path {
             let frame_selector = if let Some(selector) = direct_target_selector(frame) {
                 selector
             } else {
                 let candidates = self.gather_bidi_context_candidates(&context).await?;
-                match resolve_candidates(frame, &candidates, &ResolutionPolicy::default()) {
+                // Snapshot-stamped unnamed frame hops carry an empty name.
+                // Match Chromium's frame normalization before ranking.
+                let mut normalized_frame = (**frame).clone();
+                if normalized_frame.accessible_name.as_deref() == Some("") {
+                    normalized_frame.accessible_name = None;
+                }
+                match resolve_candidates(
+                    &normalized_frame,
+                    &candidates,
+                    &ResolutionPolicy::default(),
+                ) {
                     Ok(ResolutionDecision::Resolved { candidate, .. }) => {
                         candidate.css.ok_or_else(|| {
                             driver_error(
@@ -2208,25 +2208,29 @@ impl FirefoxCompanionWorker {
             .gather_candidates_for_context(page_id, top_context, &context)
             .await?;
         let resolution = resolve_candidates(target, &candidates, &ResolutionPolicy::default());
-        if truncated && matches!(resolution, Ok(ResolutionDecision::NotFound)) {
-            // The bounded control walk stopped before the end of the page; a
-            // search that is not capped by the control budget finds the
-            // target if it exists.
-            if let Ok(location) = self
+        if matches!(resolution, Ok(ResolutionDecision::NotFound)) {
+            // The control walk leaves out what an open modal dialog hides, and
+            // a bounded walk can stop early; the companion's own search finds
+            // the target either way, or reports it obscured.
+            match self
                 .observer
                 .locate_target(&self.current_lease(), page_id, target)
                 .await
             {
-                if location.ambiguous {
-                    return Err(driver_error(
-                        ErrorCode::TargetAmbiguous,
-                        "Firefox semantic target is ambiguous",
-                        false,
-                    ));
+                Err(error) if error.code == ErrorCode::TargetObscured => return Err(error),
+                Ok(location) if truncated => {
+                    if location.ambiguous {
+                        return Err(driver_error(
+                            ErrorCode::TargetAmbiguous,
+                            "Firefox semantic target is ambiguous",
+                            false,
+                        ));
+                    }
+                    if let (true, Some(css_path)) = (location.found, location.css_path) {
+                        return Ok((context, css_path));
+                    }
                 }
-                if let (true, Some(css_path)) = (location.found, location.css_path) {
-                    return Ok((context, css_path));
-                }
+                _ => {}
             }
         }
         match resolution {
@@ -2421,11 +2425,12 @@ impl FirefoxCompanionWorker {
             })
     }
 
-    async fn resolve_shadow_element(
+    async fn shadow_target_response(
         &self,
         context: &str,
         target: &types::TargetSpec,
-    ) -> Result<String, CommandError> {
+        read: ShadowRead,
+    ) -> Result<Value, CommandError> {
         if target.shadow_path.len() > MAX_FRAME_PATH_DEPTH {
             return Err(driver_error(
                 ErrorCode::InvalidRequest,
@@ -2438,20 +2443,34 @@ impl FirefoxCompanionWorker {
             .iter()
             .map(|host| shadow_target_descriptor(host))
             .collect::<Result<Vec<_>, _>>()?;
-        let target_selector = shadow_target_descriptor(target)?;
+        // The caller already descended frame_path to obtain this context.
+        let mut local_target = target.clone();
+        local_target.frame_path.clear();
+        let target_selector = shadow_target_descriptor(&local_target)?;
+        let (max_matches, finish) = match read {
+            ShadowRead::Element => (
+                2,
+                "if(matches.length!==1)return 'target-ambiguous';return matches[0];",
+            ),
+            ShadowRead::Text => (
+                10000,
+                "return JSON.stringify(matches.map(el=>el.innerText??''));",
+            ),
+            ShadowRead::Value => (
+                10000,
+                "return JSON.stringify(matches.map(el=>el.value??''));",
+            ),
+        };
         let hosts_json = serde_json::to_string(&hosts)
             .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
         let target_json = serde_json::to_string(&target_selector)
             .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
         let response = self.transport.send("script.evaluate", json!({
-            "expression": format!("(()=>{{const norm=s=>String(s??'').replace(/\\s+/g,' ').trim();const resolve=(root,spec)=>{{if(spec.selector)return [...root.querySelectorAll(spec.selector)].slice(0,2);const selector=spec.role==='button'?'button,[role=button]':spec.role==='group'?'[role=group]':'*';const nodes=root.querySelectorAll(selector);if(nodes.length>10000)return 'too-many';const matches=[];for(const el of nodes){{const role=el.getAttribute('role')||(el.tagName==='BUTTON'?'button':null);if(role!==spec.role)continue;const labelledBy=el.getAttribute('aria-labelledby');const labelled=labelledBy?labelledBy.split(/\\s+/).map(id=>el.ownerDocument.getElementById(id)?.textContent??'').join(' '):null;const name=el.getAttribute('aria-label')??labelled??el.textContent;if(norm(name)===norm(spec.name))matches.push(el);if(matches.length>1)break;}}return matches;}};let root=document;for(const spec of {hosts_json}){{const matches=resolve(root,spec);if(matches==='too-many')return 'too-many';if(matches.length===0)return 'host-missing';if(matches.length!==1)return 'host-ambiguous';if(!matches[0].shadowRoot)return 'shadow-unavailable';root=matches[0].shadowRoot;}}const matches=resolve(root,{target_json});if(matches==='too-many')return 'too-many';if(matches.length===0)return 'target-missing';if(matches.length!==1)return 'target-ambiguous';return matches[0];}})()"),
+            "expression": format!("(()=>{{const norm=s=>String(s??'').replace(/\\s+/g,' ').trim();const resolve=(root,spec,limit=2)=>{{if(spec.selector){{const nodes=root.querySelectorAll(spec.selector);if(limit>2&&nodes.length>10000)return 'too-many';return [...nodes].slice(0,limit);}}const selector=spec.role==='button'?'button,[role=button]':spec.role==='group'?'[role=group]':'*';const nodes=root.querySelectorAll(selector);if(nodes.length>10000)return 'too-many';const matches=[];for(const el of nodes){{const role=el.getAttribute('role')||(el.tagName==='BUTTON'?'button':null);if(role!==spec.role)continue;const labelledBy=el.getAttribute('aria-labelledby');const labelled=labelledBy?labelledBy.split(/\\s+/).map(id=>el.ownerDocument.getElementById(id)?.textContent??'').join(' '):null;const name=el.getAttribute('aria-label')??labelled??el.textContent;if(norm(name)===norm(spec.name))matches.push(el);if(matches.length>=limit)break;}}return matches;}};let root=document;for(const spec of {hosts_json}){{const matches=resolve(root,spec);if(matches==='too-many')return 'too-many';if(matches.length===0)return 'host-missing';if(matches.length!==1)return 'host-ambiguous';if(!matches[0].shadowRoot)return 'shadow-unavailable';root=matches[0].shadowRoot;}}const matches=resolve(root,{target_json},{max_matches});if(matches==='too-many')return 'too-many';if(matches.length===0)return 'target-missing';{finish}}})()"),
             "target": {"context": context, "sandbox": COMPANION_SANDBOX},
             "awaitPromise": false,
             "resultOwnership": "none",
         })).await?;
-        if let Some(shared_id) = response.pointer("/result/sharedId").and_then(Value::as_str) {
-            return Ok(shared_id.to_owned());
-        }
         match response.pointer("/result/value").and_then(Value::as_str) {
             Some("host-ambiguous") | Some("target-ambiguous") => Err(driver_error(
                 ErrorCode::TargetAmbiguous,
@@ -2473,12 +2492,52 @@ impl FirefoxCompanionWorker {
                 "Firefox shadow search exceeded its node bound",
                 false,
             )),
-            _ => Err(driver_error(
-                ErrorCode::BrowserCommandFailed,
-                "Firefox shadow probe returned an invalid result",
-                false,
-            )),
+            _ => Ok(response),
         }
+    }
+
+    async fn resolve_shadow_element(
+        &self,
+        context: &str,
+        target: &types::TargetSpec,
+    ) -> Result<String, CommandError> {
+        self.shadow_target_response(context, target, ShadowRead::Element)
+            .await?
+            .pointer("/result/sharedId")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox shadow probe returned an invalid result",
+                    false,
+                )
+            })
+    }
+
+    async fn read_shadow_wait_values(
+        &self,
+        context: &str,
+        target: &types::TargetSpec,
+        is_value: bool,
+    ) -> Result<Vec<String>, CommandError> {
+        let read = if is_value {
+            ShadowRead::Value
+        } else {
+            ShadowRead::Text
+        };
+        let response = self.shadow_target_response(context, target, read).await?;
+        response
+            .pointer("/result/value")
+            .and_then(Value::as_str)
+            .and_then(|value| serde_json::from_str(value).ok())
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox shadow wait returned an invalid observation",
+                    false,
+                )
+            })
     }
 
     async fn perform_pointer_click(
@@ -2754,12 +2813,16 @@ impl FirefoxCompanionWorker {
         context: &str,
         shared_id: &str,
     ) -> Result<String, CommandError> {
+        let function_declaration = format!(
+            "async(element)=>{{if(!(element instanceof Element)||!element.isConnected)return 'detached';element.scrollIntoView({{block:'center',inline:'center'}});await new Promise(resolve=>requestAnimationFrame(()=>resolve()));const verdict=({})(element);if(verdict!=='ok')return verdict;return element;}}",
+            worker_pool::pointer_hit_function(),
+        );
         let response = self
             .transport
             .send(
                 "script.callFunction",
                 json!({
-                    "functionDeclaration": "async(element)=>{if(!(element instanceof Element)||!element.isConnected)return 'detached';element.scrollIntoView({block:'center',inline:'center'});await new Promise(resolve=>requestAnimationFrame(()=>resolve()));if(!element.isConnected)return 'detached';const rect=element.getBoundingClientRect();const width=document.documentElement.clientWidth;const height=document.documentElement.clientHeight;if(rect.width<=0||rect.height<=0||rect.right<=0||rect.bottom<=0||rect.left>=width||rect.top>=height)return 'out-of-bounds';const x=Math.min(Math.max(rect.left+rect.width/2,0),width-1);const y=Math.min(Math.max(rect.top+rect.height/2,0),height-1);const root=element.getRootNode();const hit=typeof root.elementFromPoint==='function'?root.elementFromPoint(x,y):document.elementFromPoint(x,y);if(hit===null||(hit!==element&&!element.contains(hit)))return 'obscured';return element;}",
+                    "functionDeclaration": function_declaration,
                     "target": {"context": context, "sandbox": COMPANION_SANDBOX},
                     "arguments": [{"sharedId": shared_id}],
                     "awaitPromise": true,
@@ -3863,6 +3926,39 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
         }
     }
 
+    async fn read_attribute(
+        &self,
+        page_id: &PageId,
+        target: &TargetSpec,
+        attribute: &str,
+    ) -> Result<Option<String>, CommandError> {
+        let top_context = self.context(page_id).await?;
+        let (context, selector) = self
+            .resolve_input_target(page_id, &top_context, "", Some(target))
+            .await?;
+        let json = |value: &str| {
+            serde_json::to_string(value)
+                .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))
+        };
+        let (selector, attribute) = (json(&selector)?, json(attribute)?);
+        let response = self
+            .transport
+            .send(
+                "script.evaluate",
+                json!({
+                    "expression": format!("{COMPOSED_QUERY}({selector})?.getAttribute({attribute}) ?? null"),
+                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                    "awaitPromise": false,
+                    "resultOwnership": "none",
+                }),
+            )
+            .await?;
+        Ok(response
+            .pointer("/result/value")
+            .and_then(Value::as_str)
+            .map(str::to_owned))
+    }
+
     async fn collect_candidates(
         &self,
         page_id: &PageId,
@@ -3889,7 +3985,7 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
         // Accessibility candidates carry no selector, so the companion resolves
         // a CSS target; a hidden or detached element adds no candidate.
         if let Some(css) = target.css.as_ref().filter(|css| !css.is_empty()) {
-            let mut candidates = accessibility_candidates(&nodes);
+            let mut candidates = accessibility_candidates(&nodes, "firefox-a11y");
             let location = self
                 .observer
                 .locate_target(&self.current_lease(), page_id, target)
@@ -3919,7 +4015,7 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
                     target.ordinal.unwrap_or(0),
                     location.css_path.clone(),
                 ) {
-                    let mut candidates = accessibility_candidates(&nodes);
+                    let mut candidates = accessibility_candidates(&nodes, "firefox-a11y");
                     candidates.push(located_candidate(&location, css_path));
                     return Ok(candidates);
                 }
@@ -3932,7 +4028,7 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
                 false,
             ));
         }
-        Ok(accessibility_candidates(&nodes))
+        Ok(accessibility_candidates(&nodes, "firefox-a11y"))
     }
 
     async fn form_snapshot(
@@ -4208,23 +4304,29 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
             )
             .await?;
         worker_pool::annotate_accessibility_targets(&mut nodes);
-        let controls_omitted = if accessibility_contains_form_control(&nodes) {
-            false
-        } else {
-            worker_pool::ObservationEngine::form_snapshot(self, page_id, Some(512))
-                .await
-                .ok()
-                .is_some_and(|evidence| {
-                    evidence.iter().any(|item| {
-                        matches!(
-                            item,
-                            Evidence::FormSnapshot { snapshot }
-                                if !snapshot.unowned_controls.is_empty()
-                                    || snapshot.forms.iter().any(|form| !form.controls.is_empty())
-                        )
+        // Only a whole, unscoped tree can show that a control is missing from it.
+        let controls_omitted =
+            if truncated || command.target.is_some() || accessibility_contains_form_control(&nodes)
+            {
+                false
+            } else {
+                worker_pool::ObservationEngine::form_snapshot(self, page_id, Some(512))
+                    .await
+                    .ok()
+                    .is_some_and(|evidence| {
+                        evidence.iter().any(|item| {
+                            matches!(
+                                item,
+                                Evidence::FormSnapshot { snapshot }
+                                    if !snapshot.unowned_controls.is_empty()
+                                        || snapshot
+                                            .forms
+                                            .iter()
+                                            .any(|form| !form.controls.is_empty())
+                            )
+                        })
                     })
-                })
-        };
+            };
         let mut evidence = vec![
             Evidence::AccessibilitySnapshot {
                 page_id: page_id.clone(),
@@ -5903,56 +6005,6 @@ fn located_candidate(location: &TargetLocation, css_path: String) -> Candidate {
     }
 }
 
-fn accessibility_candidates(nodes: &[types::AccessibilityNode]) -> Vec<Candidate> {
-    fn collect(nodes: &[types::AccessibilityNode], candidates: &mut Vec<Candidate>) {
-        for node in nodes {
-            let mut text = Vec::new();
-            if let Some(name) = node.name.as_deref().filter(|value| !value.is_empty()) {
-                text.push(name);
-            }
-            if let Some(description) = node
-                .description
-                .as_deref()
-                .filter(|value| !value.is_empty())
-            {
-                text.push(description);
-            }
-            if let Some(value) = node.value.as_deref().filter(|value| !value.is_empty()) {
-                text.push(value);
-            }
-            let mut attributes = std::collections::BTreeMap::new();
-            if let Some(input_type) = &node.input_type {
-                attributes.insert("type".into(), input_type.clone());
-            }
-            if node.invalid == Some(true) {
-                attributes.insert("aria-invalid".into(), "true".into());
-            }
-            candidates.push(Candidate {
-                id: format!("firefox-a11y-{}", candidates.len()),
-                css: None,
-                tag: None,
-                test_id: None,
-                role: node.role.clone(),
-                name: node.name.clone(),
-                label: None,
-                text: text.join(" "),
-                attributes,
-                state: CandidateState {
-                    attached: true,
-                    visible: true,
-                    enabled: node.disabled != Some(true),
-                },
-                frame_path: Vec::new(),
-            });
-            collect(&node.children, candidates);
-        }
-    }
-
-    let mut candidates = Vec::new();
-    collect(nodes, &mut candidates);
-    candidates
-}
-
 #[cfg(test)]
 mod observation_redaction_tests {
     use super::{validate_observation, ExtensionControl, ExtensionObservation};
@@ -6044,7 +6096,7 @@ mod accessibility_candidate_tests {
             {"role":"button", "name":"Resume"}
         ]))
         .unwrap();
-        let candidates = accessibility_candidates(&nodes);
+        let candidates = accessibility_candidates(&nodes, "firefox-a11y");
         assert_eq!(
             candidates[0].attributes.get("type").map(String::as_str),
             Some("file")
@@ -6094,7 +6146,7 @@ mod accessibility_candidate_tests {
             ..Default::default()
         }];
 
-        let candidates = accessibility_candidates(&nodes);
+        let candidates = accessibility_candidates(&nodes, "firefox-a11y");
 
         assert_eq!(
             candidates[0]

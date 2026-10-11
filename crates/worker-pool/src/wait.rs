@@ -8,6 +8,10 @@ use types::{
     WaitForCommand, WaitUntil,
 };
 
+/// DOM observation body for an element bound to `el`, shared by both engines.
+/// Visibility requires rendered geometry and excludes CSS-hidden elements.
+pub const ELEMENT_VISIBILITY_SCRIPT: &str = "const s=getComputedStyle(el),r=el.getBoundingClientRect(); return s.visibility!=='hidden'&&s.display!=='none'&&r.width>0&&r.height>0";
+
 /// A transport observation, before condition matching or evidence truncation.
 pub enum WaitObservation {
     Pending,

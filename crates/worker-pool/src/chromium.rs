@@ -1,6 +1,7 @@
 #[cfg(test)]
 use crate::wait::{bound_observed, text_matches};
 use crate::wait::{is_page_scoped_text_target, WaitObservation, WaitObserver};
+use crate::worker_failure::is_closed_page_message;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Once};
@@ -10,6 +11,7 @@ use crate::navigation_settle::{
     navigation_settle_expression, parse_settled, run_settle, ProbeStep, SettleSession,
     NAVIGATION_SETTLE_CAP,
 };
+use crate::pointer_hit::PointerHit;
 use crate::secret_material::page_title_evidence;
 use artifact_store::ArtifactStore;
 use async_trait::async_trait;
@@ -65,7 +67,7 @@ use crate::{
     targeting::{
         gather_candidates, inspect_page_scoped_target, page_frame_ids,
         resolve_ambiguous_wait_values, resolve_target as resolve_browser_target,
-        resolve_target_with_visibility, TARGET_GONE_MESSAGE,
+        resolve_target_with_visibility,
     },
     BrowserWorker, WorkerFactory,
 };
@@ -892,9 +894,7 @@ impl ChromiumWorker {
                 "target has no clickable point",
             )
         })?;
-        if !resolved.receives_pointer(page).await? {
-            return Err(obscured_click_target());
-        }
+        pointer_miss(resolved.receives_pointer(page).await?)?;
         self.dispatch_click(page, target, &command.modifiers)
             .await
             .map_err(|(_, error)| error)
@@ -1650,11 +1650,32 @@ fn should_retry_plain_click_target_drift(
 /// re-rendered the node away after resolution; the CDP evaluate surfaces
 /// that throw as `BrowserCommandFailed` carrying the message.
 fn is_detached_target_error(error: &CommandError) -> bool {
-    error.code == ErrorCode::BrowserCommandFailed
-        && error
-            .message
-            .to_ascii_lowercase()
-            .contains("target detached")
+    matches!(
+        error.code,
+        ErrorCode::TargetDetached | ErrorCode::BrowserCommandFailed
+    ) && error
+        .message
+        .to_ascii_lowercase()
+        .contains("target detached")
+}
+
+fn pointer_miss(hit: PointerHit) -> Result<(), CommandError> {
+    match hit {
+        PointerHit::Reachable => Ok(()),
+        PointerHit::Obscured => Err(obscured_click_target()),
+        PointerHit::OutOfBounds => Err(CommandError {
+            code: ErrorCode::TargetOutOfBounds,
+            message: "click target is outside the viewport".into(),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        }),
+        PointerHit::Detached => Err(CommandError {
+            code: ErrorCode::TargetDetached,
+            message: "target detached before click".into(),
+            layer: ErrorLayer::Driver,
+            retryable: false,
+        }),
+    }
 }
 
 /// A click whose resolved node detached before any input was dispatched
@@ -2114,7 +2135,8 @@ impl crate::ObservationEngine for ChromiumWorker {
         if emitted < max_nodes {
             truncated |= descend_a11y_iframes(&page, &mut nodes, max_nodes - emitted).await;
         }
-        let controls_omitted = if a11y_contains_form_control(&nodes) {
+        // Only a whole tree can show that a control is missing from it.
+        let controls_omitted = if truncated || a11y_contains_form_control(&nodes) {
             false
         } else {
             match page
@@ -2185,6 +2207,20 @@ impl crate::ObservationEngine for ChromiumWorker {
         let page = self.page_handle(page_id).await?;
         let browser = self.browser_handle().await?;
         gather_candidates(&page, target, Some(&browser)).await
+    }
+
+    async fn read_attribute(
+        &self,
+        page_id: &PageId,
+        target: &types::TargetSpec,
+        attribute: &str,
+    ) -> Result<Option<String>, CommandError> {
+        let page = self.page_handle(page_id).await?;
+        let browser = self.browser_handle().await?;
+        resolve_browser_target(page_id, &page, "", Some(target), Some(&browser))
+            .await?
+            .attribute(&page, attribute)
+            .await
     }
 
     async fn element_at_point(
@@ -2382,8 +2418,15 @@ impl crate::InputEngine for ChromiumWorker {
                 Err(error) => return Err(error),
             };
             match resolved.receives_pointer(&page).await {
-                Ok(true) => {}
-                Ok(false) => return Err(obscured_click_target()),
+                Ok(hit) => {
+                    if let Err(error) = pointer_miss(hit) {
+                        if should_retry_click_target_detach(detach_retried, &error) {
+                            detach_retried = true;
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                }
                 Err(error) if should_retry_click_target_detach(detach_retried, &error) => {
                     detach_retried = true;
                     continue;
@@ -3934,16 +3977,10 @@ fn element_wait_missing_observation(
         ErrorCode::TargetNotFound | ErrorCode::FrameNotFound | ErrorCode::ShadowRootUnavailable
     ) || is_missing_css_node(error)
         || is_detached_target_error(error);
-    target_missing.then_some(matches!(state, types::ElementState::Detached))
-}
-
-fn is_closed_page_message(message: &str) -> bool {
-    message.contains("receiver is gone")
-        || message.contains("session closed")
-        || message.contains("Session with given id not found")
-        || message.contains("oneshot canceled")
-        || message.contains(TARGET_GONE_MESSAGE)
-        || crate::is_firefox_bidi_transport_dead(message)
+    target_missing.then_some(matches!(
+        state,
+        types::ElementState::Detached | types::ElementState::Hidden
+    ))
 }
 
 fn wait_should_retry_replaced_context(error: &CommandError) -> bool {
@@ -4344,14 +4381,6 @@ fn reattach_failed(reason: impl std::fmt::Display) -> CommandError {
         layer: ErrorLayer::Driver,
         retryable: false,
     }
-}
-
-/// The worker's browser is gone or unreachable: dead command channel,
-/// canceled oneshot, closed session, or an explicitly closed worker. Such a
-/// worker can never serve another command, so callers may invalidate and
-/// re-lease for a fresh browser instead of surfacing a dead-end failure.
-pub fn is_dead_worker_error(error: &CommandError) -> bool {
-    is_closed_page_message(&error.message) || error.message == "browser worker is closed"
 }
 
 /// DoS clamp for `EvaluateJavaScript::timeout_ms`: bounds a caller-requested
@@ -4993,13 +5022,12 @@ mod tests {
     use super::{
         apply_state_commit, clamp_js_timeout_ms, click_dispatch_phase_for_step, compact_ax_tree,
         driver_error_is_retryable, element_wait_missing_observation,
-        ensure_automatic_download_modifier_support, iframe_hop_ordinal, is_closed_page_message,
-        is_dead_worker_error, is_document_body_inspect, is_missing_css_node,
-        should_retry_click_target_detach, should_retry_plain_click_target_drift,
-        should_retry_transient_click_loss, snapshot_cookie, text_matches,
-        unscoped_css_wait_selector, validate_clip, wait_should_retry_replaced_context,
-        ChromiumWorker, ClickDispatchPhase, HttpBridgeState, EDITABLE_CONTROL_CHECK_JS,
-        TARGET_GONE_MESSAGE,
+        ensure_automatic_download_modifier_support, iframe_hop_ordinal, is_document_body_inspect,
+        is_missing_css_node, should_retry_click_target_detach,
+        should_retry_plain_click_target_drift, should_retry_transient_click_loss, snapshot_cookie,
+        text_matches, unscoped_css_wait_selector, validate_clip,
+        wait_should_retry_replaced_context, ChromiumWorker, ClickDispatchPhase, HttpBridgeState,
+        EDITABLE_CONTROL_CHECK_JS,
     };
     use types::{
         ClickModifier, CommandError, ErrorCode, ErrorLayer, InspectCommand, PageId, SessionId,
@@ -5201,6 +5229,16 @@ mod tests {
 
         assert!(should_retry_click_target_detach(false, &detached));
         assert!(!should_retry_click_target_detach(true, &detached));
+        let preflight_detached = super::pointer_miss(super::PointerHit::Detached).unwrap_err();
+        assert!(should_retry_click_target_detach(false, &preflight_detached));
+        assert!(!should_retry_click_target_detach(true, &preflight_detached));
+        let page_lost = types::CommandError {
+            code: ErrorCode::TargetDetached,
+            message: "the browser target is gone (crashed or closed)".into(),
+            layer: types::ErrorLayer::Driver,
+            retryable: true,
+        };
+        assert!(!should_retry_click_target_detach(false, &page_lost));
         assert!(!should_retry_click_target_detach(false, &dispatch_failure));
         // A stale node is the bounded drift retry's case, not this one.
         assert!(!should_retry_click_target_detach(false, &stale));
@@ -5483,6 +5521,10 @@ mod tests {
             Some(true)
         );
         assert_eq!(
+            element_wait_missing_observation(&types::ElementState::Hidden, &error),
+            Some(true)
+        );
+        assert_eq!(
             element_wait_missing_observation(&types::ElementState::Visible, &error),
             Some(false)
         );
@@ -5532,41 +5574,6 @@ mod tests {
             retryable: false,
         };
         assert!(!wait_should_retry_replaced_context(&unrelated));
-    }
-
-    #[test]
-    fn list_pages_recognizes_a_window_closed_by_the_site() {
-        assert!(is_closed_page_message(
-            "send failed because receiver is gone"
-        ));
-        assert!(is_closed_page_message("oneshot canceled"));
-        assert!(!is_closed_page_message(
-            "connection temporarily unavailable"
-        ));
-        assert!(is_closed_page_message("Firefox BiDi connection closed"));
-        assert!(is_closed_page_message(
-            "Firefox BiDi reader disconnected: connection reset"
-        ));
-        assert!(!is_closed_page_message("Firefox BiDi client closed"));
-    }
-
-    #[test]
-    fn dead_target_error_rewritten_by_targeting_triggers_the_revive_path() {
-        let rewritten = CommandError {
-            code: ErrorCode::TargetDetached,
-            message: TARGET_GONE_MESSAGE.into(),
-            layer: ErrorLayer::Driver,
-            retryable: true,
-        };
-        assert!(is_dead_worker_error(&rewritten));
-
-        let stale_element = CommandError {
-            code: ErrorCode::TargetDetached,
-            message: "target has no live object".into(),
-            layer: ErrorLayer::Driver,
-            retryable: false,
-        };
-        assert!(!is_dead_worker_error(&stale_element));
     }
 
     #[test]

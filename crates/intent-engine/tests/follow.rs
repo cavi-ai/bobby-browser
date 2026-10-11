@@ -14,6 +14,8 @@ use types::{
 struct CallLog {
     clicks: Vec<ClickCommand>,
     waits: Vec<WaitForCommand>,
+    /// The page's candidates once a click has landed, when it changes.
+    candidates_after_click: Option<Vec<Candidate>>,
 }
 
 struct FakeBrowser {
@@ -31,7 +33,11 @@ impl IntentBrowser for FakeBrowser {
         _page_id: &PageId,
         _target: &TargetSpec,
     ) -> Result<Vec<Candidate>, CommandError> {
-        Ok((*self.candidates).clone())
+        let log = self.calls.lock().expect("call log");
+        match &log.candidates_after_click {
+            Some(after) if !log.clicks.is_empty() => Ok(after.clone()),
+            _ => Ok((*self.candidates).clone()),
+        }
     }
 
     async fn click(
@@ -469,4 +475,87 @@ async fn follow_recodes_ambiguous_postclick_wait_as_verification_failed() {
     );
     let log = calls.lock().expect("call log");
     assert_eq!(log.clicks.len(), 1, "the click ran exactly once");
+}
+
+fn dialog(name: &str) -> Candidate {
+    Candidate {
+        role: Some("dialog".into()),
+        css: None,
+        ..link(name)
+    }
+}
+
+fn timed_out() -> CommandError {
+    CommandError {
+        code: ErrorCode::WaitConditionTimedOut,
+        message: "wait condition was not satisfied within 5000ms".into(),
+        layer: types::ErrorLayer::Driver,
+        retryable: false,
+    }
+}
+
+async fn follow_with_dialogs(
+    before: Vec<Candidate>,
+    after: Vec<Candidate>,
+) -> (CommandError, types::ExecutionRecord) {
+    let calls = Arc::new(Mutex::new(CallLog {
+        candidates_after_click: Some(after),
+        ..CallLog::default()
+    }));
+    let browser = FakeBrowser {
+        candidates: Arc::new(before),
+        calls,
+        click_evidence: Vec::new(),
+        wait_evidence: Vec::new(),
+        wait_error: Some(timed_out()),
+    };
+    let outcome = IntentEngine::execute(
+        &follow("Details", Some("link"), details_wait(), false),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+    let IntentOutcome::Failed { error, evidence } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    let record = evidence
+        .into_iter()
+        .find_map(|item| match item {
+            Evidence::IntentExecution { record } => Some(record),
+            _ => None,
+        })
+        .expect("IntentExecution evidence");
+    (error, record)
+}
+
+#[tokio::test]
+async fn follow_reports_a_dialog_that_opened_instead_of_the_destination() {
+    let (error, record) = follow_with_dialogs(
+        vec![link("Details")],
+        vec![link("Details"), dialog("Sign in")],
+    )
+    .await;
+    assert_eq!(error.code, ErrorCode::ObstructionSuspected);
+    assert!(!error.message.contains("Sign in"), "{}", error.message);
+    assert_eq!(record.verification, "dialogOpened");
+    assert!(
+        record.candidates.iter().any(|candidate| {
+            candidate.role.as_deref() == Some("dialog")
+                && candidate.name.as_deref() == Some("Sign in")
+        }),
+        "the evidence names the dialog: {:?}",
+        record.candidates
+    );
+}
+
+#[tokio::test]
+async fn follow_keeps_the_timeout_when_no_new_dialog_opened() {
+    let (error, record) = follow_with_dialogs(
+        vec![link("Details"), dialog("Notice")],
+        vec![link("Details"), dialog("Notice")],
+    )
+    .await;
+    assert_eq!(error.code, ErrorCode::WaitConditionTimedOut);
+    assert_eq!(record.verification, "verifyFailed");
 }

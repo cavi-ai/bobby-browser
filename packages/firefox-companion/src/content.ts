@@ -1132,12 +1132,18 @@ const A11Y_ACTIONABLE_ROLES = new Set([
   "combobox",
   "link",
   "listbox",
+  "menuitem",
+  "menuitemcheckbox",
+  "menuitemradio",
+  "option",
   "radio",
   "searchbox",
   "slider",
   "spinbutton",
   "switch",
+  "tab",
   "textbox",
+  "treeitem",
   "iframe",
 ]);
 

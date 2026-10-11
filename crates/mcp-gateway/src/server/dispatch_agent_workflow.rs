@@ -401,6 +401,12 @@ impl Server {
             .and_then(|outcome| outcome.get("workflowId"))
             .cloned()
             .and_then(|value| serde_json::from_value::<types::WorkflowId>(value).ok());
+        // The action's idempotency key names the action; the observation is a
+        // separate read and must not replay or conflict with it.
+        let context = types::RequestContext {
+            idempotency_key: None,
+            ..context
+        };
         let (mut outcome, observation) = WorkflowService::new(Arc::clone(&self.runtime))
             .post_action_report_with(
                 result,

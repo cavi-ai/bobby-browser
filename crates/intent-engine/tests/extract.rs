@@ -20,10 +20,21 @@ struct FakeBrowser {
     /// declaration order.
     candidate_responses: Arc<Mutex<VecDeque<Vec<Candidate>>>>,
     screenshot_png: Vec<u8>,
+    /// Attributes the live element holds beyond what its candidate carries.
+    live_attributes: BTreeMap<String, String>,
 }
 
 #[async_trait]
 impl IntentBrowser for FakeBrowser {
+    async fn read_attribute(
+        &self,
+        _page_id: &PageId,
+        _target: &TargetSpec,
+        attribute: &str,
+    ) -> Result<Option<String>, CommandError> {
+        Ok(self.live_attributes.get(attribute).cloned())
+    }
+
     async fn collect_candidates(
         &self,
         _page_id: &PageId,
@@ -200,6 +211,58 @@ fn extract(fields: Vec<ExtractField>) -> IntentCommand {
     })
 }
 
+#[tokio::test]
+async fn extract_reads_an_attribute_the_candidate_lacks_from_the_live_element() {
+    let browser = FakeBrowser {
+        candidate_responses: Arc::new(Mutex::new(VecDeque::from([
+            vec![candidate(
+                PROFILE_LINK_FIELD,
+                "View profile",
+                BTreeMap::new(),
+            )],
+            vec![candidate(
+                PROFILE_LINK_FIELD,
+                "View profile",
+                BTreeMap::new(),
+            )],
+        ]))),
+        live_attributes: BTreeMap::from([
+            ("href".into(), "/profile/42".into()),
+            ("data-user-id".into(), "42".into()),
+        ]),
+        ..FakeBrowser::default()
+    };
+    let outcome = IntentEngine::execute(
+        &extract(vec![
+            field("link", "View profile", ExtractValueKind::Href),
+            field(
+                "user",
+                "View profile",
+                ExtractValueKind::Attribute {
+                    attribute: "data-user-id".into(),
+                },
+            ),
+        ]),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+    let IntentOutcome::Completed { evidence } = outcome else {
+        panic!("expected Completed, got {outcome:?}");
+    };
+    for (field, expected) in [("link", "/profile/42"), ("user", "42")] {
+        let Evidence::Extraction {
+            value, error_code, ..
+        } = find_extraction(&evidence, field)
+        else {
+            unreachable!()
+        };
+        assert_eq!(value.as_deref(), Some(expected), "{field}");
+        assert_eq!(*error_code, None, "{field}");
+    }
+}
+
 fn find_extraction<'a>(evidence: &'a [Evidence], field_name: &str) -> &'a Evidence {
     evidence
         .iter()
@@ -365,6 +428,7 @@ async fn extract_escalates_missing_field_to_vision_and_uses_the_proposed_value()
     let browser = FakeBrowser {
         candidate_responses: Arc::new(Mutex::new(VecDeque::from([vec![]]))),
         screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
     };
     let assist = fake_vision(VisionProposal {
         confidence: 0.9,
@@ -422,6 +486,7 @@ async fn extract_reports_field_missing_when_vision_confidence_is_below_floor() {
     let browser = FakeBrowser {
         candidate_responses: Arc::new(Mutex::new(VecDeque::from([vec![]]))),
         screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
     };
     let assist = fake_vision(VisionProposal {
         confidence: 0.1,
@@ -533,6 +598,7 @@ async fn extract_from_candidate_reads_the_exact_provider_selected_candidate_for_
             candidates,
         ]))),
         screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
     };
     let assist = fake_vision(VisionProposal {
         confidence: 0.9,
@@ -651,6 +717,7 @@ async fn extract_from_candidate_uses_second_dom_candidate_when_provider_visible_
             candidates,
         ]))),
         screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
     };
     let assist = fake_vision(VisionProposal {
         confidence: 0.9,
@@ -725,6 +792,7 @@ async fn extract_from_candidate_out_of_range_reports_vision_assist_failed() {
     let browser = FakeBrowser {
         candidate_responses: Arc::new(Mutex::new(VecDeque::from([ambiguous_extract_candidates()]))),
         screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
     };
     let outcome = execute_vision_extract(
         &browser,
@@ -750,6 +818,7 @@ async fn successful_candidate_extraction_records_index_without_runtime_value() {
             BTreeMap::new(),
         )]]))),
         screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
     };
     let dir = tempfile::tempdir().unwrap();
     let outcome = IntentEngine::execute(
@@ -801,6 +870,7 @@ async fn extract_from_candidate_without_role_or_name_reports_vision_assist_faile
             name_missing,
         ]]))),
         screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
     };
     let outcome = execute_vision_extract(
         &browser,
@@ -819,6 +889,7 @@ async fn extract_type_into_candidate_reports_vision_assist_failed() {
     let browser = FakeBrowser {
         candidate_responses: Arc::new(Mutex::new(VecDeque::from([ambiguous_extract_candidates()]))),
         screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
     };
     let outcome = execute_vision_extract(
         &browser,

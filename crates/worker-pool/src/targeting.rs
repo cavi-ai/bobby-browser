@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::pointer_hit::{parse_pointer_hit, pointer_hit_function, PointerHit};
 use chromiumoxide::browser::BrowserHandle;
 use chromiumoxide::cdp::browser_protocol::accessibility::QueryAxTreeParams;
 #[cfg(test)]
@@ -26,8 +27,8 @@ use chromiumoxide::layout::{ElementQuad, Point};
 use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide::{Command, Element, Method, Page};
 use dom_engine::{
-    rank_candidates, resolve_candidates, Candidate, CandidateState, ResolutionDecision,
-    ResolutionPolicy,
+    accessibility_alignment_unnecessary, apply_accessibility_alignment, rank_candidates,
+    resolve_candidates, Candidate, CandidateState, ResolutionDecision, ResolutionPolicy,
 };
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -155,23 +156,18 @@ impl ResolvedTarget {
             .next())
     }
 
-    /// Whether a pointer at the target's center reaches the target or one of
-    /// its descendants, rather than an element drawn over it.
-    pub async fn receives_pointer(&self, page: &Page) -> Result<bool, CommandError> {
-        self.eval(
-            page,
-            "return ((target)=>{\
-             const rect=target.getBoundingClientRect();\
-             const width=document.documentElement.clientWidth;\
-             const height=document.documentElement.clientHeight;\
-             const x=Math.min(Math.max(rect.left+rect.width/2,0),width-1);\
-             const y=Math.min(Math.max(rect.top+rect.height/2,0),height-1);\
-             const owner=target.getRootNode();\
-             const hit=typeof owner.elementFromPoint==='function'\
-               ?owner.elementFromPoint(x,y):document.elementFromPoint(x,y);\
-             return hit!==null&&(hit===target||target.contains(hit));})(el);",
-        )
-        .await
+    /// Classifies a pointer at the target's center: reachable, covered,
+    /// outside the viewport, or detached.
+    pub async fn receives_pointer(&self, page: &Page) -> Result<PointerHit, CommandError> {
+        let verdict: String = self
+            .eval(page, &format!("return ({})(el);", pointer_hit_function()))
+            .await?;
+        parse_pointer_hit(&verdict).ok_or_else(|| {
+            target_error(
+                ErrorCode::BrowserCommandFailed,
+                "pointer hit check returned an invalid result",
+            )
+        })
     }
 
     /// Scrolls the target into view. A coordinate-based click dispatch
@@ -228,6 +224,13 @@ impl ResolvedTarget {
         self.eval(page, "return el.value || ''").await.map(Some)
     }
 
+    pub async fn attribute(&self, page: &Page, name: &str) -> Result<Option<String>, CommandError> {
+        let name = serde_json::to_string(name)
+            .map_err(|error| target_error(ErrorCode::InvalidRequest, error))?;
+        self.eval(page, &format!("return el.getAttribute({name})"))
+            .await
+    }
+
     pub async fn outer_html(&self, page: &Page) -> Result<Option<String>, CommandError> {
         if let Some(element) = &self.native {
             return element.outer_html().await.map_err(cdp_error);
@@ -236,7 +239,7 @@ impl ResolvedTarget {
     }
 
     pub async fn visible(&self, page: &Page) -> Result<bool, CommandError> {
-        self.eval(page, "const s=getComputedStyle(el),r=el.getBoundingClientRect(); return s.visibility!=='hidden'&&s.display!=='none'&&r.width>0&&r.height>0")
+        self.eval(page, crate::wait::ELEMENT_VISIBILITY_SCRIPT)
             .await
     }
 
@@ -553,7 +556,7 @@ pub async fn resolve_target(
 /// An empty string in a target field can never resolve — an exact match
 /// against "" — but a wait condition would poll for it until the deadline,
 /// reporting a timeout instead of the real mistake. Reject it up front.
-fn validate_target_spec(target: &TargetSpec) -> Result<(), CommandError> {
+pub fn validate_target_spec(target: &TargetSpec) -> Result<(), CommandError> {
     validate_target_spec_hop(target, false)
 }
 
@@ -628,8 +631,8 @@ pub async fn gather_candidates(
         scope.scope_id,
     )
     .await?;
-    let raw = align_with_accessibility(&scope.execution_page, target, raw).await?;
-    let mut candidates: Vec<Candidate> = raw.into_iter().map(into_candidate).collect();
+    let mut candidates =
+        align_with_accessibility(&scope.execution_page, scope.context_id, target, raw).await?;
     // Auto-descend one level into iframes for main-frame intents: agents
     // cannot name a framePath for content they cannot see, so without this
     // every in-frame control resolves as targetNotFound. Each stamped
@@ -834,7 +837,11 @@ async fn open_target_scope(
         if normalized_frame_target.accessible_name.as_deref() == Some("") {
             normalized_frame_target.accessible_name = None;
         }
-        let (candidate, evidence, _) = choose(&normalized_frame_target, raw, true)?;
+        let (candidate, evidence, _) = choose(
+            &normalized_frame_target,
+            raw.into_iter().map(into_candidate).collect(),
+            true,
+        )?;
         frame_trace.push(evidence);
         let deadline = Instant::now() + Duration::from_secs(2);
         let (child, oopif) = loop {
@@ -900,7 +907,11 @@ async fn open_target_scope(
                 collect_candidates_within(element, &shadow_hosts, nested_scope).await?
             }
         };
-        let (candidate, evidence, _) = choose(host_target, raw, true)?;
+        let (candidate, evidence, _) = choose(
+            host_target,
+            raw.into_iter().map(into_candidate).collect(),
+            true,
+        )?;
         let mut prospective = shadow_hosts.clone();
         prospective.push(candidate.id.clone());
         let has_root: bool = eval_scoped(
@@ -1020,7 +1031,8 @@ pub async fn resolve_target_with_visibility(
         scope.scope_id,
     )
     .await?;
-    let raw = align_with_accessibility(&scope.execution_page, target, raw).await?;
+    let raw =
+        align_with_accessibility(&scope.execution_page, scope.context_id, target, raw).await?;
     let (candidate, evidence, best_match_authorized) = choose(target, raw, require_visible)?;
     let owner = owners.get(&candidate.id).cloned();
     // A candidate gathered from a closed shadow root must be located relative
@@ -1159,38 +1171,27 @@ pub async fn resolve_ambiguous_wait_values(
 /// tree leaves out, such as controls hidden behind a modal dialog, drop out.
 async fn align_with_accessibility(
     page: &Page,
+    context_id: Option<ExecutionContextId>,
     target: &TargetSpec,
-    mut raw: Vec<BrowserCandidate>,
-) -> Result<Vec<BrowserCandidate>, CommandError> {
+    raw: Vec<BrowserCandidate>,
+) -> Result<Vec<Candidate>, CommandError> {
+    let mut candidates: Vec<_> = raw.into_iter().map(into_candidate).collect();
     let (Some(role), Some(name)) = (&target.role, &target.accessible_name) else {
-        return Ok(raw);
+        return Ok(candidates);
     };
-    let gathered_match = |candidate: &BrowserCandidate| {
-        candidate
-            .role
-            .as_deref()
-            .is_some_and(|actual| actual.eq_ignore_ascii_case(role))
-            && candidate.name.as_deref().map(str::trim) == Some(name.trim())
-    };
-    if target.ordinal.is_none() && raw.iter().filter(|c| gathered_match(c)).count() == 1 {
-        return Ok(raw);
+    if accessibility_alignment_unnecessary(&candidates, role, name, target.ordinal) {
+        return Ok(candidates);
     }
-    let exposed = accessibility_matches(page, role, name).await?;
-    if exposed.is_empty() {
-        return Ok(raw);
-    }
-    raw.retain(|candidate| exposed.contains(&candidate.id) || !gathered_match(candidate));
-    for candidate in raw.iter_mut().filter(|c| exposed.contains(&c.id)) {
-        candidate.role = Some(role.clone());
-        candidate.name = Some(name.clone());
-    }
-    Ok(raw)
+    let exposed = accessibility_matches(page, context_id, role, name).await?;
+    apply_accessibility_alignment(&mut candidates, role, name, &exposed);
+    Ok(candidates)
 }
 
 /// The gathered ids of the elements Chrome's accessibility tree exposes with
 /// `role` and `name`.
 async fn accessibility_matches(
     page: &Page,
+    context_id: Option<ExecutionContextId>,
     role: &str,
     name: &str,
 ) -> Result<Vec<String>, CommandError> {
@@ -1200,10 +1201,18 @@ async fn accessibility_matches(
         .map_err(cdp_error)?
         .result
         .root;
+    let backend_node_id = if context_id.is_some() {
+        let object_id = scope_root_object_id(page, &LocatorScope::Context(context_id), &[]).await?;
+        element_from_remote_object(page, object_id)
+            .await?
+            .backend_node_id
+    } else {
+        document.backend_node_id
+    };
     let nodes = page
         .execute(
             QueryAxTreeParams::builder()
-                .backend_node_id(document.backend_node_id)
+                .backend_node_id(backend_node_id)
                 .accessible_name(name)
                 .role(role)
                 .build(),
@@ -1262,10 +1271,9 @@ const AX_RESOLVE_GROUP: &str = "bobby-accessibility-named";
 
 fn choose(
     target: &TargetSpec,
-    raw: Vec<BrowserCandidate>,
+    candidates: Vec<Candidate>,
     require_visible: bool,
 ) -> Result<(Candidate, types::CandidateEvidence, bool), CommandError> {
-    let candidates = raw.into_iter().map(into_candidate).collect::<Vec<_>>();
     let policy = ResolutionPolicy {
         require_visible,
         ..ResolutionPolicy::default()
@@ -1496,6 +1504,11 @@ async fn element_from_remote_object(
     page: &Page,
     object_id: RemoteObjectId,
 ) -> Result<Element, CommandError> {
+    // Initialize the DOM domain's document before requesting a frontend node.
+    // Script-based resolution can reach this path before any DOM query.
+    page.execute(GetDocumentParams::builder().depth(0).build())
+        .await
+        .map_err(cdp_error)?;
     let node_id = page
         .execute(RequestNodeParams::new(object_id))
         .await
@@ -2285,6 +2298,30 @@ mod tests {
     }
 
     #[test]
+    fn unnamed_iframe_hop_may_carry_an_empty_accessible_name() {
+        validate_target_spec(&TargetSpec {
+            frame_path: vec![Box::new(TargetSpec {
+                role: Some("iframe".into()),
+                accessible_name: Some(String::new()),
+                ..TargetSpec::default()
+            })],
+            ..TargetSpec::default()
+        })
+        .expect("unnamed iframe hop");
+
+        let err = validate_target_spec(&TargetSpec {
+            shadow_path: vec![Box::new(TargetSpec {
+                role: Some("group".into()),
+                accessible_name: Some(String::new()),
+                ..TargetSpec::default()
+            })],
+            ..TargetSpec::default()
+        })
+        .expect_err("shadow hop stays strict");
+        assert!(err.message.contains("accessibleName"));
+    }
+
+    #[test]
     fn implicit_role_covers_headings_lists_images_and_tables() {
         let operation = candidate_collector_operation(1).expect("collector operation");
         for mapping in [
@@ -2355,7 +2392,8 @@ mod tests {
             ambiguous_candidate(Some("button"), Some("Submit"), 80),
             ambiguous_candidate(Some("button"), Some("Submit now"), 80),
         ];
-        let error = choose(&target, raw, true).expect_err("two equal candidates");
+        let error = choose(&target, raw.into_iter().map(into_candidate).collect(), true)
+            .expect_err("two equal candidates");
         assert_eq!(error.code, ErrorCode::TargetAmbiguous);
         assert!(
             error.message.contains("button \"Submit\" score=")

@@ -45,7 +45,7 @@ pub(super) fn sidecars(_context: &mut DoctorContext, report: &mut DoctorReport) 
     Ok(())
 }
 
-pub(crate) fn sidecar_version_status(
+fn sidecar_version_status(
     bobby: &str,
     mcp: Option<&str>,
     acp: Option<&str>,
@@ -83,4 +83,29 @@ pub(in crate::doctor) fn sidecar_versions(
             .map_err(|error| format!("{}: {error:#}", path.display())),
     };
     Ok((read(mcp)?, read(acp)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sidecar_version_status_omits_when_both_missing() {
+        assert!(sidecar_version_status("0.12.0", None, None).is_none());
+    }
+
+    #[test]
+    fn sidecar_version_status_fails_on_mismatch() {
+        let check = sidecar_version_status("0.12.0", Some("0.11.0"), Some("0.12.0")).unwrap();
+        assert_eq!(check.status, DoctorStatus::Fail);
+        assert_eq!(check.name, "sidecar-version");
+        assert!(check.detail.contains("0.11.0"));
+    }
+
+    #[test]
+    fn sidecar_version_status_ok_when_found_match() {
+        let check = sidecar_version_status("0.12.0", Some("0.12.0"), None).unwrap();
+        assert_eq!(check.status, DoctorStatus::Ok);
+        assert_eq!(check.name, "sidecar-version");
+    }
 }

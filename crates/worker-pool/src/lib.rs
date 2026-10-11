@@ -1,6 +1,7 @@
 mod chromium;
 mod engine;
 mod page_behavior;
+mod worker_failure;
 pub use engine::*;
 pub use page_behavior::PageBehavior;
 mod fingerprint_host;
@@ -8,6 +9,7 @@ mod form_snapshot;
 mod har;
 pub mod navigation_settle;
 mod network_quiet;
+mod pointer_hit;
 pub mod policy;
 pub mod process_registry;
 pub mod secret_material;
@@ -26,33 +28,12 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex, OnceCell, OwnedRwLockReadGuard, OwnedSemaphorePermit, RwLock, Semaphore};
 use types::{CommandError, Evidence, SessionId, WorkerId};
 
-pub use chromium::{is_dead_worker_error, ChromiumWorkerFactory};
+pub use chromium::ChromiumWorkerFactory;
+pub use worker_failure::{
+    is_browser_gone_error, is_dead_worker_error, is_firefox_bidi_transport_dead,
+    BROWSER_GONE_MESSAGE, FIREFOX_WORKER_CLOSED_MESSAGE,
+};
 
-/// The Firefox worker's message once its transport is gone or it was closed.
-pub const FIREFOX_WORKER_CLOSED_MESSAGE: &str = "Firefox companion worker is closed";
-
-/// A Firefox BiDi transport died. Chromium's closed-page check uses this so
-/// the Chromium module does not own Firefox's wording.
-pub fn is_firefox_bidi_transport_dead(message: &str) -> bool {
-    message.contains("Firefox BiDi")
-        && !message.contains("client closed")
-        && (message.contains("connection closed")
-            || message.contains("connection ended")
-            || message.contains("disconnected")
-            || message.contains("command channel closed")
-            || message.contains("command capacity closed")
-            || message.contains("response channel closed"))
-}
-
-/// What a caller is told when its session's browser is gone.
-pub const BROWSER_GONE_MESSAGE: &str =
-    "this session's browser is gone; create a new session and close this one";
-
-/// The session's browser can never serve another command: a dead worker
-/// (either engine) or a closed Firefox worker.
-pub fn is_browser_gone_error(error: &types::CommandError) -> bool {
-    is_dead_worker_error(error) || error.message == FIREFOX_WORKER_CLOSED_MESSAGE
-}
 pub use fingerprint_host::ChromiumPageHost;
 pub use form_snapshot::{
     control_action_evidence, decode_form_snapshot, form_snapshot_expression,
@@ -63,6 +44,7 @@ pub use network_quiet::{
     bounded_request_id, counted_in_flight, map_bidi_network_type, pending_page_loads,
     warn_tracking_lost, NetworkQuietFilters, NetworkQuietState, TrackingLoss, MAX_TRACKED_REQUESTS,
 };
+pub use pointer_hit::{parse_pointer_hit, pointer_hit_function, PointerHit};
 pub use selection::{
     BrowserWorkerSelector, EnginePreference, FactoryRegistration, RequiredCapabilities,
     SelectedWorkerFactory, DEFAULT_LEASE_LAUNCH_TIMEOUT, DEFAULT_REPLACEMENT_CLEANUP_TIMEOUT,
@@ -72,6 +54,7 @@ pub use skill_adapter::{
     CHROMIUM_PRODUCTION_SKILL_PROFILE_VERSION, FIREFOX_PRODUCTION_SKILL_PROFILE_VERSION,
     PRODUCTION_SKILL_CAPABILITIES,
 };
+pub use targeting::validate_target_spec;
 
 /// Adds command-ready semantic targets to actionable accessibility nodes.
 /// Duplicate role/name pairs receive an ordinal in tree traversal order,
@@ -90,12 +73,18 @@ pub(crate) fn accessibility_role_is_actionable(role: &str) -> bool {
             | "combobox"
             | "link"
             | "listbox"
+            | "menuitem"
+            | "menuitemcheckbox"
+            | "menuitemradio"
+            | "option"
             | "radio"
             | "searchbox"
             | "slider"
             | "spinbutton"
             | "switch"
+            | "tab"
             | "textbox"
+            | "treeitem"
     )
 }
 
@@ -799,5 +788,46 @@ mod corpus_privacy_tests {
         assert!(install.contains("test-token"));
         assert!(cleanup.contains("test-token"));
         assert!(cleanup.contains("remove()"));
+    }
+}
+
+#[cfg(test)]
+mod accessibility_ordinal_tests {
+    use super::*;
+
+    fn node(role: &str, name: &str) -> types::AccessibilityNode {
+        types::AccessibilityNode {
+            role: Some(role.into()),
+            name: Some(name.into()),
+            ..types::AccessibilityNode::default()
+        }
+    }
+
+    #[test]
+    fn scoped_ordinal_continues_from_preceding_counts() {
+        let mut nodes = vec![node("textbox", "Phone")];
+        let mut totals = BTreeMap::new();
+        totals.insert(("textbox".into(), "Phone".into()), 2);
+        let mut preceding = BTreeMap::new();
+        preceding.insert(("textbox".into(), "Phone".into()), 1);
+        annotate_accessibility_targets_with_totals(&mut nodes, &totals, preceding);
+        assert_eq!(nodes[0].target.as_ref().unwrap().ordinal, Some(1));
+    }
+
+    #[test]
+    fn pre_stamped_ordinal_survives_annotation() {
+        let mut nodes = vec![types::AccessibilityNode {
+            role: Some("button".into()),
+            name: Some("Save".into()),
+            target: Some(types::AccessibilityTarget {
+                role: "button".into(),
+                accessible_name: "Save".into(),
+                ordinal: Some(3),
+                frame_path: Vec::new(),
+            }),
+            ..types::AccessibilityNode::default()
+        }];
+        annotate_accessibility_targets(&mut nodes);
+        assert_eq!(nodes[0].target.as_ref().unwrap().ordinal, Some(3));
     }
 }

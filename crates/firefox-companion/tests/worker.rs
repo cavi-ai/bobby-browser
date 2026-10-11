@@ -2482,6 +2482,118 @@ async fn frame_candidate_boundary_rejects_unsanitized_credential_metadata() {
 }
 
 #[tokio::test]
+async fn unnamed_semantic_frame_hop_reaches_the_child_context() {
+    let controls = json!({"truncated": false, "controls": [{
+        "css": "iframe", "role": "iframe", "name": "", "label": "", "disabled": false
+    }]});
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context": "context-1"})),
+        Ok(json!({"result": {"type": "string", "value": controls.to_string()}})),
+        Ok(json!({"result": {"type": "string", "value": "index:0"}})),
+        Ok(json!({"result": {"type": "boolean", "value": true}})),
+    ]);
+    bidi.set_tree(json!({"contexts": [{
+        "context": "context-1",
+        "children": [{"context": "frame-context", "children": []}]
+    }]}))
+    .await;
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
+    worker_pool::input_or_default(worker.input())
+        .verify_framed_typed_value(
+            &page,
+            &TypeTextCommand {
+                selector: String::new(),
+                target: Some(TargetSpec {
+                    css: Some("input".into()),
+                    frame_path: vec![Box::new(TargetSpec {
+                        role: Some("iframe".into()),
+                        accessible_name: Some(String::new()),
+                        ..Default::default()
+                    })],
+                    ..Default::default()
+                }),
+                value: "test".into(),
+                clear_first: true,
+                expected_url: None,
+            },
+            None,
+            "text",
+        )
+        .await
+        .expect("unnamed frame must resolve")
+        .expect("framed verification");
+    assert!(bidi.calls().await.iter().any(|call| {
+        call.method == "script.evaluate"
+            && call.params["target"]["context"] == "frame-context"
+            && call.params["expression"]
+                .as_str()
+                .is_some_and(|s| s.contains("actual===expected"))
+    }));
+}
+
+#[tokio::test]
+async fn invalid_nested_target_fields_fail_before_frame_probes_or_input() {
+    for target in [
+        TargetSpec {
+            frame_path: vec![Box::new(TargetSpec {
+                css: Some(" ".into()),
+                ..Default::default()
+            })],
+            ..Default::default()
+        },
+        TargetSpec {
+            frame_path: vec![Box::new(TargetSpec {
+                role: Some("iframe".into()),
+                accessible_name: Some(" ".into()),
+                ..Default::default()
+            })],
+            ..Default::default()
+        },
+        TargetSpec {
+            shadow_path: vec![Box::new(TargetSpec {
+                role: Some("group".into()),
+                accessible_name: Some(String::new()),
+                ..Default::default()
+            })],
+            ..Default::default()
+        },
+    ] {
+        let bidi = FakeBidi::new(vec![Ok(json!({"context": "context-1"}))]);
+        let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+        let page = PageId::new();
+        worker_pool::tabs_or_default(worker.tabs())
+            .open_page(page.clone())
+            .await
+            .unwrap();
+        let before = bidi.calls().await.len();
+        let error = worker_pool::input_or_default(worker.input())
+            .click(
+                &page,
+                &ClickCommand {
+                    selector: String::new(),
+                    target: Some(target),
+                    boundary: false,
+                    expected_url: None,
+                    modifiers: Vec::new(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert_eq!(
+            bidi.calls().await.len(),
+            before,
+            "invalid target dispatched a protocol request"
+        );
+    }
+}
+
+#[tokio::test]
 async fn framed_typed_value_is_verified_without_returning_payment_value() {
     let bidi = FakeBidi::new(vec![
         Ok(json!({"context": "context-1"})),

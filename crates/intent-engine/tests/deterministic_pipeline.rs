@@ -293,6 +293,47 @@ async fn locate_keeps_equal_purpose_overlap_ambiguous() {
 }
 
 #[tokio::test]
+async fn locate_reports_a_hidden_control_as_hidden_not_a_mismatch() {
+    let hidden = Candidate {
+        state: CandidateState {
+            attached: true,
+            visible: false,
+            enabled: true,
+        },
+        ..button("Load more")
+    };
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![hidden]),
+        wait_ok: true,
+    };
+    let outcome = IntentEngine::execute(
+        &locate_with_purpose("Load more"),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+
+    let IntentOutcome::Failed { error, evidence } = outcome else {
+        panic!("expected Failed, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::TargetNotFound);
+    let record = evidence
+        .iter()
+        .find_map(|item| match item {
+            Evidence::IntentExecution { record } => Some(record),
+            _ => None,
+        })
+        .expect("IntentExecution on stuck failure");
+    let near_miss = record
+        .candidates
+        .iter()
+        .find(|candidate| candidate.name.as_deref() == Some("Load more"))
+        .expect("the hidden control is in the near-miss window");
+    assert_eq!(near_miss.reasons, ["hidden"]);
+}
+
+#[tokio::test]
 async fn locate_zero_candidates_is_the_stuck_code_when_gates_closed() {
     let browser = FakeBrowser {
         candidates: Arc::new(vec![]),

@@ -72,10 +72,27 @@ pub(super) fn mcp_handshake(context: &mut DoctorContext, report: &mut DoctorRepo
     Ok(())
 }
 
-pub(crate) fn handshake_error_status(message: &str) -> DoctorStatus {
+fn handshake_error_status(message: &str) -> DoctorStatus {
     if message.contains("not found") {
         DoctorStatus::Warn
     } else {
         DoctorStatus::Fail
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handshake_error_classification_distinguishes_missing_binary_from_failed_handshake() {
+        assert_eq!(
+            handshake_error_status("failed to spawn /usr/local/bin/mcp-gateway: not found"),
+            DoctorStatus::Warn
+        );
+        assert_eq!(
+            handshake_error_status("initialize: gateway did not answer within 15s"),
+            DoctorStatus::Fail
+        );
     }
 }

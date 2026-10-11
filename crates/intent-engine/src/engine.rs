@@ -153,6 +153,17 @@ pub trait IntentBrowser: Send + Sync {
         target.clone()
     }
 
+    /// The value of `attribute` on the element `target` resolves to. Defaults
+    /// to `None`, for runtimes that cannot read the live element.
+    async fn read_attribute(
+        &self,
+        _page_id: &PageId,
+        _target: &TargetSpec,
+        _attribute: &str,
+    ) -> Result<Option<String>, CommandError> {
+        Ok(None)
+    }
+
     /// Waits until the document has stopped changing after a navigation the
     /// intent caused, with the probe `navigate` settles with. Fakes and
     /// alternate runtimes return at once.
@@ -383,6 +394,7 @@ async fn reveal_field(
         candidate,
         evidence: candidate_evidence,
         best_match_authorized,
+        ..
     } = match locate(
         page_id,
         browser,
@@ -856,6 +868,7 @@ async fn execute_locate(
         candidate,
         evidence: candidate_evidence,
         best_match_authorized,
+        ..
     } = match locate(
         page_id,
         browser,
@@ -974,7 +987,12 @@ fn ranked_near_miss_window(
             role: candidate.role.clone(),
             name: candidate.name.clone(),
             score: 0,
-            reasons: vec!["noMatch".into()],
+            // A control that exists but is not visible cannot match; say so.
+            reasons: vec![if candidate.state.visible {
+                "noMatch".into()
+            } else {
+                "hidden".into()
+            }],
         })
         .collect()
 }
@@ -1468,6 +1486,7 @@ async fn execute_fill(
         candidate,
         evidence: candidate_evidence,
         best_match_authorized,
+        open_dialogs,
     } = match locate(
         page_id,
         browser,
@@ -1529,6 +1548,7 @@ async fn execute_fill(
     let mut act_evidence = match act_fill(page_id, browser, &candidate, &target, &value).await {
         Ok(evidence) => evidence,
         Err(error) => {
+            let candidates = act_failure_candidates(&error, candidate_evidence, open_dialogs);
             return IntentOutcome::Failed {
                 error,
                 evidence: vec![
@@ -1537,7 +1557,7 @@ async fn execute_fill(
                         "fill",
                         purpose,
                         plan_summary,
-                        vec![candidate_evidence],
+                        candidates,
                         None,
                         "actFailed",
                     )),
@@ -1831,6 +1851,7 @@ async fn execute_submit_and_verify(
         candidate,
         evidence: candidate_evidence,
         best_match_authorized,
+        open_dialogs,
     } = match locate(
         page_id,
         browser,
@@ -1934,6 +1955,7 @@ async fn execute_submit_and_verify(
             }]
         }
         Err(error) => {
+            let candidates = act_failure_candidates(&error, candidate_evidence, open_dialogs);
             return IntentOutcome::Failed {
                 error,
                 evidence: vec![
@@ -1942,7 +1964,7 @@ async fn execute_submit_and_verify(
                         "submitAndVerify",
                         purpose,
                         plan_summary,
-                        vec![candidate_evidence],
+                        candidates,
                         None,
                         "actFailed",
                     )),
@@ -1959,19 +1981,32 @@ async fn execute_submit_and_verify(
             // "the submit failed" and invite a blind resubmit that duplicates
             // the POST. Rewrap so the effect and the safe next step are
             // explicit.
+            let opened = dialogs_opened(page_id, browser, &target, &open_dialogs).await;
             let error = CommandError {
                 code: ErrorCode::VerificationFailed,
                 message: format!(
-                    "submit click landed but the expected post-state did not hold ({}): {}. \
+                    "submit click landed but the expected post-state did not hold ({}): {}{}. \
                      Do not resubmit blindly — inspect the page for a server rejection or \
                      confirmation, then re-verify with intent_wait_for_state or correct the \
                      rejected fields",
                     wait_condition_kind(&expected_state.condition),
-                    error.message
+                    error.message,
+                    if opened.is_empty() {
+                        ""
+                    } else {
+                        "; a dialog opened over the page"
+                    }
                 ),
                 layer: error.layer,
                 retryable: false,
             };
+            let verification = if opened.is_empty() {
+                "verifyFailed"
+            } else {
+                "dialogOpened"
+            };
+            let mut candidates = vec![candidate_evidence];
+            candidates.extend(opened);
             return IntentOutcome::Failed {
                 error,
                 evidence: {
@@ -1981,9 +2016,9 @@ async fn execute_submit_and_verify(
                         "submitAndVerify",
                         purpose,
                         plan_summary,
-                        vec![candidate_evidence],
+                        candidates,
                         None,
-                        "verifyFailed",
+                        verification,
                     )));
                     evidence
                 },
@@ -2153,6 +2188,60 @@ fn disambiguate_submit_by_purpose(
 /// the original message, so a repair reader sees "landed, unverified" instead
 /// of "ambiguous, retry". Any other code (e.g. a real command failure) passes
 /// through unchanged.
+/// The candidates an act failure reports: the target, and the dialogs open
+/// when it resolved if something covered it.
+fn act_failure_candidates(
+    error: &CommandError,
+    target: types::CandidateEvidence,
+    open_dialogs: Vec<types::CandidateEvidence>,
+) -> Vec<types::CandidateEvidence> {
+    let mut candidates = vec![target];
+    if error.code == ErrorCode::TargetObscured {
+        candidates.extend(open_dialogs);
+    }
+    candidates
+}
+
+/// Dialogs open now that were not open when the target resolved.
+async fn dialogs_opened(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    target: &TargetSpec,
+    before: &[types::CandidateEvidence],
+) -> Vec<types::CandidateEvidence> {
+    match open_dialogs_now(page_id, browser, target).await {
+        Some(now) => dialogs_not_in(&now, before),
+        None => Vec::new(),
+    }
+}
+
+async fn open_dialogs_now(
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    target: &TargetSpec,
+) -> Option<Vec<types::CandidateEvidence>> {
+    let census = browser.collect_candidates(page_id, target).await.ok()?;
+    Some(locate::open_dialogs(&census))
+}
+
+/// The dialogs in `dialogs` that `other` does not hold, by role and name.
+fn dialogs_not_in(
+    dialogs: &[types::CandidateEvidence],
+    other: &[types::CandidateEvidence],
+) -> Vec<types::CandidateEvidence> {
+    let mut unmatched: Vec<&types::CandidateEvidence> = other.iter().collect();
+    dialogs
+        .iter()
+        .filter(|dialog| {
+            let seen = unmatched
+                .iter()
+                .position(|open| open.role == dialog.role && open.name == dialog.name);
+            seen.map(|index| unmatched.swap_remove(index)).is_none()
+        })
+        .cloned()
+        .collect()
+}
+
 fn recode_postclick_verification_error(error: CommandError, prefix: &str) -> CommandError {
     match error.code {
         ErrorCode::TargetAmbiguous | ErrorCode::TargetNotFound | ErrorCode::InvalidRequest => {
@@ -2189,6 +2278,7 @@ async fn execute_follow(
         candidate,
         evidence: candidate_evidence,
         best_match_authorized,
+        open_dialogs,
     } = match locate(
         page_id,
         browser,
@@ -2226,6 +2316,7 @@ async fn execute_follow(
     let mut click_evidence = match browser.click(page_id, &click).await {
         Ok(evidence) => evidence,
         Err(error) => {
+            let candidates = act_failure_candidates(&error, candidate_evidence, open_dialogs);
             return IntentOutcome::Failed {
                 error,
                 evidence: vec![
@@ -2234,7 +2325,7 @@ async fn execute_follow(
                         "follow",
                         purpose,
                         plan_summary,
-                        vec![candidate_evidence],
+                        candidates,
                         None,
                         "actFailed",
                     )),
@@ -2252,10 +2343,28 @@ async fn execute_follow(
             // post-state could not be verified. Reporting it verbatim reads
             // as a retryable ambiguity and invites re-clicking a control that
             // already fired.
-            let error = recode_postclick_verification_error(
-                error,
-                "activation landed; expectedState could not be verified",
-            );
+            let opened = dialogs_opened(page_id, browser, &target, &open_dialogs).await;
+            let (error, verification) = if opened.is_empty() {
+                (
+                    recode_postclick_verification_error(
+                        error,
+                        "activation landed; expectedState could not be verified",
+                    ),
+                    "verifyFailed",
+                )
+            } else {
+                (
+                    CommandError {
+                        code: ErrorCode::ObstructionSuspected,
+                        message: "activation landed; a dialog opened over the page instead of the expectedState".into(),
+                        layer: ErrorLayer::Page,
+                        retryable: false,
+                    },
+                    "dialogOpened",
+                )
+            };
+            let mut candidates = vec![candidate_evidence];
+            candidates.extend(opened);
             return IntentOutcome::Failed {
                 error,
                 evidence: {
@@ -2265,9 +2374,9 @@ async fn execute_follow(
                         "follow",
                         purpose,
                         plan_summary,
-                        vec![candidate_evidence],
+                        candidates,
                         None,
-                        "verifyFailed",
+                        verification,
                     )));
                     evidence
                 },
@@ -2311,15 +2420,30 @@ async fn execute_dismiss_obstruction(
     target: TargetSpec,
     timeout_ms: u64,
 ) -> IntentOutcome {
-    let purpose = match intent {
-        IntentCommand::DismissObstruction(dismiss) => Some(dismiss.purpose.clone()),
-        _ => None,
+    let (purpose, hinted) = match intent {
+        IntentCommand::DismissObstruction(dismiss) => (
+            Some(dismiss.purpose.clone()),
+            dismiss.hints.role.is_some()
+                || dismiss.hints.accessible_name.is_some()
+                || dismiss.hints.near_text.is_some(),
+        ),
+        _ => (None, true),
     };
     let plan_summary = format!("{} timeout_ms={timeout_ms}", summarize_target(&target));
+    // Without hints the purpose names the control, and the dialogs open now
+    // are the obstruction a fallback or a failure is judged against.
+    let dialogs_before = if hinted {
+        Vec::new()
+    } else {
+        open_dialogs_now(page_id, browser, &target)
+            .await
+            .unwrap_or_default()
+    };
     let LocatedTarget {
         candidate,
         evidence: candidate_evidence,
         best_match_authorized,
+        open_dialogs,
     } = match locate(
         page_id,
         browser,
@@ -2335,7 +2459,32 @@ async fn execute_dismiss_obstruction(
     .await
     {
         Ok(located) => located,
-        Err(outcome) => return outcome,
+        Err(outcome) if dialogs_before.is_empty() => return outcome,
+        Err(outcome) => {
+            let judged = judge_against_open_dialogs(
+                outcome,
+                page_id,
+                browser,
+                &target,
+                &dialogs_before,
+                timeout_ms,
+            )
+            .await;
+            return match judged {
+                Ok(outcome) => outcome,
+                Err((error, mut evidence, verification)) => {
+                    evidence.push(intent_evidence(execution_record(
+                        "dismissObstruction",
+                        purpose,
+                        plan_summary,
+                        dialogs_before,
+                        None,
+                        verification,
+                    )));
+                    IntentOutcome::Failed { error, evidence }
+                }
+            };
+        }
     };
 
     let fingerprint = fingerprint(page_id, &candidate);
@@ -2362,6 +2511,7 @@ async fn execute_dismiss_obstruction(
     let mut click_evidence = match browser.click(page_id, &click).await {
         Ok(evidence) => evidence,
         Err(error) => {
+            let candidates = act_failure_candidates(&error, candidate_evidence, open_dialogs);
             return IntentOutcome::Failed {
                 error,
                 evidence: vec![
@@ -2370,7 +2520,7 @@ async fn execute_dismiss_obstruction(
                         "dismissObstruction",
                         purpose,
                         plan_summary,
-                        vec![candidate_evidence],
+                        candidates,
                         None,
                         "actFailed",
                     )),
@@ -2383,7 +2533,7 @@ async fn execute_dismiss_obstruction(
     if !gone {
         let mut prior_evidence = vec![resolution];
         prior_evidence.append(&mut click_evidence);
-        return stuck_outcome_with_prior_evidence(
+        let outcome = stuck_outcome_with_prior_evidence(
             StuckReport {
                 intent_kind: "dismissObstruction",
                 kind: StuckKind::ObstructionSuspected,
@@ -2399,6 +2549,23 @@ async fn execute_dismiss_obstruction(
             prior_evidence,
         )
         .await;
+        // A vision fallback completes only once the clicked control is gone.
+        return match outcome {
+            IntentOutcome::Completed { evidence }
+                if !wait_until_gone(page_id, browser, &pinned, timeout_ms).await =>
+            {
+                IntentOutcome::Failed {
+                    error: CommandError {
+                        code: ErrorCode::ObstructionSuspected,
+                        message: "obstructionPersisted; the vision fallback acted and the control is still present".into(),
+                        layer: ErrorLayer::Page,
+                        retryable: false,
+                    },
+                    evidence,
+                }
+            }
+            other => other,
+        };
     }
 
     let mut evidence = vec![resolution];
@@ -2412,6 +2579,57 @@ async fn execute_dismiss_obstruction(
         "dismissed",
     )));
     IntentOutcome::Completed { evidence }
+}
+
+/// The failure an unhinted dismissal ends in while dialogs are open, with its
+/// verification label: a vision fallback stands only once one of those
+/// dialogs closed, and a plain miss becomes `obstructionSuspected`.
+type DialogFailure = (CommandError, Vec<Evidence>, &'static str);
+
+async fn judge_against_open_dialogs(
+    outcome: IntentOutcome,
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    target: &TargetSpec,
+    dialogs_before: &[types::CandidateEvidence],
+    timeout_ms: u64,
+) -> Result<IntentOutcome, DialogFailure> {
+    match outcome {
+        IntentOutcome::Completed { evidence } => {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+            loop {
+                let Some(now) = open_dialogs_now(page_id, browser, target).await else {
+                    return Ok(IntentOutcome::Completed { evidence });
+                };
+                if !dialogs_not_in(dialogs_before, &now).is_empty() {
+                    return Ok(IntentOutcome::Completed { evidence });
+                }
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(DISMISS_POLL_INTERVAL_MS))
+                    .await;
+            }
+            let error = CommandError {
+                code: ErrorCode::ObstructionSuspected,
+                message:
+                    "obstructionPersisted; the vision fallback acted and the dialog is still open"
+                        .into(),
+                layer: ErrorLayer::Page,
+                retryable: false,
+            };
+            Err((error, evidence, "obstructionPersisted"))
+        }
+        IntentOutcome::Failed { error, evidence } if error.code == ErrorCode::TargetNotFound => {
+            let error = CommandError {
+                code: ErrorCode::ObstructionSuspected,
+                message: format!("{}; a dialog is open over the page", error.message),
+                ..error
+            };
+            Err((error, evidence, "dialogOpen"))
+        }
+        other => Ok(other),
+    }
 }
 
 /// Polls the acted-on target until it is detached or no longer visible. Both are checked in
@@ -2539,14 +2757,29 @@ async fn resolve_extract_field(
                 candidates: vec![evidence],
                 best_match_authorized,
             };
-            let value = extract_value_from_candidate(&field.value, &candidate);
+            // Candidates carry a subset of attributes; the live element has the rest.
+            let read = match (
+                extract_value_from_candidate(&field.value, &candidate),
+                extracted_attribute(&field.value),
+            ) {
+                (Some(value), _) => Ok(Some(value)),
+                (None, Some(attribute)) => {
+                    let (_, target) = action_target(&candidate, &field.target);
+                    browser.read_attribute(page_id, &target, attribute).await
+                }
+                (None, None) => Ok(None),
+            };
+            let (value, error_code) = match read {
+                Ok(value) => (value, None),
+                Err(error) => (None, Some(error.code)),
+            };
             vec![
                 resolution,
                 Evidence::Extraction {
                     field: field.name.clone(),
                     value,
                     resolution_path: IntentResolutionPath::Deterministic,
-                    error_code: None,
+                    error_code,
                 },
             ]
         }
@@ -2839,6 +3072,15 @@ fn a11y_only_role_extraction(field: &ExtractFieldPlan) -> Vec<Evidence> {
             error_code: Some(ErrorCode::InvalidRequest),
         },
     ]
+}
+
+/// The attribute an extraction reads, when it reads one.
+fn extracted_attribute(kind: &ExtractValueKind) -> Option<&str> {
+    match kind {
+        ExtractValueKind::Text => None,
+        ExtractValueKind::Attribute { attribute } => Some(attribute),
+        ExtractValueKind::Href => Some("href"),
+    }
 }
 
 fn extract_value_from_candidate(kind: &ExtractValueKind, candidate: &Candidate) -> Option<String> {

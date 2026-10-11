@@ -22,6 +22,8 @@ pub(super) fn storage(context: &mut DoctorContext, report: &mut DoctorReport) ->
         record_command_journal(report, &config.storage.journal_path);
         record_scheduler_journal(report, &config.storage.scheduler_journal_path);
         record_idempotency_ledgers(report, config);
+        #[cfg(unix)]
+        crate::doctor::skill_permissions::record(report, &config.storage.checkpoints_dir);
         if let Some(dir) = &config.vision.corpus_dir {
             record_vision_corpus(report, &dir.join("vision-corpus.jsonl"));
         }

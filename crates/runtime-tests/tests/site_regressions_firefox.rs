@@ -28,10 +28,11 @@ macro_rules! case_table {
 async fn site_regressions_hold_on_firefox() {
     let rig = Rig::firefox().await;
     let mut failures: Vec<&str> = Vec::new();
-    // The candidate cap this extra case exercises exists only in the Firefox companion.
+    // The candidate cap and the control walk these extra cases exercise exist only in the Firefox companion.
     let table = cases::every_case!(
         case_table,
-        oversized_page_reports_truncation_not_target_not_found
+        oversized_page_reports_truncation_not_target_not_found,
+        typing_behind_a_modal_reports_the_dialog
     );
     for (name, case) in table {
         if AssertUnwindSafe(case(&rig)).catch_unwind().await.is_err() {
@@ -46,4 +47,13 @@ async fn site_regressions_hold_on_firefox() {
 async fn snapshot_scoped_behind_a_modal_reports_the_dialog() {
     let rig = Rig::firefox().await;
     cases::snapshot_scoped_behind_a_modal_reports_the_dialog(&rig).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed headed Firefox and paired test profile"]
+async fn accessibility_candidate_targets_resolve() {
+    let rig = Rig::firefox().await;
+    cases::snapshot_targets_act_on_the_described_element(&rig).await;
+    cases::snapshot_target_types_into_a_slot_labelled_field(&rig).await;
+    cases::snapshot_targets_resolve_beside_a_modal_dialog(&rig).await;
 }

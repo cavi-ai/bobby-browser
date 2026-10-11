@@ -879,10 +879,13 @@ tools most likely to produce it.
   the control doesn't support the requested action, or it's disabled or
   read-only. Repair: re-check the control's real role or kind and match the
   action to it.
-- `obstructionSuspected` -- an `intent_dismiss_obstruction` attempt acted,
-  but the target it expected to disappear was still present afterward.
-  Repair: take a fresh `a11y_snapshot` -- there may be another dismissal
-  control, or the wrong thing was dismissed.
+- `obstructionSuspected` -- something covers the page: an
+  `intent_dismiss_obstruction` attempt acted but the control it clicked was
+  still present afterward, or an `intent_follow` activation opened a dialog
+  instead of reaching its expected state (the evidence names the dialog).
+  Repair: `a11y_snapshot` with target `{role: "dialog"}` shows it; close it
+  with `intent_dismiss_obstruction` using a control from that snapshot, then
+  retry.
 - `visionAssistDenied` -- vision *is* the operation, and the double gate
   (capability + session policy) is closed: `extract_structured`,
   `intent_solve_challenge`, `intent_detect_challenge`. `extract_structured`

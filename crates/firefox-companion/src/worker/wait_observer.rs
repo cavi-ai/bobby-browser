@@ -6,7 +6,24 @@ use super::{
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use types::{CommandError, ErrorCode, PageId, WaitCondition};
-use worker_pool::wait::{is_page_scoped_text_target, WaitObservation, WaitObserver};
+use worker_pool::wait::{
+    is_page_scoped_text_target, WaitObservation, WaitObserver, ELEMENT_VISIBILITY_SCRIPT,
+};
+
+fn visibility_predicate(hidden: bool) -> String {
+    if hidden {
+        format!("!el||!el.isConnected||!(()=>{{{ELEMENT_VISIBILITY_SCRIPT}}})()")
+    } else {
+        format!("Boolean(el)&&el.isConnected&&(()=>{{{ELEMENT_VISIBILITY_SCRIPT}}})()")
+    }
+}
+
+fn text_read_script(selector: &str, is_value: bool) -> String {
+    let property = if is_value { "value" } else { "innerText" };
+    // Absence is a pending observation, distinct from a present empty control.
+    format!("(()=>{{const el={COMPOSED_QUERY}({selector});return el?(el.{property}??''):null;}})()")
+}
+
 pub(super) struct FirefoxWaitObserver<'a> {
     pub(super) worker: &'a FirefoxCompanionWorker,
     pub(super) page_id: &'a PageId,
@@ -67,12 +84,12 @@ impl FirefoxCompanionWorker {
                         match self.resolve_shadow_element(&context, target).await {
                             Ok(shared_id) => {
                                 let condition = match state {
-                                    types::ElementState::Attached => "el.isConnected",
-                                    types::ElementState::Visible => "el.isConnected&&el.checkVisibility()",
-                                    types::ElementState::Detached => "!el.isConnected",
-                                    types::ElementState::Enabled => "el.isConnected&&!el.matches(':disabled,[aria-disabled=\"true\"]')",
-                                    types::ElementState::Disabled => "el.isConnected&&el.matches(':disabled,[aria-disabled=\"true\"]')",
-                                    types::ElementState::Hidden => "el.isConnected&&!el.checkVisibility()",
+                                    types::ElementState::Attached => "el.isConnected".into(),
+                                    types::ElementState::Visible => visibility_predicate(false),
+                                    types::ElementState::Detached => "!el.isConnected".into(),
+                                    types::ElementState::Enabled => "el.isConnected&&!el.matches(':disabled,[aria-disabled=\"true\"]')".into(),
+                                    types::ElementState::Disabled => "el.isConnected&&el.matches(':disabled,[aria-disabled=\"true\"]')".into(),
+                                    types::ElementState::Hidden => visibility_predicate(true),
                                 };
                                 let response = self.transport.send("script.callFunction", json!({
                                     "functionDeclaration": format!("function(el){{return Boolean({condition});}}"),
@@ -95,7 +112,13 @@ impl FirefoxCompanionWorker {
                                     ErrorCode::TargetNotFound | ErrorCode::ShadowRootUnavailable
                                 ) =>
                             {
-                                (matches!(state, types::ElementState::Detached), None)
+                                (
+                                    matches!(
+                                        state,
+                                        types::ElementState::Detached | types::ElementState::Hidden
+                                    ),
+                                    None,
+                                )
                             }
                             Err(error) => return Err(error),
                         }
@@ -145,15 +168,18 @@ impl FirefoxCompanionWorker {
                                         )
                                     })?;
                                 let expression = match state {
-                                types::ElementState::Attached | types::ElementState::Visible => {
+                                types::ElementState::Attached => {
                                     format!("Boolean({COMPOSED_QUERY}({selector}))")
+                                }
+                                types::ElementState::Visible | types::ElementState::Hidden => {
+                                    let predicate = visibility_predicate(*state == types::ElementState::Hidden);
+                                    format!("(()=>{{const el={COMPOSED_QUERY}({selector});return {predicate};}})()")
                                 }
                                 types::ElementState::Detached => {
                                     format!("!{COMPOSED_QUERY}({selector})")
                                 }
                                 types::ElementState::Enabled => format!("!{COMPOSED_QUERY}({selector})?.matches(':disabled,[aria-disabled=\"true\"]')"),
                                 types::ElementState::Disabled => format!("Boolean({COMPOSED_QUERY}({selector})?.matches(':disabled,[aria-disabled=\"true\"]'))"),
-                                types::ElementState::Hidden => format!("Boolean({COMPOSED_QUERY}({selector})) && !{COMPOSED_QUERY}({selector}).checkVisibility()"),
                             };
                                 let response = self.transport.send("script.evaluate", json!({
                                 "expression": expression,
@@ -167,9 +193,13 @@ impl FirefoxCompanionWorker {
                                     .unwrap_or(false);
                                 (satisfied, None)
                             }
-                            Err(error) if error.code == ErrorCode::TargetNotFound => {
-                                (matches!(state, types::ElementState::Detached), None)
-                            }
+                            Err(error) if error.code == ErrorCode::TargetNotFound => (
+                                matches!(
+                                    state,
+                                    types::ElementState::Detached | types::ElementState::Hidden
+                                ),
+                                None,
+                            ),
                             Err(error) => return Err(error),
                         }
                     }
@@ -178,7 +208,25 @@ impl FirefoxCompanionWorker {
             }
             WaitCondition::Text { target, .. } | WaitCondition::Value { target, .. } => {
                 let is_value = matches!(condition, WaitCondition::Value { .. });
-                if !is_value && is_page_scoped_text_target(target) {
+                if !target.shadow_path.is_empty() {
+                    let top_context = self.context(page_id).await?;
+                    let context = self.resolve_input_context(&top_context, target).await?;
+                    match self
+                        .read_shadow_wait_values(&context, target, is_value)
+                        .await
+                    {
+                        Ok(values) => Ok(WaitObservation::Text(values)),
+                        Err(error)
+                            if matches!(
+                                error.code,
+                                ErrorCode::TargetNotFound | ErrorCode::ShadowRootUnavailable
+                            ) =>
+                        {
+                            Ok(WaitObservation::Pending)
+                        }
+                        Err(error) => Err(error),
+                    }
+                } else if !is_value && is_page_scoped_text_target(target) {
                     let context = self.context(page_id).await?;
                     let context = self.resolve_input_context(&context, target).await?;
                     let response = self.transport.send("script.evaluate", json!({
@@ -203,23 +251,18 @@ impl FirefoxCompanionWorker {
                             let selector = serde_json::to_string(&selector).map_err(|error| {
                                 driver_error(ErrorCode::InvalidRequest, error.to_string(), false)
                             })?;
-                            let read = if is_value {
-                                format!("{COMPOSED_QUERY}({selector})?.value ?? ''")
-                            } else {
-                                format!("{COMPOSED_QUERY}({selector})?.innerText ?? ''")
-                            };
+                            let read = text_read_script(&selector, is_value);
                             let response = self.transport.send("script.evaluate", json!({
                                 "expression": read,
                                 "target": {"context": context, "sandbox": COMPANION_SANDBOX},
                                 "awaitPromise": false,
                                 "resultOwnership": "none",
                             })).await?;
-                            let value = response
-                                .pointer("/result/value")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default()
-                                .to_owned();
-                            Ok(WaitObservation::Text(vec![value]))
+                            let value = response.pointer("/result/value").and_then(Value::as_str);
+                            Ok(match value {
+                                Some(value) => WaitObservation::Text(vec![value.to_owned()]),
+                                None => WaitObservation::Pending,
+                            })
                         }
                         Err(error) if error.code == ErrorCode::TargetNotFound => {
                             Ok(WaitObservation::Pending)
@@ -242,11 +285,7 @@ impl FirefoxCompanionWorker {
                                             false,
                                         )
                                     })?;
-                                let read = if is_value {
-                                    format!("{COMPOSED_QUERY}({selector_json})?.value ?? ''")
-                                } else {
-                                    format!("{COMPOSED_QUERY}({selector_json})?.innerText ?? ''")
-                                };
+                                let read = text_read_script(&selector_json, is_value);
                                 let response = match self.transport.send("script.evaluate", json!({
                                         "expression": read,
                                         "target": {"context": selector_context, "sandbox": COMPANION_SANDBOX},
@@ -273,12 +312,11 @@ impl FirefoxCompanionWorker {
                                             continue;
                                         }
                                     };
-                                let observed = response
-                                    .pointer("/result/value")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or_default()
-                                    .to_owned();
-                                values.push(observed);
+                                if let Some(observed) =
+                                    response.pointer("/result/value").and_then(Value::as_str)
+                                {
+                                    values.push(observed.to_owned());
+                                }
                             }
                             Ok(WaitObservation::Text(values))
                         }
