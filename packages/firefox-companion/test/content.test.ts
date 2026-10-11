@@ -659,6 +659,35 @@ test("a11yTree includes a same-origin iframe's controls with the frame hop in th
   assert.equal(open?.target?.framePath, undefined);
 });
 
+test("a scoped a11yTree keeps the page-wide ordinal in child frame targets", () => {
+  const document = documentFor(`
+    <iframe title="Widget frame"></iframe>
+    <section id="second-widget"><iframe id="second-frame" title="Widget frame"></iframe></section>
+  `);
+  for (const frame of document.querySelectorAll("iframe")) {
+    frame.contentDocument!.body.innerHTML = "<button>Frame action</button>";
+  }
+  type Node = {
+    name?: string;
+    target?: { ordinal?: number; framePath?: Array<{ role: string; accessibleName: string; ordinal?: number }> };
+    children?: Node[];
+  };
+  const flat = (nodes: Node[]): Node[] => nodes.flatMap((node) => [node, ...flat(node.children ?? [])]);
+  for (const css of ["#second-widget", "#second-frame"]) {
+    const tree = executeContentAction(document, "a11yTree", { maxNodes: 32, target: { css } }) as {
+      nodes: Node[];
+      truncated: boolean;
+    };
+    assert.equal(tree.truncated, false);
+    const actions = flat(tree.nodes).filter((node) => node.name === "Frame action");
+    assert.equal(actions.length, 1);
+    assert.deepEqual(actions[0]!.target?.framePath, [
+      { role: "iframe", accessibleName: "Widget frame", ordinal: 1 },
+    ], css);
+    assert.equal(actions[0]!.target?.ordinal, undefined);
+  }
+});
+
 test("a11yTree marks a control invalid when the page flags it aria-invalid", () => {
   const document = documentFor(
     '<label>Name <input name="name" aria-invalid="true"></label><label>City <input name="city"></label>',
@@ -757,6 +786,19 @@ test("a webauthn token does not clear a password field's redaction", () => {
   const tree = JSON.stringify(executeContentAction(document, "a11yTree", { maxNodes: 16, includeText: true }));
   assert.equal(tree.includes(secret), false);
   assert.equal(tree.includes("Passphrase"), false);
+});
+
+test("a11yTree supplies page counts before a scoped duplicate", () => {
+  const document = documentFor(`<button>Save</button><section id="scope"><button>Save</button></section><button>Save</button>`);
+  const result = executeContentAction(document, "a11yTree", {
+    maxNodes: 16, target: { css: "#scope" }, includeTargetCounts: true,
+  }) as { targetCounts: unknown; nodes:Array<{target?:unknown}> };
+  assert.deepEqual(result.targetCounts, [
+    { role: "button", name: "Save", total: 3, preceding: 1 },
+  ]);
+  assert.equal(result.nodes[0]?.target, undefined);
+  const legacy = executeContentAction(document, "a11yTree", { maxNodes:16, target:{css:"#scope"} }) as Record<string, unknown>;
+  assert.equal("targetCounts" in legacy, false);
 });
 
 test("a11yTree keeps the global ordinal when a duplicate is truncated", () => {

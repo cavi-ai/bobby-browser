@@ -3,7 +3,7 @@ mod support;
 
 use serde_json::{json, Value};
 use std::time::Duration;
-use support::rig::{Live, Rig};
+use support::rig::{find_node, Live, Rig};
 use test_site::{FixtureSite, Route};
 
 enum Engine {
@@ -361,6 +361,89 @@ async fn shadow_text_wait_chromium() {
 #[ignore = "requires installed Firefox and paired test profile"]
 async fn shadow_text_wait_firefox() {
     shadow_text_wait_contract(Engine::Firefox).await;
+}
+
+async fn semantic_target_contract(engine: Engine) {
+    let site = FixtureSite::spawn(vec![("/", Route::Html(r#"<!doctype html>
+        <title>Semantic targets</title>
+        <button onclick="document.querySelector('#status').textContent='Wrong'">Save</button>
+        <section aria-label="Editor"><button onclick="document.querySelector('#status').textContent='Saved'">Save</button></section>
+        <button>Save</button><p id="status">Pending</p>
+        <span id="widget-label">Widget</span><span id="document-only">Document name</span>
+        <div id="widget" role="group" aria-labelledby="widget-label" aria-label="Fallback widget"></div>
+        <script>
+        const root = document.querySelector('#widget').attachShadow({mode:'open'});
+        root.innerHTML = '<span id="label">Accept</span><input type="checkbox" aria-labelledby="label" aria-label="Fallback"><input type="checkbox" aria-labelledby="document-only">';
+        root.querySelector('input').onclick = () => document.querySelector('#status').textContent='Accepted';
+        </script>"#.into()))]).await;
+    let rig = match engine {
+        Engine::Chromium => Rig::chromium().await,
+        Engine::Firefox => Rig::firefox().await,
+    };
+    let live = Live::open(&rig, &site.url("/")).await;
+    let snapshot = live
+        .snapshot(json!({"target":{"css":"section"}, "maxNodes":16}))
+        .await;
+    assert_eq!(snapshot["status"], "completed", "{snapshot}");
+    let target = find_node(&snapshot, "button", Some("Save"))
+        .and_then(|node| node.get("target"))
+        .unwrap_or_else(|| panic!("missing scoped target: {snapshot}"));
+    assert_eq!(target["ordinal"], 1, "{snapshot}");
+    let clicked = live.call("click", json!({"target":target})).await;
+    assert_eq!(clicked["status"], "completed", "{clicked}");
+    for (expected, action) in [("Saved", false), ("Accepted", true)] {
+        if action {
+            let clicked = live
+                .call(
+                    "click",
+                    json!({"target":{
+                        "role":"checkbox", "accessibleName":"Accept",
+                        "shadowPath":[{"role":"group", "accessibleName":"Widget"}]
+                    }}),
+                )
+                .await;
+            assert_eq!(clicked["status"], "completed", "{clicked}");
+        }
+        let observed = live
+            .call(
+                "wait_for",
+                json!({
+                    "condition":{"kind":"text", "target":{"css":"#status"},
+                        "matcher":{"kind":"exact", "value":expected}}, "timeoutMs":1000
+                }),
+            )
+            .await;
+        assert_eq!(observed["status"], "completed", "{observed}");
+    }
+    let missing = live
+        .call(
+            "wait_for",
+            json!({
+                "condition":{"kind":"element", "target":{
+                    "role":"checkbox", "accessibleName":"Document name",
+                    "shadowPath":[{"role":"group", "accessibleName":"Widget"}]
+                }, "state":"attached"}, "timeoutMs":200
+            }),
+        )
+        .await;
+    assert_eq!(missing["status"], "failed", "{missing}");
+    assert_eq!(
+        missing["error"]["code"], "waitConditionTimedOut",
+        "{missing}"
+    );
+    live.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn semantic_targets_chromium() {
+    semantic_target_contract(Engine::Chromium).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Firefox and paired test profile"]
+async fn semantic_targets_firefox() {
+    semantic_target_contract(Engine::Firefox).await;
 }
 
 async fn shadow_native_control_contract(engine: Engine) {

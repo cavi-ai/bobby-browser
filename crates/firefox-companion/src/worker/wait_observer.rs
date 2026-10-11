@@ -1,7 +1,7 @@
 //! Firefox observations for the shared wait policy.
 use super::{
-    accessibility_tree_contains, driver_error, FirefoxCompanionWorker, COMPANION_SANDBOX,
-    COMPOSED_QUERY, MAX_URL_BYTES,
+    accessibility_tree_contains, driver_error, AccessibilitySnapshot, FirefoxCompanionWorker,
+    COMPANION_SANDBOX, COMPOSED_QUERY, MAX_URL_BYTES,
 };
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -147,7 +147,7 @@ impl FirefoxCompanionWorker {
                             )
                         )
                     {
-                        let (nodes, _) = self
+                        let AccessibilitySnapshot { nodes, .. } = self
                             .observer
                             .a11y_snapshot(&self.current_lease(), page_id, 256, None, false)
                             .await?;

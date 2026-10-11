@@ -170,6 +170,72 @@ async fn misfiled_recovery_receipts_are_preserved_without_hiding_healthy_workflo
 
 #[tokio::test]
 #[cfg(unix)]
+async fn hard_linked_checkpoints_are_preserved_and_excluded_from_recovery() {
+    use std::os::unix::fs::MetadataExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let linked = checkpoint(WorkflowId::new(), "https://example.test/linked");
+    let mut healthy = checkpoint(WorkflowId::new(), "https://example.test/healthy");
+    healthy.session_id = linked.session_id.clone();
+    store.save(&linked).await.unwrap();
+    store.save(&healthy).await.unwrap();
+    assert_eq!(
+        store
+            .list_for_session(&linked.session_id, 10)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    let path = checkpoint_store::checkpoint_path(root.path(), &linked.workflow_id);
+    let alias = root.path().join("authority-backup");
+    let mut snapshot = store.lock_snapshot(&linked.workflow_id).await.unwrap();
+    std::fs::hard_link(&path, &alias).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(matches!(
+        snapshot.verify_unchanged().await,
+        Err(CheckpointStoreError::Io(_))
+    ));
+    assert!(matches!(
+        snapshot.save_if_unchanged(&linked).await,
+        Err(CheckpointStoreError::Io(_))
+    ));
+    drop(snapshot);
+    for store in [
+        store.clone(),
+        CheckpointStore::open(root.path()).await.unwrap(),
+    ] {
+        assert!(matches!(
+            store.load(&linked.workflow_id).await,
+            Err(CheckpointStoreError::Io(_))
+        ));
+        assert!(matches!(
+            store.lock_snapshot(&linked.workflow_id).await,
+            Err(CheckpointStoreError::Io(_))
+        ));
+        assert!(matches!(
+            store.save(&linked).await,
+            Err(CheckpointStoreError::Io(_))
+        ));
+        assert_eq!(
+            store
+                .list_for_session(&linked.session_id, 10)
+                .await
+                .unwrap(),
+            vec![healthy.clone()]
+        );
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(std::fs::read(&alias).unwrap(), bytes);
+    assert_eq!(std::fs::metadata(&path).unwrap().nlink(), 2);
+    std::fs::remove_file(&alias).unwrap();
+    assert_eq!(store.load(&linked.workflow_id).await.unwrap(), linked);
+    store.save(&linked).await.unwrap();
+}
+
+#[tokio::test]
+#[cfg(unix)]
 async fn checkpoint_reads_and_replacements_reject_symbolic_links() {
     let root = tempfile::tempdir().unwrap();
     let external = tempfile::tempdir().unwrap();
@@ -298,6 +364,52 @@ async fn fifo_entries_cannot_block_checkpoint_or_issuance_operations() {
             .file_type()
             .is_fifo());
     }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn hard_linked_skill_decisions_cannot_be_loaded_or_replaced() {
+    use std::os::unix::fs::MetadataExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let workflow = WorkflowId::new();
+    let issuance = skill_issuance(workflow.clone());
+    store
+        .save_skill_issuance(&workflow, &issuance)
+        .await
+        .unwrap();
+    let path = root
+        .path()
+        .join(format!("{}.skill-issuance.json", workflow.0));
+    let alias = root.path().join("decision-backup");
+    std::fs::hard_link(&path, &alias).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    for store in [
+        store.clone(),
+        CheckpointStore::open(root.path()).await.unwrap(),
+    ] {
+        assert!(matches!(
+            store.load_skill_issuance(&workflow).await,
+            Err(CheckpointStoreError::Io(_))
+        ));
+        assert!(matches!(
+            store.save_skill_issuance(&workflow, &issuance).await,
+            Err(CheckpointStoreError::Io(_))
+        ));
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(std::fs::read(&alias).unwrap(), bytes);
+    assert_eq!(std::fs::metadata(&path).unwrap().nlink(), 2);
+    std::fs::remove_file(&alias).unwrap();
+    assert_eq!(
+        store.load_skill_issuance(&workflow).await.unwrap(),
+        Some(issuance.clone())
+    );
+    store
+        .save_skill_issuance(&workflow, &issuance)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

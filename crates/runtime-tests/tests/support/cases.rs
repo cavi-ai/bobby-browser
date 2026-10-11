@@ -55,6 +55,7 @@ macro_rules! every_case {
             actions_wait_for_a_late_target,
             actions_fail_a_missing_target_within_one_bound,
             click_refuses_a_covered_target,
+            typing_under_a_dialog_reports_obscured,
             locate_miss_marks_a_hidden_control,
             covered_intent_names_the_covering_dialog,
             omitted_controls_need_a_whole_tree,
@@ -669,6 +670,51 @@ pub async fn scoped_snapshot_targets_act_on_the_scoped_element(rig: &Rig) {
         find_node(&after, "status", Some("acted item")).is_some(),
         "the scoped target {link} clicked another link: {after}"
     );
+    live.close().await;
+}
+
+/// A child target from a scoped iframe snapshot keeps the page-wide frame hop,
+/// so same-name frames outside the scope cannot receive the action.
+pub async fn scoped_snapshot_frame_targets_reach_the_second_frame(rig: &Rig) {
+    let body = r#"<iframe title="Widget frame" src="/first"></iframe>
+        <section id="second-widget"><iframe id="second-frame" title="Widget frame" src="/second"></iframe></section>
+        <p role="status" aria-label="idle" id="status"></p>"#;
+    let first = r#"<button onclick="parent.document.getElementById('status').setAttribute('aria-label', 'acted first')">Frame action</button>"#;
+    let second = r#"<button onclick="parent.document.getElementById('status').setAttribute('aria-label', 'acted second')">Frame action</button>"#;
+    let site = FixtureSite::spawn(vec![
+        ("/frames", Route::Html(page("Scoped frames", body))),
+        ("/first", Route::Html(page("First frame", first))),
+        ("/second", Route::Html(page("Second frame", second))),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/frames")).await;
+    for css in ["#second-widget", "#second-frame"] {
+        let scoped = live.snapshot(json!({"target":{"css":css}})).await;
+        let mut targets = Vec::new();
+        targets_under(&scoped, &mut targets);
+        let actions: Vec<_> = targets
+            .iter()
+            .filter(|(role, target)| {
+                *role == "button" && target["accessibleName"] == "Frame action"
+            })
+            .collect();
+        assert_eq!(actions.len(), 1, "scoped frame targets: {scoped}");
+        let target = actions[0].1;
+        assert_eq!(
+            target["framePath"],
+            json!([{
+                "role":"iframe", "accessibleName":"Widget frame", "ordinal":1
+            }]),
+            "scoped frame hop: {scoped}"
+        );
+        let clicked = live.call("click", json!({"target":target})).await;
+        assert_eq!(clicked["status"], "completed", "click {target}: {clicked}");
+        let after = live.snapshot(json!({})).await;
+        assert!(
+            find_node(&after, "status", Some("acted second")).is_some(),
+            "scoped frame target {target} reached another frame: {after}"
+        );
+    }
     live.close().await;
 }
 
@@ -2289,6 +2335,37 @@ pub async fn click_refuses_a_covered_target(rig: &Rig) {
         listed_url,
         site.url("/home").as_str(),
         "the click followed another link"
+    );
+    live.close().await;
+}
+
+/// A text field an open dialog covers: typing into it fails targetObscured,
+/// and a field inside the dialog still takes text.
+pub async fn typing_under_a_dialog_reports_obscured(rig: &Rig) {
+    let body = r#"<main><input aria-label="Keywords"></main>
+        <div role="dialog" aria-label="Notice"
+             style="position:fixed;inset:0;background:#fff"><input aria-label="Email"></div>"#;
+    let site = FixtureSite::spawn(vec![("/home", Route::Html(page("Home", body)))]).await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let covered = live
+        .call(
+            "type_text",
+            json!({"target":{"role":"textbox","accessibleName":"Keywords"},"value":"rust"}),
+        )
+        .await;
+    assert_eq!(
+        covered["error"]["code"], "targetObscured",
+        "typing under a dialog: {covered}"
+    );
+    let inside = live
+        .call(
+            "type_text",
+            json!({"target":{"role":"textbox","accessibleName":"Email"},"value":"ada"}),
+        )
+        .await;
+    assert_eq!(
+        inside["status"], "completed",
+        "typing inside the dialog: {inside}"
     );
     live.close().await;
 }

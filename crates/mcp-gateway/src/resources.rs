@@ -807,22 +807,16 @@ tools most likely to produce it.
   - *The element went stale*: it existed at resolution time but was no
     longer connected to the DOM by the time the engine acted. Repair:
     re-resolve the target -- the page changed underneath the call.
-- `targetObscured` -- **Firefox-engine only.** The Firefox companion's
-  pointer preflight hit-tests the resolved element's center and finds a
-  different element on top of it there. There is no equivalent preflight in
-  the Chromium driver -- the identical situation on a Chromium session does
-  not produce this code; it surfaces as generic `browserCommandFailed`
-  instead (the click call itself fails at the driver level). Do not treat
-  the absence of this code as proof nothing is obscuring the target on a
-  Chromium session. Repair: clear whatever is on top (for example
-  `intent_dismiss_obstruction`) or scroll the element into the clear, then
-  retry.
-- `targetOutOfBounds` -- **Firefox-engine only**, same preflight: the
-  resolved element has no clickable point inside the current viewport. As
-  with `targetObscured`, Chromium has no equivalent preflight and the same
-  condition there surfaces as generic `browserCommandFailed`, not this code.
-  Repair: bring the element into view (scroll, resize, or `emulate` a larger
-  viewport) before retrying.
+- `targetObscured` -- another element covers the resolved target. A click
+  hit-tests the target's center on both engines; typing does too on Firefox,
+  and on Chromium refuses a field an open dialog covers. A target an open
+  modal dialog hides from the accessibility tree fails the same way. Repair:
+  clear whatever is on top (for example `intent_dismiss_obstruction`) or
+  scroll the element into the clear, then retry.
+- `targetOutOfBounds` -- the same hit test found no clickable point for the
+  resolved element inside the current viewport. Repair: bring the element
+  into view (scroll, resize, or `emulate` a larger viewport) before
+  retrying.
 - `waitConditionTimedOut` -- the awaited page condition didn't hold before
   the call's timeout. Repair: confirm the condition via `inspect`, then
   retry with a longer timeout.

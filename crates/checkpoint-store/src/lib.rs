@@ -571,11 +571,24 @@ async fn read_regular_file(path: &Path) -> std::io::Result<Vec<u8>> {
     // FILE_FLAG_OPEN_REPARSE_POINT opens the link itself for validation.
     options.custom_flags(0x0020_0000);
     let mut file = options.open(path).await?;
-    if !file.metadata().await?.file_type().is_file() {
+    let metadata = file.metadata().await?;
+    if !metadata.file_type().is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "checkpoint storage entry must be a regular file",
         ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // Match doctor's repair boundary: another name must not share the
+        // inode holding checkpoint or issued-decision authority.
+        if metadata.nlink() != 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "checkpoint storage entry must have exactly one hard link",
+            ));
+        }
     }
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).await?;

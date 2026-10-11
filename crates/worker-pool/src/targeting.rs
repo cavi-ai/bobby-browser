@@ -170,6 +170,19 @@ impl ResolvedTarget {
         })
     }
 
+    /// Scrolls the target to the viewport center and reports whether its
+    /// center is covered while an open dialog it is not part of is shown.
+    pub async fn covered_by_dialog(&self, page: &Page) -> Result<bool, CommandError> {
+        let script = format!(
+            "el.scrollIntoView({{block:'center',inline:'center',behavior:'instant'}});\
+             if(({hit})(el)!=='obscured')return false;\
+             const holds=dialog=>{{for(let node=el;node;node=node.parentNode||node.host)if(node===dialog)return true;return false;}};\
+             return [...document.querySelectorAll('dialog[open],[role=dialog],[role=alertdialog]')].some(dialog=>dialog.checkVisibility()&&!holds(dialog));",
+            hit = pointer_hit_function()
+        );
+        self.eval(page, &script).await
+    }
+
     /// Scrolls the target into view. A coordinate-based click dispatch
     /// (`clickable_point` followed by `Input.dispatchMouseEvent`) needs the
     /// target on-screen first -- unlike a native `Element::click()`, which
@@ -893,7 +906,7 @@ async fn open_target_scope(
 
     let mut closed_root: Option<Arc<Element>> = None;
 
-    for (index, host_target) in target.shadow_path.iter().enumerate() {
+    for host_target in &target.shadow_path {
         let scope_ref = match &closed_root {
             Some(element) => LocatorScope::ClosedRoot(Arc::clone(element)),
             None => LocatorScope::Context(context_id),
@@ -907,11 +920,9 @@ async fn open_target_scope(
                 collect_candidates_within(element, &shadow_hosts, nested_scope).await?
             }
         };
-        let (candidate, evidence, _) = choose(
-            host_target,
-            raw.into_iter().map(into_candidate).collect(),
-            true,
-        )?;
+        let candidates: Vec<_> = raw.into_iter().map(into_candidate).collect();
+        let (candidate, evidence, _) =
+            dom_engine::resolve_shadow_segment(host_target, &candidates)?;
         let mut prospective = shadow_hosts.clone();
         prospective.push(candidate.id.clone());
         let has_root: bool = eval_scoped(
@@ -936,10 +947,7 @@ async fn open_target_scope(
         )
         .await?;
         let Some(root_backend_id) = discovered else {
-            return Err(target_error(
-                ErrorCode::ShadowRootUnavailable,
-                format!("shadow path component {index} has no attached shadow root"),
-            ));
+            return Err(dom_engine::shadow_probe_error("shadow-unavailable").unwrap());
         };
         let element = execution_page
             .element_from_backend_node_id(root_backend_id)
@@ -1619,16 +1627,11 @@ async fn discover_closed_root_for_candidate(
 }
 
 fn candidate_collector_operation(scope: u64) -> Result<String, CommandError> {
-    let implicit_role = dom_engine::IMPLICIT_ROLE_SCRIPT;
-    let prefix = format!("bobby-{scope}-");
-    let prefix = serde_json::to_string(&prefix)
+    let prefix = serde_json::to_string(&format!("bobby-{scope}-"))
         .map_err(|error| target_error(ErrorCode::InvalidRequest, error))?;
     Ok(format!(
-        r#"let n=0,out=[];
-const labelledBy=el=>(el.getAttribute('aria-labelledby')||'').split(/\s+/).filter(Boolean).map(id=>String(el.ownerDocument.getElementById(id)?.innerText||'').trim()||'').filter(Boolean).join(' ')||null;
-const contentName=el=>{{const parts=[];const walk=n=>{{if(n.nodeType===3){{parts.push(n.nodeValue);return;}}if(n.nodeType!==1)return;const tag=n.tagName.toLowerCase();if(tag==='script'||tag==='style')return;if(tag==='img'){{parts.push(' '+(n.getAttribute('alt')||'')+' ');return;}}if(tag==='title'&&n.parentElement instanceof SVGElement){{parts.push(' '+n.textContent+' ');return;}}const s=getComputedStyle(n);if(s.display==='none'||s.visibility==='hidden')return;for(const c of n.childNodes)walk(c);}};walk(el);return parts.join('').replace(/\s+/g,' ').trim()||null;}};
-{implicit_role}
-const visit=current=>{{for(const el of current.querySelectorAll('*')){{const id={prefix}+(++n);el.setAttribute('data-bobby-target',id);const style=getComputedStyle(el),rect=el.getBoundingClientRect();const label=el.labels&&el.labels.length?Array.from(el.labels).map(x=>String(x.innerText||'').trim()).filter(Boolean).join(' '):null;const role=el.getAttribute('role')||implicitRole(el);const name=el.getAttribute('aria-label')||labelledBy(el)||label||(el.tagName==='IMG'?el.getAttribute('alt'):null)||(el.tagName==='IFRAME'?el.getAttribute('title'):null)||((el.tagName==='INPUT'||el.tagName==='TEXTAREA')?el.getAttribute('placeholder'):null)||String(el.innerText||'').trim()||contentName(el)||el.getAttribute('title')||null;const tag=el.tagName.toLowerCase();const attributes={{}};for(const a of el.attributes)if(['id','name','type','src','href','placeholder','autocomplete','pattern','min','max','step','multiple','aria-invalid','aria-label','title'].includes(a.name)||a.name.startsWith('data-'))attributes[a.name]=a.value;for(const booleanName of ['required','readonly','checked','multiple'])if(el[booleanName]===true)attributes[booleanName]='true';const aria=el.getAttribute('aria-label');const uniqueId=Boolean(el.id)&&el.getRootNode().querySelector(`#${{CSS.escape(el.id)}}`)===el;const css=uniqueId?`#${{CSS.escape(el.id)}}`:aria?`[aria-label="${{aria.replace(/\\\\/g,'\\\\\\\\').replace(/"/g,'\\\\"')}}"]`:tag;out.push({{id,css,tag,testId:el.getAttribute('data-testid'),role,name,label,text:String(el.innerText||el.value||'').trim(),attributes,attached:el.isConnected,visible:style.visibility!=='hidden'&&style.display!=='none'&&rect.width>0&&rect.height>0,enabled:!el.disabled&&el.getAttribute('aria-disabled')!=='true'&&!el.closest('fieldset[disabled]')}});if(el.shadowRoot)visit(el.shadowRoot)}}}};visit(root);return out"#
+        "return ({}) (root, {{prefix:{prefix}}}).candidates",
+        dom_engine::candidate_gather_function()
     ))
 }
 
@@ -2054,20 +2057,6 @@ mod tests {
         let candidate = into_candidate(raw);
 
         assert_eq!(candidate.css, Some("#resume-upload".to_owned()));
-    }
-
-    #[test]
-    fn candidate_collector_preserves_aria_invalid_for_validation_classification() {
-        let operation = candidate_collector_operation(1).expect("collector operation");
-
-        assert!(operation.contains("'aria-invalid'"));
-        assert!(operation.contains("'aria-label'"));
-        assert!(operation.contains("'title'"));
-        assert!(operation.contains("const tag=el.tagName.toLowerCase()"));
-        assert!(
-            !operation.contains("[data-bobby-target="),
-            "stamped css must not advertise the per-gather tracking id"
-        );
     }
 
     fn cdp_node(
