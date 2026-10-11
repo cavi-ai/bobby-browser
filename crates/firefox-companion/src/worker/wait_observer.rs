@@ -208,7 +208,25 @@ impl FirefoxCompanionWorker {
             }
             WaitCondition::Text { target, .. } | WaitCondition::Value { target, .. } => {
                 let is_value = matches!(condition, WaitCondition::Value { .. });
-                if !is_value && is_page_scoped_text_target(target) {
+                if !target.shadow_path.is_empty() {
+                    let top_context = self.context(page_id).await?;
+                    let context = self.resolve_input_context(&top_context, target).await?;
+                    match self
+                        .read_shadow_wait_values(&context, target, is_value)
+                        .await
+                    {
+                        Ok(values) => Ok(WaitObservation::Text(values)),
+                        Err(error)
+                            if matches!(
+                                error.code,
+                                ErrorCode::TargetNotFound | ErrorCode::ShadowRootUnavailable
+                            ) =>
+                        {
+                            Ok(WaitObservation::Pending)
+                        }
+                        Err(error) => Err(error),
+                    }
+                } else if !is_value && is_page_scoped_text_target(target) {
                     let context = self.context(page_id).await?;
                     let context = self.resolve_input_context(&context, target).await?;
                     let response = self.transport.send("script.evaluate", json!({

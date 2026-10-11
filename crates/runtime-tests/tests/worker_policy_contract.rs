@@ -282,6 +282,87 @@ async fn empty_wait_target_firefox() {
     empty_wait_target_contract(Engine::Firefox).await;
 }
 
+async fn shadow_text_wait_contract(engine: Engine) {
+    const CONTROLS: &str = "<p class='status' role='status' aria-label='Progress'>First</p>\
+        <p class='status' role='status' aria-label='Progress'>Second</p>\
+        <p class='status' id='status' data-testid='status' role='status' aria-label='Progress'>Inside</p>\
+        <input class='code' role='textbox' aria-label='Code' value='First'>\
+        <input class='code' role='textbox' aria-label='Code' value='Second'>\
+        <input class='code' id='code' data-testid='code' role='textbox' aria-label='Code' value='Inside'>";
+    let document = format!(
+        "<!doctype html><title>Shadow text wait contract</title>\
+         <p class='status' id='status' data-testid='status' role='status' aria-label='Progress'>Outside</p>\
+         <input class='code' id='code' data-testid='code' role='textbox' aria-label='Code' value='Outside'>\
+         <div id='shadow-host' role='group' aria-label='Widget'></div>\
+         <script>document.querySelector('#shadow-host').attachShadow({{mode:'open'}}).innerHTML={};</script>",
+        json!(CONTROLS),
+    );
+    let site = FixtureSite::spawn(vec![
+        (
+            "/",
+            Route::Html(format!(
+                "{document}<iframe id='frame' src='/frame'></iframe>"
+            )),
+        ),
+        ("/frame", Route::Html(document)),
+    ])
+    .await;
+    let rig = match engine {
+        Engine::Chromium => Rig::chromium().await,
+        Engine::Firefox => Rig::firefox().await,
+    };
+    let live = Live::open(&rig, &site.url("/")).await;
+    let mut failures = Vec::new();
+    for frame_path in [json!([]), json!([{"css":"#frame"}])] {
+        for (kind, css, tag, role, name) in [
+            ("text", "status", "p", "status", "Progress"),
+            ("value", "code", "input", "textbox", "Code"),
+        ] {
+            for mut target in [
+                json!({"css":format!("#{css}")}),
+                json!({"css":tag}),
+                json!({"testId":css}),
+                json!({"role":role, "accessibleName":name}),
+            ] {
+                target["framePath"] = frame_path.clone();
+                target["shadowPath"] = json!([{"role":"group", "accessibleName":"Widget"}]);
+                for (expected, status) in [("Inside", "completed"), ("Outside", "failed")] {
+                    let timeout_ms = if status == "completed" { 5000 } else { 300 };
+                    let result = live.call("wait_for", json!({
+                        "condition":{"kind":kind, "target":target, "matcher":{"kind":"exact", "value":expected}},
+                        "timeoutMs":timeout_ms,
+                    })).await;
+                    if result["status"] != status
+                        || (status == "failed"
+                            && result["error"]["code"] != "waitConditionTimedOut")
+                    {
+                        failures.push(format!("{kind} {target} expected {expected}: {result}"));
+                    } else if status == "completed" {
+                        assert_eq!(evidence(&result, "wait")["observed"], "Inside", "{result}");
+                    }
+                }
+            }
+        }
+    }
+    live.close().await;
+    assert!(
+        failures.is_empty(),
+        "shadow waits escaped their scope: {failures:#?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn shadow_text_wait_chromium() {
+    shadow_text_wait_contract(Engine::Chromium).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Firefox and paired test profile"]
+async fn shadow_text_wait_firefox() {
+    shadow_text_wait_contract(Engine::Firefox).await;
+}
+
 fn evidence<'a>(outcome: &'a Value, kind: &str) -> &'a Value {
     outcome["evidence"]
         .as_array()
