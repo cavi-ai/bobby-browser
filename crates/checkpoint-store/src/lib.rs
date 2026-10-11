@@ -6,7 +6,7 @@ use std::time::SystemTime;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::fs::{File, OpenOptions};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use types::{SkillIssuedDecision, WorkflowCheckpoint, WorkflowId, MAX_RECOVERY_RECEIPTS};
 use uuid::Uuid;
@@ -64,6 +64,9 @@ impl LockedCheckpointSnapshot {
         self.verify_unchanged().await?;
         if checkpoint.workflow_id != self.checkpoint.workflow_id {
             return Err(CheckpointStoreError::SnapshotChanged);
+        }
+        if checkpoint.session_id != self.checkpoint.session_id {
+            return Err(CheckpointStoreError::IdentityChanged);
         }
         self.store.validate_schema(checkpoint)?;
         self.store.write_unlocked(checkpoint).await?;
@@ -259,7 +262,7 @@ impl CheckpointStore {
                         continue;
                     };
                     let path = entry.path();
-                    let Ok(bytes) = tokio::fs::read(&path).await else {
+                    let Ok(bytes) = read_regular_file(&path).await else {
                         continue;
                     };
                     let Ok(checkpoint) = serde_json::from_slice::<WorkflowCheckpoint>(&bytes)
@@ -305,7 +308,7 @@ impl CheckpointStore {
             {
                 continue;
             }
-            let Ok(bytes) = tokio::fs::read(&candidate.path).await else {
+            let Ok(bytes) = read_regular_file(&candidate.path).await else {
                 continue;
             };
             let Ok(checkpoint) = serde_json::from_slice::<WorkflowCheckpoint>(&bytes) else {
@@ -341,7 +344,7 @@ impl CheckpointStore {
         }
         let mut found = Vec::new();
         for candidate in candidates {
-            let Ok(bytes) = tokio::fs::read(&candidate.path).await else {
+            let Ok(bytes) = read_regular_file(&candidate.path).await else {
                 continue;
             };
             let Ok(checkpoint) = serde_json::from_slice::<WorkflowCheckpoint>(&bytes) else {
@@ -362,7 +365,7 @@ impl CheckpointStore {
     }
 
     async fn read_bytes(&self, workflow_id: &WorkflowId) -> Result<Vec<u8>, CheckpointStoreError> {
-        tokio::fs::read(self.path(workflow_id))
+        read_regular_file(&self.path(workflow_id))
             .await
             .map_err(|error| match error.kind() {
                 std::io::ErrorKind::NotFound => CheckpointStoreError::NotFound(workflow_id.clone()),
@@ -447,7 +450,7 @@ impl CheckpointStore {
         &self,
         workflow_id: &WorkflowId,
     ) -> Result<Option<SkillIssuedDecision>, CheckpointStoreError> {
-        match tokio::fs::read(self.issuance_path(workflow_id)).await {
+        match read_regular_file(&self.issuance_path(workflow_id)).await {
             Ok(bytes) => {
                 let issuance = serde_json::from_slice(&bytes)?;
                 Self::validate_skill_issuance_identity(workflow_id, &issuance)?;
@@ -516,6 +519,13 @@ impl CheckpointStore {
             )));
         }
         for receipt in &checkpoint.recovery_receipts {
+            // Attempts and pages can change after recovery, but a receipt
+            // always belongs to this workflow and its established session.
+            if receipt.identity.workflow_id != checkpoint.workflow_id
+                || receipt.identity.session_id != checkpoint.session_id
+            {
+                return Err(CheckpointStoreError::IdentityChanged);
+            }
             receipt.validate().map_err(|message| {
                 CheckpointStoreError::Serialization(serde_json::Error::io(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -548,6 +558,28 @@ impl CheckpointStore {
         locks.retain(|_, lock| Arc::strong_count(lock) > 1);
         locks.entry(workflow_id.clone()).or_default().clone()
     }
+}
+
+/// Validate the opened handle before reading: a metadata check on the path
+/// alone can race replacement, and opening a FIFO normally blocks first.
+async fn read_regular_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    #[cfg(windows)]
+    // FILE_FLAG_OPEN_REPARSE_POINT opens the link itself for validation.
+    options.custom_flags(0x0020_0000);
+    let mut file = options.open(path).await?;
+    if !file.metadata().await?.file_type().is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "checkpoint storage entry must be a regular file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).await?;
+    Ok(bytes)
 }
 
 fn checkpoint_digest(bytes: &[u8]) -> String {
