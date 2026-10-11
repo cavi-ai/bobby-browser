@@ -10,8 +10,7 @@ use chromiumoxide::cdp::browser_protocol::accessibility::QueryAxTreeParams;
 use chromiumoxide::cdp::browser_protocol::dom::Node as CdpNode;
 use chromiumoxide::cdp::browser_protocol::dom::{
     BackendNodeId, DescribeNodeParams, GetContentQuadsParams, GetDocumentParams,
-    GetFrameOwnerParams, RequestNodeParams, ResolveNodeParams, SetFileInputFilesParams,
-    ShadowRootType,
+    GetFrameOwnerParams, ResolveNodeParams, SetFileInputFilesParams, ShadowRootType,
 };
 use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
 use chromiumoxide::cdp::browser_protocol::page::{
@@ -1003,16 +1002,11 @@ pub async fn resolve_target_with_visibility(
     browser: Option<&BrowserHandle>,
 ) -> Result<ResolvedTarget, CommandError> {
     let Some(target) = target else {
-        let element = page.find_element(selector).await.map_err(|error| {
-            let message = error.to_string();
-            if message.contains("Could not find node with given id") {
-                target_error(
-                    ErrorCode::TargetNotFound,
-                    format!("no element matches selector `{selector}`"),
-                )
-            } else {
-                cdp_error(error)
-            }
+        let element = query_element(page, None, selector).await?.ok_or_else(|| {
+            target_error(
+                ErrorCode::TargetNotFound,
+                format!("no element matches selector `{selector}`"),
+            )
         })?;
         return Ok(ResolvedTarget {
             native: Some(element),
@@ -1062,10 +1056,16 @@ pub async fn resolve_target_with_visibility(
     let native = if target.frame_path.is_empty() && target.shadow_path.is_empty() {
         match (&owner, candidate.css.as_deref()) {
             (Some(element), Some(css)) if css.starts_with('#') => {
-                element.find_element(css).await.ok()
+                query_element(&scope.execution_page, Some(element), css)
+                    .await
+                    .ok()
+                    .flatten()
             }
             (None, Some(css)) if css.starts_with('#') => {
-                scope.execution_page.find_element(css).await.ok()
+                query_element(&scope.execution_page, None, css)
+                    .await
+                    .ok()
+                    .flatten()
             }
             _ => None,
         }
@@ -1229,6 +1229,12 @@ async fn accessibility_matches(
         .map_err(cdp_error)?
         .result
         .nodes;
+    // Each call releases only its own objects; a shared group would free the
+    // objects of a concurrent call on the same page.
+    let group = format!(
+        "{AX_RESOLVE_GROUP}-{}",
+        TARGET_SCOPE.fetch_add(1, Ordering::Relaxed)
+    );
     let mut ids = Vec::new();
     for backend_node_id in nodes
         .into_iter()
@@ -1239,7 +1245,7 @@ async fn accessibility_matches(
             .execute(
                 ResolveNodeParams::builder()
                     .backend_node_id(backend_node_id)
-                    .object_group(AX_RESOLVE_GROUP)
+                    .object_group(group.clone())
                     .build(),
             )
             .await
@@ -1269,9 +1275,7 @@ async fn accessibility_matches(
             ids.push(id.to_owned());
         }
     }
-    let _ = page
-        .execute(ReleaseObjectGroupParams::new(AX_RESOLVE_GROUP))
-        .await;
+    let _ = page.execute(ReleaseObjectGroupParams::new(group)).await;
     Ok(ids)
 }
 
@@ -1494,9 +1498,9 @@ async fn discovery_scan_root(
     shadow_hosts: &[String],
 ) -> Result<Element, CommandError> {
     match scope {
-        LocatorScope::Context(_) if shadow_hosts.is_empty() => {
-            page.find_element("html").await.map_err(cdp_error)
-        }
+        LocatorScope::Context(_) if shadow_hosts.is_empty() => query_element(page, None, "html")
+            .await?
+            .ok_or_else(|| target_error(ErrorCode::TargetDetached, "page has no html element")),
         LocatorScope::ClosedRoot(element) if shadow_hosts.is_empty() => page
             .element_from_backend_node_id(element.backend_node_id)
             .await
@@ -1517,13 +1521,59 @@ async fn element_from_remote_object(
     page.execute(GetDocumentParams::builder().depth(0).build())
         .await
         .map_err(cdp_error)?;
-    let node_id = page
-        .execute(RequestNodeParams::new(object_id))
+    // Built from the backend node id: requesting the document again, as any
+    // concurrent call on the page may, discards every frontend node id.
+    let backend_node_id = page
+        .execute(
+            DescribeNodeParams::builder()
+                .object_id(object_id)
+                .depth(0)
+                .build(),
+        )
         .await
         .map_err(cdp_error)?
         .result
-        .node_id;
-    page.element_from_node_id(node_id).await.map_err(cdp_error)
+        .node
+        .backend_node_id;
+    page.element_from_backend_node_id(backend_node_id)
+        .await
+        .map_err(cdp_error)
+}
+
+/// The first element `selector` matches under `owner`, or in the page's
+/// document without one.
+async fn query_element(
+    page: &Page,
+    owner: Option<&Element>,
+    selector: &str,
+) -> Result<Option<Element>, CommandError> {
+    let selector = serde_json::to_string(selector)
+        .map_err(|error| target_error(ErrorCode::InvalidRequest, error))?;
+    let object = match owner {
+        Some(owner) => {
+            owner
+                .call_js_fn(
+                    format!("function(){{return this.querySelector({selector})}}"),
+                    false,
+                )
+                .await
+                .map_err(cdp_error)?
+                .result
+        }
+        None => {
+            let mut params = EvaluateParams::new(format!("document.querySelector({selector})"));
+            params.return_by_value = Some(false);
+            page.evaluate(params)
+                .await
+                .map_err(cdp_error)?
+                .object()
+                .clone()
+        }
+    };
+    match object.object_id {
+        Some(object_id) => element_from_remote_object(page, object_id).await.map(Some),
+        None => Ok(None),
+    }
 }
 
 #[cfg(test)]
