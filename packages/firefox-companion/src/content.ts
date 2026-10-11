@@ -1126,6 +1126,8 @@ type A11yNode = {
   children?: A11yNode[];
 };
 
+type A11yTargetCount = { role: string; name: string; total: number; preceding: number };
+
 const A11Y_ACTIONABLE_ROLES = new Set([
   "button",
   "checkbox",
@@ -1153,7 +1155,8 @@ function a11yTree(
   targetInput?: unknown,
   locateOnly = false,
   includeText = false,
-): { nodes: A11yNode[]; truncated: boolean; located?: LocatedTarget } {
+  includeTargetCounts = false,
+): { nodes: A11yNode[]; truncated: boolean; located?: LocatedTarget; targetCounts?: A11yTargetCount[] } {
   let maxNodes = 256;
   if (typeof maxNodesInput === "number" && Number.isSafeInteger(maxNodesInput)) {
     maxNodes = Math.min(Math.max(1, maxNodesInput), A11Y_MAX_NODES);
@@ -1542,6 +1545,7 @@ function a11yTree(
   const nodes = build(scope, 0, 0, false);
   const targetSeen = new Map<string, number>(scopeSeen ?? []);
   const sendBudget = { values: A11Y_MAX_VALUES, bytes: MAX_OBSERVATION_BYTES };
+  const targetCounts = new Map<string, A11yTargetCount>();
   const annotateTargets = (candidates: A11yNode[]): A11yNode[] => {
     const kept: A11yNode[] = [];
     for (const node of candidates) {
@@ -1554,7 +1558,7 @@ function a11yTree(
       ) {
         const key = targetKey(node.role, node.name);
         const ordinal = targetSeen.get(key) ?? 0;
-        node.target = {
+        if (!includeTargetCounts || node.role === "iframe") node.target = {
           role: node.role,
           accessibleName: node.name,
           ...(targetTotals.get(key)! > 1 ? { ordinal } : {}),
@@ -1562,9 +1566,16 @@ function a11yTree(
         targetSeen.set(key, ordinal + 1);
       }
       const { children, ...own } = node;
+      const key = includeTargetCounts && own.role && own.name && own.name !== REDACTED &&
+        own.role !== "iframe" && A11Y_ACTIONABLE_ROLES.has(own.role) && !own.target?.framePath?.length
+        ? targetKey(own.role, own.name) : undefined;
+      const count = key && !targetCounts.has(key) ? {
+        role: own.role!, name: own.name!,
+        total: targetTotals.get(key) ?? 1, preceding: scopeSeen?.get(key) ?? 0,
+      } : undefined;
       const values =
-        2 + Object.keys(own).length + (own.target ? Object.keys(own.target).length : 0);
-      const bytes = byteLength(JSON.stringify(own)) + 4;
+        2 + Object.keys(own).length + (own.target ? Object.keys(own.target).length : 0) + (count ? 9 : 0);
+      const bytes = byteLength(JSON.stringify(own)) + 4 + (count ? byteLength(JSON.stringify(count)) + 1 : 0);
       if (sendBudget.values < values || sendBudget.bytes < bytes) {
         state.truncated = true;
         sendBudget.values = 0;
@@ -1572,6 +1583,7 @@ function a11yTree(
       }
       sendBudget.values -= values;
       sendBudget.bytes -= bytes;
+      if (key && count) targetCounts.set(key, count);
       if (children) {
         const keptChildren = annotateTargets(children);
         if (keptChildren.length) node.children = keptChildren;
@@ -1583,7 +1595,9 @@ function a11yTree(
   };
   const sent = annotateTargets(nodes);
   if (state.remaining <= 0) state.truncated = true;
-  return { nodes: sent, truncated: state.truncated };
+  return { nodes: sent, truncated: state.truncated,
+    ...(includeTargetCounts ? { targetCounts: [...targetCounts.values()] } : {}),
+  };
 }
 
 export function executeContentAction(
@@ -1596,7 +1610,7 @@ export function executeContentAction(
     return observeRoot(document, inspectionRoot(document, parsed), parsed.includeHtml as boolean);
   }
   if (operation === "a11yTree") {
-    return a11yTree(document, parsed.maxNodes, parsed.target, false, parsed.includeText === true);
+    return a11yTree(document, parsed.maxNodes, parsed.target, false, parsed.includeText === true, parsed.includeTargetCounts === true);
   }
   if (operation === "locateTarget") {
     return a11yTree(document, 1, parsed.target, true).located;

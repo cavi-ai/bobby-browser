@@ -4909,7 +4909,7 @@ fn compact_ax_tree_from(
         }
     }
     let truncated = budget == 0 && (forced_root.is_some() || raw.len() > max_nodes);
-    super::annotate_accessibility_targets_with_totals(&mut roots_built, &target_totals, preceding);
+    super::annotate_accessibility_targets(&mut roots_built, &target_totals, preceding);
     (roots_built, truncated)
 }
 

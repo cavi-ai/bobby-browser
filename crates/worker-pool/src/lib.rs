@@ -1,3 +1,4 @@
+mod accessibility_targets;
 mod chromium;
 mod engine;
 mod page_behavior;
@@ -19,7 +20,9 @@ mod targeting;
 pub mod upload;
 pub mod wait;
 
-use std::collections::{BTreeMap, HashMap};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
@@ -34,6 +37,10 @@ pub use worker_failure::{
     BROWSER_GONE_MESSAGE, FIREFOX_WORKER_CLOSED_MESSAGE,
 };
 
+pub(crate) use accessibility_targets::accessibility_role_is_actionable;
+pub use accessibility_targets::{
+    accessibility_target_totals, annotate_accessibility_targets, AccessibilityTargetCount,
+};
 pub use fingerprint_host::ChromiumPageHost;
 pub use form_snapshot::{
     control_action_evidence, decode_form_snapshot, form_snapshot_expression,
@@ -55,92 +62,6 @@ pub use skill_adapter::{
     PRODUCTION_SKILL_CAPABILITIES,
 };
 pub use targeting::validate_target_spec;
-
-/// Adds command-ready semantic targets to actionable accessibility nodes.
-/// Duplicate role/name pairs receive an ordinal in tree traversal order,
-/// matching the candidate collection order used by the resolver.
-pub fn annotate_accessibility_targets(nodes: &mut [types::AccessibilityNode]) {
-    let mut totals = BTreeMap::new();
-    count_accessibility_targets(nodes, &mut totals);
-    annotate_accessibility_targets_with_totals(nodes, &totals, BTreeMap::new());
-}
-
-pub(crate) fn accessibility_role_is_actionable(role: &str) -> bool {
-    matches!(
-        role,
-        "button"
-            | "checkbox"
-            | "combobox"
-            | "link"
-            | "listbox"
-            | "menuitem"
-            | "menuitemcheckbox"
-            | "menuitemradio"
-            | "option"
-            | "radio"
-            | "searchbox"
-            | "slider"
-            | "spinbutton"
-            | "switch"
-            | "tab"
-            | "textbox"
-            | "treeitem"
-    )
-}
-
-fn count_accessibility_targets(
-    nodes: &[types::AccessibilityNode],
-    totals: &mut BTreeMap<(String, String), usize>,
-) {
-    for node in nodes {
-        if let (Some(role), Some(name)) = (&node.role, &node.name) {
-            if accessibility_role_is_actionable(role) && !name.is_empty() && name != "[redacted]" {
-                *totals.entry((role.clone(), name.clone())).or_default() += 1;
-            }
-        }
-        count_accessibility_targets(&node.children, totals);
-    }
-}
-
-/// `preceding` counts the targets of each role and name that come before
-/// `nodes` in the page, so ordinals stay page-wide in a scoped tree.
-pub(crate) fn annotate_accessibility_targets_with_totals(
-    nodes: &mut [types::AccessibilityNode],
-    totals: &BTreeMap<(String, String), usize>,
-    preceding: BTreeMap<(String, String), usize>,
-) {
-    fn annotate(
-        nodes: &mut [types::AccessibilityNode],
-        totals: &BTreeMap<(String, String), usize>,
-        seen: &mut BTreeMap<(String, String), usize>,
-    ) {
-        for node in nodes {
-            if let (Some(role), Some(name)) = (&node.role, &node.name) {
-                let key = (role.clone(), name.clone());
-                if accessibility_role_is_actionable(role)
-                    && !name.is_empty()
-                    && name != "[redacted]"
-                {
-                    let index = seen.entry(key.clone()).or_default();
-                    if node.target.is_none() {
-                        node.target = Some(types::AccessibilityTarget {
-                            role: role.clone(),
-                            accessible_name: name.clone(),
-                            ordinal: (totals.get(&key).copied().unwrap_or_default() > 1)
-                                .then_some(*index),
-                            frame_path: Vec::new(),
-                        });
-                    }
-                    *index += 1;
-                }
-            }
-            annotate(&mut node.children, totals, seen);
-        }
-    }
-
-    let mut seen = preceding;
-    annotate(nodes, totals, &mut seen);
-}
 
 pub fn session_download_dir(root: &Path, session_id: &SessionId) -> PathBuf {
     root.join(session_id.0.to_string())
@@ -810,7 +731,7 @@ mod accessibility_ordinal_tests {
         totals.insert(("textbox".into(), "Phone".into()), 2);
         let mut preceding = BTreeMap::new();
         preceding.insert(("textbox".into(), "Phone".into()), 1);
-        annotate_accessibility_targets_with_totals(&mut nodes, &totals, preceding);
+        annotate_accessibility_targets(&mut nodes, &totals, preceding);
         assert_eq!(nodes[0].target.as_ref().unwrap().ordinal, Some(1));
     }
 
@@ -827,7 +748,8 @@ mod accessibility_ordinal_tests {
             }),
             ..types::AccessibilityNode::default()
         }];
-        annotate_accessibility_targets(&mut nodes);
+        let totals = accessibility_target_totals(&nodes);
+        annotate_accessibility_targets(&mut nodes, &totals, BTreeMap::new());
         assert_eq!(nodes[0].target.as_ref().unwrap().ordinal, Some(3));
     }
 }

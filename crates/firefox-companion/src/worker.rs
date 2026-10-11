@@ -75,54 +75,10 @@ const COMPOSED_QUERY_ALL: &str = "((selector)=>{const parts=selector.split(' >>>
 
 /// Accessibility nodes read to build intent candidates.
 const CANDIDATE_MAX_NODES: u32 = 1024;
-const FRAME_CANDIDATES_SCRIPT: &str = r#"(()=>{
-  const controls=[];
-  const nodes=document.querySelectorAll('input,textarea,select,button,a[href],iframe,[role]');
-  const bounded=value=>typeof value==='string'?value.trim().replace(/\s+/g,' ').slice(0,256):'';
-  const secret=/(?:authorization|authentication|bearer|token|secret|password|passwd|api[-_]?key|credential)/i;
-  const paymentValue=/(?:card(?: number)?|cvc|cvv|otp|expiry|challenge code)\s*[:=]?\s*\d{3,}/i;
-  const credentialShape=/(?:\d[ -]?){12,19}|[a-zA-Z0-9_-]{32,}/;
-  const publicLabels=new Set(['Password','Authentication code','Card details','Card number','Expiry','CVC','3-D Secure challenge','Challenge code']);
-  const isCredentialShaped=token=>/\d/.test(token)||token.endsWith('=')||(/[A-Z]/.test(token.slice(1))&&/[a-z]/.test(token));
-  const hasAuthScheme=value=>Array.from(value.matchAll(/(?:^|\s)(?:bearer|basic)\s+([A-Za-z0-9._~+\/=-]{8,})/gi)).some(match=>isCredentialShaped(match[1]));
-  const hasLongRun=value=>Array.from(value.matchAll(/[A-Za-z0-9+\/_=-]{40,}/g)).some(match=>/\d/.test(match[0])&&/[A-Z]/.test(match[0])&&/[a-z]/.test(match[0]));
-  const secretMaterial=value=>hasAuthScheme(value)||/(?:password|passwd|secret|token|api[-_ ]?key|credentials?|authorization|private[-_ ]?(?:key|token|secret)|pairing[-_ ]?code)\s*[:=]\s*\S{4}/i.test(value)||/-----BEGIN[\s\S]*?PRIVATE KEY-----/.test(value)||/eyJ[\w-]{7,}\.[\w-]{10,}\.[\w-]{10,}/.test(value)||/(?<![A-Za-z0-9])(?:sk-|sk_live_|sk_test_|rk_live_|ghp_|gho_|ghu_|ghs_|github_pat_|xox[abprs]-)[A-Za-z0-9_-]{16,}/.test(value)||/(?<![A-Z0-9])AKIA[A-Z0-9]{16}/.test(value)||/AIza[A-Za-z0-9_-]{35}/.test(value)||(!/^https?:\/\//i.test(value.trim())&&hasLongRun(value));
-  const safeLabel=value=>publicLabels.has(value)?value:(secretMaterial(value)||paymentValue.test(value)||credentialShape.test(value)?'[redacted]':value);
-  const sensitive=element=>['input','textarea','select'].includes(element.localName)&&((element.localName==='input'&&element.type==='password')||Array.from(element.attributes).some(attribute=>secret.test(attribute.name)||secret.test(attribute.value)||paymentValue.test(attribute.value)||/(?:card|cvc|cvv|otp|one[-_]?time|expiry|challenge|code)/i.test(attribute.name)||credentialShape.test(attribute.value)));
-  const path=element=>{
-    const parts=[];
-    for(let current=element;current;current=current.parentElement){
-      if(parts.length>=12)return null;
-      const tag=current.localName;
-      if(!/^[a-z][a-z0-9-]*$/.test(tag))return null;
-      let position=1;
-      for(let peer=current.previousElementSibling;peer;peer=peer.previousElementSibling){
-        if(peer.localName===tag)position++;
-      }
-      parts.unshift(`${tag}:nth-of-type(${position})`);
-    }
-    const selector=parts.join(' > ');
-    return selector.length<=2048?selector:null;
-  };
-  for(let index=0;index<nodes.length&&index<4096;index++){
-    const element=nodes[index];
-    if(element.getClientRects().length===0||getComputedStyle(element).visibility==='hidden')continue;
-    const tag=element.localName;
-    const role=bounded(element.getAttribute('role'))||({input:'textbox',textarea:'textbox',select:'combobox',button:'button',a:'link',iframe:'iframe'})[tag]||'';
-    const isSensitive=sensitive(element);
-    const rawLabel=bounded(element.labels?.[0]?.textContent||element.closest('label')?.textContent);
-    const rawName=bounded(element.getAttribute('aria-label')||element.getAttribute('title')||element.getAttribute('alt')||rawLabel||((tag==='button'||tag==='a')?element.textContent:''));
-    const label=isSensitive?(publicLabels.has(rawLabel)?rawLabel:'[redacted]'):safeLabel(rawLabel);
-    const name=isSensitive?(publicLabels.has(rawName)?rawName:'[redacted]'):safeLabel(rawName);
-    const css=path(element);
-    if(!css)continue;
-    controls.push({css,role,name,label,disabled:Boolean(element.disabled)});
-    if(controls.length>128)return JSON.stringify({truncated:true,controls:[]});
-  }
-  if(nodes.length>4096)return JSON.stringify({truncated:true,controls:[]});
-  const output=JSON.stringify({truncated:false,controls});
-  return output.length<=65536?output:JSON.stringify({truncated:true,controls:[]});
-})()"#;
+fn frame_candidates_script() -> String {
+    format!("(()=>{{const gathered=({})(document,{{controlsOnly:true,redact:true,maxNodes:4096,maxCandidates:128}});const controls=gathered.candidates.map(c=>({{css:c.css,role:c.role||'',name:c.name||'',label:c.label||'',disabled:!c.enabled}}));const output=JSON.stringify({{truncated:gathered.truncated,controls}});return output.length<=65536?output:JSON.stringify({{truncated:true,controls:[]}});}})()", dom_engine::candidate_gather_function())
+}
+
 const DEFAULT_NAVIGATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn session_subscribe_params() -> Value {
@@ -212,11 +168,23 @@ pub struct TargetLocation {
     pub disabled: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ExtensionAccessibilitySnapshot {
-    nodes: Vec<types::AccessibilityNode>,
-    truncated: bool,
+pub struct AccessibilitySnapshot {
+    pub nodes: Vec<types::AccessibilityNode>,
+    pub truncated: bool,
+    #[serde(default)]
+    pub target_counts: Option<Vec<worker_pool::AccessibilityTargetCount>>,
+}
+
+impl From<(Vec<types::AccessibilityNode>, bool)> for AccessibilitySnapshot {
+    fn from((nodes, truncated): (Vec<types::AccessibilityNode>, bool)) -> Self {
+        Self {
+            nodes,
+            truncated,
+            target_counts: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -281,7 +249,7 @@ pub trait ExtensionObserver: Send + Sync {
         max_nodes: u32,
         target: Option<&types::TargetSpec>,
         include_text: bool,
-    ) -> Result<(Vec<types::AccessibilityNode>, bool), CommandError> {
+    ) -> Result<AccessibilitySnapshot, CommandError> {
         let _ = (lease, page_id, max_nodes, target, include_text);
         Err(driver_error(
             ErrorCode::BrowserCommandFailed,
@@ -543,7 +511,7 @@ impl ExtensionObserver for CompanionExtensionObserver {
         max_nodes: u32,
         target: Option<&types::TargetSpec>,
         include_text: bool,
-    ) -> Result<(Vec<types::AccessibilityNode>, bool), CommandError> {
+    ) -> Result<AccessibilitySnapshot, CommandError> {
         if lease.expires_at <= Instant::now() {
             return Err(lease_error());
         }
@@ -558,7 +526,7 @@ impl ExtensionObserver for CompanionExtensionObserver {
             command_id: command_id.clone(),
             page_id: page_id.clone(),
             operation: "a11yTree".into(),
-            input: json!({"maxNodes": max_nodes, "target": scope, "includeText": include_text}),
+            input: json!({"maxNodes": max_nodes, "target": scope, "includeText": include_text, "includeTargetCounts": true}),
             deadline_unix_ms: deadline_unix_ms(self.timeout),
         };
         match self
@@ -570,8 +538,8 @@ impl ExtensionObserver for CompanionExtensionObserver {
                 if result.command_id == command_id
                     && result.interaction_path == InteractionPath::ExtensionApi =>
             {
-                let snapshot: ExtensionAccessibilitySnapshot =
-                    serde_json::from_value(result.output).map_err(|error| {
+                let snapshot: AccessibilitySnapshot = serde_json::from_value(result.output)
+                    .map_err(|error| {
                         driver_error(
                             ErrorCode::BrowserCommandFailed,
                             format!("invalid extension accessibility snapshot: {error}"),
@@ -585,7 +553,7 @@ impl ExtensionObserver for CompanionExtensionObserver {
                         false,
                     ));
                 }
-                Ok((snapshot.nodes, snapshot.truncated))
+                Ok(snapshot)
             }
             CompanionEvent::ActionCompleted(_) => Err(driver_error(
                 ErrorCode::BrowserCommandFailed,
@@ -1983,7 +1951,7 @@ impl FirefoxCompanionWorker {
         worker_pool::validate_target_spec(target)?;
         let mut context = top_context.to_owned();
         for frame in &target.frame_path {
-            let frame_selector = if let Some(selector) = direct_target_selector(frame) {
+            let frame_selector = if let Some(selector) = dom_engine::exact_target_selector(frame) {
                 selector
             } else {
                 let candidates = self.gather_bidi_context_candidates(&context).await?;
@@ -2117,7 +2085,7 @@ impl FirefoxCompanionWorker {
             .send(
                 "script.evaluate",
                 json!({
-                    "expression": FRAME_CANDIDATES_SCRIPT,
+                    "expression": frame_candidates_script(),
                     "target": {"context": context, "sandbox": COMPANION_SANDBOX},
                     "awaitPromise": false,
                     "resultOwnership": "none",
@@ -2201,7 +2169,7 @@ impl FirefoxCompanionWorker {
             return Ok((top_context.to_owned(), selector.to_owned()));
         };
         let context = self.resolve_input_context(top_context, target).await?;
-        if let Some(selector) = direct_target_selector(target) {
+        if let Some(selector) = dom_engine::exact_target_selector(target) {
             return Ok((context, selector));
         }
         let (candidates, truncated) = self
@@ -2441,12 +2409,12 @@ impl FirefoxCompanionWorker {
         let hosts = target
             .shadow_path
             .iter()
-            .map(|host| shadow_target_descriptor(host))
+            .map(|host| dom_engine::shadow_segment_descriptor(host))
             .collect::<Result<Vec<_>, _>>()?;
         // The caller already descended frame_path to obtain this context.
         let mut local_target = target.clone();
         local_target.frame_path.clear();
-        let target_selector = shadow_target_descriptor(&local_target)?;
+        let target_selector = dom_engine::shadow_segment_descriptor(&local_target)?;
         let (max_matches, finish) = match read {
             ShadowRead::Element => (
                 2,
@@ -2466,34 +2434,19 @@ impl FirefoxCompanionWorker {
         let target_json = serde_json::to_string(&target_selector)
             .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
         let response = self.transport.send("script.evaluate", json!({
-            "expression": format!("(()=>{{const norm=s=>String(s??'').replace(/\\s+/g,' ').trim();const resolve=(root,spec,limit=2)=>{{if(spec.selector){{const nodes=root.querySelectorAll(spec.selector);if(limit>2&&nodes.length>10000)return 'too-many';return [...nodes].slice(0,limit);}}const selector=spec.role==='button'?'button,[role=button]':spec.role==='group'?'[role=group]':'*';const nodes=root.querySelectorAll(selector);if(nodes.length>10000)return 'too-many';const matches=[];for(const el of nodes){{const role=el.getAttribute('role')||(el.tagName==='BUTTON'?'button':null);if(role!==spec.role)continue;const labelledBy=el.getAttribute('aria-labelledby');const labelled=labelledBy?labelledBy.split(/\\s+/).map(id=>el.ownerDocument.getElementById(id)?.textContent??'').join(' '):null;const name=el.getAttribute('aria-label')??labelled??el.textContent;if(norm(name)===norm(spec.name))matches.push(el);if(matches.length>=limit)break;}}return matches;}};let root=document;for(const spec of {hosts_json}){{const matches=resolve(root,spec);if(matches==='too-many')return 'too-many';if(matches.length===0)return 'host-missing';if(matches.length!==1)return 'host-ambiguous';if(!matches[0].shadowRoot)return 'shadow-unavailable';root=matches[0].shadowRoot;}}const matches=resolve(root,{target_json},{max_matches});if(matches==='too-many')return 'too-many';if(matches.length===0)return 'target-missing';{finish}}})()"),
+            "expression": format!("(()=>{{const gather=({});const match=({});const resolve=(root,spec,limit=2)=>match(root,spec,gather,limit);let root=document;for(const spec of {hosts_json}){{const matches=resolve(root,spec);if(matches==='too-many')return 'too-many';if(matches.length===0)return 'host-missing';if(matches.length!==1)return 'host-ambiguous';if(!matches[0].shadowRoot)return 'shadow-unavailable';root=matches[0].shadowRoot;}}const matches=resolve(root,{target_json},{max_matches});if(matches==='too-many')return 'too-many';if(matches.length===0)return 'target-missing';{finish}}})()", dom_engine::candidate_gather_function(), dom_engine::shadow_segment_function()),
             "target": {"context": context, "sandbox": COMPANION_SANDBOX},
             "awaitPromise": false,
             "resultOwnership": "none",
         })).await?;
-        match response.pointer("/result/value").and_then(Value::as_str) {
-            Some("host-ambiguous") | Some("target-ambiguous") => Err(driver_error(
-                ErrorCode::TargetAmbiguous,
-                "Firefox shadow path or target is ambiguous",
-                false,
-            )),
-            Some("target-missing") => Err(driver_error(
-                ErrorCode::TargetNotFound,
-                "Firefox shadow target was not found",
-                false,
-            )),
-            Some("host-missing") | Some("shadow-unavailable") => Err(driver_error(
-                ErrorCode::ShadowRootUnavailable,
-                "Firefox shadow host or open root is unavailable",
-                false,
-            )),
-            Some("too-many") => Err(driver_error(
-                ErrorCode::BrowserCommandFailed,
-                "Firefox shadow search exceeded its node bound",
-                false,
-            )),
-            _ => Ok(response),
+        if let Some(error) = response
+            .pointer("/result/value")
+            .and_then(Value::as_str)
+            .and_then(dom_engine::shadow_probe_error)
+        {
+            return Err(error);
         }
+        Ok(response)
     }
 
     async fn resolve_shadow_element(
@@ -3972,7 +3925,9 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
                 false,
             ));
         }
-        let (nodes, truncated) = self
+        let AccessibilitySnapshot {
+            nodes, truncated, ..
+        } = self
             .observer
             .a11y_snapshot(
                 &self.current_lease(),
@@ -4293,7 +4248,11 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         self.context(page_id).await?;
         let max_nodes = command.max_nodes.unwrap_or(256).clamp(1, 2048);
-        let (mut nodes, truncated) = self
+        let AccessibilitySnapshot {
+            mut nodes,
+            truncated,
+            target_counts,
+        } = self
             .observer
             .a11y_snapshot(
                 &self.current_lease(),
@@ -4303,7 +4262,45 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
                 true,
             )
             .await?;
-        worker_pool::annotate_accessibility_targets(&mut nodes);
+        let mut totals = worker_pool::accessibility_target_totals(&nodes);
+        let mut preceding = std::collections::BTreeMap::new();
+        // Preserve targets stamped by companions that omit count metadata.
+        if let Some(counts) = target_counts {
+            if counts.len() > max_nodes as usize {
+                return Err(driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "extension target counts exceeded the snapshot node bound",
+                    false,
+                ));
+            }
+            let mut keys = std::collections::BTreeSet::new();
+            for count in counts {
+                let key = (count.role, count.name);
+                let local = totals.get(&key).copied().unwrap_or_default();
+                if count.total == 0
+                    || count.preceding >= count.total
+                    || local == 0
+                    || local > (count.total - count.preceding) as usize
+                    || !keys.insert(key.clone())
+                {
+                    return Err(driver_error(
+                        ErrorCode::BrowserCommandFailed,
+                        "extension accessibility target counts are invalid",
+                        false,
+                    ));
+                }
+                totals.insert(key.clone(), count.total as usize);
+                preceding.insert(key, count.preceding as usize);
+            }
+            if keys.len() != totals.len() {
+                return Err(driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "extension accessibility target counts are incomplete",
+                    false,
+                ));
+            }
+        }
+        worker_pool::annotate_accessibility_targets(&mut nodes, &totals, preceding);
         // Only a whole, unscoped tree can show that a control is missing from it.
         let controls_omitted =
             if truncated || command.target.is_some() || accessibility_contains_form_control(&nodes)
@@ -6003,53 +6000,7 @@ fn located_candidate(location: &TargetLocation, css_path: String) -> Candidate {
 }
 
 fn accessibility_candidates(nodes: &[types::AccessibilityNode]) -> Vec<Candidate> {
-    fn collect(nodes: &[types::AccessibilityNode], candidates: &mut Vec<Candidate>) {
-        for node in nodes {
-            let mut text = Vec::new();
-            if let Some(name) = node.name.as_deref().filter(|value| !value.is_empty()) {
-                text.push(name);
-            }
-            if let Some(description) = node
-                .description
-                .as_deref()
-                .filter(|value| !value.is_empty())
-            {
-                text.push(description);
-            }
-            if let Some(value) = node.value.as_deref().filter(|value| !value.is_empty()) {
-                text.push(value);
-            }
-            let mut attributes = std::collections::BTreeMap::new();
-            if let Some(input_type) = &node.input_type {
-                attributes.insert("type".into(), input_type.clone());
-            }
-            if node.invalid == Some(true) {
-                attributes.insert("aria-invalid".into(), "true".into());
-            }
-            candidates.push(Candidate {
-                id: format!("firefox-a11y-{}", candidates.len()),
-                css: None,
-                tag: None,
-                test_id: None,
-                role: node.role.clone(),
-                name: node.name.clone(),
-                label: None,
-                text: text.join(" "),
-                attributes,
-                state: CandidateState {
-                    attached: true,
-                    visible: true,
-                    enabled: node.disabled != Some(true),
-                },
-                frame_path: Vec::new(),
-            });
-            collect(&node.children, candidates);
-        }
-    }
-
-    let mut candidates = Vec::new();
-    collect(nodes, &mut candidates);
-    candidates
+    dom_engine::accessibility_candidates(nodes, "firefox-a11y")
 }
 
 #[cfg(test)]
@@ -6909,7 +6860,7 @@ fn a11y_scope_input(target: &types::TargetSpec) -> Result<Value, CommandError> {
             false,
         ));
     }
-    if direct_target_selector(target).is_none() && target.role.is_none() {
+    if dom_engine::exact_target_selector(target).is_none() && target.role.is_none() {
         return Err(driver_error(
             ErrorCode::InvalidRequest,
             "Firefox scoped accessibility snapshots need a role, CSS selector, or test ID target",
@@ -6923,57 +6874,6 @@ fn a11y_scope_input(target: &types::TargetSpec) -> Result<Value, CommandError> {
         "accessibleName": target.accessible_name,
         "ordinal": target.ordinal,
     }))
-}
-
-fn direct_target_selector(target: &types::TargetSpec) -> Option<String> {
-    if let Some(css) = target.css.as_ref().filter(|css| !css.is_empty()) {
-        return Some(css.clone());
-    }
-    target
-        .test_id
-        .as_ref()
-        .filter(|value| !value.is_empty())
-        .map(|value| {
-            let escaped = value.chars().fold(String::new(), |mut output, character| {
-                if character == '\\' || character == '"' {
-                    output.push('\\');
-                }
-                output.push(character);
-                output
-            });
-            format!("[data-testid=\"{escaped}\"]")
-        })
-}
-
-fn shadow_target_descriptor(target: &types::TargetSpec) -> Result<Value, CommandError> {
-    if let Some(selector) = direct_target_selector(target) {
-        return Ok(json!({"selector": selector}));
-    }
-    if let (Some(role), Some(name)) = (
-        target
-            .role
-            .as_deref()
-            .filter(|value| !value.trim().is_empty()),
-        target
-            .accessible_name
-            .as_deref()
-            .filter(|value| !value.trim().is_empty()),
-    ) {
-        if target.attributes.is_empty()
-            && target.label.is_none()
-            && target.text.is_none()
-            && target.ordinal.is_none()
-            && !target.allow_best_match
-            && target.frame_path.is_empty()
-        {
-            return Ok(json!({"role": role, "name": name}));
-        }
-    }
-    Err(driver_error(
-        ErrorCode::InvalidRequest,
-        "Firefox shadow segment requires exact CSS, test ID, or role and accessible name",
-        false,
-    ))
 }
 
 fn popup_context_from_event(event: &BidiEvent, opener: &str) -> Option<(String, String)> {

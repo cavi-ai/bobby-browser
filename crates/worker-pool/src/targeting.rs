@@ -27,8 +27,8 @@ use chromiumoxide::layout::{ElementQuad, Point};
 use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide::{Command, Element, Method, Page};
 use dom_engine::{
-    rank_candidates, resolve_candidates, Candidate, CandidateState, ResolutionDecision,
-    ResolutionPolicy,
+    accessibility_alignment_unnecessary, apply_accessibility_alignment, rank_candidates,
+    resolve_candidates, Candidate, CandidateState, ResolutionDecision, ResolutionPolicy,
 };
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -633,7 +633,7 @@ pub async fn gather_candidates(
     .await?;
     let raw =
         align_with_accessibility(&scope.execution_page, scope.context_id, target, raw).await?;
-    let mut candidates: Vec<Candidate> = raw.into_iter().map(into_candidate).collect();
+    let mut candidates = raw;
     // Auto-descend one level into iframes for main-frame intents: agents
     // cannot name a framePath for content they cannot see, so without this
     // every in-frame control resolves as targetNotFound. Each stamped
@@ -838,7 +838,11 @@ async fn open_target_scope(
         if normalized_frame_target.accessible_name.as_deref() == Some("") {
             normalized_frame_target.accessible_name = None;
         }
-        let (candidate, evidence, _) = choose(&normalized_frame_target, raw, true)?;
+        let (candidate, evidence, _) = choose(
+            &normalized_frame_target,
+            raw.into_iter().map(into_candidate).collect(),
+            true,
+        )?;
         frame_trace.push(evidence);
         let deadline = Instant::now() + Duration::from_secs(2);
         let (child, oopif) = loop {
@@ -890,7 +894,7 @@ async fn open_target_scope(
 
     let mut closed_root: Option<Arc<Element>> = None;
 
-    for (index, host_target) in target.shadow_path.iter().enumerate() {
+    for host_target in &target.shadow_path {
         let scope_ref = match &closed_root {
             Some(element) => LocatorScope::ClosedRoot(Arc::clone(element)),
             None => LocatorScope::Context(context_id),
@@ -904,7 +908,9 @@ async fn open_target_scope(
                 collect_candidates_within(element, &shadow_hosts, nested_scope).await?
             }
         };
-        let (candidate, evidence, _) = choose(host_target, raw, true)?;
+        let candidates: Vec<_> = raw.into_iter().map(into_candidate).collect();
+        let (candidate, evidence, _) =
+            dom_engine::resolve_shadow_segment(host_target, &candidates)?;
         let mut prospective = shadow_hosts.clone();
         prospective.push(candidate.id.clone());
         let has_root: bool = eval_scoped(
@@ -929,10 +935,7 @@ async fn open_target_scope(
         )
         .await?;
         let Some(root_backend_id) = discovered else {
-            return Err(target_error(
-                ErrorCode::ShadowRootUnavailable,
-                format!("shadow path component {index} has no attached shadow root"),
-            ));
+            return Err(dom_engine::shadow_probe_error("shadow-unavailable").unwrap());
         };
         let element = execution_page
             .element_from_backend_node_id(root_backend_id)
@@ -1166,8 +1169,9 @@ async fn align_with_accessibility(
     page: &Page,
     context_id: Option<ExecutionContextId>,
     target: &TargetSpec,
-    mut raw: Vec<BrowserCandidate>,
-) -> Result<Vec<BrowserCandidate>, CommandError> {
+    raw: Vec<BrowserCandidate>,
+) -> Result<Vec<Candidate>, CommandError> {
+    let mut raw: Vec<Candidate> = raw.into_iter().map(into_candidate).collect();
     let (Some(role), Some(name)) = (&target.role, &target.accessible_name) else {
         return Ok(raw);
     };
@@ -1177,55 +1181,6 @@ async fn align_with_accessibility(
     let exposed = accessibility_matches(page, context_id, role, name).await?;
     apply_accessibility_alignment(&mut raw, role, name, &exposed);
     Ok(raw)
-}
-
-fn gathered_name_match(candidate: &BrowserCandidate, role: &str, name: &str) -> bool {
-    candidate
-        .role
-        .as_deref()
-        .is_some_and(|actual| actual.eq_ignore_ascii_case(role))
-        && candidate.name.as_deref().map(str::trim) == Some(name.trim())
-}
-
-/// One gathered match and no ordinal already agrees with the accessibility
-/// tree, so the tree probe can be skipped.
-fn accessibility_alignment_unnecessary(
-    raw: &[BrowserCandidate],
-    role: &str,
-    name: &str,
-    ordinal: Option<usize>,
-) -> bool {
-    ordinal.is_none()
-        && raw
-            .iter()
-            .filter(|candidate| gathered_name_match(candidate, role, name))
-            .count()
-            == 1
-}
-
-/// Keeps candidates the accessibility tree exposes for `role` and `name`,
-/// and rewrites those candidates' names to the tree's. An empty exposure
-/// leaves the gathered set alone. Gathered matches the tree does not expose
-/// drop out; other gathered candidates stay.
-fn apply_accessibility_alignment(
-    raw: &mut Vec<BrowserCandidate>,
-    role: &str,
-    name: &str,
-    exposed: &[String],
-) {
-    if exposed.is_empty() {
-        return;
-    }
-    raw.retain(|candidate| {
-        exposed.iter().any(|id| id == &candidate.id) || !gathered_name_match(candidate, role, name)
-    });
-    for candidate in raw
-        .iter_mut()
-        .filter(|candidate| exposed.iter().any(|id| id == &candidate.id))
-    {
-        candidate.role = Some(role.to_owned());
-        candidate.name = Some(name.to_owned());
-    }
 }
 
 /// The gathered ids of the elements Chrome's accessibility tree exposes with
@@ -1312,10 +1267,9 @@ const AX_RESOLVE_GROUP: &str = "bobby-accessibility-named";
 
 fn choose(
     target: &TargetSpec,
-    raw: Vec<BrowserCandidate>,
+    candidates: Vec<Candidate>,
     require_visible: bool,
 ) -> Result<(Candidate, types::CandidateEvidence, bool), CommandError> {
-    let candidates = raw.into_iter().map(into_candidate).collect::<Vec<_>>();
     let policy = ResolutionPolicy {
         require_visible,
         ..ResolutionPolicy::default()
@@ -1661,15 +1615,11 @@ async fn discover_closed_root_for_candidate(
 }
 
 fn candidate_collector_operation(scope: u64) -> Result<String, CommandError> {
-    let prefix = format!("bobby-{scope}-");
-    let prefix = serde_json::to_string(&prefix)
+    let prefix = serde_json::to_string(&format!("bobby-{scope}-"))
         .map_err(|error| target_error(ErrorCode::InvalidRequest, error))?;
     Ok(format!(
-        r#"let n=0,out=[];
-const labelledBy=el=>(el.getAttribute('aria-labelledby')||'').split(/\s+/).filter(Boolean).map(id=>String(el.ownerDocument.getElementById(id)?.innerText||'').trim()||'').filter(Boolean).join(' ')||null;
-const contentName=el=>{{const parts=[];const walk=n=>{{if(n.nodeType===3){{parts.push(n.nodeValue);return;}}if(n.nodeType!==1)return;const tag=n.tagName.toLowerCase();if(tag==='script'||tag==='style')return;if(tag==='img'){{parts.push(' '+(n.getAttribute('alt')||'')+' ');return;}}if(tag==='title'&&n.parentElement instanceof SVGElement){{parts.push(' '+n.textContent+' ');return;}}const s=getComputedStyle(n);if(s.display==='none'||s.visibility==='hidden')return;for(const c of n.childNodes)walk(c);}};walk(el);return parts.join('').replace(/\s+/g,' ').trim()||null;}};
-const implicitRole=el=>{{if(el.tagName==='BUTTON')return 'button';if(el.tagName==='A'&&el.hasAttribute('href'))return 'link';if(el.tagName==='IFRAME')return 'iframe';if(el.tagName==='TEXTAREA'||el.isContentEditable)return 'textbox';if(el.tagName==='SELECT')return el.multiple?'listbox':'combobox';if(el.tagName==='FORM')return 'form';if(el.tagName==='DIALOG')return 'dialog';if(el.tagName==='MAIN')return 'main';if(el.tagName==='NAV')return 'navigation';if(el.tagName==='ARTICLE')return 'article';if(el.tagName==='SECTION'&&(el.getAttribute('aria-label')||el.getAttribute('aria-labelledby')))return 'region';if(/^H[1-6]$/.test(el.tagName))return 'heading';if(el.tagName==='UL'||el.tagName==='OL'||el.tagName==='MENU'||el.tagName==='DL')return 'list';if(el.tagName==='LI')return 'listitem';if(el.tagName==='IMG')return 'img';if(el.tagName==='OPTION')return 'option';if(el.tagName==='TABLE')return 'table';if(el.tagName==='TR')return 'row';if(el.tagName==='TD')return 'cell';if(el.tagName==='TH')return 'columnheader';if(el.tagName==='P')return 'paragraph';if(el.tagName==='HR')return 'separator';if(el.tagName==='FIELDSET'||el.tagName==='DETAILS')return 'group';if(el.tagName==='ASIDE')return 'complementary';if(el.tagName==='HEADER')return 'banner';if(el.tagName==='FOOTER')return 'contentinfo';if(el.tagName==='PROGRESS')return 'progressbar';if(el.tagName==='METER')return 'meter';if(el.tagName==='OUTPUT')return 'status';if(el.tagName==='SUMMARY')return 'button';if(el.tagName==='FIGURE')return 'figure';if(el.tagName==='BLOCKQUOTE')return 'blockquote';if(el.tagName==='DT')return 'term';if(el.tagName==='DD')return 'definition';if(el.tagName==='AREA'&&el.hasAttribute('href'))return 'link';if(el.tagName==='TIME')return 'time';if(el.tagName!=='INPUT')return null;const type=(el.type||'text').toLowerCase();if(['button','submit','reset','image','file'].includes(type))return 'button';if(type==='checkbox')return 'checkbox';if(type==='radio')return 'radio';if(type==='range')return 'slider';if(type==='number')return 'spinbutton';if(type==='search')return 'searchbox';return type==='hidden'?null:'textbox'}};
-const visit=current=>{{for(const el of current.querySelectorAll('*')){{const id={prefix}+(++n);el.setAttribute('data-bobby-target',id);const style=getComputedStyle(el),rect=el.getBoundingClientRect();const label=el.labels&&el.labels.length?Array.from(el.labels).map(x=>String(x.innerText||'').trim()).filter(Boolean).join(' '):null;const role=el.getAttribute('role')||implicitRole(el);const name=el.getAttribute('aria-label')||labelledBy(el)||label||(el.tagName==='IMG'?el.getAttribute('alt'):null)||(el.tagName==='IFRAME'?el.getAttribute('title'):null)||((el.tagName==='INPUT'||el.tagName==='TEXTAREA')?el.getAttribute('placeholder'):null)||String(el.innerText||'').trim()||contentName(el)||el.getAttribute('title')||null;const tag=el.tagName.toLowerCase();const attributes={{}};for(const a of el.attributes)if(['id','name','type','src','href','placeholder','autocomplete','pattern','min','max','step','multiple','aria-invalid','aria-label','title'].includes(a.name)||a.name.startsWith('data-'))attributes[a.name]=a.value;for(const booleanName of ['required','readonly','checked','multiple'])if(el[booleanName]===true)attributes[booleanName]='true';const aria=el.getAttribute('aria-label');const uniqueId=Boolean(el.id)&&el.getRootNode().querySelector(`#${{CSS.escape(el.id)}}`)===el;const css=uniqueId?`#${{CSS.escape(el.id)}}`:aria?`[aria-label="${{aria.replace(/\\\\/g,'\\\\\\\\').replace(/"/g,'\\\\"')}}"]`:tag;out.push({{id,css,tag,testId:el.getAttribute('data-testid'),role,name,label,text:String(el.innerText||el.value||'').trim(),attributes,attached:el.isConnected,visible:style.visibility!=='hidden'&&style.display!=='none'&&rect.width>0&&rect.height>0,enabled:!el.disabled&&el.getAttribute('aria-disabled')!=='true'&&!el.closest('fieldset[disabled]')}});if(el.shadowRoot)visit(el.shadowRoot)}}}};visit(root);return out"#
+        "return ({}) (root, {{prefix:{prefix}}}).candidates",
+        dom_engine::candidate_gather_function()
     ))
 }
 
@@ -2097,20 +2047,6 @@ mod tests {
         assert_eq!(candidate.css, Some("#resume-upload".to_owned()));
     }
 
-    #[test]
-    fn candidate_collector_preserves_aria_invalid_for_validation_classification() {
-        let operation = candidate_collector_operation(1).expect("collector operation");
-
-        assert!(operation.contains("'aria-invalid'"));
-        assert!(operation.contains("'aria-label'"));
-        assert!(operation.contains("'title'"));
-        assert!(operation.contains("const tag=el.tagName.toLowerCase()"));
-        assert!(
-            !operation.contains("[data-bobby-target="),
-            "stamped css must not advertise the per-gather tracking id"
-        );
-    }
-
     fn cdp_node(
         id: i64,
         shadow_root_type: Option<ShadowRootType>,
@@ -2363,13 +2299,13 @@ mod tests {
         assert!(err.message.contains("accessibleName"));
     }
 
-    fn named_candidate(id: &str, role: &str, name: &str) -> BrowserCandidate {
-        BrowserCandidate {
+    fn named_candidate(id: &str, role: &str, name: &str) -> Candidate {
+        into_candidate(BrowserCandidate {
             id: id.into(),
             role: Some(role.into()),
             name: Some(name.into()),
             ..browser_candidate(None, BTreeMap::new())
-        }
+        })
     }
 
     #[test]
@@ -2485,7 +2421,8 @@ mod tests {
             ambiguous_candidate(Some("button"), Some("Submit"), 80),
             ambiguous_candidate(Some("button"), Some("Submit now"), 80),
         ];
-        let error = choose(&target, raw, true).expect_err("two equal candidates");
+        let error = choose(&target, raw.into_iter().map(into_candidate).collect(), true)
+            .expect_err("two equal candidates");
         assert_eq!(error.code, ErrorCode::TargetAmbiguous);
         assert!(
             error.message.contains("button \"Submit\" score=")
