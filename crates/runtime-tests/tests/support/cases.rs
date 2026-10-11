@@ -70,6 +70,7 @@ macro_rules! every_case {
             observation_carries_each_text_once,
             sign_in_fields_show_their_labels,
             concurrent_sessions_each_keep_their_own_page,
+            a_copied_control_resolves_apart_from_its_original,
             $($extra,)*
         }
     };
@@ -3155,4 +3156,36 @@ pub async fn concurrent_sessions_each_keep_their_own_page(rig: &Rig) {
     for live in sessions {
         live.close().await;
     }
+}
+
+/// A control copied after a scan, the copy placed first: a click on the
+/// second control reaches the original, not the copy.
+pub async fn a_copied_control_resolves_apart_from_its_original(rig: &Rig) {
+    let body = r#"<main><button data-who="original"
+          onclick="document.getElementById('status').setAttribute('aria-label','acted '+this.dataset.who)">Save</button>
+        <button onclick="const copy=document.querySelector('[data-who=original]').cloneNode(true);copy.dataset.who='copy';document.querySelector('main').prepend(copy)">Copy</button>
+        <p role="status" aria-label="idle" id="status"></p></main>"#;
+    let site = FixtureSite::spawn(vec![("/home", Route::Html(page("Home", body)))]).await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    live.snapshot(json!({})).await;
+    let copied = live
+        .call(
+            "click",
+            json!({"target":{"role":"button","accessibleName":"Copy"}}),
+        )
+        .await;
+    assert_eq!(copied["status"], "completed", "copy: {copied}");
+    let clicked = live
+        .call(
+            "click",
+            json!({"target":{"role":"button","accessibleName":"Save","ordinal":1}}),
+        )
+        .await;
+    assert_eq!(clicked["status"], "completed", "click: {clicked}");
+    let after = live.snapshot(json!({})).await;
+    assert!(
+        find_node(&after, "status", Some("acted original")).is_some(),
+        "the click reached the copy: {after}"
+    );
+    live.close().await;
 }

@@ -970,9 +970,9 @@ async fn open_target_scope(
 }
 
 fn into_candidate(mut item: BrowserCandidate) -> Candidate {
-    // `data-bobby-target` is a per-gather instrumentation id, re-assigned on
-    // every scan. Never treat it as stable identity or match on it in a later
-    // resolution pass.
+    // `data-bobby-target` is an instrumentation id an element keeps across
+    // scans. Never treat it as identity or match on it in a later resolution
+    // pass.
     item.attributes.remove("data-bobby-target");
     let css = item.css.filter(|css| !css.contains("data-bobby-target"));
     Candidate {

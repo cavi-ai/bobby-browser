@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- On Chromium, calls sent at once on one page no longer overwrite each other's resolved targets.
 - A missed target's near-miss list marks a control that exists but is hidden as `hidden`, not `noMatch`.
 - An intent that fails `targetObscured` lists the dialogs open over the page in its evidence.
 - Snapshots report form controls missing from the accessibility tree only when the tree is whole and unscoped.
