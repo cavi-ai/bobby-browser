@@ -1665,7 +1665,7 @@ fn pointer_miss(hit: PointerHit) -> Result<(), CommandError> {
         PointerHit::Obscured => Err(obscured_click_target()),
         PointerHit::OutOfBounds => Err(CommandError {
             code: ErrorCode::TargetOutOfBounds,
-            message: "click target is outside the viewport".into(),
+            message: crate::CLICK_OUTSIDE_VIEWPORT.into(),
             layer: ErrorLayer::Driver,
             retryable: false,
         }),
@@ -3979,10 +3979,7 @@ fn element_wait_missing_observation(
         ErrorCode::TargetNotFound | ErrorCode::FrameNotFound | ErrorCode::ShadowRootUnavailable
     ) || is_missing_css_node(error)
         || is_detached_target_error(error);
-    target_missing.then_some(matches!(
-        state,
-        types::ElementState::Detached | types::ElementState::Hidden
-    ))
+    target_missing.then_some(crate::wait::unresolved_element_satisfies(*state))
 }
 
 fn wait_should_retry_replaced_context(error: &CommandError) -> bool {
@@ -4362,7 +4359,7 @@ fn driver_error_is_retryable(code: ErrorCode) -> bool {
 fn obscured_click_target() -> CommandError {
     CommandError {
         code: ErrorCode::TargetObscured,
-        message: "click target is covered by another element".into(),
+        message: crate::COVERED_CLICK.into(),
         layer: ErrorLayer::Driver,
         retryable: false,
     }
@@ -4703,18 +4700,12 @@ fn hidden_from_accessibility(
             })
         })
     });
-    if modal_open {
-        CommandError {
-            code: ErrorCode::TargetObscured,
-            message: "target is behind an open modal dialog; dismiss it first".into(),
-            layer: ErrorLayer::Driver,
-            retryable: false,
-        }
-    } else {
-        driver_error(
-            ErrorCode::TargetNotFound,
-            "resolved target is hidden from the accessibility tree",
-        )
+    let (code, message) = crate::accessibility_miss(modal_open);
+    CommandError {
+        code,
+        message: message.into(),
+        layer: ErrorLayer::Driver,
+        retryable: false,
     }
 }
 

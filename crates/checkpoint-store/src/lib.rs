@@ -182,25 +182,11 @@ impl CheckpointStore {
             checkpoint.workflow_id.0,
             Uuid::new_v4()
         ));
-        let result = async {
-            let mut options = OpenOptions::new();
-            options.create_new(true).write(true);
-            // Checkpoints carry workflow/session state; match the authority
-            // store's owner-only permissions instead of the process umask.
-            #[cfg(unix)]
-            options.mode(0o600);
-            let mut file = options.open(&temporary).await?;
-            file.write_all(&serde_json::to_vec(checkpoint)?).await?;
-            file.sync_all().await?;
-            drop(file);
-            tokio::fs::rename(&temporary, destination).await?;
-            File::open(self.root.as_ref()).await?.sync_all().await?;
-            Ok::<_, CheckpointStoreError>(())
-        }
-        .await;
-        if result.is_err() {
-            let _ = tokio::fs::remove_file(&temporary).await;
-        }
+        let bytes = serde_json::to_vec(checkpoint)?;
+        let result =
+            durable_file::replace_exclusive(self.root.as_path(), &temporary, &destination, &bytes)
+                .await
+                .map_err(CheckpointStoreError::from);
         if result.is_ok() {
             let mut index = self.session_index.lock().await;
             if index.modified == Some(before) {
@@ -565,31 +551,11 @@ impl CheckpointStore {
 async fn read_regular_file(path: &Path) -> std::io::Result<Vec<u8>> {
     let mut options = OpenOptions::new();
     options.read(true);
-    #[cfg(unix)]
-    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    #[cfg(windows)]
-    // FILE_FLAG_OPEN_REPARSE_POINT opens the link itself for validation.
-    options.custom_flags(0x0020_0000);
+    durable_file::without_following_links_async(&mut options);
     let mut file = options.open(path).await?;
     let metadata = file.metadata().await?;
-    if !metadata.file_type().is_file() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "checkpoint storage entry must be a regular file",
-        ));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        // Match doctor's repair boundary: another name must not share the
-        // inode holding checkpoint or issued-decision authority.
-        if metadata.nlink() != 1 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "checkpoint storage entry must have exactly one hard link",
-            ));
-        }
-    }
+    durable_file::require_regular_file(&metadata, "checkpoint storage entry")?;
+    durable_file::require_sole_hard_link(&metadata, "checkpoint storage entry")?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).await?;
     Ok(bytes)

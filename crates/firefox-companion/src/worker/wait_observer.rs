@@ -7,21 +7,12 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use types::{CommandError, ErrorCode, PageId, WaitCondition};
 use worker_pool::wait::{
-    is_page_scoped_text_target, WaitObservation, WaitObserver, ELEMENT_VISIBILITY_SCRIPT,
+    bound_element_state, is_page_scoped_text_target, queried_element_state, text_read_expression,
+    unresolved_element_satisfies, WaitObservation, WaitObserver,
 };
 
-fn visibility_predicate(hidden: bool) -> String {
-    if hidden {
-        format!("!el||!el.isConnected||!(()=>{{{ELEMENT_VISIBILITY_SCRIPT}}})()")
-    } else {
-        format!("Boolean(el)&&el.isConnected&&(()=>{{{ELEMENT_VISIBILITY_SCRIPT}}})()")
-    }
-}
-
-fn text_read_script(selector: &str, is_value: bool) -> String {
-    let property = if is_value { "value" } else { "innerText" };
-    // Absence is a pending observation, distinct from a present empty control.
-    format!("(()=>{{const el={COMPOSED_QUERY}({selector});return el?(el.{property}??''):null;}})()")
+fn composed_call(selector: &str) -> String {
+    format!("{COMPOSED_QUERY}({selector})")
 }
 
 pub(super) struct FirefoxWaitObserver<'a> {
@@ -83,14 +74,7 @@ impl FirefoxCompanionWorker {
                         let context = self.resolve_input_context(&top_context, target).await?;
                         match self.resolve_shadow_element(&context, target).await {
                             Ok(shared_id) => {
-                                let condition = match state {
-                                    types::ElementState::Attached => "el.isConnected".into(),
-                                    types::ElementState::Visible => visibility_predicate(false),
-                                    types::ElementState::Detached => "!el.isConnected".into(),
-                                    types::ElementState::Enabled => "el.isConnected&&!el.matches(':disabled,[aria-disabled=\"true\"]')".into(),
-                                    types::ElementState::Disabled => "el.isConnected&&el.matches(':disabled,[aria-disabled=\"true\"]')".into(),
-                                    types::ElementState::Hidden => visibility_predicate(true),
-                                };
+                                let condition = bound_element_state(*state);
                                 let response = self.transport.send("script.callFunction", json!({
                                     "functionDeclaration": format!("function(el){{return Boolean({condition});}}"),
                                     "target": {"context": context, "sandbox": COMPANION_SANDBOX},
@@ -112,13 +96,7 @@ impl FirefoxCompanionWorker {
                                     ErrorCode::TargetNotFound | ErrorCode::ShadowRootUnavailable
                                 ) =>
                             {
-                                (
-                                    matches!(
-                                        state,
-                                        types::ElementState::Detached | types::ElementState::Hidden
-                                    ),
-                                    None,
-                                )
+                                (unresolved_element_satisfies(*state), None)
                             }
                             Err(error) => return Err(error),
                         }
@@ -167,20 +145,8 @@ impl FirefoxCompanionWorker {
                                             false,
                                         )
                                     })?;
-                                let expression = match state {
-                                types::ElementState::Attached => {
-                                    format!("Boolean({COMPOSED_QUERY}({selector}))")
-                                }
-                                types::ElementState::Visible | types::ElementState::Hidden => {
-                                    let predicate = visibility_predicate(*state == types::ElementState::Hidden);
-                                    format!("(()=>{{const el={COMPOSED_QUERY}({selector});return {predicate};}})()")
-                                }
-                                types::ElementState::Detached => {
-                                    format!("!{COMPOSED_QUERY}({selector})")
-                                }
-                                types::ElementState::Enabled => format!("!{COMPOSED_QUERY}({selector})?.matches(':disabled,[aria-disabled=\"true\"]')"),
-                                types::ElementState::Disabled => format!("Boolean({COMPOSED_QUERY}({selector})?.matches(':disabled,[aria-disabled=\"true\"]'))"),
-                            };
+                                let expression =
+                                    queried_element_state(*state, &composed_call(&selector));
                                 let response = self.transport.send("script.evaluate", json!({
                                 "expression": expression,
                                 "target": {"context": context, "sandbox": COMPANION_SANDBOX},
@@ -193,13 +159,9 @@ impl FirefoxCompanionWorker {
                                     .unwrap_or(false);
                                 (satisfied, None)
                             }
-                            Err(error) if error.code == ErrorCode::TargetNotFound => (
-                                matches!(
-                                    state,
-                                    types::ElementState::Detached | types::ElementState::Hidden
-                                ),
-                                None,
-                            ),
+                            Err(error) if error.code == ErrorCode::TargetNotFound => {
+                                (unresolved_element_satisfies(*state), None)
+                            }
                             Err(error) => return Err(error),
                         }
                     }
@@ -251,7 +213,7 @@ impl FirefoxCompanionWorker {
                             let selector = serde_json::to_string(&selector).map_err(|error| {
                                 driver_error(ErrorCode::InvalidRequest, error.to_string(), false)
                             })?;
-                            let read = text_read_script(&selector, is_value);
+                            let read = text_read_expression(&composed_call(&selector), is_value);
                             let response = self.transport.send("script.evaluate", json!({
                                 "expression": read,
                                 "target": {"context": context, "sandbox": COMPANION_SANDBOX},
@@ -285,7 +247,8 @@ impl FirefoxCompanionWorker {
                                             false,
                                         )
                                     })?;
-                                let read = text_read_script(&selector_json, is_value);
+                                let read =
+                                    text_read_expression(&composed_call(&selector_json), is_value);
                                 let response = match self.transport.send("script.evaluate", json!({
                                         "expression": read,
                                         "target": {"context": selector_context, "sandbox": COMPANION_SANDBOX},

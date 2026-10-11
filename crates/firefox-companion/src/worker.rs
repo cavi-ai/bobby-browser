@@ -1,3 +1,4 @@
+mod locate;
 mod wait_observer;
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
@@ -69,9 +70,21 @@ enum ShadowRead {
 
 /// A page function returning the element a selector names. A selector joined
 /// by " >>> " names each open shadow root's host in turn, then the element.
-const COMPOSED_QUERY: &str = "((selector)=>{const parts=selector.split(' >>> ');const probe=document.createDocumentFragment();for(const part of parts)probe.querySelector(part);let root=document;for(let index=0;index<parts.length;index+=1){const found=root.querySelector(parts[index]);if(!found||index===parts.length-1)return found;root=found.shadowRoot;if(!root)return null}return null})";
+struct ComposedQueryFn;
+impl std::fmt::Display for ComposedQueryFn {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(dom_engine::composed_query_function())
+    }
+}
+const COMPOSED_QUERY: ComposedQueryFn = ComposedQueryFn;
 /// [`COMPOSED_QUERY`] returning every element the last part matches.
-const COMPOSED_QUERY_ALL: &str = "((selector)=>{const parts=selector.split(' >>> ');const probe=document.createDocumentFragment();for(const part of parts)probe.querySelector(part);let root=document;for(let index=0;index<parts.length-1;index+=1){const host=root.querySelector(parts[index]);root=host&&host.shadowRoot;if(!root)return []}return [...root.querySelectorAll(parts[parts.length-1])]})";
+struct ComposedQueryAllFn;
+impl std::fmt::Display for ComposedQueryAllFn {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(dom_engine::composed_query_all_function())
+    }
+}
+const COMPOSED_QUERY_ALL: ComposedQueryAllFn = ComposedQueryAllFn;
 
 /// Accessibility nodes read to build intent candidates.
 const CANDIDATE_MAX_NODES: u32 = 1024;
@@ -2177,28 +2190,23 @@ impl FirefoxCompanionWorker {
             .await?;
         let resolution = resolve_candidates(target, &candidates, &ResolutionPolicy::default());
         if matches!(resolution, Ok(ResolutionDecision::NotFound)) {
-            // The control walk leaves out what an open modal dialog hides, and
-            // a bounded walk can stop early; the companion's own search finds
-            // the target either way, or reports it obscured.
-            match self
+            let located = self
                 .observer
                 .locate_target(&self.current_lease(), page_id, target)
-                .await
-            {
-                Err(error) if error.code == ErrorCode::TargetObscured => return Err(error),
-                Ok(location) if truncated => {
-                    if location.ambiguous {
-                        return Err(driver_error(
-                            ErrorCode::TargetAmbiguous,
-                            "Firefox semantic target is ambiguous",
-                            false,
-                        ));
-                    }
-                    if let (true, Some(css_path)) = (location.found, location.css_path) {
-                        return Ok((context, css_path));
-                    }
+                .await;
+            match locate::follow_not_found(truncated, locate::answer(&located)) {
+                locate::Follow::Obscured => {
+                    return Err(located.expect_err("an obscured locate is an error"));
                 }
-                _ => {}
+                locate::Follow::Ambiguous => {
+                    return Err(driver_error(
+                        ErrorCode::TargetAmbiguous,
+                        "Firefox semantic target is ambiguous",
+                        false,
+                    ))
+                }
+                locate::Follow::Css(css_path) => return Ok((context, css_path.to_owned())),
+                locate::Follow::Unresolved => {}
             }
         }
         match resolution {
@@ -2798,12 +2806,12 @@ impl FirefoxCompanionWorker {
             )),
             Some("obscured") => Err(driver_error(
                 ErrorCode::TargetObscured,
-                "Firefox native click target is obscured after viewport preflight",
+                worker_pool::FIREFOX_POINTER_OBSCURED,
                 false,
             )),
             Some("out-of-bounds") => Err(driver_error(
                 ErrorCode::TargetOutOfBounds,
-                "Firefox native click target has no clickable point in the viewport",
+                worker_pool::FIREFOX_POINTER_OUT_OF_BOUNDS,
                 false,
             )),
             _ => Err(driver_error(

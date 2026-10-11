@@ -1,3 +1,10 @@
+import {
+  composedQuery,
+  isElementHidden,
+  isRenderedHidden,
+  modalDialogOpen,
+  SHADOW_HOP,
+} from "../../../crates/dom-engine/src/page_dom.js";
 import { isExtensionSafeString, isExtensionSafeUrl } from "./native-transport.js";
 import { containsSecretMaterial } from "./secret-material.js";
 import {
@@ -34,7 +41,6 @@ const MAX_URL_LENGTH = 2 * 1024;
 const MAX_TITLE_LENGTH = 1024;
 const MAX_ROLE_LENGTH = 64;
 const REDACTED = "[redacted]";
-const MAX_ANCESTOR_VISITS = 256;
 const SAFE_BOOLEAN_HTML_ATTRIBUTES = new Set([
   "checked",
   "disabled",
@@ -245,81 +251,6 @@ function composedChildren(element: Element): Node[] {
 
 function composedElementChildren(element: Element): Element[] {
   return composedChildren(element).filter((node): node is Element => node.nodeType === 1);
-}
-
-// An element's parent in the rendered tree: its slot, its parent, or the host
-// of the shadow root it sits at the top of.
-function composedParent(element: Element): Element | null {
-  if (element.assignedSlot) return element.assignedSlot;
-  if (element.parentElement) return element.parentElement;
-  const parent = element.parentNode;
-  return parent && parent.nodeType === 11 ? ((parent as ShadowRoot).host ?? null) : null;
-}
-
-// Joins the selectors of each shadow host and the element, each in its own
-// root, into one selector the action side resolves through open shadow roots.
-const SHADOW_HOP = " >>> ";
-
-// The element a selector names, entering each host's open shadow root in turn.
-// Throws, as querySelector does, on an invalid part.
-function composedQuery(document: Document, selector: string): Element | null {
-  const parts = selector.split(SHADOW_HOP);
-  const probe = document.createDocumentFragment();
-  for (const part of parts) probe.querySelector(part);
-  let root: Document | ShadowRoot = document;
-  for (let index = 0; index < parts.length; index += 1) {
-    const found: Element | null = root.querySelector(parts[index]!);
-    if (!found || index === parts.length - 1) return found;
-    if (!found.shadowRoot) return null;
-    root = found.shadowRoot;
-  }
-  return null;
-}
-
-function isElementHidden(element: Element, budget?: WorkBudget): boolean {
-  let visited = 0;
-  for (let current: Element | null = element; current; current = composedParent(current)) {
-    visited += 1;
-    if (visited > MAX_ANCESTOR_VISITS || !takeWork(budget)) return true;
-    if (current.hasAttribute("hidden") || current.getAttribute("aria-hidden") === "true") {
-      return true;
-    }
-    const style = current.ownerDocument.defaultView?.getComputedStyle(current);
-    if (style?.display === "none" || style?.visibility === "hidden") {
-      return true;
-    }
-  }
-  return false;
-}
-
-// Hidden from rendering, unlike an element hidden only from assistive
-// technology with aria-hidden.
-function isRenderedHidden(element: Element): boolean {
-  let visited = 0;
-  for (let current: Element | null = element; current; current = composedParent(current)) {
-    visited += 1;
-    if (visited > MAX_ANCESTOR_VISITS) return true;
-    if (current.hasAttribute("hidden")) return true;
-    const style = current.ownerDocument.defaultView?.getComputedStyle(current);
-    if (style?.display === "none" || style?.visibility === "hidden") return true;
-  }
-  return false;
-}
-
-function modalDialogOpen(document: Document): boolean {
-  for (const dialog of Array.from(document.querySelectorAll('[aria-modal="true"], dialog')).slice(0, 64)) {
-    let modal: boolean;
-    try {
-      modal =
-        dialog.tagName === "DIALOG"
-          ? dialog.matches(":modal")
-          : ["dialog", "alertdialog"].includes(dialog.getAttribute("role") ?? "");
-    } catch {
-      modal = false;
-    }
-    if (modal && !isElementHidden(dialog)) return true;
-  }
-  return false;
 }
 
 function isSensitiveTextContext(element: Element): boolean {

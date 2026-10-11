@@ -809,14 +809,23 @@ tools most likely to produce it.
     re-resolve the target -- the page changed underneath the call.
 - `targetObscured` -- another element covers the resolved target. A click
   hit-tests the target's center on both engines; typing does too on Firefox,
-  and on Chromium refuses a field an open dialog covers. A target an open
-  modal dialog hides from the accessibility tree fails the same way. Repair:
-  clear whatever is on top (for example `intent_dismiss_obstruction`) or
-  scroll the element into the clear, then retry.
+  and on Chromium refuses a field an open dialog covers
+  (`text field is covered by an open dialog; dismiss it first`). Chromium
+  also reports `target is behind an open modal dialog; dismiss it first`
+  when the accessibility tree omits the target while a modal node is open,
+  and `click target is covered by another element` when the pointer hit finds
+  another element at the target's center. Firefox reports
+  `Firefox native click target is obscured after viewport preflight` and the
+  content search when a rendered target is hidden from assistive technology
+  by an open modal. Repair: clear whatever is on top (for example
+  `intent_dismiss_obstruction`) or scroll the element into the clear, then
+  retry.
 - `targetOutOfBounds` -- the same hit test found no clickable point for the
-  resolved element inside the current viewport. Repair: bring the element
-  into view (scroll, resize, or `emulate` a larger viewport) before
-  retrying.
+  resolved element inside the current viewport. Chromium reports
+  `click target is outside the viewport`. Firefox reports
+  `Firefox native click target has no clickable point in the viewport`.
+  Repair: bring the element into view (scroll, resize, or `emulate` a larger
+  viewport) before retrying.
 - `waitConditionTimedOut` -- the awaited page condition didn't hold before
   the call's timeout. Repair: confirm the condition via `inspect`, then
   retry with a longer timeout.

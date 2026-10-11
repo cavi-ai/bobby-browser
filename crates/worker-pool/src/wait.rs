@@ -8,9 +8,64 @@ use types::{
     WaitForCommand, WaitUntil,
 };
 
-/// DOM observation body for an element bound to `el`, shared by both engines.
-/// Visibility requires rendered geometry and excludes CSS-hidden elements.
-pub const ELEMENT_VISIBILITY_SCRIPT: &str = "const s=getComputedStyle(el),r=el.getBoundingClientRect(); return s.visibility!=='hidden'&&s.display!=='none'&&r.width>0&&r.height>0";
+pub use dom_engine::ELEMENT_VISIBILITY_SCRIPT;
+
+/// An unresolved element satisfies Detached and Hidden. Every other state stays unsatisfied.
+pub fn unresolved_element_satisfies(state: types::ElementState) -> bool {
+    matches!(
+        state,
+        types::ElementState::Detached | types::ElementState::Hidden
+    )
+}
+
+fn visibility_holds(hidden: bool) -> String {
+    if hidden {
+        format!("!el||!el.isConnected||!(()=>{{{ELEMENT_VISIBILITY_SCRIPT}}})()")
+    } else {
+        format!("Boolean(el)&&el.isConnected&&(()=>{{{ELEMENT_VISIBILITY_SCRIPT}}})()")
+    }
+}
+
+/// Boolean expression over a bound `el` (a node the adapter already holds).
+pub fn bound_element_state(state: types::ElementState) -> String {
+    match state {
+        types::ElementState::Attached => "el.isConnected".to_owned(),
+        types::ElementState::Visible => visibility_holds(false),
+        types::ElementState::Detached => "!el.isConnected".to_owned(),
+        types::ElementState::Enabled => {
+            "el.isConnected&&!el.matches(':disabled,[aria-disabled=\"true\"]')".to_owned()
+        }
+        types::ElementState::Disabled => {
+            "el.isConnected&&el.matches(':disabled,[aria-disabled=\"true\"]')".to_owned()
+        }
+        types::ElementState::Hidden => visibility_holds(true),
+    }
+}
+
+/// Boolean expression for a selector query that yields the element or null.
+/// `query` is the call that resolves the element, already including its argument.
+pub fn queried_element_state(state: types::ElementState, query: &str) -> String {
+    match state {
+        types::ElementState::Attached => format!("Boolean({query})"),
+        types::ElementState::Visible | types::ElementState::Hidden => {
+            let predicate = visibility_holds(matches!(state, types::ElementState::Hidden));
+            format!("(()=>{{const el={query};return {predicate};}})()")
+        }
+        types::ElementState::Detached => format!("!{query}"),
+        types::ElementState::Enabled => {
+            format!("!{query}?.matches(':disabled,[aria-disabled=\"true\"]')")
+        }
+        types::ElementState::Disabled => {
+            format!("Boolean({query}?.matches(':disabled,[aria-disabled=\"true\"]'))")
+        }
+    }
+}
+
+/// Read `innerText` or `value`. A missing element is null, distinct from a present empty control.
+pub fn text_read_expression(query: &str, is_value: bool) -> String {
+    let property = if is_value { "value" } else { "innerText" };
+    format!("(()=>{{const el={query};return el?(el.{property}??''):null;}})()")
+}
 
 /// A transport observation, before condition matching or evidence truncation.
 pub enum WaitObservation {
@@ -360,6 +415,49 @@ mod tests {
                 .chars()
                 .count(),
             types::MAX_WAIT_OBSERVED_CHARS
+        );
+    }
+
+    #[test]
+    fn unresolved_elements_satisfy_only_detached_and_hidden() {
+        for state in [
+            types::ElementState::Attached,
+            types::ElementState::Visible,
+            types::ElementState::Enabled,
+            types::ElementState::Disabled,
+        ] {
+            assert!(!unresolved_element_satisfies(state));
+        }
+        assert!(unresolved_element_satisfies(types::ElementState::Detached));
+        assert!(unresolved_element_satisfies(types::ElementState::Hidden));
+    }
+
+    #[test]
+    fn element_state_expressions_share_one_visibility_body() {
+        let visible = bound_element_state(types::ElementState::Visible);
+        let hidden = bound_element_state(types::ElementState::Hidden);
+        assert!(visible.contains(ELEMENT_VISIBILITY_SCRIPT));
+        assert!(hidden.contains(ELEMENT_VISIBILITY_SCRIPT));
+        assert!(visible.starts_with("Boolean(el)&&el.isConnected&&"));
+        assert!(hidden.starts_with("!el||!el.isConnected||"));
+        let query = "query(selector)";
+        assert_eq!(
+            queried_element_state(types::ElementState::Attached, query),
+            "Boolean(query(selector))"
+        );
+        assert_eq!(
+            queried_element_state(types::ElementState::Detached, query),
+            "!query(selector)"
+        );
+        assert!(queried_element_state(types::ElementState::Visible, query)
+            .contains(&format!("const el={query};return {visible}")));
+        assert_eq!(
+            text_read_expression(query, false),
+            "(()=>{const el=query(selector);return el?(el.innerText??''):null;})()"
+        );
+        assert_eq!(
+            text_read_expression(query, true),
+            "(()=>{const el=query(selector);return el?(el.value??''):null;})()"
         );
     }
 }
