@@ -25,8 +25,8 @@ use companion_protocol::{
     ActionRequest, BrowserEngine, CompanionEvent, InteractionPath, PROTOCOL_VERSION,
 };
 use dom_engine::{
-    rank_candidates, resolve_candidates, Candidate, CandidateState, ResolutionDecision,
-    ResolutionPolicy,
+    accessibility_candidates, rank_candidates, resolve_candidates, Candidate, CandidateState,
+    ResolutionDecision, ResolutionPolicy,
 };
 use fingerprinting::FingerprintApplyPlan;
 use fingerprinting::FingerprintConfig;
@@ -3985,7 +3985,7 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
         // Accessibility candidates carry no selector, so the companion resolves
         // a CSS target; a hidden or detached element adds no candidate.
         if let Some(css) = target.css.as_ref().filter(|css| !css.is_empty()) {
-            let mut candidates = accessibility_candidates(&nodes);
+            let mut candidates = accessibility_candidates(&nodes, "firefox-a11y");
             let location = self
                 .observer
                 .locate_target(&self.current_lease(), page_id, target)
@@ -4015,7 +4015,7 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
                     target.ordinal.unwrap_or(0),
                     location.css_path.clone(),
                 ) {
-                    let mut candidates = accessibility_candidates(&nodes);
+                    let mut candidates = accessibility_candidates(&nodes, "firefox-a11y");
                     candidates.push(located_candidate(&location, css_path));
                     return Ok(candidates);
                 }
@@ -4028,7 +4028,7 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
                 false,
             ));
         }
-        Ok(accessibility_candidates(&nodes))
+        Ok(accessibility_candidates(&nodes, "firefox-a11y"))
     }
 
     async fn form_snapshot(
@@ -6002,56 +6002,6 @@ fn located_candidate(location: &TargetLocation, css_path: String) -> Candidate {
     }
 }
 
-fn accessibility_candidates(nodes: &[types::AccessibilityNode]) -> Vec<Candidate> {
-    fn collect(nodes: &[types::AccessibilityNode], candidates: &mut Vec<Candidate>) {
-        for node in nodes {
-            let mut text = Vec::new();
-            if let Some(name) = node.name.as_deref().filter(|value| !value.is_empty()) {
-                text.push(name);
-            }
-            if let Some(description) = node
-                .description
-                .as_deref()
-                .filter(|value| !value.is_empty())
-            {
-                text.push(description);
-            }
-            if let Some(value) = node.value.as_deref().filter(|value| !value.is_empty()) {
-                text.push(value);
-            }
-            let mut attributes = std::collections::BTreeMap::new();
-            if let Some(input_type) = &node.input_type {
-                attributes.insert("type".into(), input_type.clone());
-            }
-            if node.invalid == Some(true) {
-                attributes.insert("aria-invalid".into(), "true".into());
-            }
-            candidates.push(Candidate {
-                id: format!("firefox-a11y-{}", candidates.len()),
-                css: None,
-                tag: None,
-                test_id: None,
-                role: node.role.clone(),
-                name: node.name.clone(),
-                label: None,
-                text: text.join(" "),
-                attributes,
-                state: CandidateState {
-                    attached: true,
-                    visible: true,
-                    enabled: node.disabled != Some(true),
-                },
-                frame_path: Vec::new(),
-            });
-            collect(&node.children, candidates);
-        }
-    }
-
-    let mut candidates = Vec::new();
-    collect(nodes, &mut candidates);
-    candidates
-}
-
 #[cfg(test)]
 mod observation_redaction_tests {
     use super::{validate_observation, ExtensionControl, ExtensionObservation};
@@ -6143,7 +6093,7 @@ mod accessibility_candidate_tests {
             {"role":"button", "name":"Resume"}
         ]))
         .unwrap();
-        let candidates = accessibility_candidates(&nodes);
+        let candidates = accessibility_candidates(&nodes, "firefox-a11y");
         assert_eq!(
             candidates[0].attributes.get("type").map(String::as_str),
             Some("file")
@@ -6193,7 +6143,7 @@ mod accessibility_candidate_tests {
             ..Default::default()
         }];
 
-        let candidates = accessibility_candidates(&nodes);
+        let candidates = accessibility_candidates(&nodes, "firefox-a11y");
 
         assert_eq!(
             candidates[0]
