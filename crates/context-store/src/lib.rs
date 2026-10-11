@@ -105,6 +105,7 @@ pub struct PageContext {
 
 /// Counters for one challenge kind (e.g. `recaptchaV2Checkbox`) seen on a
 /// site. Day-precision stamp only, same privacy discipline as intent stats.
+/// Counts saturate at `u64::MAX`; verification days continue to update.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChallengeStats {
     pub success_count: u64,
@@ -582,10 +583,10 @@ impl ContextStore {
                 .entry(challenge_kind.to_string())
                 .or_default();
             if success {
-                stats.success_count += 1;
+                stats.success_count = stats.success_count.saturating_add(1);
                 stats.last_verified_day = Some(today);
             } else {
-                stats.failure_count += 1;
+                stats.failure_count = stats.failure_count.saturating_add(1);
             }
         })
         .await;
@@ -599,7 +600,9 @@ impl ContextStore {
             .await?
             .challenges
             .into_iter()
-            .max_by_key(|(_, stats)| stats.success_count + stats.failure_count)
+            .max_by_key(|(_, stats)| {
+                u128::from(stats.success_count) + u128::from(stats.failure_count)
+            })
     }
 
     /// Persists every dirty site. Returns the keys that failed to write;
