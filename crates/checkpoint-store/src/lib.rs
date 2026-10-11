@@ -92,6 +92,30 @@ pub struct CheckpointStore {
 struct SessionIndex {
     modified: Option<SystemTime>,
     sessions: HashMap<types::SessionId, Vec<CheckpointRef>>,
+    rejected: HashMap<PathBuf, FileVersion>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct FileVersion {
+    len: u64,
+    modified: Option<SystemTime>,
+    file_type: std::fs::FileType,
+    #[cfg(unix)]
+    links: u64,
+}
+
+impl FileVersion {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            file_type: metadata.file_type(),
+            #[cfg(unix)]
+            links: metadata.nlink(),
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -110,6 +134,7 @@ impl SessionIndex {
         path: PathBuf,
         metadata: &std::fs::Metadata,
     ) {
+        self.rejected.remove(&path);
         let entries = self
             .sessions
             .entry(checkpoint.session_id.clone())
@@ -245,7 +270,7 @@ impl CheckpointStore {
             return Ok(Vec::new());
         }
         let before = tokio::fs::metadata(self.root.as_path()).await?.modified()?;
-        let mut candidates = {
+        let rejected = {
             let mut index = self.session_index.lock().await;
             if index.modified != Some(before) {
                 let mut rebuilt = SessionIndex::default();
@@ -258,10 +283,17 @@ impl CheckpointStore {
                     if !name.ends_with(".json") || name.ends_with(".skill-issuance.json") {
                         continue;
                     }
+                    let id = name.trim_end_matches(".json");
+                    if !Uuid::parse_str(id).is_ok_and(|uuid| uuid.to_string() == id) {
+                        continue;
+                    }
                     let Ok(metadata) = entry.metadata().await else {
                         continue;
                     };
                     let path = entry.path();
+                    rebuilt
+                        .rejected
+                        .insert(path.clone(), FileVersion::from_metadata(&metadata));
                     let Ok(bytes) = read_regular_file(&path).await else {
                         continue;
                     };
@@ -272,6 +304,7 @@ impl CheckpointStore {
                     if self.validate_schema(&checkpoint).is_ok()
                         && path == self.path(&checkpoint.workflow_id)
                     {
+                        rebuilt.rejected.remove(&path);
                         rebuilt
                             .sessions
                             .entry(checkpoint.session_id)
@@ -292,8 +325,47 @@ impl CheckpointStore {
                 rebuilt.modified = (before == after).then_some(after);
                 *index = rebuilt;
             }
-            index.sessions.get(session_id).cloned().unwrap_or_default()
+            index.rejected.clone()
         };
+        // A corrupt file may be repaired in place without changing the
+        // directory timestamp. Retain only metadata for rejected entries,
+        // and inspect changed entries outside the shared index mutex.
+        for (path, original) in rejected {
+            let Ok(metadata) = tokio::fs::symlink_metadata(&path).await else {
+                continue;
+            };
+            let version = FileVersion::from_metadata(&metadata);
+            if version.modified.is_some() && version == original {
+                continue;
+            }
+            let checkpoint = match read_regular_file(&path).await {
+                Ok(bytes) => serde_json::from_slice::<WorkflowCheckpoint>(&bytes)
+                    .ok()
+                    .filter(|checkpoint| {
+                        self.validate_schema(checkpoint).is_ok()
+                            && path == self.path(&checkpoint.workflow_id)
+                    }),
+                Err(_) => None,
+            };
+            let mut index = self.session_index.lock().await;
+            // A concurrent save or rebuild can supersede these hints.
+            if index.rejected.get(&path) != Some(&original) {
+                continue;
+            }
+            if let Some(checkpoint) = checkpoint {
+                index.update(&checkpoint, path, &metadata);
+            } else {
+                index.rejected.insert(path, version);
+            }
+        }
+        let mut candidates = self
+            .session_index
+            .lock()
+            .await
+            .sessions
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default();
         let mut refreshed = HashMap::new();
         for candidate in &mut candidates {
             // In-place writes do not change the directory timestamp. Check
@@ -382,6 +454,7 @@ impl CheckpointStore {
                 File::open(self.root.as_ref()).await?.sync_all().await?;
                 let mut index = self.session_index.lock().await;
                 if index.modified == Some(before) {
+                    index.rejected.remove(&self.path(workflow_id));
                     for entries in index.sessions.values_mut() {
                         entries.retain(|entry| &entry.workflow_id != workflow_id);
                     }
