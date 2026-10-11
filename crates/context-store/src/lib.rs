@@ -870,16 +870,12 @@ async fn load_envelope(
     path: &Path,
     limits: ContextLimits,
 ) -> Result<(String, SiteContext), String> {
-    let file = File::open(path).await.map_err(|error| error.to_string())?;
-    if file
-        .metadata()
+    let file = OpenOptions::from(site_file_options())
+        .open(path)
         .await
-        .map_err(|error| error.to_string())?
-        .len()
-        > limits.max_file_bytes as u64
-    {
-        return Err("context site exceeds file byte limit".into());
-    }
+        .map_err(|error| error.to_string())?;
+    let metadata = file.metadata().await.map_err(|error| error.to_string())?;
+    validate_site_file(&metadata, limits)?;
     let mut bytes = Vec::new();
     file.take((limits.max_file_bytes as u64).saturating_add(1))
         .read_to_end(&mut bytes)
@@ -916,10 +912,11 @@ fn decode_envelope(
 pub fn inspect_site_file(path: &Path, limits: ContextLimits) -> Result<(), String> {
     use std::io::Read;
     limits.validate().map_err(str::to_string)?;
-    let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
-    if file.metadata().map_err(|error| error.to_string())?.len() > limits.max_file_bytes as u64 {
-        return Err("context site exceeds file byte limit".into());
-    }
+    let file = site_file_options()
+        .open(path)
+        .map_err(|error| error.to_string())?;
+    let metadata = file.metadata().map_err(|error| error.to_string())?;
+    validate_site_file(&metadata, limits)?;
     let mut bytes = Vec::new();
     file.take((limits.max_file_bytes as u64).saturating_add(1))
         .read_to_end(&mut bytes)
@@ -928,6 +925,35 @@ pub fn inspect_site_file(path: &Path, limits: ContextLimits) -> Result<(), Strin
         return Err("context site exceeds file byte limit".into());
     }
     decode_envelope(path, &bytes, limits).map(|_| ())
+}
+
+/// Check the opened handle, not the path: replacement can race a path check,
+/// and a normal FIFO open blocks before its metadata can be inspected.
+fn site_file_options() -> std::fs::OpenOptions {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT opens the link itself for validation.
+        options.custom_flags(0x0020_0000);
+    }
+    options
+}
+
+fn validate_site_file(metadata: &std::fs::Metadata, limits: ContextLimits) -> Result<(), String> {
+    if !metadata.file_type().is_file() {
+        return Err("context storage entry must be a regular file".into());
+    }
+    if metadata.len() > limits.max_file_bytes as u64 {
+        return Err("context site exceeds file byte limit".into());
+    }
+    Ok(())
 }
 
 /// Injective filesystem encoding for arbitrary UTF-8 identity strings.
