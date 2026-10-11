@@ -1099,6 +1099,122 @@ async fn listing_reads_current_files_even_when_directory_timestamp_is_unchanged(
 }
 
 #[tokio::test]
+async fn listing_discovers_initially_rejected_checkpoints_after_in_place_repair() {
+    for damage in ["json", "schema", "workflow"] {
+        let root = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::open(root.path()).await.unwrap();
+        let mut healthy = checkpoint(WorkflowId::new(), "https://example.test/healthy");
+        healthy.created_at = "2026-01-01T00:00:00Z".parse().unwrap();
+        store.save(&healthy).await.unwrap();
+        let mut repaired = checkpoint(WorkflowId::new(), "https://example.test/repaired");
+        repaired.session_id = healthy.session_id.clone();
+        repaired.created_at = healthy.created_at + Duration::hours(1);
+        let path = checkpoint_store::checkpoint_path(root.path(), &repaired.workflow_id);
+        let bytes = serde_json::to_vec(&repaired).unwrap();
+        let mut damaged = repaired.clone();
+        let damaged_bytes = match damage {
+            "json" => {
+                let mut damaged = bytes.clone();
+                damaged[0] = b'!';
+                damaged
+            }
+            "schema" => {
+                damaged.schema_version = 0;
+                serde_json::to_vec(&damaged).unwrap()
+            }
+            "workflow" => {
+                damaged.workflow_id = WorkflowId::new();
+                serde_json::to_vec(&damaged).unwrap()
+            }
+            _ => unreachable!(),
+        };
+        std::fs::write(&path, &damaged_bytes).unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                store
+                    .list_for_session(&healthy.session_id, 1)
+                    .await
+                    .unwrap(),
+                vec![healthy.clone()]
+            );
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), damaged_bytes);
+        let directory_stamp = std::fs::metadata(root.path()).unwrap().modified().unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(modified + std::time::Duration::from_secs(1)),
+            )
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(root.path()).unwrap().modified().unwrap(),
+            directory_stamp
+        );
+        assert_eq!(
+            store
+                .list_for_session(&healthy.session_id, 1)
+                .await
+                .unwrap(),
+            vec![repaired.clone()],
+            "in-place {damage} repair was hidden by the index"
+        );
+        assert_eq!(store.load(&repaired.workflow_id).await.unwrap(), repaired);
+        assert_eq!(
+            CheckpointStore::open(root.path())
+                .await
+                .unwrap()
+                .list_for_session(&healthy.session_id, 1)
+                .await
+                .unwrap(),
+            vec![repaired]
+        );
+    }
+}
+
+#[tokio::test]
+async fn repaired_checkpoint_discovery_keeps_sessions_separate() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let healthy = checkpoint(WorkflowId::new(), "https://example.test/healthy");
+    let repaired = checkpoint(WorkflowId::new(), "https://example.test/repaired");
+    store.save(&healthy).await.unwrap();
+    let path = checkpoint_store::checkpoint_path(root.path(), &repaired.workflow_id);
+    std::fs::write(&path, b"broken").unwrap();
+    assert_eq!(
+        store
+            .list_for_session(&healthy.session_id, 10)
+            .await
+            .unwrap(),
+        vec![healthy.clone()]
+    );
+    assert!(store
+        .list_for_session(&repaired.session_id, 10)
+        .await
+        .unwrap()
+        .is_empty());
+    std::fs::write(&path, serde_json::to_vec(&repaired).unwrap()).unwrap();
+    assert_eq!(
+        store
+            .list_for_session(&healthy.session_id, 10)
+            .await
+            .unwrap(),
+        vec![healthy]
+    );
+    assert_eq!(
+        store
+            .list_for_session(&repaired.session_id, 10)
+            .await
+            .unwrap(),
+        vec![repaired]
+    );
+}
+
+#[tokio::test]
 async fn listing_refreshes_changed_files_before_applying_the_limit() {
     let root = tempfile::tempdir().unwrap();
     let store = CheckpointStore::open(root.path()).await.unwrap();
