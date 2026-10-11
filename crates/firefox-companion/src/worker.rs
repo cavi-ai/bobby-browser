@@ -4315,13 +4315,16 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
                     .ok()
                     .is_some_and(|evidence| {
                         evidence.iter().any(|item| {
-                        matches!(
-                            item,
-                            Evidence::FormSnapshot { snapshot }
-                                if !snapshot.unowned_controls.is_empty()
-                                    || snapshot.forms.iter().any(|form| !form.controls.is_empty())
-                        )
-                    })
+                            matches!(
+                                item,
+                                Evidence::FormSnapshot { snapshot }
+                                    if !snapshot.unowned_controls.is_empty()
+                                        || snapshot
+                                            .forms
+                                            .iter()
+                                            .any(|form| !form.controls.is_empty())
+                            )
+                        })
                     })
             };
         let mut evidence = vec![
