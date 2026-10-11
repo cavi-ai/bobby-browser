@@ -672,6 +672,51 @@ pub async fn scoped_snapshot_targets_act_on_the_scoped_element(rig: &Rig) {
     live.close().await;
 }
 
+/// A child target from a scoped iframe snapshot keeps the page-wide frame hop,
+/// so same-name frames outside the scope cannot receive the action.
+pub async fn scoped_snapshot_frame_targets_reach_the_second_frame(rig: &Rig) {
+    let body = r#"<iframe title="Widget frame" src="/first"></iframe>
+        <section id="second-widget"><iframe id="second-frame" title="Widget frame" src="/second"></iframe></section>
+        <p role="status" aria-label="idle" id="status"></p>"#;
+    let first = r#"<button onclick="parent.document.getElementById('status').setAttribute('aria-label', 'acted first')">Frame action</button>"#;
+    let second = r#"<button onclick="parent.document.getElementById('status').setAttribute('aria-label', 'acted second')">Frame action</button>"#;
+    let site = FixtureSite::spawn(vec![
+        ("/frames", Route::Html(page("Scoped frames", body))),
+        ("/first", Route::Html(page("First frame", first))),
+        ("/second", Route::Html(page("Second frame", second))),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/frames")).await;
+    for css in ["#second-widget", "#second-frame"] {
+        let scoped = live.snapshot(json!({"target":{"css":css}})).await;
+        let mut targets = Vec::new();
+        targets_under(&scoped, &mut targets);
+        let actions: Vec<_> = targets
+            .iter()
+            .filter(|(role, target)| {
+                *role == "button" && target["accessibleName"] == "Frame action"
+            })
+            .collect();
+        assert_eq!(actions.len(), 1, "scoped frame targets: {scoped}");
+        let target = actions[0].1;
+        assert_eq!(
+            target["framePath"],
+            json!([{
+                "role":"iframe", "accessibleName":"Widget frame", "ordinal":1
+            }]),
+            "scoped frame hop: {scoped}"
+        );
+        let clicked = live.call("click", json!({"target":target})).await;
+        assert_eq!(clicked["status"], "completed", "click {target}: {clicked}");
+        let after = live.snapshot(json!({})).await;
+        assert!(
+            find_node(&after, "status", Some("acted second")).is_some(),
+            "scoped frame target {target} reached another frame: {after}"
+        );
+    }
+    live.close().await;
+}
+
 /// A snapshot scoped to a region an open modal dialog hides fails
 /// targetObscured saying a modal dialog is in the way, not targetNotFound.
 pub async fn snapshot_scoped_behind_a_modal_reports_the_dialog(rig: &Rig) {

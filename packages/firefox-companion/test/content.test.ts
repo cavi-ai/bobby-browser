@@ -659,6 +659,35 @@ test("a11yTree includes a same-origin iframe's controls with the frame hop in th
   assert.equal(open?.target?.framePath, undefined);
 });
 
+test("a scoped a11yTree keeps the page-wide ordinal in child frame targets", () => {
+  const document = documentFor(`
+    <iframe title="Widget frame"></iframe>
+    <section id="second-widget"><iframe id="second-frame" title="Widget frame"></iframe></section>
+  `);
+  for (const frame of document.querySelectorAll("iframe")) {
+    frame.contentDocument!.body.innerHTML = "<button>Frame action</button>";
+  }
+  type Node = {
+    name?: string;
+    target?: { ordinal?: number; framePath?: Array<{ role: string; accessibleName: string; ordinal?: number }> };
+    children?: Node[];
+  };
+  const flat = (nodes: Node[]): Node[] => nodes.flatMap((node) => [node, ...flat(node.children ?? [])]);
+  for (const css of ["#second-widget", "#second-frame"]) {
+    const tree = executeContentAction(document, "a11yTree", { maxNodes: 32, target: { css } }) as {
+      nodes: Node[];
+      truncated: boolean;
+    };
+    assert.equal(tree.truncated, false);
+    const actions = flat(tree.nodes).filter((node) => node.name === "Frame action");
+    assert.equal(actions.length, 1);
+    assert.deepEqual(actions[0]!.target?.framePath, [
+      { role: "iframe", accessibleName: "Widget frame", ordinal: 1 },
+    ], css);
+    assert.equal(actions[0]!.target?.ordinal, undefined);
+  }
+});
+
 test("a11yTree marks a control invalid when the page flags it aria-invalid", () => {
   const document = documentFor(
     '<label>Name <input name="name" aria-invalid="true"></label><label>City <input name="city"></label>',
