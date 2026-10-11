@@ -2563,6 +2563,7 @@ impl crate::InputEngine for ChromiumWorker {
                 "select",
             )
         } else if crate::SessionSettings::humanization_enabled(self) {
+            refuse_dialog_covered_field(&page, &resolved).await?;
             let synthesized = self
                 .humanized_type_text(&page, &resolved, &command.value, command.clear_first)
                 .await?;
@@ -2581,6 +2582,7 @@ impl crate::InputEngine for ChromiumWorker {
             };
             (observed, "text")
         } else {
+            refuse_dialog_covered_field(&page, &resolved).await?;
             // The field is read before a trailing Enter, which may submit
             // and replace the page.
             let text = command.value.trim_end_matches(['\n', '\r']);
@@ -4274,6 +4276,22 @@ async fn ensure_editable_control(
     Err(CommandError {
         code: ErrorCode::InvalidRequest,
         message: "target is not an editable control (disabled, readonly, hidden, or not a text/select/checkable control)".into(),
+        layer: ErrorLayer::Driver,
+        retryable: false,
+    })
+}
+
+/// Text entry refuses a field an open dialog covers, as a click on it would be.
+async fn refuse_dialog_covered_field(
+    page: &Page,
+    resolved: &crate::targeting::ResolvedTarget,
+) -> Result<(), CommandError> {
+    if !resolved.covered_by_dialog(page).await? {
+        return Ok(());
+    }
+    Err(CommandError {
+        code: ErrorCode::TargetObscured,
+        message: "text field is covered by an open dialog; dismiss it first".into(),
         layer: ErrorLayer::Driver,
         retryable: false,
     })

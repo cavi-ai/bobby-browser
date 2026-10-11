@@ -170,6 +170,19 @@ impl ResolvedTarget {
         })
     }
 
+    /// Scrolls the target to the viewport center and reports whether its
+    /// center is covered while an open dialog it is not part of is shown.
+    pub async fn covered_by_dialog(&self, page: &Page) -> Result<bool, CommandError> {
+        let script = format!(
+            "el.scrollIntoView({{block:'center',inline:'center',behavior:'instant'}});\
+             if(({hit})(el)!=='obscured')return false;\
+             const holds=dialog=>{{for(let node=el;node;node=node.parentNode||node.host)if(node===dialog)return true;return false;}};\
+             return [...document.querySelectorAll('dialog[open],[role=dialog],[role=alertdialog]')].some(dialog=>dialog.checkVisibility()&&!holds(dialog));",
+            hit = pointer_hit_function()
+        );
+        self.eval(page, &script).await
+    }
+
     /// Scrolls the target into view. A coordinate-based click dispatch
     /// (`clickable_point` followed by `Input.dispatchMouseEvent`) needs the
     /// target on-screen first -- unlike a native `Element::click()`, which
