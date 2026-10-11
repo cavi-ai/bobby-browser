@@ -27,8 +27,8 @@ use chromiumoxide::layout::{ElementQuad, Point};
 use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide::{Command, Element, Method, Page};
 use dom_engine::{
-    rank_candidates, resolve_candidates, Candidate, CandidateState, ResolutionDecision,
-    ResolutionPolicy,
+    accessibility_alignment_unnecessary, apply_accessibility_alignment, rank_candidates,
+    resolve_candidates, Candidate, CandidateState, ResolutionDecision, ResolutionPolicy,
 };
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -631,9 +631,8 @@ pub async fn gather_candidates(
         scope.scope_id,
     )
     .await?;
-    let raw =
+    let mut candidates =
         align_with_accessibility(&scope.execution_page, scope.context_id, target, raw).await?;
-    let mut candidates: Vec<Candidate> = raw.into_iter().map(into_candidate).collect();
     // Auto-descend one level into iframes for main-frame intents: agents
     // cannot name a framePath for content they cannot see, so without this
     // every in-frame control resolves as targetNotFound. Each stamped
@@ -838,7 +837,11 @@ async fn open_target_scope(
         if normalized_frame_target.accessible_name.as_deref() == Some("") {
             normalized_frame_target.accessible_name = None;
         }
-        let (candidate, evidence, _) = choose(&normalized_frame_target, raw, true)?;
+        let (candidate, evidence, _) = choose(
+            &normalized_frame_target,
+            raw.into_iter().map(into_candidate).collect(),
+            true,
+        )?;
         frame_trace.push(evidence);
         let deadline = Instant::now() + Duration::from_secs(2);
         let (child, oopif) = loop {
@@ -904,7 +907,11 @@ async fn open_target_scope(
                 collect_candidates_within(element, &shadow_hosts, nested_scope).await?
             }
         };
-        let (candidate, evidence, _) = choose(host_target, raw, true)?;
+        let (candidate, evidence, _) = choose(
+            host_target,
+            raw.into_iter().map(into_candidate).collect(),
+            true,
+        )?;
         let mut prospective = shadow_hosts.clone();
         prospective.push(candidate.id.clone());
         let has_root: bool = eval_scoped(
@@ -1166,66 +1173,18 @@ async fn align_with_accessibility(
     page: &Page,
     context_id: Option<ExecutionContextId>,
     target: &TargetSpec,
-    mut raw: Vec<BrowserCandidate>,
-) -> Result<Vec<BrowserCandidate>, CommandError> {
+    raw: Vec<BrowserCandidate>,
+) -> Result<Vec<Candidate>, CommandError> {
+    let mut candidates: Vec<_> = raw.into_iter().map(into_candidate).collect();
     let (Some(role), Some(name)) = (&target.role, &target.accessible_name) else {
-        return Ok(raw);
+        return Ok(candidates);
     };
-    if accessibility_alignment_unnecessary(&raw, role, name, target.ordinal) {
-        return Ok(raw);
+    if accessibility_alignment_unnecessary(&candidates, role, name, target.ordinal) {
+        return Ok(candidates);
     }
     let exposed = accessibility_matches(page, context_id, role, name).await?;
-    apply_accessibility_alignment(&mut raw, role, name, &exposed);
-    Ok(raw)
-}
-
-fn gathered_name_match(candidate: &BrowserCandidate, role: &str, name: &str) -> bool {
-    candidate
-        .role
-        .as_deref()
-        .is_some_and(|actual| actual.eq_ignore_ascii_case(role))
-        && candidate.name.as_deref().map(str::trim) == Some(name.trim())
-}
-
-/// One gathered match and no ordinal already agrees with the accessibility
-/// tree, so the tree probe can be skipped.
-fn accessibility_alignment_unnecessary(
-    raw: &[BrowserCandidate],
-    role: &str,
-    name: &str,
-    ordinal: Option<usize>,
-) -> bool {
-    ordinal.is_none()
-        && raw
-            .iter()
-            .filter(|candidate| gathered_name_match(candidate, role, name))
-            .count()
-            == 1
-}
-
-/// Keeps candidates the accessibility tree exposes for `role` and `name`,
-/// and rewrites those candidates' names to the tree's. An empty exposure
-/// leaves the gathered set alone. Gathered matches the tree does not expose
-/// drop out; other gathered candidates stay.
-fn apply_accessibility_alignment(
-    raw: &mut Vec<BrowserCandidate>,
-    role: &str,
-    name: &str,
-    exposed: &[String],
-) {
-    if exposed.is_empty() {
-        return;
-    }
-    raw.retain(|candidate| {
-        exposed.iter().any(|id| id == &candidate.id) || !gathered_name_match(candidate, role, name)
-    });
-    for candidate in raw
-        .iter_mut()
-        .filter(|candidate| exposed.iter().any(|id| id == &candidate.id))
-    {
-        candidate.role = Some(role.to_owned());
-        candidate.name = Some(name.to_owned());
-    }
+    apply_accessibility_alignment(&mut candidates, role, name, &exposed);
+    Ok(candidates)
 }
 
 /// The gathered ids of the elements Chrome's accessibility tree exposes with
@@ -1312,10 +1271,9 @@ const AX_RESOLVE_GROUP: &str = "bobby-accessibility-named";
 
 fn choose(
     target: &TargetSpec,
-    raw: Vec<BrowserCandidate>,
+    candidates: Vec<Candidate>,
     require_visible: bool,
 ) -> Result<(Candidate, types::CandidateEvidence, bool), CommandError> {
-    let candidates = raw.into_iter().map(into_candidate).collect::<Vec<_>>();
     let policy = ResolutionPolicy {
         require_visible,
         ..ResolutionPolicy::default()
@@ -2363,57 +2321,6 @@ mod tests {
         assert!(err.message.contains("accessibleName"));
     }
 
-    fn named_candidate(id: &str, role: &str, name: &str) -> BrowserCandidate {
-        BrowserCandidate {
-            id: id.into(),
-            role: Some(role.into()),
-            name: Some(name.into()),
-            ..browser_candidate(None, BTreeMap::new())
-        }
-    }
-
-    #[test]
-    fn accessibility_alignment_rewrites_exposed_names_and_drops_covered_matches() {
-        let mut raw = vec![
-            named_candidate("slotted", "generic", "label text"),
-            named_candidate("covered", "button", "Save"),
-            named_candidate("other", "link", "Docs"),
-        ];
-        apply_accessibility_alignment(&mut raw, "button", "Save", &["slotted".into()]);
-        assert_eq!(
-            raw.iter()
-                .map(|candidate| candidate.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["slotted", "other"]
-        );
-        assert_eq!(raw[0].role.as_deref(), Some("button"));
-        assert_eq!(raw[0].name.as_deref(), Some("Save"));
-    }
-
-    #[test]
-    fn one_gathered_match_skips_the_accessibility_probe() {
-        let raw = vec![
-            named_candidate("only", "button", "Save"),
-            named_candidate("other", "link", "Docs"),
-        ];
-        assert!(accessibility_alignment_unnecessary(
-            &raw, "button", "Save", None
-        ));
-        assert!(!accessibility_alignment_unnecessary(
-            &raw,
-            "button",
-            "Save",
-            Some(0)
-        ));
-    }
-
-    #[test]
-    fn empty_accessibility_exposure_keeps_gathered_candidates() {
-        let mut raw = vec![named_candidate("a", "button", "Save")];
-        apply_accessibility_alignment(&mut raw, "button", "Save", &[]);
-        assert_eq!(raw.len(), 1);
-    }
-
     #[test]
     fn implicit_role_covers_headings_lists_images_and_tables() {
         let operation = candidate_collector_operation(1).expect("collector operation");
@@ -2485,7 +2392,8 @@ mod tests {
             ambiguous_candidate(Some("button"), Some("Submit"), 80),
             ambiguous_candidate(Some("button"), Some("Submit now"), 80),
         ];
-        let error = choose(&target, raw, true).expect_err("two equal candidates");
+        let error = choose(&target, raw.into_iter().map(into_candidate).collect(), true)
+            .expect_err("two equal candidates");
         assert_eq!(error.code, ErrorCode::TargetAmbiguous);
         assert!(
             error.message.contains("button \"Submit\" score=")

@@ -48,3 +48,12 @@ async fn snapshot_scoped_behind_a_modal_reports_the_dialog() {
     let rig = Rig::firefox().await;
     cases::snapshot_scoped_behind_a_modal_reports_the_dialog(&rig).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed headed Firefox and paired test profile"]
+async fn accessibility_candidate_targets_resolve() {
+    let rig = Rig::firefox().await;
+    cases::snapshot_targets_act_on_the_described_element(&rig).await;
+    cases::snapshot_target_types_into_a_slot_labelled_field(&rig).await;
+    cases::snapshot_targets_resolve_beside_a_modal_dialog(&rig).await;
+}
