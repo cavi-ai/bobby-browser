@@ -67,7 +67,7 @@ The class tells you how to retry. A Replayable intent is safe to repeat. A Recon
 |---|---|
 | `role` | Accessible role |
 | `accessibleName` | Accessible name. May be a `controlId` from `form_snapshot` |
-| `nearText` | `{kind: "exact" \| "contains" \| "regex", value}` near the control |
+| `nearText` | `{kind: "exact" \| "contains" \| "regex", value}` matched against the control's own text, in place of `accessibleName` |
 | `ordinal` | Zero-based index among peers with the same role and name |
 | `framePath`, `shadowPath` | Paths into frames and shadow roots |
 | `allowBestMatch` | Accept a best-effort match |

@@ -678,19 +678,36 @@ pub async fn scoped_snapshot_targets_act_on_the_scoped_element(rig: &Rig) {
 /// A child target from a scoped iframe snapshot keeps the page-wide frame hop,
 /// so same-name frames outside the scope cannot receive the action.
 pub async fn scoped_snapshot_frame_targets_reach_the_second_frame(rig: &Rig) {
-    let body = r#"<iframe title="Widget frame" src="/first"></iframe>
-        <section id="second-widget"><iframe id="second-frame" title="Widget frame" src="/second"></iframe></section>
-        <p role="status" aria-label="idle" id="status"></p>"#;
+    scoped_frame_targets_reach_the_second_frame(
+        rig,
+        &["#second-widget", "#second-frame"],
+        "Widget frame",
+    )
+    .await;
+}
+
+pub async fn iframe_scoped_targets_reach_the_second_frame(rig: &Rig) {
+    for name in ["Widget frame", ""] {
+        scoped_frame_targets_reach_the_second_frame(rig, &["#second-frame"], name).await;
+    }
+}
+
+async fn scoped_frame_targets_reach_the_second_frame(rig: &Rig, scopes: &[&str], name: &str) {
+    let body = format!(
+        r#"<iframe title="{name}" src="/first"></iframe>
+        <section id="second-widget"><iframe id="second-frame" title="{name}" src="/second"></iframe></section>
+        <p role="status" aria-label="idle" id="status"></p>"#
+    );
     let first = r#"<button onclick="parent.document.getElementById('status').setAttribute('aria-label', 'acted first')">Frame action</button>"#;
     let second = r#"<button onclick="parent.document.getElementById('status').setAttribute('aria-label', 'acted second')">Frame action</button>"#;
     let site = FixtureSite::spawn(vec![
-        ("/frames", Route::Html(page("Scoped frames", body))),
+        ("/frames", Route::Html(page("Scoped frames", &body))),
         ("/first", Route::Html(page("First frame", first))),
         ("/second", Route::Html(page("Second frame", second))),
     ])
     .await;
     let live = Live::open(rig, &site.url("/frames")).await;
-    for css in ["#second-widget", "#second-frame"] {
+    for css in scopes {
         let scoped = live.snapshot(json!({"target":{"css":css}})).await;
         let mut targets = Vec::new();
         targets_under(&scoped, &mut targets);
@@ -705,7 +722,7 @@ pub async fn scoped_snapshot_frame_targets_reach_the_second_frame(rig: &Rig) {
         assert_eq!(
             target["framePath"],
             json!([{
-                "role":"iframe", "accessibleName":"Widget frame", "ordinal":1
+                "role":"iframe", "accessibleName":name, "ordinal":1
             }]),
             "scoped frame hop: {scoped}"
         );
