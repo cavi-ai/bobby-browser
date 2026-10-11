@@ -90,7 +90,7 @@ pub enum CompileError {
     EmptyFieldName,
     #[error("duplicate extract field name: {0}")]
     DuplicateFieldName(String),
-    #[error("hints set accessibleName and an exact nearText to different values")]
+    #[error("hints set accessibleName and a nearText other than the same exact name")]
     ConflictingNameHints,
 }
 
@@ -261,10 +261,10 @@ fn compile_target_with_purpose_fallback(
     };
 
     // `accessibleName` is the snapshot-shaped spelling of an exact `nearText`.
-    // Two different names is a caller mistake with no safe reading, so refuse
-    // instead of silently preferring one.
+    // Any other `nearText` beside it is a second name hint with no safe
+    // reading, so refuse instead of silently preferring one.
     let name_hint = match (&hints.accessible_name, &hints.near_text) {
-        (Some(name), Some(TextMatch::Exact(near))) if name != near => {
+        (Some(name), Some(near)) if !matches!(near, TextMatch::Exact(exact) if exact == name) => {
             return Err(CompileError::ConflictingNameHints);
         }
         (Some(name), _) => Some(TextMatch::Exact(name.clone())),
