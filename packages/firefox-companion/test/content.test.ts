@@ -759,6 +759,19 @@ test("a webauthn token does not clear a password field's redaction", () => {
   assert.equal(tree.includes("Passphrase"), false);
 });
 
+test("a11yTree supplies page counts before a scoped duplicate", () => {
+  const document = documentFor(`<button>Save</button><section id="scope"><button>Save</button></section><button>Save</button>`);
+  const result = executeContentAction(document, "a11yTree", {
+    maxNodes: 16, target: { css: "#scope" }, includeTargetCounts: true,
+  }) as { targetCounts: unknown; nodes:Array<{target?:unknown}> };
+  assert.deepEqual(result.targetCounts, [
+    { role: "button", name: "Save", total: 3, preceding: 1 },
+  ]);
+  assert.equal(result.nodes[0]?.target, undefined);
+  const legacy = executeContentAction(document, "a11yTree", { maxNodes:16, target:{css:"#scope"} }) as Record<string, unknown>;
+  assert.equal("targetCounts" in legacy, false);
+});
+
 test("a11yTree keeps the global ordinal when a duplicate is truncated", () => {
   const document = documentFor(`
     <label for="home-phone">Phone</label><input id="home-phone">

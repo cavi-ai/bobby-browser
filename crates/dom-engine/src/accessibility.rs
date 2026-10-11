@@ -1,3 +1,4 @@
+//! Accessibility names and candidate alignment shared by browser adapters.
 use crate::{Candidate, CandidateState};
 
 fn gathered_name_match(candidate: &Candidate, role: &str, name: &str) -> bool {

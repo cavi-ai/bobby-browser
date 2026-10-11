@@ -429,7 +429,7 @@ impl ExtensionObserver for CandidateObserver {
         max_nodes: u32,
         _target: Option<&TargetSpec>,
         include_text: bool,
-    ) -> Result<(Vec<types::AccessibilityNode>, bool), CommandError> {
+    ) -> Result<firefox_companion::AccessibilitySnapshot, CommandError> {
         if include_text {
             return Ok((
                 vec![types::AccessibilityNode {
@@ -438,7 +438,8 @@ impl ExtensionObserver for CandidateObserver {
                     ..types::AccessibilityNode::default()
                 }],
                 false,
-            ));
+            )
+                .into());
         }
         assert_eq!(max_nodes, 1024);
         Ok((
@@ -455,7 +456,8 @@ impl ExtensionObserver for CandidateObserver {
                 ..types::AccessibilityNode::default()
             }],
             false,
-        ))
+        )
+            .into())
     }
 }
 
@@ -897,6 +899,118 @@ async fn accessibility_snapshot_asks_the_extension_for_page_text() {
         nodes[0].name.as_deref(),
         Some("hidden-file=hidden-bytes-7731;")
     );
+}
+
+struct CountObserver(firefox_companion::AccessibilitySnapshot);
+
+#[async_trait]
+impl ExtensionObserver for CountObserver {
+    async fn begin_page_binding(
+        &self,
+        lease: &AttachmentLease,
+        page: &PageId,
+    ) -> Result<Box<dyn ExtensionPageBinding>, CommandError> {
+        CandidateObserver.begin_page_binding(lease, page).await
+    }
+    async fn observe(
+        &self,
+        lease: &AttachmentLease,
+        page: &PageId,
+        command: &InspectCommand,
+    ) -> Result<ExtensionObservation, CommandError> {
+        CandidateObserver.observe(lease, page, command).await
+    }
+    async fn release_page_binding(
+        &self,
+        lease: &AttachmentLease,
+        page: &PageId,
+    ) -> Result<(), CommandError> {
+        CandidateObserver.release_page_binding(lease, page).await
+    }
+    async fn a11y_snapshot(
+        &self,
+        _: &AttachmentLease,
+        _: &PageId,
+        _: u32,
+        _: Option<&TargetSpec>,
+        _: bool,
+    ) -> Result<firefox_companion::AccessibilitySnapshot, CommandError> {
+        Ok(self.0.clone())
+    }
+}
+
+#[tokio::test]
+async fn scoped_snapshot_consumes_page_counts_and_rejects_invalid_counts() {
+    for (counts, expected) in [
+        (json!([]), None),
+        (
+            json!([{ "role":"button", "name":"Save", "total":3, "preceding":1 }]),
+            Some(1),
+        ),
+        (
+            json!([{ "role":"button", "name":"Save", "total":0, "preceding":0 }]),
+            None,
+        ),
+        (
+            json!([{ "role":"button", "name":"Save", "total":2, "preceding":2 }]),
+            None,
+        ),
+        (
+            json!([{ "role":"button", "name":"Save", "total":3, "preceding":2 }]),
+            None,
+        ),
+        (
+            json!([{ "role":"button", "name":"Other", "total":2, "preceding":1 }]),
+            None,
+        ),
+        (
+            json!([{ "role":"button", "name":"Save", "total":3, "preceding":1 },
+               { "role":"button", "name":"Save", "total":3, "preceding":1 }]),
+            None,
+        ),
+    ] {
+        let snapshot = serde_json::from_value(json!({
+            "nodes":[{"role":"button", "name":"Save"}, {"role":"button", "name":"Save"}],
+            "truncated":false, "targetCounts":counts,
+        }))
+        .unwrap();
+        let worker = FirefoxCompanionWorker::new(
+            WorkerId::new(),
+            PathBuf::from("/profiles/firefox"),
+            lease(),
+            FakeBidi::new(Vec::new()),
+            Arc::new(CountObserver(snapshot)),
+        )
+        .await
+        .unwrap();
+        let page = PageId::new();
+        worker_pool::tabs_or_default(worker.tabs())
+            .open_page(page.clone())
+            .await
+            .unwrap();
+        let result = worker_pool::observation_or_default(worker.observation())
+            .a11y_snapshot(
+                &page,
+                &types::AccessibilitySnapshotCommand {
+                    target: Some(TargetSpec {
+                        css: Some("#scope".into()),
+                        ..Default::default()
+                    }),
+                    max_nodes: Some(16),
+                },
+            )
+            .await;
+        match expected {
+            Some(index) => {
+                let evidence = result.unwrap();
+                let Evidence::AccessibilitySnapshot { nodes, .. } = &evidence[0] else {
+                    panic!("missing snapshot")
+                };
+                assert_eq!(nodes[0].target.as_ref().unwrap().ordinal, Some(index));
+            }
+            None => assert_eq!(result.unwrap_err().code, ErrorCode::BrowserCommandFailed),
+        }
+    }
 }
 
 #[tokio::test]
@@ -5105,7 +5219,7 @@ impl ExtensionObserver for LargePageObserver {
         _max_nodes: u32,
         _target: Option<&TargetSpec>,
         _include_text: bool,
-    ) -> Result<(Vec<types::AccessibilityNode>, bool), CommandError> {
+    ) -> Result<firefox_companion::AccessibilitySnapshot, CommandError> {
         Ok((
             vec![types::AccessibilityNode {
                 role: Some("button".into()),
@@ -5113,7 +5227,8 @@ impl ExtensionObserver for LargePageObserver {
                 ..types::AccessibilityNode::default()
             }],
             true,
-        ))
+        )
+            .into())
     }
 
     async fn locate_target(
