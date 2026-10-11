@@ -490,6 +490,26 @@ fn compile_target_refuses_two_different_names_rather_than_guessing() {
 }
 
 #[test]
+fn compile_target_refuses_a_non_exact_near_text_beside_an_accessible_name() {
+    for near_text in [
+        TextMatch::Contains("Home".into()),
+        TextMatch::Regex("^Email".into()),
+    ] {
+        let error = compile_intent(&IntentCommand::Locate(LocateIntent {
+            purpose: "find the email field".into(),
+            hints: IntentHints {
+                role: Some("textbox".into()),
+                accessible_name: Some("Email address".into()),
+                near_text: Some(near_text.clone()),
+                ..IntentHints::default()
+            },
+        }))
+        .expect_err("a second name hint must not be dropped");
+        assert_eq!(error, CompileError::ConflictingNameHints, "{near_text:?}");
+    }
+}
+
+#[test]
 fn compile_target_keeps_a_non_exact_near_text_alongside_no_accessible_name() {
     let plan = compile_intent(&IntentCommand::Locate(LocateIntent {
         purpose: "find the banner".into(),

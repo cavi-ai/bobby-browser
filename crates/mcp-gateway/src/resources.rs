@@ -1117,9 +1117,10 @@ role/name pairs apart.
 
 `accessibleName` matches the control's accessible name exactly and is the
 same hint as `nearText: {"kind":"exact","value":...}`. Use `nearText` when
-you need `contains` or `regex` matching instead. Setting `accessibleName`
-and an exact `nearText` to two different values is refused
-(`intentCompileFailed`) rather than resolved to one of them -- send one name.
+you need `contains` or `regex` matching on the control's own text instead.
+Setting `accessibleName` beside any `nearText` other than the same exact
+value is refused (`intentCompileFailed`) rather than resolved to one of
+them -- send one name.
 
 With no name hint at all, the intent falls back to matching on `purpose`,
 which is looser and more likely to go ambiguous.

@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Intent hints that set `accessibleName` beside a `contains` or `regex` `nearText` fail `intentCompileFailed` instead of ignoring the `nearText`.
 - A missed target's near-miss list marks a control that exists but is hidden as `hidden`, not `noMatch`.
 - An intent that fails `targetObscured` lists the dialogs open over the page in its evidence.
 - Snapshots report form controls missing from the accessibility tree only when the tree is whole and unscoped.
