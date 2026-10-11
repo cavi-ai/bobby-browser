@@ -42,7 +42,8 @@ pub enum ContextStoreError {
     AlreadyLocked,
     /// The lockfile could not be claimed for a reason that is not another
     /// writer holding it: the path is not a regular file, or the path and the
-    /// opened descriptor disagree about which inode they are.
+    /// opened descriptor disagree about which inode they are, or the inode
+    /// is shared through another hard link.
     ///
     /// Kept distinct from [`Self::AlreadyLocked`] because the CLI tells the
     /// operator to stop a running bobby, which is wrong advice for every one
@@ -997,7 +998,7 @@ impl Lockfile {
         }
         #[cfg(unix)]
         {
-            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            use std::os::unix::fs::MetadataExt;
             if path_metadata.dev() != file_metadata.dev()
                 || path_metadata.ino() != file_metadata.ino()
             {
@@ -1005,13 +1006,27 @@ impl Lockfile {
                     "lock path and descriptor disagree about the inode",
                 ));
             }
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            if file_metadata.nlink() != 1 {
+                return Err(ContextStoreError::LockUnusable(
+                    "lock inode is shared through hard links",
+                ));
+            }
         }
         match file.try_lock() {
-            Ok(()) => Ok(Self { file }),
-            Err(std::fs::TryLockError::WouldBlock) => Err(ContextStoreError::AlreadyLocked),
-            Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Err(ContextStoreError::AlreadyLocked),
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
         }
+        let lock = Self { file };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Only the successful owner may change permissions. Use its
+            // validated handle so replacing the path cannot redirect chmod.
+            lock.file
+                .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(lock)
     }
 }
 
