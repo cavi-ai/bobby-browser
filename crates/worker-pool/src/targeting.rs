@@ -43,6 +43,8 @@ pub struct ResolvedTarget {
     /// The frame the resolved element lives in; `None` for the main frame.
     /// The a11y snapshot's scoped mode fetches that frame's AX tree.
     frame_id: Option<chromiumoxide::cdp::browser_protocol::page::FrameId>,
+    /// The selected iframe's semantic hop, ranked within its parent scope.
+    pub(crate) iframe_hop: Option<types::SemanticTargetSegment>,
     pub evidence: Evidence,
 }
 
@@ -629,6 +631,24 @@ pub(crate) async fn main_frame_iframe_candidates(
         .collect())
 }
 
+/// A named hop ranks only same-name frames; an unnamed hop ranks every
+/// visible iframe because its normalized name applies no filter.
+pub(crate) fn iframe_hop_ordinal(
+    visible_iframes: &[&Candidate],
+    candidate: &Candidate,
+) -> Option<usize> {
+    let matching: Vec<_> = visible_iframes
+        .iter()
+        .filter(|other| candidate.name.is_none() || other.name == candidate.name)
+        .collect();
+    (matching.len() > 1).then(|| {
+        matching
+            .iter()
+            .position(|other| other.id == candidate.id)
+            .unwrap_or(0)
+    })
+}
+
 /// Gather DOM candidates for intent resolution without choosing a match.
 pub async fn gather_candidates(
     page: &Page,
@@ -852,7 +872,7 @@ async fn open_target_scope(
         }
         let (candidate, evidence, _) = choose(
             &normalized_frame_target,
-            raw.into_iter().map(into_candidate).collect(),
+            &raw.into_iter().map(into_candidate).collect::<Vec<_>>(),
             true,
         )?;
         frame_trace.push(evidence);
@@ -1023,6 +1043,7 @@ pub async fn resolve_target_with_visibility(
             },
             execution_page: None,
             frame_id: None,
+            iframe_hop: None,
             evidence: selector_evidence(page_id, selector),
         });
     };
@@ -1041,7 +1062,22 @@ pub async fn resolve_target_with_visibility(
     .await?;
     let raw =
         align_with_accessibility(&scope.execution_page, scope.context_id, target, raw).await?;
-    let (candidate, evidence, best_match_authorized) = choose(target, raw, require_visible)?;
+    let (candidate, evidence, best_match_authorized) = choose(target, &raw, require_visible)?;
+    let iframe_hop = (candidate.role.as_deref() == Some("iframe")).then(|| {
+        let visible_iframes: Vec<_> = raw
+            .iter()
+            .filter(|other| {
+                other.role.as_deref() == Some("iframe")
+                    && other.state.attached
+                    && other.state.visible
+            })
+            .collect();
+        types::SemanticTargetSegment {
+            role: "iframe".into(),
+            accessible_name: candidate.name.clone().unwrap_or_default(),
+            ordinal: iframe_hop_ordinal(&visible_iframes, &candidate),
+        }
+    });
     let owner = owners.get(&candidate.id).cloned();
     // A candidate gathered from a closed shadow root must be located relative
     // to that root's own element handle, not the outer document/frame context.
@@ -1091,6 +1127,7 @@ pub async fn resolve_target_with_visibility(
             Some(main) if *main == scope.frame_id => None,
             _ => Some(scope.frame_id),
         },
+        iframe_hop,
         evidence: Evidence::Resolution {
             target: Box::new(target.clone()),
             fingerprint: Box::new(fingerprint),
@@ -1279,14 +1316,14 @@ const AX_RESOLVE_GROUP: &str = "bobby-accessibility-named";
 
 fn choose(
     target: &TargetSpec,
-    candidates: Vec<Candidate>,
+    candidates: &[Candidate],
     require_visible: bool,
 ) -> Result<(Candidate, types::CandidateEvidence, bool), CommandError> {
     let policy = ResolutionPolicy {
         require_visible,
         ..ResolutionPolicy::default()
     };
-    match resolve_candidates(target, &candidates, &policy)
+    match resolve_candidates(target, candidates, &policy)
         .map_err(|error| target_error(ErrorCode::InvalidRequest, error))?
     {
         ResolutionDecision::NotFound => Err(target_error(
@@ -2382,8 +2419,12 @@ mod tests {
             ambiguous_candidate(Some("button"), Some("Submit"), 80),
             ambiguous_candidate(Some("button"), Some("Submit now"), 80),
         ];
-        let error = choose(&target, raw.into_iter().map(into_candidate).collect(), true)
-            .expect_err("two equal candidates");
+        let error = choose(
+            &target,
+            &raw.into_iter().map(into_candidate).collect::<Vec<_>>(),
+            true,
+        )
+        .expect_err("two equal candidates");
         assert_eq!(error.code, ErrorCode::TargetAmbiguous);
         assert!(
             error.message.contains("button \"Submit\" score=")

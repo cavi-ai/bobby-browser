@@ -13,6 +13,7 @@ use crate::navigation_settle::{
 };
 use crate::pointer_hit::PointerHit;
 use crate::secret_material::page_title_evidence;
+use crate::targeting::iframe_hop_ordinal;
 use artifact_store::ArtifactStore;
 use async_trait::async_trait;
 use behavioral_engine::{
@@ -2077,17 +2078,8 @@ impl crate::ObservationEngine for ChromiumWorker {
                 // Stamp targets with the hop that re-resolves the iframe
                 // element, so in-frame targets pass to control_action
                 // verbatim like the full-tree descent's do.
-                let hop_name = match &resolved.evidence {
-                    Evidence::Resolution { fingerprint, .. } => fingerprint.name.clone(),
-                    _ => None,
-                };
-                if let Some(name) = hop_name {
-                    let segment = types::SemanticTargetSegment {
-                        role: "iframe".into(),
-                        accessible_name: name,
-                        ordinal: None,
-                    };
-                    stamp_a11y_frame_path(&mut nodes, &segment);
+                if let Some(segment) = &resolved.iframe_hop {
+                    stamp_a11y_frame_path(&mut nodes, segment);
                 }
                 return Ok(vec![Evidence::AccessibilitySnapshot {
                     page_id: page_id.clone(),
@@ -4657,30 +4649,6 @@ async fn descend_a11y_iframes(
         }
     }
     truncated
-}
-
-/// The stamped hop's ordinal for an iframe candidate among the resolver's own
-/// matching set: `choose` filters `collect_candidates` output by role and (if
-/// set) accessibleName, over attached+visible candidates, then ranks by score
-/// and DOM order. A named candidate's matching set is every visible iframe
-/// with that name; an unnamed candidate's is every visible iframe, since a
-/// normalized (`None`) accessibleName applies no name filter at all. `None`
-/// when that set has at most one element, matching the pre-existing rule that
-/// an unambiguous hop carries no ordinal.
-fn iframe_hop_ordinal(
-    visible_iframes: &[&dom_engine::Candidate],
-    candidate: &dom_engine::Candidate,
-) -> Option<usize> {
-    let matching: Vec<&&dom_engine::Candidate> = visible_iframes
-        .iter()
-        .filter(|other| candidate.name.is_none() || other.name == candidate.name)
-        .collect();
-    (matching.len() > 1).then(|| {
-        matching
-            .iter()
-            .position(|other| other.id == candidate.id)
-            .unwrap_or(0)
-    })
 }
 
 fn compact_ax_tree(
