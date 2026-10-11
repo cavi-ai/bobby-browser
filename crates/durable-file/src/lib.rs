@@ -24,7 +24,7 @@ pub fn without_following_links_async(options: &mut tokio::fs::OpenOptions) {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::OpenOptionsExt;
+        // Inherent on tokio's Windows OpenOptions; the std trait does not apply.
         options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
 }

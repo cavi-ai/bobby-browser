@@ -40,8 +40,29 @@ export function composedQueryAll(root, selector) {
 
 // Rendered-leaf visibility. The body is `ELEMENT_VISIBILITY_SCRIPT`: geometry
 // and CSS hiding of this element only, not ancestors or aria-hidden.
-export function renderedLeafVisible(el) {
-  const s=getComputedStyle(el),r=el.getBoundingClientRect(); return s.visibility!=='hidden'&&s.display!=='none'&&r.width>0&&r.height>0
+function renderedLeafVisible(el) {
+  const s=el.ownerDocument.defaultView.getComputedStyle(el),r=el.getBoundingClientRect(); return s.visibility!=='hidden'&&s.display!=='none'&&r.width>0&&r.height>0
+}
+
+// `rendered` is this element only. `a11y` walks ancestors and aria-hidden.
+// `hit-ready` walks ancestors and skips aria-hidden.
+export function isHidden(element, mode, budget) {
+  if (mode === "rendered") return !renderedLeafVisible(element);
+  const aria = mode === "a11y";
+  let visited = 0;
+  for (let current = element; current; current = composedParent(current)) {
+    visited += 1;
+    if (visited > MAX_ANCESTOR_VISITS || (aria && !takeAncestorWork(budget))) return true;
+    if (current.hasAttribute("hidden")) return true;
+    if (aria && current.getAttribute("aria-hidden") === "true") return true;
+    const style = current.ownerDocument.defaultView?.getComputedStyle(current);
+    if (style?.display === "none" || style?.visibility === "hidden") return true;
+  }
+  return false;
+}
+
+export function hidden(mode) {
+  return (element, budget) => isHidden(element, mode, budget);
 }
 
 const MAX_ANCESTOR_VISITS = 256;
@@ -60,33 +81,6 @@ function takeAncestorWork(budget) {
   return true;
 }
 
-// Hidden from rendering or from assistive technology, walking composed ancestors.
-export function isElementHidden(element, budget) {
-  let visited = 0;
-  for (let current = element; current; current = composedParent(current)) {
-    visited += 1;
-    if (visited > MAX_ANCESTOR_VISITS || !takeAncestorWork(budget)) return true;
-    if (current.hasAttribute("hidden") || current.getAttribute("aria-hidden") === "true") {
-      return true;
-    }
-    const style = current.ownerDocument.defaultView?.getComputedStyle(current);
-    if (style?.display === "none" || style?.visibility === "hidden") return true;
-  }
-  return false;
-}
-
-// Hidden from rendering. aria-hidden alone does not count.
-export function isRenderedHidden(element) {
-  let visited = 0;
-  for (let current = element; current; current = composedParent(current)) {
-    visited += 1;
-    if (visited > MAX_ANCESTOR_VISITS) return true;
-    if (current.hasAttribute("hidden")) return true;
-    const style = current.ownerDocument.defaultView?.getComputedStyle(current);
-    if (style?.display === "none" || style?.visibility === "hidden") return true;
-  }
-  return false;
-}
 
 export function modalDialogOpen(document) {
   for (const dialog of Array.from(document.querySelectorAll('[aria-modal="true"], dialog')).slice(0, 64)) {
@@ -99,7 +93,13 @@ export function modalDialogOpen(document) {
     } catch {
       modal = false;
     }
-    if (modal && !isElementHidden(dialog)) return true;
+    if (modal && !isHidden(dialog, "a11y")) return true;
   }
   return false;
+}
+
+// A target the accessibility walk skipped, and the rendered walk still finds,
+// is behind the open modal.
+export function obscuredByOpenModal(document, renderedMatch) {
+  return Boolean(renderedMatch) && modalDialogOpen(document);
 }

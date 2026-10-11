@@ -1,8 +1,8 @@
 import {
   composedQuery,
-  isElementHidden,
-  isRenderedHidden,
-  modalDialogOpen,
+  hidden,
+  isHidden,
+  obscuredByOpenModal,
   SHADOW_HOP,
 } from "../../../crates/dom-engine/src/page_dom.js";
 import { isExtensionSafeString, isExtensionSafeUrl } from "./native-transport.js";
@@ -281,7 +281,7 @@ function visibleText(document: Document, root: Element): string {
     if (
       !parent ||
       ["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT"].includes(parent.tagName) ||
-      isElementHidden(parent)
+      isHidden(parent, "a11y")
     ) {
       continue;
     }
@@ -539,7 +539,7 @@ function boundedElementText(
     return true;
   };
   try {
-    if (!isElementHidden(element)) visit(element, 0);
+    if (!isHidden(element, "a11y")) visit(element, 0);
   } catch {
     // A node that throws during inspection contributes no name.
   }
@@ -835,7 +835,7 @@ function observeRoot(document: Document, root: Element, includeHtml: boolean): P
       controlsTruncated = true;
       break;
     }
-    if (isElementHidden(element, helperBudget)) continue;
+    if (isHidden(element, "a11y", helperBudget)) continue;
     const sensitive = isSensitiveControl(element, helperBudget);
     const observedPath = composedCssPath(element, helperBudget, siblingPositions, !sensitive);
     if (!observedPath) continue;
@@ -959,7 +959,7 @@ function inspectionRoot(document: Document, input: Record<string, unknown>): Ele
   } catch {
     throw unresolvable("observe selector is invalid");
   }
-  if (!root || isElementHidden(root)) {
+  if (!root || isHidden(root, "a11y")) {
     throw new ContentActionError("targetNotFound", "observe target was not found");
   }
   return root;
@@ -979,7 +979,7 @@ function target(document: Document, input: Record<string, unknown>): Element {
   } catch {
     throw new ContentActionError("invalidInput", "content action cssPath is invalid");
   }
-  if (!element || isElementHidden(element)) {
+  if (!element || isHidden(element, "a11y")) {
     throw new ContentActionError("targetNotFound", "content action target was not found");
   }
   return element;
@@ -1167,7 +1167,7 @@ function a11yTree(
       } catch {
         throw unresolvable("a11y target selector is invalid");
       }
-      if (!found || isElementHidden(found)) throw notFound();
+      if (!found || isHidden(found, "a11y")) throw notFound();
       return found;
     }
     if (typeof role !== "string" || role.length === 0) {
@@ -1215,14 +1215,14 @@ function a11yTree(
       walk(root, 0);
       return { matches, visited };
     };
-    const { matches, visited } = search(isElementHidden);
+    const { matches, visited } = search(hidden("a11y"));
     const picked = matches[wanted];
     if (!picked && visited > A11Y_MAX_SCOPE_VISITS) {
       throw new ContentActionError("budgetExhausted", "a11y target search exceeded its visit bound");
     }
     // An open modal dialog hides the rest of the page from assistive
     // technology; a target hidden only that way is behind the dialog.
-    if (!picked && modalDialogOpen(document) && search(isRenderedHidden).matches[wanted]) {
+    if (!picked && obscuredByOpenModal(document, search(hidden("hit-ready")).matches[wanted])) {
       throw new ContentActionError("targetObscured", "a11y target is behind an open modal dialog");
     }
     if (typeof ordinal === "number") {
@@ -1297,7 +1297,7 @@ function a11yTree(
   let scopeSeen: Map<string, number> | undefined;
   const countTargets = (element: Element, depth: number): void => {
     try {
-      if (isElementHidden(element)) return;
+      if (isHidden(element, "a11y")) return;
       if (element === scope) scopeSeen = new Map(targetTotals);
       const { role, name } = semantics(element);
       if (role && name && name !== REDACTED && A11Y_ACTIONABLE_ROLES.has(role)) {
@@ -1387,7 +1387,7 @@ function a11yTree(
     // descendant spends the node budget.
     let hidden = false;
     try {
-      hidden = isElementHidden(element);
+      hidden = isHidden(element, "a11y");
     } catch {
       hidden = true;
     }

@@ -85,6 +85,86 @@ pub trait WaitObserver: Send + Sync {
     async fn observe(&self, condition: &WaitCondition) -> Result<WaitObservation, CommandError>;
 }
 
+/// An element read. `Missing` is unresolved; the module decides which states that satisfies.
+pub enum ElementProbe {
+    Satisfied(bool),
+    Missing,
+}
+
+/// A text or value read. `Missing` stays pending. An empty `Values` list was read.
+pub enum TextProbe {
+    Values(Vec<String>),
+    Missing,
+}
+
+pub fn element_observation(state: types::ElementState, probe: ElementProbe) -> WaitObservation {
+    WaitObservation::Element(match probe {
+        ElementProbe::Satisfied(satisfied) => satisfied,
+        ElementProbe::Missing => unresolved_element_satisfies(state),
+    })
+}
+
+pub fn text_observation(probe: TextProbe) -> WaitObservation {
+    match probe {
+        TextProbe::Values(values) => WaitObservation::Text(values),
+        TextProbe::Missing => WaitObservation::Pending,
+    }
+}
+
+/// DOM reads an engine can perform. Condition matching stays in [`observe_condition`].
+#[async_trait]
+pub trait WaitDom: Send + Sync {
+    async fn element(
+        &self,
+        target: &TargetSpec,
+        state: types::ElementState,
+    ) -> Result<ElementProbe, CommandError>;
+    async fn text(&self, target: &TargetSpec, is_value: bool) -> Result<TextProbe, CommandError>;
+    async fn url(&self) -> Result<String, CommandError>;
+    async fn document_ready(&self) -> Result<String, CommandError>;
+    async fn network(
+        &self,
+        filters: &crate::NetworkQuietFilters<'_>,
+    ) -> Result<(usize, Vec<String>), CommandError>;
+}
+
+pub async fn observe_condition(
+    dom: &(impl WaitDom + ?Sized),
+    condition: &WaitCondition,
+) -> Result<WaitObservation, CommandError> {
+    match condition {
+        WaitCondition::Element { target, state } => Ok(element_observation(
+            *state,
+            dom.element(target, *state).await?,
+        )),
+        WaitCondition::Text { target, .. } | WaitCondition::Value { target, .. } => {
+            let is_value = matches!(condition, WaitCondition::Value { .. });
+            Ok(text_observation(dom.text(target, is_value).await?))
+        }
+        WaitCondition::Url { .. } => Ok(WaitObservation::Url(dom.url().await?)),
+        WaitCondition::Document { .. } => {
+            Ok(WaitObservation::Document(dom.document_ready().await?))
+        }
+        WaitCondition::NetworkQuiet {
+            ignore_url_substrings,
+            ignore_resource_types,
+            ignore_long_lived,
+            ..
+        } => {
+            let filters = crate::NetworkQuietFilters {
+                ignore_url_substrings,
+                ignore_resource_types,
+                ignore_long_lived: *ignore_long_lived,
+            };
+            let (in_flight, excluded_classes) = dom.network(&filters).await?;
+            Ok(WaitObservation::Network {
+                in_flight,
+                excluded_classes,
+            })
+        }
+    }
+}
+
 fn error(code: ErrorCode, message: impl Into<String>) -> CommandError {
     CommandError {
         code,
@@ -416,6 +496,30 @@ mod tests {
                 .count(),
             types::MAX_WAIT_OBSERVED_CHARS
         );
+    }
+
+    #[test]
+    fn missing_reads_map_once() {
+        assert!(matches!(
+            element_observation(types::ElementState::Hidden, ElementProbe::Missing),
+            WaitObservation::Element(true)
+        ));
+        assert!(matches!(
+            element_observation(types::ElementState::Visible, ElementProbe::Missing),
+            WaitObservation::Element(false)
+        ));
+        assert!(matches!(
+            element_observation(types::ElementState::Attached, ElementProbe::Satisfied(true)),
+            WaitObservation::Element(true)
+        ));
+        assert!(matches!(
+            text_observation(TextProbe::Missing),
+            WaitObservation::Pending
+        ));
+        assert!(matches!(
+            text_observation(TextProbe::Values(vec![])),
+            WaitObservation::Text(values) if values.is_empty()
+        ));
     }
 
     #[test]

@@ -4,13 +4,18 @@ export function composedQuery(root: ParentNode, selector: string): Element | nul
 
 export function composedQueryAll(root: ParentNode, selector: string): Element[];
 
-export function renderedLeafVisible(el: Element): boolean;
+export type VisibilityMode = "rendered" | "a11y" | "hit-ready";
 
-export function isElementHidden(
+export function isHidden(
   element: Element,
+  mode: VisibilityMode,
   budget?: { remaining: number },
 ): boolean;
 
-export function isRenderedHidden(element: Element): boolean;
+export function hidden(
+  mode: VisibilityMode,
+): (element: Element, budget?: { remaining: number }) => boolean;
 
 export function modalDialogOpen(document: Document): boolean;
+
+export function obscuredByOpenModal(document: Document, renderedMatch: unknown): boolean;

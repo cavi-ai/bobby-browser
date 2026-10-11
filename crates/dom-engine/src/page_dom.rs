@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 /// DOM observation body for an element bound to `el`.
 /// Visibility requires rendered geometry and excludes CSS-hidden elements.
 /// The same statement is the body of `renderedLeafVisible` in `page_dom.js`.
-pub const ELEMENT_VISIBILITY_SCRIPT: &str = "const s=getComputedStyle(el),r=el.getBoundingClientRect(); return s.visibility!=='hidden'&&s.display!=='none'&&r.width>0&&r.height>0";
+pub const ELEMENT_VISIBILITY_SCRIPT: &str = "const s=el.ownerDocument.defaultView.getComputedStyle(el),r=el.getBoundingClientRect(); return s.visibility!=='hidden'&&s.display!=='none'&&r.width>0&&r.height>0";
 
 fn page_bindings() -> &'static str {
     static CELL: OnceLock<String> = OnceLock::new();

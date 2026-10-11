@@ -5,9 +5,9 @@ import { JSDOM } from "jsdom";
 import {
   composedQuery,
   composedQueryAll,
-  isElementHidden,
-  isRenderedHidden,
+  isHidden,
   modalDialogOpen,
+  obscuredByOpenModal,
 } from "../../../crates/dom-engine/src/page_dom.js";
 
 function page(html: string) {
@@ -98,13 +98,17 @@ test("composed query hops open shadow roots and stops without one", () => {
 });
 
 test("hidden modes disagree on aria-hidden and agree on display none", () => {
-  const window = page(`<div id="aria" aria-hidden="true"><span id="leaf">Text</span></div><div id="css" style="display:none"><span>Gone</span></div>`);
+  const window = page(`<div id="aria" aria-hidden="true"><span id="leaf">Text</span></div><div id="css" style="display:none"><span id="gone">Gone</span></div><span id="self" style="display:none">Self</span>`);
   const leaf = window.document.getElementById("leaf")!;
-  const gone = window.document.querySelector("#css span")!;
-  assert.equal(isElementHidden(leaf), true);
-  assert.equal(isRenderedHidden(leaf), false);
-  assert.equal(isElementHidden(gone), true);
-  assert.equal(isRenderedHidden(gone), true);
+  const gone = window.document.getElementById("gone")!;
+  const self = window.document.getElementById("self")!;
+  assert.equal(isHidden(leaf, "a11y"), true);
+  assert.equal(isHidden(leaf, "hit-ready"), false);
+  assert.equal(isHidden(leaf, "rendered"), false);
+  assert.equal(isHidden(gone, "a11y"), true);
+  assert.equal(isHidden(gone, "hit-ready"), true);
+  assert.equal(isHidden(gone, "rendered"), false);
+  assert.equal(isHidden(self, "rendered"), true);
 });
 
 test("a visible aria-modal dialog is open and a hidden one is not", () => {
@@ -112,4 +116,7 @@ test("a visible aria-modal dialog is open and a hidden one is not", () => {
   const shut = page(`<div role="dialog" aria-modal="true" hidden>Shut</div>`);
   assert.equal(modalDialogOpen(open.document), true);
   assert.equal(modalDialogOpen(shut.document), false);
+  assert.equal(obscuredByOpenModal(open.document, open.document.body), true);
+  assert.equal(obscuredByOpenModal(shut.document, shut.document.body), false);
+  assert.equal(obscuredByOpenModal(open.document, null), false);
 });
