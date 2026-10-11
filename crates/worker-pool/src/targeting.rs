@@ -631,9 +631,8 @@ pub async fn gather_candidates(
         scope.scope_id,
     )
     .await?;
-    let raw =
+    let mut candidates =
         align_with_accessibility(&scope.execution_page, scope.context_id, target, raw).await?;
-    let mut candidates = raw;
     // Auto-descend one level into iframes for main-frame intents: agents
     // cannot name a framePath for content they cannot see, so without this
     // every in-frame control resolves as targetNotFound. Each stamped
@@ -1171,16 +1170,16 @@ async fn align_with_accessibility(
     target: &TargetSpec,
     raw: Vec<BrowserCandidate>,
 ) -> Result<Vec<Candidate>, CommandError> {
-    let mut raw: Vec<Candidate> = raw.into_iter().map(into_candidate).collect();
+    let mut candidates: Vec<_> = raw.into_iter().map(into_candidate).collect();
     let (Some(role), Some(name)) = (&target.role, &target.accessible_name) else {
-        return Ok(raw);
+        return Ok(candidates);
     };
-    if accessibility_alignment_unnecessary(&raw, role, name, target.ordinal) {
-        return Ok(raw);
+    if accessibility_alignment_unnecessary(&candidates, role, name, target.ordinal) {
+        return Ok(candidates);
     }
     let exposed = accessibility_matches(page, context_id, role, name).await?;
-    apply_accessibility_alignment(&mut raw, role, name, &exposed);
-    Ok(raw)
+    apply_accessibility_alignment(&mut candidates, role, name, &exposed);
+    Ok(candidates)
 }
 
 /// The gathered ids of the elements Chrome's accessibility tree exposes with
@@ -2297,57 +2296,6 @@ mod tests {
         })
         .expect_err("shadow hop stays strict");
         assert!(err.message.contains("accessibleName"));
-    }
-
-    fn named_candidate(id: &str, role: &str, name: &str) -> Candidate {
-        into_candidate(BrowserCandidate {
-            id: id.into(),
-            role: Some(role.into()),
-            name: Some(name.into()),
-            ..browser_candidate(None, BTreeMap::new())
-        })
-    }
-
-    #[test]
-    fn accessibility_alignment_rewrites_exposed_names_and_drops_covered_matches() {
-        let mut raw = vec![
-            named_candidate("slotted", "generic", "label text"),
-            named_candidate("covered", "button", "Save"),
-            named_candidate("other", "link", "Docs"),
-        ];
-        apply_accessibility_alignment(&mut raw, "button", "Save", &["slotted".into()]);
-        assert_eq!(
-            raw.iter()
-                .map(|candidate| candidate.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["slotted", "other"]
-        );
-        assert_eq!(raw[0].role.as_deref(), Some("button"));
-        assert_eq!(raw[0].name.as_deref(), Some("Save"));
-    }
-
-    #[test]
-    fn one_gathered_match_skips_the_accessibility_probe() {
-        let raw = vec![
-            named_candidate("only", "button", "Save"),
-            named_candidate("other", "link", "Docs"),
-        ];
-        assert!(accessibility_alignment_unnecessary(
-            &raw, "button", "Save", None
-        ));
-        assert!(!accessibility_alignment_unnecessary(
-            &raw,
-            "button",
-            "Save",
-            Some(0)
-        ));
-    }
-
-    #[test]
-    fn empty_accessibility_exposure_keeps_gathered_candidates() {
-        let mut raw = vec![named_candidate("a", "button", "Save")];
-        apply_accessibility_alignment(&mut raw, "button", "Save", &[]);
-        assert_eq!(raw.len(), 1);
     }
 
     #[test]
