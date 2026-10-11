@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
 use chromiumoxide::{Browser, BrowserConfig};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
 #[tokio::test]
 async fn launch_deadline_includes_a_stalled_devtools_handshake() {
@@ -22,19 +22,37 @@ async fn launch_deadline_includes_a_stalled_devtools_handshake() {
     )
     .unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (request_seen, mut observed_request) = tokio::sync::oneshot::channel();
     let peer = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        let mut request = [0; 4096];
-        assert!(socket.read(&mut request).await.unwrap() > 0);
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut socket = BufReader::new(socket);
+        let mut line = String::new();
+        assert!(socket.read_line(&mut line).await.unwrap() > 0);
+        assert_eq!(line, "GET /devtools/browser/test HTTP/1.1\r\n");
+        let mut header_bytes = line.len();
+        loop {
+            line.clear();
+            let received = socket.read_line(&mut line).await.unwrap();
+            assert!(received > 0);
+            header_bytes += received;
+            assert!(header_bytes <= 4096);
+            if line == "\r\n" {
+                break;
+            }
+        }
+        request_seen.send(()).unwrap();
+        let mut request = [0; 1];
         // Accept TCP and consume the HTTP upgrade, but never send a handshake reply.
         assert_eq!(socket.read(&mut request).await.unwrap(), 0);
     });
     let config = BrowserConfig::builder()
         .chrome_executable(executable)
-        .launch_timeout(Duration::from_millis(500))
+        // Leave time for child startup to reach the handshake being tested,
+        // while keeping the stalled upgrade's deadline bounded.
+        .launch_timeout(Duration::from_secs(2))
         .build()
         .unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(3), Browser::launch(config)).await;
+    let result = tokio::time::timeout(Duration::from_secs(5), Browser::launch(config)).await;
     let error = result
         .expect("launch must enforce its deadline while connecting to DevTools")
         .expect_err("the stalled handshake cannot launch a browser");
@@ -42,6 +60,9 @@ async fn launch_deadline_includes_a_stalled_devtools_handshake() {
         error,
         chromiumoxide::error::CdpError::LaunchTimeout(_)
     ));
+    observed_request
+        .try_recv()
+        .expect("the launch deadline must be exercised during the HTTP upgrade");
     tokio::time::timeout(Duration::from_secs(1), peer)
         .await
         .expect("the failed handshake connection must close")
