@@ -1389,7 +1389,7 @@ function a11yTree(
   // A same-origin frame's tree is built from its own document; each target in
   // it carries the hop that re-resolves the iframe element, so it passes to
   // the click path verbatim. Cross-origin frames stay a leaf.
-  const frameSeen = new Map<string, number>();
+  const frameSeen = new Map<string, number>(scopeSeen ?? []);
   const frameNodes = (frame: HTMLIFrameElement, name: string): A11yNode[] => {
     const key = targetKey("iframe", name);
     const seen = frameSeen.get(key) ?? 0;

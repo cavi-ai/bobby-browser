@@ -32,7 +32,8 @@ async fn site_regressions_hold_on_firefox() {
     let table = cases::every_case!(
         case_table,
         oversized_page_reports_truncation_not_target_not_found,
-        typing_behind_a_modal_reports_the_dialog
+        typing_behind_a_modal_reports_the_dialog,
+        scoped_snapshot_frame_targets_reach_the_second_frame
     );
     for (name, case) in table {
         if AssertUnwindSafe(case(&rig)).catch_unwind().await.is_err() {
@@ -56,4 +57,5 @@ async fn accessibility_candidate_targets_resolve() {
     cases::snapshot_targets_act_on_the_described_element(&rig).await;
     cases::snapshot_target_types_into_a_slot_labelled_field(&rig).await;
     cases::snapshot_targets_resolve_beside_a_modal_dialog(&rig).await;
+    cases::scoped_snapshot_frame_targets_reach_the_second_frame(&rig).await;
 }
