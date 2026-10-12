@@ -337,6 +337,25 @@ async fn file_identity(file: File) -> Result<same_file::Handle, std::io::Error> 
         .map_err(std::io::Error::other)?
 }
 
+/// Invalid archive entries remain visible for repair, but must never be read
+/// as streams or followed to another file. Validate the opened handle too,
+/// since the path can be replaced after the first metadata check.
+async fn open_archive(path: &Path) -> Result<Option<File>, std::io::Error> {
+    if !tokio::fs::symlink_metadata(path).await?.is_file() {
+        warn!(path = %path.display(), "non-regular journal archive preserved without reading; history remains uncertain");
+        return Ok(None);
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    durable_file::without_following_links_async(&mut options);
+    let file = options.open(path).await?;
+    if durable_file::require_regular_file(&file.metadata().await?, "journal archive").is_err() {
+        warn!(path = %path.display(), "non-regular journal archive preserved without reading; history remains uncertain");
+        return Ok(None);
+    }
+    Ok(Some(file))
+}
+
 async fn open_writer(path: &Path) -> Result<WriterState, JournalError> {
     let mut options = OpenOptions::new();
     options.create(true).append(true).read(true);
@@ -376,7 +395,12 @@ async fn open_writer(path: &Path) -> Result<WriterState, JournalError> {
             continue;
         }
         let archive = Arc::new(entry.path());
-        let mut reader = BufReader::new(File::open(archive.as_ref()).await?);
+        let Some(file) = open_archive(archive.as_ref()).await? else {
+            archived_incompatible_records += 1;
+            archives.push(archive);
+            continue;
+        };
+        let mut reader = BufReader::new(file);
         let mut line = Vec::new();
         let mut offset = 0;
         while reader.read_until(b'\n', &mut line).await? > 0 {
@@ -491,7 +515,10 @@ impl CommandJournal for JsonlJournal {
             if let Some(offsets) = writer.archived_offsets.get(&id) {
                 // Startup indexes each archive consecutively using one shared path.
                 for entries in offsets.chunk_by(|a, b| Arc::ptr_eq(&a.path, &b.path)) {
-                    let file = File::open(entries[0].path.as_ref()).await?;
+                    let Some(file) = open_archive(entries[0].path.as_ref()).await? else {
+                        scan.incompatible_records += 1;
+                        continue;
+                    };
                     let mut reader = BufReader::new(file);
                     let mut position = 0;
                     let mut line = Vec::new();

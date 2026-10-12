@@ -326,6 +326,118 @@ async fn archived_history_preserves_discovery_order_across_files_and_sparse_offs
 }
 
 #[tokio::test]
+async fn non_regular_archive_directory_does_not_block_new_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("commands.jsonl");
+    let archive = dir.path().join("commands.jsonl.archive-directory");
+    tokio::fs::create_dir(&archive).await.unwrap();
+    let journal = JsonlJournal::open(&path).await.unwrap();
+    assert_eq!(journal.archives().await, vec![archive.clone()]);
+    assert!(
+        journal
+            .history(CommandId::new())
+            .await
+            .unwrap()
+            .incompatible_records
+            > 0
+    );
+
+    let fresh = CommandId::new();
+    journal
+        .append(record(&fresh, CommandPhase::Accepted))
+        .await
+        .unwrap();
+    let scan = journal.history(fresh.clone()).await.unwrap();
+    assert_eq!(scan.records.len(), 1);
+    assert_eq!(scan.incompatible_records, 0);
+    assert!(archive.is_dir());
+    drop(journal);
+    let reopened = JsonlJournal::open(&path).await.unwrap();
+    assert_eq!(reopened.history(fresh).await.unwrap().records.len(), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn non_regular_archive_symlink_is_preserved_without_reading_its_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("commands.jsonl");
+    let target = dir.path().join("other-history.jsonl");
+    let archive = dir.path().join("commands.jsonl.archive-symlink");
+    let id = CommandId::new();
+    let bytes = format!(
+        "{}\n",
+        serde_json::to_string(&record(&id, CommandPhase::Accepted)).unwrap()
+    );
+    tokio::fs::write(&target, &bytes).await.unwrap();
+    std::os::unix::fs::symlink(&target, &archive).unwrap();
+    let journal = JsonlJournal::open(&path).await.unwrap();
+    let scan = journal.history(id).await.unwrap();
+    assert!(scan.records.is_empty());
+    assert!(scan.incompatible_records > 0);
+    assert_eq!(std::fs::read_link(&archive).unwrap(), target);
+    assert_eq!(tokio::fs::read_to_string(&target).await.unwrap(), bytes);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn non_regular_archive_fifo_does_not_wait_for_a_writer() {
+    use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("commands.jsonl");
+    let archive = dir.path().join("commands.jsonl.archive-fifo");
+    let name = std::ffi::CString::new(archive.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    // Keep a writer present so a broken blocking reader can be released after
+    // the bounded assertion, rather than stranding a runtime blocking thread.
+    let keeper = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&archive)
+        .unwrap();
+    let opened =
+        tokio::time::timeout(std::time::Duration::from_secs(1), JsonlJournal::open(&path)).await;
+    drop(keeper);
+    let journal = opened
+        .expect("archive FIFO must not block startup")
+        .unwrap();
+    assert!(
+        journal
+            .history(CommandId::new())
+            .await
+            .unwrap()
+            .incompatible_records
+            > 0
+    );
+    assert_eq!(journal.archives().await, vec![archive]);
+}
+
+#[tokio::test]
+async fn non_regular_archive_replacement_remains_diagnostic() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("commands.jsonl");
+    let archive = dir.path().join("commands.jsonl.archive-fixture");
+    let id = CommandId::new();
+    let bytes = format!(
+        "{}\n",
+        serde_json::to_string(&record(&id, CommandPhase::Accepted)).unwrap()
+    );
+    tokio::fs::write(&archive, bytes).await.unwrap();
+    let journal = JsonlJournal::open(&path).await.unwrap();
+    tokio::fs::remove_file(&archive).await.unwrap();
+    tokio::fs::create_dir(&archive).await.unwrap();
+    let scan = journal.history(id.clone()).await.unwrap();
+    assert!(scan.records.is_empty());
+    assert!(scan.incompatible_records > 0);
+    assert!(matches!(
+        journal.append(record(&id, CommandPhase::Prepared)).await,
+        Err(workflow_journal::JournalError::UncertainCommand)
+    ));
+    assert!(archive.is_dir());
+}
+
+#[tokio::test]
 async fn archived_history_seeks_to_the_next_indexed_record_after_an_early_newline() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("commands.jsonl");
