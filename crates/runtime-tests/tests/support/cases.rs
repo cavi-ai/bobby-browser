@@ -686,6 +686,82 @@ pub async fn scoped_snapshot_frame_targets_reach_the_second_frame(rig: &Rig) {
     .await;
 }
 
+/// Targets from scopes inside frames keep every resolved ancestor hop.
+pub async fn scoped_snapshot_targets_preserve_parent_frame_paths(rig: &Rig) {
+    for name in ["Widget frame", ""] {
+        let body = format!(
+            r#"<button>Frame action</button>
+            <iframe title="{name}" src="/outer"></iframe>
+            <iframe id="outer-second" title="{name}" src="/outer"></iframe>
+            <p role="status" aria-label="idle" id="status"></p>"#
+        );
+        let outer = format!(
+            r#"<section id="scope"><button onclick="top.document.getElementById('status').setAttribute('aria-label', 'acted outer')">Frame action</button></section>
+            <iframe title="{name}" src="/inner-first"></iframe>
+            <iframe id="inner-second" title="{name}" src="/inner-second"></iframe>"#
+        );
+        let first = r#"<section id="scope"><button onclick="top.document.getElementById('status').setAttribute('aria-label', 'acted inner first')">Frame action</button></section>"#;
+        let second = r#"<section id="scope"><button onclick="top.document.getElementById('status').setAttribute('aria-label', 'acted inner second')">Frame action</button></section>"#;
+        let site = FixtureSite::spawn(vec![
+            ("/frames", Route::Html(page("Parent frame scopes", &body))),
+            ("/outer", Route::Html(page("Outer frame", &outer))),
+            (
+                "/inner-first",
+                Route::Html(page("First inner frame", first)),
+            ),
+            (
+                "/inner-second",
+                Route::Html(page("Second inner frame", second)),
+            ),
+        ])
+        .await;
+        let live = Live::open(rig, &site.url("/frames")).await;
+        for (scope, depth, status) in [
+            (
+                json!({"css":"#scope","framePath":[{"css":"#outer-second"}]}),
+                1,
+                "acted outer",
+            ),
+            (
+                json!({"css":"#inner-second","framePath":[{"css":"#outer-second"}]}),
+                2,
+                "acted inner second",
+            ),
+            (
+                json!({"css":"#scope","framePath":[{"css":"#outer-second"},{"css":"#inner-second"}]}),
+                2,
+                "acted inner second",
+            ),
+        ] {
+            let scoped = live.snapshot(json!({"target":scope})).await;
+            let mut targets = Vec::new();
+            targets_under(&scoped, &mut targets);
+            let actions: Vec<_> = targets
+                .iter()
+                .filter(|(role, target)| {
+                    *role == "button" && target["accessibleName"] == "Frame action"
+                })
+                .collect();
+            assert_eq!(actions.len(), 1, "scoped targets: {scoped}");
+            let target = actions[0].1;
+            let hop = json!({"role":"iframe","accessibleName":name,"ordinal":1});
+            assert_eq!(
+                target["framePath"],
+                json!(vec![hop; depth]),
+                "parent frame path: {scoped}"
+            );
+            let clicked = live.call("click", json!({"target":target})).await;
+            assert_eq!(clicked["status"], "completed", "click {target}: {clicked}");
+            let after = live.snapshot(json!({})).await;
+            assert!(
+                find_node(&after, "status", Some(status)).is_some(),
+                "wrong frame action: {after}"
+            );
+        }
+        live.close().await;
+    }
+}
+
 pub async fn iframe_scoped_targets_reach_the_second_frame(rig: &Rig) {
     for name in ["Widget frame", ""] {
         scoped_frame_targets_reach_the_second_frame(rig, &["#second-frame"], name).await;

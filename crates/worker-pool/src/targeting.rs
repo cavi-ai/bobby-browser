@@ -44,6 +44,8 @@ pub struct ResolvedTarget {
     frame_id: Option<chromiumoxide::cdp::browser_protocol::page::FrameId>,
     /// The selected iframe's semantic hop, ranked within its parent scope.
     pub(crate) iframe_hop: Option<types::SemanticTargetSegment>,
+    /// Resolved ancestor hops, ranked within each parent frame.
+    pub(crate) frame_path: Vec<types::SemanticTargetSegment>,
     pub evidence: Evidence,
 }
 
@@ -648,6 +650,23 @@ pub(crate) fn iframe_hop_ordinal(
     })
 }
 
+fn semantic_iframe_hop(
+    candidate: &Candidate,
+    candidates: &[Candidate],
+) -> types::SemanticTargetSegment {
+    let visible_iframes: Vec<_> = candidates
+        .iter()
+        .filter(|other| {
+            other.role.as_deref() == Some("iframe") && other.state.attached && other.state.visible
+        })
+        .collect();
+    types::SemanticTargetSegment {
+        role: "iframe".into(),
+        accessible_name: candidate.name.clone().unwrap_or_default(),
+        ordinal: iframe_hop_ordinal(&visible_iframes, candidate),
+    }
+}
+
 /// Gather DOM candidates for intent resolution without choosing a match.
 pub async fn gather_candidates(
     page: &Page,
@@ -825,6 +844,7 @@ struct TargetScope {
     scope_id: u64,
     frame_id: chromiumoxide::cdp::browser_protocol::page::FrameId,
     frame_trace: Vec<types::CandidateEvidence>,
+    frame_path: Vec<types::SemanticTargetSegment>,
 }
 
 impl TargetScope {
@@ -859,6 +879,7 @@ async fn open_target_scope(
     let mut context_id = None;
     let mut shadow_hosts = Vec::new();
     let mut frame_trace = Vec::new();
+    let mut frame_path = Vec::new();
 
     for (index, frame_target) in target.frame_path.iter().enumerate() {
         let raw = collect_candidates(&execution_page, context_id, &shadow_hosts, scope_id).await?;
@@ -869,11 +890,9 @@ async fn open_target_scope(
         if normalized_frame_target.accessible_name.as_deref() == Some("") {
             normalized_frame_target.accessible_name = None;
         }
-        let (candidate, evidence, _) = choose(
-            &normalized_frame_target,
-            &raw.into_iter().map(into_candidate).collect::<Vec<_>>(),
-            true,
-        )?;
+        let candidates: Vec<_> = raw.into_iter().map(into_candidate).collect();
+        let (candidate, evidence, _) = choose(&normalized_frame_target, &candidates, true)?;
+        frame_path.push(semantic_iframe_hop(&candidate, &candidates));
         frame_trace.push(evidence);
         let deadline = Instant::now() + Duration::from_secs(2);
         let (child, oopif) = loop {
@@ -985,6 +1004,7 @@ async fn open_target_scope(
         scope_id,
         frame_id,
         frame_trace,
+        frame_path,
     })
 }
 
@@ -1038,6 +1058,7 @@ pub async fn resolve_target_with_visibility(
             execution_page: None,
             frame_id: None,
             iframe_hop: None,
+            frame_path: Vec::new(),
             evidence: selector_evidence(page_id, selector),
         });
     };
@@ -1057,21 +1078,8 @@ pub async fn resolve_target_with_visibility(
     let raw =
         align_with_accessibility(&scope.execution_page, scope.context_id, target, raw).await?;
     let (candidate, evidence, best_match_authorized) = choose(target, &raw, require_visible)?;
-    let iframe_hop = (candidate.role.as_deref() == Some("iframe")).then(|| {
-        let visible_iframes: Vec<_> = raw
-            .iter()
-            .filter(|other| {
-                other.role.as_deref() == Some("iframe")
-                    && other.state.attached
-                    && other.state.visible
-            })
-            .collect();
-        types::SemanticTargetSegment {
-            role: "iframe".into(),
-            accessible_name: candidate.name.clone().unwrap_or_default(),
-            ordinal: iframe_hop_ordinal(&visible_iframes, &candidate),
-        }
-    });
+    let iframe_hop = (candidate.role.as_deref() == Some("iframe"))
+        .then(|| semantic_iframe_hop(&candidate, &raw));
     let owner = owners.get(&candidate.id).cloned();
     // A candidate gathered from a closed shadow root must be located relative
     // to that root's own element handle, not the outer document/frame context.
@@ -1128,6 +1136,7 @@ pub async fn resolve_target_with_visibility(
             _ => Some(scope.frame_id),
         },
         iframe_hop,
+        frame_path: scope.frame_path,
         evidence: Evidence::Resolution {
             target: Box::new(target.clone()),
             fingerprint: Box::new(fingerprint),
