@@ -404,22 +404,41 @@ struct ArtifactManifest {
 /// remove at construction: a live publish holds its StagingGuard only inside
 /// a running process, and construction happens before any publish. Without a
 /// sweep, every crash mid-capture leaks up to max_bytes of disk forever.
+/// Only real directories with recognized session and staging names are swept.
 fn sweep_orphaned_staging(root: &Path) {
     let Ok(sessions) = std::fs::read_dir(root) else {
         return;
     };
     for session in sessions.flatten() {
+        if !session.file_type().is_ok_and(|kind| kind.is_dir())
+            || !session
+                .file_name()
+                .to_str()
+                .is_some_and(|name| Uuid::parse_str(name).is_ok())
+        {
+            continue;
+        }
         let Ok(children) = std::fs::read_dir(session.path()) else {
             continue;
         };
         for child in children.flatten() {
             let name = child.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with('.') && name.ends_with(".tmp") {
+            if child.file_type().is_ok_and(|kind| kind.is_dir())
+                && name.to_str().is_some_and(valid_staging_directory_name)
+            {
                 let _ = std::fs::remove_dir_all(child.path());
             }
         }
     }
+}
+
+fn valid_staging_directory_name(name: &str) -> bool {
+    name.strip_prefix('.')
+        .and_then(|name| name.strip_suffix(".tmp"))
+        .and_then(|name| name.split_once('.'))
+        .is_some_and(|(artifact, staging)| {
+            valid_artifact_id(artifact) && Uuid::parse_str(staging).is_ok()
+        })
 }
 
 fn valid_artifact_id(artifact_id: &str) -> bool {
@@ -492,7 +511,12 @@ fn validate_directory(
 }
 
 async fn write_synced(path: PathBuf, bytes: &[u8]) -> Result<(), ArtifactError> {
-    let mut file = tokio::fs::File::create(path).await.map_err(storage_error)?;
+    // Set privacy at creation and refuse existing entries before writing bytes.
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path).await.map_err(storage_error)?;
     file.write_all(bytes).await.map_err(storage_error)?;
     file.sync_all().await.map_err(storage_error)
 }
@@ -581,6 +605,20 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::*;
+
+    #[tokio::test]
+    async fn writing_refuses_an_existing_file_without_changing_its_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("existing.bin");
+        std::fs::write(&path, b"preserve").unwrap();
+        let before = std::fs::metadata(&path).unwrap().permissions();
+        assert!(matches!(
+            write_synced(path.clone(), b"replacement").await,
+            Err(ArtifactError::Storage(_))
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), b"preserve");
+        assert_eq!(std::fs::metadata(path).unwrap().permissions(), before);
+    }
 
     #[tokio::test]
     async fn abort_before_publish_removes_staging_without_visible_artifact() {

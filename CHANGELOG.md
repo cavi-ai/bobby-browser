@@ -5,6 +5,7 @@
 ### Fixed
 
 - On Chromium, a text or value wait whose target the page replaces mid-read keeps polling instead of failing with the raw script exception.
+- `type_text` with line breaks into a multi-line control (a textarea or editable region) completes and keeps the lines instead of failing `verificationFailed`.
 - An Ollama vision model is ready only when Ollama serves that exact tag; an untagged default uses the installed tag in `bobby install`, `bobby vision connect` and `bobby doctor --fix`.
 - `inspect` reads the page from the browser when its response sets cookies the direct HTTP path cannot mirror, instead of failing `httpEquivalenceUnproven`.
 - On Chromium, calls sent at once on one page each resolve their own target instead of failing `targetNotFound`.
