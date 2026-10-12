@@ -478,6 +478,9 @@ impl BrowserConfig {
             // hiding so navigator.webdriver stays false without JS redefines.
             builder.remove("enable-automation");
             builder.arg(Arg::value("disable-blink-features", "AutomationControlled"));
+            // Chrome warns about that flag in an infobar that shrinks the
+            // viewport; `--test-type` suppresses the warning.
+            builder.arg(Arg::key("test-type"));
         }
 
         if self.disable_https_first {
