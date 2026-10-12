@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 chrono.workspace = true
+durable-file.workspace = true
 hex.workspace = true
 libc.workspace = true
 psl.workspace = true

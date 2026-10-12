@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { JSDOM } from "jsdom";
 
+import { composedQuery } from "../../../crates/dom-engine/src/page_dom.js";
 import {
   MAX_CONTROL_COUNT,
   MAX_CONTROL_VISITED_NODES,
@@ -74,20 +75,6 @@ test("observeDocument returns page identity, visible text, labels, roles, and st
   assert.equal(observed.controls[1]?.role, "button");
   assert.equal(observed.controls[1]?.name, "Continue");
 });
-
-// Resolves a composed selector the way the runtime does: each part names a
-// host in its root, the last names the element.
-function composedQuery(document: Document, selector: string): Element | null {
-  const parts = selector.split(" >>> ");
-  let root: Document | ShadowRoot = document;
-  for (let index = 0; index < parts.length; index += 1) {
-    const found: Element | null = root.querySelector(parts[index]!);
-    if (!found || index === parts.length - 1) return found;
-    if (!found.shadowRoot) return null;
-    root = found.shadowRoot;
-  }
-  return null;
-}
 
 test("controls inside open shadow roots are observed with selectors through each host", () => {
   const document = documentFor(`<outer-part id="outer"><span slot="scope" aria-label="Within this section"></span></outer-part>`);

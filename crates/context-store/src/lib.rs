@@ -25,7 +25,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 
 pub use sitekey::{page_pattern, site_key};
@@ -809,25 +809,11 @@ impl ContextStore {
         let temporary = self
             .root
             .join(format!(".context.{}.tmp", uuid::Uuid::new_v4()));
-        let result = async {
-            let mut options = OpenOptions::new();
-            options.create_new(true).write(true);
-            // Context is remembered form structure; owner-only, matching the
-            // checkpoint and authority stores.
-            #[cfg(unix)]
-            options.mode(0o600);
-            let mut file = options.open(&temporary).await?;
-            file.write_all(&serde_json::to_vec(&envelope)?).await?;
-            file.sync_all().await?;
-            drop(file);
-            tokio::fs::rename(&temporary, destination).await?;
-            File::open(self.root.as_ref()).await?.sync_all().await?;
-            Ok::<_, ContextStoreError>(())
-        }
-        .await;
-        if result.is_err() {
-            let _ = tokio::fs::remove_file(&temporary).await;
-        }
+        let bytes = serde_json::to_vec(&envelope)?;
+        let result =
+            durable_file::replace_exclusive(self.root.as_path(), &temporary, &destination, &bytes)
+                .await
+                .map_err(ContextStoreError::from);
         result
     }
 }
@@ -936,24 +922,13 @@ pub fn inspect_site_file(path: &Path, limits: ContextLimits) -> Result<(), Strin
 fn site_file_options() -> std::fs::OpenOptions {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        // FILE_FLAG_OPEN_REPARSE_POINT opens the link itself for validation.
-        options.custom_flags(0x0020_0000);
-    }
+    durable_file::without_following_links(&mut options);
     options
 }
 
 fn validate_site_file(metadata: &std::fs::Metadata, limits: ContextLimits) -> Result<(), String> {
-    if !metadata.file_type().is_file() {
-        return Err("context storage entry must be a regular file".into());
-    }
+    durable_file::require_regular_file(metadata, "context storage entry")
+        .map_err(|error| error.to_string())?;
     if metadata.len() > limits.max_file_bytes as u64 {
         return Err("context site exceeds file byte limit".into());
     }

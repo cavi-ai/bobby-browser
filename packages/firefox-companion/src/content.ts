@@ -1,3 +1,10 @@
+import {
+  composedQuery,
+  hidden,
+  isHidden,
+  obscuredByOpenModal,
+  SHADOW_HOP,
+} from "../../../crates/dom-engine/src/page_dom.js";
 import { isExtensionSafeString, isExtensionSafeUrl } from "./native-transport.js";
 import { containsSecretMaterial } from "./secret-material.js";
 import {
@@ -34,7 +41,6 @@ const MAX_URL_LENGTH = 2 * 1024;
 const MAX_TITLE_LENGTH = 1024;
 const MAX_ROLE_LENGTH = 64;
 const REDACTED = "[redacted]";
-const MAX_ANCESTOR_VISITS = 256;
 const SAFE_BOOLEAN_HTML_ATTRIBUTES = new Set([
   "checked",
   "disabled",
@@ -247,81 +253,6 @@ function composedElementChildren(element: Element): Element[] {
   return composedChildren(element).filter((node): node is Element => node.nodeType === 1);
 }
 
-// An element's parent in the rendered tree: its slot, its parent, or the host
-// of the shadow root it sits at the top of.
-function composedParent(element: Element): Element | null {
-  if (element.assignedSlot) return element.assignedSlot;
-  if (element.parentElement) return element.parentElement;
-  const parent = element.parentNode;
-  return parent && parent.nodeType === 11 ? ((parent as ShadowRoot).host ?? null) : null;
-}
-
-// Joins the selectors of each shadow host and the element, each in its own
-// root, into one selector the action side resolves through open shadow roots.
-const SHADOW_HOP = " >>> ";
-
-// The element a selector names, entering each host's open shadow root in turn.
-// Throws, as querySelector does, on an invalid part.
-function composedQuery(document: Document, selector: string): Element | null {
-  const parts = selector.split(SHADOW_HOP);
-  const probe = document.createDocumentFragment();
-  for (const part of parts) probe.querySelector(part);
-  let root: Document | ShadowRoot = document;
-  for (let index = 0; index < parts.length; index += 1) {
-    const found: Element | null = root.querySelector(parts[index]!);
-    if (!found || index === parts.length - 1) return found;
-    if (!found.shadowRoot) return null;
-    root = found.shadowRoot;
-  }
-  return null;
-}
-
-function isElementHidden(element: Element, budget?: WorkBudget): boolean {
-  let visited = 0;
-  for (let current: Element | null = element; current; current = composedParent(current)) {
-    visited += 1;
-    if (visited > MAX_ANCESTOR_VISITS || !takeWork(budget)) return true;
-    if (current.hasAttribute("hidden") || current.getAttribute("aria-hidden") === "true") {
-      return true;
-    }
-    const style = current.ownerDocument.defaultView?.getComputedStyle(current);
-    if (style?.display === "none" || style?.visibility === "hidden") {
-      return true;
-    }
-  }
-  return false;
-}
-
-// Hidden from rendering, unlike an element hidden only from assistive
-// technology with aria-hidden.
-function isRenderedHidden(element: Element): boolean {
-  let visited = 0;
-  for (let current: Element | null = element; current; current = composedParent(current)) {
-    visited += 1;
-    if (visited > MAX_ANCESTOR_VISITS) return true;
-    if (current.hasAttribute("hidden")) return true;
-    const style = current.ownerDocument.defaultView?.getComputedStyle(current);
-    if (style?.display === "none" || style?.visibility === "hidden") return true;
-  }
-  return false;
-}
-
-function modalDialogOpen(document: Document): boolean {
-  for (const dialog of Array.from(document.querySelectorAll('[aria-modal="true"], dialog')).slice(0, 64)) {
-    let modal: boolean;
-    try {
-      modal =
-        dialog.tagName === "DIALOG"
-          ? dialog.matches(":modal")
-          : ["dialog", "alertdialog"].includes(dialog.getAttribute("role") ?? "");
-    } catch {
-      modal = false;
-    }
-    if (modal && !isElementHidden(dialog)) return true;
-  }
-  return false;
-}
-
 function isSensitiveTextContext(element: Element): boolean {
   const control = element.closest(CONTROL_SELECTOR);
   if (control && isSensitiveControl(control)) return true;
@@ -350,7 +281,7 @@ function visibleText(document: Document, root: Element): string {
     if (
       !parent ||
       ["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT"].includes(parent.tagName) ||
-      isElementHidden(parent)
+      isHidden(parent, "a11y")
     ) {
       continue;
     }
@@ -608,7 +539,7 @@ function boundedElementText(
     return true;
   };
   try {
-    if (!isElementHidden(element)) visit(element, 0);
+    if (!isHidden(element, "a11y")) visit(element, 0);
   } catch {
     // A node that throws during inspection contributes no name.
   }
@@ -904,7 +835,7 @@ function observeRoot(document: Document, root: Element, includeHtml: boolean): P
       controlsTruncated = true;
       break;
     }
-    if (isElementHidden(element, helperBudget)) continue;
+    if (isHidden(element, "a11y", helperBudget)) continue;
     const sensitive = isSensitiveControl(element, helperBudget);
     const observedPath = composedCssPath(element, helperBudget, siblingPositions, !sensitive);
     if (!observedPath) continue;
@@ -1028,7 +959,7 @@ function inspectionRoot(document: Document, input: Record<string, unknown>): Ele
   } catch {
     throw unresolvable("observe selector is invalid");
   }
-  if (!root || isElementHidden(root)) {
+  if (!root || isHidden(root, "a11y")) {
     throw new ContentActionError("targetNotFound", "observe target was not found");
   }
   return root;
@@ -1048,7 +979,7 @@ function target(document: Document, input: Record<string, unknown>): Element {
   } catch {
     throw new ContentActionError("invalidInput", "content action cssPath is invalid");
   }
-  if (!element || isElementHidden(element)) {
+  if (!element || isHidden(element, "a11y")) {
     throw new ContentActionError("targetNotFound", "content action target was not found");
   }
   return element;
@@ -1236,7 +1167,7 @@ function a11yTree(
       } catch {
         throw unresolvable("a11y target selector is invalid");
       }
-      if (!found || isElementHidden(found)) throw notFound();
+      if (!found || isHidden(found, "a11y")) throw notFound();
       return found;
     }
     if (typeof role !== "string" || role.length === 0) {
@@ -1284,14 +1215,14 @@ function a11yTree(
       walk(root, 0);
       return { matches, visited };
     };
-    const { matches, visited } = search(isElementHidden);
+    const { matches, visited } = search(hidden("a11y"));
     const picked = matches[wanted];
     if (!picked && visited > A11Y_MAX_SCOPE_VISITS) {
       throw new ContentActionError("budgetExhausted", "a11y target search exceeded its visit bound");
     }
     // An open modal dialog hides the rest of the page from assistive
     // technology; a target hidden only that way is behind the dialog.
-    if (!picked && modalDialogOpen(document) && search(isRenderedHidden).matches[wanted]) {
+    if (!picked && obscuredByOpenModal(document, search(hidden("hit-ready")).matches[wanted])) {
       throw new ContentActionError("targetObscured", "a11y target is behind an open modal dialog");
     }
     if (typeof ordinal === "number") {
@@ -1366,7 +1297,7 @@ function a11yTree(
   let scopeSeen: Map<string, number> | undefined;
   const countTargets = (element: Element, depth: number): void => {
     try {
-      if (isElementHidden(element)) return;
+      if (isHidden(element, "a11y")) return;
       if (element === scope) scopeSeen = new Map(targetTotals);
       const { role, name } = semantics(element);
       if (role && name && name !== REDACTED && A11Y_ACTIONABLE_ROLES.has(role)) {
@@ -1456,7 +1387,7 @@ function a11yTree(
     // descendant spends the node budget.
     let hidden = false;
     try {
-      hidden = isElementHidden(element);
+      hidden = isHidden(element, "a11y");
     } catch {
       hidden = true;
     }

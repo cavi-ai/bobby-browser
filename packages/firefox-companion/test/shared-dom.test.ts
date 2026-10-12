@@ -2,6 +2,13 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { JSDOM } from "jsdom";
+import {
+  composedQuery,
+  composedQueryAll,
+  isHidden,
+  modalDialogOpen,
+  obscuredByOpenModal,
+} from "../../../crates/dom-engine/src/page_dom.js";
 
 function page(html: string) {
   const dom = new JSDOM(html, { runScripts: "outside-only" });
@@ -77,4 +84,39 @@ test("shared shadow matching stays inside the selected root and uses native role
   assert.equal(match(root,{role:"checkbox",name:"Document name"},collect).length, 0);
   root.append(root.querySelector("input")!.cloneNode());
   assert.equal(match(root,{role:"checkbox",name:"Inside"},collect).length, 2);
+});
+
+test("composed query hops open shadow roots and stops without one", () => {
+  const window = page(`<div id="host"></div><div id="plain"></div>`);
+  const host = window.document.getElementById("host")!;
+  const shadow = host.attachShadow({ mode: "open" });
+  shadow.innerHTML = `<span class="inner">Inside</span><b class="inner">Also</b>`;
+  assert.equal(composedQuery(window.document, "#host >>> .inner")?.textContent, "Inside");
+  assert.equal(composedQueryAll(window.document, "#host >>> .inner").length, 2);
+  assert.equal(composedQuery(window.document, "#plain >>> .inner"), null);
+  assert.throws(() => composedQuery(window.document, "#host >>> ["));
+});
+
+test("hidden modes disagree on aria-hidden and agree on display none", () => {
+  const window = page(`<div id="aria" aria-hidden="true"><span id="leaf">Text</span></div><div id="css" style="display:none"><span id="gone">Gone</span></div><span id="self" style="display:none">Self</span>`);
+  const leaf = window.document.getElementById("leaf")!;
+  const gone = window.document.getElementById("gone")!;
+  const self = window.document.getElementById("self")!;
+  assert.equal(isHidden(leaf, "a11y"), true);
+  assert.equal(isHidden(leaf, "hit-ready"), false);
+  assert.equal(isHidden(leaf, "rendered"), false);
+  assert.equal(isHidden(gone, "a11y"), true);
+  assert.equal(isHidden(gone, "hit-ready"), true);
+  assert.equal(isHidden(gone, "rendered"), false);
+  assert.equal(isHidden(self, "rendered"), true);
+});
+
+test("a visible aria-modal dialog is open and a hidden one is not", () => {
+  const open = page(`<div role="dialog" aria-modal="true">Open</div>`);
+  const shut = page(`<div role="dialog" aria-modal="true" hidden>Shut</div>`);
+  assert.equal(modalDialogOpen(open.document), true);
+  assert.equal(modalDialogOpen(shut.document), false);
+  assert.equal(obscuredByOpenModal(open.document, open.document.body), true);
+  assert.equal(obscuredByOpenModal(shut.document, shut.document.body), false);
+  assert.equal(obscuredByOpenModal(open.document, null), false);
 });

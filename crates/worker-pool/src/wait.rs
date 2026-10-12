@@ -8,9 +8,64 @@ use types::{
     WaitForCommand, WaitUntil,
 };
 
-/// DOM observation body for an element bound to `el`, shared by both engines.
-/// Visibility requires rendered geometry and excludes CSS-hidden elements.
-pub const ELEMENT_VISIBILITY_SCRIPT: &str = "const s=getComputedStyle(el),r=el.getBoundingClientRect(); return s.visibility!=='hidden'&&s.display!=='none'&&r.width>0&&r.height>0";
+pub use dom_engine::ELEMENT_VISIBILITY_SCRIPT;
+
+/// An unresolved element satisfies Detached and Hidden. Every other state stays unsatisfied.
+pub fn unresolved_element_satisfies(state: types::ElementState) -> bool {
+    matches!(
+        state,
+        types::ElementState::Detached | types::ElementState::Hidden
+    )
+}
+
+fn visibility_holds(hidden: bool) -> String {
+    if hidden {
+        format!("!el||!el.isConnected||!(()=>{{{ELEMENT_VISIBILITY_SCRIPT}}})()")
+    } else {
+        format!("Boolean(el)&&el.isConnected&&(()=>{{{ELEMENT_VISIBILITY_SCRIPT}}})()")
+    }
+}
+
+/// Boolean expression over a bound `el` (a node the adapter already holds).
+pub fn bound_element_state(state: types::ElementState) -> String {
+    match state {
+        types::ElementState::Attached => "el.isConnected".to_owned(),
+        types::ElementState::Visible => visibility_holds(false),
+        types::ElementState::Detached => "!el.isConnected".to_owned(),
+        types::ElementState::Enabled => {
+            "el.isConnected&&!el.matches(':disabled,[aria-disabled=\"true\"]')".to_owned()
+        }
+        types::ElementState::Disabled => {
+            "el.isConnected&&el.matches(':disabled,[aria-disabled=\"true\"]')".to_owned()
+        }
+        types::ElementState::Hidden => visibility_holds(true),
+    }
+}
+
+/// Boolean expression for a selector query that yields the element or null.
+/// `query` is the call that resolves the element, already including its argument.
+pub fn queried_element_state(state: types::ElementState, query: &str) -> String {
+    match state {
+        types::ElementState::Attached => format!("Boolean({query})"),
+        types::ElementState::Visible | types::ElementState::Hidden => {
+            let predicate = visibility_holds(matches!(state, types::ElementState::Hidden));
+            format!("(()=>{{const el={query};return {predicate};}})()")
+        }
+        types::ElementState::Detached => format!("!{query}"),
+        types::ElementState::Enabled => {
+            format!("!{query}?.matches(':disabled,[aria-disabled=\"true\"]')")
+        }
+        types::ElementState::Disabled => {
+            format!("Boolean({query}?.matches(':disabled,[aria-disabled=\"true\"]'))")
+        }
+    }
+}
+
+/// Read `innerText` or `value`. A missing element is null, distinct from a present empty control.
+pub fn text_read_expression(query: &str, is_value: bool) -> String {
+    let property = if is_value { "value" } else { "innerText" };
+    format!("(()=>{{const el={query};return el?(el.{property}??''):null;}})()")
+}
 
 /// A transport observation, before condition matching or evidence truncation.
 pub enum WaitObservation {
@@ -28,6 +83,86 @@ pub enum WaitObservation {
 #[async_trait]
 pub trait WaitObserver: Send + Sync {
     async fn observe(&self, condition: &WaitCondition) -> Result<WaitObservation, CommandError>;
+}
+
+/// An element read. `Missing` is unresolved; the module decides which states that satisfies.
+pub enum ElementProbe {
+    Satisfied(bool),
+    Missing,
+}
+
+/// A text or value read. `Missing` stays pending. An empty `Values` list was read.
+pub enum TextProbe {
+    Values(Vec<String>),
+    Missing,
+}
+
+pub fn element_observation(state: types::ElementState, probe: ElementProbe) -> WaitObservation {
+    WaitObservation::Element(match probe {
+        ElementProbe::Satisfied(satisfied) => satisfied,
+        ElementProbe::Missing => unresolved_element_satisfies(state),
+    })
+}
+
+pub fn text_observation(probe: TextProbe) -> WaitObservation {
+    match probe {
+        TextProbe::Values(values) => WaitObservation::Text(values),
+        TextProbe::Missing => WaitObservation::Pending,
+    }
+}
+
+/// DOM reads an engine can perform. Condition matching stays in [`observe_condition`].
+#[async_trait]
+pub trait WaitDom: Send + Sync {
+    async fn element(
+        &self,
+        target: &TargetSpec,
+        state: types::ElementState,
+    ) -> Result<ElementProbe, CommandError>;
+    async fn text(&self, target: &TargetSpec, is_value: bool) -> Result<TextProbe, CommandError>;
+    async fn url(&self) -> Result<String, CommandError>;
+    async fn document_ready(&self) -> Result<String, CommandError>;
+    async fn network(
+        &self,
+        filters: &crate::NetworkQuietFilters<'_>,
+    ) -> Result<(usize, Vec<String>), CommandError>;
+}
+
+pub async fn observe_condition(
+    dom: &(impl WaitDom + ?Sized),
+    condition: &WaitCondition,
+) -> Result<WaitObservation, CommandError> {
+    match condition {
+        WaitCondition::Element { target, state } => Ok(element_observation(
+            *state,
+            dom.element(target, *state).await?,
+        )),
+        WaitCondition::Text { target, .. } | WaitCondition::Value { target, .. } => {
+            let is_value = matches!(condition, WaitCondition::Value { .. });
+            Ok(text_observation(dom.text(target, is_value).await?))
+        }
+        WaitCondition::Url { .. } => Ok(WaitObservation::Url(dom.url().await?)),
+        WaitCondition::Document { .. } => {
+            Ok(WaitObservation::Document(dom.document_ready().await?))
+        }
+        WaitCondition::NetworkQuiet {
+            ignore_url_substrings,
+            ignore_resource_types,
+            ignore_long_lived,
+            ..
+        } => {
+            let filters = crate::NetworkQuietFilters {
+                ignore_url_substrings,
+                ignore_resource_types,
+                ignore_long_lived: *ignore_long_lived,
+            };
+            let (in_flight, excluded_classes) = dom.network(&filters).await?;
+            Ok(WaitObservation::Network {
+                in_flight,
+                excluded_classes,
+            })
+        }
+    }
 }
 
 fn error(code: ErrorCode, message: impl Into<String>) -> CommandError {
@@ -360,6 +495,73 @@ mod tests {
                 .chars()
                 .count(),
             types::MAX_WAIT_OBSERVED_CHARS
+        );
+    }
+
+    #[test]
+    fn missing_reads_map_once() {
+        assert!(matches!(
+            element_observation(types::ElementState::Hidden, ElementProbe::Missing),
+            WaitObservation::Element(true)
+        ));
+        assert!(matches!(
+            element_observation(types::ElementState::Visible, ElementProbe::Missing),
+            WaitObservation::Element(false)
+        ));
+        assert!(matches!(
+            element_observation(types::ElementState::Attached, ElementProbe::Satisfied(true)),
+            WaitObservation::Element(true)
+        ));
+        assert!(matches!(
+            text_observation(TextProbe::Missing),
+            WaitObservation::Pending
+        ));
+        assert!(matches!(
+            text_observation(TextProbe::Values(vec![])),
+            WaitObservation::Text(values) if values.is_empty()
+        ));
+    }
+
+    #[test]
+    fn unresolved_elements_satisfy_only_detached_and_hidden() {
+        for state in [
+            types::ElementState::Attached,
+            types::ElementState::Visible,
+            types::ElementState::Enabled,
+            types::ElementState::Disabled,
+        ] {
+            assert!(!unresolved_element_satisfies(state));
+        }
+        assert!(unresolved_element_satisfies(types::ElementState::Detached));
+        assert!(unresolved_element_satisfies(types::ElementState::Hidden));
+    }
+
+    #[test]
+    fn element_state_expressions_share_one_visibility_body() {
+        let visible = bound_element_state(types::ElementState::Visible);
+        let hidden = bound_element_state(types::ElementState::Hidden);
+        assert!(visible.contains(ELEMENT_VISIBILITY_SCRIPT));
+        assert!(hidden.contains(ELEMENT_VISIBILITY_SCRIPT));
+        assert!(visible.starts_with("Boolean(el)&&el.isConnected&&"));
+        assert!(hidden.starts_with("!el||!el.isConnected||"));
+        let query = "query(selector)";
+        assert_eq!(
+            queried_element_state(types::ElementState::Attached, query),
+            "Boolean(query(selector))"
+        );
+        assert_eq!(
+            queried_element_state(types::ElementState::Detached, query),
+            "!query(selector)"
+        );
+        assert!(queried_element_state(types::ElementState::Visible, query)
+            .contains(&format!("const el={query};return {visible}")));
+        assert_eq!(
+            text_read_expression(query, false),
+            "(()=>{const el=query(selector);return el?(el.innerText??''):null;})()"
+        );
+        assert_eq!(
+            text_read_expression(query, true),
+            "(()=>{const el=query(selector);return el?(el.value??''):null;})()"
         );
     }
 }

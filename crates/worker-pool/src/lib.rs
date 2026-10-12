@@ -10,6 +10,7 @@ mod form_snapshot;
 mod har;
 pub mod navigation_settle;
 mod network_quiet;
+mod obstruction;
 mod pointer_hit;
 pub mod policy;
 pub mod process_registry;
@@ -50,6 +51,10 @@ pub use har::{har_document, HarEntry, HarRecorder};
 pub use network_quiet::{
     bounded_request_id, counted_in_flight, map_bidi_network_type, pending_page_loads,
     warn_tracking_lost, NetworkQuietFilters, NetworkQuietState, TrackingLoss, MAX_TRACKED_REQUESTS,
+};
+pub use obstruction::{
+    accessibility_miss, ACCESSIBILITY_MISS, CLICK_OUTSIDE_VIEWPORT, COVERED_CLICK,
+    FIREFOX_POINTER_OBSCURED, FIREFOX_POINTER_OUT_OF_BOUNDS, MODAL_OBSTRUCTION,
 };
 pub use pointer_hit::{parse_pointer_hit, pointer_hit_function, PointerHit};
 pub use selection::{

@@ -1,6 +1,9 @@
 #[cfg(test)]
 use crate::wait::{bound_observed, text_matches};
-use crate::wait::{is_page_scoped_text_target, WaitObservation, WaitObserver};
+use crate::wait::{
+    is_page_scoped_text_target, observe_condition, ElementProbe, TextProbe, WaitDom,
+    WaitObservation, WaitObserver,
+};
 use crate::worker_failure::is_closed_page_message;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1666,7 +1669,7 @@ fn pointer_miss(hit: PointerHit) -> Result<(), CommandError> {
         PointerHit::Obscured => Err(obscured_click_target()),
         PointerHit::OutOfBounds => Err(CommandError {
             code: ErrorCode::TargetOutOfBounds,
-            message: "click target is outside the viewport".into(),
+            message: crate::CLICK_OUTSIDE_VIEWPORT.into(),
             layer: ErrorLayer::Driver,
             retryable: false,
         }),
@@ -3775,15 +3778,13 @@ impl WaitObserver for ChromiumWaitObserver<'_> {
             .get(self.page_id)
             .cloned();
         let page = self.worker.page_handle(self.page_id).await?;
-        match wait_condition_satisfied(
-            &self.worker.browser,
-            self.page_id,
-            &page,
-            tracker.as_deref(),
-            condition,
-        )
-        .await
-        {
+        let dom = ChromiumWaitDom {
+            browser: &self.worker.browser,
+            page_id: self.page_id,
+            page: &page,
+            tracker: tracker.as_deref(),
+        };
+        match observe_condition(&dom, condition).await {
             Err(error) if wait_should_retry_replaced_context(&error) => {
                 Ok(WaitObservation::Pending)
             }
@@ -3792,154 +3793,145 @@ impl WaitObserver for ChromiumWaitObserver<'_> {
     }
 }
 
-async fn wait_condition_satisfied(
-    browser: &Mutex<Option<Browser>>,
-    page_id: &PageId,
-    page: &Page,
-    tracker: Option<&crate::network_quiet::NetworkQuietTracker>,
-    condition: &WaitCondition,
-) -> Result<WaitObservation, CommandError> {
-    match condition {
-        WaitCondition::Element { target, state } => {
-            let resolved = if let Some(selector) = unscoped_css_wait_selector(target) {
-                resolve_target_with_visibility(page_id, page, selector, None, false, None).await
-            } else {
-                let handle = browser.lock().await.as_ref().map(Browser::handle);
-                match handle {
-                    Some(handle) => {
-                        resolve_target_with_visibility(
-                            page_id,
-                            page,
-                            "",
-                            Some(target),
-                            false,
-                            Some(&handle),
-                        )
-                        .await
-                    }
-                    None => Err(closed_error()),
+struct ChromiumWaitDom<'a> {
+    browser: &'a Mutex<Option<Browser>>,
+    page_id: &'a PageId,
+    page: &'a Page,
+    tracker: Option<&'a crate::network_quiet::NetworkQuietTracker>,
+}
+
+#[async_trait]
+impl WaitDom for ChromiumWaitDom<'_> {
+    async fn element(
+        &self,
+        target: &TargetSpec,
+        state: types::ElementState,
+    ) -> Result<ElementProbe, CommandError> {
+        let page = self.page;
+        let resolved = if let Some(selector) = unscoped_css_wait_selector(target) {
+            resolve_target_with_visibility(self.page_id, page, selector, None, false, None).await
+        } else {
+            let handle = self.browser.lock().await.as_ref().map(Browser::handle);
+            match handle {
+                Some(handle) => {
+                    resolve_target_with_visibility(
+                        self.page_id,
+                        page,
+                        "",
+                        Some(target),
+                        false,
+                        Some(&handle),
+                    )
+                    .await
                 }
-            };
-            let resolved = match resolved {
-                Ok(resolved) => resolved,
-                Err(error) => {
-                    if let Some(satisfied) = element_wait_missing_observation(state, &error) {
-                        return Ok(WaitObservation::Element(satisfied));
-                    }
-                    return Err(error);
+                None => Err(closed_error()),
+            }
+        };
+        let resolved = match resolved {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                if element_wait_missing_observation(&state, &error).is_some() {
+                    return Ok(ElementProbe::Missing);
                 }
-            };
-            let observation = match state {
-                types::ElementState::Attached => true,
-                types::ElementState::Detached => match resolved.visible(page).await {
-                    Ok(_) => false,
-                    Err(error) => match element_wait_missing_observation(state, &error) {
+                return Err(error);
+            }
+        };
+        let observation = match state {
+            types::ElementState::Attached => true,
+            types::ElementState::Detached => match resolved.visible(page).await {
+                Ok(_) => false,
+                Err(error) => match element_wait_missing_observation(&state, &error) {
+                    Some(satisfied) => satisfied,
+                    None => return Err(error),
+                },
+            },
+            types::ElementState::Visible | types::ElementState::Hidden => {
+                match resolved.visible(page).await {
+                    Ok(visible) => matches!(state, types::ElementState::Visible) == visible,
+                    Err(error) => match element_wait_missing_observation(&state, &error) {
                         Some(satisfied) => satisfied,
                         None => return Err(error),
                     },
-                },
-                types::ElementState::Visible | types::ElementState::Hidden => {
-                    match resolved.visible(page).await {
-                        Ok(visible) => matches!(state, types::ElementState::Visible) == visible,
-                        Err(error) => match element_wait_missing_observation(state, &error) {
-                            Some(satisfied) => satisfied,
-                            None => return Err(error),
-                        },
-                    }
                 }
-                types::ElementState::Enabled | types::ElementState::Disabled => {
-                    match resolved.enabled(page).await {
-                        Ok(enabled) => matches!(state, types::ElementState::Enabled) == enabled,
-                        Err(error) => match element_wait_missing_observation(state, &error) {
-                            Some(satisfied) => satisfied,
-                            None => return Err(error),
-                        },
-                    }
-                }
-            };
-            Ok(WaitObservation::Element(observation))
-        }
-        WaitCondition::Text { target, .. } | WaitCondition::Value { target, .. } => {
-            let is_value = matches!(condition, WaitCondition::Value { .. });
-            // a11y / landmark page-scoped roles (and css:body) are not a single
-            // node; read live document.body.innerText via evaluate so polls see
-            // async UI updates the same way a whole-page inspect does.
-            if !is_value && is_page_scoped_text_target(target) {
-                let value = read_page_scoped_text(browser, page_id, page, target).await?;
-                return Ok(WaitObservation::Text(vec![value]));
             }
-            let handle = browser.lock().await.as_ref().map(Browser::handle);
-            let resolved = match handle {
-                Some(handle) => {
-                    resolve_browser_target(page_id, page, "", Some(target), Some(&handle)).await
+            types::ElementState::Enabled | types::ElementState::Disabled => {
+                match resolved.enabled(page).await {
+                    Ok(enabled) => matches!(state, types::ElementState::Enabled) == enabled,
+                    Err(error) => match element_wait_missing_observation(&state, &error) {
+                        Some(satisfied) => satisfied,
+                        None => return Err(error),
+                    },
                 }
-                None => Err(closed_error()),
-            };
-            let resolved = match resolved {
-                Ok(resolved) => resolved,
-                Err(error) if matches!(error.code, ErrorCode::TargetNotFound) => {
-                    return Ok(WaitObservation::Pending)
-                }
-                // The click already landed; a matcher-satisfying candidate
-                // among several is still a match, not an ambiguity the
-                // caller must narrow before the wait can even be evaluated.
-                Err(error) if matches!(error.code, ErrorCode::TargetAmbiguous) => {
-                    let handle = browser.lock().await.as_ref().map(Browser::handle);
-                    let values =
-                        resolve_ambiguous_wait_values(page, target, is_value, handle.as_ref())
-                            .await?;
-                    return Ok(WaitObservation::Text(values));
-                }
-                Err(error) => return Err(error),
-            };
-            let value = if is_value {
-                resolved.value(page).await?.unwrap_or_default()
-            } else {
-                resolved.inner_text(page).await?.unwrap_or_default()
-            };
-            Ok(WaitObservation::Text(vec![value]))
-        }
-        WaitCondition::Url { .. } => {
-            let url = page
-                .url()
-                .await
-                .map_err(command_failed)?
-                .unwrap_or_default();
-            Ok(WaitObservation::Url(url))
-        }
-        WaitCondition::Document { .. } => {
-            let state: String = page
-                .evaluate("document.readyState")
-                .await
-                .map_err(command_failed)?
-                .into_value()
-                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
-            Ok(WaitObservation::Document(state))
-        }
+            }
+        };
+        Ok(ElementProbe::Satisfied(observation))
+    }
 
-        WaitCondition::NetworkQuiet {
-            ignore_url_substrings,
-            ignore_resource_types,
-            ignore_long_lived,
-            ..
-        } => {
-            let tracker = tracker.ok_or_else(|| {
-                driver_error(
-                    ErrorCode::BrowserCommandFailed,
-                    "network quiet tracker is not attached to this page",
-                )
-            })?;
-            let filters = crate::network_quiet::NetworkQuietFilters {
-                ignore_url_substrings,
-                ignore_resource_types,
-                ignore_long_lived: *ignore_long_lived,
-            };
-            let (in_flight, excluded_classes) = tracker.snapshot(&filters).await;
-            Ok(WaitObservation::Network {
-                in_flight,
-                excluded_classes,
-            })
+    async fn text(&self, target: &TargetSpec, is_value: bool) -> Result<TextProbe, CommandError> {
+        let page = self.page;
+        if !is_value && is_page_scoped_text_target(target) {
+            let value = read_page_scoped_text(self.browser, self.page_id, page, target).await?;
+            return Ok(TextProbe::Values(vec![value]));
         }
+        let handle = self.browser.lock().await.as_ref().map(Browser::handle);
+        let resolved = match handle {
+            Some(handle) => {
+                resolve_browser_target(self.page_id, page, "", Some(target), Some(&handle)).await
+            }
+            None => Err(closed_error()),
+        };
+        let resolved = match resolved {
+            Ok(resolved) => resolved,
+            Err(error) if matches!(error.code, ErrorCode::TargetNotFound) => {
+                return Ok(TextProbe::Missing)
+            }
+            // The click already landed; a matcher-satisfying candidate
+            // among several is still a match, not an ambiguity the
+            // caller must narrow before the wait can even be evaluated.
+            Err(error) if matches!(error.code, ErrorCode::TargetAmbiguous) => {
+                let handle = self.browser.lock().await.as_ref().map(Browser::handle);
+                let values =
+                    resolve_ambiguous_wait_values(page, target, is_value, handle.as_ref()).await?;
+                return Ok(TextProbe::Values(values));
+            }
+            Err(error) => return Err(error),
+        };
+        let value = if is_value {
+            resolved.value(page).await?.unwrap_or_default()
+        } else {
+            resolved.inner_text(page).await?.unwrap_or_default()
+        };
+        Ok(TextProbe::Values(vec![value]))
+    }
+
+    async fn url(&self) -> Result<String, CommandError> {
+        self.page
+            .url()
+            .await
+            .map_err(command_failed)
+            .map(|url| url.unwrap_or_default())
+    }
+
+    async fn document_ready(&self) -> Result<String, CommandError> {
+        self.page
+            .evaluate("document.readyState")
+            .await
+            .map_err(command_failed)?
+            .into_value()
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))
+    }
+
+    async fn network(
+        &self,
+        filters: &crate::NetworkQuietFilters<'_>,
+    ) -> Result<(usize, Vec<String>), CommandError> {
+        let tracker = self.tracker.ok_or_else(|| {
+            driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "network quiet tracker is not attached to this page",
+            )
+        })?;
+        Ok(tracker.snapshot(filters).await)
     }
 }
 
@@ -3971,10 +3963,7 @@ fn element_wait_missing_observation(
         ErrorCode::TargetNotFound | ErrorCode::FrameNotFound | ErrorCode::ShadowRootUnavailable
     ) || is_missing_css_node(error)
         || is_detached_target_error(error);
-    target_missing.then_some(matches!(
-        state,
-        types::ElementState::Detached | types::ElementState::Hidden
-    ))
+    target_missing.then_some(crate::wait::unresolved_element_satisfies(*state))
 }
 
 fn wait_should_retry_replaced_context(error: &CommandError) -> bool {
@@ -4354,7 +4343,7 @@ fn driver_error_is_retryable(code: ErrorCode) -> bool {
 fn obscured_click_target() -> CommandError {
     CommandError {
         code: ErrorCode::TargetObscured,
-        message: "click target is covered by another element".into(),
+        message: crate::COVERED_CLICK.into(),
         layer: ErrorLayer::Driver,
         retryable: false,
     }
@@ -4671,18 +4660,12 @@ fn hidden_from_accessibility(
             })
         })
     });
-    if modal_open {
-        CommandError {
-            code: ErrorCode::TargetObscured,
-            message: "target is behind an open modal dialog; dismiss it first".into(),
-            layer: ErrorLayer::Driver,
-            retryable: false,
-        }
-    } else {
-        driver_error(
-            ErrorCode::TargetNotFound,
-            "resolved target is hidden from the accessibility tree",
-        )
+    let (code, message) = crate::accessibility_miss(modal_open);
+    CommandError {
+        code,
+        message: message.into(),
+        layer: ErrorLayer::Driver,
+        retryable: false,
     }
 }
 
