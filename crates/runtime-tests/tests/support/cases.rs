@@ -78,6 +78,11 @@ macro_rules! every_case {
             concurrent_scoped_snapshots_resolve_their_own_targets,
             fill_clears_controls_the_form_snapshot_cannot_name,
             typing_follows_focus_into_a_swapped_editor,
+            dismiss_closes_an_overlay_framed_from_another_site,
+            snapshot_lists_controls_inside_a_frame_from_another_site,
+            scoped_snapshot_reads_a_frame_from_another_site,
+            intent_fill_types_inside_a_frame_from_another_site,
+            wait_for_reaches_into_a_frame_from_another_site,
             $($extra,)*
         }
     };
@@ -3926,4 +3931,204 @@ pub async fn dismiss_closes_an_overlay_framed_from_another_site(rig: &Rig) {
         );
         live.close().await;
     }
+}
+
+/// A page from one site holding an iframe titled `Widget` whose document,
+/// `frame_body`, comes from another site; the frame reports to the page's
+/// `Result` status by `postMessage`. Both sites stay up while held.
+async fn cross_site_frame_page(frame_body: &str) -> (FixtureSite, FixtureSite) {
+    let frame_site =
+        FixtureSite::spawn(vec![("/frame", Route::Html(page("Frame", frame_body)))]).await;
+    let frame_url = frame_site.url("/frame").replace("127.0.0.1", "localhost");
+    let body = format!(
+        r#"<main><h1>Host</h1>
+        <iframe title="Widget" src="{frame_url}" style="width:400px;height:200px"></iframe>
+        <p role="status" aria-label="Result">idle</p></main>
+        <script>addEventListener('message', (event) => {{ document.querySelector('[aria-label="Result"]').textContent = String(event.data); }});</script>"#
+    );
+    let site = FixtureSite::spawn(vec![("/host", Route::Html(page("Host", &body)))]).await;
+    (site, frame_site)
+}
+
+async fn wait_for_result(live: &Live<'_>, text: &str) -> Value {
+    live.call(
+        "wait_for",
+        json!({
+            "condition":{"kind":"text","target":{"role":"status","accessibleName":"Result"},
+                         "matcher":{"kind":"contains","value":text}},
+            "timeoutMs":10000
+        }),
+    )
+    .await
+}
+
+/// Controls inside a frame from another site appear in the full snapshot with
+/// a target that acts through the frame.
+pub async fn snapshot_lists_controls_inside_a_frame_from_another_site(rig: &Rig) {
+    let (site, _frame) = cross_site_frame_page(
+        r#"<button onclick="parent.postMessage('pressed','*')">Frame action</button>
+        <script>parent.postMessage('ready','*')</script>"#,
+    )
+    .await;
+    let live = Live::open(rig, &site.url("/host")).await;
+    let ready = wait_for_result(&live, "ready").await;
+    assert_eq!(
+        ready["status"], "completed",
+        "the frame never loaded: {ready}"
+    );
+    let snapshot = live.snapshot(json!({})).await;
+    let mut targets = Vec::new();
+    targets_under(&snapshot, &mut targets);
+    let actions: Vec<_> = targets
+        .iter()
+        .filter(|(role, target)| *role == "button" && target["accessibleName"] == "Frame action")
+        .collect();
+    assert_eq!(
+        actions.len(),
+        1,
+        "framed control in the snapshot: {snapshot}"
+    );
+    let target = actions[0].1;
+    assert_eq!(
+        target["framePath"][0]["role"], "iframe",
+        "frame hop: {target}"
+    );
+    assert_eq!(
+        target["framePath"][0]["accessibleName"], "Widget",
+        "frame hop: {target}"
+    );
+    let clicked = live.call("click", json!({"target":target})).await;
+    assert_eq!(
+        clicked["status"], "completed",
+        "click through the frame: {clicked}"
+    );
+    let pressed = wait_for_result(&live, "pressed").await;
+    assert_eq!(
+        pressed["status"], "completed",
+        "the click never landed: {pressed}"
+    );
+    live.close().await;
+}
+
+/// A snapshot scoped to a frame from another site, or to a control inside it,
+/// reads that frame's document.
+pub async fn scoped_snapshot_reads_a_frame_from_another_site(rig: &Rig) {
+    let (site, _frame) = cross_site_frame_page(
+        r#"<button>Frame action</button><script>parent.postMessage('ready','*')</script>"#,
+    )
+    .await;
+    let live = Live::open(rig, &site.url("/host")).await;
+    let ready = wait_for_result(&live, "ready").await;
+    assert_eq!(
+        ready["status"], "completed",
+        "the frame never loaded: {ready}"
+    );
+    let framed = live
+        .snapshot(json!({"target":{"role":"iframe","accessibleName":"Widget"}}))
+        .await;
+    assert!(
+        framed.to_string().contains("Frame action"),
+        "scoped to the frame: {framed}"
+    );
+    let control = live
+        .snapshot(
+            json!({"target":{"role":"button","accessibleName":"Frame action",
+                                   "framePath":[{"role":"iframe","accessibleName":"Widget"}]}}),
+        )
+        .await;
+    assert_eq!(
+        control["status"], "completed",
+        "scoped to the framed control: {control}"
+    );
+    assert!(
+        control.to_string().contains("Frame action"),
+        "scoped to the framed control: {control}"
+    );
+    live.close().await;
+}
+
+/// An intent fills a field inside a frame from another site without naming
+/// the frame.
+pub async fn intent_fill_types_inside_a_frame_from_another_site(rig: &Rig) {
+    let (site, _frame) = cross_site_frame_page(
+        r#"<label>Email <input oninput="parent.postMessage('typed:' + this.value,'*')"></label>
+        <script>parent.postMessage('ready','*')</script>"#,
+    )
+    .await;
+    let live = Live::open(rig, &site.url("/host")).await;
+    let ready = wait_for_result(&live, "ready").await;
+    assert_eq!(
+        ready["status"], "completed",
+        "the frame never loaded: {ready}"
+    );
+    let filled = live
+        .call(
+            "intent_fill",
+            json!({"purpose":"enter the email",
+                   "hints":{"role":"textbox","accessibleName":"Email"},
+                   "value":{"kind":"setText","value":"ada@example.com"}}),
+        )
+        .await;
+    assert_eq!(
+        filled["status"], "completed",
+        "fill inside the frame: {filled}"
+    );
+    let typed = wait_for_result(&live, "typed:ada@example.com").await;
+    assert_eq!(
+        typed["status"], "completed",
+        "the frame never saw the value: {typed}"
+    );
+    live.close().await;
+}
+
+/// Waits that name a frame from another site see its controls appear and its
+/// text change.
+pub async fn wait_for_reaches_into_a_frame_from_another_site(rig: &Rig) {
+    let (site, _frame) = cross_site_frame_page(
+        r#"<p role="status" aria-label="Frame status">waiting</p>
+        <script>parent.postMessage('ready','*');
+        setTimeout(() => {
+          document.body.insertAdjacentHTML('beforeend', '<button>Late</button>');
+          document.querySelector('[aria-label="Frame status"]').textContent = 'done';
+        }, 500);</script>"#,
+    )
+    .await;
+    let live = Live::open(rig, &site.url("/host")).await;
+    let ready = wait_for_result(&live, "ready").await;
+    assert_eq!(
+        ready["status"], "completed",
+        "the frame never loaded: {ready}"
+    );
+    let frame = json!([{"role":"iframe","accessibleName":"Widget"}]);
+    let appeared = live
+        .call(
+            "wait_for",
+            json!({
+                "condition":{"kind":"element",
+                             "target":{"role":"button","accessibleName":"Late","framePath":frame},
+                             "state":"attached"},
+                "timeoutMs":10000
+            }),
+        )
+        .await;
+    assert_eq!(
+        appeared["status"], "completed",
+        "element wait inside the frame: {appeared}"
+    );
+    let changed = live
+        .call(
+            "wait_for",
+            json!({
+                "condition":{"kind":"text",
+                             "target":{"role":"status","accessibleName":"Frame status","framePath":frame},
+                             "matcher":{"kind":"contains","value":"done"}},
+                "timeoutMs":10000
+            }),
+        )
+        .await;
+    assert_eq!(
+        changed["status"], "completed",
+        "text wait inside the frame: {changed}"
+    );
+    live.close().await;
 }
