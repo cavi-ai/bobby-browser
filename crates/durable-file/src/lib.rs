@@ -57,19 +57,21 @@ pub fn require_sole_hard_link(metadata: &std::fs::Metadata, entry: &str) -> std:
 }
 
 /// Create `temporary` exclusively, write `bytes`, then rename it onto `destination`.
-/// The directory entry is synced. A failed attempt removes `temporary`.
+/// The directory entry is synced. A failed attempt removes `temporary` only
+/// after creating it; an existing temporary entry is left intact.
 pub async fn replace_exclusive(
     directory: &Path,
     temporary: &Path,
     destination: &Path,
     bytes: &[u8],
 ) -> std::io::Result<()> {
-    let result = async {
-        let mut options = tokio::fs::OpenOptions::new();
-        options.create_new(true).write(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        let mut file = options.open(temporary).await?;
+    let mut options = tokio::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    // Cleanup starts only once this attempt owns a newly created file.
+    let mut file = options.open(temporary).await?;
+    let result = async move {
         file.write_all(bytes).await?;
         file.sync_all().await?;
         drop(file);
@@ -88,6 +90,53 @@ pub async fn replace_exclusive(
 mod tests {
     use super::*;
     use std::io::Read;
+
+    #[tokio::test]
+    async fn a_temporary_path_collision_preserves_both_existing_files() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("entry.json");
+        let temporary = root.path().join(".entry.tmp");
+        std::fs::write(&destination, b"previous destination").unwrap();
+        std::fs::write(&temporary, b"other writer's temporary bytes").unwrap();
+
+        let error = replace_exclusive(root.path(), &temporary, &destination, b"replacement")
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            b"previous destination"
+        );
+        assert_eq!(
+            std::fs::read(&temporary).unwrap(),
+            b"other writer's temporary bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_rename_removes_its_own_temporary_file_and_allows_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("occupied");
+        let temporary = root.path().join(".entry.tmp");
+        std::fs::create_dir(&destination).unwrap();
+        let canary = destination.join("canary");
+        std::fs::write(&canary, b"keep").unwrap();
+
+        assert!(
+            replace_exclusive(root.path(), &temporary, &destination, b"replacement")
+                .await
+                .is_err()
+        );
+        assert!(!temporary.exists());
+        assert_eq!(std::fs::read(&canary).unwrap(), b"keep");
+
+        let retry = root.path().join("retry.json");
+        replace_exclusive(root.path(), &temporary, &retry, b"retry")
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(retry).unwrap(), b"retry");
+        assert!(!temporary.exists());
+    }
 
     #[tokio::test]
     async fn replace_writes_an_owner_file_the_next_read_accepts() {
