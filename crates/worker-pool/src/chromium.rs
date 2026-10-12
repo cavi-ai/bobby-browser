@@ -1865,16 +1865,20 @@ impl crate::TabsEngine for ChromiumWorker {
             .unregister_page(&command.page_id)
             .await
             .ok_or_else(page_missing)?;
-        let evidence = page_evidence(command.page_id.clone(), &page).await?;
+        // The tab closes even when its url and title cannot be read.
+        let evidence = page_evidence(command.page_id.clone(), &page).await.ok();
         self.closed_targets
             .lock()
             .await
             .insert(page.target_id().clone());
         page.close().await.map_err(command_failed)?;
+        let (url, title) = evidence
+            .map(|evidence| (evidence.url, evidence.title))
+            .unwrap_or_default();
         Ok(vec![Evidence::Page {
-            page_id: evidence.page_id,
-            url: evidence.url,
-            title: evidence.title,
+            page_id: command.page_id.clone(),
+            url,
+            title,
         }])
     }
 
@@ -4125,21 +4129,26 @@ async fn read_page_scoped_text(
 }
 
 async fn page_evidence(page_id: PageId, page: &Page) -> Result<PageEvidence, CommandError> {
+    let url = page
+        .url()
+        .await
+        .map_err(command_failed)?
+        .unwrap_or_default();
+    // A page whose navigation has not committed has no document to read a
+    // title from; it reports none instead of holding the call.
+    let title = match tokio::time::timeout(PAGE_TITLE_TIMEOUT, page.get_title()).await {
+        Ok(title) => title.map_err(command_failed)?.unwrap_or_default(),
+        Err(_) => String::new(),
+    };
     Ok(PageEvidence {
         page_id,
-        url: page
-            .url()
-            .await
-            .map_err(command_failed)?
-            .unwrap_or_default(),
-        title: page_title_evidence(
-            page.get_title()
-                .await
-                .map_err(command_failed)?
-                .unwrap_or_default(),
-        ),
+        url,
+        title: page_title_evidence(title),
     })
 }
+
+/// How long a page title read may take before the page reports no title.
+const PAGE_TITLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Upper bound on a single CDP call that carries no command timeout of its
 /// own: a hung browser must fail the command at 30s, not park it for the

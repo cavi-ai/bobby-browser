@@ -70,6 +70,7 @@ macro_rules! every_case {
             observation_carries_each_text_once,
             sign_in_fields_show_their_labels,
             concurrent_sessions_each_keep_their_own_page,
+            a_page_stuck_navigating_closes,
             a_copied_control_resolves_apart_from_its_original,
             concurrent_scoped_snapshots_resolve_their_own_targets,
             $($extra,)*
@@ -3358,4 +3359,53 @@ pub async fn concurrent_scoped_snapshots_resolve_their_own_targets(rig: &Rig) {
         futures_util::future::join_all(snapshots).await;
     }
     live.close().await;
+}
+
+/// A page still waiting on a navigation that never commits is listed, closes
+/// on request, and leaves the session's page list.
+pub async fn a_page_stuck_navigating_closes(rig: &Rig) {
+    let site = FixtureSite::spawn(vec![
+        ("/home", Route::Html(page("Home", "<h1>Home</h1>"))),
+        (
+            "/slow",
+            Route::Delayed {
+                delay: std::time::Duration::from_secs(60),
+                content_type: "text/html",
+                body: page("Slow", "<h1>Slow</h1>"),
+            },
+        ),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let navigated = live
+        .call(
+            "navigate",
+            json!({"url":site.url("/slow"),"timeoutMs":1000}),
+        )
+        .await;
+    assert_ne!(navigated["status"], "completed", "navigate: {navigated}");
+    let page_id = live.page_id.as_str().unwrap_or_default().to_owned();
+    let started = std::time::Instant::now();
+    let stuck = rig
+        .tool("page_list", json!({"sessionId":live.session_id}))
+        .await;
+    assert_eq!(stuck["status"], "completed", "page_list: {stuck}");
+    assert!(
+        stuck.to_string().contains(&page_id),
+        "the stuck page is not listed: {stuck}"
+    );
+    let closed = live.call("page_close", json!({})).await;
+    assert_eq!(closed["status"], "completed", "page_close: {closed}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(15),
+        "listing and closing took {:?}",
+        started.elapsed()
+    );
+    let listed = rig
+        .tool("page_list", json!({"sessionId":live.session_id}))
+        .await;
+    assert!(
+        !listed.to_string().contains(&page_id),
+        "the closed page is still listed: {listed}"
+    );
 }
