@@ -9,14 +9,13 @@ use chromiumoxide::cdp::browser_protocol::accessibility::QueryAxTreeParams;
 #[cfg(test)]
 use chromiumoxide::cdp::browser_protocol::dom::Node as CdpNode;
 use chromiumoxide::cdp::browser_protocol::dom::{
-    BackendNodeId, DescribeNodeParams, GetContentQuadsParams, GetDocumentParams,
-    GetFrameOwnerParams, ResolveNodeParams, SetFileInputFilesParams, ShadowRootType,
+    BackendNodeId, DescribeNodeParams, GetContentQuadsParams, GetDocumentParams, ResolveNodeParams,
+    SetFileInputFilesParams, ShadowRootType,
 };
 use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
 use chromiumoxide::cdp::browser_protocol::page::{
     CaptureScreenshotFormat, GetFrameTreeParams, Viewport,
 };
-use chromiumoxide::cdp::browser_protocol::target::GetTargetsParams;
 use chromiumoxide::cdp::js_protocol::runtime::{
     CallFunctionOnParams, EvaluateParams, ExecutionContextId, ReleaseObjectGroupParams,
     RemoteObjectId,
@@ -47,6 +46,9 @@ pub struct ResolvedTarget {
     pub(crate) iframe_hop: Option<types::SemanticTargetSegment>,
     /// Resolved ancestor hops, ranked within each parent frame.
     pub(crate) frame_path: Vec<types::SemanticTargetSegment>,
+    /// The iframe element and its parent's session for every hop into a frame
+    /// from another site: that frame reports geometry in its own viewport.
+    frame_owners: Vec<(Page, BackendNodeId)>,
     pub evidence: Evidence,
 }
 
@@ -94,7 +96,9 @@ pub struct FormControlValidity {
 }
 
 impl ResolvedTarget {
-    fn execution_page<'a>(&'a self, fallback: &'a Page) -> &'a Page {
+    /// The session serving the target's frame: `fallback` for the page's own
+    /// frames, the frame's own target for a frame from another site.
+    pub(crate) fn execution_page<'a>(&'a self, fallback: &'a Page) -> &'a Page {
         self.execution_page.as_ref().unwrap_or(fallback)
     }
 
@@ -150,14 +154,41 @@ impl ResolvedTarget {
             )
             .await
             .map_err(cdp_error)?;
-        Ok(quads
+        let Some(mut point) = quads
             .quads
             .iter()
             .filter(|quad| quad.inner().len() == 8)
             .map(ElementQuad::from_quad)
             .filter(|quad| quad.quad_area() > 1.)
             .map(|quad| quad.quad_center())
-            .next())
+            .next()
+        else {
+            return Ok(None);
+        };
+        // Each frame from another site reports from its own viewport origin:
+        // its iframe's content box places that origin in the parent.
+        for (session, owner) in &self.frame_owners {
+            let owner_quads = session
+                .execute(
+                    GetContentQuadsParams::builder()
+                        .backend_node_id(*owner)
+                        .build(),
+                )
+                .await
+                .map_err(cdp_error)?;
+            let Some(origin) = owner_quads
+                .quads
+                .iter()
+                .filter(|quad| quad.inner().len() == 8)
+                .map(ElementQuad::from_quad)
+                .next()
+            else {
+                return Ok(None);
+            };
+            point.x += origin.top_left.x;
+            point.y += origin.top_left.y;
+        }
+        Ok(Some(point))
     }
 
     /// Classifies a pointer at the target's center: reachable, covered,
@@ -930,43 +961,24 @@ async fn gather_frame_candidates(
     browser: Option<&BrowserHandle>,
 ) -> Result<Vec<Candidate>, CommandError> {
     let locator_scope = scope.locator_scope();
-    let (child, oopif) = match find_child_frame(
+    let Some(child) = owned_frame(
         &scope.execution_page,
+        browser,
         &locator_scope,
         &scope.shadow_hosts,
-        &scope.frame_id,
         frame,
     )
     .await?
-    {
-        Some(child) => (Some(child), None),
-        None => match browser {
-            Some(active_browser) => (
-                None,
-                find_oopif(
-                    active_browser,
-                    &scope.execution_page,
-                    &scope.frame_id,
-                    frame,
-                )
-                .await?,
-            ),
-            None => (None, None),
-        },
-    };
-    let (execution_page, frame_id) = if let Some(child) = child {
-        (scope.execution_page.clone(), child)
-    } else if let Some((oopif_page, oopif_frame)) = oopif {
-        (oopif_page, oopif_frame)
-    } else {
+    else {
         return Ok(Vec::new());
     };
-    let context_id = execution_page
-        .frame_execution_context(frame_id)
+    let context_id = child
+        .session
+        .frame_execution_context(child.frame)
         .await
         .map_err(cdp_error)?;
     let nested_scope = TARGET_SCOPE.fetch_add(1, Ordering::Relaxed);
-    let raw = collect_candidates(&execution_page, context_id, &[], nested_scope).await?;
+    let raw = collect_candidates(&child.session, context_id, &[], nested_scope).await?;
     Ok(raw
         .into_iter()
         .map(|item| {
@@ -989,6 +1001,7 @@ struct TargetScope {
     frame_id: chromiumoxide::cdp::browser_protocol::page::FrameId,
     frame_trace: Vec<types::CandidateEvidence>,
     frame_path: Vec<types::SemanticTargetSegment>,
+    frame_owners: Vec<(Page, BackendNodeId)>,
 }
 
 impl TargetScope {
@@ -1026,6 +1039,7 @@ async fn open_target_scope(
     let mut shadow_hosts = Vec::new();
     let mut frame_trace = Vec::new();
     let mut frame_path = Vec::new();
+    let mut frame_owners = Vec::new();
 
     for (index, frame_target) in target.frame_path.iter().enumerate() {
         let raw = collect_candidates(&execution_page, context_id, &shadow_hosts, scope_id).await?;
@@ -1040,51 +1054,33 @@ async fn open_target_scope(
         let (candidate, evidence, _) = choose(&normalized_frame_target, &candidates, true)?;
         frame_path.push(semantic_iframe_hop(&candidate, &candidates));
         frame_trace.push(evidence);
+        // The owner can be in the DOM before its document, or a frame from
+        // another site before its target attaches.
         let deadline = Instant::now() + Duration::from_secs(2);
-        let (child, oopif) = loop {
+        let child = loop {
             let scope = LocatorScope::Context(context_id);
-            if let Some(child) = find_child_frame(
-                &execution_page,
-                &scope,
-                &shadow_hosts,
-                &frame_id,
-                &candidate,
-            )
-            .await?
+            if let Some(child) =
+                owned_frame(&execution_page, browser, &scope, &shadow_hosts, &candidate).await?
             {
-                break (Some(child), None);
+                break child;
             }
-            let found = match browser {
-                Some(active_browser) => {
-                    find_oopif(active_browser, &execution_page, &frame_id, &candidate).await?
-                }
-                None => None,
-            };
-            if found.is_some() || Instant::now() >= deadline {
-                break (None, found);
+            if Instant::now() >= deadline {
+                return Err(target_error(
+                    ErrorCode::FrameNotFound,
+                    format!("frame path component {index} did not map to a child frame"),
+                ));
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         };
-        if let Some(child) = child {
-            frame_id = child.clone();
-            context_id = execution_page
-                .frame_execution_context(child)
-                .await
-                .map_err(cdp_error)?;
-        } else {
-            let (oopif, oopif_frame) = oopif.ok_or_else(|| {
-                target_error(
-                    ErrorCode::FrameNotFound,
-                    format!("frame path component {index} did not map to a child frame"),
-                )
-            })?;
-            execution_page = oopif;
-            frame_id = oopif_frame.clone();
-            context_id = execution_page
-                .frame_execution_context(oopif_frame)
-                .await
-                .map_err(cdp_error)?;
+        if child.session.target_id() != execution_page.target_id() {
+            frame_owners.push((execution_page.clone(), child.owner));
         }
+        execution_page = child.session;
+        frame_id = child.frame.clone();
+        context_id = execution_page
+            .frame_execution_context(child.frame)
+            .await
+            .map_err(cdp_error)?;
         shadow_hosts.clear();
     }
 
@@ -1151,6 +1147,7 @@ async fn open_target_scope(
         frame_id,
         frame_trace,
         frame_path,
+        frame_owners,
     })
 }
 
@@ -1205,6 +1202,7 @@ pub async fn resolve_target_with_visibility(
             frame_id: None,
             iframe_hop: None,
             frame_path: Vec::new(),
+            frame_owners: Vec::new(),
             evidence: selector_evidence(page_id, selector),
         });
     };
@@ -1283,6 +1281,7 @@ pub async fn resolve_target_with_visibility(
         },
         iframe_hop,
         frame_path: scope.frame_path,
+        frame_owners: scope.frame_owners,
         evidence: Evidence::Resolution {
             target: Box::new(target.clone()),
             fingerprint: Box::new(fingerprint),
@@ -1877,82 +1876,70 @@ fn candidate_collector_operation(scope: u64) -> Result<String, CommandError> {
     ))
 }
 
-/// Maps a gathered iframe `candidate` to the CDP child frame it owns.
-/// Matches by DOM identity (`DOM.getFrameOwner`'s `backend_node_id` against
-/// the candidate's own backend node id) so unnamed iframes with no `src`
-/// resolve correctly even with 2+ siblings; name/src matching cannot tell
-/// such siblings apart. Falls back to the name/src heuristic (then the
-/// single-child guess) only when the identity lookup itself fails.
-async fn find_child_frame(
-    page: &Page,
-    scope: &LocatorScope,
-    shadow_hosts: &[String],
-    parent: &chromiumoxide::cdp::browser_protocol::page::FrameId,
-    candidate: &Candidate,
-) -> Result<Option<chromiumoxide::cdp::browser_protocol::page::FrameId>, CommandError> {
-    let mut children = Vec::new();
-    for frame in page.frames().await.map_err(cdp_error)? {
-        if page
-            .frame_parent(frame.clone())
-            .await
-            .map_err(cdp_error)?
-            .as_ref()
-            != Some(parent)
-        {
-            continue;
-        }
-        children.push(frame);
-    }
-
-    match candidate_backend_node_id(page, scope, shadow_hosts, candidate).await {
-        Ok(wanted_backend_node_id) => {
-            for frame in &children {
-                match page.execute(GetFrameOwnerParams::new(frame.clone())).await {
-                    Ok(owner) if owner.result.backend_node_id == wanted_backend_node_id => {
-                        return Ok(Some(frame.clone()));
-                    }
-                    Ok(_) => continue,
-                    Err(error) => {
-                        tracing::debug!(
-                            ?error,
-                            "DOM.getFrameOwner failed, falling back to name/src match"
-                        );
-                        return find_child_frame_by_name_or_src(page, &children, candidate).await;
-                    }
-                }
-            }
-            Ok(None)
-        }
-        Err(error) => {
-            tracing::debug!(
-                ?error,
-                "candidate backend node id lookup failed, falling back to name/src match"
-            );
-            find_child_frame_by_name_or_src(page, &children, candidate).await
-        }
-    }
+/// A child frame and the page session that serves it: the parent's page for a
+/// same-process frame, the frame's own target for a frame from another site.
+pub(crate) struct ChildFrame {
+    pub frame: chromiumoxide::cdp::browser_protocol::page::FrameId,
+    pub session: Page,
+    /// The iframe element, in the parent's session.
+    pub owner: BackendNodeId,
 }
 
-async fn find_child_frame_by_name_or_src(
+/// The frame an iframe `owner` shows, by DOM identity: `DOM.describeNode` on
+/// the owner element names its content frame. `None` while the owner has no
+/// document yet or, for a frame from another site, while its target is not
+/// attached.
+pub(crate) async fn owned_frame(
     page: &Page,
-    children: &[chromiumoxide::cdp::browser_protocol::page::FrameId],
-    candidate: &Candidate,
-) -> Result<Option<chromiumoxide::cdp::browser_protocol::page::FrameId>, CommandError> {
-    let wanted_name = candidate.attributes.get("name");
-    let wanted_src = candidate.attributes.get("src");
-    for frame in children {
-        let name = page.frame_name(frame.clone()).await.map_err(cdp_error)?;
-        let url = page.frame_url(frame.clone()).await.map_err(cdp_error)?;
-        if wanted_name.is_some_and(|wanted| name.as_ref() == Some(wanted))
-            || wanted_src.is_some_and(|wanted| {
-                url.as_ref()
-                    .is_some_and(|actual| actual == wanted || actual.ends_with(wanted))
-            })
-        {
-            return Ok(Some(frame.clone()));
-        }
+    browser: Option<&BrowserHandle>,
+    scope: &LocatorScope,
+    shadow_hosts: &[String],
+    owner: &Candidate,
+) -> Result<Option<ChildFrame>, CommandError> {
+    let backend_node_id = candidate_backend_node_id(page, scope, shadow_hosts, owner).await?;
+    let node = page
+        .execute(
+            DescribeNodeParams::builder()
+                .backend_node_id(backend_node_id)
+                .depth(0)
+                .build(),
+        )
+        .await
+        .map_err(cdp_error)?
+        .result
+        .node;
+    let Some(frame) = node.frame_id else {
+        return Ok(None);
+    };
+    Ok(frame_session(page, browser, frame)
+        .await?
+        .map(|(frame, session)| ChildFrame {
+            frame,
+            session,
+            owner: backend_node_id,
+        }))
+}
+
+/// The session serving `frame`: `page` for one of its own frames, else the
+/// frame's own target, whose id is the frame id. `None` while that target is
+/// not attached.
+pub(crate) async fn frame_session(
+    page: &Page,
+    browser: Option<&BrowserHandle>,
+    frame: chromiumoxide::cdp::browser_protocol::page::FrameId,
+) -> Result<Option<(chromiumoxide::cdp::browser_protocol::page::FrameId, Page)>, CommandError> {
+    if page.frames().await.map_err(cdp_error)?.contains(&frame) {
+        return Ok(Some((frame, page.clone())));
     }
-    Ok((children.len() == 1).then(|| children[0].clone()))
+    let Some(browser) = browser else {
+        return Ok(None);
+    };
+    let target = chromiumoxide::cdp::browser_protocol::target::TargetId::new(frame.inner().clone());
+    Ok(browser
+        .get_page(target)
+        .await
+        .ok()
+        .map(|session| (frame, session)))
 }
 
 /// Every frame id in the page's frame tree.
@@ -1972,64 +1959,6 @@ pub(crate) async fn page_frame_ids(
         pending.extend(node.child_frames.unwrap_or_default());
     }
     Ok(ids)
-}
-
-async fn find_oopif(
-    browser: &BrowserHandle,
-    page: &Page,
-    parent: &chromiumoxide::cdp::browser_protocol::page::FrameId,
-    candidate: &Candidate,
-) -> Result<Option<(Page, chromiumoxide::cdp::browser_protocol::page::FrameId)>, CommandError> {
-    let wanted_src = candidate.attributes.get("src");
-    let targets = browser
-        .execute(GetTargetsParams { filter: None })
-        .await
-        .map_err(cdp_error)?
-        .result
-        .target_infos
-        .into_iter()
-        .filter(|target| {
-            target.r#type == "iframe"
-                && wanted_src.is_none_or(|wanted| {
-                    target.url == *wanted
-                        || target.url.trim_end_matches('/') == wanted.trim_end_matches('/')
-                        || target.url.ends_with(wanted)
-                })
-        })
-        .collect::<Vec<_>>();
-    let mut target = targets
-        .iter()
-        .find(|target| target.parent_frame_id.as_ref() == Some(parent))
-        .cloned();
-    // The one matching frame elsewhere in this page's tree; the browser may
-    // also serve other sessions' pages, whose frames never qualify.
-    if target.is_none() && targets.len() == 1 {
-        let frames = page_frame_ids(page).await?;
-        target = targets
-            .first()
-            .filter(|only| {
-                only.parent_frame_id
-                    .as_ref()
-                    .is_some_and(|id| frames.contains(id))
-            })
-            .cloned();
-    }
-    let Some(target) = target else {
-        return Ok(None);
-    };
-    let page = browser
-        .get_page(target.target_id)
-        .await
-        .map_err(cdp_error)?;
-    let frame = page
-        .execute(GetFrameTreeParams::default())
-        .await
-        .map_err(cdp_error)?
-        .result
-        .frame_tree
-        .frame
-        .id;
-    Ok(Some((page, frame)))
 }
 
 /// The `find`-by-id helper plus the shadow_hosts descent loop, shared by the

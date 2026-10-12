@@ -2045,19 +2045,21 @@ impl crate::ObservationEngine for ChromiumWorker {
             .max_nodes
             .unwrap_or(DEFAULT_A11Y_MAX_NODES)
             .clamp(1, MAX_A11Y_NODES) as usize;
+        let browser = self.browser_handle().await?;
         if let Some(target) = &command.target {
             // Scoped: resolve the target, fetch the AX tree of the frame it
             // lives in, and compact only its subtree.
-            let resolved = {
-                let browser = self.browser_handle().await?;
+            let resolved =
                 crate::targeting::resolve_target(page_id, &page, "", Some(target), Some(&browser))
-                    .await?
-            };
+                    .await?;
+            // A target inside a frame from another site lives in that frame's
+            // own session.
+            let tree_page = resolved.execution_page(&page).clone();
             let backend_id = resolved.backend_node_id(&page).await?;
             // Scoping to the iframe element itself must return the frame's
             // content — the main-frame AX subtree of an iframe node is empty,
             // and the agent asked for what is inside.
-            let owner_frame = page
+            let owner_frame = tree_page
                 .execute(
                     chromiumoxide::cdp::browser_protocol::dom::DescribeNodeParams::builder()
                         .backend_node_id(backend_id)
@@ -2081,7 +2083,14 @@ impl crate::ObservationEngine for ChromiumWorker {
                         truncated: true,
                     }]);
                 }
-                let mut result = page
+                let frame_page = crate::targeting::frame_session(
+                    &tree_page,
+                    Some(&browser),
+                    content_frame.clone(),
+                )
+                .await?
+                .map_or_else(|| tree_page.clone(), |(_, session)| session);
+                let mut result = frame_page
                     .execute(
                         chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::builder()
                             .frame_id(content_frame.clone())
@@ -2090,12 +2099,13 @@ impl crate::ObservationEngine for ChromiumWorker {
                     .await
                     .map_err(command_failed)?
                     .result;
-                name_fields_by_placeholder(&page, &mut result.nodes).await;
+                name_fields_by_placeholder(&frame_page, &mut result.nodes).await;
                 let (mut nodes, mut truncated) = compact_ax_tree(&result.nodes, max_nodes);
                 let owners = snapshot_iframe_owners(&result.nodes, None);
                 let emitted = count_a11y_nodes(&nodes);
                 truncated |= descend_a11y_iframes(
-                    &page,
+                    &frame_page,
+                    &browser,
                     Some(&content_frame),
                     frame_path.len(),
                     &mut nodes,
@@ -2120,8 +2130,12 @@ impl crate::ObservationEngine for ChromiumWorker {
                     chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::default()
                 }
             };
-            let mut result = page.execute(params).await.map_err(command_failed)?.result;
-            name_fields_by_placeholder(&page, &mut result.nodes).await;
+            let mut result = tree_page
+                .execute(params)
+                .await
+                .map_err(command_failed)?
+                .result;
+            name_fields_by_placeholder(&tree_page, &mut result.nodes).await;
             let root_id = result
                 .nodes
                 .iter()
@@ -2133,7 +2147,8 @@ impl crate::ObservationEngine for ChromiumWorker {
             let owners = snapshot_iframe_owners(&result.nodes, Some(root_id.as_ref()));
             let emitted = count_a11y_nodes(&nodes);
             truncated |= descend_a11y_iframes(
-                &page,
+                &tree_page,
+                &browser,
                 resolved.frame_id(),
                 resolved.frame_path.len(),
                 &mut nodes,
@@ -2157,13 +2172,21 @@ impl crate::ObservationEngine for ChromiumWorker {
             .result;
         name_fields_by_placeholder(&page, &mut result.nodes).await;
         let (mut nodes, mut truncated) = compact_ax_tree(&result.nodes, max_nodes);
-        // The main-frame AX tree stops at `Iframe` nodes; descend one level
-        // (cap 8, same-process frames) so in-frame controls are visible and
-        // their targets carry the frame hop control_action can re-resolve.
+        // The main-frame AX tree stops at `Iframe` nodes; descend one level so
+        // in-frame controls are visible and their targets carry the frame hop
+        // control_action can re-resolve.
         let emitted = count_a11y_nodes(&nodes);
         if emitted < max_nodes {
-            truncated |=
-                descend_a11y_iframes(&page, None, 0, &mut nodes, max_nodes - emitted, None).await;
+            truncated |= descend_a11y_iframes(
+                &page,
+                &browser,
+                None,
+                0,
+                &mut nodes,
+                max_nodes - emitted,
+                None,
+            )
+            .await;
         }
         // Only a whole tree can show that a control is missing from it.
         let controls_omitted = if truncated || a11y_contains_form_control(&nodes) {
@@ -4514,13 +4537,15 @@ fn splice_under_iframe(
     go(nodes, name, &mut 0, occurrence, frame_roots)
 }
 
-/// Descends one level into same-process iframes with a shared node budget
-/// so the snapshot does not stop at `Iframe` nodes. Each frame's compacted
-/// tree is spliced under its parent-tree `Iframe` node and every in-frame
-/// target is stamped with the role/name/ordinal hop that re-resolves the
-/// iframe element at action time. Returns whether any frame was truncated.
+/// Descends one level into iframes, same-process or from another site, with a
+/// shared node budget so the snapshot does not stop at `Iframe` nodes. Each
+/// frame's compacted tree, read through the session that serves it, is
+/// spliced under its parent-tree `Iframe` node and every in-frame target is
+/// stamped with the role/name/ordinal hop that re-resolves the iframe element
+/// at action time. Returns whether any frame was truncated.
 async fn descend_a11y_iframes(
     page: &Page,
+    browser: &BrowserHandle,
     parent_frame: Option<&chromiumoxide::cdp::browser_protocol::page::FrameId>,
     frame_depth: usize,
     nodes: &mut Vec<types::AccessibilityNode>,
@@ -4534,19 +4559,14 @@ async fn descend_a11y_iframes(
         // Child controls would need a hop beyond the target contract.
         return true;
     }
-    let (parent_frame, context_id) = match parent_frame {
+    let context_id = match parent_frame {
         Some(frame) => {
             let Ok(Some(context_id)) = page.frame_execution_context(frame.clone()).await else {
                 return false;
             };
-            (frame.clone(), Some(context_id))
+            Some(context_id)
         }
-        None => {
-            let Ok(Some(main_frame)) = page.mainframe().await else {
-                return false;
-            };
-            (main_frame, None)
-        }
+        None => None,
     };
     let Ok(iframes) = crate::targeting::iframe_candidates(page, context_id).await else {
         return false;
@@ -4554,34 +4574,18 @@ async fn descend_a11y_iframes(
     if iframes.is_empty() {
         return false;
     }
-    let Ok(frames) = page.frames().await else {
-        return false;
-    };
-    // Frame <-> element identity, computed once for every candidate: name/src
-    // are absent for a `srcdoc` iframe with no `name` attribute, so 2+ such
-    // siblings cannot be told apart by the old heuristic. A candidate whose
-    // backend node id lookup fails is skipped here and falls back to the
-    // name/src heuristic per-frame below.
+    let scope = crate::targeting::LocatorScope::Context(context_id);
+    // Owner identity, computed once: a scoped snapshot keeps only the frames
+    // whose owners sit inside its subtree.
     let mut candidate_backend_ids: Vec<(
         chromiumoxide::cdp::browser_protocol::dom::BackendNodeId,
         &dom_engine::Candidate,
     )> = Vec::new();
     for candidate in &iframes {
-        match crate::targeting::candidate_backend_node_id(
-            page,
-            &crate::targeting::LocatorScope::Context(context_id),
-            &[],
-            candidate,
-        )
-        .await
+        if let Ok(backend_node_id) =
+            crate::targeting::candidate_backend_node_id(page, &scope, &[], candidate).await
         {
-            Ok(backend_node_id) => candidate_backend_ids.push((backend_node_id, candidate)),
-            Err(error) => {
-                tracing::debug!(
-                    ?error,
-                    "candidate backend node id lookup failed, iframe descent falls back to name/src match for this candidate"
-                );
-            }
+            candidate_backend_ids.push((backend_node_id, candidate));
         }
     }
     let scoped_iframes: Vec<_> = iframes
@@ -4595,80 +4599,28 @@ async fn descend_a11y_iframes(
         })
         .collect();
     let mut truncated = false;
-    for frame in frames {
-        let is_child = page
-            .frame_parent(frame.clone())
-            .await
-            .ok()
-            .flatten()
-            .as_ref()
-            == Some(&parent_frame);
-        if !is_child {
-            continue;
-        }
-        let owner_backend_node_id = page
-            .execute(
-                chromiumoxide::cdp::browser_protocol::dom::GetFrameOwnerParams::new(frame.clone()),
-            )
-            .await
-            .ok()
-            .map(|owner| owner.result.backend_node_id);
-        if allowed_owners.is_some_and(|allowed| {
-            !owner_backend_node_id
-                .as_ref()
-                .is_some_and(|id| allowed.contains(id))
-        }) {
-            continue;
-        }
-        let candidate = match owner_backend_node_id.and_then(|backend_node_id| {
-            candidate_backend_ids
-                .iter()
-                .find(|(id, _)| *id == backend_node_id)
-                .map(|(_, candidate)| *candidate)
-        }) {
-            Some(candidate) => Some(candidate),
-            None if allowed_owners.is_some() => None,
-            None => {
-                let frame_name = page.frame_name(frame.clone()).await.ok().flatten();
-                let frame_url = page.frame_url(frame.clone()).await.ok().flatten();
-                iframes
-                    .iter()
-                    .find(|candidate| {
-                        frame_name
-                            .as_ref()
-                            .is_some_and(|name| candidate.attributes.get("name") == Some(name))
-                            || frame_url.as_ref().is_some_and(|url| {
-                                candidate
-                                    .attributes
-                                    .get("src")
-                                    .is_some_and(|src| url == src || url.ends_with(src))
-                            })
-                    })
-                    .or(if iframes.len() == 1 {
-                        iframes.first()
-                    } else {
-                        None
-                    })
-            }
-        };
-        let Some(candidate) = candidate else {
+    for candidate in scoped_iframes.iter().copied() {
+        let Ok(Some(child)) =
+            crate::targeting::owned_frame(page, Some(browser), &scope, &[], candidate).await
+        else {
             continue;
         };
         if budget == 0 {
             truncated = true;
             break;
         }
-        let Ok(mut tree) = page
+        let Ok(mut tree) = child
+            .session
             .execute(
                 chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::builder()
-                    .frame_id(frame)
+                    .frame_id(child.frame)
                     .build(),
             )
             .await
         else {
             continue;
         };
-        name_fields_by_placeholder(page, &mut tree.result.nodes).await;
+        name_fields_by_placeholder(&child.session, &mut tree.result.nodes).await;
         let (mut frame_roots, frame_truncated) = compact_ax_tree(&tree.result.nodes, budget);
         truncated |= frame_truncated;
         // Two distinct counting domains: `splice_occurrence` finds the right
