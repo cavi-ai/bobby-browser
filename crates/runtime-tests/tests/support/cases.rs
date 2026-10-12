@@ -83,6 +83,7 @@ macro_rules! every_case {
             scoped_snapshot_reads_a_frame_from_another_site,
             intent_fill_types_inside_a_frame_from_another_site,
             wait_for_reaches_into_a_frame_from_another_site,
+            form_snapshot_targets_reach_an_unnamed_frame,
             $($extra,)*
         }
     };
@@ -4129,6 +4130,69 @@ pub async fn wait_for_reaches_into_a_frame_from_another_site(rig: &Rig) {
     assert_eq!(
         changed["status"], "completed",
         "text wait inside the frame: {changed}"
+    );
+    live.close().await;
+}
+
+/// The first object under `value` whose `accessibleName` is `name` and that
+/// carries a `target`.
+fn control_named<'a>(value: &'a Value, name: &str) -> Option<&'a Value> {
+    match value {
+        Value::Object(map) => {
+            if map.get("accessibleName").and_then(Value::as_str) == Some(name)
+                && map.get("target").is_some()
+            {
+                return Some(value);
+            }
+            map.values().find_map(|child| control_named(child, name))
+        }
+        Value::Array(items) => items.iter().find_map(|child| control_named(child, name)),
+        _ => None,
+    }
+}
+
+/// A form snapshot target for a field inside an iframe with no name acts on
+/// that field.
+pub async fn form_snapshot_targets_reach_an_unnamed_frame(rig: &Rig) {
+    let frame = page(
+        "Frame",
+        r#"<label>Code <input oninput="parent.postMessage('typed:' + this.value,'*')"></label>
+        <script>parent.postMessage('ready','*')</script>"#,
+    );
+    let host = page(
+        "Host",
+        r#"<main><h1>Host</h1><iframe src="/frame" style="width:400px;height:120px"></iframe>
+        <p role="status" aria-label="Result">idle</p></main>
+        <script>addEventListener('message', (event) => { document.querySelector('[aria-label="Result"]').textContent = String(event.data); });</script>"#,
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/host", Route::Html(host)),
+        ("/frame", Route::Html(frame)),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/host")).await;
+    let ready = wait_for_result(&live, "ready").await;
+    assert_eq!(
+        ready["status"], "completed",
+        "the frame never loaded: {ready}"
+    );
+    let snapshot = live.call("form_snapshot", json!({})).await;
+    let control = control_named(&snapshot, "Code")
+        .unwrap_or_else(|| panic!("no framed control in the form snapshot: {snapshot}"));
+    let typed = live
+        .call(
+            "control_action",
+            json!({"target":control["target"],"action":{"kind":"setText","value":"42"}}),
+        )
+        .await;
+    assert_eq!(
+        typed["status"], "completed",
+        "control_action through an unnamed frame: {typed}"
+    );
+    let landed = wait_for_result(&live, "typed:42").await;
+    assert_eq!(
+        landed["status"], "completed",
+        "the field never got the value: {landed}"
     );
     live.close().await;
 }
