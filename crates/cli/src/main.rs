@@ -4731,6 +4731,67 @@ endpoint_url = "http://127.0.0.1:8080/propose"
         assert!(action.detail.contains("rotated"));
     }
 
+    /// Answers every request with an Ollama model listing that holds only `qwen3:8b`.
+    fn fake_ollama_serving_only_qwen3_8b() -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut request = [0_u8; 2048];
+                let _ = stream.read(&mut request);
+                let body = r#"{"object":"list","data":[{"id":"qwen3:8b"}]}"#;
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        format!("http://{address}")
+    }
+
+    #[test]
+    fn doctor_fix_selects_the_installed_tag_of_an_untagged_ollama_model() {
+        let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
+        let _env = DoctorEnvGuard::clear();
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[vision]\nprovider = \"ollama\"\n\n[vision.providers.ollama]\nbase_url = \"{}\"\nmodel = \"qwen3\"\n",
+                fake_ollama_serving_only_qwen3_8b()
+            ),
+        )
+        .unwrap();
+
+        let report = run_doctor_fix(DoctorFixOptions {
+            config: Some(config.clone()),
+            bootstrap_env: Some(root.path().join("bootstrap.env")),
+            check_health: false,
+            download_model: false,
+            profile: None,
+        })
+        .unwrap();
+
+        let action = report
+            .actions
+            .iter()
+            .find(|action| action.name == "vision-model")
+            .expect("doctor --fix reports the vision model it selected");
+        assert_eq!(action.status, DoctorFixStatus::Fixed, "{}", action.detail);
+        let loaded = AppConfig::load(&config).unwrap();
+        assert_eq!(
+            loaded.vision.selected_provider().unwrap().1.model,
+            "qwen3:8b"
+        );
+        assert_eq!(
+            report.post_fix.check("vision-readiness").unwrap().status,
+            DoctorStatus::Ok
+        );
+    }
+
     #[test]
     fn doctor_fix_generates_missing_private_credentials() {
         let _lock = DOCTOR_ENV_LOCK.lock().unwrap();

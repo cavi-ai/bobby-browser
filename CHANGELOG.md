@@ -5,6 +5,8 @@
 ### Fixed
 
 - `type_text` with line breaks into a multi-line control (a textarea or editable region) completes and keeps the lines instead of failing `verificationFailed`.
+- An Ollama vision model is ready only when Ollama serves that exact tag; an untagged default uses the installed tag in `bobby install`, `bobby vision connect` and `bobby doctor --fix`.
+- `inspect` reads the page from the browser when its response sets cookies the direct HTTP path cannot mirror, instead of failing `httpEquivalenceUnproven`.
 - On Chromium, calls sent at once on one page each resolve their own target instead of failing `targetNotFound`.
 - Intent hints that set `accessibleName` beside a `contains` or `regex` `nearText` fail `intentCompileFailed` instead of ignoring the `nearText`.
 - A missed target's near-miss list marks a control that exists but is hidden as `hidden`, not `noMatch`.

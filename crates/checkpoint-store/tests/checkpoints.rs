@@ -1243,6 +1243,111 @@ async fn listing_discovers_repairs_preserving_size_and_modified_time() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn listing_rebuilds_after_directory_replacement_preserving_modified_time() {
+    use std::os::unix::fs::MetadataExt;
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("checkpoints");
+    let replacement = parent.path().join("replacement");
+    let archived = parent.path().join("archived");
+    let store = CheckpointStore::open(&root).await.unwrap();
+    let original = checkpoint(WorkflowId::new(), "https://example.test/original");
+    store.save(&original).await.unwrap();
+    assert_eq!(
+        store
+            .list_for_session(&original.session_id, 10)
+            .await
+            .unwrap(),
+        vec![original.clone()]
+    );
+    let before = std::fs::metadata(&root).unwrap();
+    let restored_store = CheckpointStore::open(&replacement).await.unwrap();
+    let mut restored = original.clone();
+    restored.workflow_id = WorkflowId::new();
+    restored.current_url = "https://example.test/restored".into();
+    restored_store.save(&restored).await.unwrap();
+    std::fs::File::open(&replacement)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(before.modified().unwrap()))
+        .unwrap();
+    std::fs::rename(&root, &archived).unwrap();
+    std::fs::rename(&replacement, &root).unwrap();
+    let after = std::fs::metadata(&root).unwrap();
+    assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+    assert_ne!((after.dev(), after.ino()), (before.dev(), before.ino()));
+    assert_eq!(
+        store
+            .list_for_session(&original.session_id, 10)
+            .await
+            .unwrap(),
+        vec![restored.clone()]
+    );
+    assert_eq!(
+        CheckpointStore::open(&root)
+            .await
+            .unwrap()
+            .list_for_session(&original.session_id, 10)
+            .await
+            .unwrap(),
+        vec![restored]
+    );
+    assert_eq!(
+        CheckpointStore::open(&archived)
+            .await
+            .unwrap()
+            .load(&original.workflow_id)
+            .await
+            .unwrap(),
+        original
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn listing_rebuilds_after_directory_update_preserving_modified_time() {
+    use std::os::unix::fs::MetadataExt;
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let mut original = checkpoint(WorkflowId::new(), "https://example.test/original");
+    original.created_at = "2026-01-01T00:00:00Z".parse().unwrap();
+    store.save(&original).await.unwrap();
+    assert_eq!(
+        store
+            .list_for_session(&original.session_id, 1)
+            .await
+            .unwrap(),
+        vec![original.clone()]
+    );
+    let before = std::fs::metadata(root.path()).unwrap();
+    let mut added = original.clone();
+    added.workflow_id = WorkflowId::new();
+    added.created_at += Duration::hours(1);
+    std::fs::write(
+        checkpoint_store::checkpoint_path(root.path(), &added.workflow_id),
+        serde_json::to_vec(&added).unwrap(),
+    )
+    .unwrap();
+    std::fs::File::open(root.path())
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(before.modified().unwrap()))
+        .unwrap();
+    let after = std::fs::metadata(root.path()).unwrap();
+    assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+    assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
+    assert_ne!(
+        (after.ctime(), after.ctime_nsec()),
+        (before.ctime(), before.ctime_nsec())
+    );
+    assert_eq!(
+        store
+            .list_for_session(&original.session_id, 1)
+            .await
+            .unwrap(),
+        vec![added]
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn listing_reorders_rewrites_preserving_size_and_modified_time() {
     let root = tempfile::tempdir().unwrap();
     let store = CheckpointStore::open(root.path()).await.unwrap();

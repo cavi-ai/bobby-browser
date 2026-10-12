@@ -863,6 +863,14 @@ async fn adaptive_runtime_paused(
 }
 
 async fn http_fixture(body: &'static str, content_type: &'static str) -> String {
+    http_fixture_with_header(body, content_type, None).await
+}
+
+async fn http_fixture_with_header(
+    body: &'static str,
+    content_type: &'static str,
+    header: Option<&'static str>,
+) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -876,7 +884,10 @@ async fn http_fixture(body: &'static str, content_type: &'static str) -> String 
             if socket.read(&mut request).await.is_err() {
                 continue;
             }
-            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            let extra = header
+                .map(|header| format!("{header}\r\n"))
+                .unwrap_or_default();
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
             if socket.write_all(response.as_bytes()).await.is_err() {
                 continue;
             }
@@ -2164,6 +2175,48 @@ async fn semantic_inspect_routes_directly_to_chromium() {
         1
     );
     assert!(!events.contains(&"http:state".to_string()));
+    assert_one_lifecycle(&events);
+}
+
+#[tokio::test]
+async fn inspect_reads_the_browser_when_response_cookies_cannot_be_mirrored() {
+    let url = http_fixture_with_header(
+        "<title>Fixture</title><p>Ada</p>",
+        "text/html",
+        Some("Set-Cookie: session=1; Domain=127.0.0.1"),
+    )
+    .await;
+    let (runtime, session, page, events, _root) = adaptive_runtime(DriverMode::Succeed).await;
+    runtime
+        .set_url(&page, url.clone(), "interactive")
+        .await
+        .unwrap();
+    events.lock().await.push(format!("url:{url}"));
+    let evidence = completed_evidence(
+        runtime
+            .execute(envelope(
+                session,
+                page,
+                PrimitiveCommand::Inspect(InspectCommand::default()),
+            ))
+            .await,
+    );
+    assert!(evidence.iter().any(|item| matches!(
+        item,
+        Evidence::ExecutionPath {
+            path: ExecutionPath::BrowserFallback,
+            reason: ExecutionReason::StateConflict,
+            ..
+        }
+    )));
+    let events = events.lock().await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.as_str() == "browser:inspect")
+            .count(),
+        1
+    );
     assert_one_lifecycle(&events);
 }
 
