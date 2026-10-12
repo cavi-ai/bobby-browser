@@ -631,6 +631,65 @@ async fn shadow_ordinals_firefox() {
     shadow_ordinal_contract(Engine::Firefox).await;
 }
 
+async fn frame_ordinal_contract(engine: Engine) {
+    let missing_code = match engine {
+        Engine::Chromium => "targetNotFound",
+        Engine::Firefox => "frameNotFound",
+    };
+    let site = FixtureSite::spawn(vec![
+        ("/", Route::Html("<!doctype html><title>Frame ordinals</title><iframe id='first-frame' data-testid='editor' src='/frame'></iframe><iframe id='second-frame' data-testid='editor' src='/frame'></iframe>".into())),
+        ("/frame", Route::Html("<!doctype html><input id='email' value='Original'>".into())),
+    ]).await;
+    let rig = match engine {
+        Engine::Chromium => Rig::chromium().await,
+        Engine::Firefox => Rig::firefox().await,
+    };
+    let live = Live::open(&rig, &site.url("/")).await;
+    let mut failures = Vec::new();
+    for mut frame in [json!({"css":"iframe"}), json!({"testId":"editor"})] {
+        frame["ordinal"] = json!(1);
+        let typed = live.call("type_text", json!({"target":{"css":"#email", "framePath":[frame]}, "value":"Selected", "clearFirst":true})).await;
+        if typed["status"] != "completed" {
+            failures.push(format!("frame selection: {typed}"));
+        }
+        for (ordinal, code) in [(None, "targetAmbiguous"), (Some(2), missing_code)] {
+            let mut invalid = frame.clone();
+            if let Some(ordinal) = ordinal {
+                invalid["ordinal"] = json!(ordinal);
+            } else {
+                invalid.as_object_mut().unwrap().remove("ordinal");
+            }
+            let refused = live.call("type_text", json!({"target":{"css":"#email", "framePath":[invalid]}, "value":"Wrong", "clearFirst":true})).await;
+            if refused["status"] != "failed" || refused["error"]["code"] != code {
+                failures.push(format!("unsafe frame selection: {refused}"));
+            }
+        }
+        for (css, expected) in [("#first-frame", "Original"), ("#second-frame", "Selected")] {
+            let observed = live.call("wait_for", json!({"condition":{"kind":"value", "target":{"css":"#email", "framePath":[{"css":css}]}, "matcher":{"kind":"exact", "value":expected}}, "timeoutMs":1000})).await;
+            if observed["status"] != "completed" {
+                failures.push(format!("{css}: {observed}"));
+            }
+        }
+    }
+    live.close().await;
+    assert!(
+        failures.is_empty(),
+        "frame ordinals did not preserve control identity: {failures:#?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn frame_ordinals_chromium() {
+    frame_ordinal_contract(Engine::Chromium).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Firefox and paired test profile"]
+async fn frame_ordinals_firefox() {
+    frame_ordinal_contract(Engine::Firefox).await;
+}
+
 fn evidence<'a>(outcome: &'a Value, kind: &str) -> &'a Value {
     outcome["evidence"]
         .as_array()

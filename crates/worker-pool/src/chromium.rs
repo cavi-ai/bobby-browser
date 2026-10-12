@@ -2072,7 +2072,7 @@ impl crate::ObservationEngine for ChromiumWorker {
                 .node
                 .frame_id;
             if let Some(content_frame) = owner_frame {
-                let result = page
+                let mut result = page
                     .execute(
                         chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::builder()
                             .frame_id(content_frame)
@@ -2081,6 +2081,7 @@ impl crate::ObservationEngine for ChromiumWorker {
                     .await
                     .map_err(command_failed)?
                     .result;
+                name_fields_by_placeholder(&page, &mut result.nodes).await;
                 let (mut nodes, truncated) = compact_ax_tree(&result.nodes, max_nodes);
                 // Preserve ancestor hops before the selected iframe's hop.
                 let mut frame_path = resolved.frame_path.clone();
@@ -2104,7 +2105,8 @@ impl crate::ObservationEngine for ChromiumWorker {
                     chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::default()
                 }
             };
-            let result = page.execute(params).await.map_err(command_failed)?.result;
+            let mut result = page.execute(params).await.map_err(command_failed)?.result;
+            name_fields_by_placeholder(&page, &mut result.nodes).await;
             let root_id = result
                 .nodes
                 .iter()
@@ -2115,13 +2117,19 @@ impl crate::ObservationEngine for ChromiumWorker {
                 compact_ax_tree_from(&result.nodes, max_nodes, Some(root_id.as_ref()));
             let owners = scoped_iframe_owners(&result.nodes, root_id.as_ref());
             let emitted = count_a11y_nodes(&nodes);
-            truncated |= descend_a11y_iframes(
-                &page,
-                &mut nodes,
-                max_nodes.saturating_sub(emitted),
-                Some(&owners),
-            )
-            .await;
+            if resolved.frame_path.len() < crate::targeting::MAX_TARGET_PATH_DEPTH {
+                truncated |= descend_a11y_iframes(
+                    &page,
+                    resolved.frame_id(),
+                    &mut nodes,
+                    max_nodes.saturating_sub(emitted),
+                    Some(&owners),
+                )
+                .await;
+            } else {
+                // Child controls would need a hop beyond the target contract.
+                truncated |= !owners.is_empty();
+            }
             prepend_a11y_frame_path(&mut nodes, &resolved.frame_path);
             return Ok(vec![Evidence::AccessibilitySnapshot {
                 page_id: page_id.clone(),
@@ -2129,20 +2137,22 @@ impl crate::ObservationEngine for ChromiumWorker {
                 truncated,
             }]);
         }
-        let result = page
+        let mut result = page
             .execute(
                 chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::default(),
             )
             .await
             .map_err(command_failed)?
             .result;
+        name_fields_by_placeholder(&page, &mut result.nodes).await;
         let (mut nodes, mut truncated) = compact_ax_tree(&result.nodes, max_nodes);
         // The main-frame AX tree stops at `Iframe` nodes; descend one level
         // (cap 8, same-process frames) so in-frame controls are visible and
         // their targets carry the frame hop control_action can re-resolve.
         let emitted = count_a11y_nodes(&nodes);
         if emitted < max_nodes {
-            truncated |= descend_a11y_iframes(&page, &mut nodes, max_nodes - emitted, None).await;
+            truncated |=
+                descend_a11y_iframes(&page, None, &mut nodes, max_nodes - emitted, None).await;
         }
         // Only a whole tree can show that a control is missing from it.
         let controls_omitted = if truncated || a11y_contains_form_control(&nodes) {
@@ -3896,7 +3906,10 @@ impl WaitDom for ChromiumWaitDom<'_> {
         };
         let resolved = match resolved {
             Ok(resolved) => resolved,
-            Err(error) if matches!(error.code, ErrorCode::TargetNotFound) => {
+            Err(error)
+                if matches!(error.code, ErrorCode::TargetNotFound)
+                    || is_detached_target_error(&error) =>
+            {
                 return Ok(TextProbe::Missing)
             }
             // The click already landed; a matcher-satisfying candidate
@@ -3911,11 +3924,17 @@ impl WaitDom for ChromiumWaitDom<'_> {
             Err(error) => return Err(error),
         };
         let value = if is_value {
-            resolved.value(page).await?.unwrap_or_default()
+            resolved.value(page).await
         } else {
-            resolved.inner_text(page).await?.unwrap_or_default()
+            resolved.inner_text(page).await
         };
-        Ok(TextProbe::Values(vec![value]))
+        match value {
+            Ok(value) => Ok(TextProbe::Values(vec![value.unwrap_or_default()])),
+            // The page replaced the node after it resolved; the next poll
+            // resolves the replacement.
+            Err(error) if is_detached_target_error(&error) => Ok(TextProbe::Missing),
+            Err(error) => Err(error),
+        }
     }
 
     async fn url(&self) -> Result<String, CommandError> {
@@ -4467,7 +4486,7 @@ fn prepend_a11y_frame_path(
     }
 }
 
-/// Moves `frame_roots` under the `occurrence`-th main-tree `Iframe` node with
+/// Moves `frame_roots` under the `occurrence`-th parent-tree `Iframe` node with
 /// `name`; hands the roots back when no such node exists.
 fn splice_under_iframe(
     nodes: &mut [types::AccessibilityNode],
@@ -4501,13 +4520,14 @@ fn splice_under_iframe(
     go(nodes, name, &mut 0, occurrence, frame_roots)
 }
 
-/// Descends one level into same-process iframes (cap 8, shared node budget)
+/// Descends one level into same-process iframes with a shared node budget
 /// so the snapshot does not stop at `Iframe` nodes. Each frame's compacted
-/// tree is spliced under its main-tree `Iframe` node and every in-frame
+/// tree is spliced under its parent-tree `Iframe` node and every in-frame
 /// target is stamped with the role/name/ordinal hop that re-resolves the
 /// iframe element at action time. Returns whether any frame was truncated.
 async fn descend_a11y_iframes(
     page: &Page,
+    parent_frame: Option<&chromiumoxide::cdp::browser_protocol::page::FrameId>,
     nodes: &mut Vec<types::AccessibilityNode>,
     mut budget: usize,
     allowed_owners: Option<&HashSet<chromiumoxide::cdp::browser_protocol::dom::BackendNodeId>>,
@@ -4515,10 +4535,21 @@ async fn descend_a11y_iframes(
     if allowed_owners.is_some_and(HashSet::is_empty) {
         return false;
     }
-    let Ok(Some(main_frame)) = page.mainframe().await else {
-        return false;
+    let (parent_frame, context_id) = match parent_frame {
+        Some(frame) => {
+            let Ok(Some(context_id)) = page.frame_execution_context(frame.clone()).await else {
+                return false;
+            };
+            (frame.clone(), Some(context_id))
+        }
+        None => {
+            let Ok(Some(main_frame)) = page.mainframe().await else {
+                return false;
+            };
+            (main_frame, None)
+        }
     };
-    let Ok(iframes) = crate::targeting::main_frame_iframe_candidates(page).await else {
+    let Ok(iframes) = crate::targeting::iframe_candidates(page, context_id).await else {
         return false;
     };
     if iframes.is_empty() {
@@ -4539,7 +4570,7 @@ async fn descend_a11y_iframes(
     for candidate in &iframes {
         match crate::targeting::candidate_backend_node_id(
             page,
-            &crate::targeting::LocatorScope::Context(None),
+            &crate::targeting::LocatorScope::Context(context_id),
             &[],
             candidate,
         )
@@ -4572,7 +4603,7 @@ async fn descend_a11y_iframes(
             .ok()
             .flatten()
             .as_ref()
-            == Some(&main_frame);
+            == Some(&parent_frame);
         if !is_child {
             continue;
         }
@@ -4628,7 +4659,7 @@ async fn descend_a11y_iframes(
             truncated = true;
             break;
         }
-        let Ok(tree) = page
+        let Ok(mut tree) = page
             .execute(
                 chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::builder()
                     .frame_id(frame)
@@ -4638,10 +4669,11 @@ async fn descend_a11y_iframes(
         else {
             continue;
         };
+        name_fields_by_placeholder(page, &mut tree.result.nodes).await;
         let (mut frame_roots, frame_truncated) = compact_ax_tree(&tree.result.nodes, budget);
         truncated |= frame_truncated;
         // Two distinct counting domains: `splice_occurrence` finds the right
-        // main-tree `Iframe` AX node (grouped by that node's own name, always
+        // parent-tree `Iframe` AX node (grouped by that node's own name, always
         // same-name); `hop_ordinal` is the resolver's own ranked index for
         // this hop (an unnamed hop matches every visible iframe candidate,
         // not just the unnamed ones, since `choose` drops the name filter
@@ -4732,6 +4764,63 @@ fn compact_ax_tree(
     max_nodes: usize,
 ) -> (Vec<types::AccessibilityNode>, bool) {
     compact_ax_tree_from(raw, max_nodes, None)
+}
+
+/// Names each unnamed text field after its placeholder, as target resolution
+/// does, so the snapshot gives it a target that resolves.
+async fn name_fields_by_placeholder(
+    page: &Page,
+    nodes: &mut [chromiumoxide::cdp::browser_protocol::accessibility::AxNode],
+) {
+    use chromiumoxide::cdp::browser_protocol::accessibility::{AxValue, AxValueType};
+    let text = |value: &Option<AxValue>| {
+        value
+            .as_ref()
+            .and_then(|value| value.value.as_ref())
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
+    };
+    for node in nodes.iter_mut() {
+        let unnamed_field = !node.ignored
+            && text(&node.role)
+                .is_some_and(|role| matches!(role.as_str(), "textbox" | "searchbox" | "combobox"))
+            && text(&node.name).is_none_or(|name| name.trim().is_empty());
+        let Some(backend_node_id) = node.backend_dom_node_id.filter(|_| unnamed_field) else {
+            continue;
+        };
+        let Ok(described) = page
+            .execute(
+                chromiumoxide::cdp::browser_protocol::dom::DescribeNodeParams::builder()
+                    .backend_node_id(backend_node_id)
+                    .depth(0)
+                    .build(),
+            )
+            .await
+        else {
+            continue;
+        };
+        let element = described.result.node;
+        if !matches!(element.local_name.as_str(), "input" | "textarea") {
+            continue;
+        }
+        let placeholder = element
+            .attributes
+            .as_deref()
+            .and_then(|attributes| {
+                attributes
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .find(|[name, _]| name == "placeholder")
+                    .map(|[_, value]| value.trim().to_owned())
+            })
+            .filter(|placeholder| !placeholder.is_empty());
+        if let Some(placeholder) = placeholder {
+            let mut name = AxValue::new(AxValueType::ComputedString);
+            name.value = Some(serde_json::Value::String(placeholder));
+            node.name = Some(name);
+        }
+    }
 }
 
 /// The error for a resolved element the accessibility tree leaves out: an open

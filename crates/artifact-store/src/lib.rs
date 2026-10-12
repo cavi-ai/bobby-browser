@@ -511,7 +511,12 @@ fn validate_directory(
 }
 
 async fn write_synced(path: PathBuf, bytes: &[u8]) -> Result<(), ArtifactError> {
-    let mut file = tokio::fs::File::create(path).await.map_err(storage_error)?;
+    // Set privacy at creation and refuse existing entries before writing bytes.
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path).await.map_err(storage_error)?;
     file.write_all(bytes).await.map_err(storage_error)?;
     file.sync_all().await.map_err(storage_error)
 }
@@ -600,6 +605,20 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::*;
+
+    #[tokio::test]
+    async fn writing_refuses_an_existing_file_without_changing_its_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("existing.bin");
+        std::fs::write(&path, b"preserve").unwrap();
+        let before = std::fs::metadata(&path).unwrap().permissions();
+        assert!(matches!(
+            write_synced(path.clone(), b"replacement").await,
+            Err(ArtifactError::Storage(_))
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), b"preserve");
+        assert_eq!(std::fs::metadata(path).unwrap().permissions(), before);
+    }
 
     #[tokio::test]
     async fn abort_before_publish_removes_staging_without_visible_artifact() {

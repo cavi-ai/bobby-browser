@@ -1965,7 +1965,9 @@ impl FirefoxCompanionWorker {
         worker_pool::validate_target_spec(target)?;
         let mut context = top_context.to_owned();
         for frame in &target.frame_path {
-            let frame_selector = if let Some(selector) = dom_engine::exact_target_selector(frame) {
+            let exact_selector = dom_engine::exact_target_selector(frame);
+            let ordinal = exact_selector.as_ref().and(frame.ordinal);
+            let frame_selector = if let Some(selector) = exact_selector {
                 selector
             } else {
                 let candidates = self.gather_bidi_context_candidates(&context).await?;
@@ -2013,7 +2015,7 @@ impl FirefoxCompanionWorker {
                 }
             };
             context = self
-                .descend_frame_context(&context, &frame_selector)
+                .descend_frame_context(&context, &frame_selector, ordinal)
                 .await?;
         }
         Ok(context)
@@ -2351,11 +2353,14 @@ impl FirefoxCompanionWorker {
         &self,
         context: &str,
         selector: &str,
+        ordinal: Option<usize>,
     ) -> Result<String, CommandError> {
         let selector_json = serde_json::to_string(selector)
             .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
+        let ordinal_json = serde_json::to_string(&ordinal)
+            .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
         let probe = self.transport.send("script.evaluate", json!({
-            "expression": format!("(()=>{{const matches={COMPOSED_QUERY_ALL}({selector_json});if(matches.length===0)return 'missing';if(matches.length!==1)return 'ambiguous';const frame=matches[0];if(!(frame instanceof HTMLIFrameElement||frame instanceof HTMLFrameElement))return 'non-frame';return `index:${{[...document.querySelectorAll('iframe,frame')].indexOf(frame)}}`;}})()"),
+            "expression": format!("(()=>{{const matches={COMPOSED_QUERY_ALL}({selector_json});const ordinal={ordinal_json};if(matches.length===0||(ordinal!==null&&ordinal>=matches.length))return 'missing';if(ordinal===null&&matches.length!==1)return 'ambiguous';const frame=matches[ordinal??0];if(!(frame instanceof HTMLIFrameElement||frame instanceof HTMLFrameElement))return 'non-frame';return `index:${{[...document.querySelectorAll('iframe,frame')].indexOf(frame)}}`;}})()"),
             "target": {"context": context, "sandbox": COMPANION_SANDBOX},
             "awaitPromise": false,
             "resultOwnership": "none",
