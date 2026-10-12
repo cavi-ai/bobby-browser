@@ -2078,12 +2078,12 @@ impl crate::ObservationEngine for ChromiumWorker {
                     .map_err(command_failed)?
                     .result;
                 let (mut nodes, truncated) = compact_ax_tree(&result.nodes, max_nodes);
-                // Stamp targets with the hop that re-resolves the iframe
-                // element, so in-frame targets pass to control_action
-                // verbatim like the full-tree descent's do.
+                // Preserve ancestor hops before the selected iframe's hop.
+                let mut frame_path = resolved.frame_path.clone();
                 if let Some(segment) = &resolved.iframe_hop {
-                    stamp_a11y_frame_path(&mut nodes, segment);
+                    frame_path.push(segment.clone());
                 }
+                prepend_a11y_frame_path(&mut nodes, &frame_path);
                 return Ok(vec![Evidence::AccessibilitySnapshot {
                     page_id: page_id.clone(),
                     nodes,
@@ -2118,6 +2118,7 @@ impl crate::ObservationEngine for ChromiumWorker {
                 Some(&owners),
             )
             .await;
+            prepend_a11y_frame_path(&mut nodes, &resolved.frame_path);
             return Ok(vec![Evidence::AccessibilitySnapshot {
                 page_id: page_id.clone(),
                 nodes,
@@ -4442,15 +4443,18 @@ fn a11y_contains_form_control(nodes: &[types::AccessibilityNode]) -> bool {
     })
 }
 
-fn stamp_a11y_frame_path(
+fn prepend_a11y_frame_path(
     nodes: &mut [types::AccessibilityNode],
-    segment: &types::SemanticTargetSegment,
+    frame_path: &[types::SemanticTargetSegment],
 ) {
+    if frame_path.is_empty() {
+        return;
+    }
     for node in nodes {
         if let Some(target) = &mut node.target {
-            target.frame_path = vec![segment.clone()];
+            target.frame_path.splice(0..0, frame_path.iter().cloned());
         }
-        stamp_a11y_frame_path(&mut node.children, segment);
+        prepend_a11y_frame_path(&mut node.children, frame_path);
     }
 }
 
@@ -4649,7 +4653,7 @@ async fn descend_a11y_iframes(
             accessible_name: candidate.name.clone().unwrap_or_default(),
             ordinal: hop_ordinal,
         };
-        stamp_a11y_frame_path(&mut frame_roots, &segment);
+        prepend_a11y_frame_path(&mut frame_roots, std::slice::from_ref(&segment));
         budget = budget.saturating_sub(count_a11y_nodes(&frame_roots));
         match splice_under_iframe(
             nodes,
