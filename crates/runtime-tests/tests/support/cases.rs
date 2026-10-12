@@ -84,6 +84,8 @@ macro_rules! every_case {
             intent_fill_types_inside_a_frame_from_another_site,
             wait_for_reaches_into_a_frame_from_another_site,
             form_snapshot_targets_reach_an_unnamed_frame,
+            identical_frames_from_another_site_keep_their_own_targets,
+            sandboxed_frames_list_and_act,
             $($extra,)*
         }
     };
@@ -4193,6 +4195,103 @@ pub async fn form_snapshot_targets_reach_an_unnamed_frame(rig: &Rig) {
     assert_eq!(
         landed["status"], "completed",
         "the field never got the value: {landed}"
+    );
+    live.close().await;
+}
+
+/// Two identical frames from another site side by side: the second frame's
+/// snapshot target acts on the second frame.
+pub async fn identical_frames_from_another_site_keep_their_own_targets(rig: &Rig) {
+    let frame = page(
+        "Frame",
+        r#"<button onclick="parent.postMessage('pressed','*')">Frame action</button>"#,
+    );
+    let frame_site = FixtureSite::spawn(vec![("/frame", Route::Html(frame))]).await;
+    let frame_url = frame_site.url("/frame").replace("127.0.0.1", "localhost");
+    let body = format!(
+        r#"<main><h1>Host</h1>
+        <iframe title="Widget" src="{frame_url}" style="width:300px;height:120px"></iframe>
+        <iframe title="Widget" src="{frame_url}" style="width:300px;height:120px"></iframe>
+        <p role="status" aria-label="Result">idle</p></main>
+        <script>const frames = [...document.querySelectorAll('iframe')];
+        let loaded = 0;
+        for (const frame of frames) frame.addEventListener('load', () => {{ if (++loaded === 2) document.querySelector('[aria-label="Result"]').textContent = 'ready'; }});
+        addEventListener('message', (event) => {{
+          const index = frames.findIndex((frame) => frame.contentWindow === event.source);
+          document.querySelector('[aria-label="Result"]').textContent = event.data + ':' + index;
+        }});</script>"#
+    );
+    let site = FixtureSite::spawn(vec![("/host", Route::Html(page("Host", &body)))]).await;
+    let live = Live::open(rig, &site.url("/host")).await;
+    let ready = wait_for_result(&live, "ready").await;
+    assert_eq!(
+        ready["status"], "completed",
+        "the frames never loaded: {ready}"
+    );
+    let snapshot = live.snapshot(json!({})).await;
+    let mut targets = Vec::new();
+    targets_under(&snapshot, &mut targets);
+    let actions: Vec<_> = targets
+        .iter()
+        .filter(|(role, target)| *role == "button" && target["accessibleName"] == "Frame action")
+        .collect();
+    assert_eq!(actions.len(), 2, "both framed controls: {snapshot}");
+    let clicked = live.call("click", json!({"target":actions[1].1})).await;
+    assert_eq!(
+        clicked["status"], "completed",
+        "click in the second frame: {clicked}"
+    );
+    let pressed = wait_for_result(&live, "pressed:1").await;
+    assert_eq!(
+        pressed["status"], "completed",
+        "the click landed in the wrong frame: {pressed}"
+    );
+    live.close().await;
+}
+
+/// A sandboxed frame, cross-origin to its parent though served by the same
+/// site, lists its controls and takes clicks like any other frame.
+pub async fn sandboxed_frames_list_and_act(rig: &Rig) {
+    let frame = page(
+        "Frame",
+        r#"<button onclick="parent.postMessage('pressed','*')">Frame action</button>
+        <script>parent.postMessage('ready','*')</script>"#,
+    );
+    let host = page(
+        "Host",
+        r#"<main><h1>Host</h1>
+        <iframe title="Widget" sandbox="allow-scripts" src="/frame" style="width:300px;height:120px"></iframe>
+        <p role="status" aria-label="Result">idle</p></main>
+        <script>addEventListener('message', (event) => { document.querySelector('[aria-label="Result"]').textContent = String(event.data); });</script>"#,
+    );
+    let site = FixtureSite::spawn(vec![
+        ("/host", Route::Html(host)),
+        ("/frame", Route::Html(frame)),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/host")).await;
+    let ready = wait_for_result(&live, "ready").await;
+    assert_eq!(
+        ready["status"], "completed",
+        "the frame never loaded: {ready}"
+    );
+    let snapshot = live.snapshot(json!({})).await;
+    let mut targets = Vec::new();
+    targets_under(&snapshot, &mut targets);
+    let actions: Vec<_> = targets
+        .iter()
+        .filter(|(role, target)| *role == "button" && target["accessibleName"] == "Frame action")
+        .collect();
+    assert_eq!(actions.len(), 1, "sandboxed framed control: {snapshot}");
+    let clicked = live.call("click", json!({"target":actions[0].1})).await;
+    assert_eq!(
+        clicked["status"], "completed",
+        "click in the sandboxed frame: {clicked}"
+    );
+    let pressed = wait_for_result(&live, "pressed").await;
+    assert_eq!(
+        pressed["status"], "completed",
+        "the click never landed: {pressed}"
     );
     live.close().await;
 }
