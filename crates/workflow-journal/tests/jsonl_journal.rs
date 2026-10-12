@@ -26,6 +26,81 @@ fn record(command_id: &CommandId, phase: CommandPhase) -> JournalRecord {
     }
 }
 
+#[tokio::test]
+async fn storage_bounds_archive_keeps_records_after_oversized_lines() {
+    for extra in [1, 100] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("commands.jsonl");
+        let limit = 512;
+        let id = CommandId::new();
+        let mut bytes = vec![b'x'; limit + extra - 1];
+        bytes.push(b'\n');
+        serde_json::to_writer(&mut bytes, &record(&id, CommandPhase::Accepted)).unwrap();
+        bytes.push(b'\n');
+        tokio::fs::write(&path, &bytes).await.unwrap();
+        let journal = JsonlJournal::open_with_max_record_bytes(&path, limit)
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::fs::read(&journal.archives().await[0]).await.unwrap(),
+            bytes
+        );
+        let scan = journal.history(id.clone()).await.unwrap();
+        assert_eq!(scan.records.len(), 1);
+        assert!(scan.incompatible_records > 0);
+        assert!(matches!(
+            journal.append(record(&id, CommandPhase::Accepted)).await,
+            Err(workflow_journal::JournalError::UncertainCommand)
+        ));
+        let fresh = CommandId::new();
+        journal
+            .append(record(&fresh, CommandPhase::Accepted))
+            .await
+            .unwrap();
+        drop(journal);
+        let reopened = JsonlJournal::open_with_max_record_bytes(&path, limit)
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened.history(fresh).await.unwrap().records[0].sequence,
+            0
+        );
+        assert_eq!(reopened.history(id).await.unwrap().records.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn storage_bounds_append_rejection_preserves_bytes_and_sequence() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("commands.jsonl");
+    let id = CommandId::new();
+    let first = record(&id, CommandPhase::Accepted);
+    let limit = serde_json::to_vec(&first).unwrap().len() + 1;
+    let journal = JsonlJournal::open_with_max_record_bytes(&path, limit)
+        .await
+        .unwrap();
+    journal.append(first.clone()).await.unwrap();
+    let original = tokio::fs::read(&path).await.unwrap();
+    assert_eq!(original.len(), limit);
+    let mut large = first.clone();
+    large.outcome = Some(types::CommandOutcome::Completed {
+        command_id: id.clone(),
+        evidence: vec![],
+    });
+    assert!(journal.append(large).await.is_err());
+    assert_eq!(tokio::fs::read(&path).await.unwrap(), original);
+    journal.append(first).await.unwrap();
+    drop(journal);
+    let reopened = JsonlJournal::open_with_max_record_bytes(&path, limit)
+        .await
+        .unwrap();
+    let scan = reopened.history(id).await.unwrap();
+    assert_eq!(scan.incompatible_records, 0);
+    assert!(!scan.torn_tail);
+    assert_eq!(scan.records.len(), 2);
+    assert_eq!(scan.records[1].sequence, 1);
+}
+
 async fn replace_preserving_length_and_modified(path: &std::path::Path, bytes: &[u8]) {
     let before = std::fs::metadata(path).unwrap();
     assert_eq!(before.len(), bytes.len() as u64);
@@ -357,6 +432,22 @@ async fn non_regular_archive_directory_does_not_block_new_commands() {
 }
 
 #[tokio::test]
+async fn storage_bounds_inspection_marks_oversized_records_incompatible() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("commands.jsonl");
+    let file = std::fs::File::create(&path).unwrap();
+    file.set_len(64 * 1024 * 1024 + 1).unwrap();
+    let health = JsonlJournal::inspect(&path).await.unwrap();
+    assert!(health.incompatible_records > 0);
+    assert!(!health.torn_tail);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        64 * 1024 * 1024 + 1
+    );
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[tokio::test]
 async fn non_regular_journal_directory_is_preserved_before_starting_fresh() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("commands.jsonl");
@@ -393,6 +484,103 @@ async fn non_regular_journal_directory_is_preserved_before_starting_fresh() {
     let scan = reopened.history(fresh).await.unwrap();
     assert_eq!(scan.records.len(), 1);
     assert_eq!(scan.incompatible_records, 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn hardlinked_journal_is_archived_without_changing_the_other_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("commands.jsonl");
+    let alias = dir.path().join("other-history.jsonl");
+    let old = CommandId::new();
+    let bytes = format!(
+        "{}\n",
+        serde_json::to_string(&record(&old, CommandPhase::Accepted)).unwrap()
+    );
+    tokio::fs::write(&alias, &bytes).await.unwrap();
+    std::fs::hard_link(&alias, &path).unwrap();
+    let journal = JsonlJournal::open(&path).await.unwrap();
+    let fresh = CommandId::new();
+    journal
+        .append(record(&fresh, CommandPhase::Accepted))
+        .await
+        .unwrap();
+    assert_eq!(tokio::fs::read_to_string(&alias).await.unwrap(), bytes);
+    let archives = journal.archives().await;
+    assert_eq!(archives.len(), 1);
+    assert_eq!(
+        tokio::fs::read_to_string(&archives[0]).await.unwrap(),
+        bytes
+    );
+    assert!(
+        journal
+            .history(old.clone())
+            .await
+            .unwrap()
+            .incompatible_records
+            > 0
+    );
+    assert!(matches!(
+        journal.append(record(&old, CommandPhase::Prepared)).await,
+        Err(workflow_journal::JournalError::UncertainCommand)
+    ));
+    drop(journal);
+    let reopened = JsonlJournal::open(&path).await.unwrap();
+    let scan = reopened.history(fresh).await.unwrap();
+    assert_eq!(scan.records.len(), 1);
+    assert_eq!(scan.records[0].sequence, 0);
+    assert_eq!(scan.incompatible_records, 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn hardlinked_journal_refresh_invalidates_authority_before_reading_or_appending() {
+    for read_first in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("commands.jsonl");
+        let alias = dir.path().join("other-history.jsonl");
+        let old = CommandId::new();
+        let journal = JsonlJournal::open(&path).await.unwrap();
+        journal
+            .append(record(&old, CommandPhase::Accepted))
+            .await
+            .unwrap();
+        let bytes = tokio::fs::read(&path).await.unwrap();
+        std::fs::hard_link(&path, &alias).unwrap();
+        if read_first {
+            assert!(
+                journal
+                    .history(old.clone())
+                    .await
+                    .unwrap()
+                    .incompatible_records
+                    > 0
+            );
+        }
+        let fresh = CommandId::new();
+        journal
+            .append(record(&fresh, CommandPhase::Accepted))
+            .await
+            .unwrap();
+        assert_eq!(tokio::fs::read(&alias).await.unwrap(), bytes);
+        assert_eq!(journal.archives().await.len(), 1);
+        assert!(
+            journal
+                .history(old.clone())
+                .await
+                .unwrap()
+                .incompatible_records
+                > 0
+        );
+        assert!(matches!(
+            journal.append(record(&old, CommandPhase::Prepared)).await,
+            Err(workflow_journal::JournalError::UncertainCommand)
+        ));
+        let scan = journal.history(fresh).await.unwrap();
+        assert_eq!(scan.records.len(), 1);
+        assert_eq!(scan.records[0].sequence, 0);
+        assert_eq!(scan.incompatible_records, 0);
+    }
 }
 
 #[cfg(unix)]

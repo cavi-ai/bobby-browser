@@ -29,6 +29,61 @@ fn checkpoint(workflow_id: WorkflowId, current_url: &str) -> WorkflowCheckpoint 
     }
 }
 
+#[tokio::test]
+async fn storage_bounds_preserve_saved_checkpoint_and_skip_oversized_peer() {
+    let root = tempfile::tempdir().unwrap();
+    let original = checkpoint(WorkflowId::new(), "https://example.test/ok");
+    let limit = serde_json::to_vec(&original).unwrap().len();
+    let store = CheckpointStore::open_with_max_file_bytes(root.path(), limit)
+        .await
+        .unwrap();
+    store.save(&original).await.unwrap();
+    let path = checkpoint_store::checkpoint_path(root.path(), &original.workflow_id);
+    let bytes = tokio::fs::read(&path).await.unwrap();
+    let mut large = original.clone();
+    large.current_url = "x".repeat(limit * 2);
+    assert!(store.save(&large).await.is_err());
+    assert_eq!(tokio::fs::read(&path).await.unwrap(), bytes);
+    large.workflow_id = WorkflowId::new();
+    let peer = checkpoint_store::checkpoint_path(root.path(), &large.workflow_id);
+    let oversized = serde_json::to_vec(&large).unwrap();
+    tokio::fs::write(&peer, &oversized).await.unwrap();
+    let listed = store
+        .list_for_session(&original.session_id, 10)
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].workflow_id, original.workflow_id);
+    assert!(matches!(store.load(&large.workflow_id).await,
+        Err(CheckpointStoreError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidData));
+    assert_eq!(tokio::fs::read(&peer).await.unwrap(), oversized);
+    let expanded = CheckpointStore::open_with_max_file_bytes(root.path(), oversized.len())
+        .await
+        .unwrap();
+    assert_eq!(
+        expanded.load(&large.workflow_id).await.unwrap().current_url,
+        large.current_url
+    );
+}
+
+#[tokio::test]
+async fn storage_bounds_reject_oversized_checkpoint_before_decoding() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let id = WorkflowId::new();
+    let path = checkpoint_store::checkpoint_path(root.path(), &id);
+    let file = std::fs::File::create(&path).unwrap();
+    file.set_len(64 * 1024 * 1024 + 1).unwrap();
+    assert!(
+        matches!(store.load(&id).await, Err(CheckpointStoreError::Io(error))
+        if error.kind() == std::io::ErrorKind::InvalidData)
+    );
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        64 * 1024 * 1024 + 1
+    );
+}
+
 fn recovery_receipt(checkpoint: &WorkflowCheckpoint) -> RecoveryReceipt {
     let command_id = CommandId::new();
     RecoveryReceipt::new(
