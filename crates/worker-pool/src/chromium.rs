@@ -4771,9 +4771,11 @@ async fn name_fields_by_placeholder(
             .as_deref()
             .and_then(|attributes| {
                 attributes
-                    .chunks_exact(2)
-                    .find(|pair| pair[0] == "placeholder")
-                    .map(|pair| pair[1].trim().to_owned())
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .find(|[name, _]| name == "placeholder")
+                    .map(|[_, value]| value.trim().to_owned())
             })
             .filter(|placeholder| !placeholder.is_empty());
         if let Some(placeholder) = placeholder {
