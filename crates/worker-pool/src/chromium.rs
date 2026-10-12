@@ -1287,6 +1287,11 @@ impl ChromiumWorker {
 
     async fn register_page(&self, page_id: PageId, page: Page) -> Result<(), CommandError> {
         self.apply_fingerprint_to_page(&page).await?;
+        // Every page acts as the focused one: a page whose window does not
+        // hold focus otherwise holds back its focus events.
+        page.execute(SetFocusEmulationEnabledParams::new(true))
+            .await
+            .map_err(command_failed)?;
         let tracker = crate::network_quiet::NetworkQuietTracker::start(&page)
             .await
             .map_err(command_failed)?;

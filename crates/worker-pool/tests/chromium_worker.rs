@@ -3482,11 +3482,12 @@ async fn evaluates_javascript_bounds_the_result_and_classifies_errors() {
     eprintln!("javascript evaluation fixture: closed");
 }
 
-/// Each page opens in its own window: a page that shares a window goes hidden
-/// when another page opens, and a hidden page never answers pointer moves.
+/// Each page opens in its own window and acts focused: a page that shares a
+/// window goes hidden when another page opens, a hidden page never answers
+/// pointer moves, and a page whose window lacks focus holds back focus events.
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
-async fn a_page_stays_visible_when_another_page_opens() {
+async fn a_page_stays_visible_and_focused_when_another_page_opens() {
     let profiles = tempfile::tempdir().unwrap();
     let factory = ChromiumWorkerFactory::new(BrowserConfig {
         executable: Some(chrome_executable()),
@@ -3526,21 +3527,21 @@ async fn a_page_stays_visible_when_another_page_opens() {
             .evaluate_javascript(
                 page_id,
                 &EvaluateJavaScriptCommand {
-                    expression: "document.visibilityState".into(),
+                    expression: "`${document.visibilityState} ${document.hasFocus()}`".into(),
                     timeout_ms: 10_000,
                     await_promise: false,
                 },
             )
             .await
             .unwrap();
-        let visibility = evidence
+        let state = evidence
             .iter()
             .find_map(|item| match item {
                 Evidence::JavaScriptResult { value, .. } => Some(value.clone()),
                 _ => None,
             })
             .expect("javascript result evidence");
-        assert_eq!(visibility.as_str(), Some("visible"), "{page_id:?}");
+        assert_eq!(state.as_str(), Some("visible true"), "{page_id:?}");
     }
     worker.close().await.unwrap();
 }
