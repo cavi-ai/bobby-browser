@@ -70,7 +70,13 @@ impl CommandVerifier for Text {
                             kind,
                         )
                     });
-                let inspected_control = if read_before_submit {
+                // A field the page swapped for another control as it took focus
+                // no longer holds the text; the worker read the replacement.
+                let replaced = evidence.iter().any(|item| {
+                    matches!(item, Evidence::Configuration { name, value }
+                        if name == "typedControlReplaced" && value == "true")
+                });
+                let inspected_control = if read_before_submit || replaced {
                     Ok(Vec::new())
                 } else {
                     worker_pool::observation_or_default(lease.worker().observation())
@@ -98,10 +104,20 @@ impl CommandVerifier for Text {
                     }
                     Err(error) => return Err(error),
                 };
-                let inspected = verification.iter().find_map(|item| match item {
-                    Evidence::Inspection { text, url, .. } => Some((text.as_str(), url.as_str())),
-                    _ => None,
-                });
+                let inspected = verification
+                    .iter()
+                    .find_map(|item| match item {
+                        Evidence::Inspection { text, url, .. } => {
+                            Some((text.as_str(), url.as_str()))
+                        }
+                        _ => None,
+                    })
+                    .or_else(|| {
+                        replaced
+                            .then_some(observed)
+                            .flatten()
+                            .map(|observed| (observed, typed_on.as_deref().unwrap_or_default()))
+                    });
                 // A control without a value (contenteditable) shows the kept
                 // line breaks only in its inspected text.
                 let kept_after_read = submitted_with_enter

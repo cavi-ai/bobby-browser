@@ -77,6 +77,7 @@ macro_rules! every_case {
             a_copied_control_resolves_apart_from_its_original,
             concurrent_scoped_snapshots_resolve_their_own_targets,
             fill_clears_controls_the_form_snapshot_cannot_name,
+            typing_follows_focus_into_a_swapped_editor,
             $($extra,)*
         }
     };
@@ -3796,6 +3797,49 @@ pub async fn fill_clears_controls_the_form_snapshot_cannot_name(rig: &Rig) {
         assert!(
             !field.to_string().contains(kept),
             "{name} kept its text: {field}"
+        );
+    }
+    live.close().await;
+}
+
+/// Fields the page swaps for an editor as they take focus, shortly after and
+/// at once: type_text waits for focus to settle, types the whole value into
+/// the editor and verifies it there.
+pub async fn typing_follows_focus_into_a_swapped_editor(rig: &Rig) {
+    let body = r#"<main><div id="later"><textarea aria-label="Comment"></textarea></div>
+        <div id="now"><textarea aria-label="Reply"></textarea></div></main>
+        <script>
+          const swap = (id, name, schedule) => {
+            const box = document.getElementById(id);
+            box.querySelector("textarea").addEventListener("focus", () => {
+              schedule(() => {
+                box.innerHTML = '<div contenteditable="true" role="textbox" aria-label="' + name + ' editor"></div>';
+                box.firstElementChild.focus();
+              });
+            }, {once: true});
+          };
+          swap("later", "Comment", (run) => setTimeout(run, 20));
+          swap("now", "Reply", (run) => queueMicrotask(run));
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/swap", Route::Html(page("Swap", body)))]).await;
+    let live = Live::open(rig, &site.url("/swap")).await;
+    for name in ["Comment", "Reply"] {
+        let typed = live
+            .call(
+                "type_text",
+                json!({"target":{"role":"textbox","accessibleName":name},
+                       "value":"swapped text"}),
+            )
+            .await;
+        assert_eq!(typed["status"], "completed", "type_text {name}: {typed}");
+        let editor = live
+            .snapshot(
+                json!({"target":{"role":"textbox","accessibleName":format!("{name} editor")}}),
+            )
+            .await;
+        assert!(
+            editor.to_string().contains("swapped text"),
+            "the {name} editor did not get the whole text: {editor}"
         );
     }
     live.close().await;

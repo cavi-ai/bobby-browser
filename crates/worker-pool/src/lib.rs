@@ -18,6 +18,7 @@ pub mod secret_material;
 mod selection;
 mod skill_adapter;
 mod targeting;
+pub mod typed_focus;
 pub mod upload;
 pub mod wait;
 

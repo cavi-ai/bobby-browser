@@ -3325,6 +3325,55 @@ fn require_remote_true(response: &Value, message: &'static str) -> Result<(), Co
     ))
 }
 
+/// Waits for focus to settle after the typing click; true when focus moved
+/// to a replacement control the page swapped in for the field.
+async fn settle_typing_focus(
+    transport: &Arc<dyn BidiTransport>,
+    context: &str,
+    selector_json: &str,
+) -> Result<bool, CommandError> {
+    let script = worker_pool::typed_focus::FOCUS_SETTLE_SCRIPT;
+    let response = transport
+        .send(
+            "script.evaluate",
+            json!({
+                "expression": format!("(()=>{{const el={COMPOSED_QUERY}({selector_json});const doc=document;{script}}})()"),
+                "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                "awaitPromise": true,
+                "resultOwnership": "none",
+            }),
+        )
+        .await?;
+    Ok(response
+        .pointer("/result/value")
+        .and_then(Value::as_bool)
+        .unwrap_or(false))
+}
+
+/// The text of the focused control, read once typing moved to a replacement.
+async fn read_focused_text(
+    transport: &Arc<dyn BidiTransport>,
+    context: &str,
+) -> Result<String, CommandError> {
+    let script = worker_pool::typed_focus::FOCUSED_TEXT_SCRIPT;
+    let response = transport
+        .send(
+            "script.evaluate",
+            json!({
+                "expression": format!("(()=>{{const doc=document;{script}}})()"),
+                "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                "awaitPromise": false,
+                "resultOwnership": "none",
+            }),
+        )
+        .await?;
+    Ok(response
+        .pointer("/result/value")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned())
+}
+
 async fn read_typed_control_value(
     transport: &Arc<dyn BidiTransport>,
     context: &str,
@@ -5063,6 +5112,9 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
             self.with_session_random(|random| self.mouse_simulator.generate_approach_path(random));
         self.perform_pointer_click(&context, &shared_id, Some(&path), &[])
             .await?;
+        // A page may swap the field for an editor as it takes focus; keys sent
+        // before focus settles land in the field being removed.
+        let replaced = settle_typing_focus(&self.transport, &context, &selector_json).await?;
 
         let humanize = self.humanization_enabled.load(Ordering::Relaxed);
         let typing_actions = self.with_session_random(|random| {
@@ -5098,6 +5150,8 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
             .is_some_and(|target| !target.frame_path.is_empty())
         {
             "[redacted]".to_owned()
+        } else if replaced {
+            read_focused_text(&self.transport, &context).await?
         } else {
             // Enter in the text submits the form; once the page navigates
             // the control is gone and cannot be read back.
@@ -5120,6 +5174,12 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
             },
             self.evidence(InteractionPath::EngineNative),
         ];
+        if replaced {
+            evidence.push(Evidence::Configuration {
+                name: "typedControlReplaced".into(),
+                value: "true".into(),
+            });
+        }
         // Only record humanization evidence when timing was actually
         // synthesized; a session that did not opt in drives input directly.
         if humanize {
@@ -5129,9 +5189,11 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
                 synthesized_ms: behavioral_engine::synthesized_total_ms(&typing_actions),
             });
         }
+        // A replaced field is gone or inert; the replacement has no validity
+        // state of its own to report.
         match form_control_validity_evidence(&self.transport, &context, &selector_json).await {
             Ok(validity) => evidence.extend(validity),
-            Err(_) if command.value.contains(['\n', '\r']) => {}
+            Err(_) if replaced || command.value.contains(['\n', '\r']) => {}
             Err(error) => return Err(error),
         }
         Ok(self.with_redaction_diagnostics(evidence))
