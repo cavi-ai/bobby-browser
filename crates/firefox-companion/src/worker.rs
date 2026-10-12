@@ -64,6 +64,7 @@ const COMPANION_SANDBOX: &str = "automation-runtime-companion";
 #[derive(Clone, Copy)]
 enum ShadowRead {
     Element,
+    Selector,
     Text,
     Value,
 }
@@ -2182,6 +2183,23 @@ impl FirefoxCompanionWorker {
             return Ok((top_context.to_owned(), selector.to_owned()));
         };
         let context = self.resolve_input_context(top_context, target).await?;
+        if !target.shadow_path.is_empty() {
+            let response = self
+                .shadow_target_response(&context, target, ShadowRead::Selector)
+                .await?;
+            let selector = response
+                .pointer("/result/value")
+                .and_then(Value::as_str)
+                .filter(|selector| !selector.is_empty() && selector.len() <= MAX_SELECTOR_BYTES)
+                .ok_or_else(|| {
+                    driver_error(
+                        ErrorCode::BrowserCommandFailed,
+                        "Firefox shadow target has no bounded CSS identity",
+                        false,
+                    )
+                })?;
+            return Ok((context, selector.to_owned()));
+        }
         if let Some(selector) = dom_engine::exact_target_selector(target) {
             return Ok((context, selector));
         }
@@ -2424,6 +2442,10 @@ impl FirefoxCompanionWorker {
         local_target.frame_path.clear();
         let target_selector = dom_engine::shadow_segment_descriptor(&local_target)?;
         let (max_matches, finish) = match read {
+            ShadowRead::Selector => (
+                2,
+                "if(matches.length!==1)return 'target-ambiguous';const result=gather(root,{maxNodes:10000,pierceOpen:false,includeElements:true,redact:true});if(result.truncated)return 'too-many';return result.candidates.find(candidate=>candidate.element===matches[0])?.css??null;",
+            ),
             ShadowRead::Element => (
                 2,
                 "if(matches.length!==1)return 'target-ambiguous';return matches[0];",
@@ -3868,6 +3890,22 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
     async fn pin_target(&self, page_id: &PageId, target: &TargetSpec) -> TargetSpec {
         if target.css.is_some() {
             return target.clone();
+        }
+        if !target.frame_path.is_empty() || !target.shadow_path.is_empty() {
+            let resolved = match self.context(page_id).await {
+                Ok(context) => self
+                    .resolve_input_target(page_id, &context, "", Some(target))
+                    .await
+                    .ok(),
+                Err(_) => None,
+            };
+            return resolved
+                .map(|(_, css)| TargetSpec {
+                    css: Some(css),
+                    frame_path: target.frame_path.clone(),
+                    ..TargetSpec::default()
+                })
+                .unwrap_or_else(|| target.clone());
         }
         match self
             .observer

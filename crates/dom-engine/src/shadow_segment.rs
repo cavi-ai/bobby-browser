@@ -27,26 +27,34 @@ pub fn exact_target_selector(target: &TargetSpec) -> Option<String> {
 
 /// Exact DOM identity for an adapter that evaluates the shared segment matcher.
 pub fn shadow_segment_descriptor(target: &TargetSpec) -> Result<Value, CommandError> {
-    if let Some(selector) = exact_target_selector(target) {
-        return Ok(json!({"selector":selector}));
-    }
-    if let (Some(role), Some(name)) = (&target.role, &target.accessible_name) {
+    let mut descriptor = if let Some(selector) = exact_target_selector(target) {
+        json!({"selector":selector})
+    } else if let (Some(role), Some(name)) = (&target.role, &target.accessible_name) {
         if !role.trim().is_empty()
             && !name.trim().is_empty()
             && target.attributes.is_empty()
             && target.label.is_none()
             && target.text.is_none()
-            && target.ordinal.is_none()
             && !target.allow_best_match
             && target.frame_path.is_empty()
         {
-            return Ok(json!({"role":role,"name":name}));
+            json!({"role":role,"name":name})
+        } else {
+            return Err(error(
+                ErrorCode::InvalidRequest,
+                "shadow segment requires exact CSS, test ID, or role and accessible name",
+            ));
         }
+    } else {
+        return Err(error(
+            ErrorCode::InvalidRequest,
+            "shadow segment requires exact CSS, test ID, or role and accessible name",
+        ));
+    };
+    if let Some(ordinal) = target.ordinal {
+        descriptor["ordinal"] = json!(ordinal);
     }
-    Err(error(
-        ErrorCode::InvalidRequest,
-        "shadow segment requires exact CSS, test ID, or role and accessible name",
-    ))
+    Ok(descriptor)
 }
 
 pub fn shadow_probe_error(verdict: &str) -> Option<CommandError> {

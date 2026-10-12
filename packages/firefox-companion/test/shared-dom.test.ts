@@ -19,7 +19,7 @@ function page(html: string) {
 
 type Gathered = {role:string;name:string;css:string;tag:string;attributes:Record<string,string>};
 type Gather = (root:ParentNode, options:Record<string,unknown>) => { candidates:Gathered[]; truncated:boolean };
-type Match = (root:ParentNode, spec:{role:string;name:string}, gather:Gather, limit?:number) => Element[] | "too-many";
+type Match = (root:ParentNode, spec:{role?:string;name?:string;selector?:string;ordinal?:number}, gather:Gather, limit?:number) => Element[] | "too-many";
 
 function gather(window: ReturnType<typeof page>, options = {}) {
   const script = readFileSync(new URL("../../../crates/dom-engine/src/candidate_gather.js", import.meta.url), "utf8");
@@ -120,6 +120,24 @@ test("shared shadow matching stays inside the selected root and uses native role
   assert.equal(match(root,{role:"checkbox",name:"Document name"},collect).length, 0);
   root.append(root.querySelector("input")!.cloneNode());
   assert.equal(match(root,{role:"checkbox",name:"Inside"},collect).length, 2);
+});
+
+test("shadow matching applies ordinals within the selected root and refuses missing indices", () => {
+  const window = page(`<input aria-label="Email"><div id="host"></div>`);
+  const root = window.document.getElementById("host")!.attachShadow({mode:"open"});
+  root.innerHTML = `<input aria-label="Email"><input aria-label="Email"><input aria-label="Email">`;
+  const collect = window.eval("(" + readFileSync(new URL("../../../crates/dom-engine/src/candidate_gather.js", import.meta.url), "utf8") + ")") as Gather;
+  const match = window.eval("(" + readFileSync(new URL("../../../crates/dom-engine/src/shadow_segment.js", import.meta.url), "utf8") + ")") as Match;
+  for (const spec of [{role:"textbox", name:"Email"}, {selector:"input"}]) {
+    for (const ordinal of [0, 1, 2]) {
+      const matches = match(root, {...spec, ordinal}, collect);
+      assert.ok(Array.isArray(matches));
+      assert.equal(matches.length, 1);
+      assert.equal(matches[0], root.querySelectorAll("input")[ordinal]);
+    }
+    for (const ordinal of [-1, 0.5, 3]) assert.equal(match(root, {...spec, ordinal}, collect).length, 0);
+    assert.equal(match(root, spec, collect).length, 2);
+  }
 });
 
 test("composed query hops open shadow roots and stops without one", () => {

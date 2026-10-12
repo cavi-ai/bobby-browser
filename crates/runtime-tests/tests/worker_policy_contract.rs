@@ -526,6 +526,111 @@ async fn shadow_native_controls_firefox() {
     shadow_native_control_contract(Engine::Firefox).await;
 }
 
+async fn shadow_ordinal_contract(engine: Engine) {
+    let document = "<!doctype html><title>Shadow ordinals</title>\
+        <input id='outside' aria-label='Email' value='Outside'>\
+        <div id='first-host' role='group' aria-label='Editor'></div>\
+        <div id='second-host' role='group' aria-label='Editor'></div>\
+        <script>for(const host of document.querySelectorAll('[role=group]')){\
+        host.attachShadow({mode:'open'}).innerHTML=\"<input id='first' aria-label='Email' value='First'><input id='second' aria-label='Email' value='Second'>\";}</script>";
+    let site = FixtureSite::spawn(vec![
+        (
+            "/",
+            Route::Html(format!(
+                "{document}<iframe id='frame' src='/frame'></iframe>"
+            )),
+        ),
+        ("/frame", Route::Html(document.into())),
+    ])
+    .await;
+    let rig = match engine {
+        Engine::Chromium => Rig::chromium().await,
+        Engine::Firefox => Rig::firefox().await,
+    };
+    let live = Live::open(&rig, &site.url("/")).await;
+    let mut failures = Vec::new();
+    for frame_path in [json!([]), json!([{"css":"#frame"}])] {
+        let target = json!({"role":"textbox", "accessibleName":"Email", "ordinal":1,
+            "shadowPath":[{"role":"group", "accessibleName":"Editor", "ordinal":1}], "framePath":frame_path});
+        let read = live
+            .call(
+                "wait_for",
+                json!({"condition":{"kind":"value", "target":target,
+            "matcher":{"kind":"exact", "value":"Second"}}, "timeoutMs":1000}),
+            )
+            .await;
+        if read["status"] != "completed" {
+            failures.push(format!("ordinal read: {read}"));
+            continue;
+        }
+        let typed = live
+            .call(
+                "type_text",
+                json!({"target":target, "value":"Selected", "clearFirst":true}),
+            )
+            .await;
+        if typed["status"] != "completed" {
+            failures.push(format!("{target}: {typed}"));
+            continue;
+        }
+        for (ordinal, code) in [(None, "targetAmbiguous"), (Some(2), "targetNotFound")] {
+            let mut missing = target.clone();
+            match ordinal {
+                Some(value) => missing["ordinal"] = json!(value),
+                None => {
+                    missing.as_object_mut().unwrap().remove("ordinal");
+                }
+            }
+            let refused = live
+                .call(
+                    "type_text",
+                    json!({"target":missing, "value":"Wrong", "clearFirst":true}),
+                )
+                .await;
+            if refused["status"] != "failed" || refused["error"]["code"] != code {
+                failures.push(format!("unsafe ordinal: {refused}"));
+            }
+        }
+        for (css, host, expected) in [
+            ("#first", Some("#second-host"), "First"),
+            ("#second", Some("#second-host"), "Selected"),
+            ("#second", Some("#first-host"), "Second"),
+            ("#first", Some("#first-host"), "First"),
+            ("#outside", None, "Outside"),
+        ] {
+            let shadow_path = host.map(|css| json!([{"css":css}])).unwrap_or(json!([]));
+            let observed = live
+                .call(
+                    "wait_for",
+                    json!({"condition":{"kind":"value",
+                "target":{"css":css, "shadowPath":shadow_path, "framePath":frame_path},
+                "matcher":{"kind":"exact", "value":expected}}, "timeoutMs":1000}),
+                )
+                .await;
+            if observed["status"] != "completed" {
+                failures.push(format!("{css}: {observed}"));
+            }
+        }
+    }
+    live.close().await;
+    assert!(
+        failures.is_empty(),
+        "shadow ordinals did not preserve control identity: {failures:#?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn shadow_ordinals_chromium() {
+    shadow_ordinal_contract(Engine::Chromium).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Firefox and paired test profile"]
+async fn shadow_ordinals_firefox() {
+    shadow_ordinal_contract(Engine::Firefox).await;
+}
+
 fn evidence<'a>(outcome: &'a Value, kind: &str) -> &'a Value {
     outcome["evidence"]
         .as_array()
