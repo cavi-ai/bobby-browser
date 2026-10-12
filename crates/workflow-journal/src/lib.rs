@@ -288,8 +288,15 @@ impl JsonlJournal {
 
     pub async fn inspect(path: impl AsRef<Path>) -> Result<JournalHealth, JournalError> {
         let path = path.as_ref();
-        let file = match File::open(path).await {
-            Ok(file) => file,
+        let file = match open_regular_read(path).await {
+            Ok(Some(file)) => file,
+            Ok(None) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "journal must be a regular file",
+                )
+                .into());
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(JournalHealth::default())
             }
@@ -307,8 +314,8 @@ impl JsonlJournal {
     }
 
     async fn refresh(&self, writer: &mut WriterState) -> Result<(), JournalError> {
-        match File::open(&*self.path).await {
-            Ok(file) => {
+        match open_regular_read(&self.path).await {
+            Ok(Some(file)) => {
                 let metadata = file.metadata().await?;
                 let identity = file_identity(file).await?;
                 // Size and mtime may survive atomic replacement. The index and
@@ -320,6 +327,7 @@ impl JsonlJournal {
                     return Ok(());
                 }
             }
+            Ok(None) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
@@ -337,31 +345,48 @@ async fn file_identity(file: File) -> Result<same_file::Handle, std::io::Error> 
         .map_err(std::io::Error::other)?
 }
 
-/// Invalid archive entries remain visible for repair, but must never be read
-/// as streams or followed to another file. Validate the opened handle too,
+/// Never follow a link or read a stream. Validate the opened handle too,
 /// since the path can be replaced after the first metadata check.
-async fn open_archive(path: &Path) -> Result<Option<File>, std::io::Error> {
+async fn open_regular_read(path: &Path) -> Result<Option<File>, std::io::Error> {
     if !tokio::fs::symlink_metadata(path).await?.is_file() {
-        warn!(path = %path.display(), "non-regular journal archive preserved without reading; history remains uncertain");
         return Ok(None);
     }
     let mut options = OpenOptions::new();
     options.read(true);
     durable_file::without_following_links_async(&mut options);
     let file = options.open(path).await?;
-    if durable_file::require_regular_file(&file.metadata().await?, "journal archive").is_err() {
-        warn!(path = %path.display(), "non-regular journal archive preserved without reading; history remains uncertain");
+    if durable_file::require_regular_file(&file.metadata().await?, "journal entry").is_err() {
         return Ok(None);
     }
     Ok(Some(file))
 }
 
+async fn open_archive(path: &Path) -> Result<Option<File>, std::io::Error> {
+    let file = open_regular_read(path).await?;
+    if file.is_none() {
+        warn!(path = %path.display(), "non-regular journal archive preserved without reading; history remains uncertain");
+    }
+    Ok(file)
+}
+
 async fn open_writer(path: &Path) -> Result<WriterState, JournalError> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) if !metadata.is_file() => {
+            // Preserve the entry itself: renaming a symlink does not change
+            // its target, and a FIFO must never be opened for scanning.
+            archive_damaged_journal(path).await?;
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
     let mut options = OpenOptions::new();
     options.create(true).append(true).read(true);
+    durable_file::without_following_links_async(&mut options);
     #[cfg(unix)]
     options.mode(0o600);
     let mut file = options.open(path).await?;
+    durable_file::require_regular_file(&file.metadata().await?, "journal entry")?;
     let mut offsets = HashMap::<CommandId, Vec<IndexedRecord>>::new();
     // Validate and index the writer's actual file in one streaming pass.
     let scan = scan_file(file.try_clone().await?, Some(&mut offsets)).await?;
@@ -372,6 +397,7 @@ async fn open_writer(path: &Path) -> Result<WriterState, JournalError> {
         archive_damaged_journal(path).await?;
         offsets.clear();
         file = options.open(path).await?;
+        durable_file::require_regular_file(&file.metadata().await?, "journal entry")?;
         0
     } else {
         scan.max_sequence.map_or(0, |sequence| sequence + 1)
