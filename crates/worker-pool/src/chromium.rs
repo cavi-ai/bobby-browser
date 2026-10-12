@@ -4277,60 +4277,13 @@ fn navigation_failed(url: &str, error: chromiumoxide::error::CdpError) -> Comman
     driver_error(ErrorCode::BrowserCommandFailed, error)
 }
 
-/// Typing into a target that cannot accept text — disabled, readonly, a
-/// fieldset-disabled ancestor, a non-typeable input type (hidden, button,
-/// submit, reset, image, file), or a non-form/non-contenteditable element
-/// such as `<h1>` — still dispatches key events. On macOS headless Chrome
-/// that pins the browser process at 100% CPU permanently instead of
-/// failing fast, so this must be checked before any key dispatch.
-const EDITABLE_CONTROL_CHECK_JS: &str = "function() { const el = this; return !el.disabled && !el.closest('fieldset[disabled]') && ((el instanceof HTMLInputElement && !el.readOnly && !['hidden','button','submit','reset','image','file'].includes((el.type||'text').toLowerCase())) || (el instanceof HTMLTextAreaElement && !el.readOnly) || el instanceof HTMLSelectElement || el.isContentEditable); }";
-
-/// Runs [`EDITABLE_CONTROL_CHECK_JS`] against the resolved target via
-/// `DOM.resolveNode` + `Runtime.callFunctionOn` on its backend node id —
-/// `ResolvedTarget`'s own JS-eval path is private to `targeting`, but its
-/// `backend_node_id` accessor is `pub(crate)`, which is enough to scope the
-/// same check through raw CDP from here.
+/// Refuses typing into a target that does not take text, before any key is
+/// dispatched.
 async fn ensure_editable_control(
     page: &Page,
     resolved: &crate::targeting::ResolvedTarget,
 ) -> Result<(), CommandError> {
-    let backend_id = resolved.backend_node_id(page).await?;
-    let object_id = page
-        .execute(
-            chromiumoxide::cdp::browser_protocol::dom::ResolveNodeParams::builder()
-                .backend_node_id(backend_id)
-                .build(),
-        )
-        .await
-        .map_err(command_failed)?
-        .result
-        .object
-        .object_id
-        .ok_or_else(|| driver_error(ErrorCode::TargetNotFound, "target has no live object"))?;
-    let value = page
-        .execute(
-            chromiumoxide::cdp::js_protocol::runtime::CallFunctionOnParams::builder()
-                .object_id(object_id)
-                .function_declaration(EDITABLE_CONTROL_CHECK_JS)
-                .return_by_value(true)
-                .await_promise(false)
-                .build()
-                .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?,
-        )
-        .await
-        .map_err(command_failed)?
-        .result
-        .result
-        .value
-        .ok_or_else(|| {
-            driver_error(
-                ErrorCode::BrowserCommandFailed,
-                "editability check returned no value",
-            )
-        })?;
-    let editable: bool = serde_json::from_value(value)
-        .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
-    if editable {
+    if resolved.accepts_text(page).await? {
         return Ok(());
     }
     Err(CommandError {
@@ -5246,8 +5199,8 @@ mod tests {
         should_retry_plain_click_target_drift, should_retry_transient_click_loss, snapshot_cookie,
         snapshot_iframe_owners, text_matches, unscoped_css_wait_selector, validate_clip,
         wait_should_retry_replaced_context, ChromiumWorker, ClickDispatchPhase, HttpBridgeState,
-        EDITABLE_CONTROL_CHECK_JS,
     };
+    use crate::targeting::ACCEPTS_TEXT_SCRIPT;
     use types::{
         ClickModifier, CommandError, ErrorCode, ErrorLayer, InspectCommand, PageId, SessionId,
         TargetSpec, TextMatch, WorkerId,
@@ -5255,15 +5208,15 @@ mod tests {
 
     #[test]
     fn editable_control_check_js_covers_every_required_guard() {
-        assert!(EDITABLE_CONTROL_CHECK_JS.contains("!el.disabled"));
-        assert!(EDITABLE_CONTROL_CHECK_JS.contains("el.closest('fieldset[disabled]')"));
-        assert!(EDITABLE_CONTROL_CHECK_JS.contains("HTMLInputElement"));
-        assert!(EDITABLE_CONTROL_CHECK_JS.contains("!el.readOnly"));
-        assert!(EDITABLE_CONTROL_CHECK_JS.contains("'hidden'"));
-        assert!(EDITABLE_CONTROL_CHECK_JS.contains("'file'"));
-        assert!(EDITABLE_CONTROL_CHECK_JS.contains("HTMLTextAreaElement"));
-        assert!(EDITABLE_CONTROL_CHECK_JS.contains("HTMLSelectElement"));
-        assert!(EDITABLE_CONTROL_CHECK_JS.contains("el.isContentEditable"));
+        assert!(ACCEPTS_TEXT_SCRIPT.contains("!el.disabled"));
+        assert!(ACCEPTS_TEXT_SCRIPT.contains("el.closest('fieldset[disabled]')"));
+        assert!(ACCEPTS_TEXT_SCRIPT.contains("HTMLInputElement"));
+        assert!(ACCEPTS_TEXT_SCRIPT.contains("!el.readOnly"));
+        assert!(ACCEPTS_TEXT_SCRIPT.contains("'hidden'"));
+        assert!(ACCEPTS_TEXT_SCRIPT.contains("'file'"));
+        assert!(ACCEPTS_TEXT_SCRIPT.contains("HTMLTextAreaElement"));
+        assert!(ACCEPTS_TEXT_SCRIPT.contains("HTMLSelectElement"));
+        assert!(ACCEPTS_TEXT_SCRIPT.contains("el.isContentEditable"));
     }
 
     #[test]

@@ -607,6 +607,11 @@ impl ResolvedTarget {
         Ok(())
     }
 
+    /// Whether the target takes typed text; see [`ACCEPTS_TEXT_SCRIPT`].
+    pub async fn accepts_text(&self, page: &Page) -> Result<bool, CommandError> {
+        self.eval(page, ACCEPTS_TEXT_SCRIPT).await
+    }
+
     async fn eval<T: DeserializeOwned>(
         &self,
         page: &Page,
@@ -627,6 +632,12 @@ impl ResolvedTarget {
         eval_scoped(page, &self.locator.scope, expression).await
     }
 }
+
+/// Function body with `el` bound: whether `el` takes typed text. Typing into a
+/// target that cannot (disabled, readonly, inside a disabled fieldset, a
+/// non-text input type, or a plain element) still dispatches key events, and
+/// on macOS headless Chrome that pins the browser process at full CPU.
+pub(crate) const ACCEPTS_TEXT_SCRIPT: &str = "return !el.disabled && !el.closest('fieldset[disabled]') && ((el instanceof HTMLInputElement && !el.readOnly && !['hidden','button','submit','reset','image','file'].includes((el.type||'text').toLowerCase())) || (el instanceof HTMLTextAreaElement && !el.readOnly) || el instanceof HTMLSelectElement || el.isContentEditable);";
 
 /// The DOM backend node id for a gathered candidate, for correlating it with
 /// a CDP frame owner (`DOM.getFrameOwner`'s `backend_node_id`) or an AX tree
