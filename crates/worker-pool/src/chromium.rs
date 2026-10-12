@@ -3891,7 +3891,10 @@ impl WaitDom for ChromiumWaitDom<'_> {
         };
         let resolved = match resolved {
             Ok(resolved) => resolved,
-            Err(error) if matches!(error.code, ErrorCode::TargetNotFound) => {
+            Err(error)
+                if matches!(error.code, ErrorCode::TargetNotFound)
+                    || is_detached_target_error(&error) =>
+            {
                 return Ok(TextProbe::Missing)
             }
             // The click already landed; a matcher-satisfying candidate
@@ -3906,11 +3909,17 @@ impl WaitDom for ChromiumWaitDom<'_> {
             Err(error) => return Err(error),
         };
         let value = if is_value {
-            resolved.value(page).await?.unwrap_or_default()
+            resolved.value(page).await
         } else {
-            resolved.inner_text(page).await?.unwrap_or_default()
+            resolved.inner_text(page).await
         };
-        Ok(TextProbe::Values(vec![value]))
+        match value {
+            Ok(value) => Ok(TextProbe::Values(vec![value.unwrap_or_default()])),
+            // The page replaced the node after it resolved; the next poll
+            // resolves the replacement.
+            Err(error) if is_detached_target_error(&error) => Ok(TextProbe::Missing),
+            Err(error) => Err(error),
+        }
     }
 
     async fn url(&self) -> Result<String, CommandError> {
