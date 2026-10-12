@@ -1,6 +1,42 @@
 use std::path::Path;
 use tokio::io::AsyncWriteExt;
 
+/// A serialization buffer that refuses writes exceeding its byte limit.
+pub struct BoundedBuffer {
+    bytes: Vec<u8>,
+    max_bytes: usize,
+}
+
+impl BoundedBuffer {
+    pub fn new(max_bytes: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            max_bytes,
+        }
+    }
+
+    pub fn into_inner(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl std::io::Write for BoundedBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.max_bytes.saturating_sub(self.bytes.len()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "serialized data exceeds byte limit",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 #[cfg(windows)]
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
