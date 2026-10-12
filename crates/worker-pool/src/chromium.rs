@@ -969,29 +969,6 @@ impl ChromiumWorker {
             ));
             actions
         };
-        // Ctrl/Cmd+A loops against Chrome's command pipeline: one chord yields
-        // hundreds of phantom keydowns. Backspace over the text instead.
-        let actions = if clear_first {
-            let existing = if replaced {
-                resolved.focused_text(page).await?
-            } else {
-                resolved.value(page).await?.unwrap_or_default()
-            };
-            let backspaces = u32::try_from(existing.chars().count()).unwrap_or(u32::MAX);
-            actions
-                .into_iter()
-                .filter(|action| !matches!(action, TypingAction::SelectAll { .. }))
-                .map(|action| match action {
-                    TypingAction::Backspace { delay_ms, .. } => TypingAction::Backspace {
-                        count: backspaces.saturating_add(1).max(1),
-                        delay_ms,
-                    },
-                    other => other,
-                })
-                .collect()
-        } else {
-            actions
-        };
         let synthesized_ms = behavioral_engine::synthesized_total_ms(&actions);
         let count = u32::try_from(actions.len()).unwrap_or(u32::MAX);
         for action in &actions {
@@ -1071,19 +1048,11 @@ impl ChromiumWorker {
                 delay(*delay_ms).await;
             }
             TypingAction::SelectAll { delay_ms } => {
-                // Cmd on macOS, Ctrl elsewhere: the browser runs on this
-                // machine, so the worker's OS is the browser's OS. Both events
-                // carry the modifier mask so Chrome's key state sees the chord
-                // open and close. Releasing `a` unmasked leaves the modifier
-                // logically held, and sending the physical modifier key storms
-                // unidentified events.
-                let mask = if cfg!(target_os = "macos") { 4 } else { 2 };
-                page.execute(key_event("a", DispatchKeyEventType::KeyDown, mask))
-                    .await
-                    .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
-                page.execute(key_event("a", DispatchKeyEventType::KeyUp, mask))
-                    .await
-                    .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+                for event in crate::targeting::select_all_events() {
+                    page.execute(event)
+                        .await
+                        .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+                }
                 delay(*delay_ms).await;
             }
             TypingAction::Backspace { count, delay_ms } => {
