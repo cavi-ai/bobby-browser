@@ -3337,7 +3337,7 @@ async fn settle_typing_focus(
         .send(
             "script.evaluate",
             json!({
-                "expression": format!("(()=>{{const el={COMPOSED_QUERY}({selector_json});if(!el)return false;{script}}})()"),
+                "expression": format!("(()=>{{const el={COMPOSED_QUERY}({selector_json});const doc=document;{script}}})()"),
                 "target": {"context": context, "sandbox": COMPANION_SANDBOX},
                 "awaitPromise": true,
                 "resultOwnership": "none",

@@ -362,8 +362,30 @@ impl ResolvedTarget {
     /// page swapped in another editable control that took focus. Keys sent
     /// before focus settles land in the field being removed.
     pub async fn settle_focus(&self, page: &Page) -> Result<bool, CommandError> {
-        self.eval::<bool>(page, crate::typed_focus::FOCUS_SETTLE_SCRIPT)
-            .await
+        let script = crate::typed_focus::FOCUS_SETTLE_SCRIPT;
+        if let Some(element) = &self.native {
+            let value = element
+                .call_js_fn_by_value(
+                    format!(
+                        "function() {{ const el=this; const doc=this.ownerDocument; {script} }}"
+                    ),
+                    true,
+                )
+                .await
+                .map_err(cdp_error)?;
+            return serde_json::from_value(value)
+                .map_err(|error| target_error(ErrorCode::BrowserCommandFailed, error));
+        }
+        // The page may already have removed the field; the locator then finds
+        // nothing instead of failing.
+        let id = serde_json::to_string(&self.locator.id)
+            .map_err(|error| target_error(ErrorCode::InvalidRequest, error))?;
+        let expression = scoped_expression(
+            &self.locator.scope,
+            &self.locator.shadow_hosts,
+            &format!("const el=find(root,{id});const doc=root.ownerDocument||root;{script}"),
+        )?;
+        eval_scoped(self.execution_page(page), &self.locator.scope, expression).await
     }
 
     /// Types into the target and returns whether a page-swapped replacement
