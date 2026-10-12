@@ -2349,6 +2349,35 @@ impl FirefoxCompanionWorker {
         Ok(())
     }
 
+    /// The element `selector` finds, read as one form control the caller's
+    /// `target` names; `None` when it is detached or not a form control.
+    async fn describe_control(
+        &self,
+        context: &str,
+        selector: &str,
+        target: &types::FormControlTarget,
+    ) -> Result<Option<FormControl>, CommandError> {
+        let selector = serde_json::to_string(selector)
+            .map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?;
+        let script = worker_pool::form_control_script();
+        let response = self
+            .transport
+            .send(
+                "script.evaluate",
+                json!({
+                    "expression": format!("(()=>{{const el={COMPOSED_QUERY}({selector});if(!el)return null;{script}}})()"),
+                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                    "awaitPromise": false,
+                    "resultOwnership": "none",
+                }),
+            )
+            .await?;
+        match response.pointer("/result/value").and_then(Value::as_str) {
+            Some(encoded) => worker_pool::decode_form_control(encoded, target.clone()).map(Some),
+            None => Ok(None),
+        }
+    }
+
     async fn descend_frame_context(
         &self,
         context: &str,
@@ -4428,26 +4457,22 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
                     false,
                 )
             })?;
-        let find = |snapshot: &types::FormSnapshot| -> Option<FormControl> {
-            snapshot
-                .forms
-                .iter()
-                .flat_map(|form| form.controls.iter())
-                .chain(snapshot.unowned_controls.iter())
-                .find(|control| {
-                    control.target.as_ref().is_some_and(|target| {
-                        worker_pool::target_specs_equivalent(target, &command.target)
-                    })
-                })
-                .cloned()
-        };
-        let control = find(&snapshot).ok_or_else(|| {
-            driver_error(
-                ErrorCode::TargetNotFound,
-                "form control target was not found",
-                false,
-            )
-        })?;
+        // The control is the element the target resolves to, read with the
+        // snapshot's projection; snapshot names can differ from resolver names.
+        let top_context = self.context(page_id).await?;
+        let (context, selector) = self
+            .resolve_input_target(page_id, &top_context, "", Some(&target))
+            .await?;
+        let control = self
+            .describe_control(&context, &selector, &command.target)
+            .await?
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::TargetNotFound,
+                    "form control target was not found",
+                    false,
+                )
+            })?;
         worker_pool::validate_control_action(&control, &command.action)?;
         let mut committed: Option<Vec<String>> = None;
         match &command.action {
@@ -4514,8 +4539,26 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
             ControlAction::SelectMany { values } => {
                 self.evaluate_control_script(page_id, &target, &format!("const requested=new Set({});if(!(el instanceof HTMLSelectElement)||!el.multiple)return false;const norm=s=>s.trim().toLowerCase();const wanted=new Map();for(const value of requested){{const byValue=[...el.options].filter(option=>option.value===value);const matches=byValue.length?byValue:[...el.options].filter(option=>norm(option.label)===norm(value)||norm(option.textContent)===norm(value));if(matches.length!==1||matches[0].disabled)return false;wanted.set(matches[0].value,true)}}for(const option of el.options)option.selected=wanted.has(option.value);", serde_json::to_string(values).map_err(|error| driver_error(ErrorCode::InvalidRequest, error.to_string(), false))?)).await?;
             }
+            // Rich-text editors that own their DOM revert direct edits but
+            // accept select-all and Backspace, which typing with clearFirst sends.
+            ControlAction::Clear
+                if control.control_kind == types::FormControlKind::ContentEditable =>
+            {
+                worker_pool::InputEngine::type_text(
+                    self,
+                    page_id,
+                    &TypeTextCommand {
+                        selector: String::new(),
+                        target: Some(target.clone()),
+                        value: String::new(),
+                        clear_first: true,
+                        expected_url: None,
+                    },
+                )
+                .await?;
+            }
             ControlAction::Clear => {
-                self.evaluate_control_script(page_id, &target, "if(el instanceof HTMLSelectElement)for(const option of el.options)option.selected=false;else if('checked'in el)el.checked=false;else if('value'in el)el.value='';else if(el.isContentEditable)el.textContent='';else return false;").await?;
+                self.evaluate_control_script(page_id, &target, "if(el instanceof HTMLSelectElement)for(const option of el.options)option.selected=false;else if(el instanceof HTMLInputElement&&(el.type==='checkbox'||el.type==='radio'))el.checked=false;else if('value'in el)el.value='';else if(el.isContentEditable)el.textContent='';else return false;").await?;
             }
         }
         let after = worker_pool::ObservationEngine::form_snapshot(self, page_id, None)
@@ -4532,7 +4575,21 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
                     true,
                 )
             })?;
-        let control = find(&after).ok_or_else(|| {
+        let replaced = async || -> Result<Option<FormControl>, CommandError> {
+            let (context, selector) = self
+                .resolve_input_target(page_id, &top_context, "", Some(&target))
+                .await?;
+            self.describe_control(&context, &selector, &command.target)
+                .await
+        };
+        let control = match self
+            .describe_control(&context, &selector, &command.target)
+            .await
+        {
+            Ok(Some(control)) => Some(control),
+            _ => replaced().await.ok().flatten(),
+        }
+        .ok_or_else(|| {
             driver_error(
                 ErrorCode::TargetDetached,
                 "form control was replaced after dispatch",

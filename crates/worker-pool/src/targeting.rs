@@ -234,10 +234,9 @@ impl ResolvedTarget {
         self.eval(page, "return el.innerText || ''").await.map(Some)
     }
 
+    /// The control's value; empty for an element without one, such as an
+    /// editable region.
     pub async fn value(&self, page: &Page) -> Result<Option<String>, CommandError> {
-        if let Some(element) = &self.native {
-            return element.string_property("value").await.map_err(cdp_error);
-        }
         self.eval(page, "return el.value || ''").await.map(Some)
     }
 
@@ -284,6 +283,53 @@ impl ResolvedTarget {
         Ok(())
     }
 
+    /// The element read as one form control (JSON text), or `None` when it is
+    /// detached or not a form control.
+    pub async fn form_control(&self, page: &Page) -> Result<Option<String>, CommandError> {
+        self.eval(page, &crate::form_control_script()).await
+    }
+
+    /// Empties an editable region with select-all and Backspace. Rich-text
+    /// editors that own their DOM revert direct edits but accept these keys.
+    pub async fn clear_editable(&self, page: &Page) -> Result<(), CommandError> {
+        use chromiumoxide::cdp::browser_protocol::input::{
+            DispatchKeyEventParams, DispatchKeyEventType,
+        };
+        self.eval::<bool>(page, "el.focus(); return true").await?;
+        // Cmd on macOS, Ctrl elsewhere; the editing command performs the
+        // selection, so the chord carries no text.
+        let modifiers = if cfg!(target_os = "macos") { 4 } else { 2 };
+        let select_all = |event_type| {
+            DispatchKeyEventParams::builder()
+                .r#type(event_type)
+                .key("a")
+                .code("KeyA")
+                .windows_virtual_key_code(65)
+                .modifiers(modifiers)
+        };
+        let backspace = |event_type| {
+            DispatchKeyEventParams::builder()
+                .r#type(event_type)
+                .key("Backspace")
+                .code("Backspace")
+                .windows_virtual_key_code(8)
+        };
+        let events = [
+            select_all(DispatchKeyEventType::RawKeyDown).commands(["selectAll"]),
+            select_all(DispatchKeyEventType::KeyUp),
+            backspace(DispatchKeyEventType::RawKeyDown),
+            backspace(DispatchKeyEventType::KeyUp),
+        ];
+        let page = self.execution_page(page);
+        for event in events {
+            let event = event
+                .build()
+                .map_err(|error| target_error(ErrorCode::BrowserCommandFailed, error))?;
+            page.execute(event).await.map_err(cdp_error)?;
+        }
+        Ok(())
+    }
+
     pub async fn type_text(
         &self,
         page: &Page,
@@ -301,11 +347,15 @@ impl ResolvedTarget {
             }
         }
         if clear_first {
-            self.eval::<bool>(
-                page,
-                "el.value = ''; el.dispatchEvent(new Event('input', { bubbles: true })); return true",
-            )
-            .await?;
+            let editable = self
+                .eval::<bool>(
+                    page,
+                    "if (el.isContentEditable) return true; el.value = ''; el.dispatchEvent(new Event('input', { bubbles: true })); return false",
+                )
+                .await?;
+            if editable {
+                self.clear_editable(page).await?;
+            }
         }
         // Runs of chars the US keyboard layout key-presses, runs that need a
         // caret-level insert (Unicode outside the US map), and line breaks,

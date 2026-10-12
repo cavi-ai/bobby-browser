@@ -76,6 +76,7 @@ macro_rules! every_case {
             a_page_stuck_navigating_closes,
             a_copied_control_resolves_apart_from_its_original,
             concurrent_scoped_snapshots_resolve_their_own_targets,
+            fill_clears_controls_the_form_snapshot_cannot_name,
             $($extra,)*
         }
     };
@@ -3728,4 +3729,74 @@ pub async fn a_page_stuck_navigating_closes(rig: &Rig) {
         !listed.to_string().contains(&page_id),
         "the closed page is still listed: {listed}"
     );
+}
+
+/// An editable region named by its title that restores outside DOM edits takes
+/// type_text with clearFirst, and intent_fill clears it and a field inside a
+/// shadow root, controls the form snapshot names differently.
+pub async fn fill_clears_controls_the_form_snapshot_cannot_name(rig: &Rig) {
+    let body = r#"<main><div id="editor" contenteditable="true" role="textbox" title="Draft">draft text</div>
+        <div id="host"></div></main>
+        <script>
+          const editor = document.getElementById("editor");
+          let model = "draft text";
+          const render = () => { if (editor.textContent !== model) editor.textContent = model; };
+          new MutationObserver(render).observe(editor, {childList: true, characterData: true, subtree: true});
+          editor.addEventListener("keydown", (event) => {
+            if (event.key !== "Backspace") return;
+            event.preventDefault();
+            model = getSelection().toString() === model ? "" : model.slice(0, -1);
+            render();
+          });
+          editor.addEventListener("beforeinput", (event) => {
+            if (event.inputType !== "insertText") return;
+            event.preventDefault();
+            model += event.data;
+            render();
+          });
+          document.getElementById("host").attachShadow({mode: "open"}).innerHTML =
+            '<input aria-label="Shadow note" value="shadow text">';
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/editor", Route::Html(page("Editor", body)))]).await;
+    let live = Live::open(rig, &site.url("/editor")).await;
+    let read_editor = async || {
+        let inspected = live.call("inspect", json!({"selector":"#editor"})).await;
+        let mut inspections = Vec::new();
+        objects_of_kind(&inspected, "inspection", &mut inspections);
+        inspections
+            .first()
+            .and_then(|inspection| inspection["text"].as_str())
+            .unwrap_or("<unread>")
+            .to_owned()
+    };
+    let typed = live
+        .call(
+            "type_text",
+            json!({"target":{"role":"textbox","accessibleName":"Draft"},
+                   "value":"fresh","clearFirst":true}),
+        )
+        .await;
+    assert_eq!(typed["status"], "completed", "type_text: {typed}");
+    assert_eq!(read_editor().await, "fresh", "clearFirst kept the old text");
+    for name in ["Draft", "Shadow note"] {
+        let cleared = live
+            .call(
+                "intent_fill",
+                json!({"purpose":"clear the field",
+                       "hints":{"role":"textbox","accessibleName":name},
+                       "value":{"kind":"clear"}}),
+            )
+            .await;
+        assert_eq!(cleared["status"], "completed", "clear {name}: {cleared}");
+    }
+    for (name, kept) in [("Draft", "fresh"), ("Shadow note", "shadow text")] {
+        let field = live
+            .snapshot(json!({"target":{"role":"textbox","accessibleName":name}}))
+            .await;
+        assert!(
+            !field.to_string().contains(kept),
+            "{name} kept its text: {field}"
+        );
+    }
+    live.close().await;
 }
