@@ -4335,26 +4335,9 @@ async fn name_the_frame_holding(
     else {
         return error;
     };
-    let Ok(census) = gather_candidates(page, target, Some(browser)).await else {
-        return error;
-    };
-    let framed: Vec<_> = census
-        .into_iter()
-        .filter(|candidate| !candidate.frame_path.is_empty())
-        .collect();
-    match dom_engine::resolve_candidates(target, &framed, &dom_engine::ResolutionPolicy::default())
-    {
-        Ok(dom_engine::ResolutionDecision::Resolved { candidate, .. }) => {
-            let path = serde_json::to_string(&candidate.frame_path).unwrap_or_default();
-            CommandError {
-                message: format!(
-                    "{}; the target is inside a frame: pass \"framePath\": {path}",
-                    error.message
-                ),
-                ..error
-            }
-        }
-        _ => error,
+    match gather_candidates(page, target, Some(browser)).await {
+        Ok(census) => crate::name_frame_in_miss(error, target, census),
+        Err(_) => error,
     }
 }
 

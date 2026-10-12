@@ -864,18 +864,17 @@ pub async fn gather_candidates(
     // every in-frame control resolves as targetNotFound. Each stamped
     // frame_path lets the action path re-resolve through the same frame.
     if target.frame_path.is_empty() {
-        let frames: Vec<Candidate> = candidates
+        let frames: Vec<(Candidate, Box<TargetSpec>)> = candidates
             .iter()
             .filter(|candidate| {
-                candidate.role.as_deref() == Some("iframe") && candidate.state.attached
+                candidate.role.as_deref() == Some("iframe")
+                    && candidate.state.attached
+                    && candidate.state.visible
             })
             .take(8)
-            .cloned()
+            .map(|frame| (frame.clone(), frame_hop(frame, &candidates)))
             .collect();
-        for frame in frames {
-            let Some(hop) = frame_stable_hop(&frame) else {
-                continue;
-            };
+        for (frame, hop) in frames {
             let gathered = gather_frame_candidates(&scope, &frame, &hop, browser).await;
             if let Ok(mut gathered) = gathered {
                 candidates.append(&mut gathered);
@@ -928,29 +927,41 @@ pub async fn inspect_page_scoped_target(
 /// A re-resolvable hop for a frame element: real-id CSS, then test id, then
 /// a src attribute selector. Without one the frame's candidates could not be
 /// re-resolved at action time, so the frame is skipped entirely.
-fn frame_stable_hop(frame: &Candidate) -> Option<Box<TargetSpec>> {
-    if let Some(css) = &frame.css {
-        return Some(Box::new(TargetSpec {
-            css: Some(css.clone()),
-            ..TargetSpec::default()
-        }));
+/// A `target` that missed the page, whose `census` (frames included) holds
+/// one match inside a frame: the miss names the frame path that reaches it.
+pub fn name_frame_in_miss(
+    error: CommandError,
+    target: &TargetSpec,
+    census: Vec<Candidate>,
+) -> CommandError {
+    let framed: Vec<_> = census
+        .into_iter()
+        .filter(|candidate| !candidate.frame_path.is_empty())
+        .collect();
+    match resolve_candidates(target, &framed, &ResolutionPolicy::default()) {
+        Ok(ResolutionDecision::Resolved { candidate, .. }) => {
+            let path = serde_json::to_string(&candidate.frame_path).unwrap_or_default();
+            CommandError {
+                message: format!(
+                    "{}; the target is inside a frame: pass \"framePath\": {path}",
+                    error.message
+                ),
+                ..error
+            }
+        }
+        _ => error,
     }
-    if let Some(test_id) = &frame.test_id {
-        return Some(Box::new(TargetSpec {
-            test_id: Some(test_id.clone()),
-            ..TargetSpec::default()
-        }));
-    }
-    frame.attributes.get("src").and_then(|src| {
-        (!src.is_empty()).then(|| {
-            Box::new(TargetSpec {
-                css: Some(format!(
-                    "iframe[src={}]",
-                    serde_json::to_string(src).unwrap()
-                )),
-                ..TargetSpec::default()
-            })
-        })
+}
+
+/// The hop that re-resolves `frame` among `candidates`: role, name and
+/// ordinal, the shape every frame path carries.
+fn frame_hop(frame: &Candidate, candidates: &[Candidate]) -> Box<TargetSpec> {
+    let segment = semantic_iframe_hop(frame, candidates);
+    Box::new(TargetSpec {
+        role: Some(segment.role),
+        accessible_name: (!segment.accessible_name.is_empty()).then_some(segment.accessible_name),
+        ordinal: segment.ordinal,
+        ..TargetSpec::default()
     })
 }
 

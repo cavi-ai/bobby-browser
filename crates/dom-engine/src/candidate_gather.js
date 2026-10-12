@@ -82,6 +82,9 @@ const implicitRole=el=>{if(el.tagName==='BUTTON')return 'button';if(el.tagName==
         for(const booleanName of ['required','readonly','checked','multiple'])
           if(element[booleanName]===true)attributes[booleanName]='true';
       }
+      // An input's type is a fixed vocabulary, kept even when page metadata is
+      // redacted and normalized the way the accessibility tree reports it.
+      if(element.localName==='input')attributes.type=String(element.type||'text').toLowerCase();
       const aria=element.getAttribute('aria-label');
       const uniqueId=Boolean(element.id)&&element.getRootNode().querySelector('#'+CSS.escape(element.id))===element;
       const css=publicMetadata?path(element):uniqueId?`#${CSS.escape(element.id)}`:aria?`[aria-label="${aria.replace(/\\/g,'\\\\').replace(/"/g,'\\"')}"]`:tag;

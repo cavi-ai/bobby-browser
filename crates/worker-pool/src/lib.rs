@@ -68,7 +68,7 @@ pub use skill_adapter::{
     CHROMIUM_PRODUCTION_SKILL_PROFILE_VERSION, FIREFOX_PRODUCTION_SKILL_PROFILE_VERSION,
     PRODUCTION_SKILL_CAPABILITIES,
 };
-pub use targeting::validate_target_spec;
+pub use targeting::{name_frame_in_miss, validate_target_spec};
 
 pub fn session_download_dir(root: &Path, session_id: &SessionId) -> PathBuf {
     root.join(session_id.0.to_string())
