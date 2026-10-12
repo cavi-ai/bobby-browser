@@ -72,6 +72,12 @@ Remembered form structure per site. See [Context graph](../concepts/context-grap
 |---|---|---|
 | `dir` | `context` in the config directory | Store root. Unset disables remembering |
 | `ttl_days` | `90` | Days to keep a control without a verified success |
+| `limits.max_file_bytes` | `2097152` | Largest site file; a larger file is preserved, reported and skipped |
+| `limits.max_site_records` | `16384` | Records kept per site file |
+| `limits.max_resident_sites` | `256` | Sites held in memory per profile |
+| `limits.max_resident_bytes` | `67108864` | Memory held per profile before sites reload from disk |
+
+Every limit must be positive. See [Limits](../concepts/context-graph.md#limits).
 
 ## `[mcp]`
 

@@ -66,12 +66,27 @@
 - A wrongly shaped `kind` union is rejected with the allowed kinds and the chosen kind's required properties; `intent_follow` without a wait shows a valid example.
 - An MCP connection that ends closes the sessions it opened and had not closed.
 - `a11y_snapshot`, `workflow_observe` and `postState` carry each page text once.
+- On Chromium, scoped snapshots include iframe and child-frame controls, number frames page-wide and keep the full ancestor frame path, so their targets act on the controls they show.
+- On Firefox, frame targets honor ordinals on CSS and test-id selectors, and duplicate controls inside shadow roots keep their ordinals and scope while pinned for editing.
+- On Firefox, `visible` element waits stay pending for CSS-hidden and zero-area elements, text and value waits stay pending while their target is missing, and shadow-scoped waits match only inside the shadow root.
+- On Chromium, `type_text` on a field an open dialog covers fails `targetObscured`.
+- Uploaded artifact files are kept until the session closes, and intent uploads resolve Firefox file controls.
+- A damaged command or job journal is archived intact with a warning; a job journal record that repeats or lowers a sequence, or contradicts the job's stored status, goes to reconciliation instead of replaying.
+- Checkpoints, recovery snapshots and skill-decision files load only when their stored workflow and session identity match; symbolic links, hard links and non-regular files in the checkpoint, context, lock and skill-decision stores are refused and preserved; a repaired or replaced checkpoint file is found without a restart.
+- Context storage refuses a site file whose stored identity contradicts its name, lists buffered replacements ahead of older persisted files, and writes short temporary file names so long site keys persist.
+- Skill-decision files, artifact payloads and manifests are created owner-only on Unix, and `bobby doctor --fix` repairs legacy skill-decision permissions; artifact startup cleanup removes only recognized staging directories; a durable write leaves an existing temporary file it did not create.
+- Control and challenge outcome counters saturate instead of overflowing.
+- A Chromium launch that publishes no DevTools endpoint within its launch timeout fails the session instead of hanging, and Chromium shutdown waits at most 5 s.
+- Vision provider responses are limited to 1 MiB after decompression; a larger reply is rejected without its body.
+- TypeScript and Python SDK responses are limited to 64 MiB before parsing; `maxJsonResponseBytes` and `max_json_response_bytes` raise it up to 256 MiB.
 
 ### Added
 
 - A browser selection's `chromium` entries give a durable Chromium profile its own directory, and sessions attach to a Chrome already running there.
 - `bobby install --restart-runtime` stops this scope's running runtime owner after the install; `bobby install` ends with one line naming a still-running owner when it replaced the PATH `bobby`.
 - `bobby runtime restart [--force]` and `make restart` stop this scope's runtime owner and start a new one, showing what is attached, asking before disconnecting agents, and saving the impact report under `runtime/restart-snapshots/`.
+- `[context.limits]` bounds persisted context per profile: `max_file_bytes`, `max_site_records`, `max_resident_sites` and `max_resident_bytes`; an oversized or unreadable site file is preserved, reported and skipped.
+- Idempotency changes persist in a checksummed append log with bounded compaction; `bobby doctor --fix --downgrade-idempotency` converts it back to the v1 ledger and keeps a backup.
 
 ### Changed
 
