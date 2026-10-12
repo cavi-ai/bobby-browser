@@ -62,6 +62,7 @@ macro_rules! every_case {
             omitted_controls_need_a_whole_tree,
             intent_extract_reads_href_and_attributes,
             hidden_state_holds_for_a_removed_control,
+            text_wait_follows_a_replaced_target,
             intent_follow_reports_a_dialog_that_opened,
             dismiss_completes_when_a_same_named_control_appears,
             unhinted_dismiss_names_the_open_dialog,
@@ -2734,6 +2735,58 @@ pub async fn dismiss_completes_when_a_same_named_control_appears(rig: &Rig) {
         banner["status"], "completed",
         "the banner did not appear after the close: {banner}"
     );
+    live.close().await;
+}
+
+/// A text wait whose target the page replaces between resolving and reading
+/// it keeps polling and matches the replacement. The page swaps the element
+/// on the first scan that reads it after Arm, or half a second after Arm when
+/// no scan reads it through the page's own methods.
+pub async fn text_wait_follows_a_replaced_target(rig: &Rig) {
+    let body = r#"<main><button id="arm">Arm</button>
+        <p role="status" aria-label="Result" id="result">waiting</p></main>
+        <script>
+          const original = document.getElementById("result");
+          const read = original.getAttribute.bind(original);
+          let armed = false, replaced = false;
+          const replace = () => {
+            if (replaced) return;
+            replaced = true;
+            const next = document.createElement("p");
+            next.setAttribute("role", "status");
+            next.setAttribute("aria-label", "Result");
+            next.textContent = "done";
+            original.replaceWith(next);
+          };
+          document.getElementById("arm").addEventListener("click", () => {
+            armed = true;
+            setTimeout(replace, 500);
+          });
+          original.getAttribute = (name) => {
+            if (armed) queueMicrotask(replace);
+            return read(name);
+          };
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/home", Route::Html(page("Home", body)))]).await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let armed = live
+        .call(
+            "click",
+            json!({"target":{"role":"button","accessibleName":"Arm"}}),
+        )
+        .await;
+    assert_eq!(armed["status"], "completed", "arm: {armed}");
+    let waited = live
+        .call(
+            "wait_for",
+            json!({
+                "condition":{"kind":"text","target":{"role":"status","accessibleName":"Result"},
+                             "matcher":{"kind":"contains","value":"done"}},
+                "timeoutMs":5000
+            }),
+        )
+        .await;
+    assert_eq!(waited["status"], "completed", "wait: {waited}");
     live.close().await;
 }
 
