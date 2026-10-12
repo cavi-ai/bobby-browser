@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- On Chromium, a page whose navigation never committed is listed and closes on request, so a failed `workflow_start` no longer leaves its tab open.
 - On Chromium, snapshots name a text field the accessibility tree leaves unnamed by its placeholder and give it a target.
 - On Chromium, a text or value wait whose target the page replaces mid-read keeps polling instead of failing with the raw script exception.
 - `type_text` with line breaks into a multi-line control (a textarea or editable region) completes and keeps the lines instead of failing `verificationFailed`.
