@@ -1084,7 +1084,7 @@ pub async fn resolve_target_with_visibility(
         shadow_hosts: locator_shadow_hosts,
         id: candidate.id.clone(),
     };
-    // `find_element(css)` is only safe for a unique `#id`; the collector
+    // A css lookup is only safe for a unique `#id`; the collector
     // stamps `#id` only when the id selects that element first. Tag and
     // `[aria-label=…]` stamps match more than one node; using them here
     // would click the first hit (often a wrapper) instead of the candidate
