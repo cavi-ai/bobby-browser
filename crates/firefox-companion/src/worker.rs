@@ -90,7 +90,7 @@ const COMPOSED_QUERY_ALL: ComposedQueryAllFn = ComposedQueryAllFn;
 /// Accessibility nodes read to build intent candidates.
 const CANDIDATE_MAX_NODES: u32 = 1024;
 fn frame_candidates_script() -> String {
-    format!("(()=>{{const gathered=({})(document,{{controlsOnly:true,redact:true,maxNodes:4096,maxCandidates:128}});const controls=gathered.candidates.map(c=>({{css:c.css,role:c.role||'',name:c.name||'',label:c.label||'',disabled:!c.enabled}}));const output=JSON.stringify({{truncated:gathered.truncated,controls}});return output.length<=65536?output:JSON.stringify({{truncated:true,controls:[]}});}})()", dom_engine::candidate_gather_function())
+    format!("(()=>{{const gathered=({})(document,{{controlsOnly:true,redact:true,maxNodes:4096,maxCandidates:128}});const controls=gathered.candidates.map(c=>({{css:c.css,role:c.role||'',name:c.name||'',label:c.label||'',disabled:!c.enabled,type:(c.attributes&&c.attributes.type)||''}}));const output=JSON.stringify({{truncated:gathered.truncated,controls}});return output.length<=65536?output:JSON.stringify({{truncated:true,controls:[]}});}})()", dom_engine::candidate_gather_function())
 }
 
 const DEFAULT_NAVIGATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -189,6 +189,19 @@ pub struct AccessibilitySnapshot {
     pub truncated: bool,
     #[serde(default)]
     pub target_counts: Option<Vec<worker_pool::AccessibilityTargetCount>>,
+    /// Frames whose documents the snapshotting content script cannot read,
+    /// each left as a leaf `iframe` node; their own content scripts build them.
+    #[serde(default)]
+    pub remote_frames: Vec<RemoteFrame>,
+}
+
+/// A frame of the page another content script reads: its extension frame id
+/// and the hop that re-resolves its iframe element.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoteFrame {
+    pub frame_id: u64,
+    pub hop: types::SemanticTargetSegment,
 }
 
 impl From<(Vec<types::AccessibilityNode>, bool)> for AccessibilitySnapshot {
@@ -197,6 +210,7 @@ impl From<(Vec<types::AccessibilityNode>, bool)> for AccessibilitySnapshot {
             nodes,
             truncated,
             target_counts: None,
+            remote_frames: Vec::new(),
         }
     }
 }
@@ -268,6 +282,26 @@ pub trait ExtensionObserver: Send + Sync {
         Err(driver_error(
             ErrorCode::BrowserCommandFailed,
             "accessibility snapshot is not supported by this observer",
+            false,
+        ))
+    }
+
+    /// The accessibility tree of a page frame whose document the page's own
+    /// content script cannot read, built by that frame's content script.
+    /// `frame_id` is the frame's extension id, as a snapshot's
+    /// `remote_frames` reports it.
+    async fn frame_a11y_snapshot(
+        &self,
+        lease: &AttachmentLease,
+        page_id: &PageId,
+        frame_id: u64,
+        max_nodes: u32,
+        include_text: bool,
+    ) -> Result<AccessibilitySnapshot, CommandError> {
+        let _ = (lease, page_id, frame_id, max_nodes, include_text);
+        Err(driver_error(
+            ErrorCode::BrowserCommandFailed,
+            "frame accessibility snapshot is not supported by this observer",
             false,
         ))
     }
@@ -404,6 +438,81 @@ impl CompanionExtensionObserver {
             result => result,
         }
     }
+
+    /// One `a11yTree` request: the page's frame, or the frame `input` names
+    /// by `frameId`. A scoped request whose content action fails reports the
+    /// target as missing.
+    async fn a11y_tree(
+        &self,
+        lease: &AttachmentLease,
+        page_id: &PageId,
+        input: Value,
+        scoped: bool,
+        max_nodes: u32,
+    ) -> Result<AccessibilitySnapshot, CommandError> {
+        if lease.expires_at <= Instant::now() {
+            return Err(lease_error());
+        }
+        let command_id = CommandId::new();
+        let action = ActionRequest {
+            protocol_version: PROTOCOL_VERSION,
+            attachment_id: lease.attachment_id.clone(),
+            command_id: command_id.clone(),
+            page_id: page_id.clone(),
+            operation: "a11yTree".into(),
+            input,
+            deadline_unix_ms: deadline_unix_ms(self.timeout),
+        };
+        match self
+            .dispatch_with_refresh(action, lease)
+            .await
+            .map_err(session_error)?
+        {
+            CompanionEvent::ActionCompleted(result)
+                if result.command_id == command_id
+                    && result.interaction_path == InteractionPath::ExtensionApi =>
+            {
+                let snapshot: AccessibilitySnapshot = serde_json::from_value(result.output)
+                    .map_err(|error| {
+                        driver_error(
+                            ErrorCode::BrowserCommandFailed,
+                            format!("invalid extension accessibility snapshot: {error}"),
+                            false,
+                        )
+                    })?;
+                if snapshot.nodes.len() > max_nodes as usize {
+                    return Err(driver_error(
+                        ErrorCode::BrowserCommandFailed,
+                        "extension accessibility snapshot exceeded its node bound",
+                        false,
+                    ));
+                }
+                Ok(snapshot)
+            }
+            CompanionEvent::ActionCompleted(_) => Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "extension accessibility snapshot returned an invalid execution path",
+                false,
+            )),
+            CompanionEvent::ActionFailed { code, message, .. } => Err(driver_error(
+                content_failure_code(
+                    &code,
+                    if scoped && code == "actionFailed" {
+                        ErrorCode::TargetNotFound
+                    } else {
+                        ErrorCode::BrowserCommandFailed
+                    },
+                ),
+                format!("extension accessibility snapshot failed ({code}): {message}"),
+                false,
+            )),
+            _ => Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "extension returned an unexpected accessibility snapshot event",
+                false,
+            )),
+        }
+    }
 }
 
 #[async_trait]
@@ -526,72 +635,27 @@ impl ExtensionObserver for CompanionExtensionObserver {
         target: Option<&types::TargetSpec>,
         include_text: bool,
     ) -> Result<AccessibilitySnapshot, CommandError> {
-        if lease.expires_at <= Instant::now() {
-            return Err(lease_error());
-        }
         let scope = match target {
             Some(target) => Some(a11y_scope_input(target)?),
             None => None,
         };
-        let command_id = CommandId::new();
-        let action = ActionRequest {
-            protocol_version: PROTOCOL_VERSION,
-            attachment_id: lease.attachment_id.clone(),
-            command_id: command_id.clone(),
-            page_id: page_id.clone(),
-            operation: "a11yTree".into(),
-            input: json!({"maxNodes": max_nodes, "target": scope, "includeText": include_text, "includeTargetCounts": true}),
-            deadline_unix_ms: deadline_unix_ms(self.timeout),
-        };
-        match self
-            .dispatch_with_refresh(action, lease)
+        let input = json!({"maxNodes": max_nodes, "target": scope, "includeText": include_text, "includeTargetCounts": true});
+        self.a11y_tree(lease, page_id, input, target.is_some(), max_nodes)
             .await
-            .map_err(session_error)?
-        {
-            CompanionEvent::ActionCompleted(result)
-                if result.command_id == command_id
-                    && result.interaction_path == InteractionPath::ExtensionApi =>
-            {
-                let snapshot: AccessibilitySnapshot = serde_json::from_value(result.output)
-                    .map_err(|error| {
-                        driver_error(
-                            ErrorCode::BrowserCommandFailed,
-                            format!("invalid extension accessibility snapshot: {error}"),
-                            false,
-                        )
-                    })?;
-                if snapshot.nodes.len() > max_nodes as usize {
-                    return Err(driver_error(
-                        ErrorCode::BrowserCommandFailed,
-                        "extension accessibility snapshot exceeded its node bound",
-                        false,
-                    ));
-                }
-                Ok(snapshot)
-            }
-            CompanionEvent::ActionCompleted(_) => Err(driver_error(
-                ErrorCode::BrowserCommandFailed,
-                "extension accessibility snapshot returned an invalid execution path",
-                false,
-            )),
-            CompanionEvent::ActionFailed { code, message, .. } => Err(driver_error(
-                content_failure_code(
-                    &code,
-                    if target.is_some() && code == "actionFailed" {
-                        ErrorCode::TargetNotFound
-                    } else {
-                        ErrorCode::BrowserCommandFailed
-                    },
-                ),
-                format!("extension accessibility snapshot failed ({code}): {message}"),
-                false,
-            )),
-            _ => Err(driver_error(
-                ErrorCode::BrowserCommandFailed,
-                "extension returned an unexpected accessibility snapshot event",
-                false,
-            )),
-        }
+    }
+
+    async fn frame_a11y_snapshot(
+        &self,
+        lease: &AttachmentLease,
+        page_id: &PageId,
+        frame_id: u64,
+        max_nodes: u32,
+        include_text: bool,
+    ) -> Result<AccessibilitySnapshot, CommandError> {
+        let input =
+            json!({"maxNodes": max_nodes, "frameId": frame_id, "includeText": include_text});
+        self.a11y_tree(lease, page_id, input, false, max_nodes)
+            .await
     }
 
     async fn locate_target(
@@ -775,6 +839,9 @@ struct FrameCandidateControl {
     name: String,
     label: String,
     disabled: bool,
+    /// An input's normalized type; empty for every other element.
+    #[serde(default, rename = "type")]
+    input_type: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1245,6 +1312,55 @@ impl FirefoxCompanionWorker {
     pub fn with_upload_roots(mut self, upload_roots: Vec<PathBuf>) -> Self {
         self.upload_roots = upload_roots;
         self
+    }
+
+    /// Puts each remote frame's subtree, built by that frame's own content
+    /// script, under its `iframe` node within the node budget left; every
+    /// target in it gains the frame's hop. A frame that no longer answers
+    /// stays a leaf. Returns whether the budget ran out.
+    async fn splice_remote_frames(
+        &self,
+        page_id: &PageId,
+        nodes: &mut Vec<types::AccessibilityNode>,
+        remote_frames: Vec<RemoteFrame>,
+        max_nodes: u32,
+        include_text: bool,
+    ) -> bool {
+        for frame in remote_frames {
+            let used = count_a11y_nodes(nodes);
+            let Some(left) = (max_nodes as usize)
+                .checked_sub(used)
+                .filter(|left| *left > 0)
+            else {
+                return true;
+            };
+            let Ok(mut inner) = self
+                .observer
+                .frame_a11y_snapshot(
+                    &self.current_lease(),
+                    page_id,
+                    frame.frame_id,
+                    u32::try_from(left).unwrap_or(max_nodes),
+                    include_text,
+                )
+                .await
+            else {
+                continue;
+            };
+            stamp_frame_hop(&mut inner.nodes, &frame.hop);
+            if !splice_under_frame(nodes, &frame.hop, &mut inner.nodes) {
+                nodes.push(types::AccessibilityNode {
+                    role: Some("iframe".into()),
+                    name: Some(frame.hop.accessible_name.clone()),
+                    children: inner.nodes,
+                    ..types::AccessibilityNode::default()
+                });
+            }
+            if inner.truncated {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn with_downloads_dir(mut self, downloads_dir: PathBuf) -> Self {
@@ -2146,6 +2262,11 @@ impl FirefoxCompanionWorker {
                             field.len() > MAX_CONTROL_FIELD_BYTES
                                 || !safe_frame_candidate_metadata(field)
                         })
+                    || control.input_type.len() > 32
+                    || !control
+                        .input_type
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte == b'-')
                 {
                     return Err(driver_error(
                         ErrorCode::BrowserCommandFailed,
@@ -2162,7 +2283,10 @@ impl FirefoxCompanionWorker {
                     name: (!control.name.is_empty()).then_some(control.name.clone()),
                     label: (!control.label.is_empty()).then_some(control.label),
                     text: control.name,
-                    attributes: Default::default(),
+                    attributes: (!control.input_type.is_empty())
+                        .then(|| ("type".to_owned(), control.input_type))
+                        .into_iter()
+                        .collect(),
                     state: CandidateState {
                         attached: true,
                         visible: true,
@@ -2172,6 +2296,34 @@ impl FirefoxCompanionWorker {
                 })
             })
             .collect()
+    }
+
+    /// [`Self::resolve_input_target`] for an action: a target with no frame
+    /// path that misses the page but resolves inside a frame names the frame
+    /// path that reaches it.
+    async fn resolve_action_target(
+        &self,
+        page_id: &PageId,
+        top_context: &str,
+        selector: &str,
+        target: Option<&types::TargetSpec>,
+    ) -> Result<(String, String), CommandError> {
+        let error = match self
+            .resolve_input_target(page_id, top_context, selector, target)
+            .await
+        {
+            Err(error) if error.code == ErrorCode::TargetNotFound => error,
+            resolved => return resolved,
+        };
+        let Some(target) =
+            target.filter(|target| target.frame_path.is_empty() && target.shadow_path.is_empty())
+        else {
+            return Err(error);
+        };
+        match worker_pool::ObservationEngine::collect_candidates(self, page_id, target).await {
+            Ok(census) => Err(worker_pool::name_frame_in_miss(error, target, census)),
+            Err(_) => Err(error),
+        }
     }
 
     async fn resolve_input_target(
@@ -4047,15 +4199,18 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
         target: &TargetSpec,
     ) -> Result<Vec<Candidate>, CommandError> {
         self.context(page_id).await?;
-        if !target.frame_path.is_empty() || !target.shadow_path.is_empty() {
+        if !target.shadow_path.is_empty() {
             return Err(driver_error(
                 ErrorCode::InvalidRequest,
-                "Firefox candidate collection does not support frame or shadow paths",
+                "Firefox candidate collection does not support shadow paths",
                 false,
             ));
         }
         let AccessibilitySnapshot {
-            nodes, truncated, ..
+            mut nodes,
+            truncated,
+            remote_frames,
+            ..
         } = self
             .observer
             .a11y_snapshot(
@@ -4066,6 +4221,23 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
                 false,
             )
             .await?;
+        let truncated = self
+            .splice_remote_frames(
+                page_id,
+                &mut nodes,
+                remote_frames,
+                CANDIDATE_MAX_NODES,
+                false,
+            )
+            .await
+            || truncated;
+        // A target inside a frame resolves among that frame's candidates.
+        if !target.frame_path.is_empty() {
+            return Ok(accessibility_candidates(&nodes, "firefox-a11y")
+                .into_iter()
+                .filter(|candidate| same_frame_path(&candidate.frame_path, &target.frame_path))
+                .collect());
+        }
         // Accessibility candidates carry no selector, so the companion resolves
         // a CSS target; a hidden or detached element adds no candidate.
         if let Some(css) = target.css.as_ref().filter(|css| !css.is_empty()) {
@@ -4377,19 +4549,24 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         self.context(page_id).await?;
         let max_nodes = command.max_nodes.unwrap_or(256).clamp(1, 2048);
+        // A scope inside a frame is cut from the whole tree, frames included:
+        // the page's content script cannot scope into another frame.
+        let framed_scope = command
+            .target
+            .as_ref()
+            .filter(|target| !target.frame_path.is_empty());
+        let (scope, budget) = match framed_scope {
+            Some(_) => (None, 2048),
+            None => (command.target.as_ref(), max_nodes),
+        };
         let AccessibilitySnapshot {
             mut nodes,
             truncated,
             target_counts,
+            remote_frames,
         } = self
             .observer
-            .a11y_snapshot(
-                &self.current_lease(),
-                page_id,
-                max_nodes,
-                command.target.as_ref(),
-                true,
-            )
+            .a11y_snapshot(&self.current_lease(), page_id, budget, scope, true)
             .await?;
         let mut totals = worker_pool::accessibility_target_totals(&nodes);
         let mut preceding = std::collections::BTreeMap::new();
@@ -4430,6 +4607,20 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
             }
         }
         worker_pool::annotate_accessibility_targets(&mut nodes, &totals, preceding);
+        let truncated = self
+            .splice_remote_frames(page_id, &mut nodes, remote_frames, budget, true)
+            .await
+            || truncated;
+        if let Some(target) = framed_scope {
+            let found = framed_subtree(&nodes, target).ok_or_else(|| {
+                driver_error(
+                    ErrorCode::TargetNotFound,
+                    "no node inside the frame matches the snapshot target",
+                    false,
+                )
+            })?;
+            nodes = vec![found];
+        }
         // Only a whole, unscoped tree can show that a control is missing from it.
         let controls_omitted =
             if truncated || command.target.is_some() || accessibility_contains_form_control(&nodes)
@@ -4510,7 +4701,7 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
         // snapshot's projection; snapshot names can differ from resolver names.
         let top_context = self.context(page_id).await?;
         let (context, selector) = self
-            .resolve_input_target(page_id, &top_context, "", Some(&target))
+            .resolve_action_target(page_id, &top_context, "", Some(&target))
             .await?;
         let control = self
             .describe_control(&context, &selector, &command.target)
@@ -4626,7 +4817,7 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
             })?;
         let replaced = async || -> Result<Option<FormControl>, CommandError> {
             let (context, selector) = self
-                .resolve_input_target(page_id, &top_context, "", Some(&target))
+                .resolve_action_target(page_id, &top_context, "", Some(&target))
                 .await?;
             self.describe_control(&context, &selector, &command.target)
                 .await
@@ -4770,7 +4961,7 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
                 (context, shared_id)
             } else {
                 let (context, selector) = self
-                    .resolve_input_target(
+                    .resolve_action_target(
                         page_id,
                         &top_context,
                         &command.selector,
@@ -4874,7 +5065,7 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
         .await?;
         let context = self.context(page_id).await?;
         let (context, selector) = self
-            .resolve_input_target(
+            .resolve_action_target(
                 page_id,
                 &context,
                 &command.selector,
@@ -5005,7 +5196,7 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
             }
         }
         let (context, selector) = self
-            .resolve_input_target(
+            .resolve_action_target(
                 page_id,
                 &context,
                 &command.selector,
@@ -6816,6 +7007,95 @@ fn is_text_only_inspect_target(target: &types::TargetSpec) -> bool {
 }
 
 #[cfg(test)]
+mod remote_frame_tests {
+    use super::{same_frame_path, splice_under_frame, stamp_frame_hop};
+
+    fn hop(name: &str, ordinal: Option<usize>) -> types::SemanticTargetSegment {
+        types::SemanticTargetSegment {
+            role: "iframe".into(),
+            accessible_name: name.into(),
+            ordinal,
+        }
+    }
+
+    fn frame_tree() -> Vec<types::AccessibilityNode> {
+        serde_json::from_value(serde_json::json!([
+            {"role":"iframe","target":{"role":"iframe","accessibleName":"Widget","ordinal":0}},
+            {"role":"main","children":[
+                {"role":"iframe","target":{"role":"iframe","accessibleName":"Widget","ordinal":1}},
+                {"role":"iframe"}
+            ]}
+        ]))
+        .unwrap()
+    }
+
+    fn close_button() -> Vec<types::AccessibilityNode> {
+        serde_json::from_value(serde_json::json!([
+            {"role":"button","target":{"role":"button","accessibleName":"Close"}}
+        ]))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_frame_subtree_lands_under_the_iframe_its_hop_names() {
+        let mut nodes = frame_tree();
+        let mut inner = close_button();
+        stamp_frame_hop(&mut inner, &hop("Widget", Some(1)));
+        assert!(splice_under_frame(
+            &mut nodes,
+            &hop("Widget", Some(1)),
+            &mut inner
+        ));
+        assert!(nodes[0].children.is_empty());
+        let spliced = &nodes[1].children[0].children[0];
+        let target = spliced.target.as_ref().unwrap();
+        assert_eq!(target.frame_path, vec![hop("Widget", Some(1))]);
+    }
+
+    #[test]
+    fn an_unnamed_frame_is_found_by_its_empty_name() {
+        let mut nodes = frame_tree();
+        let mut inner = close_button();
+        assert!(splice_under_frame(&mut nodes, &hop("", None), &mut inner));
+        assert_eq!(nodes[1].children[1].children.len(), 1);
+    }
+
+    #[test]
+    fn a_hop_with_no_matching_iframe_is_reported() {
+        let mut nodes = frame_tree();
+        let mut inner = close_button();
+        assert!(!splice_under_frame(
+            &mut nodes,
+            &hop("Advertisement", None),
+            &mut inner
+        ));
+    }
+
+    #[test]
+    fn frame_paths_match_by_role_name_and_ordinal() {
+        let found = vec![Box::new(types::TargetSpec {
+            role: Some("iframe".into()),
+            accessible_name: Some("Widget".into()),
+            ordinal: Some(1),
+            ..types::TargetSpec::default()
+        })];
+        let wanted = |name: Option<&str>, ordinal: Option<usize>| {
+            vec![Box::new(types::TargetSpec {
+                role: Some("iframe".into()),
+                accessible_name: name.map(str::to_owned),
+                ordinal,
+                ..types::TargetSpec::default()
+            })]
+        };
+        assert!(same_frame_path(&found, &wanted(Some("Widget"), Some(1))));
+        assert!(same_frame_path(&found, &wanted(None, None)));
+        assert!(!same_frame_path(&found, &wanted(Some("Widget"), Some(0))));
+        assert!(!same_frame_path(&found, &wanted(Some("Other"), None)));
+        assert!(!same_frame_path(&found, &[]));
+    }
+}
+
+#[cfg(test)]
 mod wait_scope_contract {
     #[test]
     fn body_text_target_keeps_its_selected_frame() {
@@ -7021,6 +7301,122 @@ fn content_failure_code(code: &str, fallback: ErrorCode) -> ErrorCode {
 /// a landmark such as `main` carries no CSS identity in the control candidates
 /// the click path resolves against, so the page-side walk that annotates
 /// snapshot targets (same role + accessible-name + ordinal key) resolves it.
+/// Prepends `hop` to the frame path of every target under `nodes`.
+fn stamp_frame_hop(nodes: &mut [types::AccessibilityNode], hop: &types::SemanticTargetSegment) {
+    for node in nodes {
+        if let Some(target) = node.target.as_mut() {
+            target.frame_path.insert(0, hop.clone());
+        }
+        stamp_frame_hop(&mut node.children, hop);
+    }
+}
+
+/// Puts `frame_nodes` under the `iframe` node `hop` names: the iframe with
+/// the hop's name at the hop's ordinal (0 without one), in document order.
+/// `false` when `nodes` holds no such iframe.
+fn splice_under_frame(
+    nodes: &mut [types::AccessibilityNode],
+    hop: &types::SemanticTargetSegment,
+    frame_nodes: &mut Vec<types::AccessibilityNode>,
+) -> bool {
+    fn visit(
+        nodes: &mut [types::AccessibilityNode],
+        hop: &types::SemanticTargetSegment,
+        seen: &mut usize,
+        frame_nodes: &mut Vec<types::AccessibilityNode>,
+    ) -> bool {
+        for node in nodes {
+            let name = node
+                .name
+                .as_deref()
+                .or_else(|| {
+                    node.target
+                        .as_ref()
+                        .map(|target| target.accessible_name.as_str())
+                })
+                .unwrap_or("");
+            if node.role.as_deref() == Some("iframe") && name == hop.accessible_name {
+                if *seen == hop.ordinal.unwrap_or(0) {
+                    node.children = std::mem::take(frame_nodes);
+                    return true;
+                }
+                *seen += 1;
+            }
+            if visit(&mut node.children, hop, seen, frame_nodes) {
+                return true;
+            }
+        }
+        false
+    }
+    visit(nodes, hop, &mut 0, frame_nodes)
+}
+
+fn count_a11y_nodes(nodes: &[types::AccessibilityNode]) -> usize {
+    nodes
+        .iter()
+        .map(|node| 1 + count_a11y_nodes(&node.children))
+        .sum()
+}
+
+/// Whether a candidate's frame hops are the ones `target` names. An unnamed
+/// hop matches any name and a hop without an ordinal matches any ordinal.
+fn same_frame_path(
+    candidate: &[Box<types::TargetSpec>],
+    target: &[Box<types::TargetSpec>],
+) -> bool {
+    candidate.len() == target.len()
+        && candidate.iter().zip(target).all(|(found, wanted)| {
+            found.role == wanted.role
+                && wanted.accessible_name.as_ref().is_none_or(|name| {
+                    name.is_empty() || found.accessible_name.as_ref() == Some(name)
+                })
+                && wanted
+                    .ordinal
+                    .is_none_or(|ordinal| found.ordinal == Some(ordinal))
+        })
+}
+
+/// The node `target` names inside a frame: same role, name, ordinal and frame
+/// hops, searched in a snapshot that already holds the frames' subtrees.
+fn framed_subtree(
+    nodes: &[types::AccessibilityNode],
+    target: &types::TargetSpec,
+) -> Option<types::AccessibilityNode> {
+    for node in nodes {
+        if let Some(found) = node.target.as_ref() {
+            let hops: Vec<Box<types::TargetSpec>> = found
+                .frame_path
+                .iter()
+                .map(|segment| {
+                    Box::new(types::TargetSpec {
+                        role: Some(segment.role.clone()),
+                        accessible_name: (!segment.accessible_name.is_empty())
+                            .then(|| segment.accessible_name.clone()),
+                        ordinal: segment.ordinal,
+                        ..types::TargetSpec::default()
+                    })
+                })
+                .collect();
+            if target.role.as_deref() == Some(found.role.as_str())
+                && target
+                    .accessible_name
+                    .as_ref()
+                    .is_none_or(|name| *name == found.accessible_name)
+                && target
+                    .ordinal
+                    .is_none_or(|ordinal| found.ordinal == Some(ordinal))
+                && same_frame_path(&hops, &target.frame_path)
+            {
+                return Some(node.clone());
+            }
+        }
+        if let Some(found) = framed_subtree(&node.children, target) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 fn a11y_scope_input(target: &types::TargetSpec) -> Result<Value, CommandError> {
     if !target.frame_path.is_empty() || !target.shadow_path.is_empty() {
         return Err(driver_error(

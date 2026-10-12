@@ -190,6 +190,26 @@ function validBrowserId(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
 }
 
+/**
+ * The frame a content action runs in: the lease's own frame, or for a
+ * read-only accessibility tree, another frame of the leased tab named by its
+ * extension frame id.
+ */
+function contentRoute(
+  lease: { frameId: number },
+  operation: string,
+  input: unknown,
+): { frameId: number; input: unknown } {
+  if (operation !== "a11yTree" || !object(input) || !("frameId" in input)) {
+    return { frameId: lease.frameId, input };
+  }
+  const { frameId, ...rest } = input;
+  if (!validBrowserId(frameId)) {
+    throw new ContentFailureError("invalidInput", "the requested frame id is not valid");
+  }
+  return { frameId, input: rest };
+}
+
 function supportedFrameUrl(value: unknown): value is string {
   if (typeof value !== "string" || value.length === 0) return false;
   try {
@@ -608,6 +628,7 @@ export class CompanionBackground {
     input: unknown,
     deadlineUnixMs: number,
   ): Promise<unknown> {
+    const route = contentRoute(lease, operation, input);
     const attempts = operation === "observe" ? OBSERVATION_RECEIVER_ATTEMPTS : 1;
     let lastError: unknown = new Error("the content receiver returned no result");
     for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -619,8 +640,8 @@ export class CompanionBackground {
         const output = await Promise.race([
           this.#dependencies.sendTabMessage(
             lease.tabId,
-            { type: "companionAction", operation, input },
-            lease.frameId,
+            { type: "companionAction", operation, input: route.input },
+            route.frameId,
           ),
           new Promise<never>((_resolve, reject) => {
             timeout = setTimeout(() => reject(new ContentDeadlineError()), remaining);

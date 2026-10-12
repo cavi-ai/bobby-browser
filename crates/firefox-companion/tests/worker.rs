@@ -1014,7 +1014,7 @@ async fn scoped_snapshot_consumes_page_counts_and_rejects_invalid_counts() {
 }
 
 #[tokio::test]
-async fn semantic_candidate_collection_rejects_unsupported_scoped_paths() {
+async fn semantic_candidate_collection_rejects_shadow_paths_and_scopes_frame_paths() {
     let worker = FirefoxCompanionWorker::new(
         WorkerId::new(),
         PathBuf::from("/profiles/firefox"),
@@ -1030,22 +1030,13 @@ async fn semantic_candidate_collection_rejects_unsupported_scoped_paths() {
         .await
         .unwrap();
 
-    for target in [
-        TargetSpec {
-            frame_path: vec![Box::new(TargetSpec {
-                css: Some("iframe".into()),
-                ..TargetSpec::default()
-            })],
+    for target in [TargetSpec {
+        shadow_path: vec![Box::new(TargetSpec {
+            css: Some("custom-element".into()),
             ..TargetSpec::default()
-        },
-        TargetSpec {
-            shadow_path: vec![Box::new(TargetSpec {
-                css: Some("custom-element".into()),
-                ..TargetSpec::default()
-            })],
-            ..TargetSpec::default()
-        },
-    ] {
+        })],
+        ..TargetSpec::default()
+    }] {
         let error = worker_pool::observation_or_default(worker.observation())
             .collect_candidates(&page_id, &target)
             .await
@@ -1053,10 +1044,27 @@ async fn semantic_candidate_collection_rejects_unsupported_scoped_paths() {
         assert_eq!(error.code, ErrorCode::InvalidRequest);
         assert_eq!(
             error.message,
-            "Firefox candidate collection does not support frame or shadow paths"
+            "Firefox candidate collection does not support shadow paths"
         );
         assert!(!error.retryable);
     }
+
+    // A frame path keeps only candidates inside that frame; this page has none.
+    let framed = worker_pool::observation_or_default(worker.observation())
+        .collect_candidates(
+            &page_id,
+            &TargetSpec {
+                frame_path: vec![Box::new(TargetSpec {
+                    role: Some("iframe".into()),
+                    accessible_name: Some("Widget".into()),
+                    ..TargetSpec::default()
+                })],
+                ..TargetSpec::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(framed.is_empty(), "{framed:?}");
 }
 
 #[tokio::test]

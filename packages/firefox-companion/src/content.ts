@@ -1087,13 +1087,19 @@ function a11yTree(
   locateOnly = false,
   includeText = false,
   includeTargetCounts = false,
-): { nodes: A11yNode[]; truncated: boolean; located?: LocatedTarget; targetCounts?: A11yTargetCount[] } {
+): {
+  nodes: A11yNode[];
+  truncated: boolean;
+  located?: LocatedTarget;
+  targetCounts?: A11yTargetCount[];
+  remoteFrames?: RemoteFrame[];
+} {
   let maxNodes = 256;
   if (typeof maxNodesInput === "number" && Number.isSafeInteger(maxNodesInput)) {
     maxNodes = Math.min(Math.max(1, maxNodesInput), A11Y_MAX_NODES);
   }
   const root = document.documentElement;
-  const state = { remaining: maxNodes, truncated: false };
+  const state = { remaining: maxNodes, truncated: false, remoteFrames: [] as RemoteFrame[] };
   if (!root) return { nodes: [], truncated: false };
   const labelsByControlId = new Map<string, Element>();
   for (const label of Array.from(document.querySelectorAll("label[for]")).slice(0, 4_096)) {
@@ -1319,19 +1325,30 @@ function a11yTree(
 
   // A same-origin frame's tree is built from its own document; each target in
   // it carries the hop that re-resolves the iframe element, so it passes to
-  // the click path verbatim. Cross-origin frames stay a leaf.
+  // the click path verbatim. A frame whose document this script cannot read
+  // stays a leaf here and is reported by its extension frame id, so its own
+  // content script builds that subtree.
   const frameSeen = new Map<string, number>(scopeSeen ?? []);
   const frameNodes = (frame: HTMLIFrameElement, name: string): A11yNode[] => {
     const key = targetKey("iframe", name);
     const seen = frameSeen.get(key) ?? 0;
     frameSeen.set(key, seen + 1);
+    const hop = {
+      role: "iframe",
+      accessibleName: name,
+      ...(targetTotals.get(key)! > 1 ? { ordinal: seen } : {}),
+    };
     let frameDocument: Document | null = null;
     try {
       frameDocument = frame.contentDocument;
     } catch {
+      frameDocument = null;
+    }
+    if (!frameDocument?.documentElement) {
+      const frameId = remoteFrameId(frame);
+      if (frameId !== undefined) state.remoteFrames.push({ frameId, hop });
       return [];
     }
-    if (!frameDocument?.documentElement) return [];
     if (state.remaining <= 0) {
       state.truncated = true;
       return [];
@@ -1341,11 +1358,6 @@ function a11yTree(
     const count = (nodes: A11yNode[]): number =>
       nodes.reduce((total, node) => total + 1 + count(node.children ?? []), 0);
     state.remaining = Math.max(0, state.remaining - count(inner.nodes));
-    const hop = {
-      role: "iframe",
-      accessibleName: name,
-      ...(targetTotals.get(key)! > 1 ? { ordinal: seen } : {}),
-    };
     const stamp = (nodes: A11yNode[]): void => {
       for (const node of nodes) {
         if (node.target) node.target.framePath = [hop, ...(node.target.framePath ?? [])];
@@ -1528,7 +1540,24 @@ function a11yTree(
   if (state.remaining <= 0) state.truncated = true;
   return { nodes: sent, truncated: state.truncated,
     ...(includeTargetCounts ? { targetCounts: [...targetCounts.values()] } : {}),
+    ...(state.remoteFrames.length ? { remoteFrames: state.remoteFrames } : {}),
   };
+}
+
+/** A frame whose document another content script reads, and the hop to it. */
+type RemoteFrame = {
+  frameId: number;
+  hop: { role: string; accessibleName: string; ordinal?: number };
+};
+
+/** The extension frame id of `frame`, which this script cannot read. */
+function remoteFrameId(frame: HTMLIFrameElement): number | undefined {
+  try {
+    const id = typeof browser === "undefined" ? undefined : browser.runtime.getFrameId?.(frame);
+    return typeof id === "number" && Number.isSafeInteger(id) && id > 0 ? id : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function executeContentAction(
@@ -1595,6 +1624,7 @@ export function contentActionReply(document: Document, operation: string, input:
 
 type ContentBrowserApi = {
   runtime: {
+    getFrameId?(target: unknown): number;
     sendMessage(message: unknown): Promise<unknown>;
     onMessage: {
       addListener(listener: (message: unknown) => unknown): void;
