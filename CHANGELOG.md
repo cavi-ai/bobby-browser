@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.20.0 - 2026-10-12
+
 ### Fixed
 
 - `intent_fill` and `control_action` act on a control the form snapshot names differently, such as one named by its title or inside a shadow root, instead of failing `targetNotFound`.
@@ -10,10 +12,8 @@
 - Headed Chromium starts without Chrome's unsupported command-line flag warning bar.
 - `type_text` into a field the page swaps for an editor as it takes focus waits for focus to settle and types the whole value into the editor, instead of losing the first keys.
 
-## 0.20.0 - 2026-10-12
-
-### Fixed
-
+- Journal records, checkpoints and skill-issuance files default to a 64 MiB byte limit. Oversized journal files are preserved in an archive with a warning; oversized checkpoint reads and writes fail without replacing stored data. The journal and checkpoint store APIs accept configurable limits.
+- On Unix, a command journal with multiple hard links is archived before a fresh journal starts, so appends do not change the other links. This link-count protection does not apply on Windows.
 - A command or job journal path that is not a regular file is archived with a warning and a fresh journal starts; read-only inspection refuses such a path instead of reading it as history.
 - On headed Chromium, clicks and typing on a visible page no longer bring the browser window to the front and take the desktop's keyboard focus.
 - On Chromium, a page whose navigation never committed is listed and closes on request, so a failed `workflow_start` no longer leaves its tab open.
