@@ -934,18 +934,20 @@ impl ChromiumWorker {
     /// Humanized typing: focus the target, then replay `behavioral-engine`
     /// key actions over CDP with their synthesized delays. Returns
     /// `(action_count, synthesized_ms)` for `Humanization` evidence, which is
-    /// emitted only when this path ran.
+    /// emitted only when this path ran, and whether a page-swapped replacement
+    /// control took the keys.
     async fn humanized_type_text(
         &self,
         page: &Page,
         resolved: &crate::targeting::ResolvedTarget,
         value: &str,
         clear_first: bool,
-    ) -> Result<(u32, u64), CommandError> {
+    ) -> Result<(u32, u64, bool), CommandError> {
         // Headless pages have no focus by default; without this the element
         // click cannot focus the input and every key event lands on <body>.
         page.activate().await.map_err(command_failed)?;
         resolved.click(page).await?;
+        let replaced = resolved.settle_focus(page).await?;
         let actions = {
             let mut random = self.session_random.lock().await;
             let mut actions = Vec::new();
@@ -970,7 +972,11 @@ impl ChromiumWorker {
         // Ctrl/Cmd+A loops against Chrome's command pipeline: one chord yields
         // hundreds of phantom keydowns. Backspace over the text instead.
         let actions = if clear_first {
-            let existing = resolved.value(page).await?.unwrap_or_default();
+            let existing = if replaced {
+                resolved.focused_text(page).await?
+            } else {
+                resolved.value(page).await?.unwrap_or_default()
+            };
             let backspaces = u32::try_from(existing.chars().count()).unwrap_or(u32::MAX);
             actions
                 .into_iter()
@@ -991,7 +997,7 @@ impl ChromiumWorker {
         for action in &actions {
             self.replay_typing_action(page, action).await?;
         }
-        Ok((count, synthesized_ms))
+        Ok((count, synthesized_ms, replaced))
     }
 
     async fn replay_typing_action(
@@ -2594,6 +2600,7 @@ impl crate::InputEngine for ChromiumWorker {
         ensure_editable_control(&page, &resolved).await?;
         self.bring_page_to_front(&page).await;
         let mut humanization_evidence = None;
+        let mut replaced = false;
         let (observed, control_kind) = if resolved.is_checkable(&page).await? {
             let checked = command.value.parse::<bool>().map_err(|_| {
                 driver_error(
@@ -2620,10 +2627,16 @@ impl crate::InputEngine for ChromiumWorker {
                 actions: synthesized.0,
                 synthesized_ms: synthesized.1,
             });
+            replaced = synthesized.2;
             // Enter in the text submits the form; when the page navigates
             // the control is gone and cannot be read back.
             let submitted_with_enter = command.value.contains(['\n', '\r']);
-            let observed = match resolved.value(&page).await {
+            let read_back = if replaced {
+                resolved.focused_text(&page).await.map(Some)
+            } else {
+                resolved.value(&page).await
+            };
+            let observed = match read_back {
                 Ok(value) => value.unwrap_or_default(),
                 Err(_) if submitted_with_enter => command.value.replace(['\n', '\r'], ""),
                 Err(error) => return Err(error),
@@ -2634,16 +2647,22 @@ impl crate::InputEngine for ChromiumWorker {
             // The field is read before a trailing Enter, which may submit
             // and replace the page.
             let text = command.value.trim_end_matches(['\n', '\r']);
-            resolved.type_text(&page, text, command.clear_first).await?;
-            let observed = resolved.value(&page).await?.unwrap_or_default();
+            replaced = resolved.type_text(&page, text, command.clear_first).await?;
+            let observed = if replaced {
+                resolved.focused_text(&page).await?
+            } else {
+                resolved.value(&page).await?.unwrap_or_default()
+            };
             for _ in text.len()..command.value.len() {
                 resolved.press_enter(&page).await?;
             }
             (observed, "text")
         };
+        // A replaced field is gone or inert; the replacement has no validity
+        // state of its own to report.
         let validity = match resolved.form_control_validity(&page).await {
             Ok(validity) => validity,
-            Err(_) if command.value.contains(['\n', '\r']) => {
+            Err(_) if replaced || command.value.contains(['\n', '\r']) => {
                 crate::targeting::FormControlValidity {
                     valid: true,
                     validation_message: String::new(),
@@ -2670,6 +2689,12 @@ impl crate::InputEngine for ChromiumWorker {
             },
             resolved.evidence,
         ];
+        if replaced {
+            evidence.push(Evidence::Configuration {
+                name: "typedControlReplaced".into(),
+                value: "true".into(),
+            });
+        }
         if let Some(humanization) = humanization_evidence {
             evidence.push(humanization);
         }
@@ -2762,7 +2787,7 @@ impl crate::InputEngine for ChromiumWorker {
         let mut committed: Option<Vec<String>> = None;
         match &command.action {
             ControlAction::SetText { value, clear_first } => {
-                resolved.type_text(&page, value, *clear_first).await?
+                resolved.type_text(&page, value, *clear_first).await?;
             }
             ControlAction::SetChecked { checked } => {
                 resolved.set_checked(&page, *checked).await?;

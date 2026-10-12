@@ -292,10 +292,15 @@ impl ResolvedTarget {
     /// Empties an editable region with select-all and Backspace. Rich-text
     /// editors that own their DOM revert direct edits but accept these keys.
     pub async fn clear_editable(&self, page: &Page) -> Result<(), CommandError> {
+        self.eval::<bool>(page, "el.focus(); return true").await?;
+        self.clear_focused(page).await
+    }
+
+    /// Select-all and Backspace on the focused control.
+    async fn clear_focused(&self, page: &Page) -> Result<(), CommandError> {
         use chromiumoxide::cdp::browser_protocol::input::{
             DispatchKeyEventParams, DispatchKeyEventType,
         };
-        self.eval::<bool>(page, "el.focus(); return true").await?;
         // Cmd on macOS, Ctrl elsewhere; the editing command performs the
         // selection, so the chord carries no text.
         let modifiers = if cfg!(target_os = "macos") { 4 } else { 2 };
@@ -330,12 +335,45 @@ impl ResolvedTarget {
         Ok(())
     }
 
+    /// The text of the focused control in the target's document: what typing
+    /// reached once focus moved off the target to a replacement control.
+    pub async fn focused_text(&self, page: &Page) -> Result<String, CommandError> {
+        let script = crate::typed_focus::FOCUSED_TEXT_SCRIPT;
+        if let Some(element) = &self.native {
+            let value = element
+                .call_js_fn_by_value(
+                    format!("function() {{ const doc=this.ownerDocument; {script} }}"),
+                    false,
+                )
+                .await
+                .map_err(cdp_error)?;
+            return serde_json::from_value(value)
+                .map_err(|error| target_error(ErrorCode::BrowserCommandFailed, error));
+        }
+        let expression = scoped_expression(
+            &self.locator.scope,
+            &self.locator.shadow_hosts,
+            &format!("const doc=root.ownerDocument||root;{script}"),
+        )?;
+        eval_scoped(self.execution_page(page), &self.locator.scope, expression).await
+    }
+
+    /// Waits for focus to settle after the target was focused; true when the
+    /// page swapped in another editable control that took focus. Keys sent
+    /// before focus settles land in the field being removed.
+    pub async fn settle_focus(&self, page: &Page) -> Result<bool, CommandError> {
+        self.eval::<bool>(page, crate::typed_focus::FOCUS_SETTLE_SCRIPT)
+            .await
+    }
+
+    /// Types into the target and returns whether a page-swapped replacement
+    /// control took focus, and the keys, instead of the target.
     pub async fn type_text(
         &self,
         page: &Page,
         value: &str,
         clear_first: bool,
-    ) -> Result<(), CommandError> {
+    ) -> Result<bool, CommandError> {
         // Keys go to the focused control: a native target is clicked into, any
         // other is focused through its locator.
         match &self.native {
@@ -346,7 +384,10 @@ impl ResolvedTarget {
                 self.eval::<bool>(page, "el.focus(); return true").await?;
             }
         }
-        if clear_first {
+        let replaced = self.settle_focus(page).await?;
+        if clear_first && replaced {
+            self.clear_focused(page).await?;
+        } else if clear_first {
             let editable = self
                 .eval::<bool>(
                     page,
@@ -386,7 +427,7 @@ impl ResolvedTarget {
                     .map_err(cdp_error)?;
             }
         }
-        Ok(())
+        Ok(replaced)
     }
 
     pub async fn is_select(&self, page: &Page) -> Result<bool, CommandError> {
@@ -558,12 +599,11 @@ impl ResolvedTarget {
         page: &Page,
         operation: &str,
     ) -> Result<T, CommandError> {
+        // A returned promise is awaited on every path, as page evaluation
+        // already does.
         if let Some(element) = &self.native {
             let value = element
-                .call_js_fn_by_value(
-                    format!("function() {{ const el=this; {operation} }}"),
-                    false,
-                )
+                .call_js_fn_by_value(format!("function() {{ const el=this; {operation} }}"), true)
                 .await
                 .map_err(cdp_error)?;
             return serde_json::from_value(value)
@@ -2006,7 +2046,7 @@ async fn eval_scoped<T: DeserializeOwned>(
         }
         LocatorScope::ClosedRoot(element) => {
             let value = element
-                .call_js_fn_by_value(expression, false)
+                .call_js_fn_by_value(expression, true)
                 .await
                 .map_err(cdp_error)?;
             serde_json::from_value(value)

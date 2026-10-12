@@ -1,0 +1,12 @@
+//! Page scripts that follow focus when a page swaps a field for another
+//! editable control as it takes focus, such as a placeholder that loads an
+//! editor.
+
+/// Function body with `el` bound. Resolves once focus has rested on one
+/// element for 50 ms (500 ms at most), to whether focus moved off `el` to
+/// another editable control.
+pub const FOCUS_SETTLE_SCRIPT: &str = "const focused=()=>{let a=el.ownerDocument.activeElement;while(a&&a.shadowRoot&&a.shadowRoot.activeElement)a=a.shadowRoot.activeElement;return a};const editable=a=>a.isContentEditable||a.tagName==='INPUT'||a.tagName==='TEXTAREA';return new Promise(resolve=>{const start=performance.now();let last=focused(),since=start;const poll=()=>{const now=focused(),at=performance.now();if(now!==last){last=now;since=at}if(at-since>=50||at-start>=500){resolve(Boolean(now&&now!==el&&!el.contains(now)&&editable(now)));return}setTimeout(poll,10)};setTimeout(poll,10)});";
+
+/// Function body with `doc` bound: the value of the focused input or text
+/// area, or the text of the focused editable region.
+pub const FOCUSED_TEXT_SCRIPT: &str = "let a=doc.activeElement;while(a&&a.shadowRoot&&a.shadowRoot.activeElement)a=a.shadowRoot.activeElement;if(!a)return '';if('value'in a&&(a.tagName==='INPUT'||a.tagName==='TEXTAREA'))return String(a.value);return a.isContentEditable?String(a.innerText||a.textContent||''):'';";

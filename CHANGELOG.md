@@ -8,6 +8,7 @@
 - Clearing an editable region, by `clear` or `type_text` with `clearFirst`, sends select-all and Backspace, so rich-text editors that restore direct DOM edits clear.
 - On Firefox, `clear` empties a text input instead of only unchecking it.
 - Headed Chromium starts without Chrome's unsupported command-line flag warning bar.
+- `type_text` into a field the page swaps for an editor as it takes focus waits for focus to settle and types the whole value into the editor, instead of losing the first keys.
 
 ## 0.20.0 - 2026-10-12
 

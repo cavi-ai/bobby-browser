@@ -77,6 +77,7 @@ macro_rules! every_case {
             a_copied_control_resolves_apart_from_its_original,
             concurrent_scoped_snapshots_resolve_their_own_targets,
             fill_clears_controls_the_form_snapshot_cannot_name,
+            typing_follows_focus_into_a_swapped_editor,
             $($extra,)*
         }
     };
@@ -3798,5 +3799,39 @@ pub async fn fill_clears_controls_the_form_snapshot_cannot_name(rig: &Rig) {
             "{name} kept its text: {field}"
         );
     }
+    live.close().await;
+}
+
+/// A field the page swaps for an editor shortly after it takes focus:
+/// type_text waits for focus to settle, types the whole value into the editor
+/// and verifies it there.
+pub async fn typing_follows_focus_into_a_swapped_editor(rig: &Rig) {
+    let body = r#"<main><div id="box"><textarea aria-label="Comment"></textarea></div></main>
+        <script>
+          const box = document.getElementById("box");
+          box.querySelector("textarea").addEventListener("focus", () => {
+            setTimeout(() => {
+              box.innerHTML = '<div contenteditable="true" role="textbox" aria-label="Comment editor"></div>';
+              box.firstElementChild.focus();
+            }, 20);
+          }, {once: true});
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/swap", Route::Html(page("Swap", body)))]).await;
+    let live = Live::open(rig, &site.url("/swap")).await;
+    let typed = live
+        .call(
+            "type_text",
+            json!({"target":{"role":"textbox","accessibleName":"Comment"},
+                   "value":"swapped text"}),
+        )
+        .await;
+    assert_eq!(typed["status"], "completed", "type_text: {typed}");
+    let editor = live
+        .snapshot(json!({"target":{"role":"textbox","accessibleName":"Comment editor"}}))
+        .await;
+    assert!(
+        editor.to_string().contains("swapped text"),
+        "the editor did not get the whole text: {editor}"
+    );
     live.close().await;
 }
