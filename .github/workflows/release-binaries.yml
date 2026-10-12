@@ -1,32 +1,18 @@
 name: Release binaries
 
 on:
-  pull_request:
-    paths:
-      - ".github/workflows/release-binaries.yml"
-      - "scripts/install.sh"
-      - "scripts/install.ps1"
-      - "scripts/certify-release-install.py"
-      - "scripts/install-release.test.sh"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "crates/cli/**"
-      - "crates/mcp-gateway/**"
-      - "crates/acp-gateway/**"
-      - "packages/firefox-companion/**"
-      - "scripts/vision-mlx/**"
   workflow_dispatch:
     inputs:
       tag:
         description: Published release tag to attach assets to, e.g. v0.3.0
-        required: false
+        required: true
         type: string
   push:
     tags:
       - "v*"
 
 concurrency:
-  group: release-binaries-${{ github.ref }}
+  group: release-binaries-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 permissions:
@@ -35,15 +21,17 @@ permissions:
 jobs:
   # addons.mozilla.org accepts one upload per extension version, so the
   # companion is signed once, on the tag push, before the platform builds.
-  # Pull requests and manual re-attach runs skip it. Unlisted: AMO signs the
+  # Manual re-attach runs reuse the published XPI. Unlisted: AMO signs the
   # build without listing it.
   sign-companion:
-    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
     outputs:
       signed: ${{ steps.sign.outputs.signed }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
@@ -92,7 +80,7 @@ jobs:
 
   build:
     needs: sign-companion
-    # Pull requests skip signing and still build every platform.
+    # Manual re-attach runs skip signing and reuse the released companion.
     if: ${{ !cancelled() && (needs.sign-companion.result == 'success' || needs.sign-companion.result == 'skipped') }}
     strategy:
       fail-fast: false
@@ -123,6 +111,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       # No `version:` input. pnpm/action-setup@v6 errors on a version given both
       # here and as `packageManager` in package.json, which failed all five
       # v0.9.0 binary builds. ci.yml, publish.yml, and publish-docs.yml already
@@ -147,6 +137,18 @@ jobs:
         with:
           name: bobby-firefox-companion-signed
           path: packages/firefox-companion/dist
+      - name: Reuse the published companion for manual re-attach
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern bobby-firefox-companion.xpi \
+            --dir packages/firefox-companion/dist
+          unzip -l packages/firefox-companion/dist/bobby-firefox-companion.xpi | grep -q 'META-INF/mozilla.rsa'
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -230,6 +232,8 @@ jobs:
       version: ${{ steps.release.outputs.version }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/download-artifact@v8
         with:
           path: dist
@@ -283,5 +287,5 @@ jobs:
     uses: ./.github/workflows/publish-docs.yml
     with:
       version: ${{ needs.release.outputs.version }}
-      dry_run: "false"
+      dry_run: ${{ 'false' }}
     secrets: inherit

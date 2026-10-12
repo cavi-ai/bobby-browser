@@ -69,7 +69,14 @@ test("release archives certify clean installs and upgrades on every release plat
     readFile(new URL("../certify-release-install.py", import.meta.url), "utf8"),
   ]);
 
-  assert.match(releaseWorkflow, /pull_request:/);
+  assert.doesNotMatch(releaseWorkflow, /pull_request:/);
+  assert.match(releaseWorkflow, /push:\s+tags:\s+- "v\*"/);
+  assert.match(releaseWorkflow, /tag:\s+description:[^\n]+\s+required: true/);
+  assert.equal(
+    releaseWorkflow.match(/ref: \$\{\{ inputs\.tag \|\| github\.ref \}\}/g)?.length,
+    3,
+    "signing, packaging, and release notes must use the selected release revision",
+  );
   assert.match(releaseWorkflow, /certify-release-install\.py/);
   assert.match(releaseWorkflow, /--asset-os "\$\{\{ matrix\.asset_os \}\}"/);
   assert.match(releaseWorkflow, /python -m zipfile -c/);
