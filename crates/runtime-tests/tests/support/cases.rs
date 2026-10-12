@@ -3743,10 +3743,16 @@ pub async fn fill_clears_controls_the_form_snapshot_cannot_name(rig: &Rig) {
           let model = "draft text";
           const render = () => { if (editor.textContent !== model) editor.textContent = model; };
           new MutationObserver(render).observe(editor, {childList: true, characterData: true, subtree: true});
+          // The editor learns the selection a task after it changes.
+          let selectedAll = false;
+          document.addEventListener("selectionchange", () => setTimeout(() => {
+            selectedAll = model !== "" && getSelection().toString() === model;
+          }));
           editor.addEventListener("keydown", (event) => {
             if (event.key !== "Backspace") return;
             event.preventDefault();
-            model = getSelection().toString() === model ? "" : model.slice(0, -1);
+            model = selectedAll ? "" : model.slice(0, -1);
+            selectedAll = false;
             render();
           });
           editor.addEventListener("beforeinput", (event) => {

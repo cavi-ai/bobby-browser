@@ -3681,6 +3681,104 @@ async fn humanized_input_reaches_the_page_with_synthesized_timing() {
     worker.close().await.unwrap();
 }
 
+/// Humanized clearing selects all before deleting: an editable region has no
+/// value to count Backspaces from, and the click can leave the caret mid-text.
+/// The select-all chord stays one keydown, even on an empty field.
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn humanized_clear_selects_all_before_deleting() {
+    let profiles = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: profiles.path().to_path_buf(),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![profiles.path().to_path_buf()],
+        downloads_dir: profiles.path().join("downloads"),
+        artifacts_dir: profiles.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let page_id = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page_id.clone())
+        .await
+        .unwrap();
+    worker_pool::navigation_or_default(worker.navigation()).navigate(
+            &page_id,
+            &NavigateCommand {
+                url: "data:text/html,<title>Editor</title><div id='editor' contenteditable='true' style='width:160px'>A draft long enough to wrap across the middle of the box</div><input id='empty'><script>window.chords=0;window.keydowns=0;document.addEventListener('keydown',(e)=>{window.keydowns++;if(e.key==='a'&&(e.metaKey||e.ctrlKey))window.chords++;});</script>".into(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 30_000,
+            },
+        )
+        .await
+        .unwrap();
+    worker_pool::session_settings_or_default(worker.session_settings())
+        .set_humanization_enabled(true)
+        .await
+        .unwrap();
+
+    // An empty field leaves select-all nothing to select, so the shortcut
+    // reaches the platform's key handling.
+    for (selector, value) in [("#editor", "Ada"), ("#empty", "Bo")] {
+        worker_pool::input_or_default(worker.input())
+            .type_text(
+                &page_id,
+                &TypeTextCommand {
+                    selector: selector.into(),
+                    target: None,
+                    value: value.into(),
+                    clear_first: true,
+                    expected_url: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let evidence = worker_pool::javascript_or_default(worker.javascript()).evaluate_javascript(
+            &page_id,
+            &EvaluateJavaScriptCommand {
+                expression: "JSON.stringify({text: document.getElementById('editor').innerText, empty: document.getElementById('empty').value, chords: window.chords, keydowns: window.keydowns})".into(),
+                timeout_ms: 10_000,
+                await_promise: false,
+            },
+        )
+        .await
+        .unwrap();
+    let probe = evidence
+        .iter()
+        .find_map(|item| match item {
+            Evidence::JavaScriptResult { value, .. } => Some(value.clone()),
+            _ => None,
+        })
+        .expect("javascript result evidence");
+    let probe: serde_json::Value =
+        serde_json::from_str(probe.as_str().expect("probe json")).unwrap();
+    assert_eq!(
+        probe["text"].as_str().unwrap_or_default(),
+        "Ada",
+        "probe: {probe}"
+    );
+    assert_eq!(
+        probe["empty"].as_str().unwrap_or_default(),
+        "Bo",
+        "probe: {probe}"
+    );
+    assert_eq!(probe["chords"].as_u64(), Some(2), "probe: {probe}");
+    // Two chords, two Backspaces, five letters and any typo corrections; a
+    // flooding chord shows up as thousands.
+    assert!(
+        probe["keydowns"].as_u64().unwrap_or(u64::MAX) <= 40,
+        "probe: {probe}"
+    );
+    worker.close().await.unwrap();
+}
+
 /// The Chromium humanized stream, read as a detector would: inter-key
 /// intervals must vary like a human's (no machine-uniform cadence, no
 /// zero-ms chords), and the mouse path must not be a straight line.
