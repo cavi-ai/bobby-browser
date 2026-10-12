@@ -9,6 +9,7 @@
 - On Firefox, `clear` empties a text input instead of only unchecking it.
 - Headed Chromium starts without Chrome's unsupported command-line flag warning bar.
 - `type_text` into a field the page swaps for an editor as it takes focus waits for focus to settle and types the whole value into the editor, instead of losing the first keys.
+- Chromium opens each page in its own background window that acts focused, so clicks and typing on a page no longer time out while another page in the same browser is in front.
 
 ## 0.20.0 - 2026-10-12
 
