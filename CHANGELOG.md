@@ -5,7 +5,7 @@
 ### Fixed
 
 - `intent_fill` and `control_action` act on a control the form snapshot names differently, such as one named by its title or inside a shadow root, instead of failing `targetNotFound`.
-- Clearing an editable region, by `clear` or `type_text` with `clearFirst`, sends select-all and Backspace, so rich-text editors that restore direct DOM edits clear.
+- Clearing a field, by `clear` or `type_text` with `clearFirst`, humanized or not, sends select-all and then Backspace once the page has seen the selection, so rich-text editors that restore direct DOM edits clear completely.
 - On Firefox, `clear` empties a text input instead of only unchecking it.
 - Headed Chromium starts without Chrome's unsupported command-line flag warning bar.
 - `type_text` into a field the page swaps for an editor as it takes focus waits for focus to settle and types the whole value into the editor, instead of losing the first keys.

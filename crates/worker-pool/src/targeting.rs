@@ -301,33 +301,24 @@ impl ResolvedTarget {
         use chromiumoxide::cdp::browser_protocol::input::{
             DispatchKeyEventParams, DispatchKeyEventType,
         };
-        // Cmd on macOS, Ctrl elsewhere; the editing command performs the
-        // selection, so the chord carries no text.
-        let modifiers = if cfg!(target_os = "macos") { 4 } else { 2 };
-        let select_all = |event_type| {
-            DispatchKeyEventParams::builder()
-                .r#type(event_type)
-                .key("a")
-                .code("KeyA")
-                .windows_virtual_key_code(65)
-                .modifiers(modifiers)
-        };
-        let backspace = |event_type| {
-            DispatchKeyEventParams::builder()
+        let page = self.execution_page(page);
+        for event in select_all_events() {
+            page.execute(event).await.map_err(cdp_error)?;
+        }
+        // Editors learn the new selection from `selectionchange` a task or more
+        // later; Backspace before that deletes from the old selection.
+        page.evaluate(crate::typed_focus::PAGE_IDLE_SCRIPT)
+            .await
+            .map_err(cdp_error)?;
+        for event_type in [
+            DispatchKeyEventType::RawKeyDown,
+            DispatchKeyEventType::KeyUp,
+        ] {
+            let event = DispatchKeyEventParams::builder()
                 .r#type(event_type)
                 .key("Backspace")
                 .code("Backspace")
                 .windows_virtual_key_code(8)
-        };
-        let events = [
-            select_all(DispatchKeyEventType::RawKeyDown).commands(["selectAll"]),
-            select_all(DispatchKeyEventType::KeyUp),
-            backspace(DispatchKeyEventType::RawKeyDown),
-            backspace(DispatchKeyEventType::KeyUp),
-        ];
-        let page = self.execution_page(page);
-        for event in events {
-            let event = event
                 .build()
                 .map_err(|error| target_error(ErrorCode::BrowserCommandFailed, error))?;
             page.execute(event).await.map_err(cdp_error)?;
@@ -680,6 +671,34 @@ pub async fn resolve_target(
     browser: Option<&BrowserHandle>,
 ) -> Result<ResolvedTarget, CommandError> {
     resolve_target_with_visibility(page_id, page, selector, target, true, browser).await
+}
+
+/// The select-all shortcut, Cmd+A on macOS and Ctrl+A elsewhere. The editing
+/// command performs the selection, so the chord carries no text and no native
+/// key code: macOS reads code 65 as the keypad decimal key and floods keydowns.
+pub(crate) fn select_all_events(
+) -> [chromiumoxide::cdp::browser_protocol::input::DispatchKeyEventParams; 2] {
+    use chromiumoxide::cdp::browser_protocol::input::{
+        DispatchKeyEventParams, DispatchKeyEventType,
+    };
+    let modifiers = if cfg!(target_os = "macos") { 4 } else { 2 };
+    let event = |event_type| {
+        DispatchKeyEventParams::builder()
+            .r#type(event_type)
+            .key("a")
+            .code("KeyA")
+            .windows_virtual_key_code(65)
+            .modifiers(modifiers)
+    };
+    [
+        event(DispatchKeyEventType::RawKeyDown)
+            .commands(["selectAll"])
+            .build()
+            .expect("select-all params carry a type"),
+        event(DispatchKeyEventType::KeyUp)
+            .build()
+            .expect("select-all params carry a type"),
+    ]
 }
 
 /// An empty string in a target field can never resolve — an exact match
