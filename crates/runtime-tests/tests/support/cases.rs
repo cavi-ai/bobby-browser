@@ -858,16 +858,21 @@ pub async fn scoped_frame_descent_respects_target_path_depth(rig: &Rig) {
         .collect();
     let site = FixtureSite::spawn(routes).await;
     let live = Live::open(rig, &site.url(paths[0])).await;
-    for depth in [7, 8] {
+    for (css, depth, expected_count, truncated) in [
+        ("#scope", 7, 2, false),
+        ("#scope", 8, 1, true),
+        ("#next", 7, 1, true),
+        ("#next", 8, 0, true),
+    ] {
         let frame_path = vec![json!({"css":"#next"}); depth];
         let snapshot = live
-            .snapshot(json!({"target":{"css":"#scope","framePath":frame_path}}))
+            .snapshot(json!({"target":{"css":css,"framePath":frame_path}}))
             .await;
         let mut targets = Vec::new();
         targets_under(&snapshot, &mut targets);
         assert_eq!(
             targets.len(),
-            if depth == 7 { 2 } else { 1 },
+            expected_count,
             "frame depth targets: {snapshot}"
         );
         assert!(
@@ -876,15 +881,17 @@ pub async fn scoped_frame_descent_respects_target_path_depth(rig: &Rig) {
                 .is_some_and(|path| path.len() <= 8)),
             "target exceeds frame depth: {snapshot}"
         );
-        assert!(
-            targets
-                .iter()
-                .any(|(_, target)| target["accessibleName"] == "Action 8"
-                    && target["framePath"]
-                        .as_array()
-                        .is_some_and(|path| path.len() == 8)),
-            "missing deepest supported target: {snapshot}"
-        );
+        if expected_count > 0 {
+            assert!(
+                targets
+                    .iter()
+                    .any(|(_, target)| target["accessibleName"] == "Action 8"
+                        && target["framePath"]
+                            .as_array()
+                            .is_some_and(|path| path.len() == 8)),
+                "missing deepest supported target: {snapshot}"
+            );
+        }
         let tree = snapshot["evidence"]
             .as_array()
             .unwrap()
@@ -892,12 +899,70 @@ pub async fn scoped_frame_descent_respects_target_path_depth(rig: &Rig) {
             .find(|evidence| evidence["kind"] == "accessibilitySnapshot")
             .unwrap();
         assert_eq!(
-            tree["truncated"],
-            depth == 8,
+            tree["truncated"], truncated,
             "frame depth truncation: {snapshot}"
         );
     }
     live.close().await;
+}
+
+/// A scope on an iframe includes its own immediate child frame controls.
+pub async fn iframe_scoped_snapshot_descends_into_child_frames(rig: &Rig) {
+    for name in ["Widget frame", ""] {
+        let body = r#"<iframe id="outer" title="Outer" src="/outer"></iframe><p role="status" aria-label="idle" id="status"></p>"#;
+        let outer = format!(
+            r#"<iframe title="{name}" src="/inner-first"></iframe><iframe title="{name}" src="/inner-second"></iframe>"#
+        );
+        let child = r#"<button onclick="top.document.getElementById('status').setAttribute('aria-label', 'acted ' + location.pathname)">Frame action</button>"#;
+        let site = FixtureSite::spawn(vec![
+            ("/frames", Route::Html(page("Iframe scope", body))),
+            ("/outer", Route::Html(page("Outer frame", &outer))),
+            (
+                "/inner-first",
+                Route::Html(page("First child frame", child)),
+            ),
+            (
+                "/inner-second",
+                Route::Html(page("Second child frame", child)),
+            ),
+        ])
+        .await;
+        let live = Live::open(rig, &site.url("/frames")).await;
+        let snapshot = live.snapshot(json!({"target":{"css":"#outer"}})).await;
+        let mut targets = Vec::new();
+        targets_under(&snapshot, &mut targets);
+        let actions: Vec<_> = targets
+            .iter()
+            .filter(|(role, target)| {
+                *role == "button" && target["accessibleName"] == "Frame action"
+            })
+            .collect();
+        assert_eq!(actions.len(), 2, "iframe scope child controls: {snapshot}");
+        for ordinal in [0, 1] {
+            let path = json!([
+                {"role":"iframe","accessibleName":"Outer","ordinal":null},
+                {"role":"iframe","accessibleName":name,"ordinal":ordinal}
+            ]);
+            let target = actions
+                .iter()
+                .find(|(_, target)| target["framePath"] == path)
+                .unwrap_or_else(|| panic!("child frame target with exact path: {snapshot}"))
+                .1;
+            let clicked = live.call("click", json!({"target":target})).await;
+            assert_eq!(clicked["status"], "completed", "click {target}: {clicked}");
+            let after = live.snapshot(json!({})).await;
+            let status = if ordinal == 0 {
+                "acted /inner-first"
+            } else {
+                "acted /inner-second"
+            };
+            assert!(
+                find_node(&after, "status", Some(status)).is_some(),
+                "wrong child frame action: {after}"
+            );
+        }
+        live.close().await;
+    }
 }
 
 pub async fn iframe_scoped_targets_reach_the_second_frame(rig: &Rig) {
@@ -2966,16 +3031,17 @@ pub async fn scoped_iframe_descent_respects_the_node_budget(rig: &Rig) {
     ])
     .await;
     let live = Live::open(rig, &site.url("/frames")).await;
-    for scope in [
-        json!({"css":"#scope"}),
-        json!({"css":"#scope","framePath":[{"css":"#outer"}]}),
+    for (scope, expected_count) in [
+        (json!({"css":"#scope"}), 1),
+        (json!({"css":"#scope","framePath":[{"css":"#outer"}]}), 1),
+        (json!({"css":"#outer"}), 2),
     ] {
         let whole_scope = live.snapshot(json!({"target":scope})).await;
         let mut targets = Vec::new();
         targets_under(&whole_scope, &mut targets);
         assert_eq!(
             targets.len(),
-            1,
+            expected_count,
             "out-of-scope frame controls: {whole_scope}"
         );
         for max_nodes in [1, 2] {
