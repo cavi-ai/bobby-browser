@@ -2656,6 +2656,45 @@ pub async fn locate_miss_marks_a_hidden_control(rig: &Rig) {
     live.close().await;
 }
 
+/// Scoped iframe descent excludes sibling frames and shares the node budget.
+pub async fn scoped_iframe_descent_respects_the_node_budget(rig: &Rig) {
+    let site = FixtureSite::spawn(vec![
+        ("/frames", Route::Html(page("Frames", r#"<iframe title="Widget" src="/child"></iframe><section id="scope"><iframe title="Widget" src="/child"></iframe></section>"#))),
+        ("/child", Route::Html(page("Child", "<button>Frame action</button>"))),
+    ]).await;
+    let live = Live::open(rig, &site.url("/frames")).await;
+    let whole_scope = live.snapshot(json!({"target":{"css":"#scope"}})).await;
+    let mut targets = Vec::new();
+    targets_under(&whole_scope, &mut targets);
+    assert_eq!(
+        targets.len(),
+        1,
+        "out-of-scope frame controls: {whole_scope}"
+    );
+    for max_nodes in [1, 2] {
+        let snapshot = live
+            .snapshot(json!({"target":{"css":"#scope"},"maxNodes":max_nodes}))
+            .await;
+        let tree = snapshot["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|evidence| evidence["kind"] == "accessibilitySnapshot")
+            .unwrap();
+        fn count(nodes: &Value) -> usize {
+            nodes.as_array().map_or(0, |nodes| {
+                nodes.iter().map(|node| 1 + count(&node["children"])).sum()
+            })
+        }
+        assert!(
+            count(&tree["nodes"]) <= max_nodes,
+            "node budget exceeded: {snapshot}"
+        );
+        assert_eq!(tree["truncated"], true, "missing truncation: {snapshot}");
+    }
+    live.close().await;
+}
+
 /// A snapshot reports form controls missing from the accessibility tree only
 /// when its tree is whole: never when truncated or scoped to a region.
 pub async fn omitted_controls_need_a_whole_tree(rig: &Rig) {
