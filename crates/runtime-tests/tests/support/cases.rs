@@ -3850,3 +3850,80 @@ pub async fn typing_follows_focus_into_a_swapped_editor(rig: &Rig) {
     }
     live.close().await;
 }
+
+/// A full-page overlay whose close control sits in a frame from another site:
+/// dismissing it by purpose alone or by the control's name completes once the
+/// overlay and its frame are gone.
+pub async fn dismiss_closes_an_overlay_framed_from_another_site(rig: &Rig) {
+    let ad = page(
+        "Ad",
+        r##"<div role="button" tabindex="0" style="position:absolute;top:20px;right:20px;color:#fff" onclick="parent.postMessage('dismiss','*')">Close</div>
+        <div style="margin:80px auto;width:60%;background:#fff;padding:20px"><h2>Ad headline</h2><a href="#open">Open</a></div>"##,
+    );
+    let ad_site = FixtureSite::spawn(vec![("/ad", Route::Html(ad))]).await;
+    let ad_url = ad_site.url("/ad").replace("127.0.0.1", "localhost");
+    let listing = page(
+        "Listing",
+        &format!(
+            r#"<main><h1>Listing</h1>
+            <button onclick="document.getElementById('applied').textContent='sent'">Apply Now</button>
+            <p role="status" aria-label="Application" id="applied">pending</p>
+            <p role="status" aria-label="Ad" id="ad">loading</p></main>
+            <ins id="overlay" style="display:none;position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.6)">
+            <iframe title="Advertisement" src="{ad_url}" style="width:100%;height:100%;border:0"
+              onload="document.getElementById('overlay').style.display='block';document.getElementById('ad').textContent='shown'"></iframe></ins>
+            <script>addEventListener('message', (event) => {{ if (event.data === 'dismiss') document.getElementById('overlay').remove(); }});</script>"#
+        ),
+    );
+    let site = FixtureSite::spawn(vec![("/listing", Route::Html(listing))]).await;
+    for dismiss in [
+        json!({"purpose":"Dismiss the overlay covering the Apply Now control"}),
+        json!({"purpose":"close the ad","hints":{"role":"button","accessibleName":"Close"}}),
+    ] {
+        let live = Live::open(rig, &site.url("/listing")).await;
+        let shown = live
+            .call(
+                "wait_for",
+                json!({
+                    "condition":{"kind":"text","target":{"role":"status","accessibleName":"Ad"},
+                                 "matcher":{"kind":"contains","value":"shown"}},
+                    "timeoutMs":10000
+                }),
+            )
+            .await;
+        assert_eq!(shown["status"], "completed", "overlay never shown: {shown}");
+        let apply = json!({"target":{"role":"button","accessibleName":"Apply Now"}});
+        let blocked = live.call("click", apply.clone()).await;
+        assert_eq!(
+            blocked["error"]["code"], "targetObscured",
+            "the overlay does not cover the page: {blocked}"
+        );
+        let dismissed = live
+            .call("intent_dismiss_obstruction", dismiss.clone())
+            .await;
+        assert_eq!(
+            dismissed["status"], "completed",
+            "dismiss {dismiss}: {dismissed}"
+        );
+        let applied = live.call("click", apply).await;
+        assert_eq!(
+            applied["status"], "completed",
+            "after dismiss {dismiss}: {applied}"
+        );
+        let sent = live
+            .call(
+                "wait_for",
+                json!({
+                    "condition":{"kind":"text","target":{"role":"status","accessibleName":"Application"},
+                                 "matcher":{"kind":"contains","value":"sent"}},
+                    "timeoutMs":5000
+                }),
+            )
+            .await;
+        assert_eq!(
+            sent["status"], "completed",
+            "the click never landed: {sent}"
+        );
+        live.close().await;
+    }
+}
