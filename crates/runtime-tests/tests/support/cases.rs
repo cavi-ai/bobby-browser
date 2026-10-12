@@ -69,6 +69,7 @@ macro_rules! every_case {
             page_titles_withhold_disclosed_credentials,
             observation_carries_each_text_once,
             sign_in_fields_show_their_labels,
+            placeholder_named_fields_get_snapshot_targets,
             concurrent_sessions_each_keep_their_own_page,
             a_copied_control_resolves_apart_from_its_original,
             concurrent_scoped_snapshots_resolve_their_own_targets,
@@ -3224,6 +3225,31 @@ pub async fn sign_in_fields_show_their_labels(rig: &Rig) {
             "{what} exposed the typed password: {result}"
         );
     }
+    live.close().await;
+}
+
+/// A text field named only by its placeholder, inside an empty label: the
+/// snapshot gives it a target named by the placeholder, and typing into that
+/// target lands in the field.
+pub async fn placeholder_named_fields_get_snapshot_targets(rig: &Rig) {
+    let body =
+        r#"<main><label><textarea placeholder="Join the conversation"></textarea></label></main>"#;
+    let site = FixtureSite::spawn(vec![("/home", Route::Html(page("Home", body)))]).await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let snapshot = live.snapshot(json!({})).await;
+    let mut targets = Vec::new();
+    targets_under(&snapshot, &mut targets);
+    let target = targets
+        .iter()
+        .find(|(role, target)| {
+            *role == "textbox" && target["accessibleName"] == "Join the conversation"
+        })
+        .map(|(_, target)| (*target).clone())
+        .unwrap_or_else(|| panic!("no target named by the placeholder: {snapshot}"));
+    let typed = live
+        .call("type_text", json!({"target":target,"value":"hello"}))
+        .await;
+    assert_eq!(typed["status"], "completed", "type_text: {typed}");
     live.close().await;
 }
 

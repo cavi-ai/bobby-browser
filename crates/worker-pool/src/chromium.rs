@@ -2068,7 +2068,7 @@ impl crate::ObservationEngine for ChromiumWorker {
                 .node
                 .frame_id;
             if let Some(content_frame) = owner_frame {
-                let result = page
+                let mut result = page
                     .execute(
                         chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::builder()
                             .frame_id(content_frame)
@@ -2077,6 +2077,7 @@ impl crate::ObservationEngine for ChromiumWorker {
                     .await
                     .map_err(command_failed)?
                     .result;
+                name_fields_by_placeholder(&page, &mut result.nodes).await;
                 let (mut nodes, truncated) = compact_ax_tree(&result.nodes, max_nodes);
                 // Preserve ancestor hops before the selected iframe's hop.
                 let mut frame_path = resolved.frame_path.clone();
@@ -2100,7 +2101,8 @@ impl crate::ObservationEngine for ChromiumWorker {
                     chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::default()
                 }
             };
-            let result = page.execute(params).await.map_err(command_failed)?.result;
+            let mut result = page.execute(params).await.map_err(command_failed)?.result;
+            name_fields_by_placeholder(&page, &mut result.nodes).await;
             let root_id = result
                 .nodes
                 .iter()
@@ -2125,13 +2127,14 @@ impl crate::ObservationEngine for ChromiumWorker {
                 truncated,
             }]);
         }
-        let result = page
+        let mut result = page
             .execute(
                 chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::default(),
             )
             .await
             .map_err(command_failed)?
             .result;
+        name_fields_by_placeholder(&page, &mut result.nodes).await;
         let (mut nodes, mut truncated) = compact_ax_tree(&result.nodes, max_nodes);
         // The main-frame AX tree stops at `Iframe` nodes; descend one level
         // (cap 8, same-process frames) so in-frame controls are visible and
@@ -4619,7 +4622,7 @@ async fn descend_a11y_iframes(
             truncated = true;
             break;
         }
-        let Ok(tree) = page
+        let Ok(mut tree) = page
             .execute(
                 chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::builder()
                     .frame_id(frame)
@@ -4629,6 +4632,7 @@ async fn descend_a11y_iframes(
         else {
             continue;
         };
+        name_fields_by_placeholder(page, &mut tree.result.nodes).await;
         let (mut frame_roots, frame_truncated) = compact_ax_tree(&tree.result.nodes, budget);
         truncated |= frame_truncated;
         // Two distinct counting domains: `splice_occurrence` finds the right
@@ -4723,6 +4727,61 @@ fn compact_ax_tree(
     max_nodes: usize,
 ) -> (Vec<types::AccessibilityNode>, bool) {
     compact_ax_tree_from(raw, max_nodes, None)
+}
+
+/// Names each unnamed text field after its placeholder, as target resolution
+/// does, so the snapshot gives it a target that resolves.
+async fn name_fields_by_placeholder(
+    page: &Page,
+    nodes: &mut [chromiumoxide::cdp::browser_protocol::accessibility::AxNode],
+) {
+    use chromiumoxide::cdp::browser_protocol::accessibility::{AxValue, AxValueType};
+    let text = |value: &Option<AxValue>| {
+        value
+            .as_ref()
+            .and_then(|value| value.value.as_ref())
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
+    };
+    for node in nodes.iter_mut() {
+        let unnamed_field = !node.ignored
+            && text(&node.role)
+                .is_some_and(|role| matches!(role.as_str(), "textbox" | "searchbox" | "combobox"))
+            && text(&node.name).is_none_or(|name| name.trim().is_empty());
+        let Some(backend_node_id) = node.backend_dom_node_id.filter(|_| unnamed_field) else {
+            continue;
+        };
+        let Ok(described) = page
+            .execute(
+                chromiumoxide::cdp::browser_protocol::dom::DescribeNodeParams::builder()
+                    .backend_node_id(backend_node_id)
+                    .depth(0)
+                    .build(),
+            )
+            .await
+        else {
+            continue;
+        };
+        let element = described.result.node;
+        if !matches!(element.local_name.as_str(), "input" | "textarea") {
+            continue;
+        }
+        let placeholder = element
+            .attributes
+            .as_deref()
+            .and_then(|attributes| {
+                attributes
+                    .chunks_exact(2)
+                    .find(|pair| pair[0] == "placeholder")
+                    .map(|pair| pair[1].trim().to_owned())
+            })
+            .filter(|placeholder| !placeholder.is_empty());
+        if let Some(placeholder) = placeholder {
+            let mut name = AxValue::new(AxValueType::ComputedString);
+            name.value = Some(serde_json::Value::String(placeholder));
+            node.name = Some(name);
+        }
+    }
 }
 
 /// The error for a resolved element the accessibility tree leaves out: an open

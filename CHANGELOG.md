@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- On Chromium, snapshots name a text field the accessibility tree leaves unnamed by its placeholder and give it a target.
 - An Ollama vision model is ready only when Ollama serves that exact tag; an untagged default uses the installed tag in `bobby install`, `bobby vision connect` and `bobby doctor --fix`.
 - `inspect` reads the page from the browser when its response sets cookies the direct HTTP path cannot mirror, instead of failing `httpEquivalenceUnproven`.
 - On Chromium, calls sent at once on one page each resolve their own target instead of failing `targetNotFound`.
