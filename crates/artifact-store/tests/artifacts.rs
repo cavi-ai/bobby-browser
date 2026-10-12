@@ -6,6 +6,89 @@ const ONE_PIXEL_PNG: &[u8] = &[
     0, 0, 31, 21, 196, 137,
 ];
 
+#[cfg(unix)]
+fn assert_private_artifact_files(directory: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let entries = std::fs::read_dir(directory)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(entries.len(), 2, "payload and manifest must both exist");
+    for entry in entries {
+        let metadata = entry.metadata().unwrap();
+        assert!(metadata.is_file());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn staged_and_committed_artifact_files_are_private() {
+    let root = tempfile::tempdir().unwrap();
+    let store = ArtifactStore::new(root.path(), 1024, 4096);
+    let session = SessionId::new();
+    let page = PageId::new();
+    let pending = store
+        .put_pending(
+            &session,
+            &page,
+            "application/octet-stream",
+            "bin",
+            b"download",
+            1024,
+        )
+        .await
+        .unwrap();
+    let staging = root.path().join(session.0.to_string()).join(format!(
+        ".{}.{}.tmp",
+        pending.record().artifact_id,
+        pending.staging_id().unwrap()
+    ));
+    assert_private_artifact_files(&staging);
+    let record = pending.commit().unwrap();
+    assert_private_artifact_files(&artifact_store::artifact_dir(
+        root.path(),
+        &session,
+        &record.artifact_id,
+    ));
+    assert_eq!(
+        store.get(&session, &record.artifact_id).await.unwrap(),
+        b"download"
+    );
+    let screenshot = store.put_png(&session, &page, ONE_PIXEL_PNG).await.unwrap();
+    assert_private_artifact_files(&artifact_store::artifact_dir(
+        root.path(),
+        &session,
+        &screenshot.artifact_id,
+    ));
+    assert_eq!(
+        store.get(&session, &screenshot.artifact_id).await.unwrap(),
+        ONE_PIXEL_PNG
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn artifact_files_are_private_with_permissive_umask() {
+    // Keep the process-wide umask change out of the parallel test runner.
+    let output = std::process::Command::new("sh")
+        .args(["-c", "umask 000; exec \"$@\"", "sh"])
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "staged_and_committed_artifact_files_are_private",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[tokio::test]
 async fn stores_hashed_session_private_artifacts_atomically() {
     let root = tempfile::tempdir().unwrap();
