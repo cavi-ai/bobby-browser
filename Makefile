@@ -12,7 +12,7 @@ RESTART_FLAGS := $(if $(filter 1,$(FORCE)),--force)$(if $(filter 1,$(DISCONNECT_
 	firefox-start firefox-stop \
 	restart start stop reload verify status \
 	fmt lint test test-browsers-setup test-browsers test-browsers-chromium test-browsers-firefox \
-	fingerprint-dogfood \
+	fingerprint-dogfood fingerprint-collectors fingerprint-collectors-headed fingerprint-collectors-firefox \
 	behavioral-benchmark behavioral-e2e behavioral-dogfood
 
 help:
@@ -49,6 +49,9 @@ help:
 	@echo
 	@echo "Fingerprint dogfood"
 	@echo "  fingerprint-dogfood              live Chromium collector probe (needs Chrome)"
+	@echo "  fingerprint-collectors           public fingerprint detector pages on Chromium (needs Chrome)"
+	@echo "  fingerprint-collectors-headed    same, headed Chrome (needs GUI)"
+	@echo "  fingerprint-collectors-firefox   same on Firefox with the test profile (run make test-browsers-setup)"
 	@echo
 	@echo "Behavioral dogfood"
 	@echo "  behavioral-benchmark   offline interaction biometric scores"
@@ -202,6 +205,21 @@ test-browsers-firefox:
 
 fingerprint-dogfood:
 	cargo test -p worker-pool --test fingerprint_conformance -- --ignored --nocapture
+
+fingerprint-collectors:
+	cargo test -p worker-pool --test fingerprint_conformance chromium_production_collector_dogfood -- --ignored --nocapture
+
+fingerprint-collectors-headed:
+	BOBBY_FP_HEADED=1 cargo test -p worker-pool --test fingerprint_conformance chromium_production_collector_dogfood -- --ignored --nocapture
+
+fingerprint-collectors-firefox:
+	@[ -f "$(TEST_BROWSERS_MANIFEST)" ] || { echo "test native host missing: run make test-browsers-setup"; exit 1; }
+	BOBBY_FIREFOX_HEADLESS="$(TEST_BROWSERS_HEADLESS)" BOBBY_FIREFOX_BIN="$(TEST_BROWSERS_FIREFOX)" \
+		BOBBY_FIREFOX_PROFILE="$(TEST_BROWSERS_PROFILE)" \
+		BOBBY_COMPANION_EXTENSION="$(TEST_BROWSERS_DIR)/extension" \
+		BOBBY_FIREFOX_PROOF_DIR="$(TEST_BROWSERS_DIR)" \
+		cargo test --manifest-path $(REPO_ROOT)Cargo.toml -p runtime-tests --locked \
+		--test fingerprint_firefox -- --ignored --nocapture --test-threads=1
 
 behavioral-benchmark:
 	cargo test -p behavioral-engine --test benchmark -- --nocapture
