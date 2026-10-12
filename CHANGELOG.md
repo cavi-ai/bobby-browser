@@ -2,8 +2,11 @@
 
 ## Unreleased
 
+## 0.20.0 - 2026-10-12
+
 ### Fixed
 
+- A command or job journal path that is not a regular file is archived with a warning and a fresh journal starts; read-only inspection refuses such a path instead of reading it as history.
 - On headed Chromium, clicks and typing on a visible page no longer bring the browser window to the front and take the desktop's keyboard focus.
 - On Chromium, a page whose navigation never committed is listed and closes on request, so a failed `workflow_start` no longer leaves its tab open.
 - On Chromium, snapshots name a text field the accessibility tree leaves unnamed by its placeholder and give it a target.
