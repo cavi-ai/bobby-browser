@@ -196,6 +196,8 @@ Presets for `bobby vision connect --provider`:
 
 Override with `--base-url` and `--model`. For LM Studio, use the server URL the app shows.
 
+Ollama reads a model name without a tag as `:latest`. When Ollama has another tag of the default model but not `:latest`, `bobby install`, `bobby vision connect` without `--model`, and `bobby doctor --fix` use the installed tag.
+
 The proxy reads at most 1 MiB from an upstream response, counted after decompression, and rejects larger replies. Extracted values are capped at 64 KiB. Errors report the provider and HTTP status without the upstream body.
 
 ### ACP backend

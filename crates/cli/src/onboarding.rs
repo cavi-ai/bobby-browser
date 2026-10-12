@@ -1642,6 +1642,16 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
 
     let mut ran = 0;
     if configure_vision || interactive {
+        if vision_state.enabled
+            && vision_state.provider == "ollama"
+            && (readiness_requested || interactive)
+        {
+            if let Some(tag) =
+                crate::vision_readiness::installed_ollama_tag(&vision_state.profile()?)
+            {
+                vision_state.model = tag;
+            }
+        }
         drop(crate::vision_token::ensure_managed_vision_token(
             bootstrap_path,
         )?);

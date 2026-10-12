@@ -171,13 +171,24 @@ pub(crate) fn check_provider_readiness(
                                 model: profile.model.clone(),
                             });
                         }
-                        return Ok(ReadinessOutcome::NeedsAction {
-                            provider,
-                            model: profile.model.clone(),
-                            detail: format!(
+                        let installed = other_installed_tags(&profile.model, &models);
+                        let detail = match installed.first() {
+                            Some(tag) => format!(
+                                "Ollama at {} serves {} but not {}; run `bobby vision connect --provider ollama --model {tag}` or `ollama pull {}`",
+                                profile.base_url,
+                                installed.join(", "),
+                                ollama_tagged(&profile.model),
+                                profile.model
+                            ),
+                            None => format!(
                                 "Ollama is running at {} but model {} is not installed; run `ollama pull {}`",
                                 profile.base_url, profile.model, profile.model
                             ),
+                        };
+                        return Ok(ReadinessOutcome::NeedsAction {
+                            provider,
+                            model: profile.model.clone(),
+                            detail,
                         });
                     }
                 }
@@ -234,16 +245,66 @@ pub(crate) fn models_probe_urls(provider: &str, base_url: &str) -> Vec<String> {
     }
 }
 
+/// Ollama resolves a model name without a tag to `<name>:latest`.
+fn ollama_tagged(name: &str) -> String {
+    let name = name.trim();
+    let last_segment = name.rsplit('/').next().unwrap_or(name);
+    if last_segment.contains(':') {
+        name.to_owned()
+    } else {
+        format!("{name}:latest")
+    }
+}
+
+fn ollama_untagged(tagged: &str) -> &str {
+    tagged.rsplit_once(':').map_or(tagged, |(name, _)| name)
+}
+
 pub(crate) fn ollama_model_listed(configured: &str, listed: &[String]) -> bool {
-    let configured = configured.trim();
-    if configured.is_empty() {
+    if configured.trim().is_empty() {
         return false;
     }
-    listed.iter().any(|id| {
-        id == configured
-            || id.starts_with(&format!("{configured}:"))
-            || configured.starts_with(&format!("{id}:"))
-    })
+    let wanted = ollama_tagged(configured);
+    listed.iter().any(|id| ollama_tagged(id) == wanted)
+}
+
+/// Installed tags of the configured model other than the one it resolves to.
+fn other_installed_tags(configured: &str, listed: &[String]) -> Vec<String> {
+    let wanted = ollama_tagged(configured);
+    let name = ollama_untagged(&wanted);
+    let mut tags: Vec<String> = listed
+        .iter()
+        .map(|id| ollama_tagged(id))
+        .filter(|id| ollama_untagged(id) == name && *id != wanted)
+        .collect();
+    tags.sort();
+    tags.dedup();
+    tags
+}
+
+/// The installed tag that serves an untagged model name whose `:latest`
+/// Ollama does not have; a name with an explicit tag is never replaced.
+pub(crate) fn installed_tag_for_untagged(configured: &str, listed: &[String]) -> Option<String> {
+    let configured = configured.trim();
+    let last_segment = configured.rsplit('/').next().unwrap_or(configured);
+    if configured.is_empty()
+        || last_segment.contains(':')
+        || ollama_model_listed(configured, listed)
+    {
+        return None;
+    }
+    other_installed_tags(configured, listed).into_iter().next()
+}
+
+/// The installed tag a running Ollama serves for the profile's untagged
+/// model when it does not have the model's `:latest`; never starts Ollama.
+pub(crate) fn installed_ollama_tag(profile: &VisionProviderConfig) -> Option<String> {
+    match openai_compatible_models_probe("ollama", profile, None, Duration::from_secs(2)) {
+        ProbeResult::Reachable {
+            models: Some(listed),
+        } => installed_tag_for_untagged(&profile.model, &listed),
+        _ => None,
+    }
 }
 
 fn listed_models(body: &str) -> Option<Vec<String>> {
@@ -591,16 +652,43 @@ mod tests {
     }
 
     #[test]
-    fn ollama_model_listed_accepts_tagged_variants() {
+    fn ollama_model_listed_matches_the_tag_ollama_resolves() {
         let listed = ["llava:7b".to_string(), "qwen3.8:27b-mlx".to_string()];
-        assert!(ollama_model_listed("llava", &listed));
+        assert!(!ollama_model_listed("llava", &listed));
         assert!(ollama_model_listed("llava:7b", &listed));
         assert!(!ollama_model_listed("llava:13b", &listed));
         assert!(!ollama_model_listed("llama3.1", &listed));
+        assert!(ollama_model_listed("llava", &["llava:latest".to_string()]));
+        assert!(ollama_model_listed("llava:latest", &["llava".to_string()]));
+        assert!(ollama_model_listed(
+            "localhost:5000/team/llava",
+            &["localhost:5000/team/llava:latest".to_string()]
+        ));
     }
 
     #[test]
-    fn ollama_host_only_readiness_succeeds_against_v1_models() {
+    fn an_untagged_model_adopts_an_installed_tag_and_a_tagged_one_never_does() {
+        let listed = [
+            "qwen3:8b".to_string(),
+            "llava:7b".to_string(),
+            "llava:13b".to_string(),
+        ];
+        assert_eq!(
+            installed_tag_for_untagged("llava", &listed).as_deref(),
+            Some("llava:13b")
+        );
+        assert_eq!(installed_tag_for_untagged("llava:34b", &listed), None);
+        assert_eq!(installed_tag_for_untagged("bakllava", &listed), None);
+        assert_eq!(
+            installed_tag_for_untagged("llava", &["llava:latest".to_string()]),
+            None
+        );
+    }
+
+    /// Serves one `GET /v1/models` request with `body` and returns its address.
+    fn serve_v1_models_once(
+        body: &'static str,
+    ) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
         use std::io::{Read, Write};
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -621,20 +709,22 @@ mod tests {
                 request.contains("GET /v1/models"),
                 "host-only ollama base must probe /v1/models, got {request}"
             );
-            let body = r#"{"object":"list","data":[{"id":"llava:7b"}]}"#;
             let _ = write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
         });
+        (address, server)
+    }
 
+    fn ollama_readiness(address: std::net::SocketAddr, model: &str) -> ReadinessOutcome {
         let profile = VisionProviderConfig {
             base_url: format!("http://{address}"),
-            model: "llava".into(),
+            model: model.into(),
             api_key_env: None,
         };
-        let outcome = check_provider_readiness(
+        check_provider_readiness(
             "ollama",
             &profile,
             &ReadinessOptions {
@@ -643,14 +733,34 @@ mod tests {
                 allow_start: false,
             },
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    fn ollama_host_only_readiness_succeeds_against_v1_models() {
+        let (address, server) =
+            serve_v1_models_once(r#"{"object":"list","data":[{"id":"llava:7b"}]}"#);
+        let outcome = ollama_readiness(address, "llava:7b");
         assert!(
             matches!(
                 outcome,
-                ReadinessOutcome::Ready { ref model, .. } if model == "llava"
+                ReadinessOutcome::Ready { ref model, .. } if model == "llava:7b"
             ),
             "{outcome:?}"
         );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn an_untagged_model_ollama_does_not_serve_is_not_ready_and_names_the_installed_tag() {
+        let (address, server) =
+            serve_v1_models_once(r#"{"object":"list","data":[{"id":"llava:7b"}]}"#);
+        let outcome = ollama_readiness(address, "llava");
+        let ReadinessOutcome::NeedsAction { detail, .. } = &outcome else {
+            panic!("an untagged model resolves to :latest, which is not served: {outcome:?}");
+        };
+        assert!(detail.contains("not llava:latest"), "{detail}");
+        assert!(detail.contains("--model llava:7b"), "{detail}");
         server.join().unwrap();
     }
 }
