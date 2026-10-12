@@ -5,7 +5,7 @@ function gatherCandidates(root, options = {}) {
   const publicMetadata = options.redact === true;
   const selector = options.controlsOnly ? 'input,textarea,select,button,a[href],iframe,[role]' : '*';
   let n=0, visited=0, truncated=false;
-  const candidates=[];
+  const candidates=[], stamps=new Set();
   const labelledBy = element => {
     const root = element.getRootNode();
     return (element.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
@@ -55,8 +55,11 @@ const implicitRole=el=>{if(el.tagName==='BUTTON')return 'button';if(el.tagName==
         if(truncated)return;
         continue;
       }
-      const id=prefix+(++n);
-      if(prefix)element.setAttribute('data-bobby-target',id);
+      // An element keeps the id an earlier scan stamped, so concurrent scans agree;
+      // a copy of a stamped element takes a fresh one.
+      const stamped=prefix?element.getAttribute('data-bobby-target'):null;
+      const id=stamped&&/^bobby-\d+-\d+$/.test(stamped)&&!stamps.has(stamped)?stamped:prefix+(++n);
+      if(prefix){stamps.add(id);if(id!==stamped)element.setAttribute('data-bobby-target',id);}
       const style=getComputedStyle(element), rect=element.getBoundingClientRect();
       const visible=style.visibility!=='hidden'&&style.display!=='none'&&rect.width>0&&rect.height>0;
       const tag=element.localName;

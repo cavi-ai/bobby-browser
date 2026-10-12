@@ -25,7 +25,7 @@ function gather(window: ReturnType<typeof page>, options = {}) {
   const script = readFileSync(new URL("../../../crates/dom-engine/src/candidate_gather.js", import.meta.url), "utf8");
   const collect=window.eval("("+script+")") as Gather;
   const result=collect(window.document,{controlsOnly:true,redact:true,maxNodes:4096,maxCandidates:128,...options});
-  return JSON.parse(JSON.stringify({ controls: result.candidates, truncated: result.truncated })) as { controls: Array<{role:string;name:string;css:string;tag:string;attributes:Record<string,string>}>;truncated:boolean };
+  return JSON.parse(JSON.stringify({ controls: result.candidates, truncated: result.truncated })) as { controls: Array<{id:string;role:string;name:string;css:string;tag:string;attributes:Record<string,string>}>;truncated:boolean };
 
 }
 
@@ -69,6 +69,17 @@ test("shared gathering redacts sensitive labels and refuses partial bounded sets
   assert.equal(JSON.stringify(gather(window)).includes(secret), false);
   assert.deepEqual(gather(window, { maxCandidates:1 }), { controls:[], truncated:true });
   assert.deepEqual(gather(window, { maxNodes:1 }), { controls:[], truncated:true });
+});
+
+test("shared gathering keeps an element's stamped id and gives a copy a fresh one", () => {
+  const window = page(`<button>Save</button><button>Cancel</button>`);
+  const ids = (prefix: string) => gather(window, { prefix }).controls.map(({ id }) => id);
+  const first = ids("bobby-1-");
+  assert.deepEqual(first, ["bobby-1-1", "bobby-1-2"]);
+  assert.deepEqual(ids("bobby-2-"), first);
+  const save = window.document.querySelector("button")!;
+  save.after(save.cloneNode(true));
+  assert.deepEqual(ids("bobby-3-"), ["bobby-1-1", "bobby-3-1", "bobby-1-2"]);
 });
 
 test("shared gathering preserves input kind and validation metadata for local resolution", () => {

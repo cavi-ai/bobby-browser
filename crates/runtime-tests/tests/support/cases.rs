@@ -70,6 +70,8 @@ macro_rules! every_case {
             observation_carries_each_text_once,
             sign_in_fields_show_their_labels,
             concurrent_sessions_each_keep_their_own_page,
+            a_copied_control_resolves_apart_from_its_original,
+            concurrent_scoped_snapshots_resolve_their_own_targets,
             $($extra,)*
         }
     };
@@ -3211,4 +3213,73 @@ pub async fn concurrent_sessions_each_keep_their_own_page(rig: &Rig) {
     for live in sessions {
         live.close().await;
     }
+}
+
+/// A control copied after a scan, the copy placed first: a click on the
+/// second control reaches the original, not the copy.
+pub async fn a_copied_control_resolves_apart_from_its_original(rig: &Rig) {
+    let body = r#"<main><button data-who="original"
+          onclick="document.getElementById('status').setAttribute('aria-label','acted '+this.dataset.who)">Save</button>
+        <button onclick="const copy=document.querySelector('[data-who=original]').cloneNode(true);copy.dataset.who='copy';document.querySelector('main').prepend(copy)">Copy</button>
+        <p role="status" aria-label="idle" id="status"></p></main>"#;
+    let site = FixtureSite::spawn(vec![("/home", Route::Html(page("Home", body)))]).await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    live.snapshot(json!({})).await;
+    let copied = live
+        .call(
+            "click",
+            json!({"target":{"role":"button","accessibleName":"Copy"}}),
+        )
+        .await;
+    assert_eq!(copied["status"], "completed", "copy: {copied}");
+    let clicked = live
+        .call(
+            "click",
+            json!({"target":{"role":"button","accessibleName":"Save","ordinal":1}}),
+        )
+        .await;
+    assert_eq!(clicked["status"], "completed", "click: {clicked}");
+    let after = live.snapshot(json!({})).await;
+    assert!(
+        find_node(&after, "status", Some("acted original")).is_some(),
+        "the click reached the copy: {after}"
+    );
+    live.close().await;
+}
+
+/// Snapshots scoped to eight same-named links, sent at once on one page:
+/// each resolves its own link.
+pub async fn concurrent_scoped_snapshots_resolve_their_own_targets(rig: &Rig) {
+    let links: String = (0..8)
+        .map(|index| {
+            format!(r#"<section><h2>Part {index}</h2><a href="/{index}">Show all</a></section>"#)
+        })
+        .collect();
+    let site = FixtureSite::spawn(vec![(
+        "/home",
+        Route::Html(page("Home", &format!("<main>{links}</main>"))),
+    )])
+    .await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    for round in 0..5 {
+        let snapshots = (0..8).map(|ordinal| {
+            let live = &live;
+            async move {
+                let target = json!({"role":"link","accessibleName":"Show all","ordinal":ordinal});
+                let scoped = live
+                    .call("a11y_snapshot", json!({"target":target,"maxNodes":5}))
+                    .await;
+                assert_eq!(
+                    scoped["status"], "completed",
+                    "round {round}, ordinal {ordinal}: {scoped}"
+                );
+                assert_eq!(
+                    scoped["evidence"][0]["nodes"][0]["target"]["ordinal"], ordinal,
+                    "round {round}, ordinal {ordinal} scoped another link: {scoped}"
+                );
+            }
+        });
+        futures_util::future::join_all(snapshots).await;
+    }
+    live.close().await;
 }
