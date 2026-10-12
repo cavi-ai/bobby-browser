@@ -34,6 +34,7 @@ use serde::Deserialize;
 use types::{CommandError, ErrorCode, ErrorLayer, Evidence, PageId, TargetFingerprint, TargetSpec};
 
 static TARGET_SCOPE: AtomicU64 = AtomicU64::new(1);
+pub(crate) const MAX_TARGET_PATH_DEPTH: usize = 8;
 
 pub struct ResolvedTarget {
     native: Option<Element>,
@@ -616,15 +617,16 @@ fn validate_target_spec_hop(target: &TargetSpec, is_frame_hop: bool) -> Result<(
     Ok(())
 }
 
-/// Iframe elements in the main frame, with the accessible names the a11y
+/// Iframe elements in the selected context, with the accessible names the a11y
 /// snapshot's `Iframe` nodes carry. The snapshot uses these to map each child
 /// frame back to its element and stamp in-frame targets with a re-resolvable
 /// hop.
-pub(crate) async fn main_frame_iframe_candidates(
+pub(crate) async fn iframe_candidates(
     page: &Page,
+    context_id: Option<ExecutionContextId>,
 ) -> Result<Vec<Candidate>, CommandError> {
     let scope_id = TARGET_SCOPE.fetch_add(1, Ordering::Relaxed);
-    let raw = collect_candidates(page, None, &[], scope_id).await?;
+    let raw = collect_candidates(page, context_id, &[], scope_id).await?;
     Ok(raw
         .into_iter()
         .map(into_candidate)
@@ -861,7 +863,9 @@ async fn open_target_scope(
     target: &TargetSpec,
     browser: Option<&BrowserHandle>,
 ) -> Result<TargetScope, CommandError> {
-    if target.frame_path.len() > 8 || target.shadow_path.len() > 8 {
+    if target.frame_path.len() > MAX_TARGET_PATH_DEPTH
+        || target.shadow_path.len() > MAX_TARGET_PATH_DEPTH
+    {
         return Err(target_error(
             ErrorCode::InvalidRequest,
             "target frame or shadow path exceeds configured depth",
