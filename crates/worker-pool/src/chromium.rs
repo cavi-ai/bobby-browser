@@ -2104,8 +2104,17 @@ impl crate::ObservationEngine for ChromiumWorker {
                 .find(|node| node.backend_dom_node_id.as_ref() == Some(&backend_id))
                 .map(|node| node.node_id.clone())
                 .ok_or_else(|| hidden_from_accessibility(&result.nodes))?;
-            let (nodes, truncated) =
+            let (mut nodes, mut truncated) =
                 compact_ax_tree_from(&result.nodes, max_nodes, Some(root_id.as_ref()));
+            let owners = scoped_iframe_owners(&result.nodes, root_id.as_ref());
+            let emitted = count_a11y_nodes(&nodes);
+            truncated |= descend_a11y_iframes(
+                &page,
+                &mut nodes,
+                max_nodes.saturating_sub(emitted),
+                Some(&owners),
+            )
+            .await;
             return Ok(vec![Evidence::AccessibilitySnapshot {
                 page_id: page_id.clone(),
                 nodes,
@@ -2125,7 +2134,7 @@ impl crate::ObservationEngine for ChromiumWorker {
         // their targets carry the frame hop control_action can re-resolve.
         let emitted = count_a11y_nodes(&nodes);
         if emitted < max_nodes {
-            truncated |= descend_a11y_iframes(&page, &mut nodes, max_nodes - emitted).await;
+            truncated |= descend_a11y_iframes(&page, &mut nodes, max_nodes - emitted, None).await;
         }
         // Only a whole tree can show that a control is missing from it.
         let controls_omitted = if truncated || a11y_contains_form_control(&nodes) {
@@ -4499,7 +4508,11 @@ async fn descend_a11y_iframes(
     page: &Page,
     nodes: &mut Vec<types::AccessibilityNode>,
     mut budget: usize,
+    allowed_owners: Option<&HashSet<chromiumoxide::cdp::browser_protocol::dom::BackendNodeId>>,
 ) -> bool {
+    if allowed_owners.is_some_and(HashSet::is_empty) {
+        return false;
+    }
     let Ok(Some(main_frame)) = page.mainframe().await else {
         return false;
     };
@@ -4539,12 +4552,18 @@ async fn descend_a11y_iframes(
             }
         }
     }
+    let scoped_iframes: Vec<_> = iframes
+        .iter()
+        .filter(|candidate| {
+            allowed_owners.is_none_or(|allowed| {
+                candidate_backend_ids
+                    .iter()
+                    .any(|(id, other)| other.id == candidate.id && allowed.contains(id))
+            })
+        })
+        .collect();
     let mut truncated = false;
     for frame in frames {
-        if budget == 0 {
-            truncated = true;
-            break;
-        }
         let is_child = page
             .frame_parent(frame.clone())
             .await
@@ -4562,6 +4581,13 @@ async fn descend_a11y_iframes(
             .await
             .ok()
             .map(|owner| owner.result.backend_node_id);
+        if allowed_owners.is_some_and(|allowed| {
+            !owner_backend_node_id
+                .as_ref()
+                .is_some_and(|id| allowed.contains(id))
+        }) {
+            continue;
+        }
         let candidate = match owner_backend_node_id.and_then(|backend_node_id| {
             candidate_backend_ids
                 .iter()
@@ -4569,6 +4595,7 @@ async fn descend_a11y_iframes(
                 .map(|(_, candidate)| *candidate)
         }) {
             Some(candidate) => Some(candidate),
+            None if allowed_owners.is_some() => None,
             None => {
                 let frame_name = page.frame_name(frame.clone()).await.ok().flatten();
                 let frame_url = page.frame_url(frame.clone()).await.ok().flatten();
@@ -4595,6 +4622,10 @@ async fn descend_a11y_iframes(
         let Some(candidate) = candidate else {
             continue;
         };
+        if budget == 0 {
+            truncated = true;
+            break;
+        }
         let Ok(tree) = page
             .execute(
                 chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::builder()
@@ -4613,7 +4644,7 @@ async fn descend_a11y_iframes(
         // this hop (an unnamed hop matches every visible iframe candidate,
         // not just the unnamed ones, since `choose` drops the name filter
         // entirely once accessibleName normalizes to `None`).
-        let same_name: Vec<&dom_engine::Candidate> = iframes
+        let same_name: Vec<_> = scoped_iframes
             .iter()
             .filter(|other| other.name == candidate.name)
             .collect();
@@ -4638,6 +4669,11 @@ async fn descend_a11y_iframes(
             frame_roots,
         ) {
             Ok(()) => {}
+            Err(_) if allowed_owners.is_some() => {
+                // A scoped frame whose AX parent was omitted must not be
+                // appended outside that parent or exceed the node budget.
+                truncated = true;
+            }
             Err(frame_roots) => {
                 nodes.push(types::AccessibilityNode {
                     role: Some("Iframe".into()),
@@ -4649,6 +4685,44 @@ async fn descend_a11y_iframes(
         }
     }
     truncated
+}
+
+/// Visible iframe owners reachable from the selected AX subtree. Ignored
+/// wrappers still carry descendant relationships; siblings remain outside
+/// the scope even when they have identical names or URLs.
+fn scoped_iframe_owners(
+    raw: &[chromiumoxide::cdp::browser_protocol::accessibility::AxNode],
+    root: &str,
+) -> HashSet<chromiumoxide::cdp::browser_protocol::dom::BackendNodeId> {
+    let by_id: HashMap<_, _> = raw
+        .iter()
+        .map(|node| (node.node_id.as_ref(), node))
+        .collect();
+    let mut pending = vec![root];
+    let mut visited = HashSet::new();
+    let mut owners = HashSet::new();
+    while let Some(id) = pending.pop() {
+        if !visited.insert(id) {
+            continue;
+        }
+        let Some(node) = by_id.get(id) else {
+            continue;
+        };
+        let role = node
+            .role
+            .as_ref()
+            .and_then(|role| role.value.as_ref())
+            .and_then(serde_json::Value::as_str);
+        if !node.ignored && role == Some("Iframe") {
+            if let Some(owner) = &node.backend_dom_node_id {
+                owners.insert(*owner);
+            }
+        }
+        if let Some(children) = &node.child_ids {
+            pending.extend(children.iter().map(|child| child.as_ref()));
+        }
+    }
+    owners
 }
 
 fn compact_ax_tree(
@@ -5009,7 +5083,7 @@ mod tests {
         apply_state_commit, clamp_js_timeout_ms, click_dispatch_phase_for_step, compact_ax_tree,
         driver_error_is_retryable, element_wait_missing_observation,
         ensure_automatic_download_modifier_support, iframe_hop_ordinal, is_document_body_inspect,
-        is_missing_css_node, should_retry_click_target_detach,
+        is_missing_css_node, scoped_iframe_owners, should_retry_click_target_detach,
         should_retry_plain_click_target_drift, should_retry_transient_click_loss, snapshot_cookie,
         text_matches, unscoped_css_wait_selector, validate_clip,
         wait_should_retry_replaced_context, ChromiumWorker, ClickDispatchPhase, HttpBridgeState,
@@ -5560,6 +5634,30 @@ mod tests {
             retryable: false,
         };
         assert!(!wait_should_retry_replaced_context(&unrelated));
+    }
+
+    #[test]
+    fn scoped_iframe_owners_follow_ignored_wrappers_and_exclude_siblings() {
+        let raw: Vec<chromiumoxide::cdp::browser_protocol::accessibility::AxNode> =
+            serde_json::from_value(serde_json::json!([
+                {"nodeId":"root","ignored":true,"childIds":["selected","outside"]},
+                {"nodeId":"selected","ignored":true,"childIds":["nested","hidden","missing"]},
+                {"nodeId":"nested","ignored":true,"childIds":["frame","control","selected"]},
+                {"nodeId":"frame","ignored":false,"backendDOMNodeId":3,
+                    "role":{"type":"role","value":"Iframe"}},
+                {"nodeId":"outside","ignored":false,"backendDOMNodeId":4,
+                    "role":{"type":"role","value":"Iframe"}},
+                {"nodeId":"hidden","ignored":true,"backendDOMNodeId":5,
+                    "role":{"type":"role","value":"Iframe"}},
+                {"nodeId":"control","ignored":false,"backendDOMNodeId":6,
+                    "role":{"type":"role","value":"button"}}
+            ]))
+            .expect("valid CDP AX fixture");
+        assert_eq!(
+            serde_json::to_value(scoped_iframe_owners(&raw, "selected")).unwrap(),
+            serde_json::json!([3])
+        );
+        assert!(scoped_iframe_owners(&raw, "missing").is_empty());
     }
 
     #[test]

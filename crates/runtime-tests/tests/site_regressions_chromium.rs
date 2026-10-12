@@ -17,4 +17,9 @@ macro_rules! chromium_cases {
     )+};
 }
 
-cases::every_case!(chromium_cases, iframe_scoped_targets_reach_the_second_frame);
+cases::every_case!(
+    chromium_cases,
+    iframe_scoped_targets_reach_the_second_frame,
+    scoped_snapshot_frame_targets_reach_the_second_frame,
+    scoped_iframe_descent_respects_the_node_budget
+);
