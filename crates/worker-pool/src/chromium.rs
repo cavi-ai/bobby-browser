@@ -60,10 +60,10 @@ use tokio::task::JoinHandle;
 use types::{
     CaptureScreenshotCommand, ClickAndWaitForDownloadCommand, ClickAndWaitForPopupCommand,
     ClickCommand, ClosePageCommand, CommandError, ControlAction, ControlActionCommand, ErrorCode,
-    ErrorLayer, EvaluateJavaScriptCommand, Evidence, FormControl, FormControlTarget,
-    InspectCommand, ListPagesCommand, NavigateCommand, OpenPageCommand, PageEvidence, PageId,
-    ScreenshotMode, SessionId, SetEmulatedMediaCommand, SetFocusEmulationCommand, TargetSpec,
-    TypeTextCommand, UploadFilesCommand, WaitCondition, WorkerId,
+    ErrorLayer, EvaluateJavaScriptCommand, Evidence, FormControlTarget, InspectCommand,
+    ListPagesCommand, NavigateCommand, OpenPageCommand, PageEvidence, PageId, ScreenshotMode,
+    SessionId, SetEmulatedMediaCommand, SetFocusEmulationCommand, TargetSpec, TypeTextCommand,
+    UploadFilesCommand, WaitCondition, WorkerId,
 };
 
 use crate::{
@@ -2736,21 +2736,21 @@ impl crate::InputEngine for ChromiumWorker {
             })?;
             crate::decode_form_snapshot(page_id.clone(), encoded, 512)
         };
-        let find_control = |snapshot: &types::FormSnapshot| -> Option<FormControl> {
-            snapshot
-                .forms
-                .iter()
-                .flat_map(|form| form.controls.iter())
-                .chain(snapshot.unowned_controls.iter())
-                .find(|control| {
-                    control.target.as_ref().is_some_and(|target| {
-                        crate::target_specs_equivalent(target, &command.target)
-                    })
-                })
-                .cloned()
+        // The control is the element the target resolves to, read with the
+        // snapshot's projection; snapshot names can differ from resolver names.
+        let describe = async |resolved: &crate::targeting::ResolvedTarget| match resolved
+            .form_control(&page)
+            .await?
+        {
+            Some(encoded) => crate::decode_form_control(&encoded, command.target.clone()).map(Some),
+            None => Ok(None),
         };
+        let target = Self::control_target_spec(&command.target);
+        let resolved = self
+            .resolve_target(page_id, &page, "", Some(&target))
+            .await?;
         let before = read_snapshot().await?;
-        let before_control = find_control(&before).ok_or_else(|| {
+        let before_control = describe(&resolved).await?.ok_or_else(|| {
             driver_error(
                 ErrorCode::TargetNotFound,
                 "form control target was not found",
@@ -2758,10 +2758,6 @@ impl crate::InputEngine for ChromiumWorker {
         })?;
         crate::validate_control_action(&before_control, &command.action)?;
 
-        let target = Self::control_target_spec(&command.target);
-        let resolved = self
-            .resolve_target(page_id, &page, "", Some(&target))
-            .await?;
         self.bring_page_to_front(&page).await;
         let mut committed: Option<Vec<String>> = None;
         match &command.action {
@@ -2785,18 +2781,23 @@ impl crate::InputEngine for ChromiumWorker {
                     .collect();
                 resolved.set_files(&page, paths).await?;
             }
-            ControlAction::Clear => {
-                if before_control.control_kind == types::FormControlKind::File {
-                    resolved.set_files(&page, Vec::new()).await?;
-                } else {
-                    resolved.clear_control(&page).await?;
-                }
-            }
+            ControlAction::Clear => match before_control.control_kind {
+                types::FormControlKind::File => resolved.set_files(&page, Vec::new()).await?,
+                types::FormControlKind::ContentEditable => resolved.clear_editable(&page).await?,
+                _ => resolved.clear_control(&page).await?,
+            },
             ControlAction::Activate => resolved.click(&page).await?,
         }
 
         let after = read_snapshot().await?;
-        let after_control = find_control(&after).ok_or_else(|| {
+        let after_control = match describe(&resolved).await {
+            Ok(Some(control)) => Some(control),
+            _ => match self.resolve_target(page_id, &page, "", Some(&target)).await {
+                Ok(replacement) => describe(&replacement).await?,
+                Err(_) => None,
+            },
+        }
+        .ok_or_else(|| {
             driver_error(
                 ErrorCode::TargetDetached,
                 "form control was replaced or detached after dispatch",
