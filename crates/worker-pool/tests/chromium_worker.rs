@@ -2073,12 +2073,49 @@ async fn wait_for_text_resolves_an_ambiguous_target_by_matcher() {
     worker.close().await.unwrap();
 }
 
+// Keep the first collection ambiguous, then remove marked candidates after
+// the second collection returns and before their live text is read. Target
+// stamps persist across collections, so attribute mutations cannot trigger
+// this race. Measuring each candidate's rectangle identifies the collection.
+const DETACH_ON_SECOND_COLLECTION: &str = concat!(
+    "<script>window.detachedCandidates=[];",
+    "const measure=Element.prototype.getBoundingClientRect;",
+    "for(const el of document.querySelectorAll('[data-detach]')){",
+    "let collections=0;el.getBoundingClientRect=function(){",
+    "const rect=measure.call(this);",
+    "if(++collections===2)queueMicrotask(()=>{",
+    "window.detachedCandidates.push(this.id);this.remove()});",
+    "return rect}};</script>"
+);
+
+async fn assert_wait_fixture_state(
+    worker: &dyn worker_pool::BrowserWorker,
+    page_id: &PageId,
+    detached: &[&str],
+    remaining: &[&str],
+) {
+    let evidence = worker_pool::javascript_or_default(worker.javascript())
+        .evaluate_javascript(
+            page_id,
+            &EvaluateJavaScriptCommand {
+                expression: "({detached:window.detachedCandidates,remaining:Array.from(document.querySelectorAll('p'),el=>el.id)})".into(),
+                timeout_ms: 5_000,
+                await_promise: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(evidence.as_slice(), [Evidence::JavaScriptResult { value, truncated: false }]
+            if value == &serde_json::json!({"detached": detached, "remaining": remaining})),
+        "the fixture must exercise candidate detachment: {evidence:?}"
+    );
+}
+
 /// A candidate that matched at ranking time can detach before its value is
-/// read on the same poll (the page re-rendered it away between the two). A
-/// `MutationObserver` removes `#gone` the instant the candidate collector
-/// stamps it with its per-scan `data-bobby-target` tracking id — which
-/// happens on every poll, so the removal always races the read — while
-/// `#keep` carries the wanted text throughout. The wait must resolve via
+/// read on the same poll (the page re-rendered it away between the two).
+/// The second collection removes `#gone` while `#keep` carries the wanted
+/// text throughout. The wait must resolve via
 /// `#keep` instead of failing the whole call with `target detached`.
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
@@ -2107,26 +2144,9 @@ async fn wait_for_text_survives_a_candidate_detaching_between_ranking_and_its_re
         .navigate(
             &page_id,
             &NavigateCommand {
-                url: concat!(
-                    "data:text/html,",
-                    "<p id=\"keep\">Step 2 of 3</p><p id=\"gone\">Step 2 of 3</p>",
-                    // The candidate collector stamps every element with a
-                    // fresh `data-bobby-target` id on every collect pass. The
-                    // first pass (the initial resolve that discovers the
-                    // ambiguity) must still see `#gone` attached; only the
-                    // second pass (resolve_ambiguous_wait_values re-collecting
-                    // candidates for itself) should race its removal against
-                    // the per-candidate read that follows. Counting stamps
-                    // per element reproduces that exact window deterministically.
-                    "<script>new MutationObserver(records=>{for(const r of records){",
-                    "if(r.attributeName==='data-bobby-target'&&r.target.id==='gone'){",
-                    "r.target._bobbyStamps=(r.target._bobbyStamps||0)+1;",
-                    "if(r.target._bobbyStamps===2){r.target.remove()}",
-                    "}}}).observe(document.documentElement,",
-                    "{attributes:true,attributeFilter:['data-bobby-target'],subtree:true})",
-                    "</script>"
-                )
-                .to_string(),
+                url: format!(
+                    "data:text/html,<p id=\"keep\">Step 2 of 3</p><p id=\"gone\" data-detach>Step 2 of 3</p>{DETACH_ON_SECOND_COLLECTION}"
+                ),
                 wait_until: WaitUntil::Interactive,
                 timeout_ms: 10_000,
             },
@@ -2162,12 +2182,13 @@ async fn wait_for_text_survives_a_candidate_detaching_between_ranking_and_its_re
         other => panic!("expected Evidence::Wait, got {other:?}"),
     }
 
+    assert_wait_fixture_state(worker.as_ref(), &page_id, &["gone"], &["keep"]).await;
     worker.close().await.unwrap();
 }
 
 /// Same race as above, but every ambiguous candidate detaches before its
 /// read on the first poll (`#gone1` and `#gone2` both carry the wanted text
-/// and both get removed the instant they are stamped). Every candidate
+/// and both get removed after the second collection). Every candidate
 /// failing to read must not fail the wait call itself — it must be
 /// observed as "not yet satisfied" so the wait keeps polling to its own
 /// deadline and times out normally instead of surfacing the per-candidate
@@ -2199,24 +2220,9 @@ async fn wait_for_text_keeps_polling_instead_of_failing_when_every_candidate_det
         .navigate(
             &page_id,
             &NavigateCommand {
-                url: concat!(
-                    "data:text/html,",
-                    "<p id=\"gone1\">Step 2 of 3</p><p id=\"gone2\">Step 2 of 3</p>",
-                    // See the sibling test above: only remove on the second
-                    // stamp so both candidates are still attached for the
-                    // ambiguity-discovering collect, then detach before the
-                    // per-candidate read that resolve_ambiguous_wait_values
-                    // performs off its own (second) collect.
-                    "<script>new MutationObserver(records=>{for(const r of records){",
-                    "if(r.attributeName==='data-bobby-target'&&",
-                    "(r.target.id==='gone1'||r.target.id==='gone2')){",
-                    "r.target._bobbyStamps=(r.target._bobbyStamps||0)+1;",
-                    "if(r.target._bobbyStamps===2){r.target.remove()}",
-                    "}}}).observe(document.documentElement,",
-                    "{attributes:true,attributeFilter:['data-bobby-target'],subtree:true})",
-                    "</script>"
-                )
-                .to_string(),
+                url: format!(
+                    "data:text/html,<p id=\"gone1\" data-detach>Step 2 of 3</p><p id=\"gone2\" data-detach>Step 2 of 3</p>{DETACH_ON_SECOND_COLLECTION}"
+                ),
                 wait_until: WaitUntil::Interactive,
                 timeout_ms: 10_000,
             },
@@ -2246,6 +2252,7 @@ async fn wait_for_text_keeps_polling_instead_of_failing_when_every_candidate_det
         "every candidate detaching mid-read must time out, not fail with {error:?}"
     );
 
+    assert_wait_fixture_state(worker.as_ref(), &page_id, &["gone1", "gone2"], &[]).await;
     worker.close().await.unwrap();
 }
 
