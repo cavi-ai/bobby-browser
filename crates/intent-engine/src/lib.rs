@@ -17,7 +17,9 @@ pub use engine::{
 };
 pub use http_vision::{HttpVisionAssist, StructuredExtractRequest, StructuredExtractor};
 pub use stuck::{never_escalates, StuckKind};
-pub use verify::{compatible, execution_record, summarize_target, verify_fill};
+pub use verify::{
+    compatible, execution_record, summarize_target, verify_fill, TYPED_VALUE_VERIFIED,
+};
 pub use vision::{
     collect_vision_training_data, compile_vision_packet, instrument_vision_assist, proposal_sha256,
     validate_backend_result, CachedProposal, CachedProposalAction, ProposalGeneration,

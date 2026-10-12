@@ -7,7 +7,9 @@ use std::{
 use artifact_store::{ArtifactStore, PendingArtifact};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use intent_engine::{IntentBrowser, IntentEngine, IntentOutcome, VisionAssist, VisionContext};
+use intent_engine::{
+    IntentBrowser, IntentEngine, IntentOutcome, VisionAssist, VisionContext, TYPED_VALUE_VERIFIED,
+};
 use network_engine::{
     DirectHttpExecutor, EligibilityDecision, EligibilityPolicy, HttpCandidate, NetworkPolicy,
 };
@@ -374,9 +376,31 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
         page_id: &PageId,
         command: &TypeTextCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        worker_pool::input_or_default(self.lease.worker().input())
-            .type_text(page_id, command)
-            .await
+        let input = worker_pool::input_or_default(self.lease.worker().input());
+        let mut evidence = input.type_text(page_id, command).await?;
+        // A framed control's value stays inside its frame: the worker checks
+        // it there, as primitive typing's verification does, and the check
+        // stands in for the read-back.
+        let kind = evidence
+            .iter()
+            .find_map(|item| match item {
+                Evidence::Configuration { name, value } if name == "typedControlKind" => {
+                    Some(value.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| "text".into());
+        if let Some(verified) = input
+            .verify_framed_typed_value(page_id, command, None, &kind)
+            .await?
+        {
+            evidence.extend(verified);
+            evidence.push(Evidence::Configuration {
+                name: TYPED_VALUE_VERIFIED.into(),
+                value: "true".into(),
+            });
+        }
+        Ok(evidence)
     }
 
     async fn element_at_point(

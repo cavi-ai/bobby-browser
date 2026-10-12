@@ -291,6 +291,10 @@ fn verify_checked_state(expected: bool, evidence: &[Evidence]) -> Result<(), Str
     }
 }
 
+/// Configuration evidence a runtime adds once it has checked a typed value
+/// where the value stays, inside a frame, in place of reading it back.
+pub const TYPED_VALUE_VERIFIED: &str = "typedValueVerified";
+
 fn verify_typed_value(expected: &str, evidence: &[Evidence]) -> Result<(), String> {
     let control_valid = evidence.iter().find_map(|item| match item {
         Evidence::Configuration { name, value } if name == "formControlValid" => {
@@ -311,6 +315,12 @@ fn verify_typed_value(expected: &str, evidence: &[Evidence]) -> Result<(), Strin
             Some(message) => format!("browser rejected the form control: {message}"),
             None => "browser rejected the form control".into(),
         });
+    }
+    if evidence.iter().any(|item| {
+        matches!(item, Evidence::Configuration { name, value }
+            if name == TYPED_VALUE_VERIFIED && value == "true")
+    }) {
+        return Ok(());
     }
     let observed = evidence
         .iter()
@@ -375,6 +385,35 @@ fn verify_upload_paths(expected: &[String], evidence: &[Evidence]) -> Result<(),
         remaining.remove(index);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod typed_value_tests {
+    use super::*;
+
+    #[test]
+    fn a_value_checked_inside_its_frame_verifies_without_a_read_back() {
+        let evidence = vec![
+            Evidence::Element {
+                selector: String::new(),
+                text: Some("[redacted]".into()),
+            },
+            Evidence::Configuration {
+                name: TYPED_VALUE_VERIFIED.into(),
+                value: "true".into(),
+            },
+        ];
+        assert_eq!(verify_typed_value("ada@example.com", &evidence), Ok(()));
+    }
+
+    #[test]
+    fn a_redacted_read_back_alone_does_not_verify() {
+        let evidence = vec![Evidence::Element {
+            selector: String::new(),
+            text: Some("[redacted]".into()),
+        }];
+        assert!(verify_typed_value("ada@example.com", &evidence).is_err());
+    }
 }
 
 #[cfg(test)]
