@@ -86,6 +86,7 @@ macro_rules! every_case {
             form_snapshot_targets_reach_an_unnamed_frame,
             identical_frames_from_another_site_keep_their_own_targets,
             sandboxed_frames_list_and_act,
+            a_main_frame_miss_names_the_frame_holding_the_target,
             $($extra,)*
         }
     };
@@ -4287,6 +4288,52 @@ pub async fn sandboxed_frames_list_and_act(rig: &Rig) {
     assert_eq!(
         clicked["status"], "completed",
         "click in the sandboxed frame: {clicked}"
+    );
+    let pressed = wait_for_result(&live, "pressed").await;
+    assert_eq!(
+        pressed["status"], "completed",
+        "the click never landed: {pressed}"
+    );
+    live.close().await;
+}
+
+/// A click whose target misses the page but sits inside a frame names the
+/// frame path that reaches it, and that path acts.
+pub async fn a_main_frame_miss_names_the_frame_holding_the_target(rig: &Rig) {
+    let (site, _frame) = cross_site_frame_page(
+        r#"<button onclick="parent.postMessage('pressed','*')">Frame action</button>
+        <script>parent.postMessage('ready','*')</script>"#,
+    )
+    .await;
+    let live = Live::open(rig, &site.url("/host")).await;
+    let ready = wait_for_result(&live, "ready").await;
+    assert_eq!(
+        ready["status"], "completed",
+        "the frame never loaded: {ready}"
+    );
+    let missed = live
+        .call(
+            "click",
+            json!({"target":{"role":"button","accessibleName":"Frame action"}}),
+        )
+        .await;
+    assert_eq!(missed["error"]["code"], "targetNotFound", "{missed}");
+    let message = missed["error"]["message"].as_str().unwrap_or_default();
+    let named = message
+        .split_once("\"framePath\": ")
+        .unwrap_or_else(|| panic!("the miss does not name the frame: {missed}"))
+        .1;
+    let frame_path: Value = serde_json::from_str(named)
+        .unwrap_or_else(|error| panic!("named frame path {named}: {error}"));
+    let clicked = live
+        .call(
+            "click",
+            json!({"target":{"role":"button","accessibleName":"Frame action","framePath":frame_path}}),
+        )
+        .await;
+    assert_eq!(
+        clicked["status"], "completed",
+        "click through the named frame path: {clicked}"
     );
     let pressed = wait_for_result(&live, "pressed").await;
     assert_eq!(

@@ -1251,7 +1251,12 @@ impl ChromiumWorker {
         target: Option<&types::TargetSpec>,
     ) -> Result<crate::targeting::ResolvedTarget, CommandError> {
         let browser = self.browser_handle().await?;
-        resolve_browser_target(page_id, page, selector, target, Some(&browser)).await
+        match resolve_browser_target(page_id, page, selector, target, Some(&browser)).await {
+            Err(error) if error.code == ErrorCode::TargetNotFound => {
+                Err(name_the_frame_holding(page, target, &browser, error).await)
+            }
+            resolved => resolved,
+        }
     }
 
     async fn register_page(&self, page_id: PageId, page: Page) -> Result<(), CommandError> {
@@ -4315,6 +4320,42 @@ async fn ensure_editable_control(
         layer: ErrorLayer::Driver,
         retryable: false,
     })
+}
+
+/// A target with no frame path that misses the main frame but resolves inside
+/// a child frame: the miss names the frame path that reaches it.
+async fn name_the_frame_holding(
+    page: &Page,
+    target: Option<&types::TargetSpec>,
+    browser: &BrowserHandle,
+    error: CommandError,
+) -> CommandError {
+    let Some(target) =
+        target.filter(|target| target.frame_path.is_empty() && target.shadow_path.is_empty())
+    else {
+        return error;
+    };
+    let Ok(census) = gather_candidates(page, target, Some(browser)).await else {
+        return error;
+    };
+    let framed: Vec<_> = census
+        .into_iter()
+        .filter(|candidate| !candidate.frame_path.is_empty())
+        .collect();
+    match dom_engine::resolve_candidates(target, &framed, &dom_engine::ResolutionPolicy::default())
+    {
+        Ok(dom_engine::ResolutionDecision::Resolved { candidate, .. }) => {
+            let path = serde_json::to_string(&candidate.frame_path).unwrap_or_default();
+            CommandError {
+                message: format!(
+                    "{}; the target is inside a frame: pass \"framePath\": {path}",
+                    error.message
+                ),
+                ..error
+            }
+        }
+        _ => error,
+    }
 }
 
 /// Text entry refuses a field an open dialog covers, as a click on it would be.
