@@ -37,6 +37,31 @@ test("shared gathering infers native roles and reads labelled-by names", () => {
   ]);
 });
 
+test("shared gathering names button inputs from their labels without exposing field values", () => {
+  const window = page(`<input type="button" value="Save"><input type="submit" value="Send"><input type="reset" value="Clear"><input type="submit" aria-label="Publish" value="Send"><span id="label">Confirm</span><input type="button" aria-labelledby="label" value="Continue"><input role="button" value="private-field-value">`);
+  assert.deepEqual(gather(window, { redact: false }).controls.map(({ role, name }) => ({ role, name })), [
+    { role: "button", name: "Save" },
+    { role: "button", name: "Send" },
+    { role: "button", name: "Clear" },
+    { role: "button", name: "Publish" },
+    { role: "button", name: "Confirm" },
+    { role: "button", name: null },
+  ]);
+  assert.equal(JSON.stringify(gather(window)).includes("private-field-value"), false);
+});
+
+test("shared gathering names image inputs from alt text and preserves ARIA precedence", () => {
+  const window = page(`<input type="image" alt="Upload image" value="private-image-value"><input type="image" alt="Fallback" aria-label="Publish"><span id="image-label">Confirm</span><input type="image" alt="Fallback" aria-labelledby="image-label" aria-label="Other"><input role="button" alt="Not a button label" value="private-field-value">`);
+  assert.deepEqual(gather(window, { redact: false }).controls.map(({ role, name }) => ({ role, name })), [
+    { role: "button", name: "Upload image" },
+    { role: "button", name: "Publish" },
+    { role: "button", name: "Confirm" },
+    { role: "button", name: null },
+  ]);
+  assert.equal(JSON.stringify(gather(window)).includes("private-image-value"), false);
+  assert.equal(JSON.stringify(gather(window)).includes("private-field-value"), false);
+});
+
 test("shared gathering redacts sensitive labels and refuses partial bounded sets", () => {
   const secret = "secret: sample-canary-2836";
   const window = page(`<input type="password" aria-label="${secret}" value="${secret}"><button>Save</button>`);
