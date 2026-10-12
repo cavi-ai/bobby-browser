@@ -90,9 +90,34 @@ pub struct CheckpointStore {
 /// even for sessions exceeding the former 256-checkpoint cache limit.
 #[derive(Default)]
 struct SessionIndex {
-    modified: Option<SystemTime>,
+    directory_version: Option<DirectoryVersion>,
     sessions: HashMap<types::SessionId, Vec<CheckpointRef>>,
     rejected: HashMap<PathBuf, FileVersion>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct DirectoryVersion {
+    modified: SystemTime,
+    #[cfg(unix)]
+    identity: (u64, u64),
+    #[cfg(unix)]
+    changed: (i64, i64),
+}
+
+impl DirectoryVersion {
+    fn from_metadata(metadata: &std::fs::Metadata) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Ok(Self {
+            modified: metadata.modified()?,
+            // A restored directory can preserve modification time while
+            // replacing every checkpoint path held by the index.
+            #[cfg(unix)]
+            identity: (metadata.dev(), metadata.ino()),
+            #[cfg(unix)]
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        })
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -204,7 +229,7 @@ impl CheckpointStore {
         &self,
         checkpoint: &WorkflowCheckpoint,
     ) -> Result<(), CheckpointStoreError> {
-        let before = tokio::fs::metadata(self.root.as_path()).await?.modified()?;
+        let before = self.directory_version().await?;
         let destination = self.path(&checkpoint.workflow_id);
         let temporary = self.root.join(format!(
             ".{}.{}.tmp",
@@ -218,13 +243,13 @@ impl CheckpointStore {
                 .map_err(CheckpointStoreError::from);
         if result.is_ok() {
             let mut index = self.session_index.lock().await;
-            if index.modified == Some(before) {
+            if index.directory_version == Some(before) {
                 let path = self.path(&checkpoint.workflow_id);
                 let metadata = tokio::fs::metadata(&path).await?;
                 index.update(checkpoint, path, &metadata);
-                index.modified = Some(tokio::fs::metadata(self.root.as_path()).await?.modified()?);
+                index.directory_version = Some(self.directory_version().await?);
             } else {
-                index.modified = None;
+                index.directory_version = None;
             }
             tracing::info!(workflow_id = %checkpoint.workflow_id.0, "checkpoint.established");
         }
@@ -259,10 +284,10 @@ impl CheckpointStore {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let before = tokio::fs::metadata(self.root.as_path()).await?.modified()?;
+        let before = self.directory_version().await?;
         let rejected = {
             let mut index = self.session_index.lock().await;
-            if index.modified != Some(before) {
+            if index.directory_version != Some(before) {
                 let mut rebuilt = SessionIndex::default();
                 let mut entries = tokio::fs::read_dir(self.root.as_path()).await?;
                 while let Some(entry) = entries.next_entry().await? {
@@ -310,8 +335,8 @@ impl CheckpointStore {
                 for entries in rebuilt.sessions.values_mut() {
                     entries.sort_by_key(|entry| std::cmp::Reverse(entry.created_at));
                 }
-                let after = tokio::fs::metadata(self.root.as_path()).await?.modified()?;
-                rebuilt.modified = (before == after).then_some(after);
+                let after = self.directory_version().await?;
+                rebuilt.directory_version = (before == after).then_some(after);
                 *index = rebuilt;
             }
             index.rejected.clone()
@@ -433,21 +458,20 @@ impl CheckpointStore {
     pub async fn remove(&self, workflow_id: &WorkflowId) -> Result<(), CheckpointStoreError> {
         let lock = self.workflow_lock(workflow_id).await;
         let _guard = lock.lock().await;
-        let before = tokio::fs::metadata(self.root.as_path()).await?.modified()?;
+        let before = self.directory_version().await?;
         match tokio::fs::remove_file(self.path(workflow_id)).await {
             Ok(()) => {
                 File::open(self.root.as_ref()).await?.sync_all().await?;
                 let mut index = self.session_index.lock().await;
-                if index.modified == Some(before) {
+                if index.directory_version == Some(before) {
                     index.rejected.remove(&self.path(workflow_id));
                     for entries in index.sessions.values_mut() {
                         entries.retain(|entry| &entry.workflow_id != workflow_id);
                     }
                     index.sessions.retain(|_, entries| !entries.is_empty());
-                    index.modified =
-                        Some(tokio::fs::metadata(self.root.as_path()).await?.modified()?);
+                    index.directory_version = Some(self.directory_version().await?);
                 } else {
-                    index.modified = None;
+                    index.directory_version = None;
                 }
                 Ok(())
             }
@@ -554,6 +578,11 @@ impl CheckpointStore {
 
     fn path(&self, workflow_id: &WorkflowId) -> PathBuf {
         checkpoint_path(&self.root, workflow_id)
+    }
+
+    async fn directory_version(&self) -> Result<DirectoryVersion, CheckpointStoreError> {
+        let metadata = tokio::fs::metadata(self.root.as_path()).await?;
+        Ok(DirectoryVersion::from_metadata(&metadata)?)
     }
 
     fn issuance_path(&self, workflow_id: &WorkflowId) -> PathBuf {
