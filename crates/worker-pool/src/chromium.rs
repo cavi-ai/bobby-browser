@@ -89,6 +89,12 @@ fn shared_memory_needs_disk(dev_shm_bytes: Option<u64>) -> bool {
     dev_shm_bytes.is_none_or(|bytes| bytes < MIN_DEV_SHM_BYTES)
 }
 
+/// Only a hidden page, or one whose visibility cannot be read, is brought to
+/// front before input.
+fn needs_bring_to_front(visibility: Option<&str>) -> bool {
+    visibility != Some("visible")
+}
+
 #[cfg(target_os = "linux")]
 // The `statvfs` field types differ between targets.
 #[allow(clippy::useless_conversion)]
@@ -908,9 +914,18 @@ impl ChromiumWorker {
     /// click or keyboard event so the target page is not backgrounded — on a
     /// background target in headless Chrome, chromiumoxide's own click path
     /// (scroll-into-view + clickable-point + `Input.dispatchMouseEvent`)
-    /// never resolves. Failure here never aborts the caller: it is logged
-    /// and the dispatch proceeds anyway.
+    /// never resolves. A visible page is left alone: bringing it to front
+    /// activates a headed browser window and takes the desktop's keyboard
+    /// focus. Failure here never aborts the caller: it is logged and the
+    /// dispatch proceeds anyway.
     async fn bring_page_to_front(&self, page: &Page) {
+        let visibility = bounded_cdp(page.evaluate("document.visibilityState"), command_failed)
+            .await
+            .ok()
+            .and_then(|result| result.into_value::<String>().ok());
+        if !needs_bring_to_front(visibility.as_deref()) {
+            return;
+        }
         if let Err(error) = bounded_cdp(page.bring_to_front(), command_failed).await {
             tracing::debug!(?error, "bring-to-front before dispatch failed");
         }
@@ -5133,6 +5148,14 @@ mod tests {
         assert!(shared_memory_needs_disk(None));
         assert!(shared_memory_needs_disk(Some(64 << 20)));
         assert!(!shared_memory_needs_disk(Some(8 << 30)));
+    }
+
+    #[test]
+    fn only_a_page_not_known_visible_is_brought_to_front() {
+        use super::needs_bring_to_front;
+        assert!(!needs_bring_to_front(Some("visible")));
+        assert!(needs_bring_to_front(Some("hidden")));
+        assert!(needs_bring_to_front(None));
     }
 
     /// A wait observation is truncated on a character boundary.
