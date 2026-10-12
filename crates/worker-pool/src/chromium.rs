@@ -5166,6 +5166,23 @@ mod tests {
     }
 
     #[test]
+    fn the_automation_flag_launches_without_its_warning_bar() {
+        use super::ChromiumWorkerFactory;
+        let config = config::BrowserConfig {
+            executable: Some("/usr/bin/true".into()),
+            ..config::BrowserConfig::default()
+        };
+        let registry = tempfile::tempdir().unwrap();
+        let args = ChromiumWorkerFactory::with_pid_registry_dir(config, registry.path().into())
+            .chromium_config(std::path::Path::new("/profiles/p"))
+            .unwrap()
+            .launch_args();
+        assert!(args.contains(&"--disable-blink-features=AutomationControlled".to_string()));
+        assert!(!args.contains(&"--enable-automation".to_string()));
+        assert!(args.contains(&"--test-type".to_string()), "{args:?}");
+    }
+
+    #[test]
     fn shared_memory_moves_to_disk_only_when_dev_shm_is_small() {
         use super::shared_memory_needs_disk;
         assert!(shared_memory_needs_disk(None));
