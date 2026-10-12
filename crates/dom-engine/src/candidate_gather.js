@@ -64,6 +64,7 @@ const implicitRole=el=>{if(el.tagName==='BUTTON')return 'button';if(el.tagName==
       const rawLabel=element.labels?.length ? Array.from(element.labels).map(label=>String(label.innerText||label.textContent||'').trim()).filter(Boolean).join(' ') : null;
       const rawName=labelledBy(element)||element.getAttribute('aria-label')||rawLabel||
         (tag==='img'?element.getAttribute('alt'):null)||(tag==='iframe'?element.getAttribute('title'):null)||
+        (tag==='input'&&['button','submit','reset'].includes(element.type)?element.value:null)||
         (tag==='input'||tag==='textarea'?element.getAttribute('placeholder'):null)||
         String(element.innerText||'').trim()||contentName(element)||element.getAttribute('title')||null;
       const isSensitive=publicMetadata&&sensitive(element);

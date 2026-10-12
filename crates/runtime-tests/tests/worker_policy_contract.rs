@@ -448,6 +448,9 @@ async fn semantic_targets_firefox() {
 
 async fn shadow_native_control_contract(engine: Engine) {
     let cases = [
+        ("button", "Save", "<input type='button' value='Save'>", "Save"),
+        ("button", "Send", "<input type='submit' value='Send'>", "Send"),
+        ("button", "Clear", "<input type='reset' value='Clear'>", "Clear"),
         ("textbox", "Email", "<input aria-label='Email' value='Inside'>", "Inside"),
         ("searchbox", "Search", "<input type='search' aria-label='Search' value='Inside'>", "Inside"),
         ("checkbox", "Terms", "<input type='checkbox' aria-label='Terms' value='Inside'>", "Inside"),
