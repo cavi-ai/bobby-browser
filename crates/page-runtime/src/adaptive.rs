@@ -1349,9 +1349,10 @@ impl AdaptivePageEngine {
                     PrimitiveCommand::Inspect(command) => {
                         match direct.executor.inspect(&snapshot, command).await {
                             Ok(candidate) => candidate,
-                            // A network-policy denial (e.g. loopback) fires at
-                            // fetch time, after eligibility already routed the
-                            // read here. Degrade to the browser — which has
+                            // A network-policy denial (e.g. loopback) and cookie
+                            // state the HTTP mirror cannot prove equivalent are
+                            // only known at fetch time, after eligibility routed
+                            // the read here. Degrade to the browser — which has
                             // the page open — instead of failing a DOM read
                             // with a network error code.
                             Err(error) if error.code == ErrorCode::NetworkPolicyDenied => {
@@ -1360,6 +1361,16 @@ impl AdaptivePageEngine {
                                     lease,
                                     ExecutionPath::BrowserFallback,
                                     ExecutionReason::PolicyRequired,
+                                    version,
+                                )
+                                .await;
+                            }
+                            Err(error) if error.code == ErrorCode::HttpEquivalenceUnproven => {
+                                return browser_execute(
+                                    envelope,
+                                    lease,
+                                    ExecutionPath::BrowserFallback,
+                                    ExecutionReason::StateConflict,
                                     version,
                                 )
                                 .await;
