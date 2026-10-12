@@ -51,6 +51,26 @@ pub(crate) fn repair_vision_config(path: &Path) -> Result<bool> {
     Ok(std::fs::read(path)? != before)
 }
 
+fn write_vision_profile(
+    path: &Path,
+    config: &AppConfig,
+    provider_name: &str,
+    profile: &config::VisionProviderConfig,
+) -> Result<()> {
+    let mut vision = config.vision.clone();
+    config::ensure_loopback_vision_defaults(&mut vision);
+    let endpoint_url = vision
+        .endpoint_url
+        .as_deref()
+        .context("vision endpoint missing after normalization")?;
+    let token_env = vision
+        .token_env
+        .as_deref()
+        .context("vision token env missing after normalization")?;
+    config::upsert_vision_platform(path, endpoint_url, token_env, provider_name, profile)
+        .map_err(|error| anyhow::anyhow!("{error}"))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DoctorFixStatus {
     Fixed,
@@ -332,9 +352,42 @@ pub(crate) fn run_doctor_fix(options: DoctorFixOptions) -> Result<DoctorFixRepor
 
         if let Ok(config) = AppConfig::load(&config_path) {
             if let Some((provider_name, profile)) = config.vision.selected_provider() {
+                let mut profile = profile.clone();
+                if provider_name.eq_ignore_ascii_case("ollama") {
+                    if let Some(tag) = crate::vision_readiness::installed_ollama_tag(&profile) {
+                        let mut adopted = profile.clone();
+                        adopted.model = tag;
+                        actions.push(
+                            match write_vision_profile(
+                                &config_path,
+                                &config,
+                                provider_name,
+                                &adopted,
+                            ) {
+                                Ok(()) => {
+                                    let detail = format!(
+                                        "selected installed Ollama model {} in place of {}",
+                                        adopted.model, profile.model
+                                    );
+                                    profile = adopted;
+                                    DoctorFixAction {
+                                        status: DoctorFixStatus::Fixed,
+                                        name: "vision-model".to_string(),
+                                        detail,
+                                    }
+                                }
+                                Err(error) => DoctorFixAction {
+                                    status: DoctorFixStatus::Failed,
+                                    name: "vision-model".to_string(),
+                                    detail: error.to_string(),
+                                },
+                            },
+                        );
+                    }
+                }
                 let readiness = crate::vision_readiness::check_provider_readiness(
                     provider_name,
-                    profile,
+                    &profile,
                     &crate::vision_readiness::ReadinessOptions {
                         timeout: Duration::from_secs(45),
                         allow_download: options.download_model

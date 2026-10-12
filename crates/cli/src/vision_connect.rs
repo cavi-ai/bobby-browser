@@ -103,7 +103,7 @@ pub fn connect(opts: ConnectOpts) -> Result<()> {
             opts.backend
         );
     }
-    let resolved = if opts.yes {
+    let mut resolved = if opts.yes {
         resolve_non_interactive(&opts)?
     } else {
         resolve_interactive(&opts)?
@@ -111,6 +111,12 @@ pub fn connect(opts: ConnectOpts) -> Result<()> {
 
     if opts.download_model && resolved.provider_name != "mlx" {
         anyhow::bail!("--download-model requires --provider mlx");
+    }
+    if resolved.provider_name == "ollama" && opts.model.is_none() {
+        if let Some(tag) = crate::vision_readiness::installed_ollama_tag(&resolved.profile) {
+            println!("Using installed Ollama model {tag}");
+            resolved.profile.model = tag;
+        }
     }
 
     upsert_vision_platform(
