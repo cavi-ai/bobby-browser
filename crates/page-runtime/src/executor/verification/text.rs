@@ -41,10 +41,17 @@ impl CommandVerifier for Text {
                     combined.extend(verification);
                     return Ok(combined);
                 }
-                // Enter in the typed text submits the form. The control holds
-                // the text without the line break, or no longer exists once
-                // the page has navigated; neither is a value mismatch.
-                let submitted_with_enter = command.value.contains(['\n', '\r']);
+                // A multi-line control keeps typed line breaks as text, which
+                // the worker's read-back shows when the control has a value.
+                let kept_before_read = observed.is_some_and(|observed| {
+                    kept_line_breaks(&command.value, command.clear_first, observed, kind)
+                });
+                // Otherwise Enter in the typed text submits the form. The
+                // control holds the text without the line break, or no longer
+                // exists once the page has navigated; neither is a value
+                // mismatch.
+                let submitted_with_enter =
+                    command.value.contains(['\n', '\r']) && !kept_before_read;
                 let typed_text = if submitted_with_enter {
                     command.value.replace(['\n', '\r'], "")
                 } else {
@@ -95,7 +102,16 @@ impl CommandVerifier for Text {
                     Evidence::Inspection { text, url, .. } => Some((text.as_str(), url.as_str())),
                     _ => None,
                 });
-                let matches = if submitted_with_enter {
+                // A control without a value (contenteditable) shows the kept
+                // line breaks only in its inspected text.
+                let kept_after_read = submitted_with_enter
+                    && inspected.is_some_and(|(inspected, _)| {
+                        kept_line_breaks(&command.value, command.clear_first, inspected, kind)
+                    });
+                let submitted_with_enter = submitted_with_enter && !kept_after_read;
+                let matches = if kept_after_read {
+                    true
+                } else if submitted_with_enter {
                     // A read-back from the page the submit landed on shows that
                     // page's field, which the site may fill with its own value.
                     inspected.is_none_or(|(inspected, read_on)| {
@@ -119,6 +135,10 @@ impl CommandVerifier for Text {
                             observed,
                             kind,
                         )
+                        // Inspected text may collapse whitespace; the worker's
+                        // own read-back already showed the kept line breaks.
+                        || (kept_before_read
+                            && same_words(&command.value, command.clear_first, inspected))
                     })
                 };
                 if matches {
@@ -280,6 +300,26 @@ impl CommandVerifier for Text {
 /// when the independent read ends with the typed value; a checkable passes
 /// when the worker's checked-state read echoes the typed boolean; a select
 /// passes when the independent read confirms the option value the worker set.
+/// Whether a read-back shows the typed line breaks kept as text, with or
+/// without the trailing ones a worker presses after reading.
+fn kept_line_breaks(value: &str, clear_first: bool, read: &str, kind: &str) -> bool {
+    read.contains(['\n', '\r'])
+        && [value, value.trim_end_matches(['\n', '\r'])]
+            .into_iter()
+            .any(|value| typed_value_verified(value, clear_first, read, Some(read), kind))
+}
+
+/// Whether `read` shows `value`, comparing whitespace-separated words.
+fn same_words(value: &str, clear_first: bool, read: &str) -> bool {
+    let value: Vec<&str> = value.split_whitespace().collect();
+    let read: Vec<&str> = read.split_whitespace().collect();
+    if clear_first {
+        read == value
+    } else {
+        read.ends_with(&value)
+    }
+}
+
 fn typed_value_verified(
     value: &str,
     clear_first: bool,
@@ -314,7 +354,33 @@ fn typed_value_verified(
 
 #[cfg(test)]
 mod tests {
-    use super::typed_value_verified;
+    use super::{kept_line_breaks, same_words, typed_value_verified};
+
+    #[test]
+    fn line_breaks_kept_by_a_multi_line_control_verify() {
+        assert!(kept_line_breaks("a\nb", true, "a\nb", "text"));
+        assert!(kept_line_breaks("a\nb\n", true, "a\nb", "text"));
+    }
+
+    #[test]
+    fn collapsed_whitespace_reads_the_same_words() {
+        assert!(same_words(
+            "first line\nsecond line",
+            true,
+            "first line second line"
+        ));
+        assert!(!same_words(
+            "first line\nsecond line",
+            true,
+            "first linesecond line"
+        ));
+    }
+
+    #[test]
+    fn a_submitted_single_line_value_did_not_keep_its_line_break() {
+        assert!(!kept_line_breaks("query\n", true, "query", "text"));
+        assert!(!kept_line_breaks("a\nb", true, "ab", "text"));
+    }
 
     #[test]
     fn exact_match_passes() {

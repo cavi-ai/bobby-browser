@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- `type_text` with line breaks into a multi-line control (a textarea or editable region) completes and keeps the lines instead of failing `verificationFailed`.
 - On Chromium, calls sent at once on one page each resolve their own target instead of failing `targetNotFound`.
 - Intent hints that set `accessibleName` beside a `contains` or `regex` `nearText` fail `intentCompileFailed` instead of ignoring the `nearText`.
 - A missed target's near-miss list marks a control that exists but is hidden as `hidden`, not `noMatch`.
