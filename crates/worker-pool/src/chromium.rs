@@ -2072,22 +2072,40 @@ impl crate::ObservationEngine for ChromiumWorker {
                 .node
                 .frame_id;
             if let Some(content_frame) = owner_frame {
+                // Include the selected iframe after its resolved ancestors.
+                let mut frame_path = resolved.frame_path.clone();
+                if let Some(segment) = &resolved.iframe_hop {
+                    frame_path.push(segment.clone());
+                }
+                if frame_path.len() > crate::targeting::MAX_TARGET_PATH_DEPTH {
+                    return Ok(vec![Evidence::AccessibilitySnapshot {
+                        page_id: page_id.clone(),
+                        nodes: Vec::new(),
+                        truncated: true,
+                    }]);
+                }
                 let mut result = page
                     .execute(
                         chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::builder()
-                            .frame_id(content_frame)
+                            .frame_id(content_frame.clone())
                             .build(),
                     )
                     .await
                     .map_err(command_failed)?
                     .result;
                 name_fields_by_placeholder(&page, &mut result.nodes).await;
-                let (mut nodes, truncated) = compact_ax_tree(&result.nodes, max_nodes);
-                // Preserve ancestor hops before the selected iframe's hop.
-                let mut frame_path = resolved.frame_path.clone();
-                if let Some(segment) = &resolved.iframe_hop {
-                    frame_path.push(segment.clone());
-                }
+                let (mut nodes, mut truncated) = compact_ax_tree(&result.nodes, max_nodes);
+                let owners = snapshot_iframe_owners(&result.nodes, None);
+                let emitted = count_a11y_nodes(&nodes);
+                truncated |= descend_a11y_iframes(
+                    &page,
+                    Some(&content_frame),
+                    frame_path.len(),
+                    &mut nodes,
+                    max_nodes.saturating_sub(emitted),
+                    Some(&owners),
+                )
+                .await;
                 prepend_a11y_frame_path(&mut nodes, &frame_path);
                 return Ok(vec![Evidence::AccessibilitySnapshot {
                     page_id: page_id.clone(),
@@ -2115,21 +2133,17 @@ impl crate::ObservationEngine for ChromiumWorker {
                 .ok_or_else(|| hidden_from_accessibility(&result.nodes))?;
             let (mut nodes, mut truncated) =
                 compact_ax_tree_from(&result.nodes, max_nodes, Some(root_id.as_ref()));
-            let owners = scoped_iframe_owners(&result.nodes, root_id.as_ref());
+            let owners = snapshot_iframe_owners(&result.nodes, Some(root_id.as_ref()));
             let emitted = count_a11y_nodes(&nodes);
-            if resolved.frame_path.len() < crate::targeting::MAX_TARGET_PATH_DEPTH {
-                truncated |= descend_a11y_iframes(
-                    &page,
-                    resolved.frame_id(),
-                    &mut nodes,
-                    max_nodes.saturating_sub(emitted),
-                    Some(&owners),
-                )
-                .await;
-            } else {
-                // Child controls would need a hop beyond the target contract.
-                truncated |= !owners.is_empty();
-            }
+            truncated |= descend_a11y_iframes(
+                &page,
+                resolved.frame_id(),
+                resolved.frame_path.len(),
+                &mut nodes,
+                max_nodes.saturating_sub(emitted),
+                Some(&owners),
+            )
+            .await;
             prepend_a11y_frame_path(&mut nodes, &resolved.frame_path);
             return Ok(vec![Evidence::AccessibilitySnapshot {
                 page_id: page_id.clone(),
@@ -2152,7 +2166,7 @@ impl crate::ObservationEngine for ChromiumWorker {
         let emitted = count_a11y_nodes(&nodes);
         if emitted < max_nodes {
             truncated |=
-                descend_a11y_iframes(&page, None, &mut nodes, max_nodes - emitted, None).await;
+                descend_a11y_iframes(&page, None, 0, &mut nodes, max_nodes - emitted, None).await;
         }
         // Only a whole tree can show that a control is missing from it.
         let controls_omitted = if truncated || a11y_contains_form_control(&nodes) {
@@ -4528,12 +4542,17 @@ fn splice_under_iframe(
 async fn descend_a11y_iframes(
     page: &Page,
     parent_frame: Option<&chromiumoxide::cdp::browser_protocol::page::FrameId>,
+    frame_depth: usize,
     nodes: &mut Vec<types::AccessibilityNode>,
     mut budget: usize,
     allowed_owners: Option<&HashSet<chromiumoxide::cdp::browser_protocol::dom::BackendNodeId>>,
 ) -> bool {
     if allowed_owners.is_some_and(HashSet::is_empty) {
         return false;
+    }
+    if frame_depth >= crate::targeting::MAX_TARGET_PATH_DEPTH {
+        // Child controls would need a hop beyond the target contract.
+        return true;
     }
     let (parent_frame, context_id) = match parent_frame {
         Some(frame) => {
@@ -4721,18 +4740,21 @@ async fn descend_a11y_iframes(
     truncated
 }
 
-/// Visible iframe owners reachable from the selected AX subtree. Ignored
-/// wrappers still carry descendant relationships; siblings remain outside
-/// the scope even when they have identical names or URLs.
-fn scoped_iframe_owners(
+/// Visible iframe owners in the full AX tree or a selected subtree. Ignored
+/// wrappers still carry descendant relationships; subtree siblings remain
+/// outside the scope even when they have identical names or URLs.
+fn snapshot_iframe_owners(
     raw: &[chromiumoxide::cdp::browser_protocol::accessibility::AxNode],
-    root: &str,
+    root: Option<&str>,
 ) -> HashSet<chromiumoxide::cdp::browser_protocol::dom::BackendNodeId> {
     let by_id: HashMap<_, _> = raw
         .iter()
         .map(|node| (node.node_id.as_ref(), node))
         .collect();
-    let mut pending = vec![root];
+    let mut pending = root.map_or_else(
+        || raw.iter().map(|node| node.node_id.as_ref()).collect(),
+        |root| vec![root],
+    );
     let mut visited = HashSet::new();
     let mut owners = HashSet::new();
     while let Some(id) = pending.pop() {
@@ -5168,9 +5190,9 @@ mod tests {
         apply_state_commit, clamp_js_timeout_ms, click_dispatch_phase_for_step, compact_ax_tree,
         driver_error_is_retryable, element_wait_missing_observation,
         ensure_automatic_download_modifier_support, iframe_hop_ordinal, is_document_body_inspect,
-        is_missing_css_node, scoped_iframe_owners, should_retry_click_target_detach,
+        is_missing_css_node, should_retry_click_target_detach,
         should_retry_plain_click_target_drift, should_retry_transient_click_loss, snapshot_cookie,
-        text_matches, unscoped_css_wait_selector, validate_clip,
+        snapshot_iframe_owners, text_matches, unscoped_css_wait_selector, validate_clip,
         wait_should_retry_replaced_context, ChromiumWorker, ClickDispatchPhase, HttpBridgeState,
         EDITABLE_CONTROL_CHECK_JS,
     };
@@ -5722,7 +5744,7 @@ mod tests {
     }
 
     #[test]
-    fn scoped_iframe_owners_follow_ignored_wrappers_and_exclude_siblings() {
+    fn snapshot_iframe_owners_follow_ignored_wrappers_and_exclude_siblings() {
         let raw: Vec<chromiumoxide::cdp::browser_protocol::accessibility::AxNode> =
             serde_json::from_value(serde_json::json!([
                 {"nodeId":"root","ignored":true,"childIds":["selected","outside"]},
@@ -5739,10 +5761,14 @@ mod tests {
             ]))
             .expect("valid CDP AX fixture");
         assert_eq!(
-            serde_json::to_value(scoped_iframe_owners(&raw, "selected")).unwrap(),
+            serde_json::to_value(snapshot_iframe_owners(&raw, Some("selected"))).unwrap(),
             serde_json::json!([3])
         );
-        assert!(scoped_iframe_owners(&raw, "missing").is_empty());
+        assert!(snapshot_iframe_owners(&raw, Some("missing")).is_empty());
+        let expected =
+            serde_json::from_value::<std::collections::HashSet<_>>(serde_json::json!([3, 4]))
+                .unwrap();
+        assert_eq!(snapshot_iframe_owners(&raw, None), expected);
     }
 
     #[test]
