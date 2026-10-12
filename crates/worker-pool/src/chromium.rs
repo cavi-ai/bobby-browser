@@ -41,7 +41,9 @@ use chromiumoxide::cdp::browser_protocol::network::{
 use chromiumoxide::cdp::browser_protocol::page::{
     CaptureScreenshotFormat, EventJavascriptDialogClosed, EventJavascriptDialogOpening, Viewport,
 };
-use chromiumoxide::cdp::browser_protocol::target::{EventTargetCreated, TargetId};
+use chromiumoxide::cdp::browser_protocol::target::{
+    CreateTargetParams, EventTargetCreated, TargetId,
+};
 use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
 use chromiumoxide::handler::Handler;
 use chromiumoxide::layout::Point;
@@ -1824,7 +1826,7 @@ impl crate::TabsEngine for ChromiumWorker {
     async fn open_page(&self, page_id: PageId) -> Result<(), CommandError> {
         let browser = self.browser_handle().await?;
         let page = browser
-            .new_page("about:blank")
+            .new_page(blank_window())
             .await
             .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
         self.register_page(page_id, page).await
@@ -1838,7 +1840,7 @@ impl crate::TabsEngine for ChromiumWorker {
         let browser = self.browser_handle().await?;
         // Always start blank so init scripts register before first real document.
         let page = browser
-            .new_page("about:blank")
+            .new_page(blank_window())
             .await
             .map_err(command_failed)?;
         self.register_page(page_id.clone(), page).await?;
@@ -4200,6 +4202,16 @@ async fn read_page_scoped_text(
     inspect_page_scoped_target(page_id, page, target, false, Some(&handle))
         .await
         .map(|(text, _, _)| text)
+}
+
+/// A blank page in its own window, shown without taking focus. A page that
+/// shares a window goes hidden behind the active tab, and a hidden page renders
+/// no frames, so pointer moves and wheel scrolls never complete on it.
+fn blank_window() -> CreateTargetParams {
+    let mut params = CreateTargetParams::new("about:blank");
+    params.new_window = Some(true);
+    params.background = Some(true);
+    params
 }
 
 async fn page_evidence(page_id: PageId, page: &Page) -> Result<PageEvidence, CommandError> {

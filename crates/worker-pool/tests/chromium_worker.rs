@@ -3482,6 +3482,69 @@ async fn evaluates_javascript_bounds_the_result_and_classifies_errors() {
     eprintln!("javascript evaluation fixture: closed");
 }
 
+/// Each page opens in its own window: a page that shares a window goes hidden
+/// when another page opens, and a hidden page never answers pointer moves.
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn a_page_stays_visible_when_another_page_opens() {
+    let profiles = tempfile::tempdir().unwrap();
+    let factory = ChromiumWorkerFactory::new(BrowserConfig {
+        executable: Some(chrome_executable()),
+        profiles_dir: profiles.path().to_path_buf(),
+        headless: true,
+        max_active: 1,
+        upload_roots: vec![profiles.path().to_path_buf()],
+        downloads_dir: profiles.path().join("downloads"),
+        artifacts_dir: profiles.path().join("artifacts"),
+        max_artifact_bytes: 8 * 1024 * 1024,
+        max_screenshot_dimension: 16_384,
+        max_js_result_bytes: 64 * 1024,
+        max_js_timeout_ms: 30_000,
+    });
+    let worker = factory.launch(&SessionId::new()).await.unwrap();
+    let first = PageId::new();
+    let second = PageId::new();
+    for page_id in [&first, &second] {
+        worker_pool::tabs_or_default(worker.tabs())
+            .open_page(page_id.clone())
+            .await
+            .unwrap();
+    }
+    let opened = worker_pool::tabs_or_default(worker.tabs())
+        .open_page_command(&OpenPageCommand { url: None })
+        .await
+        .unwrap();
+    assert!(
+        opened
+            .iter()
+            .any(|item| matches!(item, Evidence::Page { .. })),
+        "{opened:?}"
+    );
+
+    for page_id in [&first, &second] {
+        let evidence = worker_pool::javascript_or_default(worker.javascript())
+            .evaluate_javascript(
+                page_id,
+                &EvaluateJavaScriptCommand {
+                    expression: "document.visibilityState".into(),
+                    timeout_ms: 10_000,
+                    await_promise: false,
+                },
+            )
+            .await
+            .unwrap();
+        let visibility = evidence
+            .iter()
+            .find_map(|item| match item {
+                Evidence::JavaScriptResult { value, .. } => Some(value.clone()),
+                _ => None,
+            })
+            .expect("javascript result evidence");
+        assert_eq!(visibility.as_str(), Some("visible"), "{page_id:?}");
+    }
+    worker.close().await.unwrap();
+}
+
 #[tokio::test]
 #[ignore = "requires installed Chrome or Chromium"]
 async fn humanized_input_reaches_the_page_with_synthesized_timing() {
