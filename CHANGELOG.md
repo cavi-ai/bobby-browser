@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Headed Chromium starts without Chrome's unsupported command-line flag warning bar.
+
 ## 0.20.0 - 2026-10-12
 
 ### Fixed
