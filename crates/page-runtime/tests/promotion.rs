@@ -605,3 +605,104 @@ async fn concurrent_promotions_preserve_independent_controls_and_counters() {
         .iter()
         .all(|control| control.intents["fill"].success_count == 1));
 }
+
+async fn persisted_controls(
+    root: &std::path::Path,
+    controls: Vec<context_store::ControlContext>,
+) -> ContextPromotion {
+    let (store, _) = ContextStore::open(root, "profile-a").await.unwrap();
+    store
+        .upsert_site(
+            "https://example.test",
+            context_store::SiteContext {
+                pages: BTreeMap::from([(
+                    "/login".into(),
+                    context_store::PageContext {
+                        forms: BTreeMap::from([(
+                            "page".into(),
+                            context_store::FormContext { controls },
+                        )]),
+                    },
+                )]),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(store.flush().await.is_empty());
+    drop(store);
+    let (store, report) = ContextStore::open(root, "profile-a").await.unwrap();
+    assert_eq!(report.sites_loaded, 1);
+    ContextPromotion::new(store)
+}
+
+fn saturated_control(ordinal: u32, intents: usize) -> context_store::ControlContext {
+    context_store::ControlContext {
+        role: "textbox".into(),
+        accessible_name: "Email address".into(),
+        ordinal: Some(ordinal),
+        form_membership: "page".into(),
+        intents: (0..intents)
+            .map(|index| {
+                (
+                    if index == 0 {
+                        "fill".into()
+                    } else {
+                        "locate".into()
+                    },
+                    context_store::IntentStats {
+                        success_count: u64::MAX,
+                        failure_count: u64::MAX,
+                        last_verified_day: Some(10),
+                        source: Some(RecordSource::Observed),
+                    },
+                )
+            })
+            .collect(),
+    }
+}
+
+#[tokio::test]
+async fn saturated_control_outcomes_preserve_counts_and_provenance_across_reopen() {
+    for success in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let promotion = persisted_controls(root.path(), vec![saturated_control(1, 1)]).await;
+        let evidence = vec![
+            resolution("Email address", Some(1)),
+            Evidence::IntentExecution {
+                record: record("fill", IntentResolutionPath::VisionFallback),
+            },
+        ];
+        promotion
+            .record_outcome(Some(URL), &evidence, success)
+            .await;
+        drop(promotion);
+        let (store, report) = ContextStore::open(root.path(), "profile-a").await.unwrap();
+        assert_eq!(report.sites_loaded, 1);
+        let site = store.site("https://example.test").await.unwrap();
+        let stats = &site.pages["/login"].forms["page"].controls[0].intents["fill"];
+        assert_eq!(stats.success_count, u64::MAX);
+        assert_eq!(stats.failure_count, u64::MAX);
+        if success {
+            assert!(stats.last_verified_day.unwrap() > 10);
+            assert_eq!(stats.source, Some(RecordSource::VisionPromoted));
+        } else {
+            assert_eq!(stats.last_verified_day, Some(10));
+            assert_eq!(stats.source, Some(RecordSource::Observed));
+        }
+    }
+}
+
+#[tokio::test]
+async fn recall_ranks_persisted_control_totals_above_u64_without_false_ties() {
+    let root = tempfile::tempdir().unwrap();
+    // Both controls have the same reliability and age. The larger history
+    // must still get its validation boost, even when every sum exceeds u64.
+    let promotion = persisted_controls(
+        root.path(),
+        vec![saturated_control(1, 2), saturated_control(2, 1)],
+    )
+    .await;
+    let answer = promotion.ask(Some(URL), "Email address").await.unwrap();
+    assert_eq!(answer.target.ordinal, Some(1));
+    assert_eq!(answer.confidence, 1.0);
+}

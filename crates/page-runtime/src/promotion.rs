@@ -353,12 +353,14 @@ fn score_remembered(needle: &str, control: &context_store::ControlContext) -> Op
 /// a 30-day half-life with a floor at half weight so old-but-good entries
 /// still compete.
 fn validation_weight(control: &context_store::ControlContext, today: u32) -> f32 {
-    let mut successes: u64 = 0;
-    let mut failures: u64 = 0;
+    // The store bounds the number of intent records. Wider totals preserve
+    // their relative weights even when individual counters have saturated.
+    let mut successes: u128 = 0;
+    let mut failures: u128 = 0;
     let mut newest_day: Option<u32> = None;
     for stats in control.intents.values() {
-        successes += stats.success_count;
-        failures += stats.failure_count;
+        successes += u128::from(stats.success_count);
+        failures += u128::from(stats.failure_count);
         if let Some(day) = stats.last_verified_day {
             newest_day = Some(newest_day.map_or(day, |newest| newest.max(day)));
         }
@@ -378,11 +380,11 @@ fn validation_weight(control: &context_store::ControlContext, today: u32) -> f32
 
 fn apply_outcome(stats: &mut IntentStats, success: bool, source: RecordSource) {
     if success {
-        stats.success_count += 1;
+        stats.success_count = stats.success_count.saturating_add(1);
         stats.last_verified_day = Some(day_since_epoch(chrono::Utc::now()));
         stats.source = Some(source);
     } else {
-        stats.failure_count += 1;
+        stats.failure_count = stats.failure_count.saturating_add(1);
     }
 }
 
