@@ -35,6 +35,7 @@ macro_rules! every_case {
             snapshot_targets_resolve_beside_a_modal_dialog,
             type_text_enter_reports_the_settled_page,
             type_text_types_into_a_field_that_takes_only_real_input,
+            multi_line_controls_keep_typed_line_breaks,
             type_text_enter_accepts_a_reformatted_landed_field,
             intent_follow_post_state_shows_the_settled_page,
             type_text_enter_reports_the_rewritten_url,
@@ -61,6 +62,7 @@ macro_rules! every_case {
             omitted_controls_need_a_whole_tree,
             intent_extract_reads_href_and_attributes,
             hidden_state_holds_for_a_removed_control,
+            text_wait_follows_a_replaced_target,
             intent_follow_reports_a_dialog_that_opened,
             dismiss_completes_when_a_same_named_control_appears,
             unhinted_dismiss_names_the_open_dialog,
@@ -763,6 +765,140 @@ pub async fn scoped_snapshot_targets_preserve_parent_frame_paths(rig: &Rig) {
     }
 }
 
+/// A subtree scope inside a frame includes only its own child frame controls.
+pub async fn scoped_snapshot_in_frame_descends_into_child_frames(rig: &Rig) {
+    for name in ["Widget frame", ""] {
+        let body = format!(
+            r#"<iframe title="{name}" src="/outer-first"></iframe>
+            <iframe id="outer-second" title="{name}" src="/outer-second"></iframe>
+            <p role="status" aria-label="idle" id="status"></p>"#
+        );
+        let outer = format!(
+            r#"<iframe title="{name}" src="/inner-first"></iframe>
+            <section id="scope"><iframe title="{name}" src="/inner-second"></iframe></section>"#
+        );
+        let child = r#"<button onclick="top.document.getElementById('status').setAttribute('aria-label', 'acted ' + parent.location.pathname + ' ' + location.pathname)">Frame action</button>"#;
+        let site = FixtureSite::spawn(vec![
+            ("/frames", Route::Html(page("Scoped child frames", &body))),
+            (
+                "/outer-first",
+                Route::Html(page("First outer frame", &outer)),
+            ),
+            (
+                "/outer-second",
+                Route::Html(page("Second outer frame", &outer)),
+            ),
+            (
+                "/inner-first",
+                Route::Html(page("First child frame", child)),
+            ),
+            (
+                "/inner-second",
+                Route::Html(page("Second child frame", child)),
+            ),
+        ])
+        .await;
+        let live = Live::open(rig, &site.url("/frames")).await;
+        let scope = json!({"css":"#scope","framePath":[{"css":"#outer-second"}]});
+        let scoped = live.snapshot(json!({"target":scope})).await;
+        let mut targets = Vec::new();
+        targets_under(&scoped, &mut targets);
+        let actions: Vec<_> = targets
+            .iter()
+            .filter(|(role, target)| {
+                *role == "button" && target["accessibleName"] == "Frame action"
+            })
+            .collect();
+        assert_eq!(actions.len(), 1, "scoped child frame controls: {scoped}");
+        let target = actions[0].1;
+        let hop = json!({"role":"iframe","accessibleName":name,"ordinal":1});
+        assert_eq!(
+            target["framePath"],
+            json!([hop.clone(), hop]),
+            "child frame path: {scoped}"
+        );
+        let clicked = live.call("click", json!({"target":target})).await;
+        assert_eq!(clicked["status"], "completed", "click {target}: {clicked}");
+        let after = live.snapshot(json!({})).await;
+        assert!(
+            find_node(&after, "status", Some("acted /outer-second /inner-second")).is_some(),
+            "wrong child frame action: {after}"
+        );
+        live.close().await;
+    }
+}
+
+/// Descended controls never require more than the supported eight frame hops.
+pub async fn scoped_frame_descent_respects_target_path_depth(rig: &Rig) {
+    let paths = [
+        "/level0", "/level1", "/level2", "/level3", "/level4", "/level5", "/level6", "/level7",
+        "/level8", "/level9",
+    ];
+    let routes = paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let child = paths.get(index + 1).map_or(String::new(), |path| {
+                format!(
+                    r#"<iframe id="next" title="Level {}" src="{path}"></iframe>"#,
+                    index + 1
+                )
+            });
+            (
+                *path,
+                Route::Html(page(
+                    "Frame depth",
+                    &format!(
+                        r#"<section id="scope"><button>Action {index}</button>{child}</section>"#
+                    ),
+                )),
+            )
+        })
+        .collect();
+    let site = FixtureSite::spawn(routes).await;
+    let live = Live::open(rig, &site.url(paths[0])).await;
+    for depth in [7, 8] {
+        let frame_path = vec![json!({"css":"#next"}); depth];
+        let snapshot = live
+            .snapshot(json!({"target":{"css":"#scope","framePath":frame_path}}))
+            .await;
+        let mut targets = Vec::new();
+        targets_under(&snapshot, &mut targets);
+        assert_eq!(
+            targets.len(),
+            if depth == 7 { 2 } else { 1 },
+            "frame depth targets: {snapshot}"
+        );
+        assert!(
+            targets.iter().all(|(_, target)| target["framePath"]
+                .as_array()
+                .is_some_and(|path| path.len() <= 8)),
+            "target exceeds frame depth: {snapshot}"
+        );
+        assert!(
+            targets
+                .iter()
+                .any(|(_, target)| target["accessibleName"] == "Action 8"
+                    && target["framePath"]
+                        .as_array()
+                        .is_some_and(|path| path.len() == 8)),
+            "missing deepest supported target: {snapshot}"
+        );
+        let tree = snapshot["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|evidence| evidence["kind"] == "accessibilitySnapshot")
+            .unwrap();
+        assert_eq!(
+            tree["truncated"],
+            depth == 8,
+            "frame depth truncation: {snapshot}"
+        );
+    }
+    live.close().await;
+}
+
 pub async fn iframe_scoped_targets_reach_the_second_frame(rig: &Rig) {
     for name in ["Widget frame", ""] {
         scoped_frame_targets_reach_the_second_frame(rig, &["#second-frame"], name).await;
@@ -1082,6 +1218,29 @@ pub async fn type_text_types_into_a_field_that_takes_only_real_input(rig: &Rig) 
         find_node(&after, "status", Some("submitted query")).is_some(),
         "the field did not take the typed text and Enter: {after}"
     );
+    live.close().await;
+}
+
+/// Line breaks typed into a multi-line control are text: the call completes
+/// and the control keeps every line.
+pub async fn multi_line_controls_keep_typed_line_breaks(rig: &Rig) {
+    let body = r#"<main><textarea aria-label="Notes"></textarea>
+        <div contenteditable="true" role="textbox" aria-multiline="true" aria-label="Draft"></div></main>"#;
+    let site = FixtureSite::spawn(vec![("/field", Route::Html(page("Field", body)))]).await;
+    let live = Live::open(rig, &site.url("/field")).await;
+    for name in ["Notes", "Draft"] {
+        let typed = live
+            .call(
+                "type_text",
+                json!({"target":{"role":"textbox","accessibleName":name},"value":"first line\nsecond line"}),
+            )
+            .await;
+        assert_eq!(typed["status"], "completed", "type_text {name}: {typed}");
+        assert!(
+            typed.to_string().contains(r"first line\nsecond line"),
+            "{name} did not keep the line break: {typed}"
+        );
+    }
     live.close().await;
 }
 
@@ -2580,6 +2739,58 @@ pub async fn dismiss_completes_when_a_same_named_control_appears(rig: &Rig) {
     live.close().await;
 }
 
+/// A text wait whose target the page replaces between resolving and reading
+/// it keeps polling and matches the replacement. The page swaps the element
+/// on the first scan that reads it after Arm, or half a second after Arm when
+/// no scan reads it through the page's own methods.
+pub async fn text_wait_follows_a_replaced_target(rig: &Rig) {
+    let body = r#"<main><button id="arm">Arm</button>
+        <p role="status" aria-label="Result" id="result">waiting</p></main>
+        <script>
+          const original = document.getElementById("result");
+          const read = original.getAttribute.bind(original);
+          let armed = false, replaced = false;
+          const replace = () => {
+            if (replaced) return;
+            replaced = true;
+            const next = document.createElement("p");
+            next.setAttribute("role", "status");
+            next.setAttribute("aria-label", "Result");
+            next.textContent = "done";
+            original.replaceWith(next);
+          };
+          document.getElementById("arm").addEventListener("click", () => {
+            armed = true;
+            setTimeout(replace, 500);
+          });
+          original.getAttribute = (name) => {
+            if (armed) queueMicrotask(replace);
+            return read(name);
+          };
+        </script>"#;
+    let site = FixtureSite::spawn(vec![("/home", Route::Html(page("Home", body)))]).await;
+    let live = Live::open(rig, &site.url("/home")).await;
+    let armed = live
+        .call(
+            "click",
+            json!({"target":{"role":"button","accessibleName":"Arm"}}),
+        )
+        .await;
+    assert_eq!(armed["status"], "completed", "arm: {armed}");
+    let waited = live
+        .call(
+            "wait_for",
+            json!({
+                "condition":{"kind":"text","target":{"role":"status","accessibleName":"Result"},
+                             "matcher":{"kind":"contains","value":"done"}},
+                "timeoutMs":5000
+            }),
+        )
+        .await;
+    assert_eq!(waited["status"], "completed", "wait: {waited}");
+    live.close().await;
+}
+
 /// An expected `hidden` state holds once the control is removed, as well as
 /// once it is hidden.
 pub async fn hidden_state_holds_for_a_removed_control(rig: &Rig) {
@@ -2737,39 +2948,56 @@ pub async fn locate_miss_marks_a_hidden_control(rig: &Rig) {
 
 /// Scoped iframe descent excludes sibling frames and shares the node budget.
 pub async fn scoped_iframe_descent_respects_the_node_budget(rig: &Rig) {
+    let body = r#"<iframe title="Widget" src="/child"></iframe><section id="scope"><iframe title="Widget" src="/child"></iframe></section>"#;
     let site = FixtureSite::spawn(vec![
-        ("/frames", Route::Html(page("Frames", r#"<iframe title="Widget" src="/child"></iframe><section id="scope"><iframe title="Widget" src="/child"></iframe></section>"#))),
-        ("/child", Route::Html(page("Child", "<button>Frame action</button>"))),
-    ]).await;
+        (
+            "/frames",
+            Route::Html(page(
+                "Frames",
+                &format!(r#"{body}<iframe id="outer" title="Outer" src="/nested"></iframe>"#),
+            )),
+        ),
+        ("/nested", Route::Html(page("Nested frames", body))),
+        (
+            "/child",
+            Route::Html(page("Child", "<button>Frame action</button>")),
+        ),
+    ])
+    .await;
     let live = Live::open(rig, &site.url("/frames")).await;
-    let whole_scope = live.snapshot(json!({"target":{"css":"#scope"}})).await;
-    let mut targets = Vec::new();
-    targets_under(&whole_scope, &mut targets);
-    assert_eq!(
-        targets.len(),
-        1,
-        "out-of-scope frame controls: {whole_scope}"
-    );
-    for max_nodes in [1, 2] {
-        let snapshot = live
-            .snapshot(json!({"target":{"css":"#scope"},"maxNodes":max_nodes}))
-            .await;
-        let tree = snapshot["evidence"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|evidence| evidence["kind"] == "accessibilitySnapshot")
-            .unwrap();
-        fn count(nodes: &Value) -> usize {
-            nodes.as_array().map_or(0, |nodes| {
-                nodes.iter().map(|node| 1 + count(&node["children"])).sum()
-            })
-        }
-        assert!(
-            count(&tree["nodes"]) <= max_nodes,
-            "node budget exceeded: {snapshot}"
+    for scope in [
+        json!({"css":"#scope"}),
+        json!({"css":"#scope","framePath":[{"css":"#outer"}]}),
+    ] {
+        let whole_scope = live.snapshot(json!({"target":scope})).await;
+        let mut targets = Vec::new();
+        targets_under(&whole_scope, &mut targets);
+        assert_eq!(
+            targets.len(),
+            1,
+            "out-of-scope frame controls: {whole_scope}"
         );
-        assert_eq!(tree["truncated"], true, "missing truncation: {snapshot}");
+        for max_nodes in [1, 2] {
+            let snapshot = live
+                .snapshot(json!({"target":scope,"maxNodes":max_nodes}))
+                .await;
+            let tree = snapshot["evidence"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|evidence| evidence["kind"] == "accessibilitySnapshot")
+                .unwrap();
+            fn count(nodes: &Value) -> usize {
+                nodes.as_array().map_or(0, |nodes| {
+                    nodes.iter().map(|node| 1 + count(&node["children"])).sum()
+                })
+            }
+            assert!(
+                count(&tree["nodes"]) <= max_nodes,
+                "node budget exceeded: {snapshot}"
+            );
+            assert_eq!(tree["truncated"], true, "missing truncation: {snapshot}");
+        }
     }
     live.close().await;
 }
