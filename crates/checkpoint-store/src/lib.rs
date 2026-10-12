@@ -11,6 +11,9 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 use types::{SkillIssuedDecision, WorkflowCheckpoint, WorkflowId, MAX_RECOVERY_RECEIPTS};
 use uuid::Uuid;
 
+/// Default byte bound for checkpoint and skill-issuance files.
+pub const DEFAULT_MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Debug, Error)]
 pub enum CheckpointStoreError {
     #[error("checkpoint I/O failed: {0}")]
@@ -83,6 +86,7 @@ pub struct CheckpointStore {
     root: Arc<PathBuf>,
     workflow_locks: Arc<Mutex<HashMap<WorkflowId, Arc<Mutex<()>>>>>,
     session_index: Arc<Mutex<SessionIndex>>,
+    max_file_bytes: usize,
 }
 
 /// Rebuildable hints only: listing always reads and validates selected files.
@@ -182,12 +186,29 @@ impl SessionIndex {
 
 impl CheckpointStore {
     pub async fn open(root: impl AsRef<Path>) -> Result<Self, CheckpointStoreError> {
+        Self::open_with_max_file_bytes(root, DEFAULT_MAX_FILE_BYTES).await
+    }
+
+    /// Configure the byte bound for reads and serialized writes. Oversized
+    /// existing files remain intact and are omitted from session listings.
+    pub async fn open_with_max_file_bytes(
+        root: impl AsRef<Path>,
+        max_file_bytes: usize,
+    ) -> Result<Self, CheckpointStoreError> {
+        if max_file_bytes == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "checkpoint file byte limit must be positive",
+            )
+            .into());
+        }
         let root = root.as_ref().to_path_buf();
         tokio::fs::create_dir_all(&root).await?;
         Ok(Self {
             root: Arc::new(root),
             workflow_locks: Arc::default(),
             session_index: Arc::default(),
+            max_file_bytes,
         })
     }
 
@@ -236,7 +257,9 @@ impl CheckpointStore {
             checkpoint.workflow_id.0,
             Uuid::new_v4()
         ));
-        let bytes = serde_json::to_vec(checkpoint)?;
+        let mut buffer = durable_file::BoundedBuffer::new(self.max_file_bytes);
+        serde_json::to_writer(&mut buffer, checkpoint)?;
+        let bytes = buffer.into_inner();
         let result =
             durable_file::replace_exclusive(self.root.as_path(), &temporary, &destination, &bytes)
                 .await
@@ -309,7 +332,7 @@ impl CheckpointStore {
                     rebuilt
                         .rejected
                         .insert(path.clone(), FileVersion::from_metadata(&metadata));
-                    let Ok(bytes) = read_regular_file(&path).await else {
+                    let Ok(bytes) = read_regular_file(&path, self.max_file_bytes).await else {
                         continue;
                     };
                     let Ok(checkpoint) = serde_json::from_slice::<WorkflowCheckpoint>(&bytes)
@@ -352,7 +375,7 @@ impl CheckpointStore {
             if version.modified.is_some() && version == original {
                 continue;
             }
-            let checkpoint = match read_regular_file(&path).await {
+            let checkpoint = match read_regular_file(&path, self.max_file_bytes).await {
                 Ok(bytes) => serde_json::from_slice::<WorkflowCheckpoint>(&bytes)
                     .ok()
                     .filter(|checkpoint| {
@@ -391,7 +414,7 @@ impl CheckpointStore {
             if version.modified.is_some() && version == candidate.version {
                 continue;
             }
-            let Ok(bytes) = read_regular_file(&candidate.path).await else {
+            let Ok(bytes) = read_regular_file(&candidate.path, self.max_file_bytes).await else {
                 continue;
             };
             let Ok(checkpoint) = serde_json::from_slice::<WorkflowCheckpoint>(&bytes) else {
@@ -426,7 +449,7 @@ impl CheckpointStore {
         }
         let mut found = Vec::new();
         for candidate in candidates {
-            let Ok(bytes) = read_regular_file(&candidate.path).await else {
+            let Ok(bytes) = read_regular_file(&candidate.path, self.max_file_bytes).await else {
                 continue;
             };
             let Ok(checkpoint) = serde_json::from_slice::<WorkflowCheckpoint>(&bytes) else {
@@ -447,7 +470,7 @@ impl CheckpointStore {
     }
 
     async fn read_bytes(&self, workflow_id: &WorkflowId) -> Result<Vec<u8>, CheckpointStoreError> {
-        read_regular_file(&self.path(workflow_id))
+        read_regular_file(&self.path(workflow_id), self.max_file_bytes)
             .await
             .map_err(|error| match error.kind() {
                 std::io::ErrorKind::NotFound => CheckpointStoreError::NotFound(workflow_id.clone()),
@@ -497,6 +520,9 @@ impl CheckpointStore {
             workflow_id.0,
             Uuid::new_v4()
         ));
+        let mut buffer = durable_file::BoundedBuffer::new(self.max_file_bytes);
+        serde_json::to_writer(&mut buffer, issuance)?;
+        let bytes = buffer.into_inner();
         let result = async {
             let mut options = OpenOptions::new();
             options.create_new(true).write(true);
@@ -505,7 +531,7 @@ impl CheckpointStore {
             #[cfg(unix)]
             options.mode(0o600);
             let mut file = options.open(&temporary).await?;
-            file.write_all(&serde_json::to_vec(issuance)?).await?;
+            file.write_all(&bytes).await?;
             file.sync_all().await?;
             drop(file);
             tokio::fs::rename(&temporary, destination).await?;
@@ -532,7 +558,7 @@ impl CheckpointStore {
         &self,
         workflow_id: &WorkflowId,
     ) -> Result<Option<SkillIssuedDecision>, CheckpointStoreError> {
-        match read_regular_file(&self.issuance_path(workflow_id)).await {
+        match read_regular_file(&self.issuance_path(workflow_id), self.max_file_bytes).await {
             Ok(bytes) => {
                 let issuance = serde_json::from_slice(&bytes)?;
                 Self::validate_skill_issuance_identity(workflow_id, &issuance)?;
@@ -649,16 +675,30 @@ impl CheckpointStore {
 
 /// Validate the opened handle before reading: a metadata check on the path
 /// alone can race replacement, and opening a FIFO normally blocks first.
-async fn read_regular_file(path: &Path) -> std::io::Result<Vec<u8>> {
+async fn read_regular_file(path: &Path, max_bytes: usize) -> std::io::Result<Vec<u8>> {
     let mut options = OpenOptions::new();
     options.read(true);
     durable_file::without_following_links_async(&mut options);
-    let mut file = options.open(path).await?;
+    let file = options.open(path).await?;
     let metadata = file.metadata().await?;
     durable_file::require_regular_file(&metadata, "checkpoint storage entry")?;
     durable_file::require_sole_hard_link(&metadata, "checkpoint storage entry")?;
+    if metadata.len() > max_bytes as u64 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "checkpoint storage entry exceeds byte limit",
+        ));
+    }
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).await?;
+    file.take((max_bytes as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .await?;
+    if bytes.len() > max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "checkpoint storage entry exceeds byte limit",
+        ));
+    }
     Ok(bytes)
 }
 

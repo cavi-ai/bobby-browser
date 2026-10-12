@@ -13,6 +13,9 @@ use tokio::sync::Mutex;
 use tracing::warn;
 use types::{AttemptId, CommandEnvelope, CommandId, CommandOutcome, CommandPhase, Evidence};
 
+/// Default physical JSONL record bound, including the trailing newline.
+pub const DEFAULT_MAX_RECORD_BYTES: usize = 64 * 1024 * 1024;
+
 mod health;
 pub use health::{
     scan_jsonl, scan_jsonl_prefetched, LedgerDecoder, LedgerHealth, LedgerIssue, LedgerIssueKind,
@@ -153,6 +156,7 @@ pub enum JournalError {
 pub struct JsonlJournal {
     path: Arc<PathBuf>,
     writer: Arc<Mutex<WriterState>>,
+    max_record_bytes: usize,
 }
 
 struct WriterState {
@@ -261,6 +265,16 @@ async fn sync_parent(path: &Path) -> Result<(), std::io::Error> {
 
 impl JsonlJournal {
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, JournalError> {
+        Self::open_with_max_record_bytes(path, DEFAULT_MAX_RECORD_BYTES).await
+    }
+
+    /// Configure the record bound for an existing or newly created journal.
+    /// Oversized stored records are archived; oversized appends are rejected.
+    pub async fn open_with_max_record_bytes(
+        path: impl AsRef<Path>,
+        max_record_bytes: usize,
+    ) -> Result<Self, JournalError> {
+        validate_record_limit(max_record_bytes)?;
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path
             .parent()
@@ -268,10 +282,11 @@ impl JsonlJournal {
         {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let writer = open_writer(&path).await?;
+        let writer = open_writer(&path, max_record_bytes).await?;
         Ok(Self {
             path: Arc::new(path),
             writer: Arc::new(Mutex::new(writer)),
+            max_record_bytes,
         })
     }
 
@@ -287,6 +302,15 @@ impl JsonlJournal {
     }
 
     pub async fn inspect(path: impl AsRef<Path>) -> Result<JournalHealth, JournalError> {
+        Self::inspect_with_max_record_bytes(path, DEFAULT_MAX_RECORD_BYTES).await
+    }
+
+    /// Inspect using the same bound supplied when opening the journal.
+    pub async fn inspect_with_max_record_bytes(
+        path: impl AsRef<Path>,
+        max_record_bytes: usize,
+    ) -> Result<JournalHealth, JournalError> {
+        validate_record_limit(max_record_bytes)?;
         let path = path.as_ref();
         let file = match open_regular_read(path).await {
             Ok(Some(file)) => file,
@@ -303,7 +327,7 @@ impl JsonlJournal {
             Err(error) => return Err(error.into()),
         };
         let metadata = file.metadata().await?;
-        let Scan { scan, records, .. } = scan_file(file, None).await?;
+        let Scan { scan, records, .. } = scan_file(file, None, max_record_bytes).await?;
         Ok(JournalHealth {
             exists: true,
             bytes: metadata.len(),
@@ -321,6 +345,7 @@ impl JsonlJournal {
                 // Size and mtime may survive atomic replacement. The index and
                 // append handle must still refer to the file at the current path.
                 if identity == writer.identity
+                    && durable_file::require_sole_hard_link(&metadata, "journal entry").is_ok()
                     && metadata.len() == writer.file_len
                     && metadata.modified().ok() == writer.modified
                 {
@@ -331,9 +356,19 @@ impl JsonlJournal {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        *writer = open_writer(&self.path).await?;
+        *writer = open_writer(&self.path, self.max_record_bytes).await?;
         Ok(())
     }
+}
+
+fn validate_record_limit(max_bytes: usize) -> std::io::Result<()> {
+    if max_bytes == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "journal record byte limit must be positive",
+        ));
+    }
+    Ok(())
 }
 
 async fn file_identity(file: File) -> Result<same_file::Handle, std::io::Error> {
@@ -369,9 +404,12 @@ async fn open_archive(path: &Path) -> Result<Option<File>, std::io::Error> {
     Ok(file)
 }
 
-async fn open_writer(path: &Path) -> Result<WriterState, JournalError> {
+async fn open_writer(path: &Path, max_record_bytes: usize) -> Result<WriterState, JournalError> {
     match tokio::fs::symlink_metadata(path).await {
-        Ok(metadata) if !metadata.is_file() => {
+        Ok(metadata)
+            if !metadata.is_file()
+                || durable_file::require_sole_hard_link(&metadata, "journal entry").is_err() =>
+        {
             // Preserve the entry itself: renaming a symlink does not change
             // its target, and a FIFO must never be opened for scanning.
             archive_damaged_journal(path).await?;
@@ -387,9 +425,15 @@ async fn open_writer(path: &Path) -> Result<WriterState, JournalError> {
     options.mode(0o600);
     let mut file = options.open(path).await?;
     durable_file::require_regular_file(&file.metadata().await?, "journal entry")?;
+    durable_file::require_sole_hard_link(&file.metadata().await?, "journal entry")?;
     let mut offsets = HashMap::<CommandId, Vec<IndexedRecord>>::new();
     // Validate and index the writer's actual file in one streaming pass.
-    let scan = scan_file(file.try_clone().await?, Some(&mut offsets)).await?;
+    let scan = scan_file(
+        file.try_clone().await?,
+        Some(&mut offsets),
+        max_record_bytes,
+    )
+    .await?;
     let next_sequence = if scan.scan.torn_tail
         || scan.scan.incompatible_records > 0
         || scan.max_sequence == Some(u64::MAX)
@@ -398,6 +442,7 @@ async fn open_writer(path: &Path) -> Result<WriterState, JournalError> {
         offsets.clear();
         file = options.open(path).await?;
         durable_file::require_regular_file(&file.metadata().await?, "journal entry")?;
+        durable_file::require_sole_hard_link(&file.metadata().await?, "journal entry")?;
         0
     } else {
         scan.max_sequence.map_or(0, |sequence| sequence + 1)
@@ -429,7 +474,25 @@ async fn open_writer(path: &Path) -> Result<WriterState, JournalError> {
         let mut reader = BufReader::new(file);
         let mut line = Vec::new();
         let mut offset = 0;
-        while reader.read_until(b'\n', &mut line).await? > 0 {
+        loop {
+            let read = (&mut reader)
+                .take((max_record_bytes as u64).saturating_add(1))
+                .read_until(b'\n', &mut line)
+                .await?;
+            if read == 0 {
+                break;
+            }
+            if line.len() > max_record_bytes {
+                archived_incompatible_records += 1;
+                offset += line.len() as u64;
+                // At the limit + 1 boundary the newline may already be consumed.
+                // Only drain the remainder when this is still the same line.
+                if !line.ends_with(b"\n") {
+                    offset += discard_jsonl_line(&mut reader).await?;
+                }
+                line.clear();
+                continue;
+            }
             if !line.ends_with(b"\n") {
                 archived_torn_tail = true;
             }
@@ -490,8 +553,11 @@ impl CommandJournal for JsonlJournal {
                 .checked_add(1)
                 .ok_or(JournalError::UncertainCommand)?;
             record.sequence = writer.next_sequence;
-            let mut bytes = serde_json::to_vec(&record)?;
-            bytes.push(b'\n');
+            let mut buffer = durable_file::BoundedBuffer::new(journal.max_record_bytes);
+            serde_json::to_writer(&mut buffer, &record)?;
+            std::io::Write::write_all(&mut buffer, b"\n")?;
+            let bytes = buffer.into_inner();
+            durable_file::require_sole_hard_link(&writer.file.metadata().await?, "journal entry")?;
             writer.file.write_all(&bytes).await?;
             writer.file.flush().await?;
             writer.file.sync_data().await?;
@@ -531,7 +597,7 @@ impl CommandJournal for JsonlJournal {
                 // In-place damage can leave identity, size and mtime unchanged.
                 // Preserve it even when changed bytes still decode as valid JSON.
                 archive_damaged_journal(&journal.path).await?;
-                *writer = open_writer(&journal.path).await?;
+                *writer = open_writer(&journal.path, journal.max_record_bytes).await?;
             }
             let mut scan = JournalScan {
                 torn_tail: writer.archived_torn_tail,
@@ -590,6 +656,26 @@ pub enum JsonlRead {
     /// Bytes with no trailing newline.
     Torn(Vec<u8>),
     TooLong,
+}
+
+/// Discard the rest of an oversized archive line without allocating its body.
+async fn discard_jsonl_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+) -> std::io::Result<u64> {
+    let mut discarded = 0;
+    loop {
+        let bytes = reader.fill_buf().await?;
+        if bytes.is_empty() {
+            return Ok(discarded);
+        }
+        let end = bytes.iter().position(|byte| *byte == b'\n');
+        let count = end.map_or(bytes.len(), |end| end + 1);
+        reader.consume(count);
+        discarded += count as u64;
+        if end.is_some() {
+            return Ok(discarded);
+        }
+    }
 }
 
 /// Reads one line, capped at `max_bytes`. A longer line is [`JsonlRead::TooLong`]
@@ -737,11 +823,12 @@ impl LedgerDecoder for CommandDecoder<'_> {
 async fn scan_file(
     file: File,
     index: Option<&mut HashMap<CommandId, Vec<IndexedRecord>>>,
+    max_record_bytes: usize,
 ) -> Result<Scan, JournalError> {
     let health = scan_jsonl(
         &mut BufReader::new(file),
         ScanOptions {
-            max_line_bytes: u64::MAX,
+            max_line_bytes: max_record_bytes as u64,
             sequence_rule: SequenceRule::Increasing,
         },
         &mut CommandDecoder { index },
@@ -750,7 +837,8 @@ async fn scan_file(
     Ok(Scan {
         scan: JournalScan {
             torn_tail: health.issue_count(LedgerIssueKind::TornTail) > 0,
-            incompatible_records: health.incompatible_records,
+            incompatible_records: health.incompatible_records
+                + health.issue_count(LedgerIssueKind::OversizedLine),
             ..JournalScan::default()
         },
         records: health.decoded_records,
