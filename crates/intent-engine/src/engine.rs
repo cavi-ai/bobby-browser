@@ -2412,6 +2412,10 @@ async fn execute_follow(
 /// or become hidden. Matches `worker-pool`'s `wait_for` cadence.
 const DISMISS_POLL_INTERVAL_MS: u64 = 25;
 
+/// Most dismissal controls an unhinted dismissal tries after the purpose
+/// named none.
+const MAX_DISMISS_CONTROLS: usize = 8;
+
 async fn execute_dismiss_obstruction(
     intent: &IntentCommand,
     page_id: &PageId,
@@ -2420,14 +2424,124 @@ async fn execute_dismiss_obstruction(
     target: TargetSpec,
     timeout_ms: u64,
 ) -> IntentOutcome {
-    let (purpose, hinted) = match intent {
-        IntentCommand::DismissObstruction(dismiss) => (
-            Some(dismiss.purpose.clone()),
+    let hinted = match intent {
+        IntentCommand::DismissObstruction(dismiss) => {
             dismiss.hints.role.is_some()
                 || dismiss.hints.accessible_name.is_some()
-                || dismiss.hints.near_text.is_some(),
-        ),
-        _ => (None, true),
+                || dismiss.hints.near_text.is_some()
+        }
+        _ => true,
+    };
+    dismiss_target(intent, page_id, browser, vision, target, timeout_ms, hinted).await
+}
+
+/// Whether an accessible name reads as a control that closes what it sits
+/// on: a bare close or decline word, or "close" with the thing it closes.
+fn names_a_dismissal(name: &str) -> bool {
+    let name = name
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    let name = name.trim_end_matches(['.', '!']);
+    matches!(
+        name,
+        "close" | "dismiss" | "x" | "×" | "✕" | "✖" | "no thanks" | "no, thanks" | "not now"
+    ) || name.strip_prefix("close ").is_some_and(|rest| {
+        matches!(
+            rest,
+            "ad" | "advertisement"
+                | "dialog"
+                | "popup"
+                | "pop-up"
+                | "banner"
+                | "modal"
+                | "overlay"
+                | "notice"
+                | "message"
+        )
+    })
+}
+
+/// Visible buttons and links named as dismissals, frames included, as
+/// targets in page order; repeated names carry their ordinal.
+async fn dismissal_controls(page_id: &PageId, browser: &dyn IntentBrowser) -> Vec<TargetSpec> {
+    let mut controls: Vec<TargetSpec> = Vec::new();
+    for role in ["button", "link"] {
+        let probe = TargetSpec {
+            role: Some(role.into()),
+            ..TargetSpec::default()
+        };
+        let Ok(census) = browser.collect_candidates(page_id, &probe).await else {
+            continue;
+        };
+        for candidate in census {
+            let named = candidate.name.as_deref().is_some_and(names_a_dismissal);
+            if !named || !candidate.state.visible || candidate.role.as_deref() != Some(role) {
+                continue;
+            }
+            controls.push(TargetSpec {
+                role: candidate.role,
+                accessible_name: candidate.name,
+                frame_path: candidate.frame_path,
+                ..TargetSpec::default()
+            });
+        }
+    }
+    let same = |a: &TargetSpec, b: &TargetSpec| {
+        a.role == b.role && a.accessible_name == b.accessible_name && a.frame_path == b.frame_path
+    };
+    let repeated: Vec<bool> = controls
+        .iter()
+        .map(|control| controls.iter().filter(|other| same(control, other)).count() > 1)
+        .collect();
+    for index in 0..controls.len() {
+        if repeated[index] {
+            let ordinal = controls[..index]
+                .iter()
+                .filter(|other| same(other, &controls[index]))
+                .count();
+            controls[index].ordinal = Some(ordinal);
+        }
+    }
+    controls.truncate(MAX_DISMISS_CONTROLS);
+    controls
+}
+
+/// Dismisses through the first dismissal control the obstruction does not
+/// cover; a covered control refuses the click before any input reaches it.
+async fn dismiss_by_control_name(
+    intent: &IntentCommand,
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    vision: &VisionContext,
+    timeout_ms: u64,
+) -> Option<IntentOutcome> {
+    for control in dismissal_controls(page_id, browser).await {
+        let outcome = Box::pin(dismiss_target(
+            intent, page_id, browser, vision, control, timeout_ms, true,
+        ))
+        .await;
+        if !matches!(&outcome, IntentOutcome::Failed { error, .. } if error.code == ErrorCode::TargetObscured)
+        {
+            return Some(outcome);
+        }
+    }
+    None
+}
+
+async fn dismiss_target(
+    intent: &IntentCommand,
+    page_id: &PageId,
+    browser: &dyn IntentBrowser,
+    vision: &VisionContext,
+    target: TargetSpec,
+    timeout_ms: u64,
+    hinted: bool,
+) -> IntentOutcome {
+    let purpose = match intent {
+        IntentCommand::DismissObstruction(dismiss) => Some(dismiss.purpose.clone()),
+        _ => None,
     };
     let plan_summary = format!("{} timeout_ms={timeout_ms}", summarize_target(&target));
     // Without hints the purpose names the control, and the dialogs open now
@@ -2459,8 +2573,36 @@ async fn execute_dismiss_obstruction(
     .await
     {
         Ok(located) => located,
-        Err(outcome) if dialogs_before.is_empty() => return outcome,
         Err(outcome) => {
+            // A purpose that names no control on the page leaves the controls
+            // named as dismissals.
+            let missed = matches!(&outcome, IntentOutcome::Failed { error, .. } if error.code == ErrorCode::TargetNotFound);
+            if !hinted && missed {
+                if let Some(dismissed) =
+                    dismiss_by_control_name(intent, page_id, browser, vision, timeout_ms).await
+                {
+                    return match dismissed {
+                        IntentOutcome::Failed {
+                            error,
+                            mut evidence,
+                        } if !dialogs_before.is_empty() => {
+                            evidence.push(intent_evidence(execution_record(
+                                "dismissObstruction",
+                                purpose,
+                                plan_summary,
+                                dialogs_before,
+                                None,
+                                "obstructionPersisted",
+                            )));
+                            IntentOutcome::Failed { error, evidence }
+                        }
+                        other => other,
+                    };
+                }
+            }
+            if dialogs_before.is_empty() {
+                return outcome;
+            }
             let judged = judge_against_open_dialogs(
                 outcome,
                 page_id,
@@ -2654,8 +2796,11 @@ async fn wait_until_gone(
 }
 
 async fn is_gone(page_id: &PageId, browser: &dyn IntentBrowser, target: &TargetSpec) -> bool {
-    let Ok(decision) = locate::decide(page_id, browser, target, None).await else {
-        return false;
+    let decision = match locate::decide(page_id, browser, target, None).await {
+        Ok(decision) => decision,
+        // The frame or shadow host on the control's path no longer matches:
+        // the control went with it.
+        Err(error) => return error.code == ErrorCode::TargetNotFound,
     };
     match decision.resolution {
         Ok(ResolutionDecision::NotFound) => true,
