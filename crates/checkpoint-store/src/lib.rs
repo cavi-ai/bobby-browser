@@ -102,6 +102,8 @@ struct FileVersion {
     file_type: std::fs::FileType,
     #[cfg(unix)]
     links: u64,
+    #[cfg(unix)]
+    changed: (i64, i64),
 }
 
 impl FileVersion {
@@ -114,6 +116,10 @@ impl FileVersion {
             file_type: metadata.file_type(),
             #[cfg(unix)]
             links: metadata.nlink(),
+            // Unix change time catches rewrites and permission repairs even
+            // when file size and modification time are preserved.
+            #[cfg(unix)]
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
         }
     }
 }
@@ -123,8 +129,7 @@ struct CheckpointRef {
     workflow_id: WorkflowId,
     created_at: chrono::DateTime<chrono::Utc>,
     path: PathBuf,
-    file_len: u64,
-    modified: Option<SystemTime>,
+    version: FileVersion,
 }
 
 impl SessionIndex {
@@ -144,8 +149,7 @@ impl SessionIndex {
             workflow_id: checkpoint.workflow_id.clone(),
             created_at: checkpoint.created_at,
             path,
-            file_len: metadata.len(),
-            modified: metadata.modified().ok(),
+            version: FileVersion::from_metadata(metadata),
         });
         entries.sort_by_key(|entry| std::cmp::Reverse(entry.created_at));
     }
@@ -299,8 +303,7 @@ impl CheckpointStore {
                                 workflow_id: checkpoint.workflow_id,
                                 created_at: checkpoint.created_at,
                                 path,
-                                file_len: metadata.len(),
-                                modified: metadata.modified().ok(),
+                                version: FileVersion::from_metadata(&metadata),
                             });
                     }
                 }
@@ -356,14 +359,11 @@ impl CheckpointStore {
         for candidate in &mut candidates {
             // In-place writes do not change the directory timestamp. Check
             // only this session's files, outside the shared index mutex.
-            let Ok(metadata) = tokio::fs::metadata(&candidate.path).await else {
+            let Ok(metadata) = tokio::fs::symlink_metadata(&candidate.path).await else {
                 continue;
             };
-            let modified = metadata.modified().ok();
-            if modified.is_some()
-                && modified == candidate.modified
-                && metadata.len() == candidate.file_len
-            {
+            let version = FileVersion::from_metadata(&metadata);
+            if version.modified.is_some() && version == candidate.version {
                 continue;
             }
             let Ok(bytes) = read_regular_file(&candidate.path).await else {
@@ -378,8 +378,7 @@ impl CheckpointStore {
             {
                 let original = candidate.clone();
                 candidate.created_at = checkpoint.created_at;
-                candidate.modified = modified;
-                candidate.file_len = metadata.len();
+                candidate.version = version;
                 refreshed.insert(candidate.workflow_id.clone(), (original, candidate.clone()));
             }
             // Keep invalid entries discoverable so an in-place repair can be

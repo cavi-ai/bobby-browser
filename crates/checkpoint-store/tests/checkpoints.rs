@@ -1176,6 +1176,98 @@ async fn listing_discovers_initially_rejected_checkpoints_after_in_place_repair(
     }
 }
 
+#[cfg(unix)]
+fn rewrite_preserving_size_and_modified(path: &std::path::Path, bytes: &[u8]) {
+    use std::os::unix::fs::MetadataExt;
+    let original = std::fs::metadata(path).unwrap();
+    let directory = std::fs::metadata(path.parent().unwrap())
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert_eq!(original.len(), bytes.len() as u64);
+    std::fs::write(path, bytes).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(original.modified().unwrap()))
+        .unwrap();
+    let updated = std::fs::metadata(path).unwrap();
+    assert_eq!(updated.len(), original.len());
+    assert_eq!(updated.modified().unwrap(), original.modified().unwrap());
+    assert_ne!(
+        (updated.ctime(), updated.ctime_nsec()),
+        (original.ctime(), original.ctime_nsec())
+    );
+    assert_eq!(
+        std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .modified()
+            .unwrap(),
+        directory
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn listing_discovers_repairs_preserving_size_and_modified_time() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let mut healthy = checkpoint(WorkflowId::new(), "https://example.test/healthy");
+    healthy.created_at = "2026-01-01T00:00:00Z".parse().unwrap();
+    store.save(&healthy).await.unwrap();
+    let mut repaired = healthy.clone();
+    repaired.workflow_id = WorkflowId::new();
+    repaired.created_at += Duration::hours(1);
+    let path = checkpoint_store::checkpoint_path(root.path(), &repaired.workflow_id);
+    let bytes = serde_json::to_vec(&repaired).unwrap();
+    let mut damaged = bytes.clone();
+    damaged[0] = b'!';
+    std::fs::write(&path, damaged).unwrap();
+    assert_eq!(
+        store
+            .list_for_session(&healthy.session_id, 1)
+            .await
+            .unwrap(),
+        vec![healthy.clone()]
+    );
+    rewrite_preserving_size_and_modified(&path, &bytes);
+    assert_eq!(
+        store
+            .list_for_session(&healthy.session_id, 1)
+            .await
+            .unwrap(),
+        vec![repaired]
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn listing_reorders_rewrites_preserving_size_and_modified_time() {
+    let root = tempfile::tempdir().unwrap();
+    let store = CheckpointStore::open(root.path()).await.unwrap();
+    let mut rewritten = checkpoint(WorkflowId::new(), "https://example.test/rewritten");
+    rewritten.created_at = "2026-01-01T00:00:00Z".parse().unwrap();
+    let mut newest = rewritten.clone();
+    newest.workflow_id = WorkflowId::new();
+    newest.created_at += Duration::hours(1);
+    store.save(&rewritten).await.unwrap();
+    store.save(&newest).await.unwrap();
+    assert_eq!(
+        store.list_for_session(&newest.session_id, 1).await.unwrap(),
+        vec![newest.clone()]
+    );
+    rewritten.created_at += Duration::hours(2);
+    rewrite_preserving_size_and_modified(
+        &checkpoint_store::checkpoint_path(root.path(), &rewritten.workflow_id),
+        &serde_json::to_vec(&rewritten).unwrap(),
+    );
+    assert_eq!(
+        store.list_for_session(&newest.session_id, 1).await.unwrap(),
+        vec![rewritten]
+    );
+}
+
 #[tokio::test]
 async fn repaired_checkpoint_discovery_keeps_sessions_separate() {
     let root = tempfile::tempdir().unwrap();
