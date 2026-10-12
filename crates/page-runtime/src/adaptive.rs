@@ -131,6 +131,44 @@ struct WorkerIntentBrowser<'a> {
 /// It is the only wait for a late target: the resolvers fail at once.
 const TARGET_APPEAR_CAP: StdDuration = StdDuration::from_secs(5);
 
+/// How often an intent re-gathers while its target is absent.
+const TARGET_REGATHER_INTERVAL: StdDuration = StdDuration::from_millis(250);
+
+/// Waits until `target` resolves among the candidates `gather` returns, the
+/// census the intent's own locate reads (frames included), for at most
+/// `budget`. Only absence waits: a match, an ambiguous or invalid target, or a
+/// failed gather returns at once. Returns the time spent.
+async fn await_gathered_target<F, Fut>(
+    target: &TargetSpec,
+    budget: StdDuration,
+    gather: F,
+) -> StdDuration
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<dom_engine::Candidate>, CommandError>>,
+{
+    let started = tokio::time::Instant::now();
+    loop {
+        let Ok(census) = gather().await else {
+            break;
+        };
+        let absent = matches!(
+            dom_engine::resolve_candidates(
+                target,
+                &census,
+                &dom_engine::ResolutionPolicy::default()
+            ),
+            Ok(dom_engine::ResolutionDecision::NotFound)
+        );
+        let elapsed = started.elapsed();
+        if !absent || elapsed >= budget {
+            break;
+        }
+        tokio::time::sleep(TARGET_REGATHER_INTERVAL.min(budget - elapsed)).await;
+    }
+    started.elapsed()
+}
+
 /// Half the time left before `deadline`, at most `cap`. The other half stays
 /// with the action and its verification.
 fn wait_budget(deadline: DateTime<Utc>, cap: StdDuration) -> StdDuration {
@@ -411,15 +449,11 @@ impl IntentBrowser for WorkerIntentBrowser<'_> {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
         };
         let left = TARGET_APPEAR_CAP.saturating_sub(*waited());
-        let started = tokio::time::Instant::now();
-        await_target(
-            self.lease,
-            page_id,
-            target.clone(),
-            wait_budget(self.deadline, left),
-        )
+        let elapsed = await_gathered_target(target, wait_budget(self.deadline, left), || {
+            self.collect_candidates(page_id, target)
+        })
         .await;
-        *waited() += started.elapsed();
+        *waited() += elapsed;
     }
 
     async fn settle_page(&self, page_id: &PageId, requested_url: Option<&str>) {
@@ -2060,9 +2094,102 @@ async fn extract_structured(
 #[cfg(test)]
 mod tests {
     use super::{
-        metadata_name, settlement_validation_issues, staging_name, truncate_utf8,
-        SecureDownloadRoot, StagingCleanup,
+        await_gathered_target, metadata_name, settlement_validation_issues, staging_name,
+        truncate_utf8, SecureDownloadRoot, StagingCleanup, TARGET_REGATHER_INTERVAL,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    fn close_button() -> dom_engine::Candidate {
+        dom_engine::Candidate {
+            id: "close".into(),
+            css: None,
+            tag: Some("button".into()),
+            test_id: None,
+            role: Some("button".into()),
+            name: Some("Close".into()),
+            label: None,
+            text: "Close".into(),
+            attributes: Default::default(),
+            state: dom_engine::CandidateState {
+                attached: true,
+                visible: true,
+                enabled: true,
+            },
+            frame_path: Vec::new(),
+        }
+    }
+
+    fn close_target() -> types::TargetSpec {
+        types::TargetSpec {
+            role: Some("button".into()),
+            accessible_name: Some("Close".into()),
+            ..types::TargetSpec::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_present_target_is_not_waited_for() {
+        let gathers = AtomicUsize::new(0);
+        let elapsed = await_gathered_target(&close_target(), Duration::from_secs(5), || {
+            gathers.fetch_add(1, Ordering::SeqCst);
+            async { Ok(vec![close_button()]) }
+        })
+        .await;
+        assert_eq!(gathers.load(Ordering::SeqCst), 1);
+        assert!(elapsed < TARGET_REGATHER_INTERVAL, "waited {elapsed:?}");
+    }
+
+    #[tokio::test]
+    async fn an_absent_target_is_gathered_again_until_it_appears() {
+        let gathers = AtomicUsize::new(0);
+        let elapsed = await_gathered_target(&close_target(), Duration::from_secs(5), || {
+            let seen = gathers.fetch_add(1, Ordering::SeqCst);
+            async move {
+                Ok(if seen >= 2 {
+                    vec![close_button()]
+                } else {
+                    Vec::new()
+                })
+            }
+        })
+        .await;
+        assert_eq!(gathers.load(Ordering::SeqCst), 3);
+        assert!(
+            elapsed >= TARGET_REGATHER_INTERVAL * 2,
+            "waited {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_gather_ends_the_wait() {
+        let gathers = AtomicUsize::new(0);
+        await_gathered_target(&close_target(), Duration::from_secs(5), || {
+            gathers.fetch_add(1, Ordering::SeqCst);
+            async {
+                Err(types::CommandError {
+                    code: types::ErrorCode::InvalidRequest,
+                    message: "unsupported target".into(),
+                    layer: types::ErrorLayer::Driver,
+                    retryable: false,
+                })
+            }
+        })
+        .await;
+        assert_eq!(gathers.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn an_absent_target_waits_no_longer_than_its_budget() {
+        let budget = Duration::from_millis(300);
+        let elapsed =
+            await_gathered_target(&close_target(), budget, || async { Ok(Vec::new()) }).await;
+        assert!(elapsed >= budget, "waited {elapsed:?}");
+        assert!(
+            elapsed < budget + TARGET_REGATHER_INTERVAL,
+            "waited {elapsed:?}"
+        );
+    }
 
     fn form_control() -> types::FormControl {
         types::FormControl {
