@@ -35,6 +35,7 @@ macro_rules! every_case {
             snapshot_targets_resolve_beside_a_modal_dialog,
             type_text_enter_reports_the_settled_page,
             type_text_types_into_a_field_that_takes_only_real_input,
+            multi_line_controls_keep_typed_line_breaks,
             type_text_enter_accepts_a_reformatted_landed_field,
             intent_follow_post_state_shows_the_settled_page,
             type_text_enter_reports_the_rewritten_url,
@@ -1081,6 +1082,29 @@ pub async fn type_text_types_into_a_field_that_takes_only_real_input(rig: &Rig) 
         find_node(&after, "status", Some("submitted query")).is_some(),
         "the field did not take the typed text and Enter: {after}"
     );
+    live.close().await;
+}
+
+/// Line breaks typed into a multi-line control are text: the call completes
+/// and the control keeps every line.
+pub async fn multi_line_controls_keep_typed_line_breaks(rig: &Rig) {
+    let body = r#"<main><textarea aria-label="Notes"></textarea>
+        <div contenteditable="true" role="textbox" aria-multiline="true" aria-label="Draft"></div></main>"#;
+    let site = FixtureSite::spawn(vec![("/field", Route::Html(page("Field", body)))]).await;
+    let live = Live::open(rig, &site.url("/field")).await;
+    for name in ["Notes", "Draft"] {
+        let typed = live
+            .call(
+                "type_text",
+                json!({"target":{"role":"textbox","accessibleName":name},"value":"first line\nsecond line"}),
+            )
+            .await;
+        assert_eq!(typed["status"], "completed", "type_text {name}: {typed}");
+        assert!(
+            typed.to_string().contains(r"first line\nsecond line"),
+            "{name} did not keep the line break: {typed}"
+        );
+    }
     live.close().await;
 }
 
