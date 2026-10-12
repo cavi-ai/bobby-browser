@@ -404,22 +404,41 @@ struct ArtifactManifest {
 /// remove at construction: a live publish holds its StagingGuard only inside
 /// a running process, and construction happens before any publish. Without a
 /// sweep, every crash mid-capture leaks up to max_bytes of disk forever.
+/// Only real directories with recognized session and staging names are swept.
 fn sweep_orphaned_staging(root: &Path) {
     let Ok(sessions) = std::fs::read_dir(root) else {
         return;
     };
     for session in sessions.flatten() {
+        if !session.file_type().is_ok_and(|kind| kind.is_dir())
+            || !session
+                .file_name()
+                .to_str()
+                .is_some_and(|name| Uuid::parse_str(name).is_ok())
+        {
+            continue;
+        }
         let Ok(children) = std::fs::read_dir(session.path()) else {
             continue;
         };
         for child in children.flatten() {
             let name = child.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with('.') && name.ends_with(".tmp") {
+            if child.file_type().is_ok_and(|kind| kind.is_dir())
+                && name.to_str().is_some_and(valid_staging_directory_name)
+            {
                 let _ = std::fs::remove_dir_all(child.path());
             }
         }
     }
+}
+
+fn valid_staging_directory_name(name: &str) -> bool {
+    name.strip_prefix('.')
+        .and_then(|name| name.strip_suffix(".tmp"))
+        .and_then(|name| name.split_once('.'))
+        .is_some_and(|(artifact, staging)| {
+            valid_artifact_id(artifact) && Uuid::parse_str(staging).is_ok()
+        })
 }
 
 fn valid_artifact_id(artifact_id: &str) -> bool {
