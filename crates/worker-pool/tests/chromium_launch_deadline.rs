@@ -45,14 +45,29 @@ async fn launch_deadline_includes_a_stalled_devtools_handshake() {
         // Accept TCP and consume the HTTP upgrade, but never send a handshake reply.
         assert_eq!(socket.read(&mut request).await.unwrap(), 0);
     });
+    let launch_timeout = Duration::from_millis(chromiumoxide::browser::LAUNCH_TIMEOUT);
     let config = BrowserConfig::builder()
         .chrome_executable(executable)
-        // Leave time for child startup to reach the handshake being tested,
-        // while keeping the stalled upgrade's deadline bounded.
-        .launch_timeout(Duration::from_secs(2))
         .build()
         .unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(5), Browser::launch(config)).await;
+    let launch = Browser::launch(config);
+    tokio::pin!(launch);
+    tokio::time::timeout(launch_timeout + Duration::from_secs(5), async {
+        tokio::select! {
+            request = &mut observed_request => {
+                request.expect("the launch deadline must be exercised during the HTTP upgrade");
+            }
+            result = &mut launch => panic!("launch ended before the HTTP upgrade: {result:?}"),
+        }
+    })
+    .await
+    .expect("the fixture must reach the HTTP upgrade");
+    // Advance only after real process startup and TCP/HTTP setup. The
+    // production deadline must still cancel the stalled handshake itself.
+    tokio::time::pause();
+    tokio::time::advance(launch_timeout).await;
+    tokio::time::resume();
+    let result = tokio::time::timeout(Duration::from_secs(3), &mut launch).await;
     let error = result
         .expect("launch must enforce its deadline while connecting to DevTools")
         .expect_err("the stalled handshake cannot launch a browser");
@@ -60,9 +75,6 @@ async fn launch_deadline_includes_a_stalled_devtools_handshake() {
         error,
         chromiumoxide::error::CdpError::LaunchTimeout(_)
     ));
-    observed_request
-        .try_recv()
-        .expect("the launch deadline must be exercised during the HTTP upgrade");
     tokio::time::timeout(Duration::from_secs(1), peer)
         .await
         .expect("the failed handshake connection must close")
