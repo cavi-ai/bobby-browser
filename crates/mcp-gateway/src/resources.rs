@@ -870,9 +870,10 @@ tools most likely to produce it.
   attempt; issue a fresh call so it re-snapshots current state.
 - `httpEquivalenceUnproven` -- the runtime could not prove that a request
   built outside the browser would produce the same cookie or header
-  behavior the browser itself would use, so it fails closed rather than
-  risk a mismatched request. Repair: not retryable as-is; needs the page in
-  a state where equivalence can be proven.
+  behavior the browser itself would use, so a direct download fails closed
+  rather than risk a mismatched request; `inspect` reads the page from the
+  browser instead. Repair: not retryable as-is; needs the page in a state
+  where equivalence can be proven.
 - `intentCompileFailed` -- the intent's own shape is invalid before anything
   touches the page (an empty or oversized purpose, an empty or oversized
   field list, or a blank or duplicate field name). Repair: fix the request
