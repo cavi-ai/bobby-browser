@@ -99,6 +99,35 @@ pub fn annotate_accessibility_targets(
     annotate(nodes, totals, &mut seen);
 }
 
+/// Nodes in `nodes` and their subtrees, as a snapshot's `maxNodes` counts them.
+pub fn count_a11y_nodes(nodes: &[types::AccessibilityNode]) -> usize {
+    nodes
+        .iter()
+        .map(|node| 1 + count_a11y_nodes(&node.children))
+        .sum()
+}
+
+/// Keeps the first `max` nodes in document order and drops the rest; returns
+/// whether any node was dropped.
+pub fn truncate_a11y_preorder(nodes: &mut Vec<types::AccessibilityNode>, max: usize) -> bool {
+    fn keep(nodes: &mut Vec<types::AccessibilityNode>, left: &mut usize) -> bool {
+        let mut kept = 0;
+        let mut dropped = false;
+        for node in nodes.iter_mut() {
+            if *left == 0 {
+                break;
+            }
+            *left -= 1;
+            kept += 1;
+            dropped |= keep(&mut node.children, left);
+        }
+        dropped |= kept < nodes.len();
+        nodes.truncate(kept);
+        dropped
+    }
+    keep(nodes, &mut { max })
+}
+
 /// Page-wide counts for one role/name pair represented in a snapshot.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -136,5 +165,41 @@ mod tests {
         annotate_accessibility_targets(&mut nodes, &totals, BTreeMap::new());
         assert_eq!(nodes[2].target.as_ref().unwrap().ordinal, Some(1));
         assert_eq!(nodes[1].target.as_ref().unwrap().frame_path.len(), 1);
+    }
+
+    #[test]
+    fn a_preorder_trim_keeps_the_first_nodes_in_document_order() {
+        let node = |name: &str, children| types::AccessibilityNode {
+            name: Some(name.into()),
+            children,
+            ..Default::default()
+        };
+        let tree = || {
+            vec![
+                node(
+                    "a",
+                    vec![node("b", vec![node("c", vec![])]), node("d", vec![])],
+                ),
+                node("e", vec![]),
+            ]
+        };
+        let names = |nodes: &[types::AccessibilityNode]| {
+            fn walk(nodes: &[types::AccessibilityNode], out: &mut Vec<String>) {
+                for node in nodes {
+                    out.push(node.name.clone().unwrap_or_default());
+                    walk(&node.children, out);
+                }
+            }
+            let mut out = Vec::new();
+            walk(nodes, &mut out);
+            out
+        };
+        let mut trimmed = tree();
+        assert!(truncate_a11y_preorder(&mut trimmed, 3));
+        assert_eq!(names(&trimmed), ["a", "b", "c"]);
+        assert_eq!(count_a11y_nodes(&trimmed), 3);
+        let mut whole = tree();
+        assert!(!truncate_a11y_preorder(&mut whole, 5));
+        assert_eq!(names(&whole), ["a", "b", "c", "d", "e"]);
     }
 }

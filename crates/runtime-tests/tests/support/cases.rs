@@ -90,6 +90,7 @@ macro_rules! every_case {
             a_click_lands_inside_a_bordered_frame_from_another_site,
             framed_pointer_checks_parent_overlays,
             framed_pointer_respects_frame_transforms,
+            a_bounded_snapshot_lists_frames_in_document_order,
             snapshot_lists_controls_inside_an_untitled_frame_from_another_site,
             download_starts_inside_a_frame_from_another_site,
             nested_frames_from_other_sites_list_and_act,
@@ -4514,6 +4515,74 @@ pub async fn a_click_lands_inside_a_bordered_frame_from_another_site(rig: &Rig) 
     assert_eq!(
         pressed["status"], "completed",
         "the click missed the control: {pressed}"
+    );
+    live.close().await;
+}
+
+/// A snapshot that hits `maxNodes` lists frames from another site in document
+/// order: a frame above a long page is listed and acts, one past the cut is not.
+pub async fn a_bounded_snapshot_lists_frames_in_document_order(rig: &Rig) {
+    let frame = |name: &str, posted: &str| {
+        page(
+            "Frame",
+            &format!(
+                r#"<button onclick="parent.postMessage('{posted}-pressed','*')">{name}</button>
+                <script>parent.postMessage('{posted}-ready','*')</script>"#
+            ),
+        )
+    };
+    let frames = FixtureSite::spawn(vec![
+        ("/top", Route::Html(frame("Top action", "top"))),
+        ("/bottom", Route::Html(frame("Bottom action", "bottom"))),
+    ])
+    .await;
+    let frame_url = |path: &str| frames.url(path).replace("127.0.0.1", "localhost");
+    let links: String = (0..300)
+        .map(|index| format!(r#"<a href="/item/{index}">Item {index}</a>"#))
+        .collect();
+    let body = format!(
+        r#"<main><h1>Host</h1>
+        <iframe title="Top" src="{top}"></iframe>
+        <p role="status" aria-label="Result">idle</p>
+        <nav>{links}</nav>
+        <iframe title="Bottom" src="{bottom}"></iframe></main>
+        <script>addEventListener('message', (event) => {{ document.querySelector('[aria-label="Result"]').textContent += ' ' + event.data; }});</script>"#,
+        top = frame_url("/top"),
+        bottom = frame_url("/bottom"),
+    );
+    let site = FixtureSite::spawn(vec![("/host", Route::Html(page("Host", &body)))]).await;
+    let live = Live::open(rig, &site.url("/host")).await;
+    for ready in ["top-ready", "bottom-ready"] {
+        let loaded = wait_for_result(&live, ready).await;
+        assert_eq!(
+            loaded["status"], "completed",
+            "a frame never loaded: {loaded}"
+        );
+    }
+    let snapshot = live.snapshot(json!({"maxNodes":60})).await;
+    assert!(
+        snapshot.to_string().contains(r#""truncated":true"#),
+        "the snapshot does not report truncation: {snapshot}"
+    );
+    let mut targets = Vec::new();
+    targets_under(&snapshot, &mut targets);
+    let top = targets
+        .iter()
+        .find(|(role, target)| *role == "button" && target["accessibleName"] == "Top action")
+        .map(|(_, target)| (*target).clone())
+        .unwrap_or_else(|| panic!("the frame above the cut is missing: {snapshot}"));
+    assert!(
+        !targets
+            .iter()
+            .any(|(_, target)| target["accessibleName"] == "Bottom action"),
+        "a frame past the cut was listed: {snapshot}"
+    );
+    let clicked = live.call("click", json!({"target": top})).await;
+    assert_eq!(clicked["status"], "completed", "{clicked}");
+    let pressed = wait_for_result(&live, "top-pressed").await;
+    assert_eq!(
+        pressed["status"], "completed",
+        "the click never landed: {pressed}"
     );
     live.close().await;
 }

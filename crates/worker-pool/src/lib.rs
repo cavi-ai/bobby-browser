@@ -41,7 +41,8 @@ pub use worker_failure::{
 
 pub(crate) use accessibility_targets::accessibility_role_is_actionable;
 pub use accessibility_targets::{
-    accessibility_target_totals, annotate_accessibility_targets, AccessibilityTargetCount,
+    accessibility_target_totals, annotate_accessibility_targets, count_a11y_nodes,
+    truncate_a11y_preorder, AccessibilityTargetCount,
 };
 pub use fingerprint_host::ChromiumPageHost;
 pub use form_snapshot::{

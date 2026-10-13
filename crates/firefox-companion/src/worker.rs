@@ -53,6 +53,7 @@ use worker_pool::navigation_settle::{
     NAVIGATION_SETTLE_CAP,
 };
 use worker_pool::secret_material::page_title_evidence;
+use worker_pool::{count_a11y_nodes, truncate_a11y_preorder};
 use worker_pool::{BrowserWorker, WorkerFactory};
 
 use crate::bidi::{BidiClient, BidiEvent, BidiTransport, SharedBiDiTransport};
@@ -89,8 +90,15 @@ const COMPOSED_QUERY_ALL: ComposedQueryAllFn = ComposedQueryAllFn;
 
 /// Accessibility nodes read to build intent candidates.
 const CANDIDATE_MAX_NODES: u32 = 1024;
-fn frame_candidates_script() -> String {
-    format!("(()=>{{const gathered=({})(document,{{controlsOnly:true,redact:true,maxNodes:4096,maxCandidates:128}});const controls=gathered.candidates.map(c=>({{css:c.css,role:c.role||'',name:c.name||'',label:c.label||'',disabled:!c.enabled,type:(c.attributes&&c.attributes.type)||''}}));const output=JSON.stringify({{truncated:gathered.truncated,controls}});return output.length<=65536?output:JSON.stringify({{truncated:true,controls:[]}});}})()", dom_engine::candidate_gather_function())
+/// Visible controls in one document, read through BiDi. `owners_only` keeps
+/// just the iframes a frame hop picks from, over the whole document.
+fn frame_candidates_script(owners_only: bool) -> String {
+    let (selector, max_nodes) = if owners_only {
+        ("'iframe'", "null")
+    } else {
+        ("null", "4096")
+    };
+    format!("(()=>{{const gathered=({})(document,{{controlsOnly:true,selector:{selector},redact:true,maxNodes:{max_nodes},maxCandidates:128}});const controls=gathered.candidates.map(c=>({{css:c.css,role:c.role||'',name:c.name||'',label:c.label||'',disabled:!c.enabled,type:(c.attributes&&c.attributes.type)||''}}));const output=JSON.stringify({{truncated:gathered.truncated,controls}});return output.length<=65536?output:JSON.stringify({{truncated:true,controls:[]}});}})()", dom_engine::candidate_gather_function())
 }
 
 const DEFAULT_NAVIGATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1326,14 +1334,15 @@ impl FirefoxCompanionWorker {
     }
 
     /// Puts each remote frame's subtree, built by that frame's own content
-    /// script, under its `iframe` node within the node budget left; every
-    /// target in it gains the frame's hop. Frames past `max_frames` are left
-    /// out, and a frame that no longer answers stays a leaf. Returns whether
-    /// the budget ran out.
+    /// script, under its `iframe` node; every target in it gains the frame's
+    /// hop. `max_nodes` bounds the composed tree, kept in document order: a
+    /// frame is read only while its owner is kept. Frames past `max_frames`
+    /// are left out, and a frame that no longer answers stays a leaf. Returns
+    /// whether anything was cut.
     async fn splice_remote_frames(
         &self,
         page_id: &PageId,
-        nodes: &mut [types::AccessibilityNode],
+        nodes: &mut Vec<types::AccessibilityNode>,
         remote_frames: Vec<RemoteFrame>,
         max_nodes: u32,
         include_text: bool,
@@ -1353,13 +1362,12 @@ impl FirefoxCompanionWorker {
                 truncated = true;
                 continue;
             }
-            let used = count_a11y_nodes(nodes);
-            let Some(left) = (max_nodes as usize)
-                .checked_sub(used)
-                .filter(|left| *left > 0)
-            else {
-                return true;
-            };
+            // Nested frames queue after every top-level one, so a cut owner
+            // skips only its own frame.
+            if frame_node_at_path(nodes, &path).is_none() {
+                truncated = true;
+                continue;
+            }
             reads += 1;
             let Ok(mut inner) = self
                 .observer
@@ -1367,7 +1375,7 @@ impl FirefoxCompanionWorker {
                     &self.current_lease(),
                     page_id,
                     frame.frame_id,
-                    u32::try_from(left).unwrap_or(max_nodes),
+                    max_nodes,
                     include_text,
                 )
                 .await
@@ -1375,7 +1383,7 @@ impl FirefoxCompanionWorker {
                 truncated = true;
                 continue;
             };
-            if count_a11y_nodes(&inner.nodes) > left
+            if count_a11y_nodes(&inner.nodes) > max_nodes as usize
                 || annotate_snapshot_targets(&mut inner.nodes, inner.target_counts, max_nodes)
                     .is_err()
             {
@@ -1384,10 +1392,12 @@ impl FirefoxCompanionWorker {
             }
             truncated |= inner.truncated;
             stamp_frame_path(&mut inner.nodes, &path);
-            if !splice_under_frame_path(nodes, &path, &mut inner.nodes) {
+            let Some(owner) = frame_node_at_path(nodes, &path) else {
                 truncated = true;
                 continue;
-            }
+            };
+            owner.children = inner.nodes;
+            truncated |= truncate_a11y_preorder(nodes, max_nodes as usize);
             for mut child in inner.remote_frames {
                 child.frame_path.splice(0..0, path.iter().cloned());
                 pending.push_back(child);
@@ -2128,7 +2138,7 @@ impl FirefoxCompanionWorker {
             let frame_selector = if let Some(selector) = exact_selector {
                 selector
             } else {
-                let candidates = self.gather_bidi_context_candidates(&context).await?;
+                let candidates = self.gather_bidi_context_candidates(&context, true).await?;
                 // Snapshot-stamped unnamed frame hops carry an empty name.
                 // Match Chromium's frame normalization before ranking.
                 let mut normalized_frame = (**frame).clone();
@@ -2252,19 +2262,23 @@ impl FirefoxCompanionWorker {
         if context == top_context {
             return self.gather_input_candidates(page_id).await;
         }
-        Ok((self.gather_bidi_context_candidates(context).await?, false))
+        Ok((
+            self.gather_bidi_context_candidates(context, false).await?,
+            false,
+        ))
     }
 
     async fn gather_bidi_context_candidates(
         &self,
         context: &str,
+        owners_only: bool,
     ) -> Result<Vec<Candidate>, CommandError> {
         let response = self
             .transport
             .send(
                 "script.evaluate",
                 json!({
-                    "expression": frame_candidates_script(),
+                    "expression": frame_candidates_script(owners_only),
                     "target": {"context": context, "sandbox": COMPANION_SANDBOX},
                     "awaitPromise": false,
                     "resultOwnership": "none",
@@ -7533,33 +7547,23 @@ fn splice_under_frame(
     hop: &types::SemanticTargetSegment,
     frame_nodes: &mut Vec<types::AccessibilityNode>,
 ) -> bool {
-    splice_under_frame_path(nodes, std::slice::from_ref(hop), frame_nodes)
+    frame_node_at_path(nodes, std::slice::from_ref(hop))
+        .map(|frame| frame.children = std::mem::take(frame_nodes))
+        .is_some()
 }
 
-fn splice_under_frame_path(
-    nodes: &mut [types::AccessibilityNode],
+/// The frame owner `path` reaches, one document per hop.
+fn frame_node_at_path<'a>(
+    nodes: &'a mut [types::AccessibilityNode],
     path: &[types::SemanticTargetSegment],
-    frame_nodes: &mut Vec<types::AccessibilityNode>,
-) -> bool {
-    let Some((hop, rest)) = path.split_first() else {
-        return false;
-    };
-    let Some(frame) = find_frame_node(nodes, hop, &mut 0) else {
-        return false;
-    };
+) -> Option<&'a mut types::AccessibilityNode> {
+    let (hop, rest) = path.split_first()?;
+    let frame = find_frame_node(nodes, hop, &mut 0)?;
     if rest.is_empty() {
-        frame.children = std::mem::take(frame_nodes);
-        true
+        Some(frame)
     } else {
-        splice_under_frame_path(&mut frame.children, rest, frame_nodes)
+        frame_node_at_path(&mut frame.children, rest)
     }
-}
-
-fn count_a11y_nodes(nodes: &[types::AccessibilityNode]) -> usize {
-    nodes
-        .iter()
-        .map(|node| 1 + count_a11y_nodes(&node.children))
-        .sum()
 }
 
 fn annotate_snapshot_targets(

@@ -1042,6 +1042,123 @@ async fn nested_remote_frame_snapshots_keep_all_ancestor_hops() {
     );
 }
 
+async fn unscoped_frame_snapshot(
+    observer: FrameObserver,
+    max_nodes: u32,
+) -> (Vec<types::AccessibilityNode>, bool) {
+    let worker = FirefoxCompanionWorker::new(
+        WorkerId::new(),
+        PathBuf::from("/profiles/firefox"),
+        lease(),
+        FakeBidi::new(Vec::new()),
+        Arc::new(observer),
+    )
+    .await
+    .unwrap();
+    let page = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
+    let evidence = worker_pool::observation_or_default(worker.observation())
+        .a11y_snapshot(
+            &page,
+            &types::AccessibilitySnapshotCommand {
+                target: None,
+                max_nodes: Some(max_nodes),
+            },
+        )
+        .await
+        .unwrap();
+    let Evidence::AccessibilitySnapshot {
+        nodes, truncated, ..
+    } = &evidence[0]
+    else {
+        panic!("snapshot missing");
+    };
+    (nodes.clone(), *truncated)
+}
+
+fn hop(name: &str) -> SemanticTargetSegment {
+    SemanticTargetSegment {
+        role: "iframe".into(),
+        accessible_name: name.into(),
+        ordinal: None,
+    }
+}
+
+#[tokio::test]
+async fn a_full_snapshot_lists_the_frame_of_a_kept_owner() {
+    let observer = FrameObserver {
+        snapshot: serde_json::from_value(json!({
+            "nodes":[{"role":"iframe","name":"Top"},{"role":"link","name":"First"},{"role":"link","name":"Second"}],
+            "truncated":true,
+            "remoteFrames":[{"frameId":1,"hop":{"role":"iframe","accessibleName":"Top"}}]
+        }))
+        .unwrap(),
+        frames: BTreeMap::from([(
+            1,
+            serde_json::from_value(json!({"nodes":[{"role":"button","name":"Go"}],"truncated":false}))
+                .unwrap(),
+        )]),
+        scope: None,
+    };
+    let (nodes, truncated) = unscoped_frame_snapshot(observer, 3).await;
+    assert!(truncated);
+    assert_eq!(nodes.len(), 2, "{nodes:?}");
+    let button = &nodes[0].children[0];
+    assert_eq!(button.name.as_deref(), Some("Go"));
+    assert_eq!(button.target.as_ref().unwrap().frame_path, vec![hop("Top")]);
+    assert_eq!(nodes[1].name.as_deref(), Some("First"));
+}
+
+#[tokio::test]
+async fn a_cut_frame_owner_skips_only_its_own_frame() {
+    // Frame 2's owner falls past the cut once frame 1 is spliced: reading it
+    // panics. Frame 3, nested in the kept frame 1, is still read.
+    let observer = FrameObserver {
+        snapshot: serde_json::from_value(json!({
+            "nodes":[{"role":"iframe","name":"First"},{"role":"iframe","name":"Second"}],
+            "truncated":false,
+            "remoteFrames":[
+                {"frameId":1,"hop":{"role":"iframe","accessibleName":"First"}},
+                {"frameId":2,"hop":{"role":"iframe","accessibleName":"Second"}}
+            ]
+        }))
+        .unwrap(),
+        frames: BTreeMap::from([
+            (
+                1,
+                serde_json::from_value(json!({
+                    "nodes":[{"role":"iframe","name":"Inner"},{"role":"button","name":"One"},{"role":"button","name":"Two"}],
+                    "truncated":false,
+                    "remoteFrames":[{"frameId":3,"hop":{"role":"iframe","accessibleName":"Inner"}}]
+                }))
+                .unwrap(),
+            ),
+            (
+                3,
+                serde_json::from_value(json!({"nodes":[{"role":"button","name":"Deep"}],"truncated":false}))
+                    .unwrap(),
+            ),
+        ]),
+        scope: None,
+    };
+    let (nodes, truncated) = unscoped_frame_snapshot(observer, 4).await;
+    assert!(truncated);
+    assert_eq!(nodes.len(), 1, "the cut owner stayed: {nodes:?}");
+    let first = &nodes[0].children;
+    assert_eq!(first[0].name.as_deref(), Some("Inner"));
+    let deep = &first[0].children[0];
+    assert_eq!(deep.name.as_deref(), Some("Deep"));
+    assert_eq!(
+        deep.target.as_ref().unwrap().frame_path,
+        vec![hop("First"), hop("Inner")]
+    );
+    assert_eq!(first[1].name.as_deref(), Some("One"));
+    assert_eq!(first.len(), 2, "{nodes:?}");
+}
+
 #[tokio::test]
 async fn framed_css_snapshot_uses_the_content_scope_and_preserves_its_hops() {
     let target = TargetSpec {
