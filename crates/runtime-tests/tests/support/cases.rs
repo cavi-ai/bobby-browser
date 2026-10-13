@@ -87,6 +87,8 @@ macro_rules! every_case {
             identical_frames_from_another_site_keep_their_own_targets,
             sandboxed_frames_list_and_act,
             a_main_frame_miss_names_the_frame_holding_the_target,
+            a_click_lands_inside_a_bordered_frame_from_another_site,
+            snapshot_lists_controls_inside_an_untitled_frame_from_another_site,
             $($extra,)*
         }
     };
@@ -3941,12 +3943,25 @@ pub async fn dismiss_closes_an_overlay_framed_from_another_site(rig: &Rig) {
 /// `frame_body`, comes from another site; the frame reports to the page's
 /// `Result` status by `postMessage`. Both sites stay up while held.
 async fn cross_site_frame_page(frame_body: &str) -> (FixtureSite, FixtureSite) {
+    cross_site_frame_page_with(
+        frame_body,
+        r#"title="Widget" style="width:400px;height:200px""#,
+    )
+    .await
+}
+
+/// A host page whose iframe, with `attributes`, loads `frame_body` from
+/// another site; messages the frame posts land in the "Result" status.
+async fn cross_site_frame_page_with(
+    frame_body: &str,
+    attributes: &str,
+) -> (FixtureSite, FixtureSite) {
     let frame_site =
         FixtureSite::spawn(vec![("/frame", Route::Html(page("Frame", frame_body)))]).await;
     let frame_url = frame_site.url("/frame").replace("127.0.0.1", "localhost");
     let body = format!(
         r#"<main><h1>Host</h1>
-        <iframe title="Widget" src="{frame_url}" style="width:400px;height:200px"></iframe>
+        <iframe {attributes} src="{frame_url}"></iframe>
         <p role="status" aria-label="Result">idle</p></main>
         <script>addEventListener('message', (event) => {{ document.querySelector('[aria-label="Result"]').textContent = String(event.data); }});</script>"#
     );
@@ -4127,6 +4142,23 @@ pub async fn scoped_snapshot_reads_a_frame_from_another_site(rig: &Rig) {
         control.to_string().contains("Frame action"),
         "scoped to the framed control: {control}"
     );
+    let bounded = live
+        .snapshot(json!({"maxNodes":1,
+                   "target":{"role":"button","accessibleName":"Frame action",
+                             "framePath":[{"role":"iframe","accessibleName":"Widget"}]}}))
+        .await;
+    let nodes = &bounded["evidence"][0]["nodes"];
+    assert_eq!(
+        nodes.as_array().map(Vec::len),
+        Some(1),
+        "bounded scope: {bounded}"
+    );
+    assert!(
+        nodes[0]["children"]
+            .as_array()
+            .is_none_or(|children| children.is_empty()),
+        "bounded scope keeps one node: {bounded}"
+    );
     live.close().await;
 }
 
@@ -4216,40 +4248,49 @@ pub async fn wait_for_reaches_into_a_frame_from_another_site(rig: &Rig) {
     live.close().await;
 }
 
-/// The first object under `value` whose `accessibleName` is `name` and that
-/// carries a `target`.
-fn control_named<'a>(value: &'a Value, name: &str) -> Option<&'a Value> {
+/// Every object under `value` whose `accessibleName` is `name` and that
+/// carries a `target`, in document order.
+fn controls_named<'a>(value: &'a Value, name: &str, out: &mut Vec<&'a Value>) {
     match value {
         Value::Object(map) => {
             if map.get("accessibleName").and_then(Value::as_str) == Some(name)
                 && map.get("target").is_some()
             {
-                return Some(value);
+                out.push(value);
             }
-            map.values().find_map(|child| control_named(child, name))
+            map.values()
+                .for_each(|child| controls_named(child, name, out));
         }
-        Value::Array(items) => items.iter().find_map(|child| control_named(child, name)),
-        _ => None,
+        Value::Array(items) => items
+            .iter()
+            .for_each(|child| controls_named(child, name, out)),
+        _ => {}
     }
 }
 
 /// A form snapshot target for a field inside an iframe with no name acts on
 /// that field.
 pub async fn form_snapshot_targets_reach_an_unnamed_frame(rig: &Rig) {
-    let frame = page(
-        "Frame",
-        r#"<label>Code <input oninput="parent.postMessage('typed:' + this.value,'*')"></label>
-        <script>parent.postMessage('ready','*')</script>"#,
-    );
+    let frame = |posted: &str| {
+        page(
+            "Frame",
+            &format!(
+                r#"<label>Code <input oninput="parent.postMessage('{posted}:' + this.value,'*')"></label>
+                <script>parent.postMessage('ready','*')</script>"#
+            ),
+        )
+    };
     let host = page(
         "Host",
-        r#"<main><h1>Host</h1><iframe src="/frame" style="width:400px;height:120px"></iframe>
+        r#"<main><h1>Host</h1><iframe src="/first" style="width:400px;height:120px"></iframe>
+        <iframe src="/second" style="width:400px;height:120px"></iframe>
         <p role="status" aria-label="Result">idle</p></main>
         <script>addEventListener('message', (event) => { document.querySelector('[aria-label="Result"]').textContent = String(event.data); });</script>"#,
     );
     let site = FixtureSite::spawn(vec![
         ("/host", Route::Html(host)),
-        ("/frame", Route::Html(frame)),
+        ("/first", Route::Html(frame("first"))),
+        ("/second", Route::Html(frame("second"))),
     ])
     .await;
     let live = Live::open(rig, &site.url("/host")).await;
@@ -4259,8 +4300,11 @@ pub async fn form_snapshot_targets_reach_an_unnamed_frame(rig: &Rig) {
         "the frame never loaded: {ready}"
     );
     let snapshot = live.call("form_snapshot", json!({})).await;
-    let control = control_named(&snapshot, "Code")
-        .unwrap_or_else(|| panic!("no framed control in the form snapshot: {snapshot}"));
+    let mut controls = Vec::new();
+    controls_named(&snapshot, "Code", &mut controls);
+    let control = controls
+        .get(1)
+        .unwrap_or_else(|| panic!("no second framed control in the form snapshot: {snapshot}"));
     let typed = live
         .call(
             "control_action",
@@ -4269,9 +4313,9 @@ pub async fn form_snapshot_targets_reach_an_unnamed_frame(rig: &Rig) {
         .await;
     assert_eq!(
         typed["status"], "completed",
-        "control_action through an unnamed frame: {typed}"
+        "control_action through the second unnamed frame: {typed}"
     );
-    let landed = wait_for_result(&live, "typed:42").await;
+    let landed = wait_for_result(&live, "second:42").await;
     assert_eq!(
         landed["status"], "completed",
         "the field never got the value: {landed}"
@@ -4413,6 +4457,78 @@ pub async fn a_main_frame_miss_names_the_frame_holding_the_target(rig: &Rig) {
     assert_eq!(
         clicked["status"], "completed",
         "click through the named frame path: {clicked}"
+    );
+    let pressed = wait_for_result(&live, "pressed").await;
+    assert_eq!(
+        pressed["status"], "completed",
+        "the click never landed: {pressed}"
+    );
+    live.close().await;
+}
+
+/// A click on a control at the corner of a frame from another site with a
+/// thick border and padding lands on that control.
+pub async fn a_click_lands_inside_a_bordered_frame_from_another_site(rig: &Rig) {
+    let (site, _frame) = cross_site_frame_page_with(
+        r#"<button style="position:fixed;left:0;top:0;width:24px;height:24px;margin:0"
+          onclick="parent.postMessage('pressed','*')">Corner</button>
+        <script>parent.postMessage('ready','*')</script>"#,
+        r#"title="Widget" style="width:200px;height:120px;border:20px solid #333;padding:10px""#,
+    )
+    .await;
+    let live = Live::open(rig, &site.url("/host")).await;
+    let ready = wait_for_result(&live, "ready").await;
+    assert_eq!(
+        ready["status"], "completed",
+        "the frame never loaded: {ready}"
+    );
+    let clicked = live
+        .call(
+            "click",
+            json!({"target":{"role":"button","accessibleName":"Corner",
+                             "framePath":[{"role":"iframe","accessibleName":"Widget"}]}}),
+        )
+        .await;
+    assert_eq!(clicked["status"], "completed", "{clicked}");
+    let pressed = wait_for_result(&live, "pressed").await;
+    assert_eq!(
+        pressed["status"], "completed",
+        "the click missed the control: {pressed}"
+    );
+    live.close().await;
+}
+
+/// Controls inside an untitled frame from another site appear in the snapshot
+/// behind an unnamed hop, and their targets click through the frame.
+pub async fn snapshot_lists_controls_inside_an_untitled_frame_from_another_site(rig: &Rig) {
+    let (site, _frame) = cross_site_frame_page_with(
+        r#"<button onclick="parent.postMessage('pressed','*')">Frame action</button>
+        <script>parent.postMessage('ready','*')</script>"#,
+        r#"style="width:400px;height:200px""#,
+    )
+    .await;
+    let live = Live::open(rig, &site.url("/host")).await;
+    let ready = wait_for_result(&live, "ready").await;
+    assert_eq!(
+        ready["status"], "completed",
+        "the frame never loaded: {ready}"
+    );
+    let snapshot = live.snapshot(json!({})).await;
+    let mut targets = Vec::new();
+    targets_under(&snapshot, &mut targets);
+    let target = targets
+        .iter()
+        .find(|(role, target)| *role == "button" && target["accessibleName"] == "Frame action")
+        .map(|(_, target)| (*target).clone())
+        .unwrap_or_else(|| panic!("the framed control is missing: {snapshot}"));
+    assert_eq!(
+        target["framePath"][0]["accessibleName"], "",
+        "unnamed frame hop: {target}"
+    );
+    let clicked = live.call("click", json!({"target": target})).await;
+    assert_eq!(
+        clicked["status"], "completed",
+        "click through the frame: {clicked}"
     );
     let pressed = wait_for_result(&live, "pressed").await;
     assert_eq!(

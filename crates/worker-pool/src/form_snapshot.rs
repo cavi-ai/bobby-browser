@@ -127,7 +127,9 @@ pub fn normalize_form_snapshot(
         if let (Some(role), Some(name)) = (control_role(control), control.accessible_name.as_ref())
         {
             if !name.is_empty() {
-                *target_totals.entry((role, name.clone())).or_insert(0usize) += 1;
+                *target_totals
+                    .entry(target_key(role, name.clone(), control))
+                    .or_insert(0usize) += 1;
             }
         }
     }
@@ -251,13 +253,23 @@ pub fn decode_form_snapshot(
     normalize_form_snapshot(page_id, raw, max_controls)
 }
 
+/// A control target's ordinal counts the controls with its role and name in
+/// the frame and shadow root its target resolves in.
+type TargetKey = (String, String, String);
+
+fn target_key(role: String, name: String, control: &RawFormControl) -> TargetKey {
+    let scope =
+        serde_json::to_string(&(&control.frame_path, &control.shadow_path)).unwrap_or_default();
+    (role, name, scope)
+}
+
 fn normalize_control(
     raw: RawFormControl,
     id: String,
     form_ids: &BTreeMap<String, String>,
     group_ids: &BTreeMap<String, String>,
-    target_totals: &BTreeMap<(String, String), usize>,
-    target_seen: &mut BTreeMap<(String, String), usize>,
+    target_totals: &BTreeMap<TargetKey, usize>,
+    target_seen: &mut BTreeMap<TargetKey, usize>,
 ) -> FormControl {
     let kind = control_kind(&raw);
     let role = control_role(&raw);
@@ -267,7 +279,7 @@ fn normalize_control(
             if name.is_empty() {
                 return None;
             }
-            let key = (role.clone(), name.clone());
+            let key = target_key(role.clone(), name.clone(), &raw);
             let seen = target_seen.entry(key.clone()).or_default();
             let ordinal =
                 (target_totals.get(&key).copied().unwrap_or_default() > 1).then_some(*seen);
@@ -672,7 +684,9 @@ const rawControl=(e,framePath,shadowPath,index,formKeys,groupKeys)=>{const owner
 const RAW_FORM_SNAPSHOT_SCRIPT: &str = r#"JSON.stringify((()=>{
 const LIMIT=Math.max(1,Math.min(512,__MAX_CONTROLS__));
 __CONTROL_FUNCTIONS__
-const roots=[];const scanRoot=(root,framePath=[],shadowPath=[])=>{roots.push({root,framePath,shadowPath});for(const el of root.querySelectorAll('*')){if(el.shadowRoot)scanRoot(el.shadowRoot,framePath,[...shadowPath,{role:el.getAttribute('role')||'group',accessibleName:text(el.getAttribute('aria-label'))||text(el.id)||'shadow root',ordinal:null}]);if(el.tagName==='IFRAME'){try{if(el.contentDocument)scanRoot(el.contentDocument,[...framePath,{role:'iframe',accessibleName:text(el.getAttribute('aria-label'))||text(el.name)||text(el.title)||'',ordinal:null}],shadowPath)}catch{}}}};scanRoot(document);
+const frameName=f=>text(resolveRefs(f,'aria-labelledby').join(' '))||text(f.getAttribute('aria-label'))||text(f.title)||'';
+const frameHops=root=>{const frames=[...root.querySelectorAll('iframe')].filter(f=>f.getClientRects().length>0);const names=frames.map(frameName);const totals=new Map();for(const name of names)totals.set(name,(totals.get(name)||0)+1);const seen=new Map();return new Map(frames.map((f,i)=>{const name=names[i];const index=name?(seen.get(name)||0):i;if(name)seen.set(name,index+1);const total=name?totals.get(name):frames.length;return[f,{role:'iframe',accessibleName:name,ordinal:total>1?index:null}]}))};
+const roots=[];const scanRoot=(root,framePath=[],shadowPath=[])=>{roots.push({root,framePath,shadowPath});const hops=frameHops(root);for(const el of root.querySelectorAll('*')){if(el.shadowRoot)scanRoot(el.shadowRoot,framePath,[...shadowPath,{role:el.getAttribute('role')||'group',accessibleName:text(el.getAttribute('aria-label'))||text(el.id)||'shadow root',ordinal:null}]);if(el.tagName==='IFRAME'){try{if(el.contentDocument)scanRoot(el.contentDocument,[...framePath,hops.get(el)||{role:'iframe',accessibleName:frameName(el),ordinal:null}],shadowPath)}catch{}}}};scanRoot(document);
 const formElements=[];for(const {root} of roots)for(const form of root.querySelectorAll('form'))if(!formElements.includes(form))formElements.push(form);let truncated=formElements.length>64;formElements.splice(64);
 const formKeys=new Map(formElements.map((form,index)=>[form,`raw-form-${index+1}`]));
 const groupElements=[];for(const form of formElements)for(const group of form.querySelectorAll('fieldset'))if(groupElements.length<128)groupElements.push(group);else truncated=true;
@@ -895,6 +909,40 @@ mod tests {
             None
         );
         snapshot.validate().unwrap();
+    }
+
+    #[test]
+    fn duplicate_ordinals_count_within_the_frame_a_target_resolves_in() {
+        let frame = |ordinal| {
+            vec![SemanticTargetSegment {
+                role: "iframe".into(),
+                accessible_name: String::new(),
+                ordinal: Some(ordinal),
+            }]
+        };
+        let mut controls = Vec::new();
+        for (key, framed) in [("a", 0), ("b", 1), ("c", 1)] {
+            let mut control = raw_control(key, "Code");
+            control.frame_path = frame(framed);
+            controls.push(control);
+        }
+        let snapshot = normalize_form_snapshot(
+            PageId::new(),
+            RawFormSnapshot {
+                forms: Vec::new(),
+                groups: Vec::new(),
+                controls,
+                truncated: false,
+            },
+            8,
+        )
+        .unwrap();
+        let ordinals: Vec<_> = snapshot
+            .unowned_controls
+            .iter()
+            .map(|control| control.target.as_ref().unwrap().ordinal)
+            .collect();
+        assert_eq!(ordinals, [None, Some(0), Some(1)]);
     }
 
     #[test]

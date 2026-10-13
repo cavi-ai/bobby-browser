@@ -9,8 +9,8 @@ use chromiumoxide::cdp::browser_protocol::accessibility::QueryAxTreeParams;
 #[cfg(test)]
 use chromiumoxide::cdp::browser_protocol::dom::Node as CdpNode;
 use chromiumoxide::cdp::browser_protocol::dom::{
-    BackendNodeId, DescribeNodeParams, GetContentQuadsParams, GetDocumentParams, ResolveNodeParams,
-    SetFileInputFilesParams, ShadowRootType,
+    BackendNodeId, DescribeNodeParams, GetBoxModelParams, GetContentQuadsParams, GetDocumentParams,
+    ResolveNodeParams, SetFileInputFilesParams, ShadowRootType,
 };
 use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
 use chromiumoxide::cdp::browser_protocol::page::{
@@ -168,25 +168,17 @@ impl ResolvedTarget {
         // Each frame from another site reports from its own viewport origin:
         // its iframe's content box places that origin in the parent.
         for (session, owner) in &self.frame_owners {
-            let owner_quads = session
-                .execute(
-                    GetContentQuadsParams::builder()
-                        .backend_node_id(*owner)
-                        .build(),
-                )
+            let model = session
+                .execute(GetBoxModelParams::builder().backend_node_id(*owner).build())
                 .await
-                .map_err(cdp_error)?;
-            let Some(origin) = owner_quads
-                .quads
-                .iter()
-                .filter(|quad| quad.inner().len() == 8)
-                .map(ElementQuad::from_quad)
-                .next()
-            else {
+                .map_err(cdp_error)?
+                .result
+                .model;
+            let [x, y, ..] = model.content.inner().as_slice() else {
                 return Ok(None);
             };
-            point.x += origin.top_left.x;
-            point.y += origin.top_left.y;
+            point.x += x;
+            point.y += y;
         }
         Ok(Some(point))
     }
@@ -664,10 +656,8 @@ impl ResolvedTarget {
     }
 }
 
-/// Function body with `el` bound: whether `el` takes typed text. Typing into a
-/// target that cannot (disabled, readonly, inside a disabled fieldset, a
-/// non-text input type, or a plain element) still dispatches key events, and
-/// on macOS headless Chrome that pins the browser process at full CPU.
+/// Function body with `el` bound: whether `el` takes typed text. Checked
+/// before any key is dispatched.
 pub(crate) const ACCEPTS_TEXT_SCRIPT: &str = "return !el.disabled && !el.closest('fieldset[disabled]') && ((el instanceof HTMLInputElement && !el.readOnly && !['hidden','button','submit','reset','image','file'].includes((el.type||'text').toLowerCase())) || (el instanceof HTMLTextAreaElement && !el.readOnly) || el instanceof HTMLSelectElement || el.isContentEditable);";
 
 /// The DOM backend node id for a gathered candidate, for correlating it with

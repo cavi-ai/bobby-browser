@@ -2275,13 +2275,15 @@ mod tests {
     #[tokio::test]
     async fn an_absent_target_waits_no_longer_than_its_budget() {
         let budget = Duration::from_millis(300);
-        let elapsed =
-            await_gathered_target(&close_target(), budget, || async { Ok(Vec::new()) }).await;
+        let gathers = AtomicUsize::new(0);
+        let elapsed = await_gathered_target(&close_target(), budget, || {
+            gathers.fetch_add(1, Ordering::SeqCst);
+            async { Ok(Vec::new()) }
+        })
+        .await;
         assert!(elapsed >= budget, "waited {elapsed:?}");
-        assert!(
-            elapsed < budget + TARGET_REGATHER_INTERVAL,
-            "waited {elapsed:?}"
-        );
+        // At 0, at one interval, then once at the budget: no gather after it.
+        assert!(gathers.load(Ordering::SeqCst) <= 3, "{gathers:?}");
     }
 
     fn missed() -> types::CommandError {

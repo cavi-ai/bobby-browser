@@ -13,8 +13,10 @@
 - `type_text` into a field the page swaps for an editor as it takes focus waits for focus to settle and types the whole value into the editor, instead of losing the first keys.
 - `intent_dismiss_obstruction` whose purpose names no control clicks a visible close or decline control the obstruction does not cover, frames from other sites included, and completes once that control's frame is gone.
 - Chromium opens each page in its own background window that acts focused, so clicks and typing on a page no longer time out while another page in the same browser is in front.
-- Snapshots list the controls inside frames from other sites with targets that click and type through the frame, and a snapshot scoped to such a frame or a control in it reads that frame.
-- Intents find, fill and dismiss controls inside frames from other sites without a `framePath`, and start acting as soon as the control is found instead of waiting up to 5 seconds.
+- Snapshots list the controls inside frames from other sites with targets that click and type through the frame.
+- A snapshot scoped to a frame from another site, or to a control in it, reads that frame.
+- Intents find, fill and dismiss controls inside frames from other sites without a `framePath`.
+- Intents act on a control as soon as it is found instead of waiting up to 5 seconds.
 - A `click` or typing target that misses the page but sits inside a frame fails `targetNotFound` with the `framePath` that reaches it.
 - `form_snapshot` targets for fields inside unnamed frames act through `control_action`.
 - Journal records, checkpoints and skill-issuance files default to a 64 MiB byte limit. Oversized journal files are preserved in an archive with a warning; oversized checkpoint reads and writes fail without replacing stored data. The journal and checkpoint store APIs accept configurable limits.

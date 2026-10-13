@@ -7291,10 +7291,6 @@ fn content_failure_code(code: &str, fallback: ErrorCode) -> ErrorCode {
     }
 }
 
-/// The scope the content script resolves for a scoped accessibility snapshot:
-/// a landmark such as `main` carries no CSS identity in the control candidates
-/// the click path resolves against, so the page-side walk that annotates
-/// snapshot targets (same role + accessible-name + ordinal key) resolves it.
 /// Prepends `hop` to the frame path of every target under `nodes`.
 fn stamp_frame_hop(nodes: &mut [types::AccessibilityNode], hop: &types::SemanticTargetSegment) {
     for node in nodes {
@@ -7426,6 +7422,10 @@ fn stamp_frame_path(nodes: &mut [types::AccessibilityNode], path: &[types::Seman
     }
 }
 
+/// The scope the content script resolves for a scoped accessibility snapshot:
+/// a landmark such as `main` carries no CSS identity in the control candidates
+/// the click path resolves against, so the page-side walk that annotates
+/// snapshot targets (same role + accessible-name + ordinal key) resolves it.
 fn a11y_scope_input(target: &types::TargetSpec) -> Result<Value, CommandError> {
     if !target.shadow_path.is_empty() {
         return Err(driver_error(
