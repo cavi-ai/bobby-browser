@@ -849,6 +849,12 @@ struct FrameCandidateControl {
     input_type: String,
 }
 
+struct FramePointerOwner {
+    context: String,
+    selector: String,
+    ordinal: Option<usize>,
+}
+
 #[derive(Debug, Deserialize)]
 struct PointerOriginBounds {
     cx: f64,
@@ -2098,6 +2104,14 @@ impl FirefoxCompanionWorker {
         top_context: &str,
         target: &types::TargetSpec,
     ) -> Result<String, CommandError> {
+        Ok(self.resolve_input_scope(top_context, target).await?.0)
+    }
+
+    async fn resolve_input_scope(
+        &self,
+        top_context: &str,
+        target: &types::TargetSpec,
+    ) -> Result<(String, Vec<FramePointerOwner>), CommandError> {
         if target.frame_path.len() > MAX_FRAME_PATH_DEPTH {
             return Err(driver_error(
                 ErrorCode::InvalidRequest,
@@ -2107,6 +2121,7 @@ impl FirefoxCompanionWorker {
         }
         worker_pool::validate_target_spec(target)?;
         let mut context = top_context.to_owned();
+        let mut owners = Vec::new();
         for frame in &target.frame_path {
             let exact_selector = dom_engine::exact_target_selector(frame);
             let ordinal = exact_selector.as_ref().and(frame.ordinal);
@@ -2157,11 +2172,16 @@ impl FirefoxCompanionWorker {
                     }
                 }
             };
+            owners.push(FramePointerOwner {
+                context: context.clone(),
+                selector: frame_selector.clone(),
+                ordinal,
+            });
             context = self
                 .descend_frame_context(&context, &frame_selector, ordinal)
                 .await?;
         }
-        Ok(context)
+        Ok((context, owners))
     }
 
     /// Observes the page and turns its controls into semantic-resolution
@@ -2332,10 +2352,23 @@ impl FirefoxCompanionWorker {
         selector: &str,
         target: Option<&types::TargetSpec>,
     ) -> Result<(String, String), CommandError> {
+        let (context, selector, _) = self
+            .resolve_input_target_with_frames(page_id, top_context, selector, target)
+            .await?;
+        Ok((context, selector))
+    }
+
+    async fn resolve_input_target_with_frames(
+        &self,
+        page_id: &PageId,
+        top_context: &str,
+        selector: &str,
+        target: Option<&types::TargetSpec>,
+    ) -> Result<(String, String, Vec<FramePointerOwner>), CommandError> {
         let Some(target) = target else {
-            return Ok((top_context.to_owned(), selector.to_owned()));
+            return Ok((top_context.to_owned(), selector.to_owned(), Vec::new()));
         };
-        let context = self.resolve_input_context(top_context, target).await?;
+        let (context, owners) = self.resolve_input_scope(top_context, target).await?;
         if !target.shadow_path.is_empty() {
             let response = self
                 .shadow_target_response(&context, target, ShadowRead::Selector)
@@ -2351,10 +2384,10 @@ impl FirefoxCompanionWorker {
                         false,
                     )
                 })?;
-            return Ok((context, selector.to_owned()));
+            return Ok((context, selector.to_owned(), owners));
         }
         if let Some(selector) = dom_engine::exact_target_selector(target) {
-            return Ok((context, selector));
+            return Ok((context, selector, owners));
         }
         let (candidates, truncated) = self
             .gather_candidates_for_context(page_id, top_context, &context)
@@ -2376,14 +2409,14 @@ impl FirefoxCompanionWorker {
                         false,
                     ))
                 }
-                locate::Follow::Css(css_path) => return Ok((context, css_path.to_owned())),
+                locate::Follow::Css(css_path) => return Ok((context, css_path.to_owned(), owners)),
                 locate::Follow::Unresolved => {}
             }
         }
         match resolution {
             Ok(ResolutionDecision::Resolved { candidate, .. }) => candidate
                 .css
-                .map(|selector| (context, selector))
+                .map(|selector| (context, selector, owners))
                 .ok_or_else(|| {
                     driver_error(
                         ErrorCode::TargetDetached,
@@ -3027,6 +3060,114 @@ impl FirefoxCompanionWorker {
                 false,
             )),
         }
+    }
+
+    async fn preflight_frame_owners(
+        &self,
+        context: &str,
+        shared_id: &str,
+        owners: &[FramePointerOwner],
+    ) -> Result<(), CommandError> {
+        if owners.is_empty() {
+            return Ok(());
+        }
+        let bounds = self.pointer_origin_bounds(context, shared_id).await?;
+        let viewport = self.transport.send("script.evaluate", json!({"expression":"JSON.stringify([window.innerWidth,window.innerHeight])", "target":{"context":context,"sandbox":COMPANION_SANDBOX},"awaitPromise":false,"resultOwnership":"none"})).await?;
+        let viewport: (f64, f64) = viewport
+            .pointer("/result/value")
+            .and_then(Value::as_str)
+            .and_then(|value| serde_json::from_str(value).ok())
+            .ok_or_else(|| {
+                driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "Firefox frame viewport was unavailable",
+                    false,
+                )
+            })?;
+        let mut point = json!({"x":bounds.cx,"y":bounds.cy,"width":viewport.0,"height":viewport.1});
+        for owner in owners.iter().rev() {
+            let selector = serde_json::to_string(&owner.selector).map_err(|error| {
+                driver_error(ErrorCode::InvalidRequest, error.to_string(), false)
+            })?;
+            let ordinal = serde_json::to_string(&owner.ordinal).map_err(|error| {
+                driver_error(ErrorCode::InvalidRequest, error.to_string(), false)
+            })?;
+            let expression = format!(
+                r#"(()=>{{
+const frames={COMPOSED_QUERY_ALL}({selector}), ordinal={ordinal}, point={point};
+const frame=frames[ordinal??0];if(!frame||!frame.isConnected)return JSON.stringify({{verdict:'detached'}});
+if(ordinal===null&&frames.length!==1)return JSON.stringify({{verdict:'detached'}});
+if(point.width<=0||point.height<=0)return JSON.stringify({{verdict:'out-of-bounds'}});
+let matrix=new DOMMatrix(), depth=0;
+for(let node=frame;node;node=node.parentElement||node.getRootNode().host){{
+if(++depth>256)return JSON.stringify({{verdict:'out-of-bounds'}});
+const style=getComputedStyle(node), transform=style.transform==='none'?new DOMMatrix():new DOMMatrix(style.transform);
+if(!transform.is2D)return JSON.stringify({{verdict:'out-of-bounds'}});
+let local=transform;
+if(style.scale&&style.scale!=='none'){{const scales=style.scale.split(/\s+/).map(Number);if(scales.length>2)return JSON.stringify({{verdict:'out-of-bounds'}});local=new DOMMatrix().scale(scales[0],scales[1]??scales[0]).multiply(local);}}
+if(style.rotate&&style.rotate!=='none'){{const match=style.rotate.match(/^(?:z\s+)?([+-]?[\d.]+)(deg|rad|grad|turn)$/);if(!match)return JSON.stringify({{verdict:'out-of-bounds'}});const angle=Number(match[1])*({{deg:1,rad:180/Math.PI,grad:0.9,turn:360}}[match[2]]);local=new DOMMatrix().rotate(angle).multiply(local);}}
+matrix=local.multiply(matrix);
+}}
+const rect=frame.getBoundingClientRect(), width=frame.offsetWidth,height=frame.offsetHeight;
+const xs=[0,matrix.a*width,matrix.c*height,matrix.a*width+matrix.c*height];
+const ys=[0,matrix.b*width,matrix.d*height,matrix.b*width+matrix.d*height];
+const spanX=Math.max(...xs)-Math.min(...xs), spanY=Math.max(...ys)-Math.min(...ys);
+if(spanX<=0||spanY<=0)return JSON.stringify({{verdict:'out-of-bounds'}});
+const style=getComputedStyle(frame), px=parseFloat(style.paddingLeft)||0,py=parseFloat(style.paddingTop)||0;
+const lx=frame.clientLeft+px+point.x/point.width*(frame.clientWidth-px-(parseFloat(style.paddingRight)||0));
+const ly=frame.clientTop+py+point.y/point.height*(frame.clientHeight-py-(parseFloat(style.paddingBottom)||0));
+const x=rect.left+(matrix.a*lx+matrix.c*ly-Math.min(...xs))*rect.width/spanX;
+const y=rect.top+(matrix.b*lx+matrix.d*ly-Math.min(...ys))*rect.height/spanY;
+const root=frame.getRootNode(), hit=root.elementFromPoint(x,y);
+return JSON.stringify({{verdict:hit===frame?'ok':'obscured',x,y,width:window.innerWidth,height:window.innerHeight}});
+}})()"#
+            );
+            let response = self.transport.send("script.evaluate", json!({"expression":expression,
+                "target":{"context":owner.context,"sandbox":COMPANION_SANDBOX},"awaitPromise":false,"resultOwnership":"none"})).await?;
+            point = response
+                .pointer("/result/value")
+                .and_then(Value::as_str)
+                .and_then(|value| serde_json::from_str(value).ok())
+                .ok_or_else(|| {
+                    driver_error(
+                        ErrorCode::BrowserCommandFailed,
+                        "Firefox frame pointer preflight returned an invalid result",
+                        false,
+                    )
+                })?;
+            match point.get("verdict").and_then(Value::as_str) {
+                Some("ok") => {}
+                Some("detached") => {
+                    return Err(driver_error(
+                        ErrorCode::TargetDetached,
+                        "Firefox frame owner detached before click",
+                        false,
+                    ))
+                }
+                Some("out-of-bounds") => {
+                    return Err(driver_error(
+                        ErrorCode::TargetOutOfBounds,
+                        worker_pool::FIREFOX_POINTER_OUT_OF_BOUNDS,
+                        false,
+                    ))
+                }
+                Some("obscured") => {
+                    return Err(driver_error(
+                        ErrorCode::TargetObscured,
+                        worker_pool::FIREFOX_POINTER_OBSCURED,
+                        false,
+                    ))
+                }
+                _ => {
+                    return Err(driver_error(
+                        ErrorCode::BrowserCommandFailed,
+                        "Firefox frame pointer preflight returned an invalid verdict",
+                        false,
+                    ))
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn pointer_origin_bounds(
@@ -4945,13 +5086,13 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
                 .target
                 .as_ref()
                 .filter(|target| !target.shadow_path.is_empty());
-            let (context, shared_id) = if let Some(target) = shadow_target {
-                let context = self.resolve_input_context(&top_context, target).await?;
+            let (context, shared_id, owners) = if let Some(target) = shadow_target {
+                let (context, owners) = self.resolve_input_scope(&top_context, target).await?;
                 let shared_id = self.resolve_shadow_element(&context, target).await?;
-                (context, shared_id)
+                (context, shared_id, owners)
             } else {
-                let (context, selector) = self
-                    .resolve_input_target(
+                let (context, selector, owners) = self
+                    .resolve_input_target_with_frames(
                         page_id,
                         &top_context,
                         &command.selector,
@@ -4961,13 +5102,17 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
                 let shared_id = self
                     .resolve_element(&context, &selector, command.target.is_some())
                     .await?;
-                (context, shared_id)
+                (context, shared_id, owners)
             };
 
             self.behavioral_scroll_into_view_if_needed(&context, &shared_id)
                 .await?;
             match self.preflight_pointer_target(&context, &shared_id).await {
-                Ok(shared_id) => break (context, shared_id),
+                Ok(shared_id) => {
+                    self.preflight_frame_owners(&context, &shared_id, &owners)
+                        .await?;
+                    break (context, shared_id);
+                }
                 Err(error) if !detach_retried && error.code == ErrorCode::TargetDetached => {
                     detach_retried = true;
                 }

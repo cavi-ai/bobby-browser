@@ -2623,68 +2623,81 @@ async fn semantic_click_missing_live_node_is_typed_as_target_drift_input() {
 
 #[tokio::test]
 async fn semantic_click_descends_exact_test_id_frame_before_native_input() {
-    let bidi = FakeBidi::new(vec![
-        Ok(json!({"context": "context-1"})),
-        Ok(json!({"result": {"type": "string", "value": "index:0"}})),
-        Ok(json!({"result": {"type": "node", "sharedId": "frame-button"}})),
-        Ok(json!({})),
-    ]);
-    bidi.set_tree(json!({"contexts": [{
-        "context": "context-1",
-        "children": [{"context": "frame-context", "children": []}]
-    }]}))
-    .await;
-    bidi.set_preflight(vec![Ok(json!({"result": {
-        "type": "node",
-        "sharedId": "frame-button-after-scroll"
-    }}))])
-    .await;
-    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
-    let page = PageId::new();
-    worker_pool::tabs_or_default(worker.tabs())
-        .open_page(page.clone())
-        .await
-        .unwrap();
+    for obstructed in [false, true] {
+        let bidi = FakeBidi::new(vec![
+            Ok(json!({"context": "context-1"})),
+            Ok(json!({"result": {"type": "string", "value": "index:0"}})),
+            Ok(json!({"result": {"type": "node", "sharedId": "frame-button"}})),
+            Ok(json!({"result":{"type":"string","value":"[640,480]"}})),
+            Ok(
+                json!({"result":{"type":"string","value":serde_json::to_string(&json!({"verdict":if obstructed {"obscured"} else {"ok"},"x":100,"y":100,"width":640,"height":480})).unwrap()}}),
+            ),
+            Ok(json!({})),
+        ]);
+        bidi.set_tree(json!({"contexts": [{
+            "context": "context-1",
+            "children": [{"context": "frame-context", "children": []}]
+        }]}))
+        .await;
+        bidi.set_preflight(vec![Ok(json!({"result": {
+            "type": "node",
+            "sharedId": "frame-button-after-scroll"
+        }}))])
+        .await;
+        let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+        let page = PageId::new();
+        worker_pool::tabs_or_default(worker.tabs())
+            .open_page(page.clone())
+            .await
+            .unwrap();
 
-    worker_pool::input_or_default(worker.input())
-        .click(
-            &page,
-            &ClickCommand {
-                selector: String::new(),
-                target: Some(types::TargetSpec {
-                    test_id: Some("iframe-submit".into()),
-                    frame_path: vec![Box::new(types::TargetSpec {
-                        test_id: Some("iframe-challenge".into()),
+        let result = worker_pool::input_or_default(worker.input())
+            .click(
+                &page,
+                &ClickCommand {
+                    selector: String::new(),
+                    target: Some(types::TargetSpec {
+                        test_id: Some("iframe-submit".into()),
+                        frame_path: vec![Box::new(types::TargetSpec {
+                            test_id: Some("iframe-challenge".into()),
+                            ..Default::default()
+                        })],
                         ..Default::default()
-                    })],
-                    ..Default::default()
-                }),
-                boundary: false,
-                expected_url: None,
-                modifiers: Vec::new(),
-            },
-        )
-        .await
-        .unwrap();
+                    }),
+                    boundary: false,
+                    expected_url: None,
+                    modifiers: Vec::new(),
+                },
+            )
+            .await;
 
-    let calls = bidi.calls().await;
-    assert!(calls
-        .iter()
-        .any(|call| call.method == "browsingContext.getTree"));
-    let preflight = calls
-        .iter()
-        .find(|call| call.method == "script.callFunction")
-        .expect("frame click must preflight in the child context");
-    assert_eq!(preflight.params["target"]["context"], "frame-context");
-    let click = calls
-        .iter()
-        .find(|call| call.method == "input.performActions")
-        .unwrap();
-    assert_eq!(click.params["context"], "frame-context");
-    assert_eq!(
-        click.params["actions"][0]["actions"][0]["origin"]["element"]["sharedId"],
-        "frame-button-after-scroll"
-    );
+        let calls = bidi.calls().await;
+        if obstructed {
+            assert_eq!(result.unwrap_err().code, ErrorCode::TargetObscured);
+            assert!(!calls
+                .iter()
+                .any(|call| call.method == "input.performActions"));
+            continue;
+        }
+        result.unwrap();
+        assert!(calls
+            .iter()
+            .any(|call| call.method == "browsingContext.getTree"));
+        let preflight = calls
+            .iter()
+            .find(|call| call.method == "script.callFunction")
+            .expect("frame click must preflight in the child context");
+        assert_eq!(preflight.params["target"]["context"], "frame-context");
+        let click = calls
+            .iter()
+            .find(|call| call.method == "input.performActions")
+            .unwrap();
+        assert_eq!(click.params["context"], "frame-context");
+        assert_eq!(
+            click.params["actions"][0]["actions"][0]["origin"]["element"]["sharedId"],
+            "frame-button-after-scroll"
+        );
+    }
 }
 
 #[tokio::test]

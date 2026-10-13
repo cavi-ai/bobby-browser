@@ -88,6 +88,8 @@ macro_rules! every_case {
             sandboxed_frames_list_and_act,
             a_main_frame_miss_names_the_frame_holding_the_target,
             a_click_lands_inside_a_bordered_frame_from_another_site,
+            framed_pointer_checks_parent_overlays,
+            framed_pointer_respects_frame_transforms,
             snapshot_lists_controls_inside_an_untitled_frame_from_another_site,
             download_starts_inside_a_frame_from_another_site,
             nested_frames_from_other_sites_list_and_act,
@@ -4691,6 +4693,45 @@ pub async fn download_starts_inside_a_frame_from_another_site(rig: &Rig) {
     assert!(
         downloaded.to_string().contains("frame-file.txt"),
         "{downloaded}"
+    );
+    live.close().await;
+}
+
+/// A parent document's overlay blocks controls inside a frame from another site.
+pub async fn framed_pointer_checks_parent_overlays(rig: &Rig) {
+    let frame = FixtureSite::spawn(vec![("/frame", Route::Html(page("Frame", r#"<a href="/file" download>Get file</a><script>parent.postMessage('ready','*')</script>"#))) ]).await;
+    let url = frame.url("/frame").replace("127.0.0.1", "localhost");
+    let host = FixtureSite::spawn(vec![("/host", Route::Html(page("Host", &format!(r#"<iframe title="Files" src="{url}"></iframe><div style="position:fixed;inset:0;z-index:999;background:white">Cover</div><p role="status" aria-label="Result">idle</p><script>addEventListener('message',e=>document.querySelector('[aria-label="Result"]').textContent=e.data)</script>"#))))]).await;
+    let live = Live::open(rig, &host.url("/host")).await;
+    assert_eq!(wait_for_result(&live, "ready").await["status"], "completed");
+    for operation in ["click", "click_and_wait_for_download"] {
+        let mut input = json!({"target":{"role":"link","accessibleName":"Get file","framePath":[{"role":"iframe","accessibleName":"Files"}]}});
+        if operation == "click_and_wait_for_download" {
+            input["timeoutMs"] = json!(1000);
+        }
+        let result = live.call(operation, input).await;
+        assert_eq!(
+            result["error"]["code"], "targetObscured",
+            "{operation}: {result}"
+        );
+    }
+    live.close().await;
+}
+
+/// A frame transform maps the control's local point into the parent viewport.
+pub async fn framed_pointer_respects_frame_transforms(rig: &Rig) {
+    let (host, _frame) = cross_site_frame_page_with(
+        r#"<button style="position:fixed;left:100px;top:70px;width:24px;height:24px;margin:0" onclick="parent.postMessage('pressed','*')">Corner</button><script>parent.postMessage('ready','*')</script>"#,
+        r#"title="Widget" style="width:240px;height:180px;transform:scale(1.5);transform-origin:top left""#,
+    ).await;
+    let live = Live::open(rig, &host.url("/host")).await;
+    assert_eq!(wait_for_result(&live, "ready").await["status"], "completed");
+    let clicked = live.call("click", json!({"target":{"role":"button","accessibleName":"Corner","framePath":[{"role":"iframe","accessibleName":"Widget"}]}})).await;
+    assert_eq!(clicked["status"], "completed", "{clicked}");
+    assert_eq!(
+        wait_for_result(&live, "pressed").await["status"],
+        "completed",
+        "click missed the transformed control"
     );
     live.close().await;
 }

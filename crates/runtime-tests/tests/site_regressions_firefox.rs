@@ -67,3 +67,13 @@ async fn accessibility_candidate_targets_resolve() {
     cases::snapshot_targets_resolve_beside_a_modal_dialog(&rig).await;
     cases::scoped_snapshot_frame_targets_reach_the_second_frame(&rig).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Firefox and paired test profile"]
+async fn framed_pointer_regressions() {
+    let rig = Rig::firefox().await;
+    cases::framed_pointer_checks_parent_overlays(&rig).await;
+    cases::framed_pointer_respects_frame_transforms(&rig).await;
+    cases::nested_frames_from_other_sites_list_and_act(&rig).await;
+    cases::a_click_lands_inside_a_bordered_frame_from_another_site(&rig).await;
+}
