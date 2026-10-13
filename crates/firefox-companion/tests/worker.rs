@@ -1171,12 +1171,15 @@ async fn candidates_read_a_bounded_number_of_frames() {
         .open_page(page.clone())
         .await
         .unwrap();
-    let target: TargetSpec =
-        serde_json::from_value(json!({"role":"textbox","accessibleName":"Code"})).unwrap();
-    worker_pool::observation_or_default(worker.observation())
-        .collect_candidates(&page, &target)
-        .await
-        .unwrap();
+    // A target absent from the frames read is absent, not a truncated census.
+    for name in ["Code", "Missing"] {
+        let target: TargetSpec =
+            serde_json::from_value(json!({"role":"textbox","accessibleName":name})).unwrap();
+        worker_pool::observation_or_default(worker.observation())
+            .collect_candidates(&page, &target)
+            .await
+            .unwrap();
+    }
 }
 
 #[tokio::test]

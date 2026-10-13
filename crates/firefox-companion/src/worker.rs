@@ -1320,10 +1320,10 @@ impl FirefoxCompanionWorker {
     }
 
     /// Puts each remote frame's subtree, built by that frame's own content
-    /// script, under its `iframe` node within the node budget left, reading
-    /// at most `max_frames` frames; every target in it gains the frame's hop.
-    /// A frame that no longer answers stays a leaf. Returns whether the budget
-    /// or the frame bound ran out.
+    /// script, under its `iframe` node within the node budget left; every
+    /// target in it gains the frame's hop. Frames past `max_frames` are left
+    /// out, and a frame that no longer answers stays a leaf. Returns whether
+    /// the budget ran out.
     async fn splice_remote_frames(
         &self,
         page_id: &PageId,
@@ -1339,7 +1339,7 @@ impl FirefoxCompanionWorker {
         let mut reads = 0;
         while let Some(frame) = pending.pop_front() {
             if max_frames.is_some_and(|max| reads >= max) {
-                return true;
+                break;
             }
             let mut path = frame.frame_path;
             path.push(frame.hop);

@@ -70,8 +70,9 @@ pub use skill_adapter::{
 };
 pub use targeting::validate_target_spec;
 
-/// Most frames per document an action's candidate census reads: each costs a
-/// browser round trip, and the census repeats while its target is absent.
+/// Most frames an action's candidate census reads; frames past it are left
+/// out. Each costs a browser round trip, and the census repeats while its
+/// target is absent.
 pub const MAX_DESCENDED_FRAMES: usize = 8;
 
 pub fn session_download_dir(root: &Path, session_id: &SessionId) -> PathBuf {
