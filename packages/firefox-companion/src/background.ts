@@ -35,7 +35,7 @@ export const PAGE_LEASE_TTL_MS = 60_000;
 export const ENROLL_PAIR_TIMEOUT_MS = 30_000;
 const ENROLL_OPERATOR_FALLBACK = "Start bobby serve, then Pair again";
 const OBSERVATION_RECEIVER_ATTEMPTS = 20;
-const READ_ONLY_CONTENT_OPERATIONS = new Set(["observe", "a11yTree", "locateTarget"]);
+const READ_ONLY_CONTENT_OPERATIONS = new Set(["observe", "a11yTree", "locateTarget", "locateFrame"]);
 const OBSERVATION_RECEIVER_DELAY_MS = 50;
 const MAX_ID_COMPONENT_BYTES = 96;
 const PAGE_BINDING_TITLE_PREFIX = "automation-runtime-binding:";
@@ -200,7 +200,7 @@ function contentRoute(
   operation: string,
   input: unknown,
 ): { frameId: number; input: unknown } {
-  if (operation !== "a11yTree" || !object(input) || !("frameId" in input)) {
+  if (!["a11yTree", "locateTarget", "locateFrame"].includes(operation) || !object(input) || !("frameId" in input)) {
     return { frameId: lease.frameId, input };
   }
   const { frameId, ...rest } = input;
@@ -628,7 +628,30 @@ export class CompanionBackground {
     input: unknown,
     deadlineUnixMs: number,
   ): Promise<unknown> {
-    const route = contentRoute(lease, operation, input);
+    let route = contentRoute(lease, operation, input);
+    const framePath: unknown[] = [];
+    if (["a11yTree", "locateTarget"].includes(operation) && object(route.input) && object(route.input.target)) {
+      const { framePath: hops, ...target } = route.input.target;
+      if (hops !== undefined && hops !== null) {
+        if (!Array.isArray(hops) || hops.length > 8) {
+          throw new ContentFailureError("invalidInput", "the frame path exceeds its bound");
+        }
+        for (const hop of hops) {
+          if (!object(hop)) throw new ContentFailureError("invalidInput", "the frame hop is not valid");
+          const found = await this.#sendContentAction(lease, "locateFrame", {
+            frameId: route.frameId,
+            target: { ...hop, role: hop.role ?? "iframe", accessibleName: hop.accessibleName === "" ? null : hop.accessibleName },
+          }, deadlineUnixMs);
+          if (!object(found) || !validBrowserId(found.frameId) || found.frameId === 0 || !object(found.hop)) {
+            throw new ContentFailureError("targetNotFound", "the frame was not found on the page");
+          }
+          route = { ...route, frameId: found.frameId };
+          framePath.push(found.hop);
+        }
+        const scope = hops.length && !target.css && !target.testId && !target.role ? null : target;
+        route = { ...route, input: { ...route.input as Record<string, unknown>, target: scope } };
+      }
+    }
     const attempts = operation === "observe" ? OBSERVATION_RECEIVER_ATTEMPTS : 1;
     let lastError: unknown = new Error("the content receiver returned no result");
     for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -649,7 +672,10 @@ export class CompanionBackground {
         ]);
         const failure = contentFailure(output);
         if (failure) throw new ContentFailureError(failure.code, failure.message);
-        if (output !== undefined) return output;
+        if (output !== undefined) {
+          if (operation === "a11yTree" && framePath.length && object(output)) return { ...output, framePath };
+          return output;
+        }
         lastError = new Error("the content receiver returned no result");
       } catch (error) {
         if (error instanceof ContentDeadlineError || error instanceof ContentFailureError) throw error;

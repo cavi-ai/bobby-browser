@@ -33,7 +33,8 @@ async fn site_regressions_hold_on_firefox() {
         case_table,
         oversized_page_reports_truncation_not_target_not_found,
         typing_behind_a_modal_reports_the_dialog,
-        scoped_snapshot_frame_targets_reach_the_second_frame
+        scoped_snapshot_frame_targets_reach_the_second_frame,
+        firefox_frame_discovery_preserves_document_identity
     );
     for (name, case) in table {
         if AssertUnwindSafe(case(&rig)).catch_unwind().await.is_err() {
@@ -41,6 +42,13 @@ async fn site_regressions_hold_on_firefox() {
         }
     }
     assert!(failures.is_empty(), "failing cases: {failures:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed headed Firefox and paired test profile"]
+async fn frame_discovery_regressions() {
+    let rig = Rig::firefox().await;
+    cases::firefox_frame_discovery_preserves_document_identity(&rig).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

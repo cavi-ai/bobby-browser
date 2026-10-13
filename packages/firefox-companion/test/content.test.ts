@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { JSDOM } from "jsdom";
 
 import { composedQuery } from "../../../crates/dom-engine/src/page_dom.js";
@@ -26,6 +26,54 @@ function documentFor(body: string, url = "https://example.test/login"): Document
     { url },
   ).window.document;
 }
+
+function frameBrowser(t: TestContext, getFrameId: (frame: Element) => number): void {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "browser");
+  Object.defineProperty(globalThis, "browser", { configurable: true, value: { runtime: { getFrameId } } });
+  t.after(() => {
+    if (original) Object.defineProperty(globalThis, "browser", original);
+    else Reflect.deleteProperty(globalThis, "browser");
+  });
+}
+
+test("a11yTree discovers unnamed remote frames with document-wide ordinals", (t) => {
+  const document = documentFor('<iframe title="Named"></iframe><iframe></iframe><iframe></iframe>');
+  const frames = [...document.querySelectorAll("iframe")];
+  frameBrowser(t, (frame) => frames.indexOf(frame as HTMLIFrameElement) + 1);
+  for (const frame of frames) Object.defineProperty(frame, "contentDocument", { value: null });
+  const tree = executeContentAction(document, "a11yTree", { maxNodes: 32 }) as { remoteFrames: unknown[] };
+  assert.deepEqual(tree.remoteFrames, [
+    { frameId: 1, hop: { role: "iframe", accessibleName: "Named" } },
+    { frameId: 2, hop: { role: "iframe", accessibleName: "", ordinal: 1 } },
+    { frameId: 3, hop: { role: "iframe", accessibleName: "", ordinal: 2 } },
+  ]);
+});
+
+test("a11yTree preserves a remote frame inside a same-origin frame", (t) => {
+  const document = documentFor('<iframe title="Outer"></iframe>');
+  const inner = document.querySelector("iframe")!.contentDocument!;
+  inner.body.innerHTML = '<iframe title="Nested"></iframe>';
+  const frame = inner.querySelector("iframe")!;
+  Object.defineProperty(frame, "contentDocument", { value: null });
+  frameBrowser(t, () => 7);
+  const tree = executeContentAction(document, "a11yTree", { maxNodes: 32 }) as { remoteFrames: unknown[] };
+  assert.deepEqual(tree.remoteFrames, [{
+    frameId: 7,
+    hop: { role: "iframe", accessibleName: "Nested" },
+    framePath: [{ role: "iframe", accessibleName: "Outer" }],
+  }]);
+});
+
+test("locateFrame resolves CSS frame owners and rejects ambiguous semantic frames", (t) => {
+  const document = documentFor('<iframe id="first" title="Widget"></iframe><iframe id="second" title="Widget"></iframe>');
+  frameBrowser(t, (frame) => frame.id === "second" ? 9 : 8);
+  assert.deepEqual(executeContentAction(document, "locateFrame", { target: { css: "#second" } }), {
+    frameId: 9, hop: { role: "iframe", accessibleName: "Widget", ordinal: 1 },
+  });
+  assert.deepEqual(contentActionReply(document, "locateFrame", { target: { role: "iframe", accessibleName: "Widget" } }), {
+    companionContentFailure: { reason: "targetAmbiguous" },
+  });
+});
 
 function countWalkerVisits(document: Document): Map<number, number> {
   const visits = new Map<number, number>();

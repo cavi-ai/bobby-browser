@@ -193,6 +193,8 @@ pub struct AccessibilitySnapshot {
     /// each left as a leaf `iframe` node; their own content scripts build them.
     #[serde(default)]
     pub remote_frames: Vec<RemoteFrame>,
+    #[serde(default)]
+    pub frame_path: Vec<types::SemanticTargetSegment>,
 }
 
 /// A frame of the page another content script reads: its extension frame id
@@ -202,6 +204,8 @@ pub struct AccessibilitySnapshot {
 pub struct RemoteFrame {
     pub frame_id: u64,
     pub hop: types::SemanticTargetSegment,
+    #[serde(default)]
+    pub frame_path: Vec<types::SemanticTargetSegment>,
 }
 
 impl From<(Vec<types::AccessibilityNode>, bool)> for AccessibilitySnapshot {
@@ -211,6 +215,7 @@ impl From<(Vec<types::AccessibilityNode>, bool)> for AccessibilitySnapshot {
             truncated,
             target_counts: None,
             remote_frames: Vec::new(),
+            frame_path: Vec::new(),
         }
     }
 }
@@ -1321,12 +1326,21 @@ impl FirefoxCompanionWorker {
     async fn splice_remote_frames(
         &self,
         page_id: &PageId,
-        nodes: &mut Vec<types::AccessibilityNode>,
+        nodes: &mut [types::AccessibilityNode],
         remote_frames: Vec<RemoteFrame>,
         max_nodes: u32,
         include_text: bool,
     ) -> bool {
-        for frame in remote_frames {
+        let mut pending: std::collections::VecDeque<_> = remote_frames.into();
+        let mut visited = std::collections::BTreeSet::new();
+        let mut truncated = false;
+        while let Some(frame) = pending.pop_front() {
+            let mut path = frame.frame_path;
+            path.push(frame.hop);
+            if path.len() > MAX_FRAME_PATH_DEPTH || !visited.insert(frame.frame_id) {
+                truncated = true;
+                continue;
+            }
             let used = count_a11y_nodes(nodes);
             let Some(left) = (max_nodes as usize)
                 .checked_sub(used)
@@ -1345,22 +1359,28 @@ impl FirefoxCompanionWorker {
                 )
                 .await
             else {
+                truncated = true;
                 continue;
             };
-            stamp_frame_hop(&mut inner.nodes, &frame.hop);
-            if !splice_under_frame(nodes, &frame.hop, &mut inner.nodes) {
-                nodes.push(types::AccessibilityNode {
-                    role: Some("iframe".into()),
-                    name: Some(frame.hop.accessible_name.clone()),
-                    children: inner.nodes,
-                    ..types::AccessibilityNode::default()
-                });
+            if count_a11y_nodes(&inner.nodes) > left
+                || annotate_snapshot_targets(&mut inner.nodes, inner.target_counts, max_nodes)
+                    .is_err()
+            {
+                truncated = true;
+                continue;
             }
-            if inner.truncated {
-                return true;
+            truncated |= inner.truncated;
+            stamp_frame_path(&mut inner.nodes, &path);
+            if !splice_under_frame_path(nodes, &path, &mut inner.nodes) {
+                truncated = true;
+                continue;
+            }
+            for mut child in inner.remote_frames {
+                child.frame_path.splice(0..0, path.iter().cloned());
+                pending.push_back(child);
             }
         }
-        false
+        truncated
     }
 
     pub fn with_downloads_dir(mut self, downloads_dir: PathBuf) -> Self {
@@ -4206,21 +4226,35 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
                 false,
             ));
         }
+        let frame_scope = types::TargetSpec {
+            frame_path: target.frame_path.clone(),
+            ..Default::default()
+        };
+        let scope = (!target.frame_path.is_empty()).then_some(&frame_scope);
         let AccessibilitySnapshot {
             mut nodes,
             truncated,
             remote_frames,
-            ..
+            target_counts,
+            frame_path,
         } = self
             .observer
             .a11y_snapshot(
                 &self.current_lease(),
                 page_id,
                 CANDIDATE_MAX_NODES,
-                None,
+                scope,
                 false,
             )
             .await?;
+        if frame_path.len() != target.frame_path.len() {
+            return Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "the snapshot did not resolve the requested frame path",
+                false,
+            ));
+        }
+        annotate_snapshot_targets(&mut nodes, target_counts, CANDIDATE_MAX_NODES)?;
         let truncated = self
             .splice_remote_frames(
                 page_id,
@@ -4231,13 +4265,7 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
             )
             .await
             || truncated;
-        // A target inside a frame resolves among that frame's candidates.
-        if !target.frame_path.is_empty() {
-            return Ok(accessibility_candidates(&nodes, "firefox-a11y")
-                .into_iter()
-                .filter(|candidate| same_frame_path(&candidate.frame_path, &target.frame_path))
-                .collect());
-        }
+        stamp_frame_path(&mut nodes, &frame_path);
         // Accessibility candidates carry no selector, so the companion resolves
         // a CSS target; a hidden or detached element adds no candidate.
         if let Some(css) = target.css.as_ref().filter(|css| !css.is_empty()) {
@@ -4247,7 +4275,7 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
                 .locate_target(&self.current_lease(), page_id, target)
                 .await?;
             if location.found {
-                candidates.push(located_candidate(&location, css.clone()));
+                candidates.push(located_candidate(&location, css.clone(), &frame_path));
             }
             return Ok(candidates);
         }
@@ -4272,7 +4300,7 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
                     location.css_path.clone(),
                 ) {
                     let mut candidates = accessibility_candidates(&nodes, "firefox-a11y");
-                    candidates.push(located_candidate(&location, css_path));
+                    candidates.push(located_candidate(&location, css_path, &frame_path));
                     return Ok(candidates);
                 }
             }
@@ -4549,78 +4577,40 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
     ) -> Result<Vec<Evidence>, CommandError> {
         self.context(page_id).await?;
         let max_nodes = command.max_nodes.unwrap_or(256).clamp(1, 2048);
-        // A scope inside a frame is cut from the whole tree, frames included:
-        // the page's content script cannot scope into another frame.
-        let framed_scope = command
-            .target
-            .as_ref()
-            .filter(|target| !target.frame_path.is_empty());
-        let (scope, budget) = match framed_scope {
-            Some(_) => (None, 2048),
-            None => (command.target.as_ref(), max_nodes),
-        };
         let AccessibilitySnapshot {
             mut nodes,
             truncated,
             target_counts,
             remote_frames,
+            frame_path,
         } = self
             .observer
-            .a11y_snapshot(&self.current_lease(), page_id, budget, scope, true)
+            .a11y_snapshot(
+                &self.current_lease(),
+                page_id,
+                max_nodes,
+                command.target.as_ref(),
+                true,
+            )
             .await?;
-        let mut totals = worker_pool::accessibility_target_totals(&nodes);
-        let mut preceding = std::collections::BTreeMap::new();
-        // Preserve targets stamped by companions that omit count metadata.
-        if let Some(counts) = target_counts {
-            if counts.len() > max_nodes as usize {
-                return Err(driver_error(
-                    ErrorCode::BrowserCommandFailed,
-                    "extension target counts exceeded the snapshot node bound",
-                    false,
-                ));
-            }
-            let mut keys = std::collections::BTreeSet::new();
-            for count in counts {
-                let key = (count.role, count.name);
-                let local = totals.get(&key).copied().unwrap_or_default();
-                if count.total == 0
-                    || count.preceding >= count.total
-                    || local == 0
-                    || local > (count.total - count.preceding) as usize
-                    || !keys.insert(key.clone())
-                {
-                    return Err(driver_error(
-                        ErrorCode::BrowserCommandFailed,
-                        "extension accessibility target counts are invalid",
-                        false,
-                    ));
-                }
-                totals.insert(key.clone(), count.total as usize);
-                preceding.insert(key, count.preceding as usize);
-            }
-            if keys.len() != totals.len() {
-                return Err(driver_error(
-                    ErrorCode::BrowserCommandFailed,
-                    "extension accessibility target counts are incomplete",
-                    false,
-                ));
-            }
+        if frame_path.len()
+            != command
+                .target
+                .as_ref()
+                .map_or(0, |target| target.frame_path.len())
+        {
+            return Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "the snapshot did not resolve the requested frame path",
+                false,
+            ));
         }
-        worker_pool::annotate_accessibility_targets(&mut nodes, &totals, preceding);
+        annotate_snapshot_targets(&mut nodes, target_counts, max_nodes)?;
         let truncated = self
-            .splice_remote_frames(page_id, &mut nodes, remote_frames, budget, true)
+            .splice_remote_frames(page_id, &mut nodes, remote_frames, max_nodes, true)
             .await
             || truncated;
-        if let Some(target) = framed_scope {
-            let found = framed_subtree(&nodes, target).ok_or_else(|| {
-                driver_error(
-                    ErrorCode::TargetNotFound,
-                    "no node inside the frame matches the snapshot target",
-                    false,
-                )
-            })?;
-            nodes = vec![found];
-        }
+        stamp_frame_path(&mut nodes, &frame_path);
         // Only a whole, unscoped tree can show that a control is missing from it.
         let controls_omitted =
             if truncated || command.target.is_some() || accessibility_contains_form_control(&nodes)
@@ -6339,7 +6329,11 @@ fn accessibility_tree_has_match(nodes: &[types::AccessibilityNode], target: &Tar
     })
 }
 
-fn located_candidate(location: &TargetLocation, css_path: String) -> Candidate {
+fn located_candidate(
+    location: &TargetLocation,
+    css_path: String,
+    frame_path: &[types::SemanticTargetSegment],
+) -> Candidate {
     Candidate {
         id: "firefox-located-target".into(),
         css: Some(css_path),
@@ -6359,7 +6353,18 @@ fn located_candidate(location: &TargetLocation, css_path: String) -> Candidate {
             visible: true,
             enabled: !location.disabled,
         },
-        frame_path: Vec::new(),
+        frame_path: frame_path
+            .iter()
+            .map(|hop| {
+                Box::new(types::TargetSpec {
+                    role: Some(hop.role.clone()),
+                    accessible_name: (!hop.accessible_name.is_empty())
+                        .then(|| hop.accessible_name.clone()),
+                    ordinal: hop.ordinal,
+                    ..Default::default()
+                })
+            })
+            .collect(),
     }
 }
 
@@ -6464,7 +6469,21 @@ mod accessibility_candidate_tests {
             "found":true,"ambiguous":false,"role":"button","name":"Resume","inputType":"file"
         }))
         .unwrap();
-        let located = super::located_candidate(&location, "#upload".into());
+        let frame_path = vec![types::SemanticTargetSegment {
+            role: "iframe".into(),
+            accessible_name: "Widget".into(),
+            ordinal: Some(1),
+        }];
+        let located = super::located_candidate(&location, "#upload".into(), &frame_path);
+        assert_eq!(
+            located.frame_path,
+            vec![Box::new(types::TargetSpec {
+                role: Some("iframe".into()),
+                accessible_name: Some("Widget".into()),
+                ordinal: Some(1),
+                ..Default::default()
+            })]
+        );
         assert_eq!(
             located.attributes.get("type").map(String::as_str),
             Some("file")
@@ -7008,7 +7027,7 @@ fn is_text_only_inspect_target(target: &types::TargetSpec) -> bool {
 
 #[cfg(test)]
 mod remote_frame_tests {
-    use super::{same_frame_path, splice_under_frame, stamp_frame_hop};
+    use super::{splice_under_frame, stamp_frame_hop};
 
     fn hop(name: &str, ordinal: Option<usize>) -> types::SemanticTargetSegment {
         types::SemanticTargetSegment {
@@ -7053,10 +7072,36 @@ mod remote_frame_tests {
     }
 
     #[test]
-    fn an_unnamed_frame_is_found_by_its_empty_name() {
+    fn a_remote_sibling_does_not_replace_a_frame_in_another_document() {
+        let mut nodes: Vec<types::AccessibilityNode> = serde_json::from_value(serde_json::json!([
+            {"role":"iframe","name":"Outer","children":[
+                {"role":"iframe","name":"Widget","children":[{"role":"button","name":"Keep"}]}
+            ]},
+            {"role":"iframe","name":"Widget"}
+        ]))
+        .unwrap();
+        let mut inner = close_button();
+        assert!(splice_under_frame(
+            &mut nodes,
+            &hop("Widget", None),
+            &mut inner
+        ));
+        assert_eq!(
+            nodes[0].children[0].children[0].name.as_deref(),
+            Some("Keep")
+        );
+        assert_eq!(nodes[1].children.len(), 1);
+    }
+
+    #[test]
+    fn an_unnamed_frame_uses_an_ordinal_across_all_frames() {
         let mut nodes = frame_tree();
         let mut inner = close_button();
-        assert!(splice_under_frame(&mut nodes, &hop("", None), &mut inner));
+        assert!(splice_under_frame(
+            &mut nodes,
+            &hop("", Some(2)),
+            &mut inner
+        ));
         assert_eq!(nodes[1].children[1].children.len(), 1);
     }
 
@@ -7069,29 +7114,6 @@ mod remote_frame_tests {
             &hop("Advertisement", None),
             &mut inner
         ));
-    }
-
-    #[test]
-    fn frame_paths_match_by_role_name_and_ordinal() {
-        let found = vec![Box::new(types::TargetSpec {
-            role: Some("iframe".into()),
-            accessible_name: Some("Widget".into()),
-            ordinal: Some(1),
-            ..types::TargetSpec::default()
-        })];
-        let wanted = |name: Option<&str>, ordinal: Option<usize>| {
-            vec![Box::new(types::TargetSpec {
-                role: Some("iframe".into()),
-                accessible_name: name.map(str::to_owned),
-                ordinal,
-                ..types::TargetSpec::default()
-            })]
-        };
-        assert!(same_frame_path(&found, &wanted(Some("Widget"), Some(1))));
-        assert!(same_frame_path(&found, &wanted(None, None)));
-        assert!(!same_frame_path(&found, &wanted(Some("Widget"), Some(0))));
-        assert!(!same_frame_path(&found, &wanted(Some("Other"), None)));
-        assert!(!same_frame_path(&found, &[]));
     }
 }
 
@@ -7311,21 +7333,15 @@ fn stamp_frame_hop(nodes: &mut [types::AccessibilityNode], hop: &types::Semantic
     }
 }
 
-/// Puts `frame_nodes` under the `iframe` node `hop` names: the iframe with
-/// the hop's name at the hop's ordinal (0 without one), in document order.
-/// `false` when `nodes` holds no such iframe.
-fn splice_under_frame(
-    nodes: &mut [types::AccessibilityNode],
+/// Finds a frame owner in this document, without entering child documents.
+/// An empty name matches any iframe; ordinals follow document order.
+fn find_frame_node<'a>(
+    nodes: &'a mut [types::AccessibilityNode],
     hop: &types::SemanticTargetSegment,
-    frame_nodes: &mut Vec<types::AccessibilityNode>,
-) -> bool {
-    fn visit(
-        nodes: &mut [types::AccessibilityNode],
-        hop: &types::SemanticTargetSegment,
-        seen: &mut usize,
-        frame_nodes: &mut Vec<types::AccessibilityNode>,
-    ) -> bool {
-        for node in nodes {
+    seen: &mut usize,
+) -> Option<&'a mut types::AccessibilityNode> {
+    for node in nodes {
+        if node.role.as_deref() == Some("iframe") {
             let name = node
                 .name
                 .as_deref()
@@ -7335,20 +7351,47 @@ fn splice_under_frame(
                         .map(|target| target.accessible_name.as_str())
                 })
                 .unwrap_or("");
-            if node.role.as_deref() == Some("iframe") && name == hop.accessible_name {
+            if hop.accessible_name.is_empty() || name == hop.accessible_name {
                 if *seen == hop.ordinal.unwrap_or(0) {
-                    node.children = std::mem::take(frame_nodes);
-                    return true;
+                    return Some(node);
                 }
                 *seen += 1;
             }
-            if visit(&mut node.children, hop, seen, frame_nodes) {
-                return true;
-            }
+            continue;
         }
-        false
+        if let Some(found) = find_frame_node(&mut node.children, hop, seen) {
+            return Some(found);
+        }
     }
-    visit(nodes, hop, &mut 0, frame_nodes)
+    None
+}
+
+#[cfg(test)]
+fn splice_under_frame(
+    nodes: &mut [types::AccessibilityNode],
+    hop: &types::SemanticTargetSegment,
+    frame_nodes: &mut Vec<types::AccessibilityNode>,
+) -> bool {
+    splice_under_frame_path(nodes, std::slice::from_ref(hop), frame_nodes)
+}
+
+fn splice_under_frame_path(
+    nodes: &mut [types::AccessibilityNode],
+    path: &[types::SemanticTargetSegment],
+    frame_nodes: &mut Vec<types::AccessibilityNode>,
+) -> bool {
+    let Some((hop, rest)) = path.split_first() else {
+        return false;
+    };
+    let Some(frame) = find_frame_node(nodes, hop, &mut 0) else {
+        return false;
+    };
+    if rest.is_empty() {
+        frame.children = std::mem::take(frame_nodes);
+        true
+    } else {
+        splice_under_frame_path(&mut frame.children, rest, frame_nodes)
+    }
 }
 
 fn count_a11y_nodes(nodes: &[types::AccessibilityNode]) -> usize {
@@ -7358,87 +7401,94 @@ fn count_a11y_nodes(nodes: &[types::AccessibilityNode]) -> usize {
         .sum()
 }
 
-/// Whether a candidate's frame hops are the ones `target` names. An unnamed
-/// hop matches any name and a hop without an ordinal matches any ordinal.
-fn same_frame_path(
-    candidate: &[Box<types::TargetSpec>],
-    target: &[Box<types::TargetSpec>],
-) -> bool {
-    candidate.len() == target.len()
-        && candidate.iter().zip(target).all(|(found, wanted)| {
-            found.role == wanted.role
-                && wanted.accessible_name.as_ref().is_none_or(|name| {
-                    name.is_empty() || found.accessible_name.as_ref() == Some(name)
-                })
-                && wanted
-                    .ordinal
-                    .is_none_or(|ordinal| found.ordinal == Some(ordinal))
-        })
-}
-
-/// The node `target` names inside a frame: same role, name, ordinal and frame
-/// hops, searched in a snapshot that already holds the frames' subtrees.
-fn framed_subtree(
-    nodes: &[types::AccessibilityNode],
-    target: &types::TargetSpec,
-) -> Option<types::AccessibilityNode> {
-    for node in nodes {
-        if let Some(found) = node.target.as_ref() {
-            let hops: Vec<Box<types::TargetSpec>> = found
-                .frame_path
-                .iter()
-                .map(|segment| {
-                    Box::new(types::TargetSpec {
-                        role: Some(segment.role.clone()),
-                        accessible_name: (!segment.accessible_name.is_empty())
-                            .then(|| segment.accessible_name.clone()),
-                        ordinal: segment.ordinal,
-                        ..types::TargetSpec::default()
-                    })
-                })
-                .collect();
-            if target.role.as_deref() == Some(found.role.as_str())
-                && target
-                    .accessible_name
-                    .as_ref()
-                    .is_none_or(|name| *name == found.accessible_name)
-                && target
-                    .ordinal
-                    .is_none_or(|ordinal| found.ordinal == Some(ordinal))
-                && same_frame_path(&hops, &target.frame_path)
-            {
-                return Some(node.clone());
-            }
+fn annotate_snapshot_targets(
+    nodes: &mut [types::AccessibilityNode],
+    target_counts: Option<Vec<worker_pool::AccessibilityTargetCount>>,
+    max_nodes: u32,
+) -> Result<(), CommandError> {
+    let mut totals = worker_pool::accessibility_target_totals(nodes);
+    let mut preceding = std::collections::BTreeMap::new();
+    // Preserve targets stamped by companions that omit count metadata.
+    if let Some(counts) = target_counts {
+        if counts.len() > max_nodes as usize {
+            return Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "extension target counts exceeded the snapshot node bound",
+                false,
+            ));
         }
-        if let Some(found) = framed_subtree(&node.children, target) {
-            return Some(found);
+        let mut keys = std::collections::BTreeSet::new();
+        for count in counts {
+            let key = (count.role, count.name);
+            let local = totals.get(&key).copied().unwrap_or_default();
+            if count.total == 0
+                || count.preceding >= count.total
+                || local == 0
+                || local > (count.total - count.preceding) as usize
+                || !keys.insert(key.clone())
+            {
+                return Err(driver_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "extension accessibility target counts are invalid",
+                    false,
+                ));
+            }
+            totals.insert(key.clone(), count.total as usize);
+            preceding.insert(key, count.preceding as usize);
+        }
+        if keys.len() != totals.len() {
+            return Err(driver_error(
+                ErrorCode::BrowserCommandFailed,
+                "extension accessibility target counts are incomplete",
+                false,
+            ));
         }
     }
-    None
+    worker_pool::annotate_accessibility_targets(nodes, &totals, preceding);
+    Ok(())
+}
+
+fn stamp_frame_path(nodes: &mut [types::AccessibilityNode], path: &[types::SemanticTargetSegment]) {
+    for hop in path.iter().rev() {
+        stamp_frame_hop(nodes, hop);
+    }
 }
 
 fn a11y_scope_input(target: &types::TargetSpec) -> Result<Value, CommandError> {
-    if !target.frame_path.is_empty() || !target.shadow_path.is_empty() {
+    if !target.shadow_path.is_empty() {
         return Err(driver_error(
             ErrorCode::InvalidRequest,
-            "Firefox scoped accessibility snapshots do not support frame or shadow paths",
+            "Firefox scoped accessibility snapshots do not support shadow paths",
             false,
         ));
     }
-    if dom_engine::exact_target_selector(target).is_none() && target.role.is_none() {
+    worker_pool::validate_target_spec(target)?;
+    if target.frame_path.is_empty()
+        && dom_engine::exact_target_selector(target).is_none()
+        && target.role.is_none()
+    {
         return Err(driver_error(
             ErrorCode::InvalidRequest,
             "Firefox scoped accessibility snapshots need a role, CSS selector, or test ID target",
             false,
         ));
     }
-    Ok(json!({
+    let mut input = json!({
         "css": target.css,
         "testId": target.test_id,
         "role": target.role,
         "accessibleName": target.accessible_name,
         "ordinal": target.ordinal,
-    }))
+    });
+    if !target.frame_path.is_empty() {
+        input["framePath"] = target
+            .frame_path
+            .iter()
+            .map(|hop| a11y_scope_input(hop))
+            .collect::<Result<Vec<_>, _>>()?
+            .into();
+    }
+    Ok(input)
 }
 
 fn popup_context_from_event(event: &BidiEvent, opener: &str) -> Option<(String, String)> {

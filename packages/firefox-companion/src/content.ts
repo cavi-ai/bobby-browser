@@ -1087,12 +1087,14 @@ function a11yTree(
   locateOnly = false,
   includeText = false,
   includeTargetCounts = false,
+  locateFrameOnly = false,
 ): {
   nodes: A11yNode[];
   truncated: boolean;
   located?: LocatedTarget;
   targetCounts?: A11yTargetCount[];
   remoteFrames?: RemoteFrame[];
+  frame?: RemoteFrame;
 } {
   let maxNodes = 256;
   if (typeof maxNodesInput === "number" && Number.isSafeInteger(maxNodesInput)) {
@@ -1239,6 +1241,30 @@ function a11yTree(
     if (matches.length > 1) throw new ContentActionError("targetAmbiguous", "a11y target is ambiguous");
     return matches[0]!;
   };
+  if (locateFrameOnly) {
+    const element = resolveScope(targetInput);
+    if (element.tagName !== "IFRAME") throw unresolvable("the frame target is not an iframe");
+    const frameId = remoteFrameId(element as HTMLIFrameElement);
+    if (frameId === undefined) throw notFound();
+    const name = semantics(element).name ?? "";
+    const frames: Element[] = [];
+    let visited = 0;
+    const visit = (node: Element, depth: number): void => {
+      if (depth > A11Y_MAX_DEPTH || ++visited > A11Y_MAX_SCOPE_VISITS || isHidden(node, "a11y")) return;
+      if (node.tagName === "IFRAME" && (!name || semantics(node).name === name)) frames.push(node);
+      for (const child of composedElementChildren(node)) {
+        if (visited >= A11Y_MAX_SCOPE_VISITS) break;
+        visit(child, depth + 1);
+      }
+    };
+    visit(root, 0);
+    const ordinal = frames.indexOf(element);
+    if (ordinal < 0) throw notFound();
+    return { nodes: [], truncated: false, frame: {
+      frameId, hop: { role: "iframe", accessibleName: name,
+        ...(frames.length > 1 ? { ordinal } : {}) },
+    } };
+  }
   if (locateOnly) {
     if (targetInput === null || targetInput === undefined) {
       throw new ContentActionError("invalidInput", "locateTarget requires a target");
@@ -1306,6 +1332,10 @@ function a11yTree(
       if (isHidden(element, "a11y")) return;
       if (element === scope) scopeSeen = new Map(targetTotals);
       const { role, name } = semantics(element);
+      if (role === "iframe") {
+        const key = targetKey("iframe", "");
+        targetTotals.set(key, (targetTotals.get(key) ?? 0) + 1);
+      }
       if (role && name && name !== REDACTED && A11Y_ACTIONABLE_ROLES.has(role)) {
         const key = targetKey(role, name);
         targetTotals.set(key, (targetTotals.get(key) ?? 0) + 1);
@@ -1333,6 +1363,10 @@ function a11yTree(
     const key = targetKey("iframe", name);
     const seen = frameSeen.get(key) ?? 0;
     frameSeen.set(key, seen + 1);
+    if (name) {
+      const all = targetKey("iframe", "");
+      frameSeen.set(all, (frameSeen.get(all) ?? 0) + 1);
+    }
     const hop = {
       role: "iframe",
       accessibleName: name,
@@ -1354,6 +1388,9 @@ function a11yTree(
       return [];
     }
     const inner = a11yTree(frameDocument, state.remaining, undefined, false, includeText);
+    for (const remote of inner.remoteFrames ?? []) {
+      state.remoteFrames.push({ ...remote, framePath: [hop, ...(remote.framePath ?? [])] });
+    }
     if (inner.truncated) state.truncated = true;
     const count = (nodes: A11yNode[]): number =>
       nodes.reduce((total, node) => total + 1 + count(node.children ?? []), 0);
@@ -1445,8 +1482,8 @@ function a11yTree(
       }
     }
     if (!role) return children;
-    if (element.tagName === "IFRAME" && name && name !== REDACTED) {
-      children.push(...frameNodes(element as HTMLIFrameElement, name));
+    if (element.tagName === "IFRAME" && name !== REDACTED) {
+      children.push(...frameNodes(element as HTMLIFrameElement, name ?? ""));
     }
     const node: A11yNode = { role };
     if (name) node.name = name;
@@ -1548,6 +1585,7 @@ function a11yTree(
 type RemoteFrame = {
   frameId: number;
   hop: { role: string; accessibleName: string; ordinal?: number };
+  framePath?: Array<{ role: string; accessibleName: string; ordinal?: number }>;
 };
 
 /** The extension frame id of `frame`, which this script cannot read. */
@@ -1574,6 +1612,9 @@ export function executeContentAction(
   }
   if (operation === "locateTarget") {
     return a11yTree(document, 1, parsed.target, true).located;
+  }
+  if (operation === "locateFrame") {
+    return a11yTree(document, 1, parsed.target, false, false, false, true).frame;
   }
   const element = target(document, parsed);
   switch (operation) {
