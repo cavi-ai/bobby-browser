@@ -3782,6 +3782,11 @@ async fn download_correlates_bidi_events_after_one_click_and_returns_artifact_re
         Ok(json!({})),
         Ok(json!({"result": {"type": "number", "value": 1}})),
     ]);
+    // The download starts inside a frame of the page.
+    bidi.set_tree(json!({"contexts": [{"context": "context-1", "children": [
+        {"context": "frame-1", "children": []}
+    ]}]}))
+    .await;
     let worker = Arc::new(
         worker(bidi.clone(), FakeObserver::new(observation()))
             .await
@@ -3828,13 +3833,13 @@ async fn download_correlates_bidi_events_after_one_click_and_returns_artifact_re
     bidi.emit(
         "browsingContext.downloadWillBegin",
         json!({
-            "context": "context-1", "navigation": null, "suggestedFilename": "receipt.txt"
+            "context": "frame-1", "navigation": null, "suggestedFilename": "receipt.txt"
         }),
     );
     bidi.emit(
         "browsingContext.downloadEnd",
         json!({
-            "context": "context-1", "navigation": null, "status": "complete"
+            "context": "frame-1", "navigation": null, "status": "complete"
         }),
     );
     let evidence = operation.await.unwrap().unwrap();
