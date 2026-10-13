@@ -4567,12 +4567,13 @@ async fn descend_a11y_iframes(
         // Child controls would need a hop beyond the target contract.
         return true;
     }
+    // No context of its own: `page` serves `parent_frame` as its main frame.
     let context_id = match parent_frame {
         Some(frame) => {
-            let Ok(Some(context_id)) = page.frame_execution_context(frame.clone()).await else {
+            let Ok(context_id) = page.frame_execution_context(frame.clone()).await else {
                 return false;
             };
-            Some(context_id)
+            context_id
         }
         None => None,
     };

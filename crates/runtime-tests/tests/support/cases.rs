@@ -90,6 +90,7 @@ macro_rules! every_case {
             a_click_lands_inside_a_bordered_frame_from_another_site,
             snapshot_lists_controls_inside_an_untitled_frame_from_another_site,
             download_starts_inside_a_frame_from_another_site,
+            nested_frames_from_other_sites_list_and_act,
             $($extra,)*
         }
     };
@@ -4246,6 +4247,21 @@ pub async fn wait_for_reaches_into_a_frame_from_another_site(rig: &Rig) {
         changed["status"], "completed",
         "text wait inside the frame: {changed}"
     );
+    let landmark = live
+        .call(
+            "wait_for",
+            json!({
+                "condition":{"kind":"element",
+                             "target":{"role":"status","accessibleName":"Frame status","framePath":frame},
+                             "state":"visible"},
+                "timeoutMs":5000
+            }),
+        )
+        .await;
+    assert_eq!(
+        landmark["status"], "completed",
+        "landmark wait inside the frame: {landmark}"
+    );
     live.close().await;
 }
 
@@ -4530,6 +4546,57 @@ pub async fn snapshot_lists_controls_inside_an_untitled_frame_from_another_site(
     assert_eq!(
         clicked["status"], "completed",
         "click through the frame: {clicked}"
+    );
+    let pressed = wait_for_result(&live, "pressed").await;
+    assert_eq!(
+        pressed["status"], "completed",
+        "the click never landed: {pressed}"
+    );
+    live.close().await;
+}
+
+/// A snapshot scoped to a frame from another site lists the controls of the
+/// frame nested in it, and their targets click through both frames.
+pub async fn nested_frames_from_other_sites_list_and_act(rig: &Rig) {
+    let inner = FixtureSite::spawn(vec![(
+        "/inner",
+        Route::Html(page(
+            "Inner",
+            r#"<button onclick="top.postMessage('pressed','*')">Deep action</button>
+            <script>top.postMessage('ready','*')</script>"#,
+        )),
+    )])
+    .await;
+    let (site, _outer) = cross_site_frame_page(&format!(
+        r#"<iframe title="Inner" src="{}" style="width:300px;height:120px"></iframe>"#,
+        inner.url("/inner")
+    ))
+    .await;
+    let live = Live::open(rig, &site.url("/host")).await;
+    let ready = wait_for_result(&live, "ready").await;
+    assert_eq!(
+        ready["status"], "completed",
+        "the nested frame never loaded: {ready}"
+    );
+    let snapshot = live
+        .snapshot(json!({"target":{"role":"iframe","accessibleName":"Widget"}}))
+        .await;
+    let mut targets = Vec::new();
+    targets_under(&snapshot, &mut targets);
+    let listed = targets
+        .iter()
+        .find(|(role, target)| *role == "button" && target["accessibleName"] == "Deep action")
+        .map(|(_, target)| (*target).clone())
+        .unwrap_or_else(|| panic!("the nested control is missing: {snapshot}"));
+    assert_eq!(
+        listed["framePath"].as_array().map(Vec::len),
+        Some(2),
+        "the target hops both frames: {listed}"
+    );
+    let clicked = live.call("click", json!({"target": listed})).await;
+    assert_eq!(
+        clicked["status"], "completed",
+        "click through both frames: {clicked}"
     );
     let pressed = wait_for_result(&live, "pressed").await;
     assert_eq!(
