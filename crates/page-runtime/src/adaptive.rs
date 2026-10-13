@@ -2310,9 +2310,17 @@ mod tests {
     fn a_miss_names_the_frame_holding_the_one_match() {
         let named = name_framed_miss(missed(), &close_target(), &[framed_close_button("Ad")]);
         assert_eq!(named.code, types::ErrorCode::TargetNotFound);
+        let (prefix, path) = named
+            .message
+            .split_once(r#""framePath": "#)
+            .expect("the miss names a frame path");
         assert_eq!(
-            named.message,
-            r#"no target candidate matched; the target is inside a frame: pass "framePath": [{"accessibleName":"Ad","role":"iframe"}]"#
+            prefix,
+            "no target candidate matched; the target is inside a frame: pass "
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(path).unwrap(),
+            serde_json::json!([{"role":"iframe","accessibleName":"Ad"}])
         );
     }
 
