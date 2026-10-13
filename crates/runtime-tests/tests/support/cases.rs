@@ -92,6 +92,7 @@ macro_rules! every_case {
             framed_pointer_respects_frame_transforms,
             a_bounded_snapshot_lists_frames_in_document_order,
             snapshot_frame_owners_ignore_nested_frames_with_the_same_name,
+            a_click_lands_inside_a_frame_from_another_site_below_the_fold,
             snapshot_lists_controls_inside_an_untitled_frame_from_another_site,
             download_starts_inside_a_frame_from_another_site,
             nested_frames_from_other_sites_list_and_act,
@@ -4648,6 +4649,37 @@ pub async fn snapshot_frame_owners_ignore_nested_frames_with_the_same_name(rig: 
     assert_eq!(
         wait_for_result(&live, "pressed").await["status"],
         "completed"
+    );
+    live.close().await;
+}
+
+/// A click on a visible control inside a frame from another site that sits
+/// below the fold scrolls the host and lands, instead of reporting it covered.
+pub async fn a_click_lands_inside_a_frame_from_another_site_below_the_fold(rig: &Rig) {
+    let (site, _frame) = cross_site_frame_page_with(
+        r#"<button onclick="parent.postMessage('pressed','*')">Below</button>
+        <script>parent.postMessage('ready','*')</script>"#,
+        r#"title="Widget" style="display:block;width:200px;height:120px;margin-top:2400px""#,
+    )
+    .await;
+    let live = Live::open(rig, &site.url("/host")).await;
+    let ready = wait_for_result(&live, "ready").await;
+    assert_eq!(
+        ready["status"], "completed",
+        "the frame never loaded: {ready}"
+    );
+    let clicked = live
+        .call(
+            "click",
+            json!({"target":{"role":"button","accessibleName":"Below",
+                             "framePath":[{"role":"iframe","accessibleName":"Widget"}]}}),
+        )
+        .await;
+    assert_eq!(clicked["status"], "completed", "{clicked}");
+    let pressed = wait_for_result(&live, "pressed").await;
+    assert_eq!(
+        pressed["status"], "completed",
+        "the click missed the control: {pressed}"
     );
     live.close().await;
 }
