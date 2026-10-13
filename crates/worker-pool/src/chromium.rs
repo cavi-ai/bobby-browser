@@ -71,9 +71,8 @@ use types::{
 use crate::{
     process_registry, resolve_upload_paths, session_download_dir,
     targeting::{
-        gather_candidates, inspect_page_scoped_target, page_frame_ids,
-        resolve_ambiguous_wait_values, resolve_target as resolve_browser_target,
-        resolve_target_with_visibility,
+        gather_candidates, inspect_page_scoped_target, page_frames, resolve_ambiguous_wait_values,
+        resolve_target as resolve_browser_target, resolve_target_with_visibility,
     },
     BrowserWorker, WorkerFactory,
 };
@@ -3038,39 +3037,48 @@ impl crate::EventsEngine for ChromiumWorker {
         command: &ClickAndWaitForDownloadCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         let page = self.page_handle(page_id).await?;
-        tokio::time::timeout(
-            Duration::from_millis(command.timeout_ms),
-            page.execute(
-                SetDownloadBehaviorParams::builder()
-                    .behavior(SetDownloadBehaviorBehavior::Allow)
-                    .download_path(self.download_dir.to_string_lossy())
-                    .events_enabled(true)
-                    .build()
-                    .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?,
-            ),
-        )
-        .await
-        .map_err(|_| timeout_error(command.timeout_ms))?
-        .map_err(command_failed)?;
-        let mut begins = page
-            .event_listener::<EventDownloadWillBegin>()
+        let browser = self.browser_handle().await?;
+        // A frame from another site reports its downloads on its own session.
+        let (frame_ids, frame_sessions) = page_frames(&page, &browser).await?;
+        let behavior = SetDownloadBehaviorParams::builder()
+            .behavior(SetDownloadBehaviorBehavior::Allow)
+            .download_path(self.download_dir.to_string_lossy())
+            .events_enabled(true)
+            .build()
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        let mut begin_streams = Vec::new();
+        let mut progress_streams = Vec::new();
+        for session in std::iter::once(&page).chain(&frame_sessions) {
+            tokio::time::timeout(
+                Duration::from_millis(command.timeout_ms),
+                session.execute(behavior.clone()),
+            )
             .await
+            .map_err(|_| timeout_error(command.timeout_ms))?
             .map_err(command_failed)?;
-        let mut progress = page
-            .event_listener::<EventDownloadProgress>()
-            .await
-            .map_err(command_failed)?;
+            begin_streams.push(
+                session
+                    .event_listener::<EventDownloadWillBegin>()
+                    .await
+                    .map_err(command_failed)?,
+            );
+            progress_streams.push(
+                session
+                    .event_listener::<EventDownloadProgress>()
+                    .await
+                    .map_err(command_failed)?,
+            );
+        }
+        let mut begins = futures::stream::select_all(begin_streams);
+        let mut progress = futures::stream::select_all(progress_streams);
         let resolved = self
             .resolve_target(page_id, &page, &command.selector, command.target.as_ref())
             .await?;
         // Download events reach every connection to a shared browser: only
         // this page's frames start this session's download.
-        let frames = if self.shared_browser {
-            Some(page_frame_ids(&page).await?)
-        } else {
-            None
-        };
-        resolved.click_js(&page).await?;
+        let frames = self.shared_browser.then_some(frame_ids);
+        self.bring_page_to_front(&page).await;
+        resolved.click(&page).await?;
         let begin = tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
             loop {
                 let begin = begins.next().await.ok_or_else(|| {

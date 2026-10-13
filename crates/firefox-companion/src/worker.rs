@@ -3349,6 +3349,26 @@ async fn current_page(
 
 const SETTLE_URL_WATCH_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Every browsing context a `browsingContext.getTree` response lists, nested
+/// ones included.
+fn tree_contexts(tree: &Value) -> HashSet<String> {
+    let mut contexts = HashSet::new();
+    let mut pending: Vec<&Value> = tree
+        .pointer("/contexts")
+        .and_then(Value::as_array)
+        .map(|roots| roots.iter().collect())
+        .unwrap_or_default();
+    while let Some(node) = pending.pop() {
+        if let Some(context) = node.get("context").and_then(Value::as_str) {
+            contexts.insert(context.to_owned());
+        }
+        if let Some(children) = node.get("children").and_then(Value::as_array) {
+            pending.extend(children);
+        }
+    }
+    contexts
+}
+
 /// The URL the browser currently reports for `context`, `None` when the tree
 /// does not list it.
 async fn context_url(transport: &Arc<dyn BidiTransport>, context: &str) -> Option<String> {
@@ -5496,6 +5516,20 @@ impl worker_pool::EventsEngine for FirefoxCompanionWorker {
                 false,
             )
         })?;
+        // A frame reports its downloads under its own browsing context.
+        let contexts = tree_contexts(
+            &self
+                .transport
+                .send("browsingContext.getTree", json!({"root": context}))
+                .await?,
+        );
+        let ours = |event: &crate::bidi::BidiEvent| {
+            event
+                .params
+                .get("context")
+                .and_then(Value::as_str)
+                .is_some_and(|context| contexts.contains(context))
+        };
         let click_evidence = worker_pool::InputEngine::click(
             self,
             page_id,
@@ -5518,9 +5552,7 @@ impl worker_pool::EventsEngine for FirefoxCompanionWorker {
                         false,
                     )
                 })?;
-                if event.method == "browsingContext.downloadWillBegin"
-                    && event.params.get("context").and_then(Value::as_str) == Some(context.as_str())
-                {
+                if event.method == "browsingContext.downloadWillBegin" && ours(&event) {
                     let navigation = event
                         .params
                         .get("navigation")
@@ -5558,10 +5590,7 @@ impl worker_pool::EventsEngine for FirefoxCompanionWorker {
                         false,
                     )
                 })?;
-                let event_context = event.params.get("context").and_then(Value::as_str);
-                if event.method == "browsingContext.downloadWillBegin"
-                    && event_context == Some(context.as_str())
-                {
+                if event.method == "browsingContext.downloadWillBegin" && ours(&event) {
                     return Err(driver_error(
                         ErrorCode::TargetAmbiguous,
                         "Firefox click began multiple downloads",
@@ -5569,7 +5598,7 @@ impl worker_pool::EventsEngine for FirefoxCompanionWorker {
                     ));
                 }
                 if event.method == "browsingContext.downloadEnd"
-                    && event_context == Some(context.as_str())
+                    && ours(&event)
                     && event.params.get("navigation").and_then(Value::as_str)
                         == navigation.as_deref()
                 {
@@ -6999,7 +7028,18 @@ fn is_text_only_inspect_target(target: &types::TargetSpec) -> bool {
 
 #[cfg(test)]
 mod remote_frame_tests {
-    use super::{splice_under_frame, stamp_frame_hop};
+    use super::{splice_under_frame, stamp_frame_hop, tree_contexts};
+
+    #[test]
+    fn a_context_tree_lists_every_nested_context() {
+        let tree = serde_json::json!({"contexts":[{"context":"top","children":[
+            {"context":"frame","children":[{"context":"nested","children":[]}]},
+            {"context":"sibling"}
+        ]}]});
+        let mut contexts: Vec<_> = tree_contexts(&tree).into_iter().collect();
+        contexts.sort();
+        assert_eq!(contexts, ["frame", "nested", "sibling", "top"]);
+    }
 
     fn hop(name: &str, ordinal: Option<usize>) -> types::SemanticTargetSegment {
         types::SemanticTargetSegment {

@@ -229,21 +229,22 @@ impl ResolvedTarget {
         Ok(())
     }
 
+    /// A target inside a frame from another site takes a pointer press at its
+    /// point: only trusted input lets that frame start a download or a popup.
     pub async fn click(&self, page: &Page) -> Result<(), CommandError> {
         if let Some(element) = &self.native {
             element.click().await.map_err(cdp_error)?;
             return Ok(());
         }
-        self.eval::<bool>(page, "el.click(); return true").await?;
-        Ok(())
-    }
-
-    pub async fn click_js(&self, page: &Page) -> Result<(), CommandError> {
-        if let Some(element) = &self.native {
-            element
-                .call_js_fn("function() { this.click(); }", false)
-                .await
-                .map_err(cdp_error)?;
+        if !self.frame_owners.is_empty() {
+            self.scroll_into_view(page).await?;
+            let point = self.clickable_point(page).await?.ok_or_else(|| {
+                target_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "target has no clickable point",
+                )
+            })?;
+            page.click(point).await.map_err(cdp_error)?;
             return Ok(());
         }
         self.eval::<bool>(page, "el.click(); return true").await?;
@@ -1914,8 +1915,55 @@ pub(crate) async fn frame_session(
         .map(|session| (frame, session)))
 }
 
-/// Every frame id in the page's frame tree.
-pub(crate) async fn page_frame_ids(
+/// Every frame id the page holds, its own frame tree and each frame from
+/// another site nested in it at any depth, with the sessions of those frames.
+pub(crate) async fn page_frames(
+    page: &Page,
+    browser: &BrowserHandle,
+) -> Result<
+    (
+        HashSet<chromiumoxide::cdp::browser_protocol::page::FrameId>,
+        Vec<Page>,
+    ),
+    CommandError,
+> {
+    use chromiumoxide::cdp::browser_protocol::page::FrameId;
+    use chromiumoxide::cdp::browser_protocol::target::GetTargetsParams;
+    let mut ids = frame_tree_ids(page).await?;
+    let mut sessions = Vec::new();
+    let targets = browser
+        .execute(GetTargetsParams::default())
+        .await
+        .map_err(cdp_error)?
+        .result
+        .target_infos;
+    loop {
+        let nested: Vec<_> = targets
+            .iter()
+            .filter(|target| {
+                target.r#type == "iframe"
+                    && target
+                        .parent_frame_id
+                        .as_ref()
+                        .is_some_and(|parent| ids.contains(parent))
+                    && !ids.contains(&FrameId::new(target.target_id.inner().clone()))
+            })
+            .collect();
+        if nested.is_empty() {
+            return Ok((ids, sessions));
+        }
+        for target in nested {
+            ids.insert(FrameId::new(target.target_id.inner().clone()));
+            if let Ok(session) = browser.get_page(target.target_id.clone()).await {
+                ids.extend(frame_tree_ids(&session).await?);
+                sessions.push(session);
+            }
+        }
+    }
+}
+
+/// Every frame id in the session's own frame tree.
+async fn frame_tree_ids(
     page: &Page,
 ) -> Result<HashSet<chromiumoxide::cdp::browser_protocol::page::FrameId>, CommandError> {
     let tree = page

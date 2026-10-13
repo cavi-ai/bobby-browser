@@ -89,6 +89,7 @@ macro_rules! every_case {
             a_main_frame_miss_names_the_frame_holding_the_target,
             a_click_lands_inside_a_bordered_frame_from_another_site,
             snapshot_lists_controls_inside_an_untitled_frame_from_another_site,
+            download_starts_inside_a_frame_from_another_site,
             $($extra,)*
         }
     };
@@ -4534,6 +4535,54 @@ pub async fn snapshot_lists_controls_inside_an_untitled_frame_from_another_site(
     assert_eq!(
         pressed["status"], "completed",
         "the click never landed: {pressed}"
+    );
+    live.close().await;
+}
+
+/// A link inside a frame from another site downloads its file to the session
+/// that clicked it.
+pub async fn download_starts_inside_a_frame_from_another_site(rig: &Rig) {
+    let frame_site = FixtureSite::spawn(vec![
+        (
+            "/frame",
+            Route::Html(page(
+                "Files",
+                r#"<a href="/file.bin" download="frame-file.txt">Get file</a>"#,
+            )),
+        ),
+        (
+            "/file.bin",
+            Route::Raw {
+                content_type: "application/octet-stream",
+                body: "frame-file".into(),
+            },
+        ),
+    ])
+    .await;
+    let frame_url = frame_site.url("/frame").replace("127.0.0.1", "localhost");
+    let site = FixtureSite::spawn(vec![(
+        "/host",
+        Route::Html(page(
+            "Host",
+            &format!(r#"<main><iframe title="Files" src="{frame_url}"></iframe></main>"#),
+        )),
+    )])
+    .await;
+    let live = Live::open(rig, &site.url("/host")).await;
+    let downloaded = live
+        .call(
+            "click_and_wait_for_download",
+            json!({
+                "target":{"role":"link","accessibleName":"Get file",
+                          "framePath":[{"role":"iframe","accessibleName":"Files"}]},
+                "timeoutMs":10000
+            }),
+        )
+        .await;
+    assert_eq!(downloaded["status"], "completed", "{downloaded}");
+    assert!(
+        downloaded.to_string().contains("frame-file.txt"),
+        "{downloaded}"
     );
     live.close().await;
 }

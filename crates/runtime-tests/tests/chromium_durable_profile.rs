@@ -27,9 +27,11 @@ use runtime_tests::ProfileChrome;
 use sdk_core::{AuthenticatedRuntime, RuntimeService};
 use test_site::{FixtureSite, Route};
 use types::{
-    AttemptId, Capability, CommandEnvelope, CommandId, CommandOutcome, ControlAction,
-    CreateSessionRequest, FillIntent, IntentCommand, IntentHints, NavigateCommand, OpenPageRequest,
-    PageId, PrimitiveCommand, RuntimeCommand, SessionId, WaitUntil, WorkflowId,
+    AttemptId, Capability, CheckpointId, CheckpointInvariant, ClickAndWaitForDownloadCommand,
+    CommandClass, CommandEnvelope, CommandId, CommandOutcome, ControlAction, CreateSessionRequest,
+    FillIntent, InspectCommand, IntentCommand, IntentHints, NavigateCommand, OpenPageRequest,
+    PageId, PrimitiveCommand, RuntimeCommand, SessionId, TargetSpec, WaitUntil, WorkflowCheckpoint,
+    WorkflowId,
 };
 use worker_pool::ChromiumWorkerFactory;
 
@@ -193,6 +195,70 @@ impl Session {
         {
             CommandOutcome::Completed { evidence, .. } => evidence,
             outcome => panic!("session command failed: {outcome:?}"),
+        }
+    }
+
+    /// Runs a boundary command behind the checkpoint the runtime requires.
+    async fn submit_boundary(&mut self, command: PrimitiveCommand) -> Vec<types::Evidence> {
+        let workflow_id = WorkflowId::new();
+        let attempt_id = AttemptId::new();
+        let inspect_id = CommandId::new();
+        let envelope = |command_id, command| CommandEnvelope {
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
+            command_id,
+            workflow_id: workflow_id.clone(),
+            attempt_id: attempt_id.clone(),
+            session_id: self.session.clone(),
+            page_id: Some(self.page.clone()),
+            deadline: Utc::now() + Duration::seconds(30),
+            command: RuntimeCommand::Primitive(command),
+        };
+        let url = match self
+            .runtime
+            .submit(envelope(
+                inspect_id.clone(),
+                PrimitiveCommand::Inspect(InspectCommand::default()),
+            ))
+            .await
+        {
+            CommandOutcome::Completed { evidence, .. } => evidence
+                .iter()
+                .find_map(|item| match item {
+                    types::Evidence::Inspection { url, .. } => Some(url.clone()),
+                    _ => None,
+                })
+                .expect("inspection evidence"),
+            outcome => panic!("boundary preflight failed: {outcome:?}"),
+        };
+        let command_id = CommandId::new();
+        self.runtime
+            .checkpoint(
+                WorkflowCheckpoint {
+                    schema_version: WorkflowCheckpoint::SCHEMA_VERSION,
+                    checkpoint_id: CheckpointId::new(),
+                    workflow_id: workflow_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    session_id: self.session.clone(),
+                    page_id: self.page.clone(),
+                    restart_url: url.clone(),
+                    current_url: url.clone(),
+                    cursor: Some(inspect_id.clone()),
+                    boundary_command_id: Some(command_id.clone()),
+                    recovery_class: CommandClass::Boundary,
+                    invariants: vec![CheckpointInvariant::Url { value: url }],
+                    replayable_inputs: Vec::new(),
+                    evidence: Vec::new(),
+                    recovery_history: Vec::new(),
+                    recovery_receipts: Vec::new(),
+                    created_at: Utc::now(),
+                },
+                vec![inspect_id],
+            )
+            .await
+            .unwrap();
+        match self.runtime.submit(envelope(command_id, command)).await {
+            CommandOutcome::Completed { evidence, .. } => evidence,
+            outcome => panic!("boundary command failed: {outcome:?}"),
         }
     }
 
@@ -619,4 +685,69 @@ async fn a_profile_directory_attaches_to_the_chrome_already_running_there() {
     );
     let _ = user_chrome.kill();
     let _ = user_chrome.wait();
+}
+
+/// A download a control inside a frame from another site starts reaches the
+/// session that clicked it on the shared Chrome.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Chromium"]
+async fn a_shared_chrome_catches_a_download_started_in_a_frame_from_another_site() {
+    let frame_site = FixtureSite::spawn(vec![
+        (
+            "/frame",
+            Route::Html(
+                r#"<!doctype html><title>Files</title><a href="/file.bin" download="frame-file.txt">Get file</a>"#
+                    .into(),
+            ),
+        ),
+        (
+            "/file.bin",
+            Route::Raw {
+                content_type: "application/octet-stream",
+                body: "frame-file".into(),
+            },
+        ),
+    ])
+    .await;
+    let frame_url = frame_site.url("/frame").replace("127.0.0.1", "localhost");
+    let site = FixtureSite::spawn(vec![(
+        "/host",
+        Route::Html(format!(
+            r#"<!doctype html><title>Host</title><iframe title="Files" src="{frame_url}"></iframe>"#
+        )),
+    )])
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path(), None);
+    let _chrome = ProfileChrome(config.browser.profiles_dir.join("chromium").join("frames"));
+    let runtime = durable_runtime(&config, "frames").await;
+    let mut session = Session::open(&runtime, &site.url("/host")).await;
+    let link = TargetSpec {
+        role: Some("link".into()),
+        accessible_name: Some("Get file".into()),
+        frame_path: vec![Box::new(TargetSpec {
+            role: Some("iframe".into()),
+            accessible_name: Some("Files".into()),
+            ..TargetSpec::default()
+        })],
+        ..TargetSpec::default()
+    };
+    let evidence = session
+        .submit_boundary(PrimitiveCommand::ClickAndWaitForDownload(
+            ClickAndWaitForDownloadCommand {
+                selector: String::new(),
+                target: Some(link),
+                timeout_ms: 10_000,
+            },
+        ))
+        .await;
+    assert!(
+        evidence.iter().any(|item| matches!(
+            item,
+            types::Evidence::Download { filename, bytes, .. }
+                if filename == "frame-file.txt" && *bytes == 10
+        )),
+        "{evidence:?}"
+    );
+    session.close().await;
 }
