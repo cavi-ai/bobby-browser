@@ -1659,6 +1659,19 @@ fn is_detached_target_error(error: &CommandError) -> bool {
         .contains("target detached")
 }
 
+/// A trusted press on `resolved`, refused as `click` refuses one when the
+/// control does not receive the pointer.
+async fn press(
+    page: &Page,
+    resolved: &crate::targeting::ResolvedTarget,
+) -> Result<(), CommandError> {
+    if let Err(error) = resolved.scroll_into_view(page).await {
+        tracing::debug!(?error, "scroll-into-view before press failed");
+    }
+    pointer_miss(resolved.receives_pointer(page).await?)?;
+    resolved.click(page).await
+}
+
 fn pointer_miss(hit: PointerHit) -> Result<(), CommandError> {
     match hit {
         PointerHit::Reachable => Ok(()),
@@ -2986,7 +2999,7 @@ impl crate::EventsEngine for ChromiumWorker {
         // Same H3 class as `click`: a native element click on a backgrounded
         // tab hangs to the CDP request timeout, so surface the opener first.
         self.bring_page_to_front(&opener).await;
-        resolved.click(&opener).await?;
+        press(&opener, &resolved).await?;
         let event = tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
             loop {
                 let event = events.next().await.ok_or_else(|| {
@@ -3078,7 +3091,7 @@ impl crate::EventsEngine for ChromiumWorker {
         // this page's frames start this session's download.
         let frames = self.shared_browser.then_some(frame_ids);
         self.bring_page_to_front(&page).await;
-        resolved.click(&page).await?;
+        press(&page, &resolved).await?;
         let begin = tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
             loop {
                 let begin = begins.next().await.ok_or_else(|| {

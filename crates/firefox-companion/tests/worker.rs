@@ -1136,6 +1136,50 @@ impl ExtensionObserver for CountObserver {
 }
 
 #[tokio::test]
+async fn candidates_read_a_bounded_number_of_frames() {
+    // Only the frames within the bound are served: reading one more panics.
+    let bound = worker_pool::MAX_DESCENDED_FRAMES as u64;
+    let name = |id: u64| format!("Frame {id}");
+    let observer = FrameObserver {
+        snapshot: serde_json::from_value(json!({
+            "nodes": (1..=bound + 5).map(|id| json!({"role":"iframe","name":name(id)})).collect::<Vec<_>>(),
+            "truncated": false,
+            "remoteFrames": (1..=bound + 5).map(|id| json!(
+                {"frameId": id, "hop": {"role":"iframe","accessibleName":name(id)}}
+            )).collect::<Vec<_>>(),
+        }))
+        .unwrap(),
+        frames: (1..=bound)
+            .map(|id| {
+                let frame = json!({"nodes":[{"role":"textbox","name":"Code"}],"truncated":false});
+                (id, serde_json::from_value(frame).unwrap())
+            })
+            .collect(),
+        scope: None,
+    };
+    let worker = FirefoxCompanionWorker::new(
+        WorkerId::new(),
+        PathBuf::from("/profiles/firefox"),
+        lease(),
+        FakeBidi::new(Vec::new()),
+        Arc::new(observer),
+    )
+    .await
+    .unwrap();
+    let page = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
+    let target: TargetSpec =
+        serde_json::from_value(json!({"role":"textbox","accessibleName":"Code"})).unwrap();
+    worker_pool::observation_or_default(worker.observation())
+        .collect_candidates(&page, &target)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn scoped_snapshot_consumes_page_counts_and_rejects_invalid_counts() {
     for (counts, expected) in [
         (json!([]), None),

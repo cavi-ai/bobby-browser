@@ -862,7 +862,7 @@ pub async fn gather_candidates(
                     && candidate.state.attached
                     && candidate.state.visible
             })
-            .take(8)
+            .take(crate::MAX_DESCENDED_FRAMES)
             .map(|frame| (frame.clone(), frame_hop(frame, &candidates)))
             .collect();
         for (frame, hop) in frames {
@@ -1954,8 +1954,12 @@ pub(crate) async fn page_frames(
         }
         for target in nested {
             ids.insert(FrameId::new(target.target_id.inner().clone()));
-            if let Ok(session) = browser.get_page(target.target_id.clone()).await {
-                ids.extend(frame_tree_ids(&session).await?);
+            // A frame the page removes meanwhile drops out without failing.
+            let Ok(session) = browser.get_page(target.target_id.clone()).await else {
+                continue;
+            };
+            if let Ok(frames) = frame_tree_ids(&session).await {
+                ids.extend(frames);
                 sessions.push(session);
             }
         }

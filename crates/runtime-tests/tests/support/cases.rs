@@ -91,6 +91,7 @@ macro_rules! every_case {
             snapshot_lists_controls_inside_an_untitled_frame_from_another_site,
             download_starts_inside_a_frame_from_another_site,
             nested_frames_from_other_sites_list_and_act,
+            a_download_from_a_covered_control_fails_obscured,
             $($extra,)*
         }
     };
@@ -4603,6 +4604,46 @@ pub async fn nested_frames_from_other_sites_list_and_act(rig: &Rig) {
         pressed["status"], "completed",
         "the click never landed: {pressed}"
     );
+    live.close().await;
+}
+
+/// A download link another element covers fails `targetObscured` whether the
+/// target names it by role or by CSS, as a click on it does.
+pub async fn a_download_from_a_covered_control_fails_obscured(rig: &Rig) {
+    let site = FixtureSite::spawn(vec![
+        (
+            "/covered",
+            Route::Html(page(
+                "Covered",
+                r#"<a id="file" href="/file.bin" download="covered.txt">Get file</a>
+                <div style="position:fixed;inset:0;background:rgba(0,0,0,.4)"></div>"#,
+            )),
+        ),
+        (
+            "/file.bin",
+            Route::Raw {
+                content_type: "application/octet-stream",
+                body: "covered".into(),
+            },
+        ),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/covered")).await;
+    for target in [
+        json!({"role":"link","accessibleName":"Get file"}),
+        json!({"css":"#file"}),
+    ] {
+        let downloaded = live
+            .call(
+                "click_and_wait_for_download",
+                json!({"target": target, "timeoutMs": 3000}),
+            )
+            .await;
+        assert_eq!(
+            downloaded["error"]["code"], "targetObscured",
+            "{target}: {downloaded}"
+        );
+    }
     live.close().await;
 }
 

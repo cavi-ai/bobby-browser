@@ -1320,9 +1320,10 @@ impl FirefoxCompanionWorker {
     }
 
     /// Puts each remote frame's subtree, built by that frame's own content
-    /// script, under its `iframe` node within the node budget left; every
-    /// target in it gains the frame's hop. A frame that no longer answers
-    /// stays a leaf. Returns whether the budget ran out.
+    /// script, under its `iframe` node within the node budget left, reading
+    /// at most `max_frames` frames; every target in it gains the frame's hop.
+    /// A frame that no longer answers stays a leaf. Returns whether the budget
+    /// or the frame bound ran out.
     async fn splice_remote_frames(
         &self,
         page_id: &PageId,
@@ -1330,11 +1331,16 @@ impl FirefoxCompanionWorker {
         remote_frames: Vec<RemoteFrame>,
         max_nodes: u32,
         include_text: bool,
+        max_frames: Option<usize>,
     ) -> bool {
         let mut pending: std::collections::VecDeque<_> = remote_frames.into();
         let mut visited = std::collections::BTreeSet::new();
         let mut truncated = false;
+        let mut reads = 0;
         while let Some(frame) = pending.pop_front() {
+            if max_frames.is_some_and(|max| reads >= max) {
+                return true;
+            }
             let mut path = frame.frame_path;
             path.push(frame.hop);
             if path.len() > MAX_FRAME_PATH_DEPTH || !visited.insert(frame.frame_id) {
@@ -1348,6 +1354,7 @@ impl FirefoxCompanionWorker {
             else {
                 return true;
             };
+            reads += 1;
             let Ok(mut inner) = self
                 .observer
                 .frame_a11y_snapshot(
@@ -4254,6 +4261,7 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
                 remote_frames,
                 CANDIDATE_MAX_NODES,
                 false,
+                Some(worker_pool::MAX_DESCENDED_FRAMES),
             )
             .await
             || truncated;
@@ -4599,7 +4607,7 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
         }
         annotate_snapshot_targets(&mut nodes, target_counts, max_nodes)?;
         let truncated = self
-            .splice_remote_frames(page_id, &mut nodes, remote_frames, max_nodes, true)
+            .splice_remote_frames(page_id, &mut nodes, remote_frames, max_nodes, true, None)
             .await
             || truncated;
         stamp_frame_path(&mut nodes, &frame_path);
