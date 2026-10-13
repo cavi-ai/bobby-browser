@@ -903,6 +903,202 @@ async fn accessibility_snapshot_asks_the_extension_for_page_text() {
 
 struct CountObserver(firefox_companion::AccessibilitySnapshot);
 
+struct FrameObserver {
+    snapshot: firefox_companion::AccessibilitySnapshot,
+    frames: BTreeMap<u64, firefox_companion::AccessibilitySnapshot>,
+    scope: Option<TargetSpec>,
+}
+
+#[async_trait]
+impl ExtensionObserver for FrameObserver {
+    async fn begin_page_binding(
+        &self,
+        lease: &AttachmentLease,
+        page: &PageId,
+    ) -> Result<Box<dyn ExtensionPageBinding>, CommandError> {
+        CandidateObserver.begin_page_binding(lease, page).await
+    }
+    async fn observe(
+        &self,
+        lease: &AttachmentLease,
+        page: &PageId,
+        command: &InspectCommand,
+    ) -> Result<ExtensionObservation, CommandError> {
+        CandidateObserver.observe(lease, page, command).await
+    }
+    async fn release_page_binding(
+        &self,
+        lease: &AttachmentLease,
+        page: &PageId,
+    ) -> Result<(), CommandError> {
+        CandidateObserver.release_page_binding(lease, page).await
+    }
+    async fn a11y_snapshot(
+        &self,
+        _: &AttachmentLease,
+        _: &PageId,
+        _: u32,
+        target: Option<&TargetSpec>,
+        _: bool,
+    ) -> Result<firefox_companion::AccessibilitySnapshot, CommandError> {
+        assert_eq!(
+            target,
+            self.scope.as_ref(),
+            "snapshot scope must reach the content resolver unchanged"
+        );
+        Ok(self.snapshot.clone())
+    }
+    async fn frame_a11y_snapshot(
+        &self,
+        _: &AttachmentLease,
+        _: &PageId,
+        frame_id: u64,
+        max_nodes: u32,
+        _: bool,
+    ) -> Result<firefox_companion::AccessibilitySnapshot, CommandError> {
+        assert!(max_nodes > 0);
+        Ok(self
+            .frames
+            .get(&frame_id)
+            .expect("unexpected frame route")
+            .clone())
+    }
+}
+
+#[tokio::test]
+async fn nested_remote_frame_snapshots_keep_all_ancestor_hops() {
+    let observer = FrameObserver {
+        snapshot: serde_json::from_value(json!({
+            "nodes":[{"role":"iframe","name":"Widget"}], "truncated":false,
+            "remoteFrames":[{"frameId":7,"hop":{"role":"iframe","accessibleName":"Widget"}}]
+        }))
+        .unwrap(),
+        frames: BTreeMap::from([
+            (
+                7,
+                serde_json::from_value(json!({
+                    "nodes":[{"role":"iframe","name":"Widget"}], "truncated":false,
+                    "remoteFrames":[{"frameId":8,"hop":{"role":"iframe","accessibleName":"Widget"}}]
+                }))
+                .unwrap(),
+            ),
+            (
+                8,
+                serde_json::from_value(json!({
+                    "nodes":[{"role":"button","name":"Close"}], "truncated":false
+                }))
+                .unwrap(),
+            ),
+        ]),
+        scope: None,
+    };
+    let worker = FirefoxCompanionWorker::new(
+        WorkerId::new(),
+        PathBuf::from("/profiles/firefox"),
+        lease(),
+        FakeBidi::new(Vec::new()),
+        Arc::new(observer),
+    )
+    .await
+    .unwrap();
+    let page = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
+    let evidence = worker_pool::observation_or_default(worker.observation())
+        .a11y_snapshot(
+            &page,
+            &types::AccessibilitySnapshotCommand {
+                target: None,
+                max_nodes: Some(16),
+            },
+        )
+        .await
+        .unwrap();
+    let Evidence::AccessibilitySnapshot {
+        nodes, truncated, ..
+    } = &evidence[0]
+    else {
+        panic!("snapshot missing");
+    };
+    assert!(!truncated);
+    let button = &nodes[0].children[0].children[0];
+    assert_eq!(button.name.as_deref(), Some("Close"));
+    assert_eq!(
+        button.target.as_ref().unwrap().frame_path,
+        vec![
+            SemanticTargetSegment {
+                role: "iframe".into(),
+                accessible_name: "Widget".into(),
+                ordinal: None
+            },
+            SemanticTargetSegment {
+                role: "iframe".into(),
+                accessible_name: "Widget".into(),
+                ordinal: None
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn framed_css_snapshot_uses_the_content_scope_and_preserves_its_hops() {
+    let target = TargetSpec {
+        css: Some("#close".into()),
+        frame_path: vec![Box::new(TargetSpec {
+            css: Some("#widget".into()),
+            ..Default::default()
+        })],
+        ..Default::default()
+    };
+    let observer = FrameObserver {
+        snapshot: serde_json::from_value(json!({
+            "nodes":[{"role":"button","name":"Close"}], "truncated":false,
+            "framePath":[{"role":"iframe","accessibleName":"Widget"}]
+        }))
+        .unwrap(),
+        frames: BTreeMap::new(),
+        scope: Some(target.clone()),
+    };
+    let worker = FirefoxCompanionWorker::new(
+        WorkerId::new(),
+        PathBuf::from("/profiles/firefox"),
+        lease(),
+        FakeBidi::new(Vec::new()),
+        Arc::new(observer),
+    )
+    .await
+    .unwrap();
+    let page = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
+    let evidence = worker_pool::observation_or_default(worker.observation())
+        .a11y_snapshot(
+            &page,
+            &types::AccessibilitySnapshotCommand {
+                target: Some(target),
+                max_nodes: Some(1),
+            },
+        )
+        .await
+        .unwrap();
+    let Evidence::AccessibilitySnapshot { nodes, .. } = &evidence[0] else {
+        panic!("snapshot missing");
+    };
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(
+        nodes[0].target.as_ref().unwrap().frame_path,
+        vec![SemanticTargetSegment {
+            role: "iframe".into(),
+            accessible_name: "Widget".into(),
+            ordinal: None
+        }]
+    );
+}
+
 #[async_trait]
 impl ExtensionObserver for CountObserver {
     async fn begin_page_binding(
@@ -1014,7 +1210,7 @@ async fn scoped_snapshot_consumes_page_counts_and_rejects_invalid_counts() {
 }
 
 #[tokio::test]
-async fn semantic_candidate_collection_rejects_unsupported_scoped_paths() {
+async fn semantic_candidate_collection_rejects_shadow_paths_and_scopes_frame_paths() {
     let worker = FirefoxCompanionWorker::new(
         WorkerId::new(),
         PathBuf::from("/profiles/firefox"),
@@ -1030,22 +1226,13 @@ async fn semantic_candidate_collection_rejects_unsupported_scoped_paths() {
         .await
         .unwrap();
 
-    for target in [
-        TargetSpec {
-            frame_path: vec![Box::new(TargetSpec {
-                css: Some("iframe".into()),
-                ..TargetSpec::default()
-            })],
+    for target in [TargetSpec {
+        shadow_path: vec![Box::new(TargetSpec {
+            css: Some("custom-element".into()),
             ..TargetSpec::default()
-        },
-        TargetSpec {
-            shadow_path: vec![Box::new(TargetSpec {
-                css: Some("custom-element".into()),
-                ..TargetSpec::default()
-            })],
-            ..TargetSpec::default()
-        },
-    ] {
+        })],
+        ..TargetSpec::default()
+    }] {
         let error = worker_pool::observation_or_default(worker.observation())
             .collect_candidates(&page_id, &target)
             .await
@@ -1053,10 +1240,27 @@ async fn semantic_candidate_collection_rejects_unsupported_scoped_paths() {
         assert_eq!(error.code, ErrorCode::InvalidRequest);
         assert_eq!(
             error.message,
-            "Firefox candidate collection does not support frame or shadow paths"
+            "Firefox candidate collection does not support shadow paths"
         );
         assert!(!error.retryable);
     }
+
+    // An observer that ignores the requested frame scope must not return main-page candidates.
+    let framed = worker_pool::observation_or_default(worker.observation())
+        .collect_candidates(
+            &page_id,
+            &TargetSpec {
+                frame_path: vec![Box::new(TargetSpec {
+                    role: Some("iframe".into()),
+                    accessible_name: Some("Widget".into()),
+                    ..TargetSpec::default()
+                })],
+                ..TargetSpec::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(framed.code, ErrorCode::BrowserCommandFailed);
 }
 
 #[tokio::test]

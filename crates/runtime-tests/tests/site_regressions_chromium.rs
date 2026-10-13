@@ -25,6 +25,5 @@ cases::every_case!(
     scoped_snapshot_targets_preserve_parent_frame_paths,
     scoped_snapshot_in_frame_descends_into_child_frames,
     scoped_frame_descent_respects_target_path_depth,
-    scoped_iframe_descent_respects_the_node_budget,
-    dismiss_closes_an_overlay_framed_from_another_site
+    scoped_iframe_descent_respects_the_node_budget
 );

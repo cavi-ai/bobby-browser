@@ -653,11 +653,12 @@ fn validate_target(target: Option<&FormControlTarget>) -> Result<(), String> {
     }
     for segment in target.frame_path.iter().chain(&target.shadow_path) {
         validate_text(&segment.role, MAX_FORM_ID_BYTES, "target path role", false)?;
+        // An unnamed frame or shadow host hops by an empty name.
         validate_text(
             &segment.accessible_name,
             MAX_FORM_TEXT_BYTES,
             "target path name",
-            false,
+            true,
         )?;
         if segment
             .ordinal
@@ -690,4 +691,33 @@ fn validate_text(value: &str, max: usize, field: &str, allow_empty: bool) -> Res
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_target, FormControlTarget, SemanticTargetSegment};
+
+    fn framed(frame_name: &str) -> FormControlTarget {
+        FormControlTarget {
+            role: "textbox".into(),
+            accessible_name: "Code".into(),
+            ordinal: None,
+            frame_path: vec![SemanticTargetSegment {
+                role: "iframe".into(),
+                accessible_name: frame_name.into(),
+                ordinal: None,
+            }],
+            shadow_path: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_target_through_an_unnamed_frame_validates() {
+        assert_eq!(validate_target(Some(&framed(""))), Ok(()));
+    }
+
+    #[test]
+    fn a_target_path_name_with_control_characters_is_refused() {
+        assert!(validate_target(Some(&framed("bad\u{7}name"))).is_err());
+    }
 }

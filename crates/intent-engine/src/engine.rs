@@ -1707,15 +1707,10 @@ fn form_control_target(
             layer: ErrorLayer::Page,
             retryable: false,
         })?;
-        let accessible_name = target.accessible_name.clone().ok_or_else(|| CommandError {
-            code: ErrorCode::InvalidRequest,
-            message: "form control path segment requires an accessible name".into(),
-            layer: ErrorLayer::Page,
-            retryable: false,
-        })?;
+        // An unnamed frame or host hops by an empty name, which matches any.
         Ok(SemanticTargetSegment {
             role,
-            accessible_name,
+            accessible_name: target.accessible_name.clone().unwrap_or_default(),
             ordinal: target.ordinal,
         })
     };
@@ -1733,11 +1728,16 @@ fn form_control_target(
             retryable: false,
         })?,
         ordinal: intent_target.ordinal,
-        frame_path: intent_target
-            .frame_path
-            .iter()
-            .map(|target| segment(target))
-            .collect::<Result<Vec<_>, _>>()?,
+        // An explicit frame path on the intent wins; otherwise the one the
+        // gather stamped when it found the control inside a frame.
+        frame_path: if intent_target.frame_path.is_empty() {
+            &candidate.frame_path
+        } else {
+            &intent_target.frame_path
+        }
+        .iter()
+        .map(|target| segment(target))
+        .collect::<Result<Vec<_>, _>>()?,
         shadow_path: intent_target
             .shadow_path
             .iter()

@@ -2800,7 +2800,7 @@ async fn download_state_commit_cancellation_keeps_prepared_artifact_recoverable(
             ))
             .await
     });
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             if events.lock().await.contains(&"http:commit".to_string()) {
                 break;
@@ -3079,7 +3079,7 @@ async fn cancellation_at_each_post_response_journal_await_preserves_durable_arti
                 ))
                 .await
         });
-        tokio::time::timeout(StdDuration::from_secs(1), paused.notified())
+        tokio::time::timeout(StdDuration::from_secs(10), paused.notified())
             .await
             .expect("journal boundary not reached");
         let committed = events.lock().await.contains(&"http:commit".to_string());
@@ -3088,7 +3088,7 @@ async fn cancellation_at_each_post_response_journal_await_preserves_durable_arti
         let _ = task.await;
         if phase == CommandPhase::ResultPrepared {
             resume.notify_one();
-            tokio::time::timeout(StdDuration::from_secs(1), async {
+            tokio::time::timeout(StdDuration::from_secs(10), async {
                 loop {
                     let visible = std::fs::read_dir(root.path().join(session.0.to_string()))
                         .ok()

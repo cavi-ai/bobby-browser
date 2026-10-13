@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { JSDOM } from "jsdom";
+import { contentActionReply } from "../src/content.js";
 
 import * as backgroundModule from "../src/background.js";
 import { CompanionBackground, type DiscoveredTarget } from "../src/background.js";
@@ -48,6 +50,44 @@ const CONNECT_OPTIONS = {
 };
 
 const ATTACHMENT_ID = "af4e851e-630a-4a28-8fae-4cd56a9df787";
+
+test("a framed accessibility snapshot routes CSS hops and scopes the target in its document", async (t) => {
+  const host = new JSDOM('<iframe id="widget" title="Widget"></iframe>', { url: "https://host.test" }).window.document;
+  const inner = new JSDOM('<main><button id="close">Close</button><button>Other</button></main>', { url: "https://frame.test" }).window.document;
+  const original = Object.getOwnPropertyDescriptor(globalThis, "browser");
+  Object.defineProperty(globalThis, "browser", { configurable: true, value: { runtime: { getFrameId: () => 7 } } });
+  t.after(() => {
+    if (original) Object.defineProperty(globalThis, "browser", original);
+    else Reflect.deleteProperty(globalThis, "browser");
+  });
+  const transport = new FakeTransport();
+  const background = new CompanionBackground({
+    transport,
+    discoverTargets: async () => [{ tabId: 9, frameId: 0 }],
+    createTargetId: (target) => targetId(target.tabId, target.frameId),
+    async sendTabMessage(tabId, message, frameId) {
+      assert.equal(tabId, 9);
+      assert.ok(frameId === 0 || frameId === 7);
+      const action = message as { operation: string; input: unknown };
+      return contentActionReply(frameId === 0 ? host : inner, action.operation, action.input);
+    },
+    async navigateTab() {},
+    now: () => 1_000,
+  });
+  background.connect(CONNECT_OPTIONS);
+  await pair(background);
+  await grant(background, [{ tabId: 9, frameId: 0 }]);
+  await background.receive(action(9, 0, { operation: "a11yTree", input: {
+    maxNodes: 1, target: { css: "#close", framePath: [{ css: "#widget" }] },
+  } }));
+  const event = transport.sent.at(-1) as { kind: string; output: { output: unknown } };
+  assert.equal(event.kind, "actionCompleted");
+  assert.deepEqual(event.output.output, {
+    nodes: [{ role: "button", name: "Close", target: { role: "button", accessibleName: "Close" } }],
+    truncated: true,
+    framePath: [{ role: "iframe", accessibleName: "Widget" }],
+  });
+});
 
 function pageId(tabId: number, frameId: number): string {
   return `00000000-0000-4000-8000-${String(tabId * 1_000 + frameId).padStart(12, "0")}`;

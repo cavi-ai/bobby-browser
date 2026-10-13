@@ -83,6 +83,27 @@ pub fn accessibility_candidates(
             if node.invalid == Some(true) {
                 attributes.insert("aria-invalid".into(), "true".into());
             }
+            // A node inside a frame keeps the hops that re-resolve that frame;
+            // an unnamed hop matches any frame.
+            let frame_path = node
+                .target
+                .as_ref()
+                .map(|target| {
+                    target
+                        .frame_path
+                        .iter()
+                        .map(|segment| {
+                            Box::new(types::TargetSpec {
+                                role: Some(segment.role.clone()),
+                                accessible_name: (!segment.accessible_name.is_empty())
+                                    .then(|| segment.accessible_name.clone()),
+                                ordinal: segment.ordinal,
+                                ..types::TargetSpec::default()
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             candidates.push(Candidate {
                 id: format!("{id_prefix}-{}", candidates.len()),
                 css: None,
@@ -98,7 +119,7 @@ pub fn accessibility_candidates(
                     visible: true,
                     enabled: node.disabled != Some(true),
                 },
-                frame_path: Vec::new(),
+                frame_path,
             });
             collect(&node.children, candidates, id_prefix);
         }
@@ -275,5 +296,24 @@ mod tests {
         );
         assert_eq!(candidates[2].text, "Postal code Required 12345");
         assert!(candidates[2].state.attached && candidates[2].state.visible);
+    }
+
+    #[test]
+    fn framed_nodes_keep_the_hops_to_their_frame() {
+        let nodes: Vec<types::AccessibilityNode> = serde_json::from_value(serde_json::json!([
+            {"role":"button","name":"Close","target":{"role":"button","accessibleName":"Close",
+                "framePath":[{"role":"iframe","accessibleName":"Widget","ordinal":1},
+                             {"role":"iframe","accessibleName":""}]}},
+            {"role":"button","name":"Apply","target":{"role":"button","accessibleName":"Apply"}}
+        ]))
+        .unwrap();
+        let candidates = accessibility_candidates(&nodes, "firefox-a11y");
+        let hops = &candidates[0].frame_path;
+        assert_eq!(hops.len(), 2);
+        assert_eq!(hops[0].role.as_deref(), Some("iframe"));
+        assert_eq!(hops[0].accessible_name.as_deref(), Some("Widget"));
+        assert_eq!(hops[0].ordinal, Some(1));
+        assert_eq!(hops[1].accessible_name, None);
+        assert!(candidates[1].frame_path.is_empty());
     }
 }
