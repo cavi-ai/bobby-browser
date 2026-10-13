@@ -71,9 +71,8 @@ use types::{
 use crate::{
     process_registry, resolve_upload_paths, session_download_dir,
     targeting::{
-        gather_candidates, inspect_page_scoped_target, page_frame_ids,
-        resolve_ambiguous_wait_values, resolve_target as resolve_browser_target,
-        resolve_target_with_visibility,
+        gather_candidates, inspect_page_scoped_target, page_frames, resolve_ambiguous_wait_values,
+        resolve_target as resolve_browser_target, resolve_target_with_visibility,
     },
     BrowserWorker, WorkerFactory,
 };
@@ -1251,12 +1250,7 @@ impl ChromiumWorker {
         target: Option<&types::TargetSpec>,
     ) -> Result<crate::targeting::ResolvedTarget, CommandError> {
         let browser = self.browser_handle().await?;
-        match resolve_browser_target(page_id, page, selector, target, Some(&browser)).await {
-            Err(error) if error.code == ErrorCode::TargetNotFound => {
-                Err(name_the_frame_holding(page, target, &browser, error).await)
-            }
-            resolved => resolved,
-        }
+        resolve_browser_target(page_id, page, selector, target, Some(&browser)).await
     }
 
     async fn register_page(&self, page_id: PageId, page: Page) -> Result<(), CommandError> {
@@ -1663,6 +1657,19 @@ fn is_detached_target_error(error: &CommandError) -> bool {
         .message
         .to_ascii_lowercase()
         .contains("target detached")
+}
+
+/// A trusted press on `resolved`, refused as `click` refuses one when the
+/// control does not receive the pointer.
+async fn press(
+    page: &Page,
+    resolved: &crate::targeting::ResolvedTarget,
+) -> Result<(), CommandError> {
+    if let Err(error) = resolved.scroll_into_view(page).await {
+        tracing::debug!(?error, "scroll-into-view before press failed");
+    }
+    pointer_miss(resolved.receives_pointer(page).await?)?;
+    resolved.click(page).await
 }
 
 fn pointer_miss(hit: PointerHit) -> Result<(), CommandError> {
@@ -2992,7 +2999,7 @@ impl crate::EventsEngine for ChromiumWorker {
         // Same H3 class as `click`: a native element click on a backgrounded
         // tab hangs to the CDP request timeout, so surface the opener first.
         self.bring_page_to_front(&opener).await;
-        resolved.click(&opener).await?;
+        press(&opener, &resolved).await?;
         let event = tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
             loop {
                 let event = events.next().await.ok_or_else(|| {
@@ -3043,39 +3050,48 @@ impl crate::EventsEngine for ChromiumWorker {
         command: &ClickAndWaitForDownloadCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
         let page = self.page_handle(page_id).await?;
-        tokio::time::timeout(
-            Duration::from_millis(command.timeout_ms),
-            page.execute(
-                SetDownloadBehaviorParams::builder()
-                    .behavior(SetDownloadBehaviorBehavior::Allow)
-                    .download_path(self.download_dir.to_string_lossy())
-                    .events_enabled(true)
-                    .build()
-                    .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?,
-            ),
-        )
-        .await
-        .map_err(|_| timeout_error(command.timeout_ms))?
-        .map_err(command_failed)?;
-        let mut begins = page
-            .event_listener::<EventDownloadWillBegin>()
+        let browser = self.browser_handle().await?;
+        // A frame from another site reports its downloads on its own session.
+        let (frame_ids, frame_sessions) = page_frames(&page, &browser).await?;
+        let behavior = SetDownloadBehaviorParams::builder()
+            .behavior(SetDownloadBehaviorBehavior::Allow)
+            .download_path(self.download_dir.to_string_lossy())
+            .events_enabled(true)
+            .build()
+            .map_err(|error| driver_error(ErrorCode::BrowserCommandFailed, error))?;
+        let mut begin_streams = Vec::new();
+        let mut progress_streams = Vec::new();
+        for session in std::iter::once(&page).chain(&frame_sessions) {
+            tokio::time::timeout(
+                Duration::from_millis(command.timeout_ms),
+                session.execute(behavior.clone()),
+            )
             .await
+            .map_err(|_| timeout_error(command.timeout_ms))?
             .map_err(command_failed)?;
-        let mut progress = page
-            .event_listener::<EventDownloadProgress>()
-            .await
-            .map_err(command_failed)?;
+            begin_streams.push(
+                session
+                    .event_listener::<EventDownloadWillBegin>()
+                    .await
+                    .map_err(command_failed)?,
+            );
+            progress_streams.push(
+                session
+                    .event_listener::<EventDownloadProgress>()
+                    .await
+                    .map_err(command_failed)?,
+            );
+        }
+        let mut begins = futures::stream::select_all(begin_streams);
+        let mut progress = futures::stream::select_all(progress_streams);
         let resolved = self
             .resolve_target(page_id, &page, &command.selector, command.target.as_ref())
             .await?;
         // Download events reach every connection to a shared browser: only
         // this page's frames start this session's download.
-        let frames = if self.shared_browser {
-            Some(page_frame_ids(&page).await?)
-        } else {
-            None
-        };
-        resolved.click_js(&page).await?;
+        let frames = self.shared_browser.then_some(frame_ids);
+        self.bring_page_to_front(&page).await;
+        press(&page, &resolved).await?;
         let begin = tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
             loop {
                 let begin = begins.next().await.ok_or_else(|| {
@@ -4322,25 +4338,6 @@ async fn ensure_editable_control(
     })
 }
 
-/// A target with no frame path that misses the main frame but resolves inside
-/// a child frame: the miss names the frame path that reaches it.
-async fn name_the_frame_holding(
-    page: &Page,
-    target: Option<&types::TargetSpec>,
-    browser: &BrowserHandle,
-    error: CommandError,
-) -> CommandError {
-    let Some(target) =
-        target.filter(|target| target.frame_path.is_empty() && target.shadow_path.is_empty())
-    else {
-        return error;
-    };
-    match gather_candidates(page, target, Some(browser)).await {
-        Ok(census) => crate::name_frame_in_miss(error, target, census),
-        Err(_) => error,
-    }
-}
-
 /// Text entry refuses a field an open dialog covers, as a click on it would be.
 async fn refuse_dialog_covered_field(
     page: &Page,
@@ -4583,12 +4580,13 @@ async fn descend_a11y_iframes(
         // Child controls would need a hop beyond the target contract.
         return true;
     }
+    // No context of its own: `page` serves `parent_frame` as its main frame.
     let context_id = match parent_frame {
         Some(frame) => {
-            let Ok(Some(context_id)) = page.frame_execution_context(frame.clone()).await else {
+            let Ok(context_id) = page.frame_execution_context(frame.clone()).await else {
                 return false;
             };
-            Some(context_id)
+            context_id
         }
         None => None,
     };

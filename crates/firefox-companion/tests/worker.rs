@@ -1136,6 +1136,53 @@ impl ExtensionObserver for CountObserver {
 }
 
 #[tokio::test]
+async fn candidates_read_a_bounded_number_of_frames() {
+    // Only the frames within the bound are served: reading one more panics.
+    let bound = worker_pool::MAX_DESCENDED_FRAMES as u64;
+    let name = |id: u64| format!("Frame {id}");
+    let observer = FrameObserver {
+        snapshot: serde_json::from_value(json!({
+            "nodes": (1..=bound + 5).map(|id| json!({"role":"iframe","name":name(id)})).collect::<Vec<_>>(),
+            "truncated": false,
+            "remoteFrames": (1..=bound + 5).map(|id| json!(
+                {"frameId": id, "hop": {"role":"iframe","accessibleName":name(id)}}
+            )).collect::<Vec<_>>(),
+        }))
+        .unwrap(),
+        frames: (1..=bound)
+            .map(|id| {
+                let frame = json!({"nodes":[{"role":"textbox","name":"Code"}],"truncated":false});
+                (id, serde_json::from_value(frame).unwrap())
+            })
+            .collect(),
+        scope: None,
+    };
+    let worker = FirefoxCompanionWorker::new(
+        WorkerId::new(),
+        PathBuf::from("/profiles/firefox"),
+        lease(),
+        FakeBidi::new(Vec::new()),
+        Arc::new(observer),
+    )
+    .await
+    .unwrap();
+    let page = PageId::new();
+    worker_pool::tabs_or_default(worker.tabs())
+        .open_page(page.clone())
+        .await
+        .unwrap();
+    // A target absent from the frames read is absent, not a truncated census.
+    for name in ["Code", "Missing"] {
+        let target: TargetSpec =
+            serde_json::from_value(json!({"role":"textbox","accessibleName":name})).unwrap();
+        worker_pool::observation_or_default(worker.observation())
+            .collect_candidates(&page, &target)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
 async fn scoped_snapshot_consumes_page_counts_and_rejects_invalid_counts() {
     for (counts, expected) in [
         (json!([]), None),
@@ -2576,68 +2623,81 @@ async fn semantic_click_missing_live_node_is_typed_as_target_drift_input() {
 
 #[tokio::test]
 async fn semantic_click_descends_exact_test_id_frame_before_native_input() {
-    let bidi = FakeBidi::new(vec![
-        Ok(json!({"context": "context-1"})),
-        Ok(json!({"result": {"type": "string", "value": "index:0"}})),
-        Ok(json!({"result": {"type": "node", "sharedId": "frame-button"}})),
-        Ok(json!({})),
-    ]);
-    bidi.set_tree(json!({"contexts": [{
-        "context": "context-1",
-        "children": [{"context": "frame-context", "children": []}]
-    }]}))
-    .await;
-    bidi.set_preflight(vec![Ok(json!({"result": {
-        "type": "node",
-        "sharedId": "frame-button-after-scroll"
-    }}))])
-    .await;
-    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
-    let page = PageId::new();
-    worker_pool::tabs_or_default(worker.tabs())
-        .open_page(page.clone())
-        .await
-        .unwrap();
+    for obstructed in [false, true] {
+        let bidi = FakeBidi::new(vec![
+            Ok(json!({"context": "context-1"})),
+            Ok(json!({"result": {"type": "string", "value": "index:0"}})),
+            Ok(json!({"result": {"type": "node", "sharedId": "frame-button"}})),
+            Ok(json!({"result":{"type":"string","value":"[640,480]"}})),
+            Ok(
+                json!({"result":{"type":"string","value":serde_json::to_string(&json!({"verdict":if obstructed {"obscured"} else {"ok"},"x":100,"y":100,"width":640,"height":480})).unwrap()}}),
+            ),
+            Ok(json!({})),
+        ]);
+        bidi.set_tree(json!({"contexts": [{
+            "context": "context-1",
+            "children": [{"context": "frame-context", "children": []}]
+        }]}))
+        .await;
+        bidi.set_preflight(vec![Ok(json!({"result": {
+            "type": "node",
+            "sharedId": "frame-button-after-scroll"
+        }}))])
+        .await;
+        let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+        let page = PageId::new();
+        worker_pool::tabs_or_default(worker.tabs())
+            .open_page(page.clone())
+            .await
+            .unwrap();
 
-    worker_pool::input_or_default(worker.input())
-        .click(
-            &page,
-            &ClickCommand {
-                selector: String::new(),
-                target: Some(types::TargetSpec {
-                    test_id: Some("iframe-submit".into()),
-                    frame_path: vec![Box::new(types::TargetSpec {
-                        test_id: Some("iframe-challenge".into()),
+        let result = worker_pool::input_or_default(worker.input())
+            .click(
+                &page,
+                &ClickCommand {
+                    selector: String::new(),
+                    target: Some(types::TargetSpec {
+                        test_id: Some("iframe-submit".into()),
+                        frame_path: vec![Box::new(types::TargetSpec {
+                            test_id: Some("iframe-challenge".into()),
+                            ..Default::default()
+                        })],
                         ..Default::default()
-                    })],
-                    ..Default::default()
-                }),
-                boundary: false,
-                expected_url: None,
-                modifiers: Vec::new(),
-            },
-        )
-        .await
-        .unwrap();
+                    }),
+                    boundary: false,
+                    expected_url: None,
+                    modifiers: Vec::new(),
+                },
+            )
+            .await;
 
-    let calls = bidi.calls().await;
-    assert!(calls
-        .iter()
-        .any(|call| call.method == "browsingContext.getTree"));
-    let preflight = calls
-        .iter()
-        .find(|call| call.method == "script.callFunction")
-        .expect("frame click must preflight in the child context");
-    assert_eq!(preflight.params["target"]["context"], "frame-context");
-    let click = calls
-        .iter()
-        .find(|call| call.method == "input.performActions")
-        .unwrap();
-    assert_eq!(click.params["context"], "frame-context");
-    assert_eq!(
-        click.params["actions"][0]["actions"][0]["origin"]["element"]["sharedId"],
-        "frame-button-after-scroll"
-    );
+        let calls = bidi.calls().await;
+        if obstructed {
+            assert_eq!(result.unwrap_err().code, ErrorCode::TargetObscured);
+            assert!(!calls
+                .iter()
+                .any(|call| call.method == "input.performActions"));
+            continue;
+        }
+        result.unwrap();
+        assert!(calls
+            .iter()
+            .any(|call| call.method == "browsingContext.getTree"));
+        let preflight = calls
+            .iter()
+            .find(|call| call.method == "script.callFunction")
+            .expect("frame click must preflight in the child context");
+        assert_eq!(preflight.params["target"]["context"], "frame-context");
+        let click = calls
+            .iter()
+            .find(|call| call.method == "input.performActions")
+            .unwrap();
+        assert_eq!(click.params["context"], "frame-context");
+        assert_eq!(
+            click.params["actions"][0]["actions"][0]["origin"]["element"]["sharedId"],
+            "frame-button-after-scroll"
+        );
+    }
 }
 
 #[tokio::test]
@@ -3782,6 +3842,11 @@ async fn download_correlates_bidi_events_after_one_click_and_returns_artifact_re
         Ok(json!({})),
         Ok(json!({"result": {"type": "number", "value": 1}})),
     ]);
+    // The download starts inside a frame of the page.
+    bidi.set_tree(json!({"contexts": [{"context": "context-1", "children": [
+        {"context": "frame-1", "children": []}
+    ]}]}))
+    .await;
     let worker = Arc::new(
         worker(bidi.clone(), FakeObserver::new(observation()))
             .await
@@ -3828,13 +3893,13 @@ async fn download_correlates_bidi_events_after_one_click_and_returns_artifact_re
     bidi.emit(
         "browsingContext.downloadWillBegin",
         json!({
-            "context": "context-1", "navigation": null, "suggestedFilename": "receipt.txt"
+            "context": "frame-1", "navigation": null, "suggestedFilename": "receipt.txt"
         }),
     );
     bidi.emit(
         "browsingContext.downloadEnd",
         json!({
-            "context": "context-1", "navigation": null, "status": "complete"
+            "context": "frame-1", "navigation": null, "status": "complete"
         }),
     );
     let evidence = operation.await.unwrap().unwrap();

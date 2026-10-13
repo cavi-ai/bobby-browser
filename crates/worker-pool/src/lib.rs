@@ -68,7 +68,12 @@ pub use skill_adapter::{
     CHROMIUM_PRODUCTION_SKILL_PROFILE_VERSION, FIREFOX_PRODUCTION_SKILL_PROFILE_VERSION,
     PRODUCTION_SKILL_CAPABILITIES,
 };
-pub use targeting::{name_frame_in_miss, validate_target_spec};
+pub use targeting::validate_target_spec;
+
+/// Most frames an action's candidate census reads; frames past it are left
+/// out. Each costs a browser round trip, and the census repeats while its
+/// target is absent.
+pub const MAX_DESCENDED_FRAMES: usize = 8;
 
 pub fn session_download_dir(root: &Path, session_id: &SessionId) -> PathBuf {
     root.join(session_id.0.to_string())

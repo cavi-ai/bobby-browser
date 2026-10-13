@@ -13,8 +13,11 @@
 - `type_text` into a field the page swaps for an editor as it takes focus waits for focus to settle and types the whole value into the editor, instead of losing the first keys.
 - `intent_dismiss_obstruction` whose purpose names no control clicks a visible close or decline control the obstruction does not cover, frames from other sites included, and completes once that control's frame is gone.
 - Chromium opens each page in its own background window that acts focused, so clicks and typing on a page no longer time out while another page in the same browser is in front.
-- Snapshots list the controls inside frames from other sites with targets that click and type through the frame, and a snapshot scoped to such a frame or a control in it reads that frame.
-- Intents find, fill and dismiss controls inside frames from other sites without a `framePath`, and start acting as soon as the control is found instead of waiting up to 5 seconds.
+- Snapshots list the controls inside frames from other sites with targets that click and type through the frame.
+- A snapshot scoped to a frame from another site, or to a control in it, reads that frame and the frames directly inside it.
+- `click_and_wait_for_download` returns a download started inside a frame from another site, also on a durable Chromium profile.
+- Intents find, fill and dismiss controls inside frames from other sites without a `framePath`.
+- Intents act on a control as soon as it is found instead of waiting up to 5 seconds.
 - A `click` or typing target that misses the page but sits inside a frame fails `targetNotFound` with the `framePath` that reaches it.
 - `form_snapshot` targets for fields inside unnamed frames act through `control_action`.
 - Journal records, checkpoints and skill-issuance files default to a 64 MiB byte limit. Oversized journal files are preserved in an archive with a warning; oversized checkpoint reads and writes fail without replacing stored data. The journal and checkpoint store APIs accept configurable limits.
@@ -44,7 +47,7 @@
 - On Firefox, controls and text inside open shadow roots appear in snapshots and observations, and their targets act.
 - A snapshot scoped to a region an open modal dialog hides fails `targetObscured` instead of `targetNotFound`.
 - On Chromium, action targets and intent hints resolve the way snapshots report them: names from slotted label content match, and controls hidden behind a modal dialog do not.
-- On Chromium, clicking an element covered by another fails `targetObscured`, as on Firefox, instead of clicking the covering element, and so does typing into a field an open dialog covers.
+- On Chromium, `click`, `click_and_wait_for_download` and `click_and_wait_for_popup` on an element covered by another fail `targetObscured`, as on Firefox, instead of clicking the covering element, and so does typing into a field an open dialog covers.
 - On Firefox, a new session starts with no tabs and gets only the pages it opens, so concurrent sessions never take each other's pages.
 - On Linux, Chrome keeps shared memory in `/dev/shm` unless it is smaller than 1 GiB.
 - On Firefox, a command that misses its deadline fails alone; other sessions and runtime restarts keep the running Firefox.

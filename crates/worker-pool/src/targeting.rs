@@ -9,8 +9,8 @@ use chromiumoxide::cdp::browser_protocol::accessibility::QueryAxTreeParams;
 #[cfg(test)]
 use chromiumoxide::cdp::browser_protocol::dom::Node as CdpNode;
 use chromiumoxide::cdp::browser_protocol::dom::{
-    BackendNodeId, DescribeNodeParams, GetContentQuadsParams, GetDocumentParams, ResolveNodeParams,
-    SetFileInputFilesParams, ShadowRootType,
+    BackendNodeId, DescribeNodeParams, GetBoxModelParams, GetContentQuadsParams, GetDocumentParams,
+    GetNodeForLocationParams, ResolveNodeParams, SetFileInputFilesParams, ShadowRootType,
 };
 use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
 use chromiumoxide::cdp::browser_protocol::page::{
@@ -48,8 +48,34 @@ pub struct ResolvedTarget {
     pub(crate) frame_path: Vec<types::SemanticTargetSegment>,
     /// The iframe element and its parent's session for every hop into a frame
     /// from another site: that frame reports geometry in its own viewport.
-    frame_owners: Vec<(Page, BackendNodeId)>,
+    frame_owners: Vec<FrameOwner>,
     pub evidence: Evidence,
+}
+
+struct FrameOwner {
+    parent: Page,
+    backend_node_id: BackendNodeId,
+    child: Page,
+}
+
+/// Maps a child viewport point through the owner's content quad. Both scale
+/// and rotation must be applied before adding the parent's viewport origin.
+fn frame_point(point: Point, quad: &[f64], viewport: (f64, f64)) -> Option<Point> {
+    if quad.len() != 8
+        || viewport.0 <= 0.
+        || viewport.1 <= 0.
+        || !quad.iter().all(|value| value.is_finite())
+    {
+        return None;
+    }
+    Some(Point {
+        x: quad[0]
+            + point.x / viewport.0 * (quad[2] - quad[0])
+            + point.y / viewport.1 * (quad[6] - quad[0]),
+        y: quad[1]
+            + point.x / viewport.0 * (quad[3] - quad[1])
+            + point.y / viewport.1 * (quad[7] - quad[1]),
+    })
 }
 
 /// Where a [`JsLocator`]'s `find(root, id)` lookups are rooted.
@@ -141,6 +167,21 @@ impl ResolvedTarget {
     /// `Element::clickable_point` uses for a `native` target -- reports
     /// coordinates in the top-level page's viewport regardless of nesting.
     pub async fn clickable_point(&self, page: &Page) -> Result<Option<Point>, CommandError> {
+        let Some(mut point) = self.local_clickable_point(page).await? else {
+            return Ok(None);
+        };
+        for owner in self.frame_owners.iter().rev() {
+            point = self.point_in_parent(owner, point).await?.ok_or_else(|| {
+                target_error(
+                    ErrorCode::TargetOutOfBounds,
+                    "frame has no usable content geometry",
+                )
+            })?;
+        }
+        Ok(Some(point))
+    }
+
+    async fn local_clickable_point(&self, page: &Page) -> Result<Option<Point>, CommandError> {
         if let Some(element) = &self.native {
             return element.clickable_point().await.map(Some).map_err(cdp_error);
         }
@@ -154,7 +195,7 @@ impl ResolvedTarget {
             )
             .await
             .map_err(cdp_error)?;
-        let Some(mut point) = quads
+        let Some(point) = quads
             .quads
             .iter()
             .filter(|quad| quad.inner().len() == 8)
@@ -165,30 +206,33 @@ impl ResolvedTarget {
         else {
             return Ok(None);
         };
-        // Each frame from another site reports from its own viewport origin:
-        // its iframe's content box places that origin in the parent.
-        for (session, owner) in &self.frame_owners {
-            let owner_quads = session
-                .execute(
-                    GetContentQuadsParams::builder()
-                        .backend_node_id(*owner)
-                        .build(),
-                )
-                .await
-                .map_err(cdp_error)?;
-            let Some(origin) = owner_quads
-                .quads
-                .iter()
-                .filter(|quad| quad.inner().len() == 8)
-                .map(ElementQuad::from_quad)
-                .next()
-            else {
-                return Ok(None);
-            };
-            point.x += origin.top_left.x;
-            point.y += origin.top_left.y;
-        }
         Ok(Some(point))
+    }
+
+    async fn point_in_parent(
+        &self,
+        owner: &FrameOwner,
+        point: Point,
+    ) -> Result<Option<Point>, CommandError> {
+        let model = owner
+            .parent
+            .execute(
+                GetBoxModelParams::builder()
+                    .backend_node_id(owner.backend_node_id)
+                    .build(),
+            )
+            .await
+            .map_err(cdp_error)?
+            .result
+            .model;
+        let viewport: (f64, f64) = owner
+            .child
+            .evaluate("[window.innerWidth, window.innerHeight]")
+            .await
+            .map_err(cdp_error)?
+            .into_value()
+            .map_err(|error| target_error(ErrorCode::BrowserCommandFailed, error))?;
+        Ok(frame_point(point, model.content.inner(), viewport))
     }
 
     /// Classifies a pointer at the target's center: reachable, covered,
@@ -197,12 +241,41 @@ impl ResolvedTarget {
         let verdict: String = self
             .eval(page, &format!("return ({})(el);", pointer_hit_function()))
             .await?;
-        parse_pointer_hit(&verdict).ok_or_else(|| {
+        let verdict = parse_pointer_hit(&verdict).ok_or_else(|| {
             target_error(
                 ErrorCode::BrowserCommandFailed,
                 "pointer hit check returned an invalid result",
             )
-        })
+        })?;
+        if verdict != PointerHit::Reachable || self.frame_owners.is_empty() {
+            return Ok(verdict);
+        }
+        let Some(mut point) = self.local_clickable_point(page).await? else {
+            return Ok(PointerHit::OutOfBounds);
+        };
+        // Test each parent at the mapped dispatch point. CDP may stop at the
+        // cross-process frame owner, or descend and report the target frame.
+        for owner in self.frame_owners.iter().rev() {
+            let Some(mapped) = self.point_in_parent(owner, point).await? else {
+                return Ok(PointerHit::OutOfBounds);
+            };
+            point = mapped;
+            let hit = owner
+                .parent
+                .execute(GetNodeForLocationParams::new(
+                    point.x.round() as i64,
+                    point.y.round() as i64,
+                ))
+                .await
+                .map_err(cdp_error)?
+                .result;
+            if hit.backend_node_id != owner.backend_node_id
+                && self.frame_id.as_ref() != Some(&hit.frame_id)
+            {
+                return Ok(PointerHit::Obscured);
+            }
+        }
+        Ok(PointerHit::Reachable)
     }
 
     /// Scrolls the target to the viewport center and reports whether its
@@ -237,21 +310,22 @@ impl ResolvedTarget {
         Ok(())
     }
 
+    /// A target inside a frame from another site takes a pointer press at its
+    /// point: only trusted input lets that frame start a download or a popup.
     pub async fn click(&self, page: &Page) -> Result<(), CommandError> {
         if let Some(element) = &self.native {
             element.click().await.map_err(cdp_error)?;
             return Ok(());
         }
-        self.eval::<bool>(page, "el.click(); return true").await?;
-        Ok(())
-    }
-
-    pub async fn click_js(&self, page: &Page) -> Result<(), CommandError> {
-        if let Some(element) = &self.native {
-            element
-                .call_js_fn("function() { this.click(); }", false)
-                .await
-                .map_err(cdp_error)?;
+        if !self.frame_owners.is_empty() {
+            self.scroll_into_view(page).await?;
+            let point = self.clickable_point(page).await?.ok_or_else(|| {
+                target_error(
+                    ErrorCode::BrowserCommandFailed,
+                    "target has no clickable point",
+                )
+            })?;
+            page.click(point).await.map_err(cdp_error)?;
             return Ok(());
         }
         self.eval::<bool>(page, "el.click(); return true").await?;
@@ -664,10 +738,8 @@ impl ResolvedTarget {
     }
 }
 
-/// Function body with `el` bound: whether `el` takes typed text. Typing into a
-/// target that cannot (disabled, readonly, inside a disabled fieldset, a
-/// non-text input type, or a plain element) still dispatches key events, and
-/// on macOS headless Chrome that pins the browser process at full CPU.
+/// Function body with `el` bound: whether `el` takes typed text. Checked
+/// before any key is dispatched.
 pub(crate) const ACCEPTS_TEXT_SCRIPT: &str = "return !el.disabled && !el.closest('fieldset[disabled]') && ((el instanceof HTMLInputElement && !el.readOnly && !['hidden','button','submit','reset','image','file'].includes((el.type||'text').toLowerCase())) || (el instanceof HTMLTextAreaElement && !el.readOnly) || el instanceof HTMLSelectElement || el.isContentEditable);";
 
 /// The DOM backend node id for a gathered candidate, for correlating it with
@@ -871,7 +943,7 @@ pub async fn gather_candidates(
                     && candidate.state.attached
                     && candidate.state.visible
             })
-            .take(8)
+            .take(crate::MAX_DESCENDED_FRAMES)
             .map(|frame| (frame.clone(), frame_hop(frame, &candidates)))
             .collect();
         for (frame, hop) in frames {
@@ -922,35 +994,6 @@ pub async fn inspect_page_scoped_target(
         best_match_authorized: false,
     };
     Ok((observed.text, observed.html, evidence))
-}
-
-/// A re-resolvable hop for a frame element: real-id CSS, then test id, then
-/// a src attribute selector. Without one the frame's candidates could not be
-/// re-resolved at action time, so the frame is skipped entirely.
-/// A `target` that missed the page, whose `census` (frames included) holds
-/// one match inside a frame: the miss names the frame path that reaches it.
-pub fn name_frame_in_miss(
-    error: CommandError,
-    target: &TargetSpec,
-    census: Vec<Candidate>,
-) -> CommandError {
-    let framed: Vec<_> = census
-        .into_iter()
-        .filter(|candidate| !candidate.frame_path.is_empty())
-        .collect();
-    match resolve_candidates(target, &framed, &ResolutionPolicy::default()) {
-        Ok(ResolutionDecision::Resolved { candidate, .. }) => {
-            let path = serde_json::to_string(&candidate.frame_path).unwrap_or_default();
-            CommandError {
-                message: format!(
-                    "{}; the target is inside a frame: pass \"framePath\": {path}",
-                    error.message
-                ),
-                ..error
-            }
-        }
-        _ => error,
-    }
 }
 
 /// The hop that re-resolves `frame` among `candidates`: role, name and
@@ -1012,7 +1055,7 @@ struct TargetScope {
     frame_id: chromiumoxide::cdp::browser_protocol::page::FrameId,
     frame_trace: Vec<types::CandidateEvidence>,
     frame_path: Vec<types::SemanticTargetSegment>,
-    frame_owners: Vec<(Page, BackendNodeId)>,
+    frame_owners: Vec<FrameOwner>,
 }
 
 impl TargetScope {
@@ -1084,7 +1127,11 @@ async fn open_target_scope(
             tokio::time::sleep(Duration::from_millis(25)).await;
         };
         if child.session.target_id() != execution_page.target_id() {
-            frame_owners.push((execution_page.clone(), child.owner));
+            frame_owners.push(FrameOwner {
+                parent: execution_page.clone(),
+                backend_node_id: child.owner,
+                child: child.session.clone(),
+            });
         }
         execution_page = child.session;
         frame_id = child.frame.clone();
@@ -1953,8 +2000,59 @@ pub(crate) async fn frame_session(
         .map(|session| (frame, session)))
 }
 
-/// Every frame id in the page's frame tree.
-pub(crate) async fn page_frame_ids(
+/// Every frame id the page holds, its own frame tree and each frame from
+/// another site nested in it at any depth, with the sessions of those frames.
+pub(crate) async fn page_frames(
+    page: &Page,
+    browser: &BrowserHandle,
+) -> Result<
+    (
+        HashSet<chromiumoxide::cdp::browser_protocol::page::FrameId>,
+        Vec<Page>,
+    ),
+    CommandError,
+> {
+    use chromiumoxide::cdp::browser_protocol::page::FrameId;
+    use chromiumoxide::cdp::browser_protocol::target::GetTargetsParams;
+    let mut ids = frame_tree_ids(page).await?;
+    let mut sessions = Vec::new();
+    let targets = browser
+        .execute(GetTargetsParams::default())
+        .await
+        .map_err(cdp_error)?
+        .result
+        .target_infos;
+    loop {
+        let nested: Vec<_> = targets
+            .iter()
+            .filter(|target| {
+                target.r#type == "iframe"
+                    && target
+                        .parent_frame_id
+                        .as_ref()
+                        .is_some_and(|parent| ids.contains(parent))
+                    && !ids.contains(&FrameId::new(target.target_id.inner().clone()))
+            })
+            .collect();
+        if nested.is_empty() {
+            return Ok((ids, sessions));
+        }
+        for target in nested {
+            ids.insert(FrameId::new(target.target_id.inner().clone()));
+            // A frame the page removes meanwhile drops out without failing.
+            let Ok(session) = browser.get_page(target.target_id.clone()).await else {
+                continue;
+            };
+            if let Ok(frames) = frame_tree_ids(&session).await {
+                ids.extend(frames);
+                sessions.push(session);
+            }
+        }
+    }
+}
+
+/// Every frame id in the session's own frame tree.
+async fn frame_tree_ids(
     page: &Page,
 ) -> Result<HashSet<chromiumoxide::cdp::browser_protocol::page::FrameId>, CommandError> {
     let tree = page
@@ -2191,6 +2289,25 @@ fn target_error(code: ErrorCode, message: impl std::fmt::Display) -> CommandErro
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn frame_points_apply_scale_rotation_and_nested_origins() {
+        let scaled = super::frame_point(
+            chromiumoxide::layout::Point { x: 40., y: 20. },
+            &[10., 30., 310., 30., 310., 180., 10., 180.],
+            (200., 100.),
+        )
+        .unwrap();
+        assert_eq!((scaled.x, scaled.y), (70., 60.));
+        let rotated = super::frame_point(
+            scaled,
+            &[400., 100., 400., 300., 300., 300., 300., 100.],
+            (200., 100.),
+        )
+        .unwrap();
+        assert_eq!((rotated.x, rotated.y), (340., 170.));
+        assert!(super::frame_point(scaled, &[0.; 8], (0., 100.)).is_none());
+    }
+
     use super::*;
 
     fn browser_candidate(

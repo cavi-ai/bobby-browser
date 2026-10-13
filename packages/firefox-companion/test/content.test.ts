@@ -694,6 +694,24 @@ test("a11yTree includes a same-origin iframe's controls with the frame hop in th
   assert.equal(open?.target?.framePath, undefined);
 });
 
+test("a11yTree reads an untitled frame behind an unnamed hop counted among every frame", () => {
+  const document = documentFor('<iframe title="Widget frame"></iframe><iframe></iframe>');
+  const frames = document.querySelectorAll("iframe");
+  frames[0]!.contentDocument!.body.innerHTML = "<button>Named action</button>";
+  frames[1]!.contentDocument!.body.innerHTML = "<button>Untitled action</button>";
+  type Node = {
+    name?: string;
+    target?: { framePath?: Array<{ role: string; accessibleName: string; ordinal?: number }> };
+    children?: Node[];
+  };
+  const tree = executeContentAction(document, "a11yTree", { maxNodes: 32 }) as { nodes: Node[] };
+  const flat = (nodes: Node[]): Node[] => nodes.flatMap((node) => [node, ...flat(node.children ?? [])]);
+  const untitled = flat(tree.nodes).find((node) => node.name === "Untitled action");
+  assert.deepEqual(untitled?.target?.framePath, [{ role: "iframe", accessibleName: "", ordinal: 1 }]);
+  const named = flat(tree.nodes).find((node) => node.name === "Named action");
+  assert.deepEqual(named?.target?.framePath, [{ role: "iframe", accessibleName: "Widget frame" }]);
+});
+
 test("a scoped a11yTree keeps the page-wide ordinal in child frame targets", () => {
   const document = documentFor(`
     <iframe title="Widget frame"></iframe>
