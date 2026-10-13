@@ -13,8 +13,9 @@
 - `type_text` into a field the page swaps for an editor as it takes focus waits for focus to settle and types the whole value into the editor, instead of losing the first keys.
 - `intent_dismiss_obstruction` whose purpose names no control clicks a visible close or decline control the obstruction does not cover, frames from other sites included, and completes once that control's frame is gone.
 - Chromium opens each page in its own background window that acts focused, so clicks and typing on a page no longer time out while another page in the same browser is in front.
-- Snapshots list the controls inside frames from other sites with targets that click and type through the frame.
+- Snapshots list the controls inside frames from other sites with targets that click and type through the frame, and a snapshot that reaches `maxNodes` keeps frames in document order instead of leaving every frame empty.
 - A snapshot scoped to a frame from another site, or to a control in it, reads that frame and the frames directly inside it.
+- On Firefox, actions on targets inside frames work on pages with more than 128 controls instead of failing `resourceExhausted`.
 - `click_and_wait_for_download` returns a download started inside a frame from another site, also on a durable Chromium profile.
 - Intents find, fill and dismiss controls inside frames from other sites without a `framePath`.
 - Intents act on a control as soon as it is found instead of waiting up to 5 seconds.

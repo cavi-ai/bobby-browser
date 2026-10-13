@@ -3,7 +3,7 @@ function gatherCandidates(root, options = {}) {
   const maxNodes = options.maxNodes ?? Infinity;
   const maxCandidates = options.maxCandidates ?? Infinity;
   const publicMetadata = options.redact === true;
-  const selector = options.controlsOnly ? 'input,textarea,select,button,a[href],iframe,[role]' : '*';
+  const selector = options.selector || (options.controlsOnly ? 'input,textarea,select,button,a[href],iframe,[role]' : '*');
   let n=0, visited=0, truncated=false;
   const candidates=[], stamps=new Set();
   const labelledBy = element => {

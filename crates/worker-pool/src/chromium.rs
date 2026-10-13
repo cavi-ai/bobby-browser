@@ -5,6 +5,7 @@ use crate::wait::{
     WaitObservation, WaitObserver,
 };
 use crate::worker_failure::is_closed_page_message;
+use crate::{count_a11y_nodes, truncate_a11y_preorder};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Once};
@@ -2114,14 +2115,13 @@ impl crate::ObservationEngine for ChromiumWorker {
                 name_fields_by_placeholder(&frame_page, &mut result.nodes).await;
                 let (mut nodes, mut truncated) = compact_ax_tree(&result.nodes, max_nodes);
                 let owners = snapshot_iframe_owners(&result.nodes, None);
-                let emitted = count_a11y_nodes(&nodes);
                 truncated |= descend_a11y_iframes(
                     &frame_page,
                     &browser,
                     Some(&content_frame),
                     frame_path.len(),
                     &mut nodes,
-                    max_nodes.saturating_sub(emitted),
+                    max_nodes,
                     Some(&owners),
                 )
                 .await;
@@ -2157,14 +2157,13 @@ impl crate::ObservationEngine for ChromiumWorker {
             let (mut nodes, mut truncated) =
                 compact_ax_tree_from(&result.nodes, max_nodes, Some(root_id.as_ref()));
             let owners = snapshot_iframe_owners(&result.nodes, Some(root_id.as_ref()));
-            let emitted = count_a11y_nodes(&nodes);
             truncated |= descend_a11y_iframes(
                 &tree_page,
                 &browser,
                 resolved.frame_id(),
                 resolved.frame_path.len(),
                 &mut nodes,
-                max_nodes.saturating_sub(emitted),
+                max_nodes,
                 Some(&owners),
             )
             .await;
@@ -2187,19 +2186,8 @@ impl crate::ObservationEngine for ChromiumWorker {
         // The main-frame AX tree stops at `Iframe` nodes; descend one level so
         // in-frame controls are visible and their targets carry the frame hop
         // control_action can re-resolve.
-        let emitted = count_a11y_nodes(&nodes);
-        if emitted < max_nodes {
-            truncated |= descend_a11y_iframes(
-                &page,
-                &browser,
-                None,
-                0,
-                &mut nodes,
-                max_nodes - emitted,
-                None,
-            )
-            .await;
-        }
+        truncated |=
+            descend_a11y_iframes(&page, &browser, None, 0, &mut nodes, max_nodes, None).await;
         // Only a whole tree can show that a control is missing from it.
         let controls_omitted = if truncated || a11y_contains_form_control(&nodes) {
             false
@@ -4479,16 +4467,6 @@ const MAX_VISION_SCREENSHOT_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_A11Y_MAX_NODES: u32 = 256;
 const MAX_A11Y_NODES: u32 = 2048;
 
-/// Collapses Chrome's flat AXNode list into the engine-shared compact tree.
-/// Nodes Chrome marks ignored are skipped (their children are re-parented
-/// upward); generic containers without names are kept only as structure.
-fn count_a11y_nodes(nodes: &[types::AccessibilityNode]) -> usize {
-    nodes
-        .iter()
-        .map(|node| 1 + count_a11y_nodes(&node.children))
-        .sum()
-}
-
 fn a11y_contains_form_control(nodes: &[types::AccessibilityNode]) -> bool {
     nodes.iter().any(|node| {
         node.role.as_deref().is_some_and(|role| {
@@ -4524,53 +4502,52 @@ fn prepend_a11y_frame_path(
     }
 }
 
-/// Moves `frame_roots` under the `occurrence`-th parent-tree `Iframe` node with
-/// `name`; hands the roots back when no such node exists.
-fn splice_under_iframe(
-    nodes: &mut [types::AccessibilityNode],
+/// The `occurrence`-th `Iframe` owner with `name` in the parent document,
+/// without counting owners in already-spliced child documents.
+fn find_iframe_node<'a>(
+    nodes: &'a mut [types::AccessibilityNode],
     name: Option<&str>,
     occurrence: usize,
-    frame_roots: Vec<types::AccessibilityNode>,
-) -> Result<(), Vec<types::AccessibilityNode>> {
-    fn go(
-        nodes: &mut [types::AccessibilityNode],
+) -> Option<&'a mut types::AccessibilityNode> {
+    fn go<'a>(
+        nodes: &'a mut [types::AccessibilityNode],
         name: Option<&str>,
         seen: &mut usize,
         occurrence: usize,
-        frame_roots: Vec<types::AccessibilityNode>,
-    ) -> Result<(), Vec<types::AccessibilityNode>> {
-        let mut frame_roots = frame_roots;
-        for node in nodes.iter_mut() {
-            if node.role.as_deref() == Some("Iframe") && node.name.as_deref() == name {
-                if *seen == occurrence {
-                    node.children = frame_roots;
-                    return Ok(());
+    ) -> Option<&'a mut types::AccessibilityNode> {
+        for node in nodes {
+            if node.role.as_deref() == Some("Iframe") {
+                if node.name.as_deref() == name {
+                    if *seen == occurrence {
+                        return Some(node);
+                    }
+                    *seen += 1;
                 }
-                *seen += 1;
+                continue;
             }
-            frame_roots = match go(&mut node.children, name, seen, occurrence, frame_roots) {
-                Ok(()) => return Ok(()),
-                Err(roots) => roots,
-            };
+            if let Some(found) = go(&mut node.children, name, seen, occurrence) {
+                return Some(found);
+            }
         }
-        Err(frame_roots)
+        None
     }
-    go(nodes, name, &mut 0, occurrence, frame_roots)
+    go(nodes, name, &mut 0, occurrence)
 }
 
-/// Descends one level into iframes, same-process or from another site, with a
-/// shared node budget so the snapshot does not stop at `Iframe` nodes. Each
-/// frame's compacted tree, read through the session that serves it, is
-/// spliced under its parent-tree `Iframe` node and every in-frame target is
-/// stamped with the role/name/ordinal hop that re-resolves the iframe element
-/// at action time. Returns whether any frame was truncated.
+/// Descends one level into iframes, same-process or from another site, so the
+/// snapshot does not stop at `Iframe` nodes. Each frame's compacted tree, read
+/// through the session that serves it, is spliced under its parent-tree
+/// `Iframe` node and every in-frame target is stamped with the role/name/ordinal
+/// hop that re-resolves the iframe element at action time. `max_nodes` bounds
+/// the composed tree, kept in document order: a frame is read only while its
+/// owner is kept. Returns whether anything was left out.
 async fn descend_a11y_iframes(
     page: &Page,
     browser: &BrowserHandle,
     parent_frame: Option<&chromiumoxide::cdp::browser_protocol::page::FrameId>,
     frame_depth: usize,
     nodes: &mut Vec<types::AccessibilityNode>,
-    mut budget: usize,
+    max_nodes: usize,
     allowed_owners: Option<&HashSet<chromiumoxide::cdp::browser_protocol::dom::BackendNodeId>>,
 ) -> bool {
     if allowed_owners.is_some_and(HashSet::is_empty) {
@@ -4622,29 +4599,6 @@ async fn descend_a11y_iframes(
         .collect();
     let mut truncated = false;
     for candidate in scoped_iframes.iter().copied() {
-        let Ok(Some(child)) =
-            crate::targeting::owned_frame(page, Some(browser), &scope, &[], candidate).await
-        else {
-            continue;
-        };
-        if budget == 0 {
-            truncated = true;
-            break;
-        }
-        let Ok(mut tree) = child
-            .session
-            .execute(
-                chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::builder()
-                    .frame_id(child.frame)
-                    .build(),
-            )
-            .await
-        else {
-            continue;
-        };
-        name_fields_by_placeholder(&child.session, &mut tree.result.nodes).await;
-        let (mut frame_roots, frame_truncated) = compact_ax_tree(&tree.result.nodes, budget);
-        truncated |= frame_truncated;
         // Two distinct counting domains: `splice_occurrence` finds the right
         // parent-tree `Iframe` AX node (grouped by that node's own name, always
         // same-name); `hop_ordinal` is the resolver's own ranked index for
@@ -4659,6 +4613,33 @@ async fn descend_a11y_iframes(
             .iter()
             .position(|other| other.id == candidate.id)
             .unwrap_or(0);
+        // An owner missing from a full tree is past the cut; a scoped frame
+        // whose owner was omitted must not land outside it.
+        if find_iframe_node(nodes, candidate.name.as_deref(), splice_occurrence).is_none()
+            && (allowed_owners.is_some() || count_a11y_nodes(nodes) >= max_nodes)
+        {
+            truncated = true;
+            continue;
+        }
+        let Ok(Some(child)) =
+            crate::targeting::owned_frame(page, Some(browser), &scope, &[], candidate).await
+        else {
+            continue;
+        };
+        let Ok(mut tree) = child
+            .session
+            .execute(
+                chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams::builder()
+                    .frame_id(child.frame)
+                    .build(),
+            )
+            .await
+        else {
+            continue;
+        };
+        name_fields_by_placeholder(&child.session, &mut tree.result.nodes).await;
+        let (mut frame_roots, frame_truncated) = compact_ax_tree(&tree.result.nodes, max_nodes);
+        truncated |= frame_truncated;
         let visible_iframes: Vec<&dom_engine::Candidate> =
             iframes.iter().filter(|other| other.state.visible).collect();
         let hop_ordinal = iframe_hop_ordinal(&visible_iframes, candidate);
@@ -4668,28 +4649,16 @@ async fn descend_a11y_iframes(
             ordinal: hop_ordinal,
         };
         prepend_a11y_frame_path(&mut frame_roots, std::slice::from_ref(&segment));
-        budget = budget.saturating_sub(count_a11y_nodes(&frame_roots));
-        match splice_under_iframe(
-            nodes,
-            candidate.name.as_deref(),
-            splice_occurrence,
-            frame_roots,
-        ) {
-            Ok(()) => {}
-            Err(_) if allowed_owners.is_some() => {
-                // A scoped frame whose AX parent was omitted must not be
-                // appended outside that parent or exceed the node budget.
-                truncated = true;
-            }
-            Err(frame_roots) => {
-                nodes.push(types::AccessibilityNode {
-                    role: Some("Iframe".into()),
-                    name: candidate.name.clone(),
-                    children: frame_roots,
-                    ..types::AccessibilityNode::default()
-                });
-            }
+        match find_iframe_node(nodes, candidate.name.as_deref(), splice_occurrence) {
+            Some(owner) => owner.children = frame_roots,
+            None => nodes.push(types::AccessibilityNode {
+                role: Some("Iframe".into()),
+                name: candidate.name.clone(),
+                children: frame_roots,
+                ..types::AccessibilityNode::default()
+            }),
         }
+        truncated |= truncate_a11y_preorder(nodes, max_nodes);
     }
     truncated
 }
@@ -4735,6 +4704,9 @@ fn snapshot_iframe_owners(
     owners
 }
 
+/// Collapses Chrome's flat AXNode list into the engine-shared compact tree.
+/// Nodes Chrome marks ignored are skipped (their children are re-parented
+/// upward); generic containers without names are kept only as structure.
 fn compact_ax_tree(
     raw: &[chromiumoxide::cdp::browser_protocol::accessibility::AxNode],
     max_nodes: usize,
@@ -5084,6 +5056,33 @@ fn set_cookie_param(
 #[cfg(test)]
 mod tests {
     use super::bound_observed;
+
+    #[test]
+    fn iframe_lookup_counts_only_owners_in_the_parent_document() {
+        for name in [Some("Widget"), None] {
+            for parent_name in [name, Some("Other")] {
+                let mut nodes: Vec<types::AccessibilityNode> =
+                    serde_json::from_value(serde_json::json!([
+                        {"role":"Iframe","name":parent_name,"children":[
+                            {"role":"Iframe","name":name,"children":[
+                                {"role":"button","name":"Nested"}
+                            ]}
+                        ]},
+                        {"role":"Iframe","name":name,"children":[
+                            {"role":"button","name":"Sibling"}
+                        ]}
+                    ]))
+                    .unwrap();
+                let occurrence = usize::from(parent_name == name);
+                let owner = super::find_iframe_node(&mut nodes, name, occurrence).unwrap();
+                assert_eq!(
+                    owner.children[0].name.as_deref(),
+                    Some("Sibling"),
+                    "a child document changed its parent's frame ordinals"
+                );
+            }
+        }
+    }
 
     #[test]
     fn only_a_durable_profile_runs_its_installed_extensions() {
