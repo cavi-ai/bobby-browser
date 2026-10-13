@@ -14,7 +14,7 @@ use chromiumoxide::cdp::browser_protocol::dom::{
 };
 use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
 use chromiumoxide::cdp::browser_protocol::page::{
-    CaptureScreenshotFormat, GetFrameTreeParams, Viewport,
+    CaptureScreenshotFormat, GetFrameTreeParams, GetLayoutMetricsParams, Viewport,
 };
 use chromiumoxide::cdp::js_protocol::runtime::{
     CallFunctionOnParams, EvaluateParams, ExecutionContextId, ReleaseObjectGroupParams,
@@ -260,11 +260,19 @@ impl ResolvedTarget {
                 return Ok(PointerHit::OutOfBounds);
             };
             point = mapped;
+            // The hit test reads document coordinates: add the parent's scroll offset.
+            let scroll = owner
+                .parent
+                .execute(GetLayoutMetricsParams::default())
+                .await
+                .map_err(cdp_error)?
+                .result
+                .css_layout_viewport;
             let hit = owner
                 .parent
                 .execute(GetNodeForLocationParams::new(
-                    point.x.round() as i64,
-                    point.y.round() as i64,
+                    (point.x + scroll.page_x as f64).round() as i64,
+                    (point.y + scroll.page_y as f64).round() as i64,
                 ))
                 .await
                 .map_err(cdp_error)?
