@@ -77,3 +77,11 @@ async fn framed_pointer_regressions() {
     cases::nested_frames_from_other_sites_list_and_act(&rig).await;
     cases::a_click_lands_inside_a_bordered_frame_from_another_site(&rig).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Firefox and paired test profile"]
+async fn bounded_frame_snapshot_regressions() {
+    let rig = Rig::firefox().await;
+    cases::a_bounded_snapshot_lists_frames_in_document_order(&rig).await;
+    cases::snapshot_frame_owners_ignore_nested_frames_with_the_same_name(&rig).await;
+}

@@ -4502,7 +4502,8 @@ fn prepend_a11y_frame_path(
     }
 }
 
-/// The `occurrence`-th parent-tree `Iframe` node with `name`, in document order.
+/// The `occurrence`-th `Iframe` owner with `name` in the parent document,
+/// without counting owners in already-spliced child documents.
 fn find_iframe_node<'a>(
     nodes: &'a mut [types::AccessibilityNode],
     name: Option<&str>,
@@ -4515,11 +4516,14 @@ fn find_iframe_node<'a>(
         occurrence: usize,
     ) -> Option<&'a mut types::AccessibilityNode> {
         for node in nodes {
-            if node.role.as_deref() == Some("Iframe") && node.name.as_deref() == name {
-                if *seen == occurrence {
-                    return Some(node);
+            if node.role.as_deref() == Some("Iframe") {
+                if node.name.as_deref() == name {
+                    if *seen == occurrence {
+                        return Some(node);
+                    }
+                    *seen += 1;
                 }
-                *seen += 1;
+                continue;
             }
             if let Some(found) = go(&mut node.children, name, seen, occurrence) {
                 return Some(found);
@@ -5052,6 +5056,33 @@ fn set_cookie_param(
 #[cfg(test)]
 mod tests {
     use super::bound_observed;
+
+    #[test]
+    fn iframe_lookup_counts_only_owners_in_the_parent_document() {
+        for name in [Some("Widget"), None] {
+            for parent_name in [name, Some("Other")] {
+                let mut nodes: Vec<types::AccessibilityNode> =
+                    serde_json::from_value(serde_json::json!([
+                        {"role":"Iframe","name":parent_name,"children":[
+                            {"role":"Iframe","name":name,"children":[
+                                {"role":"button","name":"Nested"}
+                            ]}
+                        ]},
+                        {"role":"Iframe","name":name,"children":[
+                            {"role":"button","name":"Sibling"}
+                        ]}
+                    ]))
+                    .unwrap();
+                let occurrence = usize::from(parent_name == name);
+                let owner = super::find_iframe_node(&mut nodes, name, occurrence).unwrap();
+                assert_eq!(
+                    owner.children[0].name.as_deref(),
+                    Some("Sibling"),
+                    "a child document changed its parent's frame ordinals"
+                );
+            }
+        }
+    }
 
     #[test]
     fn only_a_durable_profile_runs_its_installed_extensions() {

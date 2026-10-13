@@ -91,6 +91,7 @@ macro_rules! every_case {
             framed_pointer_checks_parent_overlays,
             framed_pointer_respects_frame_transforms,
             a_bounded_snapshot_lists_frames_in_document_order,
+            snapshot_frame_owners_ignore_nested_frames_with_the_same_name,
             snapshot_lists_controls_inside_an_untitled_frame_from_another_site,
             download_starts_inside_a_frame_from_another_site,
             nested_frames_from_other_sites_list_and_act,
@@ -4583,6 +4584,70 @@ pub async fn a_bounded_snapshot_lists_frames_in_document_order(rig: &Rig) {
     assert_eq!(
         pressed["status"], "completed",
         "the click never landed: {pressed}"
+    );
+    live.close().await;
+}
+
+/// A nested frame with the same name as a sibling owner does not receive
+/// that sibling's controls or change its target ordinal.
+pub async fn snapshot_frame_owners_ignore_nested_frames_with_the_same_name(rig: &Rig) {
+    let inner = FixtureSite::spawn(vec![(
+        "/inner",
+        Route::Html(page("Inner", "<button>Inner action</button>")),
+    )])
+    .await;
+    let first = page(
+        "First",
+        &format!(
+            r#"<button>First action</button><iframe title="Widget" src="{}"></iframe>
+        <script>top.postMessage('first-ready','*')</script>"#,
+            inner.url("/inner"),
+        ),
+    );
+    let frames = FixtureSite::spawn(vec![
+        ("/first", Route::Html(first)),
+        ("/second", Route::Html(page("Second", r#"<button onclick="top.postMessage('pressed','*')">Second action</button><script>top.postMessage('second-ready','*')</script>"#))),
+    ]).await;
+    let host = page(
+        "Host",
+        &format!(
+            r#"<iframe title="Widget" src="{}"></iframe><iframe title="Widget" src="{}"></iframe>
+        <p role="status" aria-label="Result">idle</p>
+        <script>addEventListener('message',e=>document.querySelector('[aria-label="Result"]').textContent+=' '+e.data)</script>"#,
+            frames.url("/first").replace("127.0.0.1", "localhost"),
+            frames.url("/second").replace("127.0.0.1", "localhost"),
+        ),
+    );
+    let site = FixtureSite::spawn(vec![("/host", Route::Html(host))]).await;
+    let live = Live::open(rig, &site.url("/host")).await;
+    for ready in ["first-ready", "second-ready"] {
+        assert_eq!(wait_for_result(&live, ready).await["status"], "completed");
+    }
+    let snapshot = live.snapshot(json!({})).await;
+    let first_owner = find_node(&snapshot, "Iframe", Some("Widget"))
+        .or_else(|| find_node(&snapshot, "iframe", Some("Widget")))
+        .expect("first frame owner");
+    assert!(
+        find_node(first_owner, "button", Some("First action")).is_some(),
+        "{snapshot}"
+    );
+    assert!(
+        find_node(first_owner, "button", Some("Second action")).is_none(),
+        "a sibling's controls were inserted into a nested frame: {snapshot}"
+    );
+    let mut targets = Vec::new();
+    targets_under(&snapshot, &mut targets);
+    let second = targets
+        .iter()
+        .find(|(role, target)| *role == "button" && target["accessibleName"] == "Second action")
+        .map(|(_, target)| (*target).clone())
+        .unwrap_or_else(|| panic!("second frame is missing: {snapshot}"));
+    assert_eq!(second["framePath"][0]["ordinal"], 1, "{second}");
+    let clicked = live.call("click", json!({"target":second})).await;
+    assert_eq!(clicked["status"], "completed", "{clicked}");
+    assert_eq!(
+        wait_for_result(&live, "pressed").await["status"],
+        "completed"
     );
     live.close().await;
 }
