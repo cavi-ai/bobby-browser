@@ -2318,34 +2318,6 @@ impl FirefoxCompanionWorker {
             .collect()
     }
 
-    /// [`Self::resolve_input_target`] for an action: a target with no frame
-    /// path that misses the page but resolves inside a frame names the frame
-    /// path that reaches it.
-    async fn resolve_action_target(
-        &self,
-        page_id: &PageId,
-        top_context: &str,
-        selector: &str,
-        target: Option<&types::TargetSpec>,
-    ) -> Result<(String, String), CommandError> {
-        let error = match self
-            .resolve_input_target(page_id, top_context, selector, target)
-            .await
-        {
-            Err(error) if error.code == ErrorCode::TargetNotFound => error,
-            resolved => return resolved,
-        };
-        let Some(target) =
-            target.filter(|target| target.frame_path.is_empty() && target.shadow_path.is_empty())
-        else {
-            return Err(error);
-        };
-        match worker_pool::ObservationEngine::collect_candidates(self, page_id, target).await {
-            Ok(census) => Err(worker_pool::name_frame_in_miss(error, target, census)),
-            Err(_) => Err(error),
-        }
-    }
-
     async fn resolve_input_target(
         &self,
         page_id: &PageId,
@@ -4691,7 +4663,7 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
         // snapshot's projection; snapshot names can differ from resolver names.
         let top_context = self.context(page_id).await?;
         let (context, selector) = self
-            .resolve_action_target(page_id, &top_context, "", Some(&target))
+            .resolve_input_target(page_id, &top_context, "", Some(&target))
             .await?;
         let control = self
             .describe_control(&context, &selector, &command.target)
@@ -4807,7 +4779,7 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
             })?;
         let replaced = async || -> Result<Option<FormControl>, CommandError> {
             let (context, selector) = self
-                .resolve_action_target(page_id, &top_context, "", Some(&target))
+                .resolve_input_target(page_id, &top_context, "", Some(&target))
                 .await?;
             self.describe_control(&context, &selector, &command.target)
                 .await
@@ -4951,7 +4923,7 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
                 (context, shared_id)
             } else {
                 let (context, selector) = self
-                    .resolve_action_target(
+                    .resolve_input_target(
                         page_id,
                         &top_context,
                         &command.selector,
@@ -5055,7 +5027,7 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
         .await?;
         let context = self.context(page_id).await?;
         let (context, selector) = self
-            .resolve_action_target(
+            .resolve_input_target(
                 page_id,
                 &context,
                 &command.selector,
@@ -5186,7 +5158,7 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
             }
         }
         let (context, selector) = self
-            .resolve_action_target(
+            .resolve_input_target(
                 page_id,
                 &context,
                 &command.selector,

@@ -924,35 +924,6 @@ pub async fn inspect_page_scoped_target(
     Ok((observed.text, observed.html, evidence))
 }
 
-/// A re-resolvable hop for a frame element: real-id CSS, then test id, then
-/// a src attribute selector. Without one the frame's candidates could not be
-/// re-resolved at action time, so the frame is skipped entirely.
-/// A `target` that missed the page, whose `census` (frames included) holds
-/// one match inside a frame: the miss names the frame path that reaches it.
-pub fn name_frame_in_miss(
-    error: CommandError,
-    target: &TargetSpec,
-    census: Vec<Candidate>,
-) -> CommandError {
-    let framed: Vec<_> = census
-        .into_iter()
-        .filter(|candidate| !candidate.frame_path.is_empty())
-        .collect();
-    match resolve_candidates(target, &framed, &ResolutionPolicy::default()) {
-        Ok(ResolutionDecision::Resolved { candidate, .. }) => {
-            let path = serde_json::to_string(&candidate.frame_path).unwrap_or_default();
-            CommandError {
-                message: format!(
-                    "{}; the target is inside a frame: pass \"framePath\": {path}",
-                    error.message
-                ),
-                ..error
-            }
-        }
-        _ => error,
-    }
-}
-
 /// The hop that re-resolves `frame` among `candidates`: role, name and
 /// ordinal, the shape every frame path carries.
 fn frame_hop(frame: &Candidate, candidates: &[Candidate]) -> Box<TargetSpec> {

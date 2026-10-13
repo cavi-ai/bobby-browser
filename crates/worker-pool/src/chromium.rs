@@ -1251,12 +1251,7 @@ impl ChromiumWorker {
         target: Option<&types::TargetSpec>,
     ) -> Result<crate::targeting::ResolvedTarget, CommandError> {
         let browser = self.browser_handle().await?;
-        match resolve_browser_target(page_id, page, selector, target, Some(&browser)).await {
-            Err(error) if error.code == ErrorCode::TargetNotFound => {
-                Err(name_the_frame_holding(page, target, &browser, error).await)
-            }
-            resolved => resolved,
-        }
+        resolve_browser_target(page_id, page, selector, target, Some(&browser)).await
     }
 
     async fn register_page(&self, page_id: PageId, page: Page) -> Result<(), CommandError> {
@@ -4320,25 +4315,6 @@ async fn ensure_editable_control(
         layer: ErrorLayer::Driver,
         retryable: false,
     })
-}
-
-/// A target with no frame path that misses the main frame but resolves inside
-/// a child frame: the miss names the frame path that reaches it.
-async fn name_the_frame_holding(
-    page: &Page,
-    target: Option<&types::TargetSpec>,
-    browser: &BrowserHandle,
-    error: CommandError,
-) -> CommandError {
-    let Some(target) =
-        target.filter(|target| target.frame_path.is_empty() && target.shadow_path.is_empty())
-    else {
-        return error;
-    };
-    match gather_candidates(page, target, Some(browser)).await {
-        Ok(census) => crate::name_frame_in_miss(error, target, census),
-        Err(_) => error,
-    }
 }
 
 /// Text entry refuses a field an open dialog covers, as a click on it would be.

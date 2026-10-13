@@ -1806,11 +1806,98 @@ async fn browser_execute(
     let RuntimeCommand::Primitive(command) = &envelope.command else {
         unreachable!("intent commands use execute_intent");
     };
-    if let (Some(page_id), Some(target)) = (page_id, primitive_action_target(command)) {
+    let action_target = page_id.zip(primitive_action_target(command));
+    if let Some((page_id, target)) = &action_target {
         let budget = wait_budget(envelope.deadline, TARGET_APPEAR_CAP);
-        await_target(lease, page_id, target, budget).await;
+        await_target(lease, page_id, target.clone(), budget).await;
     }
-    let mut evidence = match command {
+    let mut evidence = match dispatch_primitive(lease, page_id, command, reason).await {
+        Err(failure) if failure.error.code == ErrorCode::TargetNotFound => {
+            let Some((page_id, target)) = action_target.as_ref().filter(|(_, target)| {
+                target.frame_path.is_empty() && target.shadow_path.is_empty()
+            }) else {
+                return Err(failure);
+            };
+            let census = worker_pool::observation_or_default(lease.worker().observation())
+                .collect_candidates(page_id, target)
+                .await
+                .unwrap_or_default();
+            return Err(AdaptiveFailure {
+                error: name_framed_miss(failure.error, target, &census),
+                evidence: failure.evidence,
+            });
+        }
+        dispatched => dispatched?,
+    };
+    let (bytes, sha256) = evidence
+        .iter()
+        .find_map(|item| match item {
+            Evidence::Download { bytes, sha256, .. } => Some((Some(*bytes), Some(sha256.clone()))),
+            _ => None,
+        })
+        .unwrap_or((None, None));
+    evidence.push(execution_evidence(
+        path,
+        reason,
+        state_version,
+        ExecutionMetrics::browser(bytes, sha256),
+    ));
+    Ok(AdaptiveExecution {
+        evidence,
+        used_browser: true,
+        prepared_http: None,
+    })
+}
+
+/// A main-frame `target` that missed: when the page's `census` (frames
+/// included) holds one match inside a frame, the miss names its frame path.
+fn name_framed_miss(
+    error: CommandError,
+    target: &TargetSpec,
+    census: &[dom_engine::Candidate],
+) -> CommandError {
+    let framed: Vec<_> = census
+        .iter()
+        .filter(|candidate| !candidate.frame_path.is_empty())
+        .cloned()
+        .collect();
+    match dom_engine::resolve_candidates(target, &framed, &dom_engine::ResolutionPolicy::default())
+    {
+        Ok(dom_engine::ResolutionDecision::Resolved { candidate, .. }) => {
+            // Each hop names only the fields it sets.
+            let unset = serde_json::to_value(TargetSpec::default()).unwrap_or_default();
+            let hops: Vec<serde_json::Value> = candidate
+                .frame_path
+                .iter()
+                .map(|hop| {
+                    let mut hop = serde_json::to_value(hop).unwrap_or_default();
+                    if let (Some(fields), Some(unset)) = (hop.as_object_mut(), unset.as_object()) {
+                        fields.retain(|key, value| unset.get(key) != Some(value));
+                    }
+                    hop
+                })
+                .collect();
+            let path = serde_json::Value::from(hops);
+            CommandError {
+                message: format!(
+                    "{}; the target is inside a frame: pass \"framePath\": {path}",
+                    error.message
+                ),
+                ..error
+            }
+        }
+        _ => error,
+    }
+}
+
+/// Runs one primitive command on the leased worker.
+async fn dispatch_primitive(
+    lease: &WorkerLease,
+    page_id: Option<&PageId>,
+    command: &PrimitiveCommand,
+    reason: ExecutionReason,
+) -> Result<Vec<Evidence>, AdaptiveFailure> {
+    Ok(match command {
         PrimitiveCommand::Navigate(command) => {
             worker_pool::navigation_or_default(lease.worker().navigation())
                 .navigate(page_id.expect("validated page id"), command)
@@ -1962,24 +2049,6 @@ async fn browser_execute(
         PrimitiveCommand::DownloadUrl(_) => {
             return Err(equivalence_unproven(reason).into());
         }
-    };
-    let (bytes, sha256) = evidence
-        .iter()
-        .find_map(|item| match item {
-            Evidence::Download { bytes, sha256, .. } => Some((Some(*bytes), Some(sha256.clone()))),
-            _ => None,
-        })
-        .unwrap_or((None, None));
-    evidence.push(execution_evidence(
-        path,
-        reason,
-        state_version,
-        ExecutionMetrics::browser(bytes, sha256),
-    ));
-    Ok(AdaptiveExecution {
-        evidence,
-        used_browser: true,
-        prepared_http: None,
     })
 }
 
@@ -2118,8 +2187,8 @@ async fn extract_structured(
 #[cfg(test)]
 mod tests {
     use super::{
-        await_gathered_target, metadata_name, settlement_validation_issues, staging_name,
-        truncate_utf8, SecureDownloadRoot, StagingCleanup, TARGET_REGATHER_INTERVAL,
+        await_gathered_target, metadata_name, name_framed_miss, settlement_validation_issues,
+        staging_name, truncate_utf8, SecureDownloadRoot, StagingCleanup, TARGET_REGATHER_INTERVAL,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
@@ -2213,6 +2282,48 @@ mod tests {
             elapsed < budget + TARGET_REGATHER_INTERVAL,
             "waited {elapsed:?}"
         );
+    }
+
+    fn missed() -> types::CommandError {
+        types::CommandError {
+            code: types::ErrorCode::TargetNotFound,
+            message: "no target candidate matched".into(),
+            layer: types::ErrorLayer::Driver,
+            retryable: false,
+        }
+    }
+
+    fn framed_close_button(name: &str) -> dom_engine::Candidate {
+        dom_engine::Candidate {
+            frame_path: vec![Box::new(types::TargetSpec {
+                role: Some("iframe".into()),
+                accessible_name: Some(name.into()),
+                ..types::TargetSpec::default()
+            })],
+            ..close_button()
+        }
+    }
+
+    #[test]
+    fn a_miss_names_the_frame_holding_the_one_match() {
+        let named = name_framed_miss(missed(), &close_target(), &[framed_close_button("Ad")]);
+        assert_eq!(named.code, types::ErrorCode::TargetNotFound);
+        assert_eq!(
+            named.message,
+            r#"no target candidate matched; the target is inside a frame: pass "framePath": [{"accessibleName":"Ad","role":"iframe"}]"#
+        );
+    }
+
+    #[test]
+    fn a_miss_without_one_framed_match_is_left_as_is() {
+        for census in [
+            Vec::new(),
+            vec![close_button()],
+            vec![framed_close_button("Ad"), framed_close_button("Promo")],
+        ] {
+            let named = name_framed_miss(missed(), &close_target(), &census);
+            assert_eq!(named.message, missed().message);
+        }
     }
 
     fn form_control() -> types::FormControl {
