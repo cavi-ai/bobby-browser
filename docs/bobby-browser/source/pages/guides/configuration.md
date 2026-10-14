@@ -195,14 +195,18 @@ Presets for `bobby vision connect --provider`:
 | Provider | `base_url` | `model` | `api_key_env` |
 |---|---|---|---|
 | `openai` | `https://api.openai.com/v1` | `gpt-4o-mini` | `OPENAI_API_KEY` |
-| `ollama` | `http://127.0.0.1:11434` | `llava` | none |
+| `ollama` | `http://127.0.0.1:11434` | `llava:7b` | none |
 | `lmstudio` | `http://127.0.0.1:1234/v1` | `local-model` | none |
 | `mlx` | local | selected model | none |
 | `custom` | `--base-url` | `--model` | `--api-key-env` |
 
 Override with `--base-url` and `--model`. For LM Studio, use the server URL the app shows.
 
-Ollama reads a model name without a tag as `:latest`. When Ollama has another tag of the default model but not `:latest`, `bobby install`, `bobby vision connect` without `--model`, and `bobby doctor --fix` use the installed tag.
+Interactive install and `bobby vision connect` list available models after you choose a provider. Type to search, select the model, or choose **Refresh** or **Back**. Ollama and LM Studio report image support, so known text-only models are excluded. OpenAI-compatible providers that omit image metadata show **image support not reported** beside their models; check the provider's model documentation before choosing one. MLX lists cached image models and offers download choices with confirmation.
+
+Model lists are cached in memory for 60 seconds, separately for each provider, endpoint and credential. Refresh queries the provider again; a selected list entry is checked again before it is saved. Provider requests time out after 5 seconds. If discovery is unavailable, you can enter an exact model ID manually.
+
+For unattended setup, use `--yes --model <id>` with `vision connect`, or `--yes --vision-model <id>` with `install`. An explicit model is retained. With no explicit model or existing selection, Ollama uses the default only if it is available, or the sole installed image model; multiple alternatives require a selection. When Ollama cannot be reached, setup can write the tagged default `llava:7b`; readiness is checked when activation is requested. Ollama reads an untagged model name as `:latest`; `bobby doctor --fix` can repair an untagged selection to an installed tag.
 
 The proxy reads at most 1 MiB from an upstream response, counted after decompression, and rejects larger replies. Extracted values are capped at 64 KiB. Errors report the provider and HTTP status without the upstream body.
 

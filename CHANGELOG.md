@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- Enabling vision keeps the selected provider's model and endpoint instead of replacing them with the install defaults. New Ollama setup resolves an available model when discovery succeeds and uses a tagged default when discovery is unavailable. `--vision-model` works for every install provider.
 - `intent_fill` and `control_action` act on a control the form snapshot names differently, such as one named by its title or inside a shadow root, instead of failing `targetNotFound`.
 - Clearing a field, by `clear` or `type_text` with `clearFirst`, humanized or not, sends select-all and then Backspace once the page has seen the selection, so rich-text editors that restore direct DOM edits clear completely.
 - On Firefox, `clear` empties a text input instead of only unchecking it.
@@ -103,6 +104,7 @@
 
 ### Added
 
+- Install and `vision connect` query available models and offer a searchable picker with Refresh and Back. Ollama and LM Studio use vision capability metadata; MLX lists cached image models; providers without image metadata are labeled explicitly.
 - A browser selection's `chromium` entries give a durable Chromium profile its own directory, and sessions attach to a Chrome already running there.
 - `bobby install --restart-runtime` stops this scope's running runtime owner after the install; `bobby install` ends with one line naming a still-running owner when it replaced the PATH `bobby`.
 - `bobby runtime restart [--force]` and `make restart` stop this scope's runtime owner and start a new one, showing what is attached, asking before disconnecting agents, and saving the impact report under `runtime/restart-snapshots/`.

@@ -938,7 +938,7 @@ const MLX_MODELS: [(&str, &str); 4] = [
 struct VisionInstallState {
     enabled: bool,
     provider: String,
-    model: String,
+    profile: config::VisionProviderConfig,
     collect_training_data: bool,
     training_data_dir: PathBuf,
 }
@@ -948,10 +948,9 @@ impl Default for VisionInstallState {
         Self {
             enabled: true,
             provider: "ollama".into(),
-            model: crate::vision_connect::preset("ollama")
+            profile: crate::vision_connect::preset("ollama")
                 .expect("ollama preset")
-                .1
-                .model,
+                .1,
             collect_training_data: false,
             training_data_dir: "data/vision".into(),
         }
@@ -964,16 +963,11 @@ impl VisionInstallState {
         let (_, profile) = crate::vision_connect::preset(&provider)
             .ok_or_else(|| anyhow!("unsupported install vision provider {provider:?}"))?;
         self.enabled = true;
-        self.provider = provider;
-        self.model = profile.model;
+        if self.provider != provider {
+            self.provider = provider;
+            self.profile = profile;
+        }
         Ok(())
-    }
-
-    fn profile(&self) -> Result<config::VisionProviderConfig> {
-        let (_, mut profile) = crate::vision_connect::preset(&self.provider)
-            .ok_or_else(|| anyhow!("unsupported install vision provider {:?}", self.provider))?;
-        profile.model.clone_from(&self.model);
-        Ok(profile)
     }
 }
 
@@ -1133,50 +1127,64 @@ fn configure_mlx_model_interactive(state: &mut VisionInstallState) -> Result<boo
     if !mlx_supported_host() {
         anyhow::bail!("MLX vision requires Apple Silicon macOS; choose Ollama on this host");
     }
-    if cached_hugging_face_model(&state.model)? {
-        return Ok(true);
-    }
-    let already_downloaded = Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt("Do you already have a compatible MLX vision model downloaded?")
-        .default(false)
-        .interact()?;
-    if already_downloaded {
-        let model = dialoguer::Input::<String>::with_theme(&ColorfulTheme::default())
-            .with_prompt("Hugging Face model id")
-            .default(state.model.clone())
-            .interact_text()?;
-        if !cached_hugging_face_model(&model)? {
-            anyhow::bail!("no complete Hugging Face cache snapshot found for {model}");
+    let mut refresh = false;
+    loop {
+        let cached = crate::vision_models::discover("mlx", &state.profile, refresh)?;
+        let mut models: Vec<String> = cached.iter().map(|model| model.id.clone()).collect();
+        let mut labels: Vec<String> = models.iter().map(|id| format!("{id} (cached)")).collect();
+        for (description, id) in MLX_MODELS {
+            if !models.iter().any(|model| model == id) {
+                models.push(id.to_owned());
+                labels.push(format!("{description} — {id} (download required)"));
+            }
         }
-        state.model = model;
+        labels.extend([
+            "Enter a Hugging Face model ID".into(),
+            "Refresh cached models".into(),
+            "Back without downloading".into(),
+        ]);
+        let Some(choice) = dialoguer::FuzzySelect::with_theme(&ColorfulTheme::default())
+            .with_prompt("MLX vision model — type to search")
+            .items(&labels)
+            .default(
+                models
+                    .iter()
+                    .position(|model| model == &state.profile.model)
+                    .unwrap_or(0),
+            )
+            .interact_opt()?
+        else {
+            return Ok(false);
+        };
+        if choice == models.len() + 2 {
+            return Ok(false);
+        }
+        if choice == models.len() + 1 {
+            refresh = true;
+            continue;
+        }
+        let model = if choice == models.len() {
+            dialoguer::Input::<String>::with_theme(&ColorfulTheme::default())
+                .with_prompt("Hugging Face model ID")
+                .interact_text()?
+        } else {
+            models[choice].clone()
+        };
+        if cached_hugging_face_model(&model)? {
+            state.profile.model = model;
+            return Ok(true);
+        }
+        if !Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt(format!("Download {model}?"))
+            .default(false)
+            .interact()?
+        {
+            return Ok(false);
+        }
+        download_and_verify_mlx_model(&model)?;
+        state.profile.model = model;
         return Ok(true);
     }
-    let labels = [
-        format!("{} — {}", MLX_MODELS[0].0, MLX_MODELS[0].1),
-        format!("{} — {}", MLX_MODELS[1].0, MLX_MODELS[1].1),
-        format!("{} — {}", MLX_MODELS[2].0, MLX_MODELS[2].1),
-        format!("{} — {}", MLX_MODELS[3].0, MLX_MODELS[3].1),
-        "Back without downloading".to_owned(),
-    ];
-    let choice = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt("Download an MLX model (resumable Hugging Face cache)")
-        .items(&labels)
-        .default(0)
-        .interact()?;
-    if choice == MLX_MODELS.len() {
-        return Ok(false);
-    }
-    let model = MLX_MODELS[choice].1;
-    if !Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt(format!("Download {model}?"))
-        .default(false)
-        .interact()?
-    {
-        return Ok(false);
-    }
-    download_and_verify_mlx_model(model)?;
-    state.model = model.to_owned();
-    Ok(true)
 }
 
 fn choose_vision_interactive(state: &mut VisionInstallState) -> Result<bool> {
@@ -1202,19 +1210,29 @@ fn choose_vision_interactive(state: &mut VisionInstallState) -> Result<bool> {
             "openai" => 4,
             _ => 1,
         };
-        match Select::with_theme(&ColorfulTheme::default())
+        let choice = Select::with_theme(&ColorfulTheme::default())
             .with_prompt("Vision setup")
             .items(&labels)
             .default(if state.enabled { default } else { 0 })
-            .interact()?
-        {
+            .interact()?;
+        match choice {
             0 => {
                 state.enabled = false;
                 return Ok(true);
             }
-            1 => {
-                state.select_provider("ollama")?;
-                return Ok(true);
+            1 | 3 | 4 => {
+                let previous = state.clone();
+                let provider = match choice {
+                    1 => "ollama",
+                    3 => "lmstudio",
+                    _ => "openai",
+                };
+                state.select_provider(provider)?;
+                if let Some(model) = crate::vision_models::pick(provider, &state.profile)? {
+                    state.profile.model = model;
+                    return Ok(true);
+                }
+                *state = previous;
             }
             2 => {
                 let previous = state.clone();
@@ -1224,14 +1242,6 @@ fn choose_vision_interactive(state: &mut VisionInstallState) -> Result<bool> {
                 }
                 *state = previous;
             }
-            3 => {
-                state.select_provider("lmstudio")?;
-                return Ok(true);
-            }
-            4 => {
-                state.select_provider("openai")?;
-                return Ok(true);
-            }
             5 => state.collect_training_data = !state.collect_training_data,
             6 => return Ok(false),
             _ => unreachable!(),
@@ -1240,12 +1250,12 @@ fn choose_vision_interactive(state: &mut VisionInstallState) -> Result<bool> {
 }
 
 fn apply_vision_install(config_path: &Path, state: &VisionInstallState) -> Result<String> {
-    let profile = state.profile()?;
+    let profile = &state.profile;
     config::set_vision_install_state(
         config_path,
         state.enabled,
         &state.provider,
-        &profile,
+        profile,
         state.collect_training_data,
         &state.training_data_dir,
     )
@@ -1254,7 +1264,7 @@ fn apply_vision_install(config_path: &Path, state: &VisionInstallState) -> Resul
         "vision {} with {} / {} (training collection {}) in {}",
         if state.enabled { "enabled" } else { "disabled" },
         state.provider,
-        state.model,
+        state.profile.model,
         if state.collect_training_data {
             "on"
         } else {
@@ -1333,41 +1343,76 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         || collect_training_data
         || no_collect_training_data;
     let configure_vision = use_defaults || vision_named;
+    let interactive = !yes
+        && hosts.is_empty()
+        && !skill
+        && !project_skill
+        && !skill_claude
+        && !skill_openclaw
+        && !skill_hermes
+        && !companion
+        && !cli
+        && !vision_named
+        && !force;
     if no_vision && (vision_provider.is_some() || vision_model.is_some() || download_vision_model) {
         anyhow::bail!("--no-vision cannot be combined with provider, model, or download flags");
-    }
-    if vision_model.is_some() && vision_provider.as_deref() != Some("mlx") {
-        anyhow::bail!("--vision-model currently requires --vision-provider mlx");
     }
     let mut vision_state = VisionInstallState {
         enabled: !no_vision,
         training_data_dir: training_data_dir.clone(),
         ..VisionInstallState::default()
     };
+    let config_path = crate::resolve_config_path(config.clone());
+    let mut model_selected = vision_model.is_some();
+    if (configure_vision || interactive) && config_path.exists() {
+        let existing = config::AppConfig::load(&config_path)?;
+        if let Some((provider, profile)) = existing.vision.selected_provider() {
+            vision_state.provider = provider.to_owned();
+            vision_state.profile = profile.clone();
+            model_selected = vision_model.is_some()
+                || vision_provider
+                    .as_deref()
+                    .is_none_or(|requested| requested.trim().eq_ignore_ascii_case(provider));
+        }
+    }
     if let Some(provider) = vision_provider.as_deref() {
         vision_state.select_provider(provider)?;
     }
     if let Some(model) = vision_model.as_deref() {
-        vision_state.model = model.to_owned();
+        if model.trim().is_empty() {
+            anyhow::bail!("--vision-model must not be empty");
+        }
+        vision_state.profile.model = model.trim().to_owned();
     }
     if collect_training_data {
         vision_state.collect_training_data = true;
     } else if no_collect_training_data {
         vision_state.collect_training_data = false;
     }
-    let config_path = crate::resolve_config_path(config.clone());
-    if configure_vision && vision_state.provider == "mlx" {
+    let pick_model = !yes
+        && !interactive
+        && configure_vision
+        && vision_state.enabled
+        && vision_model.is_none()
+        && std::io::IsTerminal::is_terminal(&std::io::stdin())
+        && std::io::IsTerminal::is_terminal(&std::io::stdout());
+    if configure_vision
+        && vision_state.enabled
+        && vision_state.provider == "mlx"
+        && !interactive
+        && !pick_model
+    {
         if !mlx_supported_host() {
             anyhow::bail!("MLX vision requires Apple Silicon macOS; choose Ollama on this host");
         }
-        if !cached_hugging_face_model(&vision_state.model)? {
+        if !cached_hugging_face_model(&vision_state.profile.model)? {
             if !download_vision_model {
                 anyhow::bail!(
                     "MLX model {} is not cached; pass --download-vision-model or run interactively",
-                    vision_state.model
+                    vision_state.profile.model
                 );
             }
-            download_and_verify_mlx_model(&vision_state.model)?;
+            download_and_verify_mlx_model(&vision_state.profile.model)?;
         }
     } else if download_vision_model {
         anyhow::bail!("--download-vision-model requires --vision-provider mlx");
@@ -1564,17 +1609,6 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         }),
     });
 
-    let interactive = !yes
-        && hosts.is_empty()
-        && !skill
-        && !project_skill
-        && !skill_claude
-        && !skill_openclaw
-        && !skill_hermes
-        && !companion
-        && !cli
-        && !vision_named
-        && !force;
     if interactive {
         if !std::io::IsTerminal::is_terminal(&std::io::stdin())
             || !std::io::IsTerminal::is_terminal(&std::io::stdout())
@@ -1588,7 +1622,7 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
             labels.push(format!(
                 "Vision: {}{}",
                 if vision_state.enabled {
-                    format!("{} / {}", vision_state.provider, vision_state.model)
+                    format!("{} / {}", vision_state.provider, vision_state.profile.model)
                 } else {
                     "off".to_owned()
                 },
@@ -1633,6 +1667,24 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
         }
     }
 
+    if pick_model {
+        if vision_state.provider == "mlx" {
+            if !configure_mlx_model_interactive(&mut vision_state)? {
+                println!("nothing changed");
+                return Ok(());
+            }
+        } else {
+            let Some(model) =
+                crate::vision_models::pick(&vision_state.provider, &vision_state.profile)?
+            else {
+                println!("nothing changed");
+                return Ok(());
+            };
+            vision_state.profile.model = model;
+        }
+        model_selected = true;
+    }
+
     let companion_selected = items
         .iter()
         .any(|item| item.enabled && item.label.starts_with("Firefox companion:"));
@@ -1644,12 +1696,18 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
     if configure_vision || interactive {
         if vision_state.enabled
             && vision_state.provider == "ollama"
-            && (readiness_requested || interactive)
+            && !interactive
+            && vision_model.is_none()
         {
-            if let Some(tag) =
-                crate::vision_readiness::installed_ollama_tag(&vision_state.profile()?)
-            {
-                vision_state.model = tag;
+            if model_selected {
+                if let Some(tag) =
+                    crate::vision_readiness::installed_ollama_tag(&vision_state.profile)
+                {
+                    vision_state.profile.model = tag;
+                }
+            } else {
+                vision_state.profile.model =
+                    crate::vision_models::default_ollama_model(&vision_state.profile)?;
             }
         }
         drop(crate::vision_token::ensure_managed_vision_token(
@@ -1679,11 +1737,11 @@ pub fn run_install(bootstrap_path: &Path, options: InstallOptions) -> Result<()>
             }
         }
     }
-    if vision_state.enabled && (readiness_requested || interactive) {
-        let profile = vision_state.profile()?;
+    if vision_state.enabled && (readiness_requested || interactive || pick_model) {
+        let profile = &vision_state.profile;
         match crate::vision_readiness::check_provider_readiness(
             &vision_state.provider,
-            &profile,
+            profile,
             &crate::vision_readiness::ReadinessOptions {
                 timeout: std::time::Duration::from_secs(45),
                 allow_download: false,
@@ -1934,7 +1992,7 @@ mod install_tests {
     fn vision_state_survives_back_off_and_reenable_transitions() {
         let mut state = VisionInstallState::default();
         state.select_provider("mlx").unwrap();
-        state.model = MLX_MODELS[1].1.into();
+        state.profile.model = MLX_MODELS[1].1.into();
         state.collect_training_data = true;
         let before_back = state.clone();
 
@@ -1942,12 +2000,12 @@ mod install_tests {
         assert_eq!(state, before_back);
         state.enabled = false;
         assert_eq!(state.provider, "mlx");
-        assert_eq!(state.model, MLX_MODELS[1].1);
+        assert_eq!(state.profile.model, MLX_MODELS[1].1);
         assert!(state.collect_training_data);
 
         state.enabled = true;
         assert_eq!(state.provider, "mlx");
-        assert_eq!(state.model, MLX_MODELS[1].1);
+        assert_eq!(state.profile.model, MLX_MODELS[1].1);
         assert!(state.collect_training_data);
     }
 
@@ -1956,7 +2014,7 @@ mod install_tests {
         let state = VisionInstallState::default();
         assert!(state.enabled);
         assert_eq!(state.provider, "ollama");
-        assert_eq!(state.model, "llava");
+        assert_eq!(state.profile.model, "llava:7b");
         assert_eq!(
             MLX_MODELS.map(|(_, model)| model),
             [
@@ -1991,6 +2049,33 @@ mod install_tests {
     }
 
     #[test]
+    fn enabling_vision_preserves_the_selected_ollama_model_and_endpoint() {
+        let _lock = INSTALL_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "[vision]\nprovider = \"ollama\"\n[vision.providers.ollama]\nbase_url = \"http://127.0.0.1:9\"\nmodel = \"my-vision:Q4_K_M\"\n",
+        )
+        .unwrap();
+        run_install(
+            &dir.path().join("bootstrap.env"),
+            InstallOptions {
+                vision: true,
+                yes: true,
+                config: Some(config_path.clone()),
+                training_data_dir: dir.path().join("training"),
+                ..InstallOptions::default()
+            },
+        )
+        .unwrap();
+        let loaded = config::AppConfig::load(&config_path).unwrap();
+        let (_, profile) = loaded.vision.selected_provider().unwrap();
+        assert_eq!(profile.model, "my-vision:Q4_K_M");
+        assert_eq!(profile.base_url, "http://127.0.0.1:9");
+    }
+
+    #[test]
     fn noninteractive_vision_only_install_writes_ollama_without_other_install_work() {
         let _lock = INSTALL_ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -2011,7 +2096,13 @@ mod install_tests {
         let loaded = config::AppConfig::load(&config_path).unwrap();
         assert!(loaded.nodes.contains_key("vision"));
         assert_eq!(loaded.vision.provider.as_deref(), Some("ollama"));
-        assert_eq!(loaded.vision.selected_provider().unwrap().1.model, "llava");
+        assert!(loaded
+            .vision
+            .selected_provider()
+            .unwrap()
+            .1
+            .model
+            .contains(':'));
         assert!(!loaded.vision.collect_training_data);
     }
 

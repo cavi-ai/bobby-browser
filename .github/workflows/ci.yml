@@ -70,6 +70,9 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+      - name: Vision model selection
+        run: python3 scripts/test_vision_model_selection.py
+
       - name: Version and naming agreement
         # One tag ships binaries, npm, and the crate, so a version that
         # disagrees between manifests ships a mislabelled artifact. npm reached

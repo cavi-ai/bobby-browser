@@ -27,7 +27,7 @@ anyhow.workspace = true
 base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
-dialoguer.workspace = true
+dialoguer = { workspace = true, features = ["fuzzy-select"] }
 dirs.workspace = true
 getrandom.workspace = true
 hex.workspace = true

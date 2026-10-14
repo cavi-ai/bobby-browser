@@ -15,6 +15,7 @@ mod vision_collect;
 mod vision_commands;
 mod vision_connect;
 mod vision_login;
+mod vision_models;
 mod vision_readiness;
 mod vision_solve;
 mod vision_token;
