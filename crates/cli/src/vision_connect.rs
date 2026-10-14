@@ -57,6 +57,13 @@ struct ResolvedProfile {
 
 /// Configure vision provider settings and persist them to config.toml.
 pub fn connect(opts: ConnectOpts) -> Result<()> {
+    if opts
+        .model
+        .as_deref()
+        .is_some_and(|model| model.trim().is_empty())
+    {
+        anyhow::bail!("--model must not be empty");
+    }
     let config_path = crate::resolve_config_path(opts.config.clone());
     if opts.backend.eq_ignore_ascii_case("acp") {
         if opts.activate || opts.download_model {
@@ -112,11 +119,17 @@ pub fn connect(opts: ConnectOpts) -> Result<()> {
     if opts.download_model && resolved.provider_name != "mlx" {
         anyhow::bail!("--download-model requires --provider mlx");
     }
-    if resolved.provider_name == "ollama" && opts.model.is_none() {
-        if let Some(tag) = crate::vision_readiness::installed_ollama_tag(&resolved.profile) {
-            println!("Using installed Ollama model {tag}");
-            resolved.profile.model = tag;
-        }
+    if opts.model.is_none() && !opts.yes {
+        let Some(model) = crate::vision_models::pick(&resolved.provider_name, &resolved.profile)?
+        else {
+            println!("nothing changed");
+            return Ok(());
+        };
+        resolved.profile.model = model;
+    }
+
+    if resolved.provider_name == "ollama" && opts.model.is_none() && opts.yes {
+        resolved.profile.model = crate::vision_models::default_ollama_model(&resolved.profile)?;
     }
 
     upsert_vision_platform(
@@ -272,7 +285,7 @@ fn resolve_interactive(opts: &ConnectOpts) -> Result<ResolvedProfile> {
                 .filter(|value| !value.is_empty())
             {
                 Some(value) => value.to_owned(),
-                None => prompt_line("Model", None)?,
+                None => String::new(),
             };
             let api_key_env = if opts.api_key_env.is_some() {
                 normalize_api_key_env(opts.api_key_env.as_deref())
@@ -305,7 +318,7 @@ fn resolve_interactive(opts: &ConnectOpts) -> Result<ResolvedProfile> {
     println!("  4) mlx      — local MLX vision (canonical server, Apple Silicon)");
     println!("  5) custom   — other OpenAI-compatible endpoint");
     let choice = prompt_line("Choice [1-5]", Some("4"))?;
-    let resolved = match choice.trim() {
+    let mut resolved = match choice.trim() {
         "1" | "openai" => preset("openai")
             .map(|(name, profile)| ResolvedProfile {
                 provider_name: name,
@@ -334,7 +347,7 @@ fn resolve_interactive(opts: &ConnectOpts) -> Result<ResolvedProfile> {
             provider_name: prompt_line("Provider name", Some("custom"))?,
             profile: VisionProviderConfig {
                 base_url: prompt_line("Base URL", None)?,
-                model: prompt_line("Model", None)?,
+                model: String::new(),
                 api_key_env: normalize_api_key_env(
                     prompt_optional("API key env var (empty for none)")?.as_deref(),
                 ),
@@ -342,6 +355,15 @@ fn resolve_interactive(opts: &ConnectOpts) -> Result<ResolvedProfile> {
         },
         other => return Err(anyhow!("invalid choice {other:?}")),
     };
+    if let Some(model) = opts.model.as_deref() {
+        resolved.profile.model = model.trim().to_owned();
+    }
+    if let Some(base_url) = opts.base_url.as_deref() {
+        resolved.profile.base_url = base_url.trim().to_owned();
+    }
+    if opts.api_key_env.is_some() {
+        resolved.profile.api_key_env = normalize_api_key_env(opts.api_key_env.as_deref());
+    }
     Ok(resolved)
 }
 
@@ -354,7 +376,7 @@ pub(crate) fn preset(name: &str) -> Option<(String, VisionProviderConfig)> {
         },
         "ollama" => VisionProviderConfig {
             base_url: "http://127.0.0.1:11434".into(),
-            model: "llava".into(),
+            model: vision_proxy::OLLAMA_DEFAULT_MODEL.into(),
             api_key_env: None,
         },
         "lmstudio" => VisionProviderConfig {
@@ -549,7 +571,7 @@ mod tests {
 
         let (_, ollama) = preset("ollama").unwrap();
         assert_eq!(ollama.base_url, "http://127.0.0.1:11434");
-        assert_eq!(ollama.model, "llava");
+        assert_eq!(ollama.model, "llava:7b");
         assert!(ollama.api_key_env.is_none());
 
         let (_, lmstudio) = preset("lmstudio").unwrap();
