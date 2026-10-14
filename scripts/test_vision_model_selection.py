@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import select
 import subprocess
 import sys
@@ -12,6 +13,8 @@ import time
 import tomllib
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+ANSI_ESCAPE = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 class ModelApi(BaseHTTPRequestHandler):
@@ -63,8 +66,10 @@ class VisionModelSelection(unittest.TestCase):
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 120, 0, 0))
         env = os.environ.copy()
+        env.pop("NO_COLOR", None)
         env.update({
             "TERM": "xterm-256color",
+            "CLICOLOR_FORCE": "1",
             "BOBBY_BROWSER_BOOTSTRAP_ENV": str(self.path / "bootstrap.env"),
             "BOBBY_VISION_TOKEN": "model-selection-test-token-0123456789",
         })
@@ -83,17 +88,21 @@ class VisionModelSelection(unittest.TestCase):
                     except OSError:
                         break
                     transcript.extend(data)
-                    if not entered and b"chosen-vision:custom" in transcript:
+                    # A selected row can style each character independently.
+                    if not entered and b"chosen-vision:custom" in ANSI_ESCAPE.sub(b"", transcript):
                         os.write(master, b"chosen-vision:custom\r")
                         entered = True
-            child.wait(timeout=3)
+            try:
+                child.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.fail("model picker did not finish:\n" + ANSI_ESCAPE.sub(b"", transcript).decode(errors="replace")[-5000:])
             self.assertEqual(child.returncode, 0, transcript.decode(errors="replace"))
         finally:
             if child.poll() is None:
                 child.terminate()
                 child.wait(timeout=3)
             os.close(master)
-        self.assertNotIn(b"text-only:8b", transcript)
+        self.assertNotIn(b"text-only:8b", ANSI_ESCAPE.sub(b"", transcript))
         saved = tomllib.loads(self.config.read_text())["vision"]["providers"]["ollama"]
         self.assertEqual(saved["model"], "chosen-vision:custom")
         self.assertEqual(saved["base_url"], self.endpoint)
