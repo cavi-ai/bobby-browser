@@ -44,7 +44,18 @@ struct InstrumentedVisionAssist {
 #[async_trait]
 impl VisionAssist for InstrumentedVisionAssist {
     async fn propose(&self, request: VisionProposeRequest) -> Result<VisionProposal, CommandError> {
-        self.inner.propose(request).await
+        let started = std::time::Instant::now();
+        let provider_mode =
+            observability::provider_health::provider_mode_name(self.inner.provider_mode());
+        tracing::info!(provider_mode, "vision.provider.started");
+        let result = self.inner.propose(request).await;
+        tracing::info!(
+            provider_mode,
+            proposal_returned = result.is_ok(),
+            elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+            "vision.provider.finished"
+        );
+        result
     }
 
     fn operational_metrics(

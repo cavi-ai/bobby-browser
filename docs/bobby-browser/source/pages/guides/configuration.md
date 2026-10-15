@@ -139,6 +139,19 @@ See [Authenticated CDP](../surfaces/cdp.md).
 | `format` | `json` | `json` or `pretty` |
 | `sink` | `stdout` | Log destination |
 
+Command logs include a `command` span with `command_id`, `workflow_id`,
+`attempt_id`, `session_id`, command `family` and `class`, and `runtime_version`.
+`command.finished` records the returned outcome status and `elapsed_ms`. If the
+command future is dropped before returning, the status is `interrupted`; use the
+durable journal and recovery APIs to reconcile effects before retrying.
+
+Vision calls emit `vision.provider.started` and `vision.provider.finished` within
+the command span. The latter includes `provider_mode`, `elapsed_ms`, and
+`proposal_returned`. A returned proposal still requires validation and does not
+mean an action succeeded. These events omit command payloads, URLs, page content,
+screenshots, and provider error text. Logging filters and operator retention
+apply; these diagnostics do not replace durable history or enforce provider health.
+
 `bobby doctor` can check vision health against objectives under `[observability.slo]`. Both are optional, and an unset one is not evaluated.
 
 | Key | Meaning |
