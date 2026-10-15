@@ -70,6 +70,21 @@ These fields are opt-ins. The capability is checked at the listed operation befo
 | `fingerprint` | `browser:fingerprint` | `createSession` | yes | yes | — | — | Chromium, Firefox |
 | `humanize` | `browser:humanize` | `createSession` | yes | yes | — | — | Chromium, Firefox |
 
+## Engine-specific option support
+
+`GET /v1/runtime` reports configured implementation features in `capabilities`, such as `engine:firefox:captureScreenshot.viewport`. Session engine, credential capabilities, execution policy, and connection health still govern each call. These options supplement the operation and policy tables above.
+
+| Operation or option | `chromium` | `firefox` |
+|---|---|---|
+| `captureScreenshot.viewport` | yes | yes |
+| `captureScreenshot.fullPage` | yes | no |
+| `captureScreenshot.clip` | yes | no |
+| `setCookies.httpOnly` | yes | no |
+| `deleteCookies.httpOnly` | yes | no |
+| `setFocusEmulation` | yes | no |
+| `setEmulatedMedia` | yes | no |
+| `waitFor.networkQuiet` | yes | yes |
+
 <!-- END GENERATED INTERFACE SUPPORT -->
 
 ## Privileged primitives (beyond `browser:mutate`)

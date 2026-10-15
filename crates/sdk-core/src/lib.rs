@@ -459,6 +459,14 @@ impl RuntimeService {
         if self.vision_provider_configured {
             capabilities.push("vision-provider".to_string());
         }
+        if let Some(workers) = &self.workers {
+            let features: std::collections::BTreeSet<_> = workers
+                .engine_feature_support()
+                .iter()
+                .flat_map(|support| support.capabilities())
+                .collect();
+            capabilities.extend(features);
+        }
         RuntimeInfo {
             storage_integrity: [
                 ("commandIdempotency", self.idempotency.integrity_issue()),

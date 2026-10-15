@@ -381,6 +381,12 @@ impl ChromiumWorkerFactory {
 
 #[async_trait]
 impl WorkerFactory for ChromiumWorkerFactory {
+    fn engine_feature_support(&self) -> Vec<crate::EngineFeatureSupport> {
+        vec![crate::EngineFeatureSupport::for_engine(
+            companion_protocol::BrowserEngine::Chromium,
+        )]
+    }
+
     async fn launch(&self, session_id: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
         let profile_dir = self
             .durable_profile_dir
