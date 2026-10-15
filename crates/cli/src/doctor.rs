@@ -637,6 +637,18 @@ mod recovery_guidance_tests {
         report.fail("storage-checkpoints-dir", "directory missing".into());
         assert_eq!(report.next_action().unwrap().command, "bobby doctor --fix");
     }
+
+    #[test]
+    fn a_busy_ledger_does_not_imply_damaged_history() {
+        let mut report = DoctorReport::default();
+        report.warn("idempotency-commands", "ledger in use".into());
+        assert!(report.next_action().is_none());
+        assert!(!report
+            .check("idempotency-commands")
+            .unwrap()
+            .detail
+            .contains("reconcile"));
+    }
 }
 
 fn check_detail_with_fix(check: &DoctorCheck) -> String {
@@ -675,7 +687,7 @@ pub(crate) struct DoctorReport {
 
 impl DoctorReport {
     pub(crate) fn record(&mut self, status: DoctorStatus, name: &str, detail: String) {
-        let detail = if status != DoctorStatus::Ok && durable_history_check(name) {
+        let detail = if status == DoctorStatus::Fail && durable_history_check(name) {
             format!("{detail}; {DURABLE_HISTORY_GUIDANCE}")
         } else {
             detail
