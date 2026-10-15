@@ -2928,6 +2928,7 @@ fn command_outcome_properties() -> Value {
     json!({
         "status":{"type":"string","enum":["completed","retryableFailure","needsReconciliation","policyDenied","resourceExhausted","restarted","failed"]},
         "commandId":id(),
+        "verificationStatus":{"type":"string","enum":["notCompleted","notReported","conditionObserved","settled","validationRejected"]},
         "evidence":{"type":"array","items":{"type":"object"}},
         "error":{"type":"object"},
         "retryAfterMs":{"type":"integer","minimum":0},
