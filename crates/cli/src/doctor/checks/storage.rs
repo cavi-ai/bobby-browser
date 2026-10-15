@@ -1,6 +1,5 @@
 //! storage diagnostics and probes.
 use super::DoctorContext;
-#[cfg(test)]
 use crate::doctor::DoctorStatus;
 use crate::doctor::{
     idempotency_ledgers, AppConfig, DoctorReport, Duration, Path, PathBuf, Result,
@@ -128,21 +127,29 @@ pub(in crate::doctor) fn record_jsonl_health(
         return;
     }
     if health.torn_tail {
-        report.warn(
+        report.record(
+            if matches!(name, "command-journal" | "scheduler-journal") {
+                DoctorStatus::Fail
+            } else {
+                DoctorStatus::Warn
+            },
             name,
             format!(
-                "torn tail · {} records · {} bytes; run `bobby doctor --fix`",
-                health.records, health.bytes
+                "torn tail in {} · {} records · {} bytes",
+                path.display(),
+                health.records,
+                health.bytes
             ),
         );
         return;
     }
-    if health.incompatible_records > 0 && name == "scheduler-journal" {
+    if health.incompatible_records > 0 && matches!(name, "command-journal" | "scheduler-journal") {
         report.fail(
             name,
             format!(
-                "{} unreadable records; scheduler history is read-only and requires repair",
-                health.incompatible_records
+                "{} unreadable records in {}; execution history requires repair",
+                health.incompatible_records,
+                path.display()
             ),
         );
         return;
@@ -323,9 +330,15 @@ pub(in crate::doctor) fn record_operational_slos(
             "runtime storage has no reported integrity issue".into(),
         );
     } else {
+        let stores = info
+            .storage_integrity
+            .iter()
+            .map(|issue| format!("{}: {}", issue.store, issue.reason))
+            .collect::<Vec<_>>()
+            .join(", ");
         report.fail(
             "storage-integrity",
-            "durable history requires repair; affected mutations are disabled".into(),
+            format!("durable history requires repair ({stores}); affected mutations are disabled"),
         );
     }
     match &info.provider_health {
@@ -475,6 +488,73 @@ pub(in crate::doctor) struct JsonlHealth {
 #[cfg(test)]
 mod slo_tests {
     use super::*;
+
+    #[test]
+    fn recovery_guidance_for_damaged_execution_history_preserves_uncertainty() {
+        for name in ["command-journal", "scheduler-journal"] {
+            for (torn_tail, incompatible_records) in [(true, 0), (false, 1)] {
+                let mut report = DoctorReport::default();
+                record_jsonl_health(
+                    &mut report,
+                    name,
+                    Path::new("history.jsonl"),
+                    JsonlHealth {
+                        exists: true,
+                        records: 3,
+                        bytes: 100,
+                        torn_tail,
+                        incompatible_records,
+                        corrupt_line: None,
+                    },
+                );
+                let check = report.check(name).unwrap();
+                assert_eq!(check.status, DoctorStatus::Fail, "{name}: {}", check.detail);
+                assert!(
+                    check.detail.contains("preserve") && check.detail.contains("reconcile"),
+                    "{}",
+                    check.detail
+                );
+                assert!(!check.detail.contains("run `bobby doctor --fix`"));
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_guidance_identifies_the_affected_runtime_stores() {
+        let mut info = runtime_info(None, &observability::OperationalMetrics::default());
+        info.storage_integrity.push(types::StorageIntegrityIssue {
+            store: "commandIdempotency".into(),
+            reason: "unreadableLedger".into(),
+        });
+        let mut report = DoctorReport::default();
+        record_operational_slos(&mut report, &AppConfig::default(), Some(&info));
+        let detail = &report.check("storage-integrity").unwrap().detail;
+        assert!(
+            detail.contains("commandIdempotency") && detail.contains("unreadableLedger"),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn recovery_guidance_does_not_modify_damaged_ledgers_or_create_locks() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.storage.journal_path = root.path().join("commands.jsonl");
+        config.storage.scheduler_journal_path = root.path().join("jobs.jsonl");
+        let damaged = b"{\"schemaVersion\":99,\"entries\":[]}\n";
+        for (_, path) in idempotency_ledgers(&config) {
+            std::fs::write(path, damaged).unwrap();
+        }
+        let mut report = DoctorReport::default();
+        record_idempotency_ledgers(&mut report, &config);
+        assert_eq!(report.failures(), 3);
+        for (name, path) in idempotency_ledgers(&config) {
+            assert_eq!(std::fs::read(&path).unwrap(), damaged);
+            assert!(!path.with_extension("lock").exists());
+            assert!(report.check(name).unwrap().detail.contains("preserve"));
+        }
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 3);
+    }
 
     fn health_snapshot(
         status: types::ProviderHealthStatus,
