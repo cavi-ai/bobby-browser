@@ -53,6 +53,22 @@ A recovery decision is to resume, restart, or reconcile. When bobby cannot prove
 
 ## Optional follow-up observations
 
+MCP command results include `verificationStatus`. The SDKs classify the same
+typed evidence with Rust's `CommandOutcome::verification_status()`, TypeScript's
+`commandVerificationStatus(outcome)`, and Python's `command_verification_status(outcome)`.
+HTTP command responses retain their existing shape.
+
+| Status | What the evidence establishes |
+|---|---|
+| `notCompleted` | The command did not return `completed`; inspect its outcome and error. |
+| `notReported` | No wait or submit-settlement evidence was reported. A plain click may have completed. |
+| `conditionObserved` | A recorded wait condition was observed. Read that condition to determine what it proves. |
+| `settled` | Submission settled without reported client-side validation rejection. Server acceptance is not established. |
+| `validationRejected` | The submission reported client-side validation rejection. Repair the form before an explicit resubmission. |
+
+These classifications do not authorize retries. Diagnostic strings and optional
+follow-up observations never promote an action to a confirmed business result.
+
 Some MCP actions return a follow-up observation as `postStateStatus`: `available`, `unavailable` or `notRequested`. If it is `unavailable`, the action itself still succeeded and `postState` is omitted. Read fresh state before the next step. Do not repeat a successful action because the observation failed.
 
 ## Storage problems and uncertain jobs

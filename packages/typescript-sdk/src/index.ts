@@ -14,3 +14,4 @@ export * from "./controls.js";
 export * from "./errors.js";
 export * from "./intents.js";
 export * from "./validators.js";
+export * from "./verification.js";
