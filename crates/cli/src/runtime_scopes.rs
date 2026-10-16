@@ -515,6 +515,10 @@ async fn ensure_owner_locked(
             use std::os::unix::process::CommandExt;
             unsafe {
                 command.pre_exec(|| {
+                    // The detached owner must not keep its launcher's pipes or
+                    // other descriptors alive. Close on exec so Rust's spawn
+                    // error pipe remains usable if setsid or exec fails.
+                    close_fds::set_fds_cloexec(3, &[]);
                     if libc::setsid() == -1 {
                         Err(std::io::Error::last_os_error())
                     } else {
