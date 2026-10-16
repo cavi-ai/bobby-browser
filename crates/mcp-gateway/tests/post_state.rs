@@ -195,6 +195,10 @@ async fn boundary_click_carries_post_state_on_success_and_omits_it_on_failure() 
         completed["result"]["structuredContent"]["status"], "completed",
         "{completed}"
     );
+    assert_eq!(
+        completed["result"]["structuredContent"]["verificationStatus"],
+        "notReported"
+    );
     assert_post_state_matches_fresh_observe(&live, &completed, &session_id, &page_id, &mut next_id)
         .await;
 }
@@ -336,6 +340,14 @@ async fn intent_submit_and_verify_carries_post_state_on_success_and_omits_it_on_
         completed["result"]["structuredContent"]["status"], "completed",
         "{completed}"
     );
+    assert_eq!(
+        failed["result"]["structuredContent"]["verificationStatus"],
+        "notCompleted"
+    );
+    assert_eq!(
+        completed["result"]["structuredContent"]["verificationStatus"],
+        "conditionObserved"
+    );
     assert_post_state_matches_fresh_observe(&live, &completed, &session_id, &page_id, &mut next_id)
         .await;
 }
@@ -465,6 +477,7 @@ async fn optional_observation_failure_preserves_completed_action_and_reports_bou
     .await;
     let content = &response["result"]["structuredContent"];
     assert_eq!(content["status"], "completed", "{response}");
+    assert_eq!(content["verificationStatus"], "notReported", "{response}");
     assert!(content["postState"].is_null());
     assert_eq!(
         content["postStateStatus"]["status"], "unavailable",

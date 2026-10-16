@@ -1,9 +1,11 @@
 mod accessibility_targets;
 mod chromium;
 mod engine;
+mod engine_features;
 mod page_behavior;
 mod worker_failure;
 pub use engine::*;
+pub use engine_features::{EngineFeature, EngineFeatureSupport};
 pub use page_behavior::PageBehavior;
 mod fingerprint_host;
 mod form_snapshot;
@@ -249,6 +251,12 @@ fn unsupported_error() -> CommandError {
 
 #[async_trait]
 pub trait WorkerFactory: Send + Sync {
+    /// Configured implementation features. Unknown factories report none;
+    /// these declarations never grant authority or change dispatch behavior.
+    fn engine_feature_support(&self) -> Vec<EngineFeatureSupport> {
+        Vec::new()
+    }
+
     async fn launch(&self, session_id: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError>;
 
     async fn release_session(&self, _session_id: &SessionId) {}
@@ -565,6 +573,10 @@ impl WorkerPool {
 
     pub fn can_select(&self, preference: &EnginePreference) -> bool {
         self.inner.factory.can_select(preference)
+    }
+
+    pub fn engine_feature_support(&self) -> Vec<EngineFeatureSupport> {
+        self.inner.factory.engine_feature_support()
     }
 
     pub async fn replace_session(

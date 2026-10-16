@@ -792,6 +792,12 @@ impl FirefoxCompanionFactory {
 
 #[async_trait]
 impl WorkerFactory for FirefoxCompanionFactory {
+    fn engine_feature_support(&self) -> Vec<worker_pool::EngineFeatureSupport> {
+        vec![worker_pool::EngineFeatureSupport::for_engine(
+            BrowserEngine::Firefox,
+        )]
+    }
+
     async fn launch(&self, session_id: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
         validate_lease(&self.lease)?;
         let transport: Arc<dyn BidiTransport> = match &self.shared_transport {
@@ -6164,6 +6170,30 @@ impl worker_pool::CaptureEngine for FirefoxCompanionWorker {
 
 #[async_trait]
 impl worker_pool::PageConfigurationEngine for FirefoxCompanionWorker {
+    async fn set_focus_emulation(
+        &self,
+        _page_id: &PageId,
+        _command: &types::SetFocusEmulationCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(driver_error(
+            ErrorCode::BrowserCommandFailed,
+            "Firefox does not support setFocusEmulation; select Chromium for this operation",
+            false,
+        ))
+    }
+
+    async fn set_emulated_media(
+        &self,
+        _page_id: &PageId,
+        _command: &types::SetEmulatedMediaCommand,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        Err(driver_error(
+            ErrorCode::BrowserCommandFailed,
+            "Firefox does not support setEmulatedMedia; select Chromium for this operation",
+            false,
+        ))
+    }
+
     async fn emulate(
         &self,
         page_id: &PageId,
@@ -6324,7 +6354,7 @@ impl worker_pool::WebStateEngine for FirefoxCompanionWorker {
             })?;
         let urls: Vec<&str> = command.urls.iter().map(String::as_str).collect();
         let mut records = Vec::new();
-        for cookie in cookies.iter().take(2048) {
+        for cookie in cookies {
             let domain = cookie
                 .get("domain")
                 .and_then(Value::as_str)
@@ -6332,6 +6362,9 @@ impl worker_pool::WebStateEngine for FirefoxCompanionWorker {
             let path = cookie.get("path").and_then(Value::as_str).unwrap_or("/");
             if !urls.is_empty() && !urls.iter().any(|url| cookie_matches_url(domain, path, url)) {
                 continue;
+            }
+            if records.len() == 2048 {
+                return Err(driver_error(ErrorCode::InvalidRequest, "Firefox cookie result exceeds the 2048-cookie bound; narrow the requested URLs", false));
             }
             records.push(types::CookieRecord {
                 name: cookie
@@ -6434,6 +6467,11 @@ impl worker_pool::WebStateEngine for FirefoxCompanionWorker {
         let Some(Evidence::CookieState { cookies, .. }) = current.first() else {
             return Ok(current);
         };
+        if cookies.iter().any(|cookie| {
+            cookie.http_only && (command.names.is_empty() || command.names.contains(&cookie.name))
+        }) {
+            return Err(driver_error(ErrorCode::InvalidRequest, "Firefox cannot delete HttpOnly cookies through document.cookie; select Chromium for this operation", false));
+        }
         for cookie in cookies {
             if !command.names.is_empty() && !command.names.contains(&cookie.name) {
                 continue;
