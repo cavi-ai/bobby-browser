@@ -522,8 +522,8 @@ pub async fn j4_upload_hidden_and_visible(rig: &Rig, dirs: &Dirs) {
     live.close().await;
 }
 
-/// A window.open popup is listed, acted in and closed, then the agent
-/// returns to the opener and targets a control inside a same-origin iframe
+/// A window.open popup is identified from its evidence, acted in and closed.
+/// The agent returns to the opener and targets a control inside a same-origin iframe
 /// from the snapshot. Acting on the closed popup fails instead of landing
 /// on the opener.
 pub async fn j5_popup_and_frame(rig: &Rig, _dirs: &Dirs) {
@@ -556,16 +556,16 @@ pub async fn j5_popup_and_frame(rig: &Rig, _dirs: &Dirs) {
         )
         .await;
     assert_completed(&opened, "click_and_wait_for_popup");
-    let listed = rig
-        .tool("page_list", json!({"sessionId":live.session_id}))
-        .await;
-    let ids = reported(&listed, "pageId");
     let opener = live.page_id.as_str().expect("page id").to_owned();
-    let popup_id = ids
+    let popup = opened["evidence"]
+        .as_array()
+        .expect("popup command evidence")
         .iter()
-        .find(|id| **id != opener)
-        .unwrap_or_else(|| panic!("page_list does not show the popup: {listed}"))
-        .clone();
+        .find(|item| item["kind"] == "popup")
+        .unwrap_or_else(|| panic!("the command did not identify the popup: {opened}"));
+    assert_eq!(popup["openerPageId"], live.page_id);
+    let popup_id = popup["pageId"].as_str().expect("popup page id").to_owned();
+    assert_ne!(popup_id, opener, "the popup must differ from its opener");
 
     let acked = rig
         .tool(
@@ -597,6 +597,10 @@ pub async fn j5_popup_and_frame(rig: &Rig, _dirs: &Dirs) {
         !reported(&after, "pageId").contains(&popup_id),
         "page_list still shows the closed popup: {after}"
     );
+    assert!(
+        reported(&after, "pageId").contains(&opener),
+        "closing the popup removed its opener: {after}"
+    );
     let stale = rig
         .tool(
             "click",
@@ -624,8 +628,8 @@ pub async fn j5_popup_and_frame(rig: &Rig, _dirs: &Dirs) {
     live.close().await;
 }
 
-/// Hop between two origins by link and by navigate, with a snapshot
-/// after every hop, then close the session and start a new one.
+/// Hop between two origins by link and by navigate, reusing verified
+/// post-state after the link, then close and start a new session.
 pub async fn j6_cross_site_navigation_recovery(rig: &Rig, _dirs: &Dirs) {
     let b = FixtureSite::spawn(vec![(
         "/b",
@@ -661,9 +665,13 @@ pub async fn j6_cross_site_navigation_recovery(rig: &Rig, _dirs: &Dirs) {
         )
         .await;
     assert_completed(&followed, "cross-origin link to B");
-    let snapshot = live.snapshot(json!({})).await;
-    assert_completed(&snapshot, "snapshot after the hop to B");
-    assert_node(&snapshot, "heading", Some("Site B"));
+    assert_eq!(followed["postStateStatus"]["status"], "available");
+    let post_state = &followed["postState"];
+    assert_completed(post_state, "post-state after the hop to B");
+    assert_eq!(post_state["sessionId"], live.session_id);
+    assert_eq!(post_state["pageId"], live.page_id);
+    assert_eq!(post_state["workflowId"], followed["workflowId"]);
+    assert_node(post_state, "heading", Some("Site B"));
 
     for (url, heading, what) in [
         (a.url("/a2"), "Site A again", "navigate back to A"),
