@@ -802,6 +802,40 @@ async fn worker(bidi: Arc<FakeBidi>, observer: Arc<FakeObserver>) -> FirefoxComp
 }
 
 #[tokio::test]
+async fn unsupported_firefox_configuration_names_the_operation_before_browser_calls() {
+    let bidi = FakeBidi::new(Vec::new());
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let before = bidi.calls.lock().await.len();
+    let page = PageId::new();
+    let focus = worker_pool::PageConfigurationEngine::set_focus_emulation(
+        &worker,
+        &page,
+        &types::SetFocusEmulationCommand { enabled: true },
+    )
+    .await
+    .unwrap_err();
+    let media = worker_pool::PageConfigurationEngine::set_emulated_media(
+        &worker,
+        &page,
+        &types::SetEmulatedMediaCommand {
+            media: "screen".into(),
+            features: BTreeMap::new(),
+        },
+    )
+    .await
+    .unwrap_err();
+    for (error, operation) in [(focus, "setFocusEmulation"), (media, "setEmulatedMedia")] {
+        assert_eq!(error.code, ErrorCode::BrowserCommandFailed);
+        assert!(!error.retryable);
+        assert!(
+            error.message.contains(operation) && error.message.contains("Chromium"),
+            "{error:?}"
+        );
+    }
+    assert_eq!(bidi.calls.lock().await.len(), before);
+}
+
+#[tokio::test]
 async fn typed_capture_domain_preserves_firefox_unsupported_mode() {
     let bidi = FakeBidi::new(vec![]);
     let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
@@ -822,6 +856,75 @@ async fn typed_capture_domain_preserves_firefox_unsupported_mode() {
         bidi.calls.lock().await.len(),
         before,
         "unsupported capture must not contact the page"
+    );
+}
+
+#[tokio::test]
+async fn firefox_http_only_cookie_deletion_refuses_before_any_cookie_write() {
+    let cookies = json!({"cookies":[
+        {"name":"normal","domain":"example.test","path":"/","value":{"type":"string","value":"public"}},
+        {"name":"session","domain":"example.test","path":"/","httpOnly":true,"value":{"type":"string","value":"private"}}
+    ]});
+    let bidi = FakeBidi::new(vec![Ok(json!({"context":"cookies"})), Ok(cookies)]);
+    let worker = worker(bidi.clone(), FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+    let before = bidi.calls.lock().await.len();
+    let error = worker_pool::WebStateEngine::delete_cookies(
+        &worker,
+        &page,
+        &types::DeleteCookiesCommand {
+            urls: vec![],
+            names: vec!["normal".into(), "session".into()],
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::InvalidRequest);
+    assert!(error.message.contains("HttpOnly") && error.message.contains("Chromium"));
+    assert!(!error.retryable);
+    let calls = bidi.calls.lock().await;
+    assert_eq!(
+        calls[before..]
+            .iter()
+            .map(|call| call.method.as_str())
+            .collect::<Vec<_>>(),
+        ["storage.getCookies"]
+    );
+}
+
+#[tokio::test]
+async fn firefox_cookie_reads_refuse_truncation_and_filter_before_the_output_bound() {
+    let mut cookies = vec![json!({"name":"other","domain":"other.test","path":"/"}); 2048];
+    cookies.push(json!({"name":"wanted","domain":"example.test","path":"/"}));
+    let response = json!({"cookies":cookies});
+    let bidi = FakeBidi::new(vec![
+        Ok(json!({"context":"cookies"})),
+        Ok(response.clone()),
+        Ok(response),
+    ]);
+    let worker = worker(bidi, FakeObserver::new(observation())).await;
+    let page = PageId::new();
+    worker.open_page(page.clone()).await.unwrap();
+    let error = worker_pool::WebStateEngine::get_cookies(
+        &worker,
+        &page,
+        &types::GetCookiesCommand { urls: vec![] },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::InvalidRequest);
+    let evidence = worker_pool::WebStateEngine::get_cookies(
+        &worker,
+        &page,
+        &types::GetCookiesCommand {
+            urls: vec!["https://example.test/".into()],
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(&evidence[0], Evidence::CookieState {cookies,..} if cookies.len()==1 && cookies[0].name=="wanted")
     );
 }
 

@@ -5036,7 +5036,7 @@ port = 9333
     }
 
     #[test]
-    fn doctor_warns_command_journal_torn_tail_without_rewriting() {
+    fn doctor_fails_command_journal_torn_tail_without_rewriting() {
         let _lock = DOCTOR_ENV_LOCK.lock().unwrap();
         let env = DoctorEnvGuard::clear();
         env.set(
@@ -5062,8 +5062,9 @@ port = 9333
         .unwrap();
         assert_eq!(std::fs::read(&journal).unwrap(), bytes);
         let check = report.check("command-journal").expect("command-journal");
-        assert_eq!(check.status, DoctorStatus::Warn);
+        assert_eq!(check.status, DoctorStatus::Fail);
         assert!(check.detail.contains("torn"), "{check:?}");
+        assert!(check.detail.contains("preserve") && check.detail.contains("reconcile"));
     }
 
     #[test]

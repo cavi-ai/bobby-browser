@@ -9,12 +9,15 @@ request: ``Authorization: Bearer ...``, ``x-interface-version``,
 
 from .client import INTERFACE_VERSION, BrowserRuntimeClient, RequestOptions
 from .errors import RuntimeClientError
+from .verification import VerificationStatus, command_verification_status
 
 __all__ = [
     "BrowserRuntimeClient",
     "RequestOptions",
     "RuntimeClientError",
     "INTERFACE_VERSION",
+    "VerificationStatus",
+    "command_verification_status",
 ]
 
 __version__ = "0.20.0"
