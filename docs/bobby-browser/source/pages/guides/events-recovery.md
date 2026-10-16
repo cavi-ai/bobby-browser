@@ -89,6 +89,33 @@ uncertainty; deleting reservations can permit a duplicate effect.
 
 For a job whose outcome is uncertain, an operator with `authority:admin` can record what they observed with `POST /v1/jobs/{job}/resolution`, or `resolveJob` and `resolve_job` in the SDKs. If a resolution write fails, further attestations for that job are refused until history is reloaded.
 
+## Export an incident report
+
+```bash
+bobby doctor --config /path/to/config.toml --incident-bundle /path/to/new-incident.json
+```
+
+The destination parent must exist. The export creates a new local JSON file
+(with mode `0600` on Unix);
+it refuses existing destinations, storage-source and lock paths, and checkpoint
+or artifact directories. It cannot be combined with `--fix`, downgrade, or other
+doctor output modes. No browser or health endpoint is contacted.
+
+The report contains the runtime version, collection time, health observations for
+the command and scheduler journals and their three idempotency ledgers, streamed
+SHA-256 hashes, checkpoint/artifact directory presence, and recovery prerequisites.
+It includes local paths but omits configuration contents, credentials, record
+payloads, screenshots, checkpoints, and artifact contents.
+
+An export exit code of zero means the report was written, **not** that history is
+healthy. Each store has its own status: `healthy`, `needsRepair`, `missing`, `busy`,
+`inspectionFailed`, `unsupportedFileType`, `changedDuringCollection`, or
+`unavailable`. Busy or changed sources have no hash. Collection is a non-atomic
+observation, not a coordinated snapshot or backup. No status or hash grants
+permission to restore or replay work. Preserve original files and backups, stop
+Bobby before offline repair, and establish uncertain effects from authoritative
+application state before choosing a recovery candidate.
+
 ## Next
 
 - [Evidence and checkpoints](../concepts/evidence-checkpoints.md)

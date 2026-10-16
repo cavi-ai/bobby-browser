@@ -1,6 +1,7 @@
 //! `bobby doctor` checks and report rendering.
 
 mod checks;
+mod incident;
 #[cfg(unix)]
 mod skill_permissions;
 
@@ -933,6 +934,7 @@ pub(crate) struct DoctorCliOptions {
     pub options: DoctorFixOptions,
     pub fix: bool,
     pub downgrade_idempotency: bool,
+    pub incident_bundle: Option<PathBuf>,
     pub json: bool,
 }
 pub(crate) fn run_cli(command: DoctorCliOptions) -> Result<()> {
@@ -940,9 +942,16 @@ pub(crate) fn run_cli(command: DoctorCliOptions) -> Result<()> {
         options,
         fix,
         downgrade_idempotency,
+        incident_bundle,
         json,
     } = command;
 
+    if let Some(output) = incident_bundle {
+        let config = AppConfig::load(&resolve_config_path(options.config))?;
+        incident::export(&config, &output)?;
+        println!("Incident diagnostics written to {}", output.display());
+        return Ok(());
+    }
     if fix {
         let report = if downgrade_idempotency {
             run_idempotency_downgrade(options)?

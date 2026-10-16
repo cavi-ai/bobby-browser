@@ -309,6 +309,9 @@ enum CliCommand {
         /// Convert healthy offline idempotency ledgers for use by older binaries
         #[arg(long, requires = "fix", conflicts_with = "download_model")]
         downgrade_idempotency: bool,
+        /// Export read-only storage diagnostics and source hashes to a new JSON file
+        #[arg(long, conflicts_with_all = ["fix", "json", "bootstrap_env", "profile", "download_model", "downgrade_idempotency"])]
+        incident_bundle: Option<PathBuf>,
         /// Print the report as JSON on stdout
         #[arg(long)]
         json: bool,
@@ -923,6 +926,7 @@ pub async fn run() -> Result<()> {
             fix,
             download_model,
             downgrade_idempotency,
+            incident_bundle,
             json,
             profile,
         } => {
@@ -936,6 +940,7 @@ pub async fn run() -> Result<()> {
                 },
                 fix,
                 downgrade_idempotency,
+                incident_bundle,
                 json,
             })?;
         }

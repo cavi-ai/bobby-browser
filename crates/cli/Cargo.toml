@@ -21,6 +21,7 @@ name = "bobby"
 path = "src/bin/cli.rs"
 
 [dependencies]
+tempfile.workspace = true
 notify.workspace = true
 toml.workspace = true
 anyhow.workspace = true
@@ -66,5 +67,4 @@ reqwest = { workspace = true, features = ["blocking"] }
 [dev-dependencies]
 sdk-core.workspace = true
 test-site.workspace = true
-tempfile.workspace = true
 gateway-transport.workspace = true
