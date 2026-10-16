@@ -31,10 +31,14 @@ async fn journeys_hold_on_firefox() {
     // The native host this extra journey kills exists only on Firefox.
     let table = journeys::every_journey!(journey_table, j7_native_host_killed_mid_session);
     for (name, journey) in table {
-        if AssertUnwindSafe(journey(&rig, &dirs))
-            .catch_unwind()
-            .await
-            .is_err()
+        if AssertUnwindSafe(async {
+            let before = rig.journey_usage();
+            journey(&rig, &dirs).await;
+            rig.assert_journey_budget(name, before);
+        })
+        .catch_unwind()
+        .await
+        .is_err()
         {
             failures.push(name);
         }
