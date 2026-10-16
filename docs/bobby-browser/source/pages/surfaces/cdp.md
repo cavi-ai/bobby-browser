@@ -58,7 +58,7 @@ const browser = await puppeteer.connect({
 const page = (await browser.pages())[0] ?? (await browser.newPage());
 ```
 
-Supported clients are `playwright-core` 1.61 to 1.63 and `puppeteer-core` 25. A newer release fails closed on every page it opens.
+Supported clients are `playwright-core` 1.61 to 1.64 and `puppeteer-core` 25. A newer release fails closed on every page it opens.
 
 Discovery is `GET /json/version` and `GET /json/list`. The only WebSocket is `/devtools/browser/<id>`; every target is addressed over it. `/json/list` reports `about:blank` for a page the gateway has not navigated.
 

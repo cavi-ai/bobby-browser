@@ -23,6 +23,10 @@ const PLAYWRIGHT_1_63_INJECTED: (usize, &str) = (
     321_149,
     "02d87b87a0382dda09a8786a2b838be38f4b2a857e1f21afc04d5e8c00fb604d",
 );
+const PLAYWRIGHT_1_64_INJECTED: (usize, &str) = (
+    328_715,
+    "18c70fd11170c6caaf9c94326796557baf86300d7c77c968756a55ae94a99f80",
+);
 const PLAYWRIGHT_1_61_UTILITY: (usize, &str) = (
     10_652,
     "3fc2ec24a4359c88a30f650d4daf23c0554eda935fb19bf1fe81f687f65d8dcd",
@@ -31,17 +35,27 @@ const PLAYWRIGHT_1_62_UTILITY: (usize, &str) = (
     11_035,
     "fd3b882cab3a898b34e827ab330d9fb152340d61f7d0c3cec30247018af131e4",
 );
+const PLAYWRIGHT_1_64_UTILITY: (usize, &str) = (
+    12_997,
+    "7547c0afc262936d8a948e35e443267d3e02cc49cc51edfe999a450c3d0da2eb",
+);
 
-const INJECTED_BOOTSTRAPS: [(usize, &str); 4] = [
+const INJECTED_BOOTSTRAPS: [(usize, &str); 5] = [
     PLAYWRIGHT_1_61_INJECTED,
     PLAYWRIGHT_1_62_0_INJECTED,
     PLAYWRIGHT_1_62_1_INJECTED,
     PLAYWRIGHT_1_63_INJECTED,
+    PLAYWRIGHT_1_64_INJECTED,
 ];
 
 fn is_pinned_bootstrap_identity(len: usize, digest: &str) -> bool {
     INJECTED_BOOTSTRAPS.contains(&(len, digest))
-        || [PLAYWRIGHT_1_61_UTILITY, PLAYWRIGHT_1_62_UTILITY].contains(&(len, digest))
+        || [
+            PLAYWRIGHT_1_61_UTILITY,
+            PLAYWRIGHT_1_62_UTILITY,
+            PLAYWRIGHT_1_64_UTILITY,
+        ]
+        .contains(&(len, digest))
 }
 
 fn normalize_playwright_frame_seq(expression: &str) -> Option<String> {
@@ -190,6 +204,22 @@ mod tests {
         assert!(is_pinned_bootstrap_identity(
             321_149,
             "02d87b87a0382dda09a8786a2b838be38f4b2a857e1f21afc04d5e8c00fb604d"
+        ));
+    }
+
+    #[test]
+    fn accepts_playwright_1_64_injected_bootstrap_identity() {
+        assert!(is_pinned_bootstrap_identity(
+            328_715,
+            "18c70fd11170c6caaf9c94326796557baf86300d7c77c968756a55ae94a99f80"
+        ));
+    }
+
+    #[test]
+    fn accepts_playwright_1_64_utility_bootstrap_identity() {
+        assert!(is_pinned_bootstrap_identity(
+            12_997,
+            "7547c0afc262936d8a948e35e443267d3e02cc49cc51edfe999a450c3d0da2eb"
         ));
     }
 
