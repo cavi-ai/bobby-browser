@@ -50,7 +50,7 @@ impl Drop for CommandTrace {
     }
 }
 
-fn outcome_name(outcome: &CommandOutcome) -> &'static str {
+pub(crate) fn outcome_name(outcome: &CommandOutcome) -> &'static str {
     match outcome {
         CommandOutcome::Completed { .. } => "completed",
         CommandOutcome::RetryableFailure { .. } => "retryableFailure",

@@ -145,6 +145,28 @@ Command logs include a `command` span with `command_id`, `workflow_id`,
 command future is dropped before returning, the status is `interrupted`; use the
 durable journal and recovery APIs to reconcile effects before retrying.
 
+Polled command submissions reaching the authenticated runtime also emit
+`command.request.finished` in a `command_request` span, including authorization
+rejections and idempotency replays. The span includes correlation, command,
+workflow, attempt, and session IDs, plus `request_mode` (`submit`, `oneShotVision`,
+or `autoCheckpoint`) and whether an idempotency key was present. Keys and bearer
+credentials are omitted.
+
+Request `disposition` is `runtimeInvoked`, `replayed`, `rejected`, or `interrupted`.
+The event includes `outcome`, a bounded `error_code`, `elapsed_ms`, and
+`runtime_invoked`, `replayed`, and `interrupted` flags. `outcome_command_id` links
+a replay to the original command even when the retry has a new command ID;
+it is `none` if no command outcome returned. Error messages are omitted.
+
+Group request events by workflow ID for request, replay, and rejection summaries.
+Count `command.finished` separately for execution attempts: invoking the runtime
+may fail during checkpoint preparation before command execution begins. Neither
+count proves a browser effect. A dropped waiter is interrupted even if it never
+invoked the runtime. Transport authentication and parsing failures that never
+reach the authenticated runtime are outside this accounting boundary. Log
+filtering and retention can omit events; these are diagnostics, not durable audit
+records or permission to retry.
+
 Vision calls emit `vision.provider.started` and `vision.provider.finished` within
 the command span. The latter includes `provider_mode`, `elapsed_ms`, and
 `proposal_returned`. A returned proposal still requires validation and does not
