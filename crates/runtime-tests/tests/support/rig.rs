@@ -4,6 +4,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use super::journey_budget::{self, Meter, Usage};
 use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, ServerConfig, StorageConfig};
 use interface_conformance::live::all_capabilities;
@@ -17,6 +18,7 @@ use types::PrincipalId;
 pub struct Rig {
     server: Server,
     next_id: AtomicU64,
+    journey_meter: Meter,
     // Stop Firefox before removing the profile directory it owns.
     _firefox: Option<InstalledFirefoxRuntime>,
     _root: tempfile::TempDir,
@@ -170,6 +172,7 @@ impl Rig {
         let rig = Self {
             server,
             next_id: AtomicU64::new(1),
+            journey_meter: Meter::default(),
             _root: root,
             _firefox: firefox,
         };
@@ -194,10 +197,39 @@ impl Rig {
 
     async fn request(&self, method: &str, params: Value) -> Value {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        self.server
+        let response = self
+            .server
             .handle_message(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
             .await
-            .unwrap_or(Value::Null)
+            .unwrap_or(Value::Null);
+        if method == "tools/call" {
+            assert!(!response.is_null(), "MCP tool call returned no response");
+            self.journey_meter.record(&response);
+        }
+        response
+    }
+
+    pub fn journey_usage(&self) -> Usage {
+        self.journey_meter.snapshot()
+    }
+
+    pub fn assert_journey_budget(&self, name: &str, before: Usage) {
+        let engine = if self.is_firefox() {
+            "firefox"
+        } else {
+            "chromium"
+        };
+        let usage = self
+            .journey_usage()
+            .since(before)
+            .expect("monotonic journey counters");
+        eprintln!(
+            "journey_usage engine={engine} journey={name} calls={} response_bytes={}",
+            usage.calls, usage.response_bytes
+        );
+        usage
+            .check(journey_budget::limit(engine, name))
+            .unwrap_or_else(|error| panic!("{engine}/{name}: {error}"));
     }
 
     /// The tool's `structuredContent`.
