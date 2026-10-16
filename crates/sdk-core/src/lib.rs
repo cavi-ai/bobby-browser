@@ -26,6 +26,7 @@ use types::{
 use worker_pool::{ChromiumWorkerFactory, WorkerFactory, WorkerPool};
 use workflow_journal::JsonlJournal;
 
+mod command_trace;
 mod impact;
 mod interface;
 pub mod workflow;
@@ -631,9 +632,13 @@ impl RuntimeService {
         vision_capability_ok: bool,
         one_shot_session_ok: bool,
     ) -> CommandOutcome {
+        use tracing::Instrument;
+        let mut trace = command_trace::CommandTrace::new(&envelope);
         let outcome = self
             .submit_with_vision_grant_inner(envelope, vision_capability_ok, one_shot_session_ok)
+            .instrument(trace.span.clone())
             .await;
+        trace.finish(&outcome);
         let bytes = serde_json::to_vec(&outcome)
             .expect("command outcomes must serialize at the runtime boundary")
             .len() as u64;
