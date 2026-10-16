@@ -29,6 +29,7 @@ use workflow_journal::JsonlJournal;
 mod command_trace;
 mod impact;
 mod interface;
+mod request_trace;
 pub mod workflow;
 
 pub use impact::{PageImpact, RestartImpact, SessionImpact};
