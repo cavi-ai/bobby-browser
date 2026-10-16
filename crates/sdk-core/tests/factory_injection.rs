@@ -19,6 +19,37 @@ struct CountingFactory(Arc<AtomicUsize>);
 struct Worker(WorkerId);
 struct InjectedVision;
 
+#[tokio::test]
+async fn runtime_info_reports_only_declared_engine_features_without_launching() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = config::AppConfig::default();
+    config.storage.journal_path = root.path().join("commands.jsonl");
+    config.storage.checkpoints_dir = root.path().join("checkpoints");
+    config.browser.artifacts_dir = root.path().join("artifacts");
+    let launches = Arc::new(AtomicUsize::new(0));
+    let runtime = RuntimeService::build_with_worker_factory(
+        &config,
+        Arc::new(CountingFactory(launches.clone())),
+    )
+    .await
+    .unwrap();
+    assert!(!runtime
+        .runtime_info()
+        .await
+        .capabilities
+        .iter()
+        .any(|name| name.starts_with("engine:")));
+    assert_eq!(launches.load(Ordering::SeqCst), 0);
+    drop(runtime);
+    let runtime = RuntimeService::build(&config).await.unwrap();
+    let capabilities = runtime.runtime_info().await.capabilities;
+    assert!(capabilities.contains(&"engine:chromium:captureScreenshot.fullPage".into()));
+    assert!(!capabilities
+        .iter()
+        .any(|name| name.starts_with("engine:firefox:")));
+    assert_eq!(runtime.runtime_info().await.active_sessions, 0);
+}
+
 #[async_trait]
 impl VisionAssist for InjectedVision {
     async fn propose(

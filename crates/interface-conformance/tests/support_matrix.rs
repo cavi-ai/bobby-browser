@@ -123,6 +123,25 @@ fn generated_documentation_matches_the_support_source() {
 }
 
 #[test]
+fn generated_options_expose_engine_limits() {
+    let table = render_support_matrix_markdown();
+    for name in [
+        "captureScreenshot.fullPage",
+        "captureScreenshot.clip",
+        "setCookies.httpOnly",
+        "deleteCookies.httpOnly",
+        "setFocusEmulation",
+        "setEmulatedMedia",
+    ] {
+        assert!(
+            table.contains(&format!("| `{name}` | yes | no |")),
+            "{name}"
+        );
+    }
+    assert!(table.contains("| `waitFor.networkQuiet` | yes | yes |"));
+}
+
+#[test]
 fn generated_preset_matrix_matches_the_preset_table() {
     let documentation = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

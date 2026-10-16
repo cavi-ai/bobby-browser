@@ -208,6 +208,24 @@ pub fn render_support_matrix_markdown() -> String {
             support[3],
         ));
     }
+    output.push_str("\n## Engine-specific option support\n\n`GET /v1/runtime` reports configured implementation features in `capabilities`, such as `engine:firefox:captureScreenshot.viewport`. Session engine, credential capabilities, execution policy, and connection health still govern each call. These options supplement the operation and policy tables above.\n\n| Operation or option |");
+    for support in worker_pool::EngineFeatureSupport::IMPLEMENTATIONS {
+        output.push_str(&format!(" `{}` |", support.engine_name()));
+    }
+    output.push_str("\n|---|");
+    output.push_str(&"---|".repeat(worker_pool::EngineFeatureSupport::IMPLEMENTATIONS.len()));
+    output.push('\n');
+    for feature in worker_pool::EngineFeature::ALL {
+        output.push_str(&format!("| `{}` |", feature.name()));
+        for support in worker_pool::EngineFeatureSupport::IMPLEMENTATIONS {
+            output.push_str(if support.features.contains(feature) {
+                " yes |"
+            } else {
+                " no |"
+            });
+        }
+        output.push('\n');
+    }
     output.push_str(&format!("\n{SUPPORT_MATRIX_END}"));
     output
 }

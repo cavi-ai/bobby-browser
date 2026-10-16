@@ -310,6 +310,12 @@ impl TryFrom<FirefoxCompanionConfig> for FirefoxRuntimeConfig {
 
 #[async_trait]
 impl WorkerFactory for ConfiguredFirefoxFactory {
+    fn engine_feature_support(&self) -> Vec<worker_pool::EngineFeatureSupport> {
+        vec![worker_pool::EngineFeatureSupport::for_engine(
+            BrowserEngine::Firefox,
+        )]
+    }
+
     async fn launch(&self, session_id: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
         let _lifecycle = self.lifecycle.lock().await;
         if self.closed.load(std::sync::atomic::Ordering::Acquire) {

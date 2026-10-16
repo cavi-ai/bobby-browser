@@ -17,8 +17,9 @@ use types::PrincipalId;
 pub struct Rig {
     server: Server,
     next_id: AtomicU64,
-    _root: tempfile::TempDir,
+    // Stop Firefox before removing the profile directory it owns.
     _firefox: Option<InstalledFirefoxRuntime>,
+    _root: tempfile::TempDir,
 }
 
 fn config(root: &std::path::Path, upload_roots: Vec<std::path::PathBuf>) -> AppConfig {
@@ -116,9 +117,13 @@ impl Rig {
     }
 
     pub async fn firefox_with_upload_roots(upload_roots: Vec<std::path::PathBuf>) -> Self {
-        let installed = InstalledFirefoxConfig::from_env()
+        let mut installed = InstalledFirefoxConfig::from_env()
             .unwrap_or_else(|name| panic!("{name} must be set to run the Firefox suite"));
         let root = tempfile::tempdir().expect("create rig root");
+        // A rig retains browser state across its cases, but separate rigs must
+        // not share crash counters, cookies, or profile locks.
+        installed.profile = root.path().join("firefox-profile");
+        std::fs::create_dir(&installed.profile).expect("create rig Firefox profile");
         let config = config(root.path(), upload_roots);
         let firefox =
             runtime_tests::launch_installed_firefox_runtime(installed, &config, "about:blank")

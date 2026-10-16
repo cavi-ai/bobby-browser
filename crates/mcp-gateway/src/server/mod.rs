@@ -1418,8 +1418,10 @@ impl Server {
                     .resources
                     .register_outcome(&self.handle, &registration_context, &envelope, &outcome)
                     .await;
+                let verification_status = outcome.verification_status();
                 match to_json(outcome) {
                     Ok(mut value) => {
+                        value["verificationStatus"] = json!(verification_status);
                         types::annotate_page_derived_evidence(&mut value);
                         admission.apply_to_mcp_value(&mut value, &envelope.command_id);
                         // `CommandOutcome` carries only `commandId`, so the

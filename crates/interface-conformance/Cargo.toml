@@ -18,10 +18,10 @@ config.workspace = true
 interface-core.workspace = true
 sdk-core.workspace = true
 test-site.workspace = true
+worker-pool.workspace = true
 types.workspace = true
 
 [dev-dependencies]
-worker-pool.workspace = true
 tempfile.workspace = true
 acp-gateway.workspace = true
 async-trait.workspace = true

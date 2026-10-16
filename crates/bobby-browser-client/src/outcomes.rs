@@ -740,7 +740,55 @@ pub fn annotate_page_derived_evidence(outcome: &mut serde_json::Value) {
     }
 }
 
+/// What a command's recorded evidence establishes. This never proves a site's
+/// business result beyond the caller's explicit wait condition. Optional MCP
+/// follow-up observations do not change this status or authorize another action.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum VerificationStatus {
+    NotCompleted,
+    NotReported,
+    ConditionObserved,
+    Settled,
+    ValidationRejected,
+}
+
 impl CommandOutcome {
+    /// Classify typed evidence without interpreting diagnostic text. A settled
+    /// submit means the page settled, not that the server accepted the request.
+    pub fn verification_status(&self) -> VerificationStatus {
+        let Self::Completed { evidence, .. } = self else {
+            return VerificationStatus::NotCompleted;
+        };
+        if evidence.iter().any(|item| {
+            matches!(
+                item,
+                Evidence::SubmitSettlement {
+                    outcome: SubmitSettlementOutcome::ValidationRejected
+                }
+            )
+        }) {
+            VerificationStatus::ValidationRejected
+        } else if evidence.iter().any(|item| {
+            matches!(
+                item,
+                Evidence::SubmitSettlement {
+                    outcome: SubmitSettlementOutcome::Settled
+                }
+            )
+        }) {
+            VerificationStatus::Settled
+        } else if evidence
+            .iter()
+            .any(|item| matches!(item, Evidence::Wait { .. }))
+        {
+            VerificationStatus::ConditionObserved
+        } else {
+            VerificationStatus::NotReported
+        }
+    }
+
     pub fn journal_safe(&self) -> Self {
         let mut safe = self.clone();
         match &mut safe {
