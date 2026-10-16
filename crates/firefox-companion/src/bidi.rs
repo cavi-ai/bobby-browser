@@ -417,6 +417,10 @@ impl SharedBiDiTransport {
 
 #[async_trait]
 impl BidiTransport for SharedBiDiTransport {
+    fn observed_connection(&self) -> Option<bool> {
+        Some(self.client.is_alive())
+    }
+
     async fn send(&self, method: &str, params: Value) -> Result<Value, CommandError> {
         self.client.send(method, params).await
     }
@@ -436,6 +440,11 @@ impl BidiTransport for SharedBiDiTransport {
 
 #[async_trait]
 pub trait BidiTransport: Send + Sync {
+    /// Passive transport observation. Custom transports stay unknown by default.
+    fn observed_connection(&self) -> Option<bool> {
+        None
+    }
+
     async fn send(&self, method: &str, params: Value) -> Result<Value, CommandError>;
 
     fn subscribe_events(&self) -> Option<broadcast::Receiver<BidiEvent>> {
@@ -461,6 +470,10 @@ pub trait BidiTransport: Send + Sync {
 
 #[async_trait]
 impl BidiTransport for BidiClient {
+    fn observed_connection(&self) -> Option<bool> {
+        Some(self.is_alive())
+    }
+
     async fn send(&self, method: &str, params: Value) -> Result<Value, CommandError> {
         BidiClient::send(self, method, params).await
     }

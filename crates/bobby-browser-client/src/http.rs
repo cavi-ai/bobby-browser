@@ -150,6 +150,39 @@ impl BrowserRuntimeClient {
             .await
     }
 
+    /// `GET /v1/sessions/{id}/capabilities` — passive availability observations.
+    pub async fn session_capabilities(
+        &self,
+        session_id: &SessionId,
+        options: Option<RequestOptions>,
+    ) -> Result<crate::SessionCapabilities, ClientError> {
+        let report: crate::SessionCapabilities = self
+            .json(
+                Method::GET,
+                &format!("/v1/sessions/{}/capabilities", session_id.0),
+                None::<()>,
+                options,
+            )
+            .await?;
+        if report.schema_version != crate::SessionCapabilities::SCHEMA_VERSION
+            || report.session_id != *session_id
+            || report.features.is_empty()
+            || report.features.len() > 64
+            || report
+                .features
+                .iter()
+                .map(|feature| &feature.name)
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != report.features.len()
+        {
+            return Err(ClientError::Protocol(
+                "invalid session capability response".into(),
+            ));
+        }
+        Ok(report)
+    }
+
     /// `DELETE /v1/sessions/{id}` — tear down a session (`204` on success).
     pub async fn delete_session(
         &self,
@@ -1481,5 +1514,72 @@ mod tests {
             validate_artifact_reference(&upper, DEFAULT_MAX_ARTIFACT_BYTES),
             Err(ClientError::Protocol(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn session_capabilities_validates_version_identity_and_feature_evidence() {
+        let session = SessionId::new();
+        let fixture = json!({
+            "schemaVersion":1,"sessionId":session,"observedAt":"2026-10-15T00:00:00Z",
+            "engine":"chromium","connection":"connected","features":[{
+                "name":"captureScreenshot.viewport","supported":true,"available":true,"reason":null,
+                "requiredCapabilities":["browser:mutate"],"policyRequirement":null
+            }]
+        });
+        let payload = Arc::new(tokio::sync::Mutex::new(fixture.clone()));
+        let response = payload.clone();
+        let expected = session.0.to_string();
+        let app = Router::new().route(
+            "/v1/sessions/{session}/capabilities",
+            get(
+                move |axum::extract::Path(id): axum::extract::Path<String>| {
+                    let response = response.clone();
+                    let expected = expected.clone();
+                    async move {
+                        assert_eq!(id, expected);
+                        axum::Json(response.lock().await.clone())
+                    }
+                },
+            ),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = BrowserRuntimeClient::new(format!("http://{address}"), "test-token").unwrap();
+        assert_eq!(
+            client
+                .session_capabilities(&session, None)
+                .await
+                .unwrap()
+                .session_id,
+            session
+        );
+        let mut invalids = Vec::new();
+        let mut value = fixture.clone();
+        value["schemaVersion"] = json!(2);
+        invalids.push(value);
+        let mut value = fixture.clone();
+        value["sessionId"] = json!(SessionId::new());
+        invalids.push(value);
+        let mut value = fixture.clone();
+        value["features"] = json!([]);
+        invalids.push(value);
+        let mut value = fixture.clone();
+        value["features"] = json!([fixture["features"][0], fixture["features"][0]]);
+        invalids.push(value);
+        let mut value = fixture;
+        value["connection"] = json!("fabricated");
+        invalids.push(value);
+        for value in invalids {
+            *payload.lock().await = value;
+            assert!(matches!(
+                client.session_capabilities(&session, None).await,
+                Err(ClientError::Protocol(_))
+            ));
+        }
+        server.abort();
+        let _ = server.await;
     }
 }

@@ -115,6 +115,17 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Passive inspection never leases or launches a worker.
+    pub async fn feature_observation(
+        &self,
+        id: &SessionId,
+    ) -> Option<worker_pool::WorkerFeatureObservation> {
+        match &self.workers {
+            Some(workers) => workers.feature_observation(id).await,
+            None => None,
+        }
+    }
+
     pub async fn list(&self) -> Vec<SessionState> {
         self.inner.read().await.values().cloned().collect()
     }

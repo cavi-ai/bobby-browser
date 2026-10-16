@@ -325,6 +325,7 @@ async fn checkpoint_save_does_not_advertise_the_evidence_union() {
 const READ_ONLY: &[&str] = &[
     "runtime_info",
     "session_list",
+    "session_capabilities",
     "page_list",
     "inspect",
     "a11y_snapshot",

@@ -319,6 +319,9 @@ tools! {
     screenshot { order: 42, title: "Screenshot", description: "Capture a screenshot artifact of a page's viewport, full page, or one element. Requires browser:mutate.",
         capabilities: &[types::Capability::BrowserMutate], operation: Some(types::InterfaceOperation::SubmitCommand), schema: screenshot_schema, args: ScreenshotArgs,
         phases: VERIFY, scope: SessionPageWorkflow, group: Primitives, hints: (true, false, false, false) }
+    session_capabilities { order: 53, title: "Inspect session capabilities", description: "Read engine-option eligibility for a session, with capability, policy, and connection reasons. Requires session:read. Consult tools/list for callable tools.",
+        capabilities: &[types::Capability::SessionRead], operation: Some(types::InterfaceOperation::ReadSession), schema: session_close_schema, args: SessionCloseArgs,
+        phases: ALWAYS, group: Lifecycle, hints: (true, false, false, false) }
     session_close { order: 43, title: "Close session", description: "Close a session and release its resources. Requires session:write. Destructive. On failure, confirm with session_list.",
         capabilities: &[types::Capability::SessionWrite], operation: Some(types::InterfaceOperation::DeleteSession), schema: session_close_schema, args: SessionCloseArgs,
         phases: ALWAYS, group: Lifecycle, hints: (false, true, false, false) }

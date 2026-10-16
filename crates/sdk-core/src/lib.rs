@@ -449,6 +449,7 @@ impl RuntimeService {
         let mut capabilities = vec![
             "sdk".to_string(),
             "browser-primitives".to_string(),
+            "session-capabilities".to_string(),
             "durable-journal".to_string(),
         ];
         if self.recovery.is_some() {

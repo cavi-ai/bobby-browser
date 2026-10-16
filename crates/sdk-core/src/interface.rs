@@ -1,3 +1,5 @@
+mod session_capabilities;
+
 use std::{
     collections::HashSet,
     sync::{
@@ -330,6 +332,14 @@ impl RuntimeInterface for AuthenticatedRuntime {
             });
         }
         Ok(info)
+    }
+
+    async fn session_capabilities(
+        &self,
+        ctx: RequestContext,
+        session: SessionId,
+    ) -> InterfaceResult<types::SessionCapabilities> {
+        self.inspect_session_capabilities(ctx, session).await
     }
 
     async fn list_sessions(&self, ctx: RequestContext) -> InterfaceResult<Vec<SessionState>> {
