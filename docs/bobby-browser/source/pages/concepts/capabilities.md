@@ -84,8 +84,19 @@ These fields are opt-ins. The capability is checked at the listed operation befo
 | `setFocusEmulation` | yes | no |
 | `setEmulatedMedia` | yes | no |
 | `waitFor.networkQuiet` | yes | yes |
+| `evaluateJavaScript` | yes | yes |
 
 <!-- END GENERATED INTERFACE SUPPORT -->
+
+## Session availability
+
+Use `GET /v1/sessions/{session}/capabilities`, MCP `session_capabilities`, or the SDK helpers `session_capabilities` (Rust/Python) and `sessionCapabilities` (TypeScript) to inspect an owned session. The query requires `session:read`. It reports schema version 1, the session ID, observation time, selected engine, connection state, and feature observations. Existing session-list responses are unchanged.
+
+Each feature has `supported` (`true`, `false`, or `null` when unknown), `available`, `reason`, `requiredCapabilities`, and `policyRequirement`. Availability combines the selected worker's implementation support, current credential grants, execution policy, writable command storage, and passively observed connection state. JavaScript evaluation requires `browser:mutate`, `javascript:evaluate`, and `javascriptEvaluation`. Other listed options require `browser:mutate`.
+
+Unavailable reasons are `unsupportedByEngine`, `missingCapability`, `policyDisabled`, `storageUnavailable`, `workerUnavailable`, `connectionUnknown`, `disconnected`, and `metadataUnavailable`. Custom workers without metadata report unknown support and remain unavailable. The query never starts, leases, reconnects, or sends messages to a browser.
+
+This observation can become stale immediately. Dispatch rechecks authorization, policy, storage, page state, and attachment grants. `available` describes eligibility for a canonical command option; it does not guarantee execution success. Consult MCP `tools/list` for callable tools.
 
 ## Privileged primitives (beyond `browser:mutate`)
 

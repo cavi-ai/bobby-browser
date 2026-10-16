@@ -257,6 +257,11 @@ pub trait ExtensionPageBinding: Send {
 
 #[async_trait]
 pub trait ExtensionObserver: Send + Sync {
+    /// Read existing connection state without binding, refreshing, or sending a request.
+    async fn attachment_connected(&self, _lease: &AttachmentLease) -> Option<bool> {
+        None
+    }
+
     fn operation_timeout(&self) -> Duration {
         DEFAULT_NAVIGATION_TIMEOUT
     }
@@ -531,6 +536,15 @@ impl CompanionExtensionObserver {
 
 #[async_trait]
 impl ExtensionObserver for CompanionExtensionObserver {
+    async fn attachment_connected(&self, lease: &AttachmentLease) -> Option<bool> {
+        Some(
+            self.server
+                .extension_connection(&lease.profile_id)
+                .await
+                .is_some(),
+        )
+    }
+
     fn operation_timeout(&self) -> Duration {
         self.timeout
     }
@@ -3872,6 +3886,31 @@ fn open_cancelled_error() -> CommandError {
 
 #[async_trait]
 impl BrowserWorker for FirefoxCompanionWorker {
+    async fn feature_observation(&self) -> worker_pool::WorkerFeatureObservation {
+        let connection = if self.closed.load(Ordering::Acquire) {
+            types::SessionConnectionState::Disconnected
+        } else if self.ensure_active().is_err() {
+            types::SessionConnectionState::Unknown
+        } else {
+            match (
+                self.transport.observed_connection(),
+                self.observer
+                    .attachment_connected(&self.current_lease())
+                    .await,
+            ) {
+                (Some(false), _) | (_, Some(false)) => types::SessionConnectionState::Disconnected,
+                (Some(true), Some(true)) => types::SessionConnectionState::Connected,
+                _ => types::SessionConnectionState::Unknown,
+            }
+        };
+        worker_pool::WorkerFeatureObservation {
+            support: Some(worker_pool::EngineFeatureSupport::for_engine(
+                BrowserEngine::Firefox,
+            )),
+            connection,
+        }
+    }
+
     fn worker_id(&self) -> WorkerId {
         self.id.clone()
     }

@@ -11,6 +11,7 @@ pub enum EngineFeature {
     FocusEmulation,
     EmulatedMedia,
     NetworkQuiet,
+    JavaScriptEvaluation,
 }
 
 impl EngineFeature {
@@ -23,6 +24,7 @@ impl EngineFeature {
         Self::FocusEmulation,
         Self::EmulatedMedia,
         Self::NetworkQuiet,
+        Self::JavaScriptEvaluation,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -35,6 +37,7 @@ impl EngineFeature {
             Self::FocusEmulation => "setFocusEmulation",
             Self::EmulatedMedia => "setEmulatedMedia",
             Self::NetworkQuiet => "waitFor.networkQuiet",
+            Self::JavaScriptEvaluation => "evaluateJavaScript",
         }
     }
 }
@@ -57,6 +60,7 @@ impl EngineFeatureSupport {
             BrowserEngine::Firefox => &[
                 EngineFeature::ViewportScreenshot,
                 EngineFeature::NetworkQuiet,
+                EngineFeature::JavaScriptEvaluation,
             ],
             BrowserEngine::WebKit => &[],
         };
@@ -78,4 +82,11 @@ impl EngineFeatureSupport {
             .map(|feature| format!("engine:{engine}:{}", feature.name()))
             .collect()
     }
+}
+
+/// Passive metadata from an existing worker. Missing metadata stays unknown.
+#[derive(Debug, Clone, Default)]
+pub struct WorkerFeatureObservation {
+    pub support: Option<EngineFeatureSupport>,
+    pub connection: types::SessionConnectionState,
 }

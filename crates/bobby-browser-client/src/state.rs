@@ -344,3 +344,56 @@ pub struct ExtractResult {
     pub page_id: PageId,
     pub data: serde_json::Value,
 }
+
+/// Last observed transport state. Discovery never probes or starts a browser.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum SessionConnectionState {
+    Connected,
+    Disconnected,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum SessionFeatureUnavailableReason {
+    UnsupportedByEngine,
+    MissingCapability,
+    PolicyDisabled,
+    StorageUnavailable,
+    WorkerUnavailable,
+    ConnectionUnknown,
+    Disconnected,
+    MetadataUnavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionFeatureAvailability {
+    pub name: String,
+    pub supported: Option<bool>,
+    pub available: bool,
+    pub reason: Option<SessionFeatureUnavailableReason>,
+    pub required_capabilities: Vec<crate::Capability>,
+    pub policy_requirement: Option<String>,
+}
+
+/// Read-only availability observations; dispatch must still authorize each call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionCapabilities {
+    pub schema_version: u16,
+    pub session_id: SessionId,
+    pub observed_at: DateTime<Utc>,
+    pub engine: Option<String>,
+    pub connection: SessionConnectionState,
+    pub features: Vec<SessionFeatureAvailability>,
+}
+impl SessionCapabilities {
+    pub const SCHEMA_VERSION: u16 = 1;
+}

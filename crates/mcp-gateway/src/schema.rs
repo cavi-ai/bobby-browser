@@ -1077,6 +1077,7 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
             &["sessions"],
         ),
         "session_create" => output_ref("SessionState"),
+        "session_capabilities" => output_ref("SessionCapabilities"),
         "workflow_start" => workflow_start_output_schema(),
         "workflow_observe" => workflow_observe_result_schema(),
         // On success only, these four append `postState`: the compact
@@ -1225,6 +1226,7 @@ pub(crate) fn advertised_tool_output_schema(name: &str) -> Value {
 
 fn advertised_output_shape(name: &str) -> Value {
     match name {
+        "session_capabilities" => json!({"type":"object"}),
         "workflow_recover" => {
             let mut schema = output_ref("RecoveryDecision");
             let mut patched = definitions();
@@ -1901,6 +1903,7 @@ fn definitions() -> Value {
         // arm and `page_open` inline `command_outcome_properties()` instead.
         "Evidence": {"oneOf": evidence_variants()},
         "SessionState": session_state(),
+        "SessionCapabilities": session_capabilities_output(),
         "PageState": page_state(),
         "CheckpointRecord": checkpoint_record(),
         "FormSnapshot": form_snapshot_schema(),
@@ -4447,4 +4450,30 @@ fn runtime_info_output_schema_advertises_operational_metrics_and_vision_budget()
         advertised["properties"]["operationalMetrics"].is_object(),
         "{advertised}"
     );
+}
+
+fn session_capabilities_output() -> Value {
+    object(
+        json!({
+            "schemaVersion":{"type":"integer","const":1}, "sessionId":id(),
+            "observedAt":{"type":"string","format":"date-time","minLength":20,"maxLength":64},
+            "engine":nullable(string(1,32)),
+            "connection":{"enum":["connected","disconnected","unknown"]},
+            "features":{"type":"array","minItems":1,"maxItems":64,"items":object(json!({
+                "name":string(1,128), "supported":nullable(json!({"type":"boolean"})),
+                "available":{"type":"boolean"},
+                "reason":nullable(json!({"enum":["unsupportedByEngine","missingCapability","policyDisabled","storageUnavailable","workerUnavailable","connectionUnknown","disconnected","metadataUnavailable"]})),
+                "requiredCapabilities":array(json!({"type":"string","enum":types::Capability::ALL}),64),
+                "policyRequirement":nullable(string(1,128))
+            }), &["name","supported","available","reason","requiredCapabilities","policyRequirement"])}
+        }),
+        &[
+            "schemaVersion",
+            "sessionId",
+            "observedAt",
+            "engine",
+            "connection",
+            "features",
+        ],
+    )
 }

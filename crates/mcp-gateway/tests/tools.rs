@@ -138,6 +138,7 @@ async fn tools_are_capability_filtered_sorted_and_have_closed_schemas() {
             "events_read",
             "page_open",
             "runtime_info",
+            "session_capabilities",
             "session_list",
             "toolset_select"
         ]

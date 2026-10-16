@@ -30,6 +30,10 @@ pub(crate) fn protected_router() -> Router<AppState> {
         .route("/v1/runtime", get(runtime_info))
         .route("/v1/sessions", get(list_sessions).post(create_session))
         .route(
+            "/v1/sessions/{session}/capabilities",
+            get(session_capabilities),
+        )
+        .route(
             "/v1/sessions/{session}",
             axum::routing::delete(delete_session),
         )
@@ -84,6 +88,24 @@ async fn runtime_info(
         }
     }
     Ok(Json(info))
+}
+
+async fn session_capabilities(
+    Path(session): Path<String>,
+    Extension(request): Extension<AuthenticatedRequest>,
+) -> Result<Json<types::SessionCapabilities>, ProtocolError> {
+    let session = types::SessionId(Uuid::parse_str(&session).map_err(|_| {
+        ProtocolError::invalid_with(
+            InterfaceErrorCode::InvalidRequest,
+            request.context.correlation_id.clone(),
+        )
+    })?);
+    request
+        .runtime
+        .session_capabilities(request.context, session)
+        .await
+        .map(Json)
+        .map_err(ProtocolError::from)
 }
 
 async fn list_sessions(

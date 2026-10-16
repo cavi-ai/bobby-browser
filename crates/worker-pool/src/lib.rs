@@ -5,7 +5,7 @@ mod engine_features;
 mod page_behavior;
 mod worker_failure;
 pub use engine::*;
-pub use engine_features::{EngineFeature, EngineFeatureSupport};
+pub use engine_features::{EngineFeature, EngineFeatureSupport, WorkerFeatureObservation};
 pub use page_behavior::PageBehavior;
 mod fingerprint_host;
 mod form_snapshot;
@@ -142,6 +142,11 @@ pub trait BrowserWorker: Send + Sync {
     fn worker_id(&self) -> WorkerId;
 
     fn profile_dir(&self) -> &Path;
+
+    /// Observe existing state only; never launch, reconnect, or renew a lease.
+    async fn feature_observation(&self) -> WorkerFeatureObservation {
+        WorkerFeatureObservation::default()
+    }
 
     async fn close(&self) -> Result<(), CommandError>;
 
@@ -573,6 +578,23 @@ impl WorkerPool {
 
     pub fn can_select(&self, preference: &EnginePreference) -> bool {
         self.inner.factory.can_select(preference)
+    }
+
+    /// Inspect an existing worker without taking an execution permit or creating an entry.
+    pub async fn feature_observation(
+        &self,
+        session: &SessionId,
+    ) -> Option<WorkerFeatureObservation> {
+        let worker = {
+            let entries = self.inner.entries.lock().await;
+            entries
+                .get(session)
+                .and_then(|entry| entry.worker.get().cloned())
+        };
+        match worker {
+            Some(worker) => Some(worker.feature_observation().await),
+            None => None,
+        }
     }
 
     pub fn engine_feature_support(&self) -> Vec<EngineFeatureSupport> {

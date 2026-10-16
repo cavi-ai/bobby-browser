@@ -483,3 +483,16 @@ export interface EventOptions extends RequestOptions {
   /** Delay between transport retries: safe integer from 0 through 60_000 ms (default 50). */
   retryDelayMs?: number;
 }
+
+export type SessionConnectionState = "connected" | "disconnected" | "unknown";
+export type SessionFeatureUnavailableReason = "unsupportedByEngine" | "missingCapability" | "policyDisabled" | "storageUnavailable" | "workerUnavailable" | "connectionUnknown" | "disconnected" | "metadataUnavailable";
+export interface SessionFeatureAvailability {
+  name: string; supported: boolean | null; available: boolean;
+  reason: SessionFeatureUnavailableReason | null;
+  requiredCapabilities: string[]; policyRequirement: string | null;
+}
+/** Passive discovery; dispatch still authorizes every operation. */
+export interface SessionCapabilities {
+  schemaVersion: 1; sessionId: Id; observedAt: string; engine: string | null;
+  connection: SessionConnectionState; features: SessionFeatureAvailability[];
+}

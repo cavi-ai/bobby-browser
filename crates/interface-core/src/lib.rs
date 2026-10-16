@@ -81,6 +81,25 @@ pub trait RuntimeInterface: Send + Sync {
         })
     }
     async fn list_sessions(&self, ctx: RequestContext) -> InterfaceResult<Vec<SessionState>>;
+    /// Passive, owner-scoped session discovery. Implementations without metadata decline.
+    async fn session_capabilities(
+        &self,
+        ctx: RequestContext,
+        _session: types::SessionId,
+    ) -> InterfaceResult<types::SessionCapabilities> {
+        Err(InterfaceError {
+            code: types::InterfaceErrorCode::UnsupportedOperation,
+            layer: types::ErrorLayer::Interface,
+            message: "session capability inspection is not supported".into(),
+            correlation_id: ctx.correlation_id,
+            command_id: None,
+            retryable: false,
+            retry_after_ms: None,
+            reconciliation_required: false,
+            required_capability: None,
+        })
+    }
+
     async fn delete_session(&self, ctx: RequestContext, session: SessionId) -> InterfaceResult<()>;
     async fn create_session(
         &self,

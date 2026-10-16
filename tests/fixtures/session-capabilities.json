@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "sessionId": "00000000-0000-4000-8000-000000000005",
+  "observedAt": "2026-10-15T00:00:00Z",
+  "engine": "chromium",
+  "connection": "connected",
+  "features": [{
+    "name": "captureScreenshot.viewport", "supported": true, "available": true,
+    "reason": null, "requiredCapabilities": ["browser:mutate"], "policyRequirement": null
+  }]
+}

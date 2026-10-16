@@ -82,6 +82,7 @@ If `workflow_start` fails, it reports `pageOpenFailed`, `navigationFailed`, `wor
 | `recovery_status` | `recovery:read` | Read a workflow's checkpoint and receipts |
 | `runtime_info` | `session:read` | Runtime version, active sessions, credential expiry |
 | `screenshot` | `browser:mutate` | Screenshot artifact |
+| `session_capabilities` | `session:read` | Observe an owned session's engine-option support, grants, policy, and connection state |
 | `session_close` | `session:write` | Close a session and release its browser |
 | `session_create` | `session:write` | Create a session |
 | `session_list` | `session:read` | List the caller's sessions |

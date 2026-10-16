@@ -1,3 +1,4 @@
+import type { SessionCapabilities } from "./contracts.js";
 /**
  * Strict structural validators for `/v1` JSON responses.
  *
@@ -662,4 +663,19 @@ export function isEventGap(value: unknown): value is EventGap {
   return hasExactKeys(value, ["reason", "earliestAvailable"])
     && (value.reason === "historyLost" || value.reason === "invalidLimit" || value.reason === "invalidCursor")
     && isSafeUnsigned(value.earliestAvailable);
+}
+
+export function isSessionCapabilities(value: unknown): value is SessionCapabilities {
+  if (!hasExactKeys(value, ["schemaVersion", "sessionId", "observedAt", "engine", "connection", "features"])
+    || value.schemaVersion !== 1 || !isUuid(value.sessionId) || !isIsoTimestamp(value.observedAt)
+    || !nullableBoundedText(value.engine, 32) || !oneOf(value.connection, ["connected", "disconnected", "unknown"])
+    || !Array.isArray(value.features) || value.features.length < 1 || value.features.length > 64) return false;
+  const reasons = ["unsupportedByEngine", "missingCapability", "policyDisabled", "storageUnavailable", "workerUnavailable", "connectionUnknown", "disconnected", "metadataUnavailable"] as const;
+  return value.features.every(feature => hasExactKeys(feature, ["name", "supported", "available", "reason", "requiredCapabilities", "policyRequirement"])
+    && boundedText(feature.name, 128) && (feature.supported === null || typeof feature.supported === "boolean")
+    && typeof feature.available === "boolean" && (feature.reason === null || oneOf(feature.reason, reasons))
+    && Array.isArray(feature.requiredCapabilities) && feature.requiredCapabilities.length <= 64
+    && feature.requiredCapabilities.every(capability => boundedText(capability, 128))
+    && nullableBoundedText(feature.policyRequirement, 128))
+    && unique(value.features.map(feature => feature.name));
 }

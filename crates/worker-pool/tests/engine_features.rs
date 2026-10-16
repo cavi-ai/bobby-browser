@@ -10,7 +10,8 @@ fn feature_support_distinguishes_engine_specific_options() {
         firefox.features,
         &[
             EngineFeature::ViewportScreenshot,
-            EngineFeature::NetworkQuiet
+            EngineFeature::NetworkQuiet,
+            EngineFeature::JavaScriptEvaluation,
         ]
     );
     assert!(EngineFeatureSupport::for_engine(BrowserEngine::WebKit)

@@ -1712,6 +1712,25 @@ fn ensure_automatic_download_modifier_support(
 
 #[async_trait]
 impl BrowserWorker for ChromiumWorker {
+    async fn feature_observation(&self) -> crate::WorkerFeatureObservation {
+        let connected = self
+            .handler_task
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|task| !task.is_finished());
+        crate::WorkerFeatureObservation {
+            support: Some(crate::EngineFeatureSupport::for_engine(
+                companion_protocol::BrowserEngine::Chromium,
+            )),
+            connection: if connected {
+                types::SessionConnectionState::Connected
+            } else {
+                types::SessionConnectionState::Disconnected
+            },
+        }
+    }
+
     fn worker_id(&self) -> WorkerId {
         self.id.clone()
     }
