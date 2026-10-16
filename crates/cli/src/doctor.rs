@@ -566,6 +566,7 @@ fn ignored_for_next_action(name: &str) -> bool {
 
 fn repair_command(name: &str) -> &'static str {
     match name {
+        name if durable_history_check(name) || name == "vision-corpus" => "bobby doctor --json",
         "bootstrap" => "bobby install",
         "bootstrap-expiry" => "bobby init --force",
         "mcp-gateway" | "acp-gateway" | "sidecar-version" => "bobby install --cli",
@@ -588,6 +589,68 @@ fn repair_command(name: &str) -> &'static str {
     }
 }
 
+#[cfg(test)]
+mod recovery_guidance_tests {
+    use super::*;
+
+    #[test]
+    fn damaged_history_never_recommends_automatic_repair() {
+        for name in [
+            "storage-integrity",
+            "idempotency-commands",
+            "idempotency-lifecycle",
+            "idempotency-jobs",
+            "command-journal",
+            "scheduler-journal",
+        ] {
+            let mut report = DoctorReport::default();
+            report.fail(name, "durable history requires repair".into());
+            assert_eq!(
+                report.next_action().unwrap().command,
+                "bobby doctor --json",
+                "{name}"
+            );
+            let mut output = Vec::new();
+            report
+                .render_to(&mut output, DoctorColorMode::Never)
+                .unwrap();
+            let text = String::from_utf8(output).unwrap();
+            assert!(!text.contains("fix: bobby doctor --fix"), "{text}");
+            assert!(
+                text.contains("preserve") && text.contains("reconcile"),
+                "{text}"
+            );
+            let mut json = Vec::new();
+            report.render_json_to(&mut json).unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&json).unwrap();
+            assert_eq!(value["nextAction"]["command"], "bobby doctor --json");
+            assert!(value["nextAction"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("reconcile"));
+        }
+    }
+
+    #[test]
+    fn missing_storage_directories_still_recommend_the_supported_fix() {
+        let mut report = DoctorReport::default();
+        report.fail("storage-checkpoints-dir", "directory missing".into());
+        assert_eq!(report.next_action().unwrap().command, "bobby doctor --fix");
+    }
+
+    #[test]
+    fn a_busy_ledger_does_not_imply_damaged_history() {
+        let mut report = DoctorReport::default();
+        report.warn("idempotency-commands", "ledger in use".into());
+        assert!(report.next_action().is_none());
+        assert!(!report
+            .check("idempotency-commands")
+            .unwrap()
+            .detail
+            .contains("reconcile"));
+    }
+}
+
 fn check_detail_with_fix(check: &DoctorCheck) -> String {
     if check.status != DoctorStatus::Fail || ignored_for_next_action(&check.name) {
         return check.detail.clone();
@@ -595,8 +658,25 @@ fn check_detail_with_fix(check: &DoctorCheck) -> String {
     if check.detail.contains("fix:") || check.name.starts_with("host-") {
         return check.detail.clone();
     }
+    if repair_command(&check.name) == "bobby doctor --json" {
+        return format!("{} · inspect: bobby doctor --json", check.detail);
+    }
     format!("{} · fix: {}", check.detail, repair_command(&check.name))
 }
+
+fn durable_history_check(name: &str) -> bool {
+    matches!(
+        name,
+        "storage-integrity"
+            | "idempotency-commands"
+            | "idempotency-lifecycle"
+            | "idempotency-jobs"
+            | "command-journal"
+            | "scheduler-journal"
+    )
+}
+
+const DURABLE_HISTORY_GUIDANCE: &str = "pause callers; stop Bobby before offline repair; preserve the ledger and backups; reconcile affected operations against authoritative state before repair; `bobby doctor --fix` does not repair durable history";
 
 /// Structured outcome of a `bobby doctor` run: every check in order, so the
 /// CLI can render it and tests can assert on it without capturing stderr.
@@ -607,6 +687,11 @@ pub(crate) struct DoctorReport {
 
 impl DoctorReport {
     pub(crate) fn record(&mut self, status: DoctorStatus, name: &str, detail: String) {
+        let detail = if status == DoctorStatus::Fail && durable_history_check(name) {
+            format!("{detail}; {DURABLE_HISTORY_GUIDANCE}")
+        } else {
+            detail
+        };
         self.checks.push(DoctorCheck {
             status,
             name: name.to_string(),

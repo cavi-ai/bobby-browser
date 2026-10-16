@@ -53,11 +53,39 @@ A recovery decision is to resume, restart, or reconcile. When bobby cannot prove
 
 ## Optional follow-up observations
 
+MCP command results include `verificationStatus`. The SDKs classify the same
+typed evidence with Rust's `CommandOutcome::verification_status()`, TypeScript's
+`commandVerificationStatus(outcome)`, and Python's `command_verification_status(outcome)`.
+HTTP command responses retain their existing shape.
+
+| Status | What the evidence establishes |
+|---|---|
+| `notCompleted` | The command did not return `completed`; inspect its outcome and error. |
+| `notReported` | No wait or submit-settlement evidence was reported. A plain click may have completed. |
+| `conditionObserved` | A recorded wait condition was observed. Read that condition to determine what it proves. |
+| `settled` | Submission settled without reported client-side validation rejection. Server acceptance is not established. |
+| `validationRejected` | The submission reported client-side validation rejection. Repair the form before an explicit resubmission. |
+
+These classifications do not authorize retries. Diagnostic strings and optional
+follow-up observations never promote an action to a confirmed business result.
+
 Some MCP actions return a follow-up observation as `postStateStatus`: `available`, `unavailable` or `notRequested`. If it is `unavailable`, the action itself still succeeded and `postState` is omitted. Read fresh state before the next step. Do not repeat a successful action because the observation failed.
 
 ## Storage problems and uncertain jobs
 
 `GET /v1/runtime` reports `storageIntegrity` when durable history is unreadable, has duplicate keys, or is too large to restore. `bobby doctor` reports the same. Reads keep working, and new mutations that depend on the damaged store are refused. Restarting does not clear it. Keep the damaged files and repair them before restarting, because deleting the ledger and resubmitting can repeat an effect.
+
+For damaged command, job, or idempotency history:
+
+1. Save `bobby doctor --json` and the affected store names and reasons.
+2. Pause callers and stop Bobby before inspecting files offline.
+3. Preserve the affected ledger and its backups, including unresolved reservations.
+4. Establish whether affected operations took effect using authoritative application state before repairing history or retrying an operation.
+
+`bobby doctor --fix` repairs supported setup problems, such as missing storage
+directories. It does not repair damaged execution history or resolve uncertain
+effects. If authoritative state cannot establish an outcome, preserve that
+uncertainty; deleting reservations can permit a duplicate effect.
 
 For a job whose outcome is uncertain, an operator with `authority:admin` can record what they observed with `POST /v1/jobs/{job}/resolution`, or `resolveJob` and `resolve_job` in the SDKs. If a resolution write fails, further attestations for that job are refused until history is reloaded.
 
