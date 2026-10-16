@@ -64,6 +64,9 @@ worker-pool.workspace = true
 vision-proxy.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
 
+[target.'cfg(unix)'.dependencies]
+close_fds = "0.3.2"
+
 [dev-dependencies]
 sdk-core.workspace = true
 test-site.workspace = true
