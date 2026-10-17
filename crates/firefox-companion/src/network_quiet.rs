@@ -409,9 +409,17 @@ mod retention_tests {
             );
         }
         assert_eq!(quiet.owners.len(), MAX_TRACKED_REQUESTS);
-        assert_eq!(quiet.pending_page_loads("tab"), Some(MAX_TRACKED_REQUESTS));
+        // Capacity retention is independent of the fetch-age cutoff used by
+        // pending_page_loads; inserting the fixture can outlast that cutoff.
+        assert_eq!(
+            quiet.by_context["tab"].requests().count(),
+            MAX_TRACKED_REQUESTS
+        );
         finish(&mut quiet, "r0");
-        assert_eq!(quiet.pending_page_loads("tab"), Some(MAX_TRACKED_REQUESTS));
+        assert_eq!(
+            quiet.by_context["tab"].requests().count(),
+            MAX_TRACKED_REQUESTS
+        );
         for index in 904..5_000 {
             finish(&mut quiet, &format!("r{index}"));
         }
