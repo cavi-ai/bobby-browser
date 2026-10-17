@@ -1,0 +1,127 @@
+{
+  "version": 1,
+  "sandboxes": {},
+  "probes": [
+    {
+      "probe": "discovery-cost",
+      "id": "discovery-budget",
+      "access": "read_only",
+      "max_tools": 42,
+      "max_schema_bytes": 54036
+    },
+    {
+      "probe": "token-cost",
+      "id": "token-budget",
+      "access": "read_only",
+      "max_total_tokens": 13600,
+      "max_tool_tokens": 1600
+    },
+    {
+      "probe": "pagination",
+      "id": "catalog-pagination",
+      "access": "read_only",
+      "max_pages": 5
+    },
+    {
+      "probe": "protocol-negotiation",
+      "id": "protocol-negotiation",
+      "access": "read_only",
+      "bogus_version": "2000-01-01"
+    },
+    {
+      "probe": "surface-listing",
+      "id": "declared-surfaces",
+      "access": "read_only",
+      "max_pages": 5
+    },
+    {
+      "probe": "schema-guessability",
+      "id": "runtime_info-guessable",
+      "tool": "runtime_info",
+      "access": "read_only",
+      "sandbox": null,
+      "arguments": {}
+    },
+    {
+      "probe": "degradation-over-n",
+      "id": "runtime_info-repeat",
+      "tool": "runtime_info",
+      "access": "read_only",
+      "sandbox": null,
+      "arguments": {},
+      "max_attempts": 5
+    },
+    {
+      "probe": "latency-budget",
+      "id": "runtime_info-latency",
+      "tool": "runtime_info",
+      "access": "read_only",
+      "sandbox": null,
+      "arguments": {},
+      "attempts": 3,
+      "max_latency_ms": 1000
+    },
+    {
+      "probe": "output-schema",
+      "id": "runtime_info-output",
+      "tool": "runtime_info",
+      "access": "read_only",
+      "sandbox": null,
+      "arguments": {}
+    },
+    {
+      "probe": "schema-guessability",
+      "id": "session_list-guessable",
+      "tool": "session_list",
+      "access": "read_only",
+      "sandbox": null,
+      "arguments": {}
+    },
+    {
+      "probe": "degradation-over-n",
+      "id": "session_list-repeat",
+      "tool": "session_list",
+      "access": "read_only",
+      "sandbox": null,
+      "arguments": {},
+      "max_attempts": 5
+    },
+    {
+      "probe": "latency-budget",
+      "id": "session_list-latency",
+      "tool": "session_list",
+      "access": "read_only",
+      "sandbox": null,
+      "arguments": {},
+      "attempts": 3,
+      "max_latency_ms": 1000
+    },
+    {
+      "probe": "output-schema",
+      "id": "session_list-output",
+      "tool": "session_list",
+      "access": "read_only",
+      "sandbox": null,
+      "arguments": {}
+    },
+    {
+      "probe": "contention",
+      "id": "runtime_info-contention",
+      "tool": "runtime_info",
+      "access": "read_only",
+      "sandbox": null,
+      "arguments": {}
+    },
+    {
+      "probe": "payload-bounds",
+      "id": "runtime_info-payload",
+      "tool": "runtime_info",
+      "access": "read_only",
+      "sandbox": null,
+      "arguments": {},
+      "field": "payload",
+      "size_bytes": 1000000,
+      "expect_handled": false
+    }
+  ]
+}
