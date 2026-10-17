@@ -315,6 +315,13 @@ struct PreferenceWorkerFactory {
 
 #[async_trait]
 impl WorkerFactory for PreferenceWorkerFactory {
+    fn engine_feature_support(&self) -> Vec<crate::EngineFeatureSupport> {
+        self.factories
+            .iter()
+            .flat_map(|factory| factory.engine_feature_support())
+            .collect()
+    }
+
     async fn launch(&self, session_id: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
         if let Some(factory) = self.launched.lock().await.get(session_id).cloned() {
             return factory.launch(session_id).await;
@@ -384,6 +391,14 @@ impl SelectedWorkerFactory {
 
 #[async_trait]
 impl WorkerFactory for SelectedWorkerFactory {
+    fn engine_feature_support(&self) -> Vec<crate::EngineFeatureSupport> {
+        self.selector
+            .find(&self.preference)
+            .iter()
+            .flat_map(|registration| registration.factory.engine_feature_support())
+            .collect()
+    }
+
     async fn launch(&self, session_id: &SessionId) -> Result<Arc<dyn BrowserWorker>, CommandError> {
         self.selector
             .select(session_id, &self.preference)

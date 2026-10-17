@@ -139,6 +139,41 @@ See [Authenticated CDP](../surfaces/cdp.md).
 | `format` | `json` | `json` or `pretty` |
 | `sink` | `stdout` | Log destination |
 
+Command logs include a `command` span with `command_id`, `workflow_id`,
+`attempt_id`, `session_id`, command `family` and `class`, and `runtime_version`.
+`command.finished` records the returned outcome status and `elapsed_ms`. If the
+command future is dropped before returning, the status is `interrupted`; use the
+durable journal and recovery APIs to reconcile effects before retrying.
+
+Polled command submissions reaching the authenticated runtime also emit
+`command.request.finished` in a `command_request` span, including authorization
+rejections and idempotency replays. The span includes correlation, command,
+workflow, attempt, and session IDs, plus `request_mode` (`submit`, `oneShotVision`,
+or `autoCheckpoint`) and whether an idempotency key was present. Keys and bearer
+credentials are omitted.
+
+Request `disposition` is `runtimeInvoked`, `replayed`, `rejected`, or `interrupted`.
+The event includes `outcome`, a bounded `error_code`, `elapsed_ms`, and
+`runtime_invoked`, `replayed`, and `interrupted` flags. `outcome_command_id` links
+a replay to the original command even when the retry has a new command ID;
+it is `none` if no command outcome returned. Error messages are omitted.
+
+Group request events by workflow ID for request, replay, and rejection summaries.
+Count `command.finished` separately for execution attempts: invoking the runtime
+may fail during checkpoint preparation before command execution begins. Neither
+count proves a browser effect. A dropped waiter is interrupted even if it never
+invoked the runtime. Transport authentication and parsing failures that never
+reach the authenticated runtime are outside this accounting boundary. Log
+filtering and retention can omit events; these are diagnostics, not durable audit
+records or permission to retry.
+
+Vision calls emit `vision.provider.started` and `vision.provider.finished` within
+the command span. The latter includes `provider_mode`, `elapsed_ms`, and
+`proposal_returned`. A returned proposal still requires validation and does not
+mean an action succeeded. These events omit command payloads, URLs, page content,
+screenshots, and provider error text. Logging filters and operator retention
+apply; these diagnostics do not replace durable history or enforce provider health.
+
 `bobby doctor` can check vision health against objectives under `[observability.slo]`. Both are optional, and an unset one is not evaluated.
 
 | Key | Meaning |
@@ -195,14 +230,18 @@ Presets for `bobby vision connect --provider`:
 | Provider | `base_url` | `model` | `api_key_env` |
 |---|---|---|---|
 | `openai` | `https://api.openai.com/v1` | `gpt-4o-mini` | `OPENAI_API_KEY` |
-| `ollama` | `http://127.0.0.1:11434` | `llava` | none |
+| `ollama` | `http://127.0.0.1:11434` | `llava:7b` | none |
 | `lmstudio` | `http://127.0.0.1:1234/v1` | `local-model` | none |
 | `mlx` | local | selected model | none |
 | `custom` | `--base-url` | `--model` | `--api-key-env` |
 
 Override with `--base-url` and `--model`. For LM Studio, use the server URL the app shows.
 
-Ollama reads a model name without a tag as `:latest`. When Ollama has another tag of the default model but not `:latest`, `bobby install`, `bobby vision connect` without `--model`, and `bobby doctor --fix` use the installed tag.
+Interactive install and `bobby vision connect` list available models after you choose a provider. Type to search, select the model, or choose **Refresh** or **Back**. Ollama and LM Studio report image support, so known text-only models are excluded. OpenAI-compatible providers that omit image metadata show **image support not reported** beside their models; check the provider's model documentation before choosing one. MLX lists cached image models and offers download choices with confirmation.
+
+Model lists are cached in memory for 60 seconds, separately for each provider, endpoint and credential. Refresh queries the provider again; a selected list entry is checked again before it is saved. Provider requests time out after 5 seconds. If discovery is unavailable, you can enter an exact model ID manually.
+
+For unattended setup, use `--yes --model <id>` with `vision connect`, or `--yes --vision-model <id>` with `install`. An explicit model is retained. With no explicit model or existing selection, Ollama uses the default only if it is available, or the sole installed image model; multiple alternatives require a selection. When Ollama cannot be reached, setup can write the tagged default `llava:7b`; readiness is checked when activation is requested. Ollama reads an untagged model name as `:latest`; `bobby doctor --fix` can repair an untagged selection to an installed tag.
 
 The proxy reads at most 1 MiB from an upstream response, counted after decompression, and rejects larger replies. Extracted values are capped at 64 KiB. Errors report the provider and HTTP status without the upstream body.
 

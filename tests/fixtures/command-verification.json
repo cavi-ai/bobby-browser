@@ -1,0 +1,260 @@
+[
+  {
+    "name": "plain click proves no requested outcome",
+    "outcome": {
+      "status": "completed",
+      "commandId": "00000000-0000-0000-0000-000000000001",
+      "evidence": [
+        {
+          "kind": "element",
+          "selector": "button",
+          "text": null
+        }
+      ]
+    },
+    "expected": "notReported"
+  },
+  {
+    "name": "empty completed evidence",
+    "outcome": {
+      "status": "completed",
+      "commandId": "00000000-0000-0000-0000-000000000001",
+      "evidence": []
+    },
+    "expected": "notReported"
+  },
+  {
+    "name": "explicit condition observed",
+    "outcome": {
+      "status": "completed",
+      "commandId": "00000000-0000-0000-0000-000000000001",
+      "evidence": [
+        {
+          "kind": "element",
+          "selector": "button",
+          "text": null
+        },
+        {
+          "kind": "wait",
+          "condition": {
+            "kind": "url",
+            "matcher": {
+              "kind": "contains",
+              "value": "/confirmed"
+            }
+          },
+          "elapsedMs": 1,
+          "observations": 1
+        }
+      ]
+    },
+    "expected": "conditionObserved"
+  },
+  {
+    "name": "idle condition alone does not confirm submission",
+    "outcome": {
+      "status": "completed",
+      "commandId": "00000000-0000-0000-0000-000000000001",
+      "evidence": [
+        {
+          "kind": "wait",
+          "condition": {
+            "kind": "networkQuiet",
+            "idleMs": 100,
+            "maxInFlight": 0
+          },
+          "elapsedMs": 1,
+          "observations": 1
+        }
+      ]
+    },
+    "expected": "conditionObserved"
+  },
+  {
+    "name": "settled submit",
+    "outcome": {
+      "status": "completed",
+      "commandId": "00000000-0000-0000-0000-000000000001",
+      "evidence": [
+        {
+          "kind": "wait",
+          "condition": {
+            "kind": "url",
+            "matcher": {
+              "kind": "contains",
+              "value": "/confirmed"
+            }
+          },
+          "elapsedMs": 1,
+          "observations": 1
+        },
+        {
+          "kind": "submitSettlement",
+          "outcome": "settled"
+        }
+      ]
+    },
+    "expected": "settled"
+  },
+  {
+    "name": "rejected submit",
+    "outcome": {
+      "status": "completed",
+      "commandId": "00000000-0000-0000-0000-000000000001",
+      "evidence": [
+        {
+          "kind": "wait",
+          "condition": {
+            "kind": "url",
+            "matcher": {
+              "kind": "contains",
+              "value": "/confirmed"
+            }
+          },
+          "elapsedMs": 1,
+          "observations": 1
+        },
+        {
+          "kind": "submitSettlement",
+          "outcome": "validationRejected"
+        }
+      ]
+    },
+    "expected": "validationRejected"
+  },
+  {
+    "name": "rejection takes precedence over settlement",
+    "outcome": {
+      "status": "completed",
+      "commandId": "00000000-0000-0000-0000-000000000001",
+      "evidence": [
+        {
+          "kind": "submitSettlement",
+          "outcome": "settled"
+        },
+        {
+          "kind": "submitSettlement",
+          "outcome": "validationRejected"
+        }
+      ]
+    },
+    "expected": "validationRejected"
+  },
+  {
+    "name": "rejection precedence is order independent",
+    "outcome": {
+      "status": "completed",
+      "commandId": "00000000-0000-0000-0000-000000000001",
+      "evidence": [
+        {
+          "kind": "submitSettlement",
+          "outcome": "validationRejected"
+        },
+        {
+          "kind": "submitSettlement",
+          "outcome": "settled"
+        }
+      ]
+    },
+    "expected": "validationRejected"
+  },
+  {
+    "name": "failed command cannot claim observed outcome",
+    "outcome": {
+      "status": "failed",
+      "commandId": "00000000-0000-0000-0000-000000000001",
+      "evidence": [
+        {
+          "kind": "wait",
+          "condition": {
+            "kind": "url",
+            "matcher": {
+              "kind": "contains",
+              "value": "/confirmed"
+            }
+          },
+          "elapsedMs": 1,
+          "observations": 1
+        }
+      ],
+      "error": {
+        "code": "verificationFailed",
+        "message": "confirmation unavailable",
+        "layer": "workflow",
+        "retryable": false
+      }
+    },
+    "expected": "notCompleted"
+  },
+  {
+    "name": "uncertain command cannot claim observed outcome",
+    "outcome": {
+      "status": "needsReconciliation",
+      "commandId": "00000000-0000-0000-0000-000000000001",
+      "evidence": [
+        {
+          "kind": "wait",
+          "condition": {
+            "kind": "url",
+            "matcher": {
+              "kind": "contains",
+              "value": "/confirmed"
+            }
+          },
+          "elapsedMs": 1,
+          "observations": 1
+        }
+      ],
+      "error": {
+        "code": "verificationFailed",
+        "message": "confirmation unavailable",
+        "layer": "workflow",
+        "retryable": false
+      }
+    },
+    "expected": "notCompleted"
+  },
+  {
+    "name": "optional observation failure does not undo confirmation",
+    "outcome": {
+      "status": "completed",
+      "commandId": "00000000-0000-0000-0000-000000000001",
+      "evidence": [
+        {
+          "kind": "wait",
+          "condition": {
+            "kind": "url",
+            "matcher": {
+              "kind": "contains",
+              "value": "/confirmed"
+            }
+          },
+          "elapsedMs": 1,
+          "observations": 1
+        }
+      ],
+      "postStateStatus": {
+        "status": "unavailable"
+      }
+    },
+    "expected": "conditionObserved"
+  },
+  {
+    "name": "optional observation success does not prove business result",
+    "outcome": {
+      "status": "completed",
+      "commandId": "00000000-0000-0000-0000-000000000001",
+      "evidence": [
+        {
+          "kind": "element",
+          "selector": "button",
+          "text": null
+        }
+      ],
+      "postStateStatus": {
+        "status": "available"
+      }
+    },
+    "expected": "notReported"
+  }
+]

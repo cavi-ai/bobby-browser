@@ -43,6 +43,55 @@ impl Drop for Cleanup {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn detached_owner_does_not_retain_launcher_descriptors() {
+    use std::{
+        io::Read,
+        os::{
+            fd::{AsRawFd, FromRawFd, OwnedFd},
+            unix::{net::UnixStream, process::CommandExt},
+        },
+        time::Duration,
+    };
+
+    let scope = Cleanup(tempfile::tempdir().unwrap());
+    let (mut reader, writer) = UnixStream::pair().unwrap();
+    reader
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    // Keep the parent's descriptor close-on-exec, including during parallel tests.
+    let descriptor = unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 128) };
+    assert!(descriptor >= 128, "{}", std::io::Error::last_os_error());
+    let inherited = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    drop(writer);
+    let mut launcher = command(scope.0.path());
+    launcher.args(["runtime", "start"]);
+    unsafe {
+        launcher.pre_exec(move || {
+            if libc::fcntl(descriptor, libc::F_SETFD, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let url = checked(launcher.output().unwrap());
+    drop(inherited);
+
+    let read = reader.read(&mut [0]);
+    assert!(
+        matches!(read, Ok(0)),
+        "the detached owner retained a launcher descriptor: {read:?}"
+    );
+    assert!(checked(
+        command(scope.0.path())
+            .args(["runtime", "status"])
+            .output()
+            .unwrap()
+    )
+    .contains(&url));
+}
+
 async fn connection(
     origin: String,
     bearer: String,

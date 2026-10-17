@@ -37,7 +37,7 @@ impl ReadinessOutcome {
     }
 }
 
-fn hugging_face_cache_root() -> Result<PathBuf> {
+pub(crate) fn hugging_face_cache_root() -> Result<PathBuf> {
     if let Some(root) = std::env::var_os("HF_HOME") {
         return Ok(PathBuf::from(root).join("hub"));
     }
@@ -299,6 +299,14 @@ pub(crate) fn installed_tag_for_untagged(configured: &str, listed: &[String]) ->
 /// The installed tag a running Ollama serves for the profile's untagged
 /// model when it does not have the model's `:latest`; never starts Ollama.
 pub(crate) fn installed_ollama_tag(profile: &VisionProviderConfig) -> Option<String> {
+    if profile
+        .model
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| name.contains(':'))
+    {
+        return None;
+    }
     match openai_compatible_models_probe("ollama", profile, None, Duration::from_secs(2)) {
         ProbeResult::Reachable {
             models: Some(listed),

@@ -150,6 +150,9 @@ bobby context forget --profile <profile-id> <site>
 | `collect` | Collect vision training data |
 
 ```bash
+bobby vision connect --provider ollama
+bobby install --vision --vision-provider ollama
+bobby install --yes --vision-provider ollama --vision-model llava:7b
 bobby vision connect --yes --provider mlx
 bobby vision connect --yes --provider mlx --activate --download-model
 bobby vision connect --yes --backend acp --provider codex --command codex --arg acp --auth advertised

@@ -1,3 +1,5 @@
+mod session_capabilities;
+
 use std::{
     collections::HashSet,
     sync::{
@@ -87,6 +89,7 @@ impl AuthenticatedRuntime {
         }
     }
 
+    /// Runtime submission invocations, including checkpoint preparation that can fail before execution.
     pub fn submit_dispatch_count(&self) -> usize {
         self.submit_dispatches.load(Ordering::Acquire)
     }
@@ -192,6 +195,29 @@ impl AuthenticatedRuntime {
         envelope: CommandEnvelope,
         one_shot_vision_consent: bool,
     ) -> InterfaceResult<CommandOutcome> {
+        use tracing::Instrument;
+        let mode = if one_shot_vision_consent {
+            "oneShotVision"
+        } else {
+            "submit"
+        };
+        let mut trace = crate::request_trace::RequestTrace::new(&ctx, &envelope, mode);
+        let span = trace.span.clone();
+        let result = self
+            .submit_authorized_inner(ctx, envelope, one_shot_vision_consent, &mut trace)
+            .instrument(span)
+            .await;
+        trace.finish(result.as_ref());
+        result
+    }
+
+    async fn submit_authorized_inner(
+        &self,
+        ctx: RequestContext,
+        envelope: CommandEnvelope,
+        one_shot_vision_consent: bool,
+        trace: &mut crate::request_trace::RequestTrace,
+    ) -> InterfaceResult<CommandOutcome> {
         self.authorize_submit(&ctx, &envelope.command, one_shot_vision_consent)?;
         self.require_owned_session(&ctx, &envelope.session_id)?;
         // Vision assist is gated at escalation time inside IntentEngine, not upfront.
@@ -204,6 +230,8 @@ impl AuthenticatedRuntime {
             .contains(Capability::VisionAssist)
             && ctx.capabilities.contains(Capability::VisionAssist);
         let Some(key) = ctx.idempotency_key.clone() else {
+            trace.runtime_invoked();
+            self.submit_dispatches.fetch_add(1, Ordering::AcqRel);
             return Ok(self
                 .inner
                 .submit_with_vision_grant(envelope, vision_capability_ok, one_shot_vision_consent)
@@ -237,6 +265,7 @@ impl AuthenticatedRuntime {
             IdempotencyReservation::Replay(outcome) => {
                 self.authorize_submit(&ctx, &envelope.command, one_shot_vision_consent)?;
                 self.require_owned_session(&ctx, &envelope.session_id)?;
+                trace.replayed();
                 Ok(outcome)
             }
             IdempotencyReservation::Acquired(permit) => {
@@ -247,6 +276,7 @@ impl AuthenticatedRuntime {
                     self.idempotency.abandon(permit).await;
                     return Err(error);
                 }
+                trace.runtime_invoked();
                 self.submit_dispatches.fetch_add(1, Ordering::AcqRel);
                 let outcome = self
                     .inner
@@ -260,6 +290,92 @@ impl AuthenticatedRuntime {
                     .finish(permit, outcome.clone(), Utc::now())
                     .await?;
                 Ok(outcome)
+            }
+        }
+    }
+
+    async fn submit_auto_checkpoint_inner(
+        &self,
+        ctx: RequestContext,
+        envelope: CommandEnvelope,
+        trace: &mut crate::request_trace::RequestTrace,
+    ) -> InterfaceResult<(CommandOutcome, Option<types::CheckpointId>)> {
+        // Both gates the manual sequence passes: writing a checkpoint and
+        // running the command. Sugar must not widen authority.
+        self.authorization
+            .authorize(&ctx, InterfaceOperation::CreateCheckpoint)?;
+        self.lifecycle_idempotency
+            .ensure_writable(&ctx.correlation_id)?;
+        self.authorize_submit(&ctx, &envelope.command, false)?;
+        self.require_owned_session(&ctx, &envelope.session_id)?;
+        let vision_capability_ok = self
+            .authorization
+            .capability_handle()
+            .capabilities()
+            .contains(Capability::VisionAssist)
+            && ctx.capabilities.contains(Capability::VisionAssist);
+        let Some(key) = ctx.idempotency_key.clone() else {
+            trace.runtime_invoked();
+            self.submit_dispatches.fetch_add(1, Ordering::AcqRel);
+            return self
+                .inner
+                .submit_with_auto_checkpoint(envelope, vision_capability_ok, false)
+                .await
+                .map(|(outcome, checkpoint_id)| (outcome, Some(checkpoint_id)))
+                .map_err(|error| map_runtime_error(&ctx, error));
+        };
+        // The same ledger and identity as `submit_authorized`: the minted
+        // checkpoint is bookkeeping, the command is the effect. Without this
+        // a Boundary submit (autoCheckpoint is its default) ignored its key.
+        let digest = command_identity_sha256(
+            envelope.schema_version,
+            &envelope.session_id,
+            &envelope.page_id,
+            &envelope.command,
+            false,
+        )?;
+        let reservation = self
+            .idempotency
+            .reserve(
+                ctx.principal_id.clone(),
+                key,
+                InterfaceOperation::SubmitCommand,
+                digest,
+                Utc::now(),
+                ctx.deadline,
+                ctx.correlation_id.clone(),
+            )
+            .await?;
+        match reservation {
+            IdempotencyReservation::Replay(outcome) => {
+                self.authorization
+                    .authorize(&ctx, InterfaceOperation::CreateCheckpoint)?;
+                self.authorize_submit(&ctx, &envelope.command, false)?;
+                self.require_owned_session(&ctx, &envelope.session_id)?;
+                trace.replayed();
+                Ok((outcome, None))
+            }
+            IdempotencyReservation::Acquired(permit) => {
+                trace.runtime_invoked();
+                self.submit_dispatches.fetch_add(1, Ordering::AcqRel);
+                match self
+                    .inner
+                    .submit_with_auto_checkpoint(envelope, vision_capability_ok, false)
+                    .await
+                {
+                    Ok((outcome, checkpoint_id)) => {
+                        self.idempotency
+                            .finish(permit, outcome.clone(), Utc::now())
+                            .await?;
+                        Ok((outcome, Some(checkpoint_id)))
+                    }
+                    Err(error) => {
+                        // Nothing ran: the checkpoint save or page lookup
+                        // failed before the command was submitted.
+                        self.idempotency.abandon(permit).await;
+                        Err(map_runtime_error(&ctx, error))
+                    }
+                }
             }
         }
     }
@@ -330,6 +446,14 @@ impl RuntimeInterface for AuthenticatedRuntime {
             });
         }
         Ok(info)
+    }
+
+    async fn session_capabilities(
+        &self,
+        ctx: RequestContext,
+        session: SessionId,
+    ) -> InterfaceResult<types::SessionCapabilities> {
+        self.inspect_session_capabilities(ctx, session).await
     }
 
     async fn list_sessions(&self, ctx: RequestContext) -> InterfaceResult<Vec<SessionState>> {
@@ -570,81 +694,15 @@ impl RuntimeInterface for AuthenticatedRuntime {
         ctx: RequestContext,
         envelope: CommandEnvelope,
     ) -> InterfaceResult<(CommandOutcome, Option<types::CheckpointId>)> {
-        // Both gates the manual sequence passes: writing a checkpoint and
-        // running the command. Sugar must not widen authority.
-        self.authorization
-            .authorize(&ctx, InterfaceOperation::CreateCheckpoint)?;
-        self.lifecycle_idempotency
-            .ensure_writable(&ctx.correlation_id)?;
-        self.authorize_submit(&ctx, &envelope.command, false)?;
-        self.require_owned_session(&ctx, &envelope.session_id)?;
-        let vision_capability_ok = self
-            .authorization
-            .capability_handle()
-            .capabilities()
-            .contains(Capability::VisionAssist)
-            && ctx.capabilities.contains(Capability::VisionAssist);
-        let Some(key) = ctx.idempotency_key.clone() else {
-            self.submit_dispatches.fetch_add(1, Ordering::AcqRel);
-            return self
-                .inner
-                .submit_with_auto_checkpoint(envelope, vision_capability_ok, false)
-                .await
-                .map(|(outcome, checkpoint_id)| (outcome, Some(checkpoint_id)))
-                .map_err(|error| map_runtime_error(&ctx, error));
-        };
-        // The same ledger and identity as `submit_authorized`: the minted
-        // checkpoint is bookkeeping, the command is the effect. Without this
-        // a Boundary submit (autoCheckpoint is its default) ignored its key.
-        let digest = command_identity_sha256(
-            envelope.schema_version,
-            &envelope.session_id,
-            &envelope.page_id,
-            &envelope.command,
-            false,
-        )?;
-        let reservation = self
-            .idempotency
-            .reserve(
-                ctx.principal_id.clone(),
-                key,
-                InterfaceOperation::SubmitCommand,
-                digest,
-                Utc::now(),
-                ctx.deadline,
-                ctx.correlation_id.clone(),
-            )
-            .await?;
-        match reservation {
-            IdempotencyReservation::Replay(outcome) => {
-                self.authorization
-                    .authorize(&ctx, InterfaceOperation::CreateCheckpoint)?;
-                self.authorize_submit(&ctx, &envelope.command, false)?;
-                self.require_owned_session(&ctx, &envelope.session_id)?;
-                Ok((outcome, None))
-            }
-            IdempotencyReservation::Acquired(permit) => {
-                self.submit_dispatches.fetch_add(1, Ordering::AcqRel);
-                match self
-                    .inner
-                    .submit_with_auto_checkpoint(envelope, vision_capability_ok, false)
-                    .await
-                {
-                    Ok((outcome, checkpoint_id)) => {
-                        self.idempotency
-                            .finish(permit, outcome.clone(), Utc::now())
-                            .await?;
-                        Ok((outcome, Some(checkpoint_id)))
-                    }
-                    Err(error) => {
-                        // Nothing ran: the checkpoint save or page lookup
-                        // failed before the command was submitted.
-                        self.idempotency.abandon(permit).await;
-                        Err(map_runtime_error(&ctx, error))
-                    }
-                }
-            }
-        }
+        use tracing::Instrument;
+        let mut trace = crate::request_trace::RequestTrace::new(&ctx, &envelope, "autoCheckpoint");
+        let span = trace.span.clone();
+        let result = self
+            .submit_auto_checkpoint_inner(ctx, envelope, &mut trace)
+            .instrument(span)
+            .await;
+        trace.finish(result.as_ref().map(|(outcome, _)| outcome));
+        result
     }
 
     async fn checkpoint(

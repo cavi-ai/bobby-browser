@@ -133,9 +133,8 @@ pub(crate) fn tool_annotations(name: &str) -> Value {
     let idempotent = tool.is_some_and(|tool| tool.idempotent);
     let open_world = tool.is_some_and(|tool| tool.open_world);
     let mut hints = serde_json::Map::new();
-    if read_only {
-        hints.insert("readOnlyHint".to_owned(), json!(true));
-    } else {
+    hints.insert("readOnlyHint".to_owned(), json!(read_only));
+    if !read_only {
         hints.insert("destructiveHint".to_owned(), json!(destructive));
     }
     if idempotent {
@@ -319,37 +318,40 @@ tools! {
     screenshot { order: 42, title: "Screenshot", description: "Capture a screenshot artifact of a page's viewport, full page, or one element. Requires browser:mutate.",
         capabilities: &[types::Capability::BrowserMutate], operation: Some(types::InterfaceOperation::SubmitCommand), schema: screenshot_schema, args: ScreenshotArgs,
         phases: VERIFY, scope: SessionPageWorkflow, group: Primitives, hints: (true, false, false, false) }
-    session_close { order: 43, title: "Close session", description: "Close a session and release its resources. Requires session:write. Destructive. On failure, confirm with session_list.",
+    session_capabilities { order: 43, title: "Inspect session capabilities", description: "Read engine-option eligibility for a session, with capability, policy, and connection reasons. Requires session:read. Consult tools/list for callable tools.",
+        capabilities: &[types::Capability::SessionRead], operation: Some(types::InterfaceOperation::ReadSession), schema: session_close_schema, args: SessionCloseArgs,
+        phases: ALWAYS, group: Lifecycle, hints: (true, false, false, false) }
+    session_close { order: 44, title: "Close session", description: "Close a session and release its resources. Requires session:write. Destructive. On failure, confirm with session_list.",
         capabilities: &[types::Capability::SessionWrite], operation: Some(types::InterfaceOperation::DeleteSession), schema: session_close_schema, args: SessionCloseArgs,
         phases: ALWAYS, group: Lifecycle, hints: (false, true, false, false) }
-    session_create { order: 44, title: "Create session", description: "Create a browser session with a profile and execution policy. Requires session:write. On failure with resourceExhausted, close an idle session.",
+    session_create { order: 45, title: "Create session", description: "Create a browser session with a profile and execution policy. Requires session:write. On failure with resourceExhausted, close an idle session.",
         capabilities: &[types::Capability::SessionWrite], operation: Some(types::InterfaceOperation::CreateSession), schema: session_create_schema, args: SessionCreateArgs,
         phases: ALWAYS, group: Lifecycle, hints: (false, false, false, false) }
-    session_list { order: 45, title: "List sessions", description: "List sessions visible to this principal. Requires session:read.",
+    session_list { order: 46, title: "List sessions", description: "List sessions visible to this principal. Requires session:read.",
         capabilities: &[types::Capability::SessionRead], operation: Some(types::InterfaceOperation::ReadSession), schema: runtime_info_schema, args: EmptyArgs,
         phases: ALWAYS, group: Lifecycle, hints: (true, false, false, false) }
-    toolset_select { order: 46, title: "Select a toolset phase", description: "Narrow tools/list to one phase (explore, act, intent, verify, full). Requires no capability.",
+    toolset_select { order: 47, title: "Select a toolset phase", description: "Narrow tools/list to one phase (explore, act, intent, verify, full). Requires no capability.",
         capabilities: &[], operation: None, schema: toolset_select_schema, args: ToolsetSelectArgs,
         phases: ALWAYS, group: Toolset, hints: (true, false, false, false) }
-    type_text { order: 47, title: "Type text", description: "Type into an element by selector or resolved target, optionally clearing it first. Requires browser:mutate. On failure with targetNotFound or targetAmbiguous, refresh a11y_snapshot.",
+    type_text { order: 48, title: "Type text", description: "Type into an element by selector or resolved target, optionally clearing it first. Requires browser:mutate. On failure with targetNotFound or targetAmbiguous, refresh a11y_snapshot.",
         capabilities: &[types::Capability::BrowserMutate], operation: Some(types::InterfaceOperation::SubmitCommand), schema: type_text_schema, args: TypeTextArgs,
         phases: EXPLORE | ACT, scope: SessionPageWorkflow, group: Primitives, hints: (false, false, false, false) }
-    upload_files { order: 48, title: "Upload files", description: "Set files on a file input via selector, target, or form_snapshot controlId. Requires browser:mutate and file:upload. On failure with needsReconciliation, call recovery_status; on policyDenied, use a configured upload root.",
+    upload_files { order: 49, title: "Upload files", description: "Set files on a file input via selector, target, or form_snapshot controlId. Requires browser:mutate and file:upload. On failure with needsReconciliation, call recovery_status; on policyDenied, use a configured upload root.",
         capabilities: &[
             types::Capability::BrowserMutate,
             types::Capability::FileUpload,
         ], operation: Some(types::InterfaceOperation::SubmitCommand), schema: upload_files_schema, args: UploadFilesArgs,
         phases: EXPLORE | ACT, scope: SessionPageWorkflow, group: PageOps, hints: (false, false, false, false) }
-    wait_for { order: 49, title: "Wait for condition", description: "Wait for a page condition with a bounded timeout. Requires browser:mutate.",
+    wait_for { order: 50, title: "Wait for condition", description: "Wait for a page condition with a bounded timeout. Requires browser:mutate.",
         capabilities: &[types::Capability::BrowserMutate], operation: Some(types::InterfaceOperation::SubmitCommand), schema: wait_for_schema, args: WaitForArgs,
         phases: ACT | INTENT, scope: SessionPageWorkflow, group: Primitives, hints: (true, false, false, false) }
-    workflow_observe { order: 51, title: "Observe retained workflow", description: "Observe retained or live accessibility evidence. Requires browser:mutate; forms need page:read. Defaults evidenceDetail=compact.",
+    workflow_observe { order: 52, title: "Observe retained workflow", description: "Observe retained or live accessibility evidence. Requires browser:mutate; forms need page:read. Defaults evidenceDetail=compact.",
         capabilities: WORKFLOW_OBSERVE_REQUIRED_CAPABILITIES, operation: Some(WORKFLOW_OBSERVE_OPERATION), schema: workflow_observe_schema, args: WorkflowObserveArgs,
         phases: ALWAYS, scope: SessionPageWorkflow, group: AgentWorkflow, page_derived: true, hints: (true, false, false, false) }
-    workflow_recover { order: 52, title: "Recover workflow", description: "Recover from the last verified checkpoint. Requires recovery:write. Returns resume, restart, or reconciliation evidence. On failure with notFound, verify session ownership with session_list.",
+    workflow_recover { order: 53, title: "Recover workflow", description: "Recover from the last verified checkpoint. Requires recovery:write. Returns resume, restart, or reconciliation evidence. On failure with notFound, verify session ownership with session_list.",
         capabilities: &[types::Capability::RecoveryWrite], operation: Some(types::InterfaceOperation::RecoverWorkflow), schema: workflow_recover_schema, args: WorkflowRecoverArgs,
         phases: VERIFY, group: Workflow, hints: (false, false, false, false) }
-    workflow_start { order: 50, title: "Start retained workflow", description: "Create and bind a session, page, and workflow, optionally navigating to url. Requires session:read, session:write, page:write. On failure, inspect session_list.",
+    workflow_start { order: 51, title: "Start retained workflow", description: "Create and bind a session, page, and workflow, optionally navigating to url. Requires session:read, session:write, page:write. On failure, inspect session_list.",
         capabilities: WORKFLOW_START_REQUIRED_CAPABILITIES, operation: Some(WORKFLOW_START_OPERATION), schema: workflow_start_schema, args: WorkflowStartArgs,
         phases: ALWAYS, group: AgentWorkflow, hints: (false, false, false, true) }
 }
@@ -383,6 +385,32 @@ mod tests {
                     "{} has a scope without session arguments",
                     tool.name
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn every_advertised_parameter_is_described_and_every_tool_declares_read_only() {
+        for tool in DESCRIPTORS {
+            let schema = crate::schema::advertised_tool_schema(tool.name);
+            for (key, property) in schema["properties"].as_object().expect("properties") {
+                assert!(
+                    property["description"]
+                        .as_str()
+                        .is_some_and(|text| !text.is_empty()),
+                    "{}.{key} needs a description",
+                    tool.name
+                );
+            }
+            let hints = tool_annotations(tool.name);
+            assert_eq!(
+                hints["readOnlyHint"],
+                json!(tool.read_only),
+                "{}",
+                tool.name
+            );
+            if !tool.read_only {
+                assert!(hints["destructiveHint"].is_boolean(), "{}", tool.name);
             }
         }
     }

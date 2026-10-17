@@ -70,6 +70,9 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+      - name: Vision model selection
+        run: python3 scripts/test_vision_model_selection.py
+
       - name: Version and naming agreement
         # One tag ships binaries, npm, and the crate, so a version that
         # disagrees between manifests ships a mislabelled artifact. npm reached
@@ -218,6 +221,12 @@ jobs:
           -- --ignored --test-threads=1
           --skip stuck_locate_records_a_real_local_vision_proposal
 
+      - name: Chromium cookie contract
+        run: cargo test -p runtime-tests --locked --test cookie_engine_contract chromium_cookie_support_matches_native_behavior -- --ignored --exact
+
+      - name: Chromium session capability contract
+        run: cargo test -p runtime-tests --locked --test session_capabilities chromium_session_capabilities_match_worker -- --ignored --exact
+
       - name: CLI live tests
         run: cargo test -p bobby-browser --locked --test audit_replay_live --test shared_runtime_load -- --ignored --test-threads=1
 
@@ -302,6 +311,20 @@ jobs:
 
           xvfb-run -a make test-browsers-firefox TEST_BROWSERS_HEADLESS=0 \
             TEST_BROWSERS_FIREFOX_SUITES="--test worker_policy_contract _firefox"
+
+      - name: Firefox cookie contract
+        run: |
+          mkdir -p "$RUNNER_TEMP/bobby-firefox-cookie-profile"
+          xvfb-run -a make test-browsers-firefox TEST_BROWSERS_HEADLESS=0 \
+            TEST_BROWSERS_PROFILE="$RUNNER_TEMP/bobby-firefox-cookie-profile" \
+            TEST_BROWSERS_FIREFOX_SUITES="--test cookie_engine_contract firefox_cookie_support_refuses_before_partial_mutation"
+
+      - name: Firefox session capability contract
+        run: |
+          mkdir -p "$RUNNER_TEMP/bobby-firefox-capabilities-profile"
+          xvfb-run -a make test-browsers-firefox TEST_BROWSERS_HEADLESS=0 \
+            TEST_BROWSERS_PROFILE="$RUNNER_TEMP/bobby-firefox-capabilities-profile" \
+            TEST_BROWSERS_FIREFOX_SUITES="--test session_capabilities firefox_session_capabilities_match_worker"
 
       # The lifecycle suite sideloads the unsigned companion into its own
       # profiles, which only Developer Edition, Nightly, or ESR accept.

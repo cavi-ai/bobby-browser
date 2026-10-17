@@ -71,6 +71,16 @@ impl Server {
                         value
                     })
             }
+            "session_capabilities" => {
+                let input: SessionCloseArgs = match bounded_parse(call.arguments) {
+                    Ok(input) => input,
+                    Err(()) => return invalid_params_reason(id, "malformedArguments"),
+                };
+                self.runtime
+                    .session_capabilities(context, input.session_id)
+                    .await
+                    .and_then(to_json)
+            }
             "session_list" => {
                 if bounded_parse::<EmptyArgs>(call.arguments).is_err() {
                     return invalid_params_reason(id, "malformedArguments");

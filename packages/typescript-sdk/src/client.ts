@@ -1,3 +1,5 @@
+import type { SessionCapabilities } from "./contracts.js";
+import { isSessionCapabilities } from "./validators.js";
 import { INTERFACE_VERSION, type ArtifactReference, type CheckpointRequest, type CommandEnvelope, type CommandOutcome, type ContextAskResponse, type ContextNeighborsResponse, type ContextSiteResponse, type CreateSessionRequest, type EventOptions, type EventGap, type FormSnapshot, type FormSnapshotOptions, type InterfaceError, type InterfaceEvent, type JobResolutionRequest, type JobResolutionReceipt, type JobStatusResponse, type JobSubmitResponse, type OpenPageRequest, type RecoveryDecision, type RecoveryStatus, type RequestOptions, type RuntimeInfo, type SessionState, type SubmitJobRequest, type PageState, type WorkflowCheckpoint } from "./contracts.js";
 import { RuntimeClientError, type RuntimeErrorRedactor } from "./errors.js";
 import { isInterfaceError } from "./events.js";
@@ -109,6 +111,13 @@ export class BrowserRuntimeClient {
   async createSession(input: CreateSessionRequest, options?: RequestOptions): Promise<SessionState> { return this.#json("POST", "/v1/sessions", input, options, isSessionState); }
   /** `GET /v1/sessions` — list active sessions. */
   async listSessions(options?: RequestOptions): Promise<SessionState[]> { return this.#json("GET", "/v1/sessions", undefined, options, isSessionStateList); }
+  /** `GET /v1/sessions/{id}/capabilities` — passive session availability. */
+  async sessionCapabilities(sessionId: string, options?: RequestOptions): Promise<SessionCapabilities> {
+    if (!isUuid(sessionId)) throw this.#protocol("session id must be a UUID");
+    const report = await this.#json("GET", `/v1/sessions/${encodeURIComponent(sessionId)}/capabilities`, undefined, options, isSessionCapabilities);
+    if (report.sessionId !== sessionId) throw this.#protocol("session capability response does not match the requested session");
+    return report;
+  }
   /** `DELETE /v1/sessions/{id}` — tear down a session (`204` on success). */
   async deleteSession(sessionId: string, options?: RequestOptions): Promise<void> {
     if (!isUuid(sessionId)) throw this.#protocol("session id must be a UUID");

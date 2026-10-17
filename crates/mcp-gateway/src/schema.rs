@@ -683,7 +683,107 @@ pub(crate) fn advertised_tool_schema(name: &str) -> Value {
         schema["examples"] = json!([example]);
     }
     compact_advertised_schema(&mut schema);
+    describe_parameters(name, &mut schema);
     schema
+}
+
+/// Gives every advertised top-level parameter a description; agents fill
+/// arguments from it. Validation schemas are unaffected.
+fn describe_parameters(name: &str, schema: &mut Value) {
+    let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) else {
+        return;
+    };
+    for (key, property) in properties.iter_mut() {
+        let Some(fields) = property.as_object_mut() else {
+            continue;
+        };
+        if fields
+            .get("description")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty())
+        {
+            continue;
+        }
+        if let Some(text) = parameter_description(name, key) {
+            fields.insert("description".to_owned(), json!(text));
+        }
+    }
+}
+
+fn parameter_description(tool: &str, property: &str) -> Option<&'static str> {
+    Some(match (tool, property) {
+        ("download_url", "url") => "URL to download.",
+        ("download_url", "maxBytes") => "Largest download accepted, in bytes.",
+        ("download_url", "saveAs") => "Absolute path to save the file to.",
+        ("download_url", "expectedContentType") => "Content type the response must have.",
+        ("intent_complete_form", "fields") => "Fields to fill, in order.",
+        ("intent_extract", "fields") => "Named fields to read.",
+        ("intent_extract" | "extract_structured", "purpose") => "What to extract, in plain words.",
+        ("extract_structured", "schema") => "JSON Schema the extracted value must match.",
+        ("type_text", "value") => "Text to type.",
+        ("dialog", "action") => "accept or dismiss.",
+        ("cookie_delete", "names") => "Cookie names to delete; all when omitted.",
+        ("cookie_delete" | "cookie_get", "urls") => "URLs whose cookies apply.",
+        ("recovery_status", "limit") => "Most workflows to list.",
+        ("events_read", "limit") => "Most events to return.",
+        (_, "sessionId") => "Session id.",
+        (_, "pageId") => "Page id.",
+        (_, "workflowId") => "Workflow id.",
+        (_, "workflowHandle") => "From workflow_start.",
+        (_, "commandId") => "Pinned command id.",
+        (_, "attemptId") => "Pinned attempt id.",
+        (_, "idempotencyKey") => "Retry dedup key.",
+        (_, "autoCheckpoint") => "Checkpoint the step.",
+        (_, "boundary") => "Run at most once.",
+        (_, "evidenceDetail") => "compact or full.",
+        (_, "selector") => "CSS selector.",
+        (_, "expectedUrl") => "URL expected after.",
+        (_, "modifiers") => "Held keys.",
+        (_, "timeoutMs") => "Timeout, ms.",
+        (_, "url") => "URL to load.",
+        (_, "waitUntil") => "Load state.",
+        (_, "purpose") => "Control's purpose.",
+        (_, "hints") => "Locator hints.",
+        (_, "expectedDestination") => "Expected destination.",
+        (_, "expectedState") => "Expected state after.",
+        (_, "maxNodes") => "Node limit.",
+        (_, "maxControls") => "Control limit.",
+        (_, "includeForms") => "Add form snapshot.",
+        (_, "goal") => "What to find.",
+        (_, "profile") => "Profile name.",
+        (_, "proxy") => "Proxy URL or null.",
+        (_, "executionPolicy") => "Opt-in features.",
+        (_, "zigzagzig") => "All flags plus recovery.",
+        (_, "toolset") => "Phase to list.",
+        (_, "clearFirst") => "Clear first.",
+        (_, "paths") => "Absolute file paths.",
+        (_, "controlId") => "form_snapshot control id.",
+        (_, "expression") => "JavaScript expression to evaluate.",
+        (_, "awaitPromise") => "Await a returned promise.",
+        (_, "checkpoint") => "Checkpoint to persist.",
+        (_, "evidenceRefs") => "Command ids whose evidence backs the checkpoint.",
+        (_, "cursor") => "Return events after this cursor.",
+        (_, "clear") => "Clear the buffer after reading; default true.",
+        (_, "cookies") => "Cookies to store, at most 128.",
+        (_, "description") => "The control, described in plain words.",
+        (_, "envelope") => "Command envelope to execute.",
+        (_, "viewport") => "Viewport width and height.",
+        (_, "geolocation") => "Latitude, longitude and accuracy.",
+        (_, "mobile") => "Emulate a mobile device.",
+        (_, "jobId") => "Job id from job_submit.",
+        (_, "name") => "Built-in job name.",
+        (_, "payload") => "Job input.",
+        (_, "priority") => "Queue priority.",
+        (_, "maxRetries") => "Retries after a failure.",
+        (_, "landscape") => "Landscape orientation.",
+        (_, "printBackground") => "Print background graphics.",
+        (_, "scale") => "Scale from 0.1 to 2.0.",
+        (_, "pageRanges") => "Pages to print, such as 1-3.",
+        (_, "mode") => "viewport, fullPage, or one element.",
+        (_, "includeHtml") => "Also return the element's HTML.",
+        (_, "limit") => "Most entries to return.",
+        _ => return None,
+    })
 }
 
 /// Advertise-only rewrites that accept exactly the same instances and drop
@@ -1077,6 +1177,7 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
             &["sessions"],
         ),
         "session_create" => output_ref("SessionState"),
+        "session_capabilities" => output_ref("SessionCapabilities"),
         "workflow_start" => workflow_start_output_schema(),
         "workflow_observe" => workflow_observe_result_schema(),
         // On success only, these four append `postState`: the compact
@@ -1225,6 +1326,7 @@ pub(crate) fn advertised_tool_output_schema(name: &str) -> Value {
 
 fn advertised_output_shape(name: &str) -> Value {
     match name {
+        "session_capabilities" => json!({"type":"object"}),
         "workflow_recover" => {
             let mut schema = output_ref("RecoveryDecision");
             let mut patched = definitions();
@@ -1901,6 +2003,7 @@ fn definitions() -> Value {
         // arm and `page_open` inline `command_outcome_properties()` instead.
         "Evidence": {"oneOf": evidence_variants()},
         "SessionState": session_state(),
+        "SessionCapabilities": session_capabilities_output(),
         "PageState": page_state(),
         "CheckpointRecord": checkpoint_record(),
         "FormSnapshot": form_snapshot_schema(),
@@ -2928,6 +3031,7 @@ fn command_outcome_properties() -> Value {
     json!({
         "status":{"type":"string","enum":["completed","retryableFailure","needsReconciliation","policyDenied","resourceExhausted","restarted","failed"]},
         "commandId":id(),
+        "verificationStatus":{"type":"string","enum":["notCompleted","notReported","conditionObserved","settled","validationRejected"]},
         "evidence":{"type":"array","items":{"type":"object"}},
         "error":{"type":"object"},
         "retryAfterMs":{"type":"integer","minimum":0},
@@ -3550,6 +3654,7 @@ mod tests {
         assert_eq!(
             tool_annotations("workflow_start"),
             json!({
+                "readOnlyHint":false,
                 "destructiveHint":false,
                 "openWorldHint":true,
             })
@@ -4446,4 +4551,30 @@ fn runtime_info_output_schema_advertises_operational_metrics_and_vision_budget()
         advertised["properties"]["operationalMetrics"].is_object(),
         "{advertised}"
     );
+}
+
+fn session_capabilities_output() -> Value {
+    object(
+        json!({
+            "schemaVersion":{"type":"integer","const":1}, "sessionId":id(),
+            "observedAt":{"type":"string","format":"date-time","minLength":20,"maxLength":64},
+            "engine":nullable(string(1,32)),
+            "connection":{"enum":["connected","disconnected","unknown"]},
+            "features":{"type":"array","minItems":1,"maxItems":64,"items":object(json!({
+                "name":string(1,128), "supported":nullable(json!({"type":"boolean"})),
+                "available":{"type":"boolean"},
+                "reason":nullable(json!({"enum":["unsupportedByEngine","missingCapability","policyDisabled","storageUnavailable","workerUnavailable","connectionUnknown","disconnected","metadataUnavailable"]})),
+                "requiredCapabilities":array(json!({"type":"string","enum":types::Capability::ALL}),64),
+                "policyRequirement":nullable(string(1,128))
+            }), &["name","supported","available","reason","requiredCapabilities","policyRequirement"])}
+        }),
+        &[
+            "schemaVersion",
+            "sessionId",
+            "observedAt",
+            "engine",
+            "connection",
+            "features",
+        ],
+    )
 }

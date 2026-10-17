@@ -432,11 +432,14 @@ impl Server {
             // A re-`initialize` is a session reset, not a protocol error: MCP
             // clients over streamable HTTP call `initialize` on every
             // reconnect. The reset clears stale cancellation state; in-flight
-            // work from the previous session runs to completion.
+            // work from the previous session runs to completion. A connection
+            // that already completed its handshake stays ready.
             self.pending_cancellations.lock().await.clear();
             self.workflow_handles.reset();
             self.boundary_executions.lock().await.clear();
-            *lifecycle = Lifecycle::AwaitingInitializedNotification;
+            if *lifecycle != Lifecycle::Ready {
+                *lifecycle = Lifecycle::AwaitingInitializedNotification;
+            }
             return id.map(|id| {
                 success(
                     id,
@@ -1418,8 +1421,10 @@ impl Server {
                     .resources
                     .register_outcome(&self.handle, &registration_context, &envelope, &outcome)
                     .await;
+                let verification_status = outcome.verification_status();
                 match to_json(outcome) {
                     Ok(mut value) => {
+                        value["verificationStatus"] = json!(verification_status);
                         types::annotate_page_derived_evidence(&mut value);
                         admission.apply_to_mcp_value(&mut value, &envelope.command_id);
                         // `CommandOutcome` carries only `commandId`, so the

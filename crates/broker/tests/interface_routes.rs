@@ -737,3 +737,50 @@ async fn context_neighbors_miss_names_the_not_remembered_reason_and_next_step() 
         })
     );
 }
+
+#[tokio::test]
+async fn session_capability_route_returns_unknown_without_starting_a_worker() {
+    let (app, token) = authenticated_app(
+        [
+            Capability::SessionRead,
+            Capability::SessionWrite,
+            Capability::BrowserMutate,
+        ],
+        InterfaceConfig::default(),
+    )
+    .await;
+    let create = app
+        .clone()
+        .oneshot(authorized(
+            "POST",
+            "/v1/sessions",
+            &token,
+            Body::from(
+                serde_json::to_vec(&CreateSessionRequest {
+                    profile: "capabilities".into(),
+                    proxy: None,
+                    execution_policy: Default::default(),
+                    zigzagzig: false,
+                })
+                .unwrap(),
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::OK);
+    let session: SessionState =
+        serde_json::from_slice(&to_bytes(create.into_body(), 65536).await.unwrap()).unwrap();
+    let path = format!("/v1/sessions/{}/capabilities", session.id.0);
+    let response = app
+        .oneshot(authorized("GET", &path, &token, Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let report: types::SessionCapabilities =
+        serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(report.session_id, session.id);
+    assert_eq!(report.connection, types::SessionConnectionState::Unknown);
+    assert!(report.engine.is_none());
+    assert!(!report.features.is_empty());
+    assert!(!report.features.iter().any(|f| f.available));
+}

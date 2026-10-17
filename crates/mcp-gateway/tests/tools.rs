@@ -71,7 +71,7 @@ fn request(id: u64, method: &str, params: Value) -> Value {
 }
 
 #[tokio::test]
-async fn reinitialize_resets_the_session_lifecycle() {
+async fn reinitialize_resets_the_session_without_gating_a_ready_connection() {
     // MCP clients reconnect by sending `initialize` again; a re-initialize is a
     // session reset, not a protocol error.
     let server = fixture_server(vec![Capability::SessionRead]).await;
@@ -93,15 +93,17 @@ async fn reinitialize_resets_the_session_lifecycle() {
     );
     assert_eq!(response["result"]["protocolVersion"], json!("2025-11-25"));
 
-    // Tool traffic before the new handshake completes is rejected as
-    // not-initialized.
+    // The connection already completed its handshake, so traffic continues.
     let early = server
         .handle_message(request(91, "tools/list", json!({})))
         .await
         .expect("tools/list returns a response");
-    assert_eq!(early["error"]["code"], json!(-32002));
+    assert!(
+        early.get("error").is_none(),
+        "a ready connection keeps serving: {early}"
+    );
 
-    // Completing the handshake restores full traffic.
+    // A repeated initialized notification is harmless.
     server
         .handle_message(json!({
             "jsonrpc":"2.0","method":"notifications/initialized","params":{}
@@ -138,6 +140,7 @@ async fn tools_are_capability_filtered_sorted_and_have_closed_schemas() {
             "events_read",
             "page_open",
             "runtime_info",
+            "session_capabilities",
             "session_list",
             "toolset_select"
         ]
@@ -2257,7 +2260,7 @@ async fn form_snapshot_is_a_read_only_page_tool() {
     );
     assert_eq!(
         snapshot["inputSchema"]["properties"]["maxControls"],
-        json!({"type":"integer","minimum":1,"maximum":512})
+        json!({"type":"integer","minimum":1,"maximum":512,"description":"Control limit."})
     );
 
     let mutate_only = fixture_server(vec![Capability::BrowserMutate]).await;
@@ -4307,7 +4310,7 @@ async fn download_url_requires_and_threads_a_page_id() {
     // either (see `apply_workflow_scope_advertisement`).
     assert_eq!(
         tool["inputSchema"]["properties"]["saveAs"],
-        json!({"type":["string","null"],"minLength":1,"maxLength":4096}),
+        json!({"type":["string","null"],"minLength":1,"maxLength":4096,"description":"Absolute path to save the file to."}),
         "download_url must advertise optional saveAs: {tool}"
     );
 

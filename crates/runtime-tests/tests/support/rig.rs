@@ -4,6 +4,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use super::journey_budget::{self, Meter, Usage};
 use chrono::{Duration, Utc};
 use config::{AppConfig, BrowserConfig, ServerConfig, StorageConfig};
 use interface_conformance::live::all_capabilities;
@@ -17,8 +18,10 @@ use types::PrincipalId;
 pub struct Rig {
     server: Server,
     next_id: AtomicU64,
-    _root: tempfile::TempDir,
+    journey_meter: Meter,
+    // Stop Firefox before removing the profile directory it owns.
     _firefox: Option<InstalledFirefoxRuntime>,
+    _root: tempfile::TempDir,
 }
 
 fn config(root: &std::path::Path, upload_roots: Vec<std::path::PathBuf>) -> AppConfig {
@@ -116,9 +119,13 @@ impl Rig {
     }
 
     pub async fn firefox_with_upload_roots(upload_roots: Vec<std::path::PathBuf>) -> Self {
-        let installed = InstalledFirefoxConfig::from_env()
+        let mut installed = InstalledFirefoxConfig::from_env()
             .unwrap_or_else(|name| panic!("{name} must be set to run the Firefox suite"));
         let root = tempfile::tempdir().expect("create rig root");
+        // A rig retains browser state across its cases, but separate rigs must
+        // not share crash counters, cookies, or profile locks.
+        installed.profile = root.path().join("firefox-profile");
+        std::fs::create_dir(&installed.profile).expect("create rig Firefox profile");
         let config = config(root.path(), upload_roots);
         let firefox =
             runtime_tests::launch_installed_firefox_runtime(installed, &config, "about:blank")
@@ -165,6 +172,7 @@ impl Rig {
         let rig = Self {
             server,
             next_id: AtomicU64::new(1),
+            journey_meter: Meter::default(),
             _root: root,
             _firefox: firefox,
         };
@@ -189,10 +197,39 @@ impl Rig {
 
     async fn request(&self, method: &str, params: Value) -> Value {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        self.server
+        let response = self
+            .server
             .handle_message(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
             .await
-            .unwrap_or(Value::Null)
+            .unwrap_or(Value::Null);
+        if method == "tools/call" {
+            assert!(!response.is_null(), "MCP tool call returned no response");
+            self.journey_meter.record(&response);
+        }
+        response
+    }
+
+    pub fn journey_usage(&self) -> Usage {
+        self.journey_meter.snapshot()
+    }
+
+    pub fn assert_journey_budget(&self, name: &str, before: Usage) {
+        let engine = if self.is_firefox() {
+            "firefox"
+        } else {
+            "chromium"
+        };
+        let usage = self
+            .journey_usage()
+            .since(before)
+            .expect("monotonic journey counters");
+        eprintln!(
+            "journey_usage engine={engine} journey={name} calls={} response_bytes={}",
+            usage.calls, usage.response_bytes
+        );
+        usage
+            .check(journey_budget::limit(engine, name))
+            .unwrap_or_else(|error| panic!("{engine}/{name}: {error}"));
     }
 
     /// The tool's `structuredContent`.

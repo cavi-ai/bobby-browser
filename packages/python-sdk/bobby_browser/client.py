@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .errors import RuntimeClientError
+from .session_capabilities import is_session_capabilities
 
 # Interface version negotiated via the `x-interface-version` request header.
 # Keep aligned with packages/typescript-sdk/src/contracts.ts INTERFACE_VERSION.
@@ -246,6 +247,17 @@ class BrowserRuntimeClient:
             if isinstance(session, dict) and session.get("id") == session_id:
                 return session
         raise self._protocol(f"no active session with id {session_id!r}", 200)
+
+    def session_capabilities(self, session_id: str, options: Optional[RequestOptions] = None) -> Dict[str, Any]:
+        """Read passive availability observations for a session; requires session:read."""
+        try:
+            identifier = str(uuid.UUID(session_id))
+        except (ValueError, TypeError, AttributeError):
+            raise self._protocol("session id must be a UUID") from None
+        report = self._json("GET", f"/v1/sessions/{identifier}/capabilities", None, options, expected_status=200)
+        if not is_session_capabilities(report) or report["sessionId"] != identifier:
+            raise self._protocol("session capability response has an unexpected version, session, or shape", 200)
+        return report
 
     def delete_session(self, session_id: str, options: Optional[RequestOptions] = None) -> None:
         """``DELETE /v1/sessions/{id}`` -- tear down a session (204 on success)."""
