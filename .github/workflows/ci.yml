@@ -230,6 +230,11 @@ jobs:
       - name: CLI live tests
         run: cargo test -p bobby-browser --locked --test audit_replay_live --test shared_runtime_load -- --ignored --test-threads=1
 
+      - name: CLI recovery · Chromium
+        run: |
+          cargo build -p bobby-browser -p mcp-gateway --locked
+          cargo test -p runtime-tests --locked --test cli_recovery chromium_ -- --ignored --test-threads=1
+
       - name: Conformance live tests
         run: >-
           cargo test -p interface-conformance --locked
@@ -337,6 +342,11 @@ jobs:
         run: |
           xvfb-run -a make test-browsers-firefox TEST_BROWSERS_HEADLESS=0 \
             TEST_BROWSERS_FIREFOX_SUITES="--test firefox_extension_lifecycle"
+
+      - name: CLI recovery · Firefox
+        run: |
+          xvfb-run -a make test-browsers-firefox TEST_BROWSERS_HEADLESS=0 \
+            TEST_BROWSERS_FIREFOX_SUITES="--test cli_recovery firefox_"
 
   node:
     name: node · typescript · docs

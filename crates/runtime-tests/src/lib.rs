@@ -164,12 +164,18 @@ pub struct InstalledFirefoxConfig {
 
 pub struct InstalledFirefoxRuntime {
     factory: Arc<dyn worker_pool::WorkerFactory>,
+    selection: BrowserSelectionConfig,
     _firefox: Child,
 }
 
 impl InstalledFirefoxRuntime {
     pub fn factory(&self) -> Arc<dyn worker_pool::WorkerFactory> {
         Arc::clone(&self.factory)
+    }
+
+    /// The enrolled profile's configuration, for handing it to a CLI owner.
+    pub fn browser_selection(&self) -> BrowserSelectionConfig {
+        self.selection.clone()
     }
 }
 
@@ -244,32 +250,34 @@ pub async fn launch_installed_firefox_runtime(
         let enrollment = enrollment?;
         extension_session_ended?;
         let profile_id = enrollment.profile_id().clone();
-        cli::compose_worker_factory_with_enrolled_firefox(
-            runtime_config,
-            BrowserSelectionConfig {
-                preference: EnginePreferenceConfig::Exact {
-                    engine: BrowserEngineConfig::Firefox,
-                    profile_id: Some(profile_id.0.to_string()),
-                },
-                firefox: vec![FirefoxCompanionConfig {
-                    profile_id: profile_id.0.to_string(),
-                    bidi_url: bidi_url.to_string(),
-                    profile_dir: installed.profile,
-                    companion_bind: "127.0.0.1:0".into(),
-                    descriptor_path,
-                    timeout_ms: PROOF_TIMEOUT.as_millis() as u64,
-                    pairing_code_ttl_ms: PROOF_TIMEOUT.as_millis() as u64,
-                    attachment_ttl_ms: 300_000,
-                }],
-                chromium: Vec::new(),
+        let selection = BrowserSelectionConfig {
+            preference: EnginePreferenceConfig::Exact {
+                engine: BrowserEngineConfig::Firefox,
+                profile_id: Some(profile_id.0.to_string()),
             },
+            firefox: vec![FirefoxCompanionConfig {
+                profile_id: profile_id.0.to_string(),
+                bidi_url: bidi_url.to_string(),
+                profile_dir: installed.profile.clone(),
+                companion_bind: "127.0.0.1:0".into(),
+                descriptor_path,
+                timeout_ms: PROOF_TIMEOUT.as_millis() as u64,
+                pairing_code_ttl_ms: PROOF_TIMEOUT.as_millis() as u64,
+                attachment_ttl_ms: 300_000,
+            }],
+            chromium: Vec::new(),
+        };
+        let factory = cli::compose_worker_factory_with_enrolled_firefox(
+            runtime_config,
+            selection.clone(),
             process_observations.pairing_code_observer(),
             enrollment,
         )
-        .map_err(|error| workflow_error(ErrorCode::BrowserLaunchFailed, error))
+        .map_err(|error| workflow_error(ErrorCode::BrowserLaunchFailed, error))?;
+        Ok::<_, CommandError>((factory, selection))
     }
     .await;
-    let factory = match factory {
+    let (factory, selection) = match factory {
         Ok(factory) => factory,
         Err(error) => {
             terminate_firefox(&mut firefox).await;
@@ -278,6 +286,7 @@ pub async fn launch_installed_firefox_runtime(
     };
     Ok(InstalledFirefoxRuntime {
         factory,
+        selection,
         _firefox: firefox,
     })
 }
