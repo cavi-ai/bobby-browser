@@ -3584,6 +3584,7 @@ dependencies = [
  "test-site",
  "tokio",
  "tokio-tungstenite 0.30.0",
+ "toml",
  "tower",
  "types",
  "url",

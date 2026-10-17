@@ -30,7 +30,7 @@ if [[ "$host_name" == "$live_host_name" || "$(basename "$manifest")" == "$live_h
   exit 2
 fi
 
-cargo build -p bobby-browser -p runtime-tests --locked
+cargo build -p bobby-browser -p mcp-gateway -p runtime-tests --locked
 pnpm --filter @cavi-ai/bobby-firefox-companion build
 
 mkdir -p "$out/firefox-profile" "$out/extension" "$manifest_dir"
