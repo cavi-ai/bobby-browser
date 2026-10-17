@@ -432,11 +432,14 @@ impl Server {
             // A re-`initialize` is a session reset, not a protocol error: MCP
             // clients over streamable HTTP call `initialize` on every
             // reconnect. The reset clears stale cancellation state; in-flight
-            // work from the previous session runs to completion.
+            // work from the previous session runs to completion. A connection
+            // that already completed its handshake stays ready.
             self.pending_cancellations.lock().await.clear();
             self.workflow_handles.reset();
             self.boundary_executions.lock().await.clear();
-            *lifecycle = Lifecycle::AwaitingInitializedNotification;
+            if *lifecycle != Lifecycle::Ready {
+                *lifecycle = Lifecycle::AwaitingInitializedNotification;
+            }
             return id.map(|id| {
                 success(
                     id,

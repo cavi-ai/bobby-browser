@@ -132,6 +132,44 @@ async fn rejects_batches_and_wrong_jsonrpc_while_reinitialize_resets_without_los
 }
 
 #[tokio::test]
+async fn reinitialize_after_a_completed_handshake_keeps_serving_requests() {
+    let server = fixture_server(vec![Capability::SessionRead]).await;
+    let initialize = |id: i64, version: &str| {
+        request(
+            json!(id),
+            "initialize",
+            json!({
+                "protocolVersion": version,
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "1"}
+            }),
+        )
+    };
+    assert!(server
+        .handle_message(initialize(1, "2025-11-25"))
+        .await
+        .unwrap()["result"]
+        .is_object());
+    assert!(server
+        .handle_message(json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}))
+        .await
+        .is_none());
+
+    for (id, version) in [(2, "2025-11-25"), (3, "2000-01-01")] {
+        let reply = server
+            .handle_message(initialize(id, version))
+            .await
+            .unwrap();
+        assert!(reply["result"]["protocolVersion"].is_string(), "{reply}");
+    }
+    let listed = server
+        .handle_message(request(json!(4), "tools/list", json!({})))
+        .await
+        .unwrap();
+    assert!(listed["result"]["tools"].is_array(), "{listed}");
+}
+
+#[tokio::test]
 async fn stdio_is_one_bounded_object_per_line_and_eof_is_clean() {
     let server = fixture_server(vec![Capability::SessionRead]).await;
     let input = concat!(

@@ -199,9 +199,10 @@ async fn the_full_surface_has_room_for_at_least_one_more_small_tool() {
     );
 }
 
-/// Byte ceilings for the catalog an agent downloads on every `tools/list`.
-const EXPLORE_BYTE_CEILING: usize = 28 * 1024;
-const FULL_BYTE_CEILING: usize = 68 * 1024;
+/// Byte ceilings for the catalog an agent downloads on every `tools/list`,
+/// including one short description per parameter.
+const EXPLORE_BYTE_CEILING: usize = 32 * 1024;
+const FULL_BYTE_CEILING: usize = 80 * 1024;
 
 #[tokio::test]
 async fn explore_and_full_catalogs_stay_under_the_diet_ceilings() {
