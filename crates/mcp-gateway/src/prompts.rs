@@ -96,13 +96,13 @@ pub(crate) fn get_prompt(name: &str, arguments: &Value) -> Option<Value> {
 fn start_browsing(arguments: &Value) -> Option<Value> {
     let url = argument(arguments, "url");
     let start = match url {
-        Some(url) => format!("Call workflow_start with profile=\"default\" and url=\"{url}\"."),
-        None => "Call workflow_start with profile=\"default\".".to_string(),
+        Some(url) => format!("Call workflow_start with profile=\"default\", url=\"{url}\", and includePostState=true."),
+        None => "Call workflow_start with profile=\"default\" and includePostState=true.".to_string(),
     };
     Some(json!({
         "description": "Start a retained browser workflow and observe its first state.",
         "messages": [message(format!(
-            "{start} It creates and binds the session, page, and workflow. Then call workflow_observe with the returned handle before taking the next action."
+            "{start} It creates and binds the session, page, and workflow. When postStateStatus.status is available, inspect postState before the next action. If unavailable, inspect its code; use workflow_observe with the returned handle when authorized and more state is needed."
         ))]
     }))
 }

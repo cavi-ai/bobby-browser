@@ -607,6 +607,7 @@ pub(crate) fn workflow_start_schema() -> (Value, Vec<&'static str>) {
     (
         json!({
             "profile": string(1, 128),
+            "includePostState":{"type":"boolean","description":"Return bounded initial page state in this response"},
             "proxy": nullable(string(0, 2048)),
             "executionPolicy": object(
                 json!({
@@ -1491,7 +1492,10 @@ fn advertised_workflow_start_output_schema() -> Value {
             "workflowId":{"$ref":"#/$defs/I"},
             "session":{"type":"object"},
             "page":{"$ref":"#/$defs/P"},
-            "navigationOutcome":{"type":["object","null"]}
+            "navigationOutcome":{"type":["object","null"]},
+            "postState":{"type":"object"},
+            "postStateStatus":{"type":"object"},
+            "pageDerived":{"const":true}
         }),
         &[
             "status",
@@ -1604,7 +1608,17 @@ fn workflow_start_output_schema() -> Value {
             "workflowId":id(),
             "session":{"$ref":"#/$defs/SessionState"},
             "page":page_state(),
-            "navigationOutcome":navigation_outcome
+            "navigationOutcome":navigation_outcome,
+            "postState":workflow_observe_result_schema(),
+            "postStateStatus":object(
+                json!({
+                    "status":{"enum":["available","unavailable","notRequested"]},
+                    "code":string(1, 128),
+                    "reconciliationRequired":{"type":"boolean"}
+                }),
+                &["status"]
+            ),
+            "pageDerived":{"const":true}
         }),
         &[
             "workflowHandle",

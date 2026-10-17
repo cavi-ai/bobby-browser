@@ -56,6 +56,9 @@ pub struct LiveProbe {
     pub accessibility_calls: AtomicUsize,
     pub form_calls: AtomicUsize,
     pub accessibility_failures_remaining: AtomicUsize,
+    pub block_accessibility: AtomicBool,
+    pub accessibility_entered: tokio::sync::Notify,
+    pub accessibility_release: tokio::sync::Notify,
     pub form_failures_remaining: AtomicUsize,
     pub last_accessibility_max_nodes: AtomicUsize,
     pub last_form_max_controls: AtomicUsize,
@@ -330,6 +333,10 @@ impl worker_pool::ObservationEngine for LiveWorker {
             .accessibility_calls
             .fetch_add(1, Ordering::SeqCst);
         self.reject_if_closed(page_id)?;
+        if self.probe.block_accessibility.load(Ordering::SeqCst) {
+            self.probe.accessibility_entered.notify_one();
+            self.probe.accessibility_release.notified().await;
+        }
         self.probe.last_accessibility_max_nodes.store(
             command.max_nodes.map_or(0, |value| value as usize),
             Ordering::SeqCst,

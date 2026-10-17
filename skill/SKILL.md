@@ -40,7 +40,10 @@ calls. Rules that govern every call:
 
 - `workflow_start` (optionally with `url`) creates session + page + workflow
   and returns a `workflowHandle`. Use it over manual `session_create` +
-  `page_open`. Prefer `workflow_observe` for context: it answers from
+  `page_open`. When you need the initial page, pass `includePostState: true`
+  and reuse the returned `postState` when `postStateStatus.status` is `available`.
+  If unavailable, inspect its code before another read. Omit the flag when setup alone is enough.
+  Prefer `workflow_observe` for context: it answers from
   retained page memory first and only pays for a live snapshot when nothing
   is remembered.
 - On success, `intent_follow`, `intent_submit_and_verify`, `intent_complete_form`,
