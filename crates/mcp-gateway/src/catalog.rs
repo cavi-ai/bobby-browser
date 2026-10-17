@@ -133,9 +133,8 @@ pub(crate) fn tool_annotations(name: &str) -> Value {
     let idempotent = tool.is_some_and(|tool| tool.idempotent);
     let open_world = tool.is_some_and(|tool| tool.open_world);
     let mut hints = serde_json::Map::new();
-    if read_only {
-        hints.insert("readOnlyHint".to_owned(), json!(true));
-    } else {
+    hints.insert("readOnlyHint".to_owned(), json!(read_only));
+    if !read_only {
         hints.insert("destructiveHint".to_owned(), json!(destructive));
     }
     if idempotent {
@@ -386,6 +385,32 @@ mod tests {
                     "{} has a scope without session arguments",
                     tool.name
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn every_advertised_parameter_is_described_and_every_tool_declares_read_only() {
+        for tool in DESCRIPTORS {
+            let schema = crate::schema::advertised_tool_schema(tool.name);
+            for (key, property) in schema["properties"].as_object().expect("properties") {
+                assert!(
+                    property["description"]
+                        .as_str()
+                        .is_some_and(|text| !text.is_empty()),
+                    "{}.{key} needs a description",
+                    tool.name
+                );
+            }
+            let hints = tool_annotations(tool.name);
+            assert_eq!(
+                hints["readOnlyHint"],
+                json!(tool.read_only),
+                "{}",
+                tool.name
+            );
+            if !tool.read_only {
+                assert!(hints["destructiveHint"].is_boolean(), "{}", tool.name);
             }
         }
     }

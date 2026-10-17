@@ -137,7 +137,8 @@ async fn click_schema_advertises_native_modifier_keys() {
             "items": {
                 "type": "string",
                 "enum": ["shift", "ctrl", "alt", "meta"]
-            }
+            },
+            "description": "Held keys."
         })
     );
 }

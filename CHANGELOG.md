@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Changed
+
+- Every MCP tool declares `readOnlyHint`, and every advertised tool parameter has a description.
+
+### Fixed
+
+- A repeated `initialize` on an MCP connection that completed its handshake resets the session without rejecting later requests as not initialized.
+
 ## 0.20.0 - 2026-10-12
 
 ### Fixed

@@ -178,7 +178,7 @@ async fn two_principals_get_independent_mcp_lifecycles() {
 /// principal. Two logical clients using the same bearer therefore share the
 /// server generation and lifecycle state.
 #[tokio::test]
-async fn same_principal_reinitialize_resets_the_shared_mcp_lifecycle() {
+async fn same_principal_reinitialize_keeps_a_ready_shared_lifecycle_serving() {
     let (app, _authority, admin_bearer) = app_with_admin(4).await;
     let bearer = issue_bearer(&app, &admin_bearer, PRINCIPAL_A, &["session:read"]).await;
 
@@ -195,10 +195,10 @@ async fn same_principal_reinitialize_resets_the_shared_mcp_lifecycle() {
     assert_eq!(body["result"]["protocolVersion"], "2025-11-25", "{body}");
 
     let (status, body) = post_mcp(&app, &bearer, tools_list_request(4)).await;
-    assert_eq!(status, StatusCode::OK, "client A gated tools/list: {body}");
-    assert_eq!(
-        body["error"]["code"], -32002,
-        "same-principal reinitialize must return the shared lifecycle to awaiting-initialized: {body}"
+    assert_eq!(status, StatusCode::OK, "client A tools/list: {body}");
+    assert!(
+        body["result"]["tools"].is_array(),
+        "a same-principal reinitialize must not gate a ready shared lifecycle: {body}"
     );
 
     let (status, body) = post_mcp(&app, &bearer, initialized_notification()).await;
