@@ -1,0 +1,76 @@
+name: mcp-eval
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/mcp-gateway/**'
+      - 'crates/gateway-transport/**'
+      - 'crates/broker/src/mcp_http.rs'
+      - '.github/workflows/mcp-eval.yml'
+      - 'mcp-eval.manifest.json'
+  pull_request:
+    paths:
+      - 'crates/mcp-gateway/**'
+      - 'crates/gateway-transport/**'
+      - 'crates/broker/src/mcp_http.rs'
+      - '.github/workflows/mcp-eval.yml'
+      - 'mcp-eval.manifest.json'
+  workflow_dispatch:
+
+concurrency:
+  group: mcp-eval-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    name: mcp-eval · probe bobby's MCP surface
+    if: ${{ !github.event.repository.private }} # public repos only (Actions is billed when private)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_TERM_COLOR: always
+      BOBBY_CHROME_NO_SANDBOX: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build bobby and the MCP gateway
+        run: cargo build -p bobby-browser -p mcp-gateway --locked
+
+      - name: Install Chrome
+        uses: browser-actions/setup-chrome@latest
+        with:
+          chrome-version: 150.0.7871.124
+          install-dependencies: false
+
+      - name: Locate Chrome
+        run: |
+          BIN="$(find /opt/hostedtoolcache -name chrome -type f | head -n 1)"
+          echo "BOBBY_CHROME_EXECUTABLE=$(readlink -f "$BIN")" >> "$GITHUB_ENV"
+          "$(readlink -f "$BIN")" --version
+
+      - name: Mint a loopback bootstrap credential
+        run: ./target/debug/bobby init --path "$RUNNER_TEMP/bootstrap.env" --force
+
+      - name: Probe the MCP server with mcpeval
+        uses: cavi-ai/mcp-eval@main
+        with:
+          server: bobby-browser
+          manifest: mcp-eval.manifest.json
+          command: >-
+            ["./target/debug/bobby", "mcp-stdio",
+             "--bootstrap-env", "${{ runner.temp }}/bootstrap.env",
+             "--no-vision"]
