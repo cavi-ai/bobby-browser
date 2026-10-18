@@ -40,6 +40,8 @@ pub(crate) struct SessionCreateArgs {
 pub(crate) struct WorkflowStartArgs {
     pub(crate) profile: String,
     #[serde(default)]
+    pub(crate) include_post_state: bool,
+    #[serde(default)]
     pub(crate) proxy: Option<String>,
     #[serde(default)]
     pub(crate) execution_policy: types::ExecutionPolicy,

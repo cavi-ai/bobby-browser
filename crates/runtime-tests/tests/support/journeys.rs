@@ -124,7 +124,7 @@ pub async fn j1_sign_in_redirect_then_app(rig: &Rig, _dirs: &Dirs) {
     ])
     .await;
 
-    let live = Live::open(rig, &site.url("/app")).await;
+    let live = Live::open_with_state(rig, &site.url("/app")).await;
     let urls = reported(&live.started, "url");
     let titles = reported(&live.started, "title");
     assert!(
@@ -142,9 +142,9 @@ pub async fn j1_sign_in_redirect_then_app(rig: &Rig, _dirs: &Dirs) {
         "workflow_start did not report the dashboard title: {}",
         live.started
     );
-    let observed = live.observe(json!({})).await;
-    assert_node(&observed, "heading", Some("Orders dashboard"));
-    assert_node(&observed, "button", Some("Export orders"));
+    let observed = live.initial_state();
+    assert_node(observed, "heading", Some("Orders dashboard"));
+    assert_node(observed, "button", Some("Export orders"));
     live.close().await;
 
     let slow = Live::open(rig, &site.url("/slow-app")).await;
@@ -652,10 +652,10 @@ pub async fn j6_cross_site_navigation_recovery(rig: &Rig, _dirs: &Dirs) {
     ])
     .await;
 
-    let live = Live::open(rig, &a.url("/a")).await;
-    let snapshot = live.snapshot(json!({})).await;
-    assert_completed(&snapshot, "snapshot on A");
-    assert_node(&snapshot, "heading", Some("Site A"));
+    let live = Live::open_with_state(rig, &a.url("/a")).await;
+    let snapshot = live.initial_state();
+    assert_completed(snapshot, "snapshot on A");
+    assert_node(snapshot, "heading", Some("Site A"));
 
     let followed = live
         .call(
@@ -691,10 +691,10 @@ pub async fn j6_cross_site_navigation_recovery(rig: &Rig, _dirs: &Dirs) {
     }
     live.close().await;
 
-    let fresh = Live::open(rig, &b.url("/b")).await;
-    let snapshot = fresh.snapshot(json!({})).await;
-    assert_completed(&snapshot, "snapshot in the new session");
-    assert_node(&snapshot, "heading", Some("Site B"));
+    let fresh = Live::open_with_state(rig, &b.url("/b")).await;
+    let snapshot = fresh.initial_state();
+    assert_completed(snapshot, "snapshot in the new session");
+    assert_node(snapshot, "heading", Some("Site B"));
     fresh.close().await;
 }
 

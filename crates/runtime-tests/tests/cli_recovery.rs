@@ -459,11 +459,26 @@ async fn open_shop(adapter: &mut Adapter, url: &str) -> Value {
     let response = adapter
         .call(
             "workflow_start",
-            json!({"profile":"recovery-shop","url":url}),
+            json!({"profile":"recovery-shop","url":url,"includePostState":true}),
         )
         .await;
     let workflow = response["result"]["structuredContent"].clone();
     assert!(workflow["workflowHandle"].is_string(), "{response}");
+    assert_eq!(
+        workflow["postStateStatus"]["status"], "available",
+        "{response}"
+    );
+    for field in ["workflowHandle", "sessionId", "pageId", "workflowId"] {
+        assert_eq!(
+            workflow["postState"][field], workflow[field],
+            "{field}: {response}"
+        );
+    }
+    assert_eq!(workflow["postState"]["pageDerived"], true, "{response}");
+    assert!(
+        workflow["postState"].to_string().contains("Place order"),
+        "{response}"
+    );
     workflow
 }
 

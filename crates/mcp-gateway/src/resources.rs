@@ -987,6 +987,12 @@ is a server-generation-scoped convenience, never authority: normal ownership,
 capability, and operation checks still run after substitution. The V1
 allowlist accepts a handle only on the advertised page-work tools; lifecycle,
 checkpoint, and recovery tools keep explicit IDs as the audit and repair path.
+Pass `includePostState: true` when the initial page is needed. The response
+then includes bounded `postState` when `postStateStatus.status` is `available`.
+An unavailable observation leaves setup successful and reports only a bounded
+status code; inspect that code before another read. Omitting the flag preserves
+startup without the extra observation.
+
 A call to one of those tools that names no `workflowHandle` and no explicit
 scope ID at all defaults to this connection's one live handle when exactly
 one is bound, and the outcome's evidence carries a `workflowHandleDefaulted`

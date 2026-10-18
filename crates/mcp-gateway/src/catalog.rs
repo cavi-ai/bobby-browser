@@ -351,9 +351,9 @@ tools! {
     workflow_recover { order: 53, title: "Recover workflow", description: "Recover from the last verified checkpoint. Requires recovery:write. Returns resume, restart, or reconciliation evidence. On failure with notFound, verify session ownership with session_list.",
         capabilities: &[types::Capability::RecoveryWrite], operation: Some(types::InterfaceOperation::RecoverWorkflow), schema: workflow_recover_schema, args: WorkflowRecoverArgs,
         phases: VERIFY, group: Workflow, hints: (false, false, false, false) }
-    workflow_start { order: 51, title: "Start retained workflow", description: "Create and bind a session, page, and workflow, optionally navigating to url. Requires session:read, session:write, page:write. On failure, inspect session_list.",
+    workflow_start { order: 51, title: "Start retained workflow", description: "Create a session, page, and workflow; optionally navigate. includePostState returns initial page state. Requires session:read/write, page:write. On failure inspect session_list.",
         capabilities: WORKFLOW_START_REQUIRED_CAPABILITIES, operation: Some(WORKFLOW_START_OPERATION), schema: workflow_start_schema, args: WorkflowStartArgs,
-        phases: ALWAYS, group: AgentWorkflow, hints: (false, false, false, true) }
+        phases: ALWAYS, group: AgentWorkflow, page_derived: true, hints: (false, false, false, true) }
 }
 
 #[cfg(test)]

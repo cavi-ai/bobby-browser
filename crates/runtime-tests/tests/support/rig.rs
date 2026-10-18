@@ -255,10 +255,18 @@ pub struct Live<'a> {
 
 impl<'a> Live<'a> {
     pub async fn open(rig: &'a Rig, url: &str) -> Live<'a> {
+        Self::open_with_options(rig, url, false).await
+    }
+
+    pub async fn open_with_state(rig: &'a Rig, url: &str) -> Live<'a> {
+        Self::open_with_options(rig, url, true).await
+    }
+
+    async fn open_with_options(rig: &'a Rig, url: &str, include_post_state: bool) -> Live<'a> {
         let started = rig
             .tool(
                 "workflow_start",
-                json!({"profile":"site-regressions","url":url}),
+                json!({"profile":"site-regressions","url":url,"includePostState":include_post_state}),
             )
             .await;
         assert_eq!(started["status"], "completed", "workflow_start: {started}");
@@ -274,6 +282,21 @@ impl<'a> Live<'a> {
             live.started
         );
         live
+    }
+
+    pub fn initial_state(&self) -> &Value {
+        assert_eq!(
+            self.started["postStateStatus"]["status"], "available",
+            "{}",
+            self.started
+        );
+        let state = &self.started["postState"];
+        assert_eq!(state["status"], "completed", "{state}");
+        for field in ["workflowHandle", "sessionId", "pageId", "workflowId"] {
+            assert_eq!(state[field], self.started[field], "{field}: {state}");
+        }
+        assert_eq!(state["pageDerived"], true);
+        state
     }
 
     pub async fn call(&self, tool: &str, extra: Value) -> Value {

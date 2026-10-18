@@ -31,8 +31,8 @@ Restart your agent host so it loads the new MCP server.
 
 Ask the agent to open a page. It makes these MCP calls:
 
-1. `workflow_start` with `{"profile": "default", "url": "https://example.com"}` creates a session, a page and a workflow, and returns a `workflowHandle`.
-2. `workflow_observe` with `{"workflowHandle": "<handle>"}` returns the page's accessibility tree with a target for each actionable element.
+1. `workflow_start` with `{"profile": "default", "url": "https://example.com", "includePostState": true}` creates a session, a page and a workflow, and returns a `workflowHandle` plus bounded initial page state.
+2. Reuse `postState` when `postStateStatus.status` is `available`. If it is `unavailable`, inspect its code before another read. `workflow_observe` with `{"workflowHandle": "<handle>"}` reads the current page when authorized. Omitting `includePostState` keeps startup free of the extra observation.
 3. `click`, `type_text`, `navigate`, or an `intent_*` tool acts on a target. Pass `workflowHandle` on each call.
 4. `session_close` releases the browser when the work is done.
 

@@ -36,6 +36,30 @@ struct LiveObservation {
     outcome: Value,
 }
 
+fn apply_post_state(
+    outcome: &mut Value,
+    observation: sdk_core::workflow::PostActionObservation<LiveObservation, types::InterfaceError>,
+) {
+    match observation {
+        sdk_core::workflow::PostActionObservation::Available(live)
+            if live.outcome["status"] != "completed" =>
+        {
+            outcome["postStateStatus"] = json!({"status":"unavailable","code":"observationIncomplete","reconciliationRequired":false});
+        }
+        sdk_core::workflow::PostActionObservation::Available(live) => {
+            outcome["postState"] = live.outcome;
+            outcome["postStateStatus"] = json!({"status":"available"});
+        }
+        sdk_core::workflow::PostActionObservation::Unavailable(error) => {
+            // Publish bounded codes; raw diagnostics may contain page values.
+            outcome["postStateStatus"] = json!({"status":"unavailable","code":error.code,"reconciliationRequired":error.reconciliation_required});
+        }
+        sdk_core::workflow::PostActionObservation::NotRequested => {
+            outcome["postStateStatus"] = json!({"status":"notRequested"});
+        }
+    }
+}
+
 /// The capability handle plus the connection's session record, so every
 /// workflow cleanup also drops the session it deleted from the record.
 #[derive(Clone)]
@@ -425,25 +449,7 @@ impl Server {
                 },
             )
             .await?;
-        match observation {
-            sdk_core::workflow::PostActionObservation::Available(live)
-                if live.outcome["status"] != "completed" =>
-            {
-                outcome["postStateStatus"] = json!({"status":"unavailable","code":"observationIncomplete","reconciliationRequired":false});
-            }
-            sdk_core::workflow::PostActionObservation::Available(live) => {
-                outcome["postState"] = live.outcome;
-                outcome["postStateStatus"] = json!({"status":"available"});
-            }
-            sdk_core::workflow::PostActionObservation::Unavailable(error) => {
-                // Codes are bounded contract values. Raw errors can contain page
-                // values and paths and must never enter this diagnostic field.
-                outcome["postStateStatus"] = json!({"status":"unavailable","code":error.code,"reconciliationRequired":error.reconciliation_required});
-            }
-            sdk_core::workflow::PostActionObservation::NotRequested => {
-                outcome["postStateStatus"] = json!({"status":"notRequested"});
-            }
-        }
+        apply_post_state(&mut outcome, observation);
         Ok(outcome)
     }
 
@@ -526,6 +532,10 @@ impl Server {
             zigzagzig: input.zigzagzig,
         };
         let (setup_sender, setup_receiver) = oneshot::channel();
+        let observation_context = types::RequestContext {
+            idempotency_key: None,
+            ..context.clone()
+        };
 
         tokio::spawn(async move {
             supervise_start(
@@ -604,7 +614,7 @@ impl Server {
         }
 
         let generation = reservation.generation();
-        let success_value = json!({
+        let mut success_value = json!({
             "status":"completed",
             "workflowHandle":handle,
             "sessionId":session.id,
@@ -614,6 +624,32 @@ impl Server {
             "page":page,
             "navigationOutcome":navigation_outcome
         });
+        // The supervisor retains cleanup ownership until the report is built
+        // and the binding is published. A cancelled read cannot strand setup.
+        // This read uses explicit IDs: the handle is not published yet.
+        if input.include_post_state {
+            let observation = match self
+                .live_workflow_observation(
+                    observation_context,
+                    session.id.clone(),
+                    page.id.clone(),
+                    Some(workflow_id.clone()),
+                    None,
+                    DEFAULT_WORKFLOW_OBSERVE_MAX_NODES,
+                    None,
+                    EvidenceDetail::Compact,
+                )
+                .await
+            {
+                Ok(mut live) => {
+                    live.outcome["workflowHandle"] = json!(handle);
+                    sdk_core::workflow::PostActionObservation::Available(live)
+                }
+                Err(error) => sdk_core::workflow::PostActionObservation::Unavailable(error),
+            };
+            apply_post_state(&mut success_value, observation);
+            success_value["pageDerived"] = json!(true);
+        }
         let success_response = self.tool_success(id.clone(), success_value).await;
         let supervisor_lost_response = self
             .workflow_start_failure_response(

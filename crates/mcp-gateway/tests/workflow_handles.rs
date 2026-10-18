@@ -783,6 +783,185 @@ async fn workflow_start_without_url_returns_a_completed_retained_binding() {
 }
 
 #[tokio::test]
+async fn workflow_start_returns_initial_state_without_a_second_observation() {
+    let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+    let response = start(
+        &live.server,
+        31,
+        json!({"profile":"harness","url":"https://live-harness.test/","includePostState":true}),
+    )
+    .await;
+    let result = &response["result"]["structuredContent"];
+    assert_eq!(result["status"], "completed", "{response}");
+    assert_eq!(
+        result["postStateStatus"]["status"], "available",
+        "{response}"
+    );
+    assert_eq!(result["postState"]["status"], "completed", "{response}");
+    assert_eq!(result["postState"]["source"], "live", "{response}");
+    for field in ["workflowHandle", "sessionId", "pageId", "workflowId"] {
+        assert_eq!(
+            result["postState"][field], result[field],
+            "{field}: {response}"
+        );
+    }
+    assert_eq!(result["pageDerived"], true, "{response}");
+    assert_eq!(live.accessibility_calls(), 1);
+    assert_eq!(
+        live.probe
+            .last_accessibility_max_nodes
+            .load(std::sync::atomic::Ordering::SeqCst),
+        256
+    );
+    assert!(
+        result["postState"]["observationOutcome"]["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["kind"] == "accessibilitySnapshot"),
+        "{response}"
+    );
+}
+
+#[tokio::test]
+async fn workflow_start_observation_failure_preserves_the_binding_without_page_diagnostics() {
+    let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+    live.probe
+        .accessibility_failures_remaining
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    let response = start(
+        &live.server,
+        32,
+        json!({"profile":"startup-observation-failure","includePostState":true}),
+    )
+    .await;
+    let result = &response["result"]["structuredContent"];
+    assert_eq!(result["status"], "completed", "{response}");
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    assert_eq!(
+        result["postStateStatus"],
+        json!({"status":"unavailable","code":"observationIncomplete","reconciliationRequired":false})
+    );
+    assert!(result.get("postState").is_none(), "{response}");
+    assert!(!result
+        .to_string()
+        .contains("injected live-harness accessibility failure"));
+    let observed = observe(
+        &live.server,
+        33,
+        json!({"workflowHandle":result["workflowHandle"]}),
+    )
+    .await;
+    assert_eq!(
+        observed["result"]["structuredContent"]["status"], "completed",
+        "{observed}"
+    );
+}
+
+#[tokio::test]
+async fn startup_state_without_observation_capability_keeps_setup_successful() {
+    let live = live_with_capabilities(vec![
+        Capability::SessionRead,
+        Capability::SessionWrite,
+        Capability::PageWrite,
+    ])
+    .await;
+    let response = start(
+        &live.server,
+        36,
+        json!({"profile":"startup-capability","includePostState":true}),
+    )
+    .await;
+    let result = &response["result"]["structuredContent"];
+    assert_eq!(result["status"], "completed", "{response}");
+    assert_eq!(
+        result["postStateStatus"],
+        json!({"status":"unavailable","code":"missingCapability","reconciliationRequired":false})
+    );
+    assert!(result.get("postState").is_none());
+    assert_eq!(live.accessibility_calls(), 0);
+    assert!(result["workflowHandle"].is_string());
+}
+
+#[tokio::test]
+async fn cancelling_startup_observation_cleans_the_unpublished_session() {
+    let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+    live.probe
+        .block_accessibility
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let server = Arc::clone(&live.server);
+    let pending = tokio::spawn(async move {
+        start(
+            &server,
+            34,
+            json!({"profile":"startup-cancel","includePostState":true}),
+        )
+        .await
+    });
+    tokio::time::timeout(
+        StdDuration::from_secs(5),
+        live.probe.accessibility_entered.notified(),
+    )
+    .await
+    .expect("startup observation entered");
+    cancel(&live.server, 34).await;
+    live.probe.accessibility_release.notify_one();
+    let response = tokio::time::timeout(StdDuration::from_secs(5), pending)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("Request cancelled; repair: ")),
+        "{response}"
+    );
+    wait_for_no_sessions(&live.runtime).await;
+    assert_eq!(
+        live.probe
+            .worker_closes
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
+#[tokio::test]
+async fn reinitializing_during_startup_observation_refuses_publication_and_cleans_setup() {
+    let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+    live.probe
+        .block_accessibility
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let server = Arc::clone(&live.server);
+    let pending = tokio::spawn(async move {
+        start(
+            &server,
+            35,
+            json!({"profile":"startup-reset","includePostState":true}),
+        )
+        .await
+    });
+    tokio::time::timeout(
+        StdDuration::from_secs(5),
+        live.probe.accessibility_entered.notified(),
+    )
+    .await
+    .expect("startup observation entered");
+    initialize(&live.server).await;
+    live.probe.accessibility_release.notify_one();
+    let response = tokio::time::timeout(StdDuration::from_secs(5), pending)
+        .await
+        .unwrap()
+        .unwrap();
+    let result = &response["result"]["structuredContent"];
+    assert_eq!(result["status"], "failed", "{response}");
+    assert_eq!(result["reason"], "workflowGenerationChanged", "{response}");
+    assert_eq!(result["sessionDeleted"], true, "{response}");
+    assert_eq!(result["workflowHandle"], Value::Null);
+    assert!(result.get("postState").is_none(), "{response}");
+    wait_for_no_sessions(&live.runtime).await;
+}
+
+#[tokio::test]
 async fn workflow_start_with_url_requires_browser_mutate_before_creating_a_session() {
     let live = live_with_capabilities(vec![
         Capability::SessionRead,
@@ -819,6 +998,11 @@ async fn navigated_workflow_start_uses_the_minted_workflow_id_and_completes() {
     )
     .await;
     let result = &response["result"]["structuredContent"];
+    assert!(
+        result.get("postState").is_none(),
+        "legacy startup must not add an observation: {response}"
+    );
+    assert_eq!(live.accessibility_calls(), 0);
     assert_eq!(result["status"], "completed", "{response}");
     assert_eq!(result["navigationOutcome"]["status"], "completed");
     assert_eq!(
@@ -1788,6 +1972,24 @@ async fn workflow_start_real_success_and_all_terminal_failure_branches_match_out
 
     let live = live_with_capabilities(Capability::ALL.to_vec()).await;
     let success = start(&live.server, 260, json!({"profile":"success"})).await;
+    let initial_state = start(
+        &live.server,
+        265,
+        json!({"profile":"initial-state","includePostState":true}),
+    )
+    .await;
+    let restricted = live_with_capabilities(vec![
+        Capability::SessionRead,
+        Capability::SessionWrite,
+        Capability::PageWrite,
+    ])
+    .await;
+    let unavailable_state = start(
+        &restricted.server,
+        266,
+        json!({"profile":"unavailable-state","includePostState":true}),
+    )
+    .await;
     let navigation_failure = start(
         &live.server,
         261,
@@ -1843,6 +2045,8 @@ async fn workflow_start_real_success_and_all_terminal_failure_branches_match_out
 
     for (label, response) in [
         ("success", success),
+        ("initialState", initial_state),
+        ("unavailableState", unavailable_state),
         ("pageOpenFailed", open_failure),
         ("navigationFailed", navigation_failure),
         ("workflowGenerationChanged", generation_failure),
