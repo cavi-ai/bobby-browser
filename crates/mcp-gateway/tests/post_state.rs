@@ -1,5 +1,6 @@
 //! On success, `intent_follow`, `intent_submit_and_verify`,
-//! `intent_complete_form`, and boundary `click` carry `postState`, the compact
+//! `intent_complete_form`, boundary `click`, and opted-in `navigate` carry
+//! `postState`, the compact
 //! observation `workflow_observe` returns for the acting page. Absent on a
 //! failed outcome.
 
@@ -44,6 +45,141 @@ async fn call_tool(server: &Server, id: u64, name: &str, arguments: Value) -> Va
         ))
         .await
         .expect("tools/call response")
+}
+
+#[tokio::test]
+async fn navigate_returns_optional_state_and_preserves_navigation_on_read_failure() {
+    let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+    let mut next_id = 40;
+    let (session, page) = create_session_and_page(&live.server, &mut next_id).await;
+    let completed = call_tool(
+        &live.server,
+        50,
+        "navigate",
+        json!({"sessionId":session,"pageId":page,"url":"https://live-harness.test/","includePostState":true}),
+    )
+    .await;
+    assert_eq!(
+        completed["result"]["structuredContent"]["status"], "completed",
+        "{completed}"
+    );
+    assert_eq!(live.accessibility_calls(), 1);
+    assert_post_state_matches_fresh_observe(
+        &live,
+        &completed,
+        &session.0.to_string(),
+        &page.0.to_string(),
+        &mut next_id,
+    )
+    .await;
+    let state = &completed["result"]["structuredContent"]["postState"];
+    assert_eq!(state["sessionId"], json!(session));
+    assert_eq!(state["pageId"], json!(page));
+    assert_eq!(state["pageDerived"], true);
+    assert_eq!(
+        live.probe
+            .last_accessibility_max_nodes
+            .load(Ordering::SeqCst),
+        256
+    );
+
+    live.probe
+        .accessibility_failures_remaining
+        .store(20, Ordering::SeqCst);
+    let unavailable = call_tool(
+        &live.server,
+        51,
+        "navigate",
+        json!({"sessionId":session,"pageId":page,"url":"https://live-harness.test/next","includePostState":true}),
+    ).await;
+    let result = &unavailable["result"]["structuredContent"];
+    assert_eq!(result["status"], "completed", "{unavailable}");
+    assert_eq!(unavailable["result"]["isError"], false, "{unavailable}");
+    assert!(result.get("postState").is_none());
+    assert_eq!(
+        result["postStateStatus"],
+        json!({"status":"unavailable","code":"observationIncomplete","reconciliationRequired":false})
+    );
+    assert!(!result
+        .to_string()
+        .contains("injected live-harness accessibility failure"));
+}
+
+#[tokio::test]
+async fn navigate_without_state_or_with_failed_navigation_never_observes() {
+    let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+    let (session, page) = create_session_and_page(&live.server, &mut 60).await;
+    for (index, flag) in [json!({}), json!({"includePostState":false})]
+        .into_iter()
+        .enumerate()
+    {
+        let mut args =
+            json!({"sessionId":session,"pageId":page,"url":"https://live-harness.test/"});
+        args.as_object_mut()
+            .unwrap()
+            .extend(flag.as_object().unwrap().clone());
+        let response = call_tool(&live.server, 70 + index as u64, "navigate", args).await;
+        let result = &response["result"]["structuredContent"];
+        assert_eq!(result["status"], "completed", "{response}");
+        assert!(result.get("postState").is_none());
+        assert!(result.get("postStateStatus").is_none());
+    }
+    let failed = call_tool(&live.server, 72, "navigate", json!({"sessionId":session,"pageId":page,"url":"https://live-harness.test/fail","includePostState":true})).await;
+    let result = &failed["result"]["structuredContent"];
+    assert_ne!(result["status"], "completed", "{failed}");
+    assert!(result.get("postState").is_none());
+    assert_eq!(result["postStateStatus"]["status"], "notRequested");
+    assert_eq!(live.accessibility_calls(), 0);
+}
+
+#[tokio::test]
+async fn navigate_state_uses_the_retained_binding_and_rejects_invalid_requests_before_dispatch() {
+    let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+    let started = call_tool(
+        &live.server,
+        80,
+        "workflow_start",
+        json!({"profile":"navigation-state"}),
+    )
+    .await;
+    let binding = &started["result"]["structuredContent"];
+    let navigated = call_tool(
+        &live.server,
+        81,
+        "navigate",
+        json!({
+            "workflowHandle":binding["workflowHandle"],
+            "url":"https://live-harness.test/bound", "includePostState":true
+        }),
+    )
+    .await;
+    let result = &navigated["result"]["structuredContent"];
+    assert_eq!(result["status"], "completed", "{navigated}");
+    assert_eq!(
+        result["postStateStatus"]["status"], "available",
+        "{navigated}"
+    );
+    for field in ["sessionId", "pageId", "workflowHandle"] {
+        assert_eq!(
+            result["postState"][field], binding[field],
+            "{field}: {navigated}"
+        );
+    }
+    assert!(result["workflowId"].is_string());
+    assert_eq!(result["postState"]["workflowId"], result["workflowId"]);
+
+    for (index, args) in [
+        json!({"workflowHandle":binding["workflowHandle"],"url":"https://live-harness.test/invalid","includePostState":"yes"}),
+        json!({"workflowHandle":"wh_unknown","url":"https://live-harness.test/invalid","includePostState":true}),
+    ].into_iter().enumerate() {
+        let denied = call_tool(&live.server, 82 + index as u64, "navigate", args).await;
+        assert!(denied.get("error").is_some(), "{denied}");
+    }
+    assert_eq!(live.accessibility_calls(), 1);
+    assert_eq!(
+        live.probe.current_url.lock().unwrap().as_deref(),
+        Some("https://live-harness.test/bound")
+    );
 }
 
 /// A resolvable clickable element, for `intent_follow`/`intent_submit_and_verify`'s
