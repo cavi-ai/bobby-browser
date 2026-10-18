@@ -268,8 +268,8 @@ pub async fn j2_search_and_follow_result(rig: &Rig, _dirs: &Dirs) {
         2,
         "the Search button did not submit the search"
     );
-    let observed = live.observe(json!({})).await;
-    assert_node(&observed, "heading", Some("Results"));
+    let observed = live.post_state(&searched);
+    assert_node(observed, "heading", Some("Results"));
 
     let ambiguous = live
         .call(
@@ -300,8 +300,8 @@ pub async fn j2_search_and_follow_result(rig: &Rig, _dirs: &Dirs) {
     assert_completed(&followed, "intent_follow with an ordinal");
     assert_eq!(site.hits("/item/2"), 1, "the second result was not opened");
     assert_eq!(site.hits("/item/1"), 0, "the first result was opened");
-    let item = live.observe(json!({})).await;
-    assert_node(&item, "heading", Some("Item two"));
+    let item = live.post_state(&followed);
+    assert_node(item, "heading", Some("Item two"));
     live.close().await;
 }
 
@@ -403,8 +403,8 @@ pub async fn j3_form_validation_then_success(rig: &Rig, _dirs: &Dirs) {
         "the corrected submit was still reported as rejected: {accepted}"
     );
     assert_eq!(site.hits("/submit"), 2);
-    let done = live.observe(json!({})).await;
-    assert_node(&done, "heading", Some("Order placed"));
+    let done = live.post_state(&accepted);
+    assert_node(done, "heading", Some("Order placed"));
     live.close().await;
 }
 
@@ -665,12 +665,7 @@ pub async fn j6_cross_site_navigation_recovery(rig: &Rig, _dirs: &Dirs) {
         )
         .await;
     assert_completed(&followed, "cross-origin link to B");
-    assert_eq!(followed["postStateStatus"]["status"], "available");
-    let post_state = &followed["postState"];
-    assert_completed(post_state, "post-state after the hop to B");
-    assert_eq!(post_state["sessionId"], live.session_id);
-    assert_eq!(post_state["pageId"], live.page_id);
-    assert_eq!(post_state["workflowId"], followed["workflowId"]);
+    let post_state = live.post_state(&followed);
     assert_node(post_state, "heading", Some("Site B"));
 
     for (url, heading, what) in [

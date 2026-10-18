@@ -77,14 +77,14 @@ impl Meter {
 pub fn limit(engine: &str, journey: &str) -> Option<Budget> {
     let (calls, response_bytes) = match (engine, journey) {
         ("chromium", "j1_sign_in_redirect_then_app") => (7, 16384),
-        ("chromium", "j2_search_and_follow_result") => (10, 32768),
-        ("chromium", "j3_form_validation_then_success") => (7, 28672),
+        ("chromium", "j2_search_and_follow_result") => (8, 32768),
+        ("chromium", "j3_form_validation_then_success") => (6, 28672),
         ("chromium", "j4_upload_hidden_and_visible") => (6, 16384),
         ("chromium", "j5_popup_and_frame") => (11, 28672),
         ("chromium", "j6_cross_site_navigation_recovery") => (11, 28672),
         ("firefox", "j1_sign_in_redirect_then_app") => (7, 20480),
-        ("firefox", "j2_search_and_follow_result") => (10, 32768),
-        ("firefox", "j3_form_validation_then_success") => (7, 28672),
+        ("firefox", "j2_search_and_follow_result") => (8, 32768),
+        ("firefox", "j3_form_validation_then_success") => (6, 28672),
         ("firefox", "j4_upload_hidden_and_visible") => (6, 16384),
         ("firefox", "j5_popup_and_frame") => (11, 28672),
         ("firefox", "j6_cross_site_navigation_recovery") => (11, 32768),
