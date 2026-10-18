@@ -299,6 +299,19 @@ impl<'a> Live<'a> {
         state
     }
 
+    pub fn post_state<'b>(&self, result: &'b Value) -> &'b Value {
+        assert_eq!(result["status"], "completed", "{result}");
+        assert_eq!(result["postStateStatus"]["status"], "available", "{result}");
+        assert!(result["workflowId"].is_string(), "{result}");
+        let state = &result["postState"];
+        assert_eq!(state["status"], "completed", "{state}");
+        assert_eq!(state["sessionId"], self.session_id, "{state}");
+        assert_eq!(state["pageId"], self.page_id, "{state}");
+        assert_eq!(state["workflowId"], result["workflowId"], "{state}");
+        assert_eq!(state["pageDerived"], true, "{state}");
+        state
+    }
+
     pub async fn call(&self, tool: &str, extra: Value) -> Value {
         let mut arguments = json!({"sessionId":self.session_id,"pageId":self.page_id});
         for (key, value) in extra.as_object().expect("arguments are an object") {

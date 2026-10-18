@@ -48,8 +48,11 @@ calls. Rules that govern every call:
   is remembered.
 - On success, `intent_follow`, `intent_submit_and_verify`, `intent_complete_form`,
   and a Boundary `click` already return `postState` — the same compact
-  observation `workflow_observe` would; read it from the result and call
-  `workflow_observe` only when it is absent.
+  observation `workflow_observe` would. When `postStateStatus.status` is
+  `available`, read that state before another observation. Check the action's
+  outcome separately: page state alone does not prove a submit was accepted.
+  If unavailable, inspect its code before another read; never repeat the action
+  just to obtain page state.
 - **Read before write.** On a site this runtime has seen before, `context_ask`
   first — a remembered answer (marked `persisted`) beats a snapshot.
   Otherwise `a11y_snapshot`, and pass its targets straight into intent or
@@ -70,7 +73,8 @@ calls. Rules that govern every call:
 
 - Link or control with a result to verify: Use one `intent_follow` with
   `expectedState`; do not split it into `click` plus `wait_for` or another
-  observation.
+  observation. After a search or result link, inspect the returned `postState`
+  for the result heading and targets, including ordinals for duplicate titles.
 - Form with multiple fields: one `intent_complete_form` (fields resolve
   just-in-time; include conditional fields after their revealer even if
   initially absent) — never a `intent_fill` per field unless fields must
@@ -81,7 +85,10 @@ calls. Rules that govern every call:
   `role: "button"`); the runtime clicks it and waits for the field before
   filling it — no separate submit-then-refill round trip.
 - Submit: `intent_submit_and_verify` with an `expectedState` that only holds
-  after the submit (a confirmation id, status change, or new element).
+  after the submit (a confirmation id, status change, or new element). Check
+  validation evidence, then inspect an available `postState` for the confirmation
+  instead of observing again. A validation rejection requires correcting the
+  fields; it is not a successful submit.
 - **A cookie-banner-then-credentials-then-MFA sign-in gate is three calls,
   not seven:** `intent_follow` the cookie-accept control, one
   `intent_complete_form` with email + password + the MFA code (the code
