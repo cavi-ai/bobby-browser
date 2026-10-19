@@ -2,13 +2,31 @@
 
 ## Unreleased
 
+## 0.21.0 - 2026-10-19
+
+### Added
+
+- `GET /v1/sessions/{session}/capabilities`, MCP `session_capabilities` and the SDK session capability helpers report an owned session's engine, connection state, and each feature's support, availability, reason, required capabilities and policy requirement. They require `session:read`.
+- `GET /v1/runtime` lists engine-specific options in `capabilities`, such as `engine:firefox:captureScreenshot.viewport`.
+- MCP command results carry `verificationStatus`: `notCompleted`, `notReported`, `conditionObserved`, `settled` or `validationRejected`. The Rust, TypeScript and Python SDKs classify command outcomes the same way.
+- `workflow_start` and `navigate` accept `includePostState` and return bounded page state with `postStateStatus`; startup and navigation still succeed when the state is unavailable.
+- `bobby doctor --incident-bundle <path>` writes a new local JSON report of execution ledger health, source hashes and recovery prerequisites without contacting a browser; it omits record contents and credentials.
+- Command logs carry a `command` span with command, workflow, attempt and session ids; `command.finished` records the outcome status and `elapsed_ms`, and a dropped command reports `interrupted`.
+- `command.request.finished` records each command request's disposition, including authorization rejections and idempotency replays, and links a replay to its original command; keys, credentials and error messages are omitted.
+- Vision calls emit `vision.provider.started` and `vision.provider.finished` with the provider mode, `elapsed_ms` and whether a proposal returned, without payloads.
+
 ### Changed
 
 - Every MCP tool declares `readOnlyHint`, and every advertised tool parameter has a description.
+- `Formula/bobby-browser.rb` carries the v0.20.0 asset digests.
 
 ### Fixed
 
 - A repeated `initialize` on an MCP connection that completed its handshake resets the session without rejecting later requests as not initialized.
+- On Firefox, operations the engine does not support, such as full-page screenshots and HttpOnly cookie writes, fail with an actionable error; an HttpOnly cookie deletion is refused before any cookie is removed.
+- On Firefox, a cookie read of more than 2048 cookies fails `invalidRequest` instead of returning a truncated list.
+- `bobby doctor` reports damaged command, job or idempotency history as failed, names the affected stores, and gives preservation and reconciliation steps; `--fix` does not repair damaged history.
+- On Unix, a detached runtime owner no longer holds the launcher's inherited descriptors, so a caller reading the launcher's output stops waiting when the launcher exits.
 
 ## 0.20.0 - 2026-10-12
 
