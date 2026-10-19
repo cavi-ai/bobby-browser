@@ -3087,13 +3087,15 @@ impl crate::EventsEngine for ChromiumWorker {
         }
         let mut begins = futures::stream::select_all(begin_streams);
         let mut progress = futures::stream::select_all(progress_streams);
+        // A popup may have backgrounded the opener. Activate it before DOM
+        // resolution, which can stall on a background target too.
+        self.bring_page_to_front(&page).await;
         let resolved = self
             .resolve_target(page_id, &page, &command.selector, command.target.as_ref())
             .await?;
         // Download events reach every connection to a shared browser: only
         // this page's frames start this session's download.
         let frames = self.shared_browser.then_some(frame_ids);
-        self.bring_page_to_front(&page).await;
         press(&page, &resolved).await?;
         let begin = tokio::time::timeout(Duration::from_millis(command.timeout_ms), async {
             loop {
