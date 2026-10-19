@@ -755,17 +755,21 @@ async fn correlates_popup_and_download_before_clicking() {
         .unwrap();
     println!("popup={popup:?}");
     assert!(matches!(&popup[0], types::Evidence::Popup { title, .. } if title == "Popup"));
-    let download = worker_pool::events_or_default(worker.events())
-        .click_and_wait_for_download(
+    // Bound resolution and dispatch too, not only the download event waits.
+    let download = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        worker_pool::events_or_default(worker.events()).click_and_wait_for_download(
             &page_id,
             &ClickAndWaitForDownloadCommand {
                 selector: "#download".into(),
                 target: None,
                 timeout_ms: 5_000,
             },
-        )
-        .await
-        .unwrap();
+        ),
+    )
+    .await
+    .expect("download target resolution and dispatch must finish within the deadline")
+    .unwrap();
     println!("download={download:?}");
     assert!(
         matches!(&download[0], types::Evidence::Download { filename, bytes, sha256, .. } if filename == "workflow-fixture.bin" && *bytes == 20 && sha256.len() == 64)
