@@ -321,6 +321,8 @@ pub(crate) struct ClickArgs {
     pub(crate) target: Option<types::TargetSpec>,
     pub(crate) boundary: Option<bool>,
     #[serde(default)]
+    pub(crate) include_post_state: Option<bool>,
+    #[serde(default)]
     pub(crate) auto_checkpoint: Option<bool>,
     pub(crate) expected_url: Option<String>,
     #[serde(default)]

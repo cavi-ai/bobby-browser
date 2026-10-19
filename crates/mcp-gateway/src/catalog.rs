@@ -151,9 +151,9 @@ tools! {
     checkpoint_save { order: 0, title: "Save checkpoint", description: "Persist a verified checkpoint from evidenceRefs. Requires recovery:write. Save before Boundary commands with pinned boundary IDs. On failure, confirm each referenced command completed.",
         capabilities: &[types::Capability::RecoveryWrite], operation: Some(types::InterfaceOperation::CreateCheckpoint), schema: checkpoint_save_schema, args: CheckpointSaveArgs,
         phases: INTENT | VERIFY, group: Workflow, hints: (false, false, true, false) }
-    click { order: 1, title: "Click", description: "Click a selector or resolved target; pass workflowHandle, optional Shift/Ctrl/Alt/Meta modifiers. Requires browser:mutate. On failure with targetNotFound or targetAmbiguous, refresh a11y_snapshot.",
+    click { order: 1, title: "Click", description: "Click target/selector; use workflowHandle. includePostState adds state. Requires browser:mutate. On failure refresh a11y_snapshot.",
         capabilities: &[types::Capability::BrowserMutate], operation: Some(types::InterfaceOperation::SubmitCommand), schema: click_schema, args: ClickArgs,
-        phases: EXPLORE | ACT, scope: SessionPageWorkflow, group: Primitives, hints: (false, false, false, true) }
+        phases: EXPLORE | ACT, scope: SessionPageWorkflow, group: Primitives, page_derived: true, hints: (false, false, false, true) }
     click_and_wait_for_download { order: 2, title: "Click and wait for download", description: "Click a control and wait for its browser download to finish (Boundary). Requires browser:mutate and file:download. On failure with needsReconciliation, call recovery_status.",
         capabilities: &[
             types::Capability::BrowserMutate,

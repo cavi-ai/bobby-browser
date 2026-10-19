@@ -571,17 +571,12 @@ pub async fn j5_popup_and_frame(rig: &Rig, _dirs: &Dirs) {
         .tool(
             "click",
             json!({"sessionId":live.session_id,"pageId":popup_id,
-                   "target":{"role":"button","accessibleName":"Acknowledge"}}),
+                   "target":{"role":"button","accessibleName":"Acknowledge"},"includePostState":true}),
         )
         .await;
     assert_completed(&acked, "click inside the popup");
-    let seen = rig
-        .tool(
-            "workflow_observe",
-            json!({"sessionId":live.session_id,"pageId":popup_id}),
-        )
-        .await;
-    assert_node(&seen, "button", Some("Acknowledged"));
+    let seen = live.post_state_on_page(&acked, &popup_id);
+    assert_node(seen, "button", Some("Acknowledged"));
 
     let closed = rig
         .tool(
@@ -621,10 +616,12 @@ pub async fn j5_popup_and_frame(rig: &Rig, _dirs: &Dirs) {
         target.is_object(),
         "the frame control has no target: {button}"
     );
-    let clicked = live.call("click", json!({"target":target})).await;
+    let clicked = live
+        .call("click", json!({"target":target,"includePostState":true}))
+        .await;
     assert_completed(&clicked, "click through the snapshot target");
-    let again = live.snapshot(json!({})).await;
-    assert_node(&again, "button", Some("Frame done"));
+    let again = live.post_state(&clicked);
+    assert_node(again, "button", Some("Frame done"));
     live.close().await;
 }
 

@@ -1,5 +1,5 @@
 //! On success, `intent_follow`, `intent_submit_and_verify`,
-//! `intent_complete_form`, boundary `click`, and opted-in `navigate` carry
+//! `intent_complete_form`, opted-in `click`/`navigate`, and boundary clicks by default carry
 //! `postState`, the compact
 //! observation `workflow_observe` returns for the acting page. Absent on a
 //! failed outcome.
@@ -45,6 +45,120 @@ async fn call_tool(server: &Server, id: u64, name: &str, arguments: Value) -> Va
         ))
         .await
         .expect("tools/call response")
+}
+
+#[tokio::test]
+async fn plain_click_state_is_opt_in_without_recovery_authority() {
+    let live = live_with_capabilities(vec![
+        Capability::SessionWrite,
+        Capability::PageWrite,
+        Capability::BrowserMutate,
+    ])
+    .await;
+    let mut next_id = 100;
+    let (session, page) = create_session_and_page(&live.server, &mut next_id).await;
+    for (index, flag) in [None, Some(false), Some(true)].into_iter().enumerate() {
+        let mut args = json!({"sessionId":session,"pageId":page,"selector":"#continue"});
+        if let Some(flag) = flag {
+            args["includePostState"] = json!(flag);
+        }
+        let before = live.accessibility_calls();
+        let response = call_tool(&live.server, 110 + index as u64, "click", args).await;
+        let result = &response["result"]["structuredContent"];
+        assert_eq!(result["status"], "completed", "{response}");
+        assert_eq!(
+            live.accessibility_calls() - before,
+            usize::from(flag == Some(true))
+        );
+        if flag == Some(true) {
+            assert_post_state_matches_fresh_observe(
+                &live,
+                &response,
+                &session.0.to_string(),
+                &page.0.to_string(),
+                &mut next_id,
+            )
+            .await;
+        } else {
+            assert!(result.get("postState").is_none());
+            assert!(result.get("postStateStatus").is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn boundary_click_can_skip_state_without_skipping_its_checkpoint() {
+    let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+    let (session, page) = create_session_and_page(&live.server, &mut 120).await;
+    let response = call_tool(
+        &live.server,
+        130,
+        "click",
+        json!({
+            "sessionId":session,"pageId":page,"selector":"#continue",
+            "boundary":true,"includePostState":false
+        }),
+    )
+    .await;
+    let result = &response["result"]["structuredContent"];
+    assert_eq!(result["status"], "completed", "{response}");
+    assert!(result.get("postState").is_none(), "{response}");
+    assert!(result.get("postStateStatus").is_none(), "{response}");
+    assert_eq!(live.accessibility_calls(), 0);
+    assert!(result["checkpointId"].is_string(), "{response}");
+}
+
+#[tokio::test]
+async fn plain_click_read_failure_keeps_the_effect_and_invalid_requests_do_not_dispatch() {
+    let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+    let (session, page) = create_session_and_page(&live.server, &mut 140).await;
+    let invalid = call_tool(
+        &live.server,
+        150,
+        "click",
+        json!({
+            "sessionId":session,"pageId":page,"selector":"#continue","includePostState":"yes"
+        }),
+    )
+    .await;
+    assert!(invalid.get("error").is_some(), "{invalid}");
+    assert_eq!(live.probe.click_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(live.accessibility_calls(), 0);
+
+    live.probe
+        .accessibility_failures_remaining
+        .store(20, Ordering::SeqCst);
+    let clicked = call_tool(
+        &live.server,
+        151,
+        "click",
+        json!({
+            "sessionId":session,"pageId":page,"selector":"#continue","includePostState":true
+        }),
+    )
+    .await;
+    let result = &clicked["result"]["structuredContent"];
+    assert_eq!(result["status"], "completed", "{clicked}");
+    assert_eq!(clicked["result"]["isError"], false, "{clicked}");
+    assert_eq!(live.probe.click_calls.load(Ordering::SeqCst), 1);
+    assert!(result.get("postState").is_none());
+    assert_eq!(
+        result["postStateStatus"],
+        json!({"status":"unavailable","code":"observationIncomplete","reconciliationRequired":false})
+    );
+    let diagnostic = result["postStateStatus"].to_string();
+    assert!(diagnostic.len() <= 256 && !diagnostic.contains("injected"));
+
+    let reads = live.accessibility_calls();
+    let failed = call_tool(&live.server, 152, "click", json!({
+        "sessionId":session,"pageId":uuid::Uuid::new_v4(),"selector":"#continue","includePostState":true
+    })).await;
+    let result = &failed["result"]["structuredContent"];
+    assert_ne!(result["status"], "completed", "{failed}");
+    assert!(result.get("postState").is_none());
+    assert_eq!(result["postStateStatus"]["status"], "notRequested");
+    assert_eq!(live.accessibility_calls(), reads);
+    assert_eq!(live.probe.click_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
