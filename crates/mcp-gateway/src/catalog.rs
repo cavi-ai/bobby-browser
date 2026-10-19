@@ -288,9 +288,9 @@ tools! {
     job_submit { order: 29, title: "Submit job", description: "Submit a built-in job: echo; sleep (ms); http_probe (url); http_wait (url, contains); http_fetch (url). Requires job:submit; HTTP handlers also require network:egress. Same as POST /v1/jobs. On failure after submission, use job_status on the returned id; unknown names fail asynchronously, so do not resubmit.",
         capabilities: &[types::Capability::JobSubmit], operation: Some(types::InterfaceOperation::SubmitJob), schema: job_submit_schema, args: JobSubmitArgs,
         phases: ACT | VERIFY, group: Workflow, hints: (false, false, false, false) }
-    navigate { order: 30, title: "Navigate", description: "Navigate and wait for a load state. Requires browser:mutate. On failure, use a longer timeoutMs.",
+    navigate { order: 30, title: "Navigate", description: "Navigate; includePostState adds state. Requires browser:mutate. On failure inspect error.code.",
         capabilities: &[types::Capability::BrowserMutate], operation: Some(types::InterfaceOperation::SubmitCommand), schema: navigate_schema, args: NavigateArgs,
-        phases: EXPLORE | ACT | INTENT, scope: SessionPageWorkflow, group: Primitives, hints: (false, false, false, true) }
+        phases: EXPLORE | ACT | INTENT, scope: SessionPageWorkflow, group: Primitives, page_derived: true, hints: (false, false, false, true) }
     network_log { order: 31, title: "Read network log", description: "Dump the page's recorded network log as a HAR artifact, then clear the buffer unless clear is false. Call it once before the traffic you want; recording starts at the first call. Requires browser:mutate. Produces HAR-artifact evidence. On failure retry; not caller-fixable.",
         capabilities: &[types::Capability::BrowserMutate], operation: Some(types::InterfaceOperation::SubmitCommand), schema: network_log_schema, args: NetworkLogArgs,
         phases: ACT, scope: SessionPageWorkflow, group: PageOps, hints: (false, false, false, false) }

@@ -396,6 +396,7 @@ pub(crate) fn navigate_schema() -> (Value, Vec<&'static str>) {
             "sessionId": id(),
             "pageId": id(),
             "url": string(1, MAX_URL_BYTES),
+            "includePostState":{"type":"boolean","description":"Include page state"},
             "waitUntil": {"type":"string","enum":["commit","domContentLoaded","interactive","networkIdle"]},
             "timeoutMs": timeout_ms()
         }),
@@ -1181,9 +1182,13 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
         "session_capabilities" => output_ref("SessionCapabilities"),
         "workflow_start" => workflow_start_output_schema(),
         "workflow_observe" => workflow_observe_result_schema(),
-        // On success only, these four append `postState`: the compact
-        // observation `workflow_observe` returns. Absent on a failed outcome.
-        "intent_follow" | "intent_submit_and_verify" | "intent_complete_form" | "click" => object(
+        // Successful actions may append the compact observation returned by
+        // `workflow_observe`; navigate opts in and click must be Boundary.
+        "intent_follow"
+        | "intent_submit_and_verify"
+        | "intent_complete_form"
+        | "click"
+        | "navigate" => object(
             {
                 let mut properties = command_outcome_properties();
                 merge_properties(
@@ -3605,11 +3610,12 @@ mod tests {
     #[test]
     fn advertised_post_state_tools_collapse_to_the_opaque_form_but_wire_schema_keeps_post_state() {
         // Correction pass: the explore catalog has zero byte headroom, so
-        // `tools/list` cannot name `postState` for any of the four tools --
+        // `tools/list` cannot name `postState` for these tools --
         // they fall through to the same opaque collapse as every other
         // command-outcome tool.
         for name in [
             "click",
+            "navigate",
             "intent_follow",
             "intent_submit_and_verify",
             "intent_complete_form",

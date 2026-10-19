@@ -296,6 +296,7 @@ intent_args!(IntentDetectChallengeArgs {
 
 page_scoped_args!(NavigateArgs {
     url: String,
+    include_post_state: Option<bool>,
     wait_until: Option<types::WaitUntil>,
     timeout_ms: Option<u64>,
 });

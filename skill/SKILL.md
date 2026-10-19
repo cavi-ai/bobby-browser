@@ -53,6 +53,9 @@ calls. Rules that govern every call:
   outcome separately: page state alone does not prove a submit was accepted.
   If unavailable, inspect its code before another read; never repeat the action
   just to obtain page state.
+- On `navigate`, pass `includePostState: true` when you need to inspect the
+  destination. Reuse an available `postState`; if unavailable, inspect its code
+  before another read. Omit the flag when navigation evidence alone is enough.
 - **Read before write.** On a site this runtime has seen before, `context_ask`
   first — a remembered answer (marked `persisted`) beats a snapshot.
   Otherwise `a11y_snapshot`, and pass its targets straight into intent or

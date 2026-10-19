@@ -676,13 +676,12 @@ pub async fn j6_cross_site_navigation_recovery(rig: &Rig, _dirs: &Dirs) {
         let navigated = live
             .call(
                 "navigate",
-                json!({"url":url,"waitUntil":"interactive","timeoutMs":15000}),
+                json!({"url":url,"waitUntil":"interactive","timeoutMs":15000,"includePostState":true}),
             )
             .await;
         assert_completed(&navigated, what);
-        let snapshot = live.snapshot(json!({})).await;
-        assert_completed(&snapshot, &format!("snapshot after {what}"));
-        assert_node(&snapshot, "heading", Some(heading));
+        let snapshot = live.post_state(&navigated);
+        assert_node(snapshot, "heading", Some(heading));
     }
     live.close().await;
 

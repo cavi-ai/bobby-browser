@@ -45,6 +45,8 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
+                let session_id = input.session_id.clone();
+                let page_id = input.page_id.clone();
                 let (context, envelope) = primitive_envelope(
                     context,
                     input.session_id,
@@ -56,8 +58,20 @@ impl Server {
                         timeout_ms: input.timeout_ms.unwrap_or(DEFAULT_COMMAND_TIMEOUT_MS),
                     }),
                 );
-                self.submit_envelope(context, envelope, handle, call.name.as_str())
-                    .await
+                let observe_context = input
+                    .include_post_state
+                    .unwrap_or(false)
+                    .then(|| context.clone());
+                let result = self
+                    .submit_envelope(context, envelope, handle, call.name.as_str())
+                    .await;
+                match observe_context {
+                    Some(context) => {
+                        self.attach_post_state(result, context, session_id, page_id, handle)
+                            .await
+                    }
+                    None => result,
+                }
             }
             "click" => {
                 let input: ClickArgs = match bounded_parse(call.arguments) {
