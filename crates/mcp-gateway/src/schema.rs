@@ -74,6 +74,7 @@ pub(crate) fn click_schema() -> (Value, Vec<&'static str>) {
             "selector": string(1, MAX_STRING_BYTES),
             "target": nullable(json!({"$ref":"#/$defs/TargetSpec"})),
             "boundary": {"type":"boolean"},
+            "includePostState":{"type":"boolean","description":"Return page state; defaults to boundary"},
             "autoCheckpoint":{"type":"boolean"},
             "expectedUrl": nullable(string(1, MAX_URL_BYTES)),
             "modifiers": {
@@ -1183,7 +1184,7 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
         "workflow_start" => workflow_start_output_schema(),
         "workflow_observe" => workflow_observe_result_schema(),
         // Successful actions may append the compact observation returned by
-        // `workflow_observe`; navigate opts in and click must be Boundary.
+        // `workflow_observe`; navigate and ordinary clicks opt in.
         "intent_follow"
         | "intent_submit_and_verify"
         | "intent_complete_form"

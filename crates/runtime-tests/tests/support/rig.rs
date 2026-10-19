@@ -300,13 +300,17 @@ impl<'a> Live<'a> {
     }
 
     pub fn post_state<'b>(&self, result: &'b Value) -> &'b Value {
+        self.post_state_on_page(result, self.page_id.as_str().expect("page id"))
+    }
+
+    pub fn post_state_on_page<'b>(&self, result: &'b Value, page_id: &str) -> &'b Value {
         assert_eq!(result["status"], "completed", "{result}");
         assert_eq!(result["postStateStatus"]["status"], "available", "{result}");
         assert!(result["workflowId"].is_string(), "{result}");
         let state = &result["postState"];
         assert_eq!(state["status"], "completed", "{state}");
         assert_eq!(state["sessionId"], self.session_id, "{state}");
-        assert_eq!(state["pageId"], self.page_id, "{state}");
+        assert_eq!(state["pageId"], page_id, "{state}");
         assert_eq!(state["workflowId"], result["workflowId"], "{state}");
         assert_eq!(state["pageDerived"], true, "{state}");
         state

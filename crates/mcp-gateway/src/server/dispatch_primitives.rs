@@ -95,9 +95,12 @@ impl Server {
                     }),
                 );
                 pin_envelope_ids(&mut envelope, input.command_id, input.attempt_id);
-                // Only a Boundary click earns a `postState`: a read-only click
-                // gets none, so the context is not cloned for it.
-                let observe_context = boundary.then(|| context.clone());
+                // Observation is independent from execution class and checkpointing.
+                // Preserve the Boundary default; ordinary clicks opt in.
+                let observe_context = input
+                    .include_post_state
+                    .unwrap_or(boundary)
+                    .then(|| context.clone());
                 let result = if boundary && input.auto_checkpoint.unwrap_or(true) {
                     self.submit_envelope_with_auto_checkpoint(context, envelope, handle)
                         .await

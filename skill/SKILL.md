@@ -47,7 +47,7 @@ calls. Rules that govern every call:
   retained page memory first and only pays for a live snapshot when nothing
   is remembered.
 - On success, `intent_follow`, `intent_submit_and_verify`, `intent_complete_form`,
-  and a Boundary `click` already return `postState` — the same compact
+  and, by default, a Boundary `click` return `postState` — the same compact
   observation `workflow_observe` would. When `postStateStatus.status` is
   `available`, read that state before another observation. Check the action's
   outcome separately: page state alone does not prove a submit was accepted.
@@ -56,6 +56,10 @@ calls. Rules that govern every call:
 - On `navigate`, pass `includePostState: true` when you need to inspect the
   destination. Reuse an available `postState`; if unavailable, inspect its code
   before another read. Omit the flag when navigation evidence alone is enough.
+- On an ordinary `click`, pass `includePostState: true` to inspect the resulting
+  page in the same response. Boundary clicks include state by default; explicit
+  `false` skips only that read, preserving checkpoint and execution behavior.
+  Page state does not replace an expected-state check when verification matters.
 - **Read before write.** On a site this runtime has seen before, `context_ask`
   first — a remembered answer (marked `persisted`) beats a snapshot.
   Otherwise `a11y_snapshot`, and pass its targets straight into intent or
