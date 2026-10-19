@@ -9,7 +9,7 @@
 - `GET /v1/sessions/{session}/capabilities`, MCP `session_capabilities` and the SDK session capability helpers report an owned session's engine, connection state, and each feature's support, availability, reason, required capabilities and policy requirement. They require `session:read`.
 - `GET /v1/runtime` lists engine-specific options in `capabilities`, such as `engine:firefox:captureScreenshot.viewport`.
 - MCP command results carry `verificationStatus`: `notCompleted`, `notReported`, `conditionObserved`, `settled` or `validationRejected`. The Rust, TypeScript and Python SDKs classify command outcomes the same way.
-- `workflow_start` and `navigate` accept `includePostState` and return bounded page state with `postStateStatus`; startup and navigation still succeed when the state is unavailable.
+- `workflow_start`, `navigate` and `click` accept `includePostState` and return bounded page state with `postStateStatus`; the call still succeeds when the state is unavailable. A Boundary click returns page state unless `includePostState` is `false`.
 - `bobby doctor --incident-bundle <path>` writes a new local JSON report of execution ledger health, source hashes and recovery prerequisites without contacting a browser; it omits record contents and credentials.
 - Command logs carry a `command` span with command, workflow, attempt and session ids; `command.finished` records the outcome status and `elapsed_ms`, and a dropped command reports `interrupted`.
 - `command.request.finished` records each command request's disposition, including authorization rejections and idempotency replays, and links a replay to its original command; keys, credentials and error messages are omitted.
@@ -27,6 +27,7 @@
 - On Firefox, a cookie read of more than 2048 cookies fails `invalidRequest` instead of returning a truncated list.
 - `bobby doctor` reports damaged command, job or idempotency history as failed, names the affected stores, and gives preservation and reconciliation steps; `--fix` does not repair damaged history.
 - On Unix, a detached runtime owner no longer holds the launcher's inherited descriptors, so a caller reading the launcher's output stops waiting when the launcher exits.
+- On Chromium, `click_and_wait_for_download` on a page that a popup sent to the background resolves its target instead of stalling.
 
 ## 0.20.0 - 2026-10-12
 
