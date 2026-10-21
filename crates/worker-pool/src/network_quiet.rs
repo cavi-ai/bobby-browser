@@ -79,30 +79,44 @@ pub struct NetworkQuietState {
 /// Request IDs kept for one settle cap, at most [`MAX_TRACKED_REQUESTS`];
 /// past it older entries are evicted first.
 #[derive(Debug, Default)]
-struct RecentIds(HashMap<String, Instant>);
+struct RecentIds {
+    by_id: HashMap<Arc<str>, Instant>,
+    // Shared strings keep the expiry index bounded without copying IDs.
+    by_time: BTreeSet<(Instant, Arc<str>)>,
+}
 
 impl RecentIds {
     fn insert(&mut self, id: String, now: Instant) {
-        if self.0.len() >= MAX_TRACKED_REQUESTS && !self.0.contains_key(&id) {
-            self.0.retain(|_, seen| {
-                now.duration_since(*seen) < crate::navigation_settle::NAVIGATION_SETTLE_CAP
-            });
-            if self.0.len() >= MAX_TRACKED_REQUESTS {
-                let oldest = self
-                    .0
-                    .iter()
-                    .min_by_key(|(_, seen)| **seen)
-                    .map(|(id, _)| id.clone());
-                if let Some(oldest) = oldest {
-                    self.0.remove(&oldest);
-                }
+        self.expire(now);
+        if let Some((id, seen)) = self.by_id.remove_entry(id.as_str()) {
+            self.by_time.remove(&(seen, id));
+        } else if self.by_id.len() >= MAX_TRACKED_REQUESTS {
+            if let Some((_, oldest)) = self.by_time.pop_first() {
+                self.by_id.remove(oldest.as_ref());
             }
         }
-        self.0.insert(id, now);
+        let id: Arc<str> = id.into();
+        self.by_time.insert((now, Arc::clone(&id)));
+        self.by_id.insert(id, now);
     }
 
     fn remove(&mut self, id: &str) -> bool {
-        self.0.remove(id).is_some()
+        self.expire(Instant::now());
+        let Some((id, seen)) = self.by_id.remove_entry(id) else {
+            return false;
+        };
+        self.by_time.remove(&(seen, id));
+        true
+    }
+
+    fn expire(&mut self, now: Instant) {
+        while self.by_time.first().is_some_and(|(seen, _)| {
+            now.saturating_duration_since(*seen) >= crate::navigation_settle::NAVIGATION_SETTLE_CAP
+        }) {
+            if let Some((_, id)) = self.by_time.pop_first() {
+                self.by_id.remove(id.as_ref());
+            }
+        }
     }
 }
 
@@ -816,7 +830,7 @@ mod tests {
             None,
         );
         assert_eq!(state.requests().count(), 0);
-        assert!(state.completed_before_start.0.is_empty());
+        assert!(state.completed_before_start.by_id.is_empty());
     }
 
     fn started_by(
@@ -887,8 +901,8 @@ mod tests {
         );
         state.remove(&RequestId::new("data".to_owned()));
         state.remove(&RequestId::new("late".to_owned()));
-        assert!(state.completed_before_start.0.is_empty());
-        assert!(state.dropped.0.is_empty());
+        assert!(state.completed_before_start.by_id.is_empty());
+        assert!(state.dropped.by_id.is_empty());
         started_by(
             &mut state,
             "rows",
@@ -983,12 +997,86 @@ mod retention_tests {
     }
 
     #[test]
+    fn expired_completion_does_not_suppress_a_reused_request_id() {
+        let mut state = NetworkQuietState::default();
+        let expired = Instant::now() - crate::navigation_settle::NAVIGATION_SETTLE_CAP;
+        state
+            .completed_before_start
+            .insert("reused".into(), expired);
+        fetch(&mut state, "reused", "https://example.test/current".into());
+        assert_eq!(pending_page_loads(&state, Instant::now()), Some(1));
+    }
+
+    #[test]
+    fn expired_tombstones_are_removed_below_capacity() {
+        let mut ids = RecentIds::default();
+        let old = Instant::now();
+        ids.insert("old".into(), old);
+        ids.insert(
+            "fresh".into(),
+            old + crate::navigation_settle::NAVIGATION_SETTLE_CAP,
+        );
+        assert!(!ids.remove("old"));
+        assert!(ids.remove("fresh"));
+    }
+
+    #[test]
+    fn tombstone_refresh_survives_the_original_expiry() {
+        let mut ids = RecentIds::default();
+        let old = Instant::now();
+        ids.insert("refreshed".into(), old);
+        ids.insert("refreshed".into(), old + Duration::from_millis(1));
+        ids.insert(
+            "other".into(),
+            old + crate::navigation_settle::NAVIGATION_SETTLE_CAP,
+        );
+        assert!(ids.remove("refreshed"));
+        assert!(ids.remove("other"));
+        assert!(!ids.remove("refreshed"));
+    }
+
+    #[test]
+    fn refreshing_a_full_tombstone_cache_keeps_other_ids() {
+        let mut ids = RecentIds::default();
+        let now = Instant::now();
+        for index in 0..MAX_TRACKED_REQUESTS {
+            ids.insert(index.to_string(), now);
+        }
+        for offset in 1..100 {
+            ids.insert("0".into(), now + Duration::from_millis(offset));
+        }
+        assert_eq!(ids.by_id.len(), MAX_TRACKED_REQUESTS);
+        assert_eq!(ids.by_time.len(), MAX_TRACKED_REQUESTS);
+        for index in 0..MAX_TRACKED_REQUESTS {
+            assert!(ids.remove(&index.to_string()));
+        }
+        assert!(ids.by_time.is_empty());
+    }
+
+    #[test]
+    fn tombstone_capacity_evicts_the_oldest_after_refresh() {
+        let mut ids = RecentIds::default();
+        let now = Instant::now();
+        for index in 0..MAX_TRACKED_REQUESTS {
+            ids.insert(index.to_string(), now + Duration::from_nanos(index as u64));
+        }
+        ids.insert("0".into(), now + Duration::from_millis(1));
+        ids.insert("new".into(), now + Duration::from_millis(2));
+        assert!(!ids.remove("1"));
+        assert!(ids.remove("0"));
+        assert!(ids.remove("new"));
+    }
+
+    #[test]
     fn unmatched_finishes_are_bounded_and_keep_tracking() {
         let mut state = NetworkQuietState::default();
         for index in 0..10_000 {
             state.remove_id(&format!("missing-{index}"));
         }
-        assert_eq!(state.completed_before_start.0.len(), MAX_TRACKED_REQUESTS);
+        assert_eq!(
+            state.completed_before_start.by_id.len(),
+            MAX_TRACKED_REQUESTS
+        );
         assert_eq!(pending_page_loads(&state, Instant::now()), Some(0));
         fetch(&mut state, "rows", "https://example.test/rows".into());
         assert_eq!(pending_page_loads(&state, Instant::now()), Some(1));
@@ -1006,7 +1094,7 @@ mod retention_tests {
         }
         let later = old + crate::navigation_settle::NAVIGATION_SETTLE_CAP;
         ids.insert("new".into(), later);
-        assert_eq!(ids.0.len(), 1);
+        assert_eq!(ids.by_id.len(), 1);
         assert!(ids.remove("new"));
     }
 
@@ -1029,7 +1117,7 @@ mod retention_tests {
             state.remove_id(&format!("request-{index}"));
         }
         assert_eq!(pending_page_loads(&state, Instant::now()), Some(0));
-        assert!(state.completed_before_start.0.is_empty());
+        assert!(state.completed_before_start.by_id.is_empty());
     }
 
     #[test]
@@ -1056,7 +1144,7 @@ mod retention_tests {
         state.remove_id("long-url");
         state.remove_id(&id);
         assert_eq!(pending_page_loads(&state, Instant::now()), Some(0));
-        assert!(state.completed_before_start.0.is_empty());
+        assert!(state.completed_before_start.by_id.is_empty());
     }
 
     #[test]
