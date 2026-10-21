@@ -2,10 +2,10 @@
 
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
-use crate::job::{Job, JobConfig, JobId, JobStatus};
+use crate::job::{Job, JobConfig, JobId, JobPriority, JobStatus};
 use crate::JobResult;
 
 /// Configuration for retry behavior.
@@ -42,7 +42,7 @@ impl RetryConfig {
 
 /// Priority-based job queue.
 pub struct JobQueue {
-    jobs: VecDeque<Job>,
+    jobs: BTreeMap<JobPriority, VecDeque<Job>>,
     max_size: usize,
     retry_config: RetryConfig,
 }
@@ -50,7 +50,7 @@ pub struct JobQueue {
 impl JobQueue {
     pub fn new(max_size: usize) -> Self {
         Self {
-            jobs: VecDeque::with_capacity(max_size),
+            jobs: BTreeMap::new(),
             max_size,
             retry_config: RetryConfig::default(),
         }
@@ -75,7 +75,7 @@ impl JobQueue {
     /// Build a job only when the queue can accept it. The scheduler persists
     /// this job before making it runnable while holding the queue lock.
     pub fn prepare(&self, config: JobConfig) -> Result<Job, crate::JobError> {
-        if self.jobs.len() >= self.max_size {
+        if self.len() >= self.max_size {
             return Err(crate::JobError::QueueFull);
         }
 
@@ -95,27 +95,25 @@ impl JobQueue {
 
     /// Re-queue an existing job (same id) after a retry delay.
     pub fn requeue(&mut self, job: Job) -> Result<(), crate::JobError> {
-        if self.jobs.len() >= self.max_size {
+        if self.len() >= self.max_size {
             return Err(crate::JobError::QueueFull);
         }
-        self.jobs.push_back(job);
+        self.jobs.entry(job.priority).or_default().push_back(job);
         Ok(())
     }
 
     /// Get the next pending job (highest priority, FIFO within priority).
     pub fn next_job(&mut self) -> Option<Job> {
-        let best_idx = self
-            .jobs
-            .iter()
-            .enumerate()
-            .filter(|(_, job)| job.status == JobStatus::Pending)
-            .max_by(|(ia, a), (ib, b)| {
-                // Higher priority wins; on ties, earlier index (FIFO) wins.
-                a.priority.cmp(&b.priority).then_with(|| ib.cmp(ia))
-            })
-            .map(|(i, _)| i)?;
-
-        let mut job = self.jobs.remove(best_idx).unwrap();
+        let (priority, index) = self.jobs.iter().rev().find_map(|(priority, jobs)| {
+            jobs.iter()
+                .position(|job| job.status == JobStatus::Pending)
+                .map(|index| (*priority, index))
+        })?;
+        let jobs = self.jobs.get_mut(&priority).unwrap();
+        let mut job = jobs.remove(index).unwrap();
+        if jobs.is_empty() {
+            self.jobs.remove(&priority);
+        }
         job.start();
         Some(job)
     }
@@ -126,7 +124,7 @@ impl JobQueue {
         job_id: &JobId,
         result: JobResult,
     ) -> Result<(), crate::JobError> {
-        if let Some(job) = self.jobs.iter_mut().find(|j| j.id == *job_id) {
+        if let Some(job) = self.jobs.values_mut().flatten().find(|j| j.id == *job_id) {
             job.complete(result);
             Ok(())
         } else {
@@ -136,7 +134,7 @@ impl JobQueue {
 
     /// Mark a queued job for retry and return backoff duration.
     pub fn retry_job(&mut self, job_id: &JobId) -> Result<Duration, crate::JobError> {
-        if let Some(job) = self.jobs.iter_mut().find(|j| j.id == *job_id) {
+        if let Some(job) = self.jobs.values_mut().flatten().find(|j| j.id == *job_id) {
             if job.can_retry() {
                 job.prepare_retry();
                 Ok(self.retry_config.calculate_backoff(job.retry_count))
@@ -153,8 +151,13 @@ impl JobQueue {
 
     /// Cancel a job by ID. Removes it from the pending queue.
     pub fn cancel_job(&mut self, job_id: &JobId) -> Result<Job, crate::JobError> {
-        if let Some(idx) = self.jobs.iter().position(|j| j.id == *job_id) {
-            let mut job = self.jobs.remove(idx).unwrap();
+        if let Some((priority, index)) = self.jobs.iter().find_map(|(priority, jobs)| {
+            jobs.iter()
+                .position(|job| job.id == *job_id)
+                .map(|index| (*priority, index))
+        }) {
+            let jobs = self.jobs.get_mut(&priority).unwrap();
+            let job = &jobs[index];
             if matches!(
                 job.status,
                 JobStatus::Completed
@@ -168,6 +171,10 @@ impl JobQueue {
                     job_id, job.status
                 )));
             }
+            let mut job = jobs.remove(index).unwrap();
+            if jobs.is_empty() {
+                self.jobs.remove(&priority);
+            }
             job.cancel();
             Ok(job)
         } else {
@@ -177,7 +184,7 @@ impl JobQueue {
 
     /// Get the number of jobs in the queue.
     pub fn len(&self) -> usize {
-        self.jobs.len()
+        self.jobs.values().map(VecDeque::len).sum()
     }
 
     /// Check if the queue is empty.
@@ -188,7 +195,8 @@ impl JobQueue {
     /// Count pending jobs.
     pub fn pending_count(&self) -> usize {
         self.jobs
-            .iter()
+            .values()
+            .flatten()
             .filter(|j| j.status == JobStatus::Pending)
             .count()
     }
@@ -201,7 +209,7 @@ impl JobQueue {
         let mut completed = 0;
         let mut cancelled = 0;
 
-        for job in &self.jobs {
+        for job in self.jobs.values().flatten() {
             match job.status {
                 JobStatus::Pending => pending += 1,
                 JobStatus::Running => running += 1,
@@ -213,7 +221,7 @@ impl JobQueue {
         }
 
         QueueStats {
-            total: self.jobs.len(),
+            total: self.len(),
             pending,
             running,
             completed,

@@ -347,6 +347,69 @@ fn job_queue_cancel_removes_pending() {
     assert!(queue.is_empty());
 }
 
+#[tokio::test]
+async fn scheduler_shutdown_releases_store_during_retry_backoff() {
+    assert_backoff_store_released(false).await;
+}
+
+#[tokio::test]
+async fn aborting_scheduler_releases_store_during_retry_backoff() {
+    assert_backoff_store_released(true).await;
+}
+
+async fn assert_backoff_store_released(abort_runner: bool) {
+    let store = Arc::new(MemoryJobStore::new());
+    let retained = Arc::downgrade(&store);
+    let mut scheduler = JobScheduler::with_store(
+        SchedulerConfig::default().with_backoff_range(60_000, 60_000),
+        store,
+    );
+    scheduler.register_handler(
+        "retry".into(),
+        Arc::new(FailNTimes {
+            failures_remaining: AtomicU32::new(1),
+        }),
+    );
+    let id = scheduler
+        .submit(JobConfig::new("retry".into(), serde_json::json!({})))
+        .await
+        .unwrap();
+    let scheduler = Arc::new(scheduler);
+    let runner = tokio::spawn({
+        let scheduler = Arc::clone(&scheduler);
+        async move { scheduler.run_with_drain(Duration::from_secs(1)).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while scheduler.stats().await.total_retried == 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("handler must enter backoff");
+    if abort_runner {
+        runner.abort();
+        assert!(runner.await.unwrap_err().is_cancelled());
+    } else {
+        scheduler.request_shutdown();
+        tokio::time::timeout(Duration::from_secs(2), runner)
+            .await
+            .expect("shutdown must not wait for the retry delay")
+            .unwrap()
+            .unwrap();
+    }
+    let pending = scheduler.get_job(&id).await.unwrap();
+    assert_eq!(pending.status, JobStatus::Pending);
+    assert_eq!(pending.retry_count, 1);
+    drop(scheduler);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while retained.strong_count() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("retry timer retained the store after its run loop stopped");
+}
+
 #[test]
 fn job_queue_stats() {
     let mut queue = JobQueue::new(100);
