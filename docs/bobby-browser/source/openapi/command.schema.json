@@ -853,15 +853,15 @@
         {
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "element"
+            },
             "target": {
               "$ref": "#/$defs/TargetSpec"
             },
             "state": {
               "$ref": "#/$defs/ElementState"
-            },
-            "kind": {
-              "type": "string",
-              "const": "element"
             }
           },
           "required": [
@@ -873,35 +873,15 @@
         {
           "type": "object",
           "properties": {
-            "target": {
-              "$ref": "#/$defs/TargetSpec"
-            },
-            "matcher": {
-              "$ref": "#/$defs/TextMatch"
-            },
             "kind": {
               "type": "string",
               "const": "text"
-            }
-          },
-          "required": [
-            "kind",
-            "target",
-            "matcher"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
+            },
             "target": {
               "$ref": "#/$defs/TargetSpec"
             },
             "matcher": {
               "$ref": "#/$defs/TextMatch"
-            },
-            "kind": {
-              "type": "string",
-              "const": "value"
             }
           },
           "required": [
@@ -913,12 +893,32 @@
         {
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "value"
+            },
+            "target": {
+              "$ref": "#/$defs/TargetSpec"
+            },
             "matcher": {
               "$ref": "#/$defs/TextMatch"
-            },
+            }
+          },
+          "required": [
+            "kind",
+            "target",
+            "matcher"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "kind": {
               "type": "string",
               "const": "url"
+            },
+            "matcher": {
+              "$ref": "#/$defs/TextMatch"
             }
           },
           "required": [
@@ -929,12 +929,12 @@
         {
           "type": "object",
           "properties": {
-            "ready": {
-              "$ref": "#/$defs/WaitUntil"
-            },
             "kind": {
               "type": "string",
               "const": "document"
+            },
+            "ready": {
+              "$ref": "#/$defs/WaitUntil"
             }
           },
           "required": [
@@ -945,6 +945,10 @@
         {
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "networkQuiet"
+            },
             "idleMs": {
               "type": "integer",
               "format": "uint64",
@@ -969,10 +973,6 @@
             },
             "ignoreLongLived": {
               "type": "boolean"
-            },
-            "kind": {
-              "type": "string",
-              "const": "networkQuiet"
             }
           },
           "required": [
@@ -1442,12 +1442,12 @@
         {
           "type": "object",
           "properties": {
-            "target": {
-              "$ref": "#/$defs/TargetSpec"
-            },
             "kind": {
               "type": "string",
               "const": "element"
+            },
+            "target": {
+              "$ref": "#/$defs/TargetSpec"
             }
           },
           "required": [
@@ -1458,6 +1458,10 @@
         {
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "clip"
+            },
             "x": {
               "type": "number",
               "format": "double"
@@ -1473,10 +1477,6 @@
             "height": {
               "type": "number",
               "format": "double"
-            },
-            "kind": {
-              "type": "string",
-              "const": "clip"
             }
           },
           "required": [
@@ -1570,16 +1570,16 @@
         {
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "setText"
+            },
             "value": {
               "type": "string"
             },
             "clearFirst": {
               "type": "boolean",
               "default": true
-            },
-            "kind": {
-              "type": "string",
-              "const": "setText"
             }
           },
           "additionalProperties": false,
@@ -1591,12 +1591,12 @@
         {
           "type": "object",
           "properties": {
-            "checked": {
-              "type": "boolean"
-            },
             "kind": {
               "type": "string",
               "const": "setChecked"
+            },
+            "checked": {
+              "type": "boolean"
             }
           },
           "additionalProperties": false,
@@ -1608,12 +1608,12 @@
         {
           "type": "object",
           "properties": {
-            "value": {
-              "type": "string"
-            },
             "kind": {
               "type": "string",
               "const": "selectOne"
+            },
+            "value": {
+              "type": "string"
             }
           },
           "additionalProperties": false,
@@ -1625,15 +1625,15 @@
         {
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "selectMany"
+            },
             "values": {
               "type": "array",
               "items": {
                 "type": "string"
               }
-            },
-            "kind": {
-              "type": "string",
-              "const": "selectMany"
             }
           },
           "additionalProperties": false,
@@ -1645,15 +1645,15 @@
         {
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "setFiles"
+            },
             "paths": {
               "type": "array",
               "items": {
                 "type": "string"
               }
-            },
-            "kind": {
-              "type": "string",
-              "const": "setFiles"
             }
           },
           "additionalProperties": false,
@@ -2252,12 +2252,12 @@
         {
           "type": "object",
           "properties": {
-            "attribute": {
-              "type": "string"
-            },
             "kind": {
               "type": "string",
               "const": "attribute"
+            },
+            "attribute": {
+              "type": "string"
             }
           },
           "required": [
