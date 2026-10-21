@@ -38,16 +38,16 @@ pub fn apply_accessibility_alignment(
     if exposed.is_empty() {
         return;
     }
-    raw.retain(|candidate| {
-        exposed.iter().any(|id| id == &candidate.id) || !gathered_name_match(candidate, role, name)
+    let exposed: std::collections::HashSet<&str> = exposed.iter().map(String::as_str).collect();
+    raw.retain_mut(|candidate| {
+        if exposed.contains(candidate.id.as_str()) {
+            candidate.role = Some(role.to_owned());
+            candidate.name = Some(name.to_owned());
+            true
+        } else {
+            !gathered_name_match(candidate, role, name)
+        }
     });
-    for candidate in raw
-        .iter_mut()
-        .filter(|candidate| exposed.iter().any(|id| id == &candidate.id))
-    {
-        candidate.role = Some(role.to_owned());
-        candidate.name = Some(name.to_owned());
-    }
 }
 
 /// Builds resolver candidates in accessibility-tree traversal order.

@@ -75,6 +75,7 @@ pub fn rank_candidates<'a>(
         }
         _ => None,
     };
+    let parsed_css = target.css.as_deref().and_then(parse_simple_css);
     let mut ranked = candidates
         .iter()
         .enumerate()
@@ -82,11 +83,13 @@ pub fn rank_candidates<'a>(
             candidate.state.attached && (!policy.require_visible || candidate.state.visible)
         })
         .filter_map(|(index, candidate)| {
-            score(target, candidate, regex.as_ref())
+            score(target, candidate, regex.as_ref(), parsed_css.as_ref())
                 .map(|(candidate, evidence)| (index, candidate, evidence))
         })
         .collect::<Vec<_>>();
-    ranked.sort_by(|left, right| {
+    // The source index breaks every score tie, preserving traversal order
+    // without the scratch allocation of a stable sort.
+    ranked.sort_unstable_by(|left, right| {
         right
             .2
             .score
@@ -104,11 +107,7 @@ pub fn resolve_candidates(
     candidates: &[Candidate],
     policy: &ResolutionPolicy,
 ) -> Result<ResolutionDecision, ResolutionError> {
-    let ranked = rank_candidates(target, candidates, policy)?
-        .into_iter()
-        .enumerate()
-        .map(|(index, (candidate, evidence))| (index, candidate, evidence))
-        .collect::<Vec<_>>();
+    let ranked = rank_candidates(target, candidates, policy)?;
     // An explicit ordinal picks one match deterministically, so a large
     // matching set is not ambiguity for it; the bound guards the ranked
     // choice below.
@@ -116,7 +115,7 @@ pub fn resolve_candidates(
         let matches = ranked
             .iter()
             .take(10)
-            .map(|(_, candidate, _)| {
+            .map(|(candidate, _)| {
                 format!(
                     "id={},role={},name={}",
                     bounded_candidate_field(&candidate.id),
@@ -137,7 +136,7 @@ pub fn resolve_candidates(
     }
     if let Some(ordinal) = target.ordinal {
         return Ok(match ranked.get(ordinal) {
-            Some((_, candidate, evidence)) => ResolutionDecision::Resolved {
+            Some((candidate, evidence)) => ResolutionDecision::Resolved {
                 candidate: Box::new((*candidate).clone()),
                 evidence: evidence.clone(),
                 best_match_authorized: false,
@@ -146,10 +145,10 @@ pub fn resolve_candidates(
         });
     }
     let unique =
-        ranked.len() == 1 || ranked[0].2.score - ranked[1].2.score >= policy.uniqueness_margin;
-    let confident = ranked[0].2.score >= policy.confidence_floor;
+        ranked.len() == 1 || ranked[0].1.score - ranked[1].1.score >= policy.uniqueness_margin;
+    let confident = ranked[0].1.score >= policy.confidence_floor;
     if confident && (unique || target.allow_best_match) {
-        let (_, candidate, evidence) = &ranked[0];
+        let (candidate, evidence) = &ranked[0];
         return Ok(ResolutionDecision::Resolved {
             candidate: Box::new((*candidate).clone()),
             evidence: evidence.clone(),
@@ -157,10 +156,7 @@ pub fn resolve_candidates(
         });
     }
     Ok(ResolutionDecision::Ambiguous {
-        candidates: ranked
-            .into_iter()
-            .map(|(_, _, evidence)| evidence)
-            .collect(),
+        candidates: ranked.into_iter().map(|(_, evidence)| evidence).collect(),
     })
 }
 
@@ -180,7 +176,7 @@ fn bounded_candidate_field(value: &str) -> String {
 /// match `tag` / stamped id / attributes (`aria-label`, `title`, `id`).
 /// Combinators, classes, and pseudos are unsupported: those still match only
 /// when `candidate.css` equals the selector verbatim (Firefox css_path).
-fn css_matches(wanted: &str, candidate: &Candidate) -> bool {
+fn css_matches(wanted: &str, candidate: &Candidate, parsed: Option<&SimpleCss>) -> bool {
     let wanted = wanted.trim();
     if wanted.is_empty() {
         return false;
@@ -188,7 +184,7 @@ fn css_matches(wanted: &str, candidate: &Candidate) -> bool {
     if candidate.css.as_deref() == Some(wanted) {
         return true;
     }
-    let Some(parsed) = parse_simple_css(wanted) else {
+    let Some(parsed) = parsed else {
         return false;
     };
     if let Some(tag) = parsed.tag.as_deref() {
@@ -333,6 +329,7 @@ fn score<'a>(
     target: &TargetSpec,
     candidate: &'a Candidate,
     regex: Option<&Regex>,
+    parsed_css: Option<&SimpleCss>,
 ) -> Option<(&'a Candidate, CandidateEvidence)> {
     let mut score = 0;
     let mut reasons = Vec::new();
@@ -348,7 +345,7 @@ fn score<'a>(
         };
     }
     if let Some(wanted) = target.css.as_ref() {
-        if !css_matches(wanted, candidate) {
+        if !css_matches(wanted, candidate, parsed_css) {
             return None;
         }
         score += 100;
