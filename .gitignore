@@ -3,6 +3,7 @@ node_modules/
 /packages/typescript-sdk/dist
 /packages/interface-conformance/dist
 /packages/firefox-companion/dist
+/examples/cavi-api-client/dist
 /data
 .DS_Store
 .env
