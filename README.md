@@ -55,6 +55,9 @@ const client = new BrowserRuntimeClient({
 const info = await client.runtimeInfo();
 ```
 
+The [Cavi API client example](examples/cavi-api-client/README.md) reads page text
+with Bobby and streams a summary through a selected model provider.
+
 Python (`pip install bobby-browser`):
 
 ```python

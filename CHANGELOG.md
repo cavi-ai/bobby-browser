@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- A TypeScript page-summary example connects the Bobby SDK to `@cavi-ai/api-client`, with provider configuration for Claude, Codex, OpenClaw, Hermes, OpenCode and AGY, bounded page context and cancellation.
+
 ### Changed
 
 - `Formula/bobby-browser.rb` carries the v0.21.0 asset digests.

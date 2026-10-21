@@ -15,6 +15,19 @@ importers:
         specifier: 7.0.2
         version: 7.0.2
 
+  examples/cavi-api-client:
+    dependencies:
+      '@cavi-ai/api-client':
+        specifier: 0.22.0
+        version: 0.22.0
+      '@cavi-ai/bobby-browser':
+        specifier: workspace:*
+        version: link:../../packages/typescript-sdk
+    devDependencies:
+      '@types/node':
+        specifier: 26.6.5
+        version: 26.6.5
+
   packages/firefox-companion:
     devDependencies:
       '@types/jsdom':
@@ -73,6 +86,16 @@ packages:
   '@bramus/specificity@2.4.3':
     resolution: {integrity: sha512-0GEz8qJWokkUVYQYRukmkSHIFNoBH8QTreeHrAFbvz1XFYc3Y+puhMs8PQ5x8GNugiC2l5jvDBXKLbBIByeSBw==}
     hasBin: true
+
+  '@cavi-ai/api-client@0.22.0':
+    resolution: {integrity: sha512-GCp8qg2me4koz2wWF0iqJIr53Q2WzaacHy8IUO5LNFWqXryQpwmH1HJE5YMZNglbGPp32gOvllSe2r2Zv47j6w==}
+    engines: {node: '>=20.0.0'}
+    hasBin: true
+    peerDependencies:
+      react: '>=18.0.0'
+    peerDependenciesMeta:
+      react:
+        optional: true
 
   '@csstools/color-helpers@6.1.2':
     resolution: {integrity: sha512-grhRy3OKmniaAEKXMjua5z/EODX0MSqBGjunw8+j/3HQjOnahs2AGhvEOIYVUWcU6ScApbhLhVrQTX8XqrMrow==}
@@ -671,6 +694,8 @@ snapshots:
   '@bramus/specificity@2.4.3':
     dependencies:
       css-tree: 3.2.1
+
+  '@cavi-ai/api-client@0.22.0': {}
 
   '@csstools/color-helpers@6.1.2': {}
 
