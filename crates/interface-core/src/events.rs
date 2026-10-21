@@ -221,10 +221,16 @@ fn read_decision(
         }));
     }
 
+    // Appends assign contiguous global cursors. Seek into the logical deque
+    // before audience filtering, including when its backing buffer wraps.
+    let start = cursor
+        .0
+        .saturating_add(1)
+        .saturating_sub(earliest.0)
+        .min(state.retained.len() as u64) as usize;
     let events = state
         .retained
-        .iter()
-        .filter(|stored| stored.event.cursor > cursor)
+        .range(start..)
         .filter(|stored| {
             principal.is_none_or(|principal| stored.audience.as_ref() == Some(principal))
         })
@@ -311,14 +317,18 @@ fn is_sensitive_key(key: &str) -> bool {
 }
 
 fn truncate_utf8(mut value: String, max_bytes: usize) -> String {
-    if value.len() <= max_bytes {
-        return value;
+    if value.len() > max_bytes {
+        let mut boundary = max_bytes;
+        while !value.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        value.truncate(boundary);
     }
-    let mut boundary = max_bytes;
-    while !value.is_char_boundary(boundary) {
-        boundary -= 1;
+    // Serialized size does not include unused String capacity. Discard excess
+    // storage before retaining a field, even if its text was already short.
+    if value.capacity() > max_bytes {
+        value = value.into_boxed_str().into_string();
     }
-    value.truncate(boundary);
     value
 }
 
@@ -331,6 +341,102 @@ mod tests {
             Value::Array(values) => values.iter().map(node_count).sum(),
             Value::Object(values) => values.values().map(node_count).sum(),
             _ => 0,
+        }
+    }
+
+    #[test]
+    fn cursor_reads_preserve_gaps_and_tail_waits_near_u64_limit() {
+        let latest = u64::MAX - 1;
+        let state = EventState {
+            next_cursor: u64::MAX,
+            retained: (latest - 3..=latest)
+                .map(|cursor| StoredEvent {
+                    audience: None,
+                    event: Event {
+                        cursor: EventCursor(cursor),
+                        kind: "test".into(),
+                        payload: Value::Null,
+                    },
+                })
+                .collect(),
+        };
+        for (cursor, expected) in [
+            (latest - 4, vec![latest - 3, latest - 2, latest - 1, latest]),
+            (latest - 3, vec![latest - 2, latest - 1, latest]),
+            (latest - 1, vec![latest]),
+        ] {
+            let ReadDecision::Return(Ok(batch)) =
+                read_decision(&state, None, EventCursor(cursor), 4)
+            else {
+                panic!("expected retained events");
+            };
+            assert_eq!(
+                batch
+                    .events
+                    .iter()
+                    .map(|event| event.cursor.0)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(batch.latest_available, EventCursor(latest));
+        }
+        assert!(matches!(
+            read_decision(&state, None, EventCursor(latest), 4),
+            ReadDecision::Wait
+        ));
+        for (cursor, reason) in [
+            (latest - 5, EventGapReason::HistoryLost),
+            (u64::MAX, EventGapReason::InvalidCursor),
+        ] {
+            let ReadDecision::Return(Err(gap)) =
+                read_decision(&state, None, EventCursor(cursor), 4)
+            else {
+                panic!("expected gap");
+            };
+            assert_eq!(gap.reason, reason);
+            assert_eq!(gap.earliest_available, EventCursor(latest - 3));
+        }
+    }
+
+    #[tokio::test]
+    async fn retained_event_strings_release_oversized_backing_allocations() {
+        for oversized_text in [false, true] {
+            let field = |short: &str| {
+                let mut value = String::with_capacity(4 * 1024 * 1024);
+                value.push_str(short);
+                if oversized_text {
+                    value.push_str(&"é".repeat(1024 * 1024));
+                }
+                value
+            };
+            let mut payload = serde_json::Map::new();
+            payload.insert(field("key"), Value::String(field("value")));
+            let store = EventStore::new(1);
+            store
+                .append(Event::new(field("kind"), Value::Object(payload)))
+                .await;
+            let state = store.inner.state.lock().await;
+            let event = &state.retained.front().unwrap().event;
+            let (key, value) = event.payload.as_object().unwrap().iter().next().unwrap();
+            let Value::String(value) = value else {
+                panic!("expected retained string")
+            };
+            let capacities = [event.kind.capacity(), key.capacity(), value.capacity()];
+            eprintln!("retained event field capacities: {capacities:?}");
+            assert!(event.kind.capacity() <= MAX_EVENT_KIND_BYTES);
+            assert!(key.capacity() <= MAX_PAYLOAD_KEY_BYTES);
+            assert!(value.capacity() <= MAX_PAYLOAD_STRING_BYTES);
+            let expected = |prefix: &str, max: usize| {
+                if oversized_text {
+                    format!("{prefix}{}", "é".repeat((max - prefix.len()) / 2))
+                } else {
+                    prefix.to_owned()
+                }
+            };
+            assert_eq!(event.kind, expected("kind", MAX_EVENT_KIND_BYTES));
+            assert_eq!(*key, expected("key", MAX_PAYLOAD_KEY_BYTES));
+            assert_eq!(*value, expected("value", MAX_PAYLOAD_STRING_BYTES));
+            assert!(serde_json::to_vec(&event.payload).unwrap().len() <= MAX_EVENT_PAYLOAD_BYTES);
         }
     }
 
