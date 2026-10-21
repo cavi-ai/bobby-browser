@@ -1,6 +1,7 @@
 //! Chromium cookie commands and versioned HTTP state synchronization.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chromiumoxide::cdp::browser_protocol::network::{
@@ -17,7 +18,57 @@ use super::{bounded_cdp, command_failed, driver_error, ChromiumWorker};
 #[derive(Default)]
 pub(super) struct HttpBridgeState {
     version: u64,
-    cache_validators: BTreeMap<String, String>,
+    cache_validators: ValidatorCache,
+}
+
+// Validators are optional cache hints. Bound both the working set and owned
+// payload; a count bound alone still retains arbitrarily large header values.
+const MAX_CACHE_VALIDATORS: usize = 256;
+const MAX_CACHE_VALIDATOR_BYTES: usize = 1024 * 1024;
+
+#[derive(Default)]
+struct ValidatorCache {
+    entries: BTreeMap<Arc<str>, String>,
+    insertion_order: VecDeque<Arc<str>>,
+    bytes: usize,
+}
+
+impl ValidatorCache {
+    fn extend(&mut self, validators: BTreeMap<String, String>) {
+        for (key, value) in validators {
+            // Arc<str> stores the URL once for both indexes. Values can have
+            // spare capacity, which must count toward the retained byte limit.
+            let bytes = key.len().saturating_add(value.capacity());
+            if bytes > MAX_CACHE_VALIDATOR_BYTES {
+                continue;
+            }
+            if let Some(previous) = self.entries.get_mut(key.as_str()) {
+                self.bytes = self.bytes - previous.capacity() + value.capacity();
+                *previous = value;
+            } else {
+                let key: Arc<str> = key.into();
+                self.insertion_order.push_back(Arc::clone(&key));
+                self.entries.insert(key, value);
+                self.bytes += bytes;
+            }
+            // FIFO eviction keeps insertion amortized logarithmic without scanning the
+            // cache. Updating a URL does not add another eviction-index entry.
+            while self.entries.len() > MAX_CACHE_VALIDATORS
+                || self.bytes > MAX_CACHE_VALIDATOR_BYTES
+            {
+                let key = self.insertion_order.pop_front().expect("validator order");
+                let value = self.entries.remove(key.as_ref()).expect("validator entry");
+                self.bytes -= key.len() + value.capacity();
+            }
+        }
+    }
+
+    fn snapshot(&self) -> BTreeMap<String, String> {
+        self.entries
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.clone()))
+            .collect()
+    }
 }
 
 #[async_trait]
@@ -157,7 +208,7 @@ impl crate::WebStateEngine for ChromiumWorker {
             version: state.version,
             current_url,
             cookies,
-            cache_validators: state.cache_validators.clone(),
+            cache_validators: state.cache_validators.snapshot(),
             user_agent,
             language,
         })
@@ -468,12 +519,163 @@ fn set_cookie_param(
 mod tests {
     use super::*;
 
+    #[test]
+    fn committed_validators_are_bounded_by_count() {
+        let mut state = HttpBridgeState::default();
+        for version in 1..=600 {
+            finish_state_commit(
+                &mut state,
+                version,
+                BTreeMap::from([(format!("https://example.test/{version}"), "etag".into())]),
+            );
+        }
+        assert_eq!(state.version, 600);
+        assert!(state.cache_validators.entries.len() <= 256);
+        assert!(!state
+            .cache_validators
+            .entries
+            .contains_key("https://example.test/1"));
+        assert!(state
+            .cache_validators
+            .entries
+            .contains_key("https://example.test/600"));
+    }
+
+    #[test]
+    fn committed_validators_are_bounded_by_owned_bytes() {
+        let mut state = HttpBridgeState::default();
+        for version in 1..=128 {
+            finish_state_commit(
+                &mut state,
+                version,
+                BTreeMap::from([(
+                    format!("https://example.test/{version}"),
+                    "x".repeat(16 * 1024),
+                )]),
+            );
+        }
+        let bytes: usize = state
+            .cache_validators
+            .entries
+            .iter()
+            .map(|(key, value)| key.len() + value.capacity())
+            .sum();
+        assert!(bytes <= 1024 * 1024, "retained validator payload: {bytes}");
+    }
+
+    #[test]
+    fn validator_replacement_preserves_accounting_and_fifo_order() {
+        let mut state = HttpBridgeState::default();
+        for version in 1..=256 {
+            finish_state_commit(
+                &mut state,
+                version,
+                BTreeMap::from([(format!("url-{version}"), "old".into())]),
+            );
+        }
+        for version in 257..=600 {
+            finish_state_commit(
+                &mut state,
+                version,
+                BTreeMap::from([("url-1".into(), "replacement".into())]),
+            );
+        }
+        assert_eq!(state.cache_validators.entries.len(), 256);
+        assert_eq!(state.cache_validators.insertion_order.len(), 256);
+        assert_eq!(
+            state.cache_validators.snapshot().get("url-1").unwrap(),
+            "replacement"
+        );
+        let expected_bytes: usize = state
+            .cache_validators
+            .entries
+            .iter()
+            .map(|(key, value)| key.len() + value.capacity())
+            .sum();
+        assert_eq!(state.cache_validators.bytes, expected_bytes);
+        finish_state_commit(
+            &mut state,
+            601,
+            BTreeMap::from([("url-257".into(), "new".into())]),
+        );
+        assert!(!state.cache_validators.entries.contains_key("url-1"));
+        assert!(state.cache_validators.entries.contains_key("url-2"));
+        assert!(state.cache_validators.entries.contains_key("url-257"));
+    }
+
+    #[test]
+    fn validator_growth_evicts_older_entries_and_shrink_releases_bytes() {
+        let mut state = HttpBridgeState::default();
+        finish_state_commit(
+            &mut state,
+            1,
+            BTreeMap::from([("first".into(), "x".repeat(400 * 1024))]),
+        );
+        finish_state_commit(
+            &mut state,
+            2,
+            BTreeMap::from([("second".into(), "x".repeat(400 * 1024))]),
+        );
+        finish_state_commit(
+            &mut state,
+            3,
+            BTreeMap::from([("second".into(), "x".repeat(800 * 1024))]),
+        );
+        assert!(!state.cache_validators.entries.contains_key("first"));
+        assert_eq!(state.cache_validators.entries.len(), 1);
+        assert_eq!(state.cache_validators.insertion_order.len(), 1);
+        assert_eq!(
+            state.cache_validators.bytes,
+            "second".len() + state.cache_validators.entries["second"].capacity()
+        );
+        assert!(state.cache_validators.bytes <= MAX_CACHE_VALIDATOR_BYTES);
+        finish_state_commit(
+            &mut state,
+            4,
+            BTreeMap::from([("second".into(), "etag".into())]),
+        );
+        assert_eq!(
+            state.cache_validators.snapshot(),
+            BTreeMap::from([("second".into(), "etag".into())])
+        );
+        assert_eq!(
+            state.cache_validators.bytes,
+            "second".len() + state.cache_validators.entries["second"].capacity()
+        );
+        assert_eq!(state.cache_validators.insertion_order.len(), 1);
+    }
+
+    #[test]
+    fn oversized_validator_capacity_does_not_flush_existing_hints() {
+        let mut state = HttpBridgeState::default();
+        finish_state_commit(
+            &mut state,
+            1,
+            BTreeMap::from([("retained".into(), "etag".into())]),
+        );
+        let mut oversized = String::with_capacity(MAX_CACHE_VALIDATOR_BYTES + 1);
+        oversized.push('x');
+        finish_state_commit(
+            &mut state,
+            2,
+            BTreeMap::from([("oversized".into(), oversized)]),
+        );
+        assert_eq!(state.version, 2);
+        assert_eq!(state.cache_validators.entries.len(), 1);
+        assert_eq!(
+            state.cache_validators.snapshot().get("retained").unwrap(),
+            "etag"
+        );
+    }
+
     #[tokio::test]
     async fn failed_cookie_application_does_not_advance_state() {
-        let mut state = HttpBridgeState {
-            version: 7,
-            cache_validators: BTreeMap::from([("etag".into(), "old".into())]),
-        };
+        let mut state = HttpBridgeState::default();
+        finish_state_commit(
+            &mut state,
+            7,
+            BTreeMap::from([("etag".into(), "old".into())]),
+        );
         let result = apply_state_commit(
             &mut state,
             8,
@@ -484,7 +686,7 @@ mod tests {
 
         assert_eq!(result.unwrap_err(), "CDP rejected cookies");
         assert_eq!(state.version, 7);
-        assert_eq!(state.cache_validators.get("etag").unwrap(), "old");
+        assert_eq!(state.cache_validators.entries.get("etag").unwrap(), "old");
     }
 
     #[test]

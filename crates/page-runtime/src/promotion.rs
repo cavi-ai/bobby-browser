@@ -172,6 +172,7 @@ impl ContextPromotion {
         if needle.is_empty() {
             return None;
         }
+        let query = crate::context::ContextQuery::new(&needle);
         let site_context = self.store.site(&site).await?;
         // Ladder first, validation record second: the name-match ladder
         // (exact 1.0, role+name 0.9, fuzzy ≤0.8) decides which controls match
@@ -189,7 +190,7 @@ impl ContextPromotion {
         let mut best: Option<(f32, f32, &context_store::ControlContext)> = None;
         let mut tied = false;
         for control in controls {
-            let Some(score) = score_remembered(&needle, control) else {
+            let Some(score) = query.score(&control.role, &control.accessible_name, None) else {
                 continue;
             };
             let weight = validation_weight(control, today);
@@ -331,18 +332,6 @@ fn control_view(control: &context_store::ControlContext) -> types::ContextNeighb
             })
             .collect(),
     }
-}
-
-fn score_remembered(needle: &str, control: &context_store::ControlContext) -> Option<f32> {
-    let name = control.accessible_name.trim().to_lowercase();
-    if name == needle {
-        return Some(1.0);
-    }
-    let role = control.role.trim().to_lowercase();
-    if format!("{role} {name}") == needle {
-        return Some(0.9);
-    }
-    crate::context::fuzzy_score(needle, &name)
 }
 
 /// Recency-frequency weight for a remembered control, used to break ladder
@@ -493,7 +482,9 @@ mod tests {
         let today = 20_000;
         let bare = control("Save", 0, 0, None);
         assert_eq!(super::validation_weight(&bare, today), 1.0);
-        let score = super::score_remembered("save", &bare).unwrap();
+        let score = crate::context::ContextQuery::new("save")
+            .score(&bare.role, &bare.accessible_name, None)
+            .unwrap();
         assert_eq!(score, 1.0);
     }
 }
