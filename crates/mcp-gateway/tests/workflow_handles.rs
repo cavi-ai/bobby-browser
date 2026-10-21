@@ -2980,6 +2980,41 @@ async fn intent_follow_without_expected_state_names_the_fix() {
     );
 }
 
+#[tokio::test]
+async fn locatorless_actions_are_rejected_before_journaling() {
+    let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+    let started = start(&live.server, 720, json!({"profile":"locator-validation"})).await;
+    let handle = &started["result"]["structuredContent"]["workflowHandle"];
+    let before = live.journal.records().await.len();
+    for name in [
+        "click",
+        "type_text",
+        "upload_files",
+        "click_and_wait_for_popup",
+        "click_and_wait_for_download",
+    ] {
+        let mut args = json!({"workflowHandle":handle});
+        if name == "type_text" {
+            args["value"] = json!("hello");
+        }
+        if name == "upload_files" {
+            args["paths"] = json!(["/uploads/example.txt"]);
+        }
+        let response = call_tool(&live.server, 721, name, args).await;
+        assert_eq!(response["error"]["code"], -32602, "{name}: {response}");
+        let message = response["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("selector") && message.contains("target"),
+            "{message}"
+        );
+        assert_eq!(
+            live.journal.records().await.len(),
+            before,
+            "{name} must not start a command or reconciliation"
+        );
+    }
+}
+
 const UNION_CAPS: [Capability; 4] = [
     Capability::SessionWrite,
     Capability::PageWrite,
