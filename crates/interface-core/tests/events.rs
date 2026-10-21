@@ -240,3 +240,58 @@ async fn branching_payload_has_one_exact_aggregate_byte_budget_after_sanitizing(
     assert!(!retained.contains("branching-secret"));
     assert!(!retained.contains("Bearer"));
 }
+
+#[tokio::test]
+async fn cursor_reads_preserve_order_limits_and_audiences_after_queue_wrap() {
+    let store = EventStore::new(4);
+    let owner = PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000001"));
+    let other = PrincipalId::from_uuid(uuid!("10000000-0000-0000-0000-000000000002"));
+    for sequence in 1..=7 {
+        let audience = if sequence % 2 == 0 { &other } else { &owner };
+        store.append_for(audience.clone(), event(sequence)).await;
+    }
+    for (cursor, limit, expected) in [
+        (3, 4, vec![4, 5, 6, 7]),
+        (4, 1, vec![5]),
+        (5, 4, vec![6, 7]),
+        (6, 4, vec![7]),
+    ] {
+        let batch = store.read_after(EventCursor(cursor), limit).await.unwrap();
+        assert_eq!(batch.latest_available, EventCursor(7));
+        assert_eq!(
+            batch
+                .events
+                .iter()
+                .map(|event| event.cursor.0)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+    let batch = store
+        .read_after_for(&owner, EventCursor(4), 1)
+        .await
+        .unwrap();
+    assert_eq!(batch.events[0].cursor, EventCursor(5));
+    assert_eq!(batch.events.len(), 1);
+    let batch = store
+        .read_after_for(&other, EventCursor(4), 4)
+        .await
+        .unwrap();
+    assert_eq!(
+        batch
+            .events
+            .iter()
+            .map(|event| event.cursor.0)
+            .collect::<Vec<_>>(),
+        vec![6]
+    );
+    assert_eq!(batch.latest_available, EventCursor(7));
+    for (cursor, reason) in [
+        (2, EventGapReason::HistoryLost),
+        (8, EventGapReason::InvalidCursor),
+    ] {
+        let gap = store.read_after(EventCursor(cursor), 4).await.unwrap_err();
+        assert_eq!(gap.reason, reason);
+        assert_eq!(gap.earliest_available, EventCursor(4));
+    }
+}

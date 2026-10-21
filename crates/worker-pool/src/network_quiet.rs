@@ -169,6 +169,10 @@ fn bounded_url(mut url: String) -> String {
         }
         url.truncate(end);
     }
+    // Truncation alone keeps the original allocation alive with the request.
+    if url.capacity() > MAX_REQUEST_URL_BYTES {
+        url = url.into_boxed_str().into_string();
+    }
     url
 }
 
@@ -604,6 +608,39 @@ impl NetworkQuietTracker {
 #[cfg(test)]
 mod landed_tests {
     use super::*;
+
+    #[test]
+    fn retained_urls_release_oversized_backing_allocations() {
+        for oversized_text in [false, true] {
+            let mut url = String::with_capacity(4 * 1024 * 1024);
+            url.push_str("https://example.test/");
+            if oversized_text {
+                url.push_str(&"é".repeat(1024 * 1024));
+            }
+            let expected = if oversized_text {
+                format!(
+                    "https://example.test/{}",
+                    "é".repeat((MAX_REQUEST_URL_BYTES - "https://example.test/".len()) / 2)
+                )
+            } else {
+                "https://example.test/".into()
+            };
+            let mut state = NetworkQuietState::default();
+            state.upsert_id("request", url, NetworkResourceType::Fetch);
+            let retained = state.requests().next().unwrap();
+            eprintln!(
+                "retained URL len={}, capacity={}",
+                retained.url.len(),
+                retained.url.capacity()
+            );
+            assert!(retained.url.capacity() <= MAX_REQUEST_URL_BYTES);
+            assert_eq!(retained.url, expected);
+            assert_eq!(
+                counted_in_flight(&state, &NetworkQuietFilters::default(), Instant::now()).0,
+                1
+            );
+        }
+    }
 
     #[test]
     fn landed_page_loads_counts_finished_scripts_and_fetches() {
