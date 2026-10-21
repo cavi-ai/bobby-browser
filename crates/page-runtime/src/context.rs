@@ -342,13 +342,16 @@ impl ContextGraph {
         if needle.is_empty() {
             return None;
         }
-        let mut best: Option<(f32, AccessibilityTarget)> = None;
+        let query = ContextQuery::new(&needle);
+        let mut best: Option<(f32, &AccessibilityTarget)> = None;
         let mut best_is_tied = false;
         for node in &entry.nodes {
             let Some(target) = node.target.as_ref() else {
                 continue;
             };
-            let Some(score) = score_match(&needle, target, node) else {
+            let Some(score) =
+                query.score(&target.role, &target.accessible_name, node.name.as_deref())
+            else {
                 continue;
             };
             match &best {
@@ -357,19 +360,17 @@ impl ContextGraph {
                     best_is_tied = true;
                 }
                 _ => {
-                    best = Some((score, target.clone()));
+                    best = Some((score, target));
                     best_is_tied = false;
                 }
             }
         }
         let (confidence, target) = best?;
-        if best_is_tied {
-            // Two controls describe themselves the same way; which one is
-            // unanswerable.
+        if best_is_tied || confidence < CONTEXT_CONFIDENCE_FLOOR {
             return None;
         }
-        (confidence >= CONTEXT_CONFIDENCE_FLOOR).then_some(ContextAnswer {
-            target,
+        Some(ContextAnswer {
+            target: target.clone(),
             confidence,
             observed_at: types::ContextObservedAt::Generation {
                 generation: entry.generation,
@@ -486,52 +487,62 @@ fn candidate_proposals(proposals: Vec<(String, CachedProposal)>) -> Vec<Candidat
         .collect()
 }
 
-/// Scores how well a described control matches a node, or `None` if it does not
-/// match at all.
-///
-/// The ladder, pinned: exact accessible name 1.0, role+name 0.9, node name
-/// 0.8, then token-overlap fuzzy at 0.8 × coverage — capped there so a fuzzy
-/// hit can never tie or beat an exact one, and only full containment reaches
-/// the floor.
-pub(crate) fn score_match(
-    needle: &str,
-    target: &AccessibilityTarget,
-    node: &AccessibilityNode,
-) -> Option<f32> {
-    let name = target.accessible_name.trim().to_lowercase();
-    if name == needle {
-        return Some(1.0);
-    }
-    let role = target.role.trim().to_lowercase();
-    if format!("{role} {name}") == needle {
-        return Some(0.9);
-    }
-    if let Some(node_name) = node.name.as_deref() {
-        if node_name.trim().to_lowercase() == needle {
-            return Some(0.8);
-        }
-    }
-    fuzzy_score(needle, &name)
+/// A normalized query shared by every candidate in a live or persisted lookup.
+/// Tokenization belongs to the query, not each candidate's scoring pass.
+pub(crate) struct ContextQuery<'a> {
+    needle: &'a str,
+    tokens: Vec<&'a str>,
 }
 
-/// Token-overlap score: 0.8 × (needle tokens found in the name). `None` when
-/// no needle token appears, and for single-token needles — a lone token
-/// hitting a long label is the confident-wrong-answer case the floor exists
-/// to refuse.
-pub(crate) fn fuzzy_score(needle: &str, name: &str) -> Option<f32> {
-    let tokens: Vec<&str> = needle.split_whitespace().collect();
-    if tokens.len() < 2 {
-        return None;
+impl<'a> ContextQuery<'a> {
+    pub(crate) fn new(needle: &'a str) -> Self {
+        Self {
+            needle,
+            tokens: needle.split_whitespace().collect(),
+        }
     }
-    let name_tokens: std::collections::HashSet<&str> = name.split_whitespace().collect();
-    let covered = tokens
-        .iter()
-        .filter(|token| name_tokens.contains(*token))
-        .count();
-    if covered == 0 {
-        return None;
+
+    /// Exact accessible name 1.0, role+name 0.9, node name 0.8,
+    /// then token-overlap fuzzy at 0.8 × coverage.
+    pub(crate) fn score(&self, role: &str, name: &str, node_name: Option<&str>) -> Option<f32> {
+        let name = name.trim().to_lowercase();
+        if name == self.needle {
+            return Some(1.0);
+        }
+        let role = role.trim().to_lowercase();
+        if self
+            .needle
+            .strip_prefix(&role)
+            .and_then(|rest| rest.strip_prefix(' '))
+            == Some(name.as_str())
+        {
+            return Some(0.9);
+        }
+        if let Some(node_name) = node_name {
+            if node_name.trim().to_lowercase() == self.needle {
+                return Some(0.8);
+            }
+        }
+        self.fuzzy_score(&name)
     }
-    Some(0.8 * covered as f32 / tokens.len() as f32)
+
+    /// Duplicate query tokens retain their original coverage weight. A lone
+    /// token never fuzzy-matches a long label, and candidate words count once.
+    fn fuzzy_score(&self, name: &str) -> Option<f32> {
+        if self.tokens.len() < 2 {
+            return None;
+        }
+        let name_tokens: std::collections::HashSet<&str> = name.split_whitespace().collect();
+        let covered = self
+            .tokens
+            .iter()
+            .filter(|token| name_tokens.contains(*token))
+            .count();
+        if covered == 0 {
+            return None;
+        }
+        Some(0.8 * covered as f32 / self.tokens.len() as f32)
+    }
 }
 
 #[cfg(test)]
@@ -561,6 +572,47 @@ mod tests {
         let page = PageId::new();
         graph.record(&page, nodes);
         (graph, page)
+    }
+
+    #[test]
+    fn prepared_queries_preserve_normalization_and_ladder_scores() {
+        for (description, role, name, node_name, expected) in [
+            (
+                "  ÉMAIL ADDRESS  ",
+                "textbox",
+                "  Émail address ",
+                None,
+                Some(1.0),
+            ),
+            (" Button   Save ", " Button ", " Save ", None, Some(0.4)),
+            ("button save", "button", "save", None, Some(0.9)),
+            ("button  save", "button", "save", None, Some(0.4)),
+            ("save", "button", "other", Some(" SAVE "), Some(0.8)),
+            (
+                "email email address",
+                "textbox",
+                "address email email",
+                None,
+                Some(0.8),
+            ),
+            (
+                "email missing missing",
+                "textbox",
+                "email email",
+                None,
+                Some(0.8 / 3.0),
+            ),
+            ("email", "textbox", "email address", None, None),
+        ] {
+            let needle = description.trim().to_lowercase();
+            // The role/name separator remains one literal space, exactly as
+            // formatting the independently trimmed role and name did.
+            assert_eq!(
+                ContextQuery::new(&needle).score(role, name, node_name),
+                expected,
+                "{description}"
+            );
+        }
     }
 
     #[test]
