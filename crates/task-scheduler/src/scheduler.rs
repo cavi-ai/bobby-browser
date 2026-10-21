@@ -16,10 +16,10 @@ use chrono::Utc;
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{watch, Mutex, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::{AbortHandle, JoinSet};
 use tokio::time::timeout;
 use tracing::{error, info, warn};
@@ -60,7 +60,7 @@ pub struct JobScheduler {
     transition_lock: Arc<Mutex<()>>,
     abort_handles: Arc<std::sync::Mutex<HashMap<JobId, AbortHandle>>>,
     admission_integrity_issue: Arc<std::sync::OnceLock<&'static str>>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: watch::Sender<bool>,
     wake: Arc<Notify>,
     total_submitted: Arc<AtomicU64>,
     total_completed: Arc<AtomicU64>,
@@ -172,7 +172,7 @@ impl JobScheduler {
             transition_lock: Arc::new(Mutex::new(())),
             abort_handles: Arc::new(std::sync::Mutex::new(HashMap::new())),
             admission_integrity_issue: Arc::new(std::sync::OnceLock::new()),
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown: watch::channel(false).0,
             wake: Arc::new(Notify::new()),
             total_submitted: Arc::new(AtomicU64::new(0)),
             total_completed: Arc::new(AtomicU64::new(0)),
@@ -299,7 +299,7 @@ impl JobScheduler {
 
     /// Request the run loop to stop (pending jobs are kept; in-flight drain per timeout).
     pub fn request_shutdown(&self) {
-        self.shutdown.store(true, Ordering::SeqCst);
+        self.shutdown.send_replace(true);
         self.wake.notify_waiters();
         info!("scheduler.shutdown");
     }
@@ -324,7 +324,7 @@ impl JobScheduler {
                 }
             }
 
-            let shutting_down = self.shutdown.load(Ordering::SeqCst);
+            let shutting_down = *self.shutdown.borrow();
 
             if shutting_down {
                 if drain_deadline.is_none() {
@@ -472,6 +472,7 @@ impl JobScheduler {
                     }
                 };
 
+                drop(job_clone);
                 let retry = scheduler
                     .finish_job(job_id.clone(), result, timed_out)
                     .await;
@@ -479,11 +480,16 @@ impl JobScheduler {
                 drop(permit_guard);
 
                 if let Some((backoff, requeue_job)) = retry {
-                    let scheduler = scheduler.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(backoff).await;
+                    // Keep the timer owned by the run loop, without holding
+                    // a concurrency permit or delaying shutdown for backoff.
+                    let mut shutdown = scheduler.shutdown.subscribe();
+                    let retry_due = tokio::select! {
+                        _ = shutdown.wait_for(|stopping| *stopping) => false,
+                        _ = tokio::time::sleep(backoff) => true,
+                    };
+                    if retry_due {
                         scheduler.requeue_after_backoff(requeue_job).await;
-                    });
+                    }
                 }
             });
 
@@ -722,6 +728,9 @@ impl JobScheduler {
         let job_id = requeue_job.id.clone();
         let mut queue = self.queue.lock().await;
         let mut registry = self.job_registry.lock().await;
+        if *self.shutdown.borrow() {
+            return;
+        }
         let Some(job) = registry.get_mut(&job_id) else {
             return;
         };
@@ -952,7 +961,7 @@ impl Clone for JobScheduler {
             transition_lock: Arc::clone(&self.transition_lock),
             abort_handles: Arc::clone(&self.abort_handles),
             admission_integrity_issue: Arc::clone(&self.admission_integrity_issue),
-            shutdown: Arc::clone(&self.shutdown),
+            shutdown: self.shutdown.clone(),
             wake: Arc::clone(&self.wake),
             total_submitted: Arc::clone(&self.total_submitted),
             total_completed: Arc::clone(&self.total_completed),
