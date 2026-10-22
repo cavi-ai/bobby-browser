@@ -290,6 +290,12 @@ impl BidiTransport for FakeBidi {
         if method == "script.callFunction" {
             if params["functionDeclaration"]
                 .as_str()
+                .is_some_and(|declaration| declaration.contains("automationDownloadLink"))
+            {
+                return Ok(json!({"result":{"type":"boolean","value":false}}));
+            }
+            if params["functionDeclaration"]
+                .as_str()
                 .is_some_and(|declaration| declaration.starts_with("function(el){return Boolean("))
             {
                 return self
@@ -4945,6 +4951,7 @@ async fn native_input_failure_does_not_fall_back_to_dom_click() {
             "script.evaluate",
             "script.evaluate",
             "script.evaluate",
+            "script.callFunction",
             "script.callFunction",
             "script.callFunction",
             "script.callFunction",

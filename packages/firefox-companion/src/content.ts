@@ -7,6 +7,7 @@ import {
 } from "../../../crates/dom-engine/src/page_dom.js";
 import { isExtensionSafeString, isExtensionSafeUrl } from "./native-transport.js";
 import { containsSecretMaterial } from "./secret-material.js";
+import { controlLabel } from "../../../crates/dom-engine/src/control_label.js";
 import {
   CONTENT_FAILURE_KEY,
   MAX_COMPANION_PAYLOAD_BYTES,
@@ -478,6 +479,8 @@ function labelText(
   labelsByControlId: ReadonlyMap<string, Element>,
   budget: WorkBudget,
 ): string | undefined {
+  const associated = controlLabel(element, () => takeWork(budget));
+  if (associated) return observationString(associated);
   const id = element.getAttribute("id");
   if (id && byteLength(id) <= MAX_SELECTOR_LENGTH && takeWork(budget)) {
     const label = labelsByControlId.get(id);

@@ -25,6 +25,8 @@ pub fn candidate_gather_function() -> &'static str {
 /// Associated label text without the labelled control's own value or options.
 pub fn control_label_function() -> &'static str {
     include_str!("control_label.js")
+        .strip_prefix("export ")
+        .expect("control label module exports its page function")
 }
 
 pub use page_dom::{

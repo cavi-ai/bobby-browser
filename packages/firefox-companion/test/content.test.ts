@@ -20,6 +20,15 @@ const EXPECTED_MAX_CONTROL_FIELD_LENGTH = 2 * 1024;
 const EXPECTED_MAX_SELECTOR_LENGTH = 512;
 const EXPECTED_MAX_OBSERVATION_BYTES = MAX_COMPANION_PAYLOAD_BYTES - 64 * 1024;
 
+test("associated labels exclude the labelled control contents", () => {
+  const document = documentFor(`<label>Shipping method<select><option>Economy</option><option>Express</option></select></label>
+    <label>Comment<textarea>Existing draft</textarea></label>
+    <label for="owner">Account</label><label for="owner">owner</label><input id="owner">
+    <label>Delivery<br>window<select><option>Morning</option></select></label>`);
+  assert.deepEqual(observeDocument(document).controls.map(control => control.name),
+    ["Shipping method", "Comment", "Account owner", "Delivery window"]);
+});
+
 function documentFor(body: string, url = "https://example.test/login"): Document {
   return new JSDOM(
     `<!doctype html><html><head><title>Example</title></head><body>${body}</body></html>`,
