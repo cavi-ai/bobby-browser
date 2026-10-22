@@ -278,6 +278,16 @@ jobs:
           fi
           gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
 
+  homebrew:
+    needs: release
+    permissions:
+      contents: read
+    uses: ./.github/workflows/publish-homebrew.yml
+    with:
+      tag: ${{ inputs.tag || github.ref_name }}
+      dry_run: ${{ 'false' }}
+    secrets: inherit
+
   # A release created with GITHUB_TOKEN does not fire `on: release`, so the
   # documentation artifact is invoked directly rather than left to the event.
   docs:

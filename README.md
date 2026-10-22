@@ -102,4 +102,4 @@ make test    # workspace tests
 make lint    # clippy and format check
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) and [TESTING.md](TESTING.md). The CDP method allowlist is [`docs/cdp-support.json`](docs/cdp-support.json). The docs are built from `docs/bobby-browser/source` with `pnpm docs:build` into the release asset `bobby-browser-docs-v0.21.0.tar.gz`; the [consumer contract](docs/bobby-browser/CONSUMER.md) describes it.
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [TESTING.md](TESTING.md). The CDP method allowlist is [`docs/cdp-support.json`](docs/cdp-support.json). The docs are built from `docs/bobby-browser/source` with `pnpm docs:build` into the release asset `bobby-browser-docs-v0.21.1.tar.gz`; the [consumer contract](docs/bobby-browser/CONSUMER.md) describes it.

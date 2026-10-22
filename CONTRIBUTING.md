@@ -61,3 +61,17 @@ Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 By contributing, you agree that your contributions are licensed under the MIT
 License in [LICENSE](LICENSE).
+
+## Homebrew releases
+
+The binary release workflow calls `publish-homebrew.yml` after publishing the
+platform archives. It verifies all four archive hashes, installs and tests the
+formula with Homebrew, and merges signed formula-update PRs in this repository
+and `cavi-ai/homebrew-tap` after applicable CI succeeds. Updates never downgrade
+a newer formula or replace a changed installation recipe.
+
+For a rehearsal or retry, dispatch **Publish Homebrew** with a published `vX.Y.Z`
+tag. `dry_run: true` verifies the archives and installation without publishing.
+Publication uses `HOMEBREW_TAP_TOKEN`, falling back to `CONSUMER_DISPATCH_TOKEN`;
+the credential needs Contents and Pull requests write access and Actions read
+access to both repositories. A missing credential or failed check fails the job.
