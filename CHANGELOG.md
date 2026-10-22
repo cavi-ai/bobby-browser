@@ -2,13 +2,28 @@
 
 ## Unreleased
 
+## 0.21.1 - 2026-10-22
+
 ### Added
 
 - A TypeScript page-summary example connects the Bobby SDK to `@cavi-ai/api-client`, with provider configuration for Claude, Codex, OpenClaw, Hermes, OpenCode and AGY, bounded page context and cancellation.
 
 ### Changed
 
+- Completed named MCP tool responses use compact evidence by default, preserving action results, recovery state, HTTP errors and full failure evidence. `evidenceDetail: "full"`, `command_execute` and durable outcomes retain detailed evidence.
+- DOM target resolution reuses parsed selectors and candidate queries, and accessibility traversal avoids repeated linear membership checks.
+- Scheduler queues allocate entries as needed and dispatch by priority. Rejected cancellation preserves terminal queue entries, and retry timers stop with the scheduler while pending retries remain recoverable.
+- Network tracking uses ordered expiry indexes, bounds cached HTTP validators, and avoids retaining oversized URL and event string buffers.
+- Event reads seek directly to the requested cursor, and HAR export avoids copying completed JSON entry trees.
 - `Formula/bobby-browser.rb` carries the v0.21.0 asset digests.
+
+### Fixed
+
+- MCP tool schemas expose nested target, wait, hint and control-action arguments while retaining parameter properties in schema-to-TypeScript clients. `intent_follow` advertises exactly one expected state or destination.
+- Form snapshots derive field labels from visible label content without including the field's own value or hidden text, consistently on Chromium and Firefox.
+- A click that completes a download passes verification even when the result has no element evidence.
+- Popup actions return the popup's fresh state. Follow and submit actions that ran but failed verification can return fresh state for recovery while keeping their failed status and evidence.
+- A verification wait that times out after activation returns non-retryable `verificationFailed` with guidance to inspect state or retry the wait without activating the control again.
 
 ## 0.21.0 - 2026-10-19
 
