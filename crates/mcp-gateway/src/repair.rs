@@ -163,7 +163,7 @@ pub(crate) fn repair_for_code(code: &str) -> Option<Value> {
             "Retry the same call; recreate the session or page if it keeps failing."
         }
         "verificationFailed" => {
-            "Read returned postState or validation detail. If the submit click landed, do not resubmit blindly; correct rejected fields or re-verify with intent_wait_for_state."
+            "Read returned postState or validation detail. If the activation landed, do not repeat it blindly; correct rejected fields or re-verify with intent_wait_for_state."
         }
         "journalFailed" => {
             "Resubmit with the same idempotency key; if the status is needsReconciliation, call recovery_status first and never retry the command."

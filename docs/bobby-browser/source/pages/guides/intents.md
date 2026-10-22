@@ -59,6 +59,21 @@ await client.submit(
 
 The class tells you how to retry. A Replayable intent is safe to repeat. A Reconciliable intent may need a page check before repeating. A Boundary intent changes the world and takes a checkpoint first; after a failure with `needsReconciliation`, inspect the page instead of retrying. See [Events and recovery](events-recovery.md).
 
+## Verification and recovery
+
+For `intent_follow`, use an observed target or a known confirmation in
+`expectedState`. When the next page's text is unknown, use a bounded
+`networkQuiet` wait, such as
+`{"condition":{"kind":"networkQuiet","idleMs":200,"maxInFlight":0},"timeoutMs":10000}`,
+then inspect the returned `postState`. Network settlement proves only that
+the wait condition held; verify the requested business outcome from the
+page before reporting success. Do not invent confirmation text.
+
+If verification times out after activation, the result remains failed with
+`verificationFailed` and may include fresh `postState` for recovery. Inspect
+that state or use `intent_wait_for_state`; do not repeat the activation just
+to retry its wait.
+
 ## Hints
 
 `hints` narrow which control matches:

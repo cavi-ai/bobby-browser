@@ -550,12 +550,46 @@ async fn follow_reports_a_dialog_that_opened_instead_of_the_destination() {
 }
 
 #[tokio::test]
-async fn follow_keeps_the_timeout_when_no_new_dialog_opened() {
+async fn follow_timeout_after_activation_is_a_non_retryable_verification_failure() {
     let (error, record) = follow_with_dialogs(
         vec![link("Details"), dialog("Notice")],
         vec![link("Details"), dialog("Notice")],
     )
     .await;
-    assert_eq!(error.code, ErrorCode::WaitConditionTimedOut);
+    assert_eq!(error.code, ErrorCode::VerificationFailed);
+    assert!(!error.retryable);
+    assert!(error.message.contains("activation landed"), "{error:?}");
+    assert!(error.message.contains("Do not activate again"), "{error:?}");
+    assert!(error.message.contains("5000ms"), "{error:?}");
     assert_eq!(record.verification, "verifyFailed");
+}
+
+#[tokio::test]
+async fn follow_keeps_a_closed_page_error_for_handle_recovery() {
+    let calls = Arc::new(Mutex::new(CallLog::default()));
+    let browser = FakeBrowser {
+        candidates: Arc::new(vec![link("Details")]),
+        calls: Arc::clone(&calls),
+        click_evidence: Vec::new(),
+        wait_evidence: Vec::new(),
+        wait_error: Some(CommandError {
+            code: ErrorCode::NotFound,
+            message: "browser page is not open".into(),
+            layer: types::ErrorLayer::Driver,
+            retryable: false,
+        }),
+    };
+    let outcome = IntentEngine::execute(
+        &follow("Details", Some("link"), details_wait(), false),
+        &PageId::new(),
+        &browser,
+        &VisionContext::default(),
+    )
+    .await;
+    let IntentOutcome::Failed { error, .. } = outcome else {
+        panic!("expected failed wait, got {outcome:?}");
+    };
+    assert_eq!(error.code, ErrorCode::NotFound);
+    assert_eq!(error.message, "browser page is not open");
+    assert_eq!(calls.lock().expect("calls").clicks.len(), 1);
 }

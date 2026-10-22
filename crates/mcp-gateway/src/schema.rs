@@ -762,7 +762,7 @@ fn parameter_description(tool: &str, property: &str) -> Option<&'static str> {
         ("type_text", "value") => "Text.",
         ("control_action", "action") => "Native control action, including its kind and value fields.",
         ("intent_follow", "purpose") => "Control label; hints.accessibleName is exact.",
-        ("intent_follow", "expectedState" | "expectedDestination") => "One verification wait. Example: {\"condition\":{\"kind\":\"document\",\"ready\":\"interactive\"},\"timeoutMs\":10000}",
+        ("intent_follow", "expectedState" | "expectedDestination") => "One wait. Example: {\"condition\":{\"kind\":\"networkQuiet\",\"idleMs\":200,\"maxInFlight\":0},\"timeoutMs\":10000}",
         ("dialog", "action") => "accept or dismiss.",
         ("cookie_delete", "names") => "Cookie names to delete; all when omitted.",
         ("cookie_delete" | "cookie_get", "urls") => "URLs whose cookies apply.",

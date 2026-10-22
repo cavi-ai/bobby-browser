@@ -2244,14 +2244,19 @@ fn dialogs_not_in(
 
 fn recode_postclick_verification_error(error: CommandError, prefix: &str) -> CommandError {
     match error.code {
-        ErrorCode::TargetAmbiguous | ErrorCode::TargetNotFound | ErrorCode::InvalidRequest => {
-            CommandError {
-                code: ErrorCode::VerificationFailed,
-                message: format!("{prefix}: {}", error.message),
-                layer: error.layer,
-                retryable: false,
-            }
-        }
+        ErrorCode::TargetAmbiguous
+        | ErrorCode::TargetNotFound
+        | ErrorCode::InvalidRequest
+        | ErrorCode::WaitConditionTimedOut => CommandError {
+            code: ErrorCode::VerificationFailed,
+            message: format!(
+                "{prefix}: {}. Do not activate again to repair this wait; \
+                     inspect the current state or use intent_wait_for_state",
+                error.message
+            ),
+            layer: error.layer,
+            retryable: false,
+        },
         _ => error,
     }
 }
@@ -2338,8 +2343,8 @@ async fn execute_follow(
         Ok(evidence) => evidence,
         Err(error) => {
             // The click already landed; a wait error that only reflects the
-            // matcher's own targeting trouble (ambiguous/missing/invalid
-            // target) is not a fresh failure to retry — it means the
+            // matcher's own targeting trouble or timeout is not a fresh
+            // failure to retry — it means the
             // post-state could not be verified. Reporting it verbatim reads
             // as a retryable ambiguity and invites re-clicking a control that
             // already fired.

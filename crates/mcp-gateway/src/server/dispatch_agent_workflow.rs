@@ -398,7 +398,7 @@ impl Server {
         })
     }
 
-    /// Appends `postState` to a completed action or a known-landed submit
+    /// Appends `postState` to a completed action or a landed follow/submit
     /// whose verification failed: the same compact
     /// observation `workflow_observe` would return for this handle's page
     /// right now, built by [`Server::live_workflow_observation`] with
@@ -436,7 +436,7 @@ impl Server {
             .post_action_report_with(
                 result,
                 |outcome| {
-                    // A known-landed submit still needs a safe recovery read
+                    // A landed activation still needs a safe recovery read
                     // when its caller's expectation failed. Keep the failure
                     // and its evidence; this read never verifies or replays it.
                     outcome["status"] == "completed"
@@ -445,7 +445,10 @@ impl Server {
                             && outcome["evidence"].as_array().is_some_and(|evidence| {
                                 evidence.iter().any(|item| {
                                     item["kind"] == "intentExecution"
-                                        && item["record"]["intentKind"] == "submitAndVerify"
+                                        && matches!(
+                                            item["record"]["intentKind"].as_str(),
+                                            Some("submitAndVerify" | "follow")
+                                        )
                                         && matches!(
                                             item["record"]["verification"].as_str(),
                                             Some("verifyFailed" | "dialogOpened")

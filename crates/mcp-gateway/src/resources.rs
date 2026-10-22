@@ -732,7 +732,8 @@ tools most likely to produce it.
   fill's committed value violates the browser's own constraint-validity
   state, or a `type_text`/`click` call carrying an expected-URL guard finds
   the page already navigated away from it. Repair: read the returned
-  validation detail and any available `postState`. A landed submit remains
+  validation detail and any available `postState`. A follow activation or
+  submit whose verification timed out remains
   failed even when that read succeeds; do not resubmit blindly. Correct
   rejected fields or re-verify with `intent_wait_for_state`.
 - `journalFailed` -- the durable outcome journal failed to record a
