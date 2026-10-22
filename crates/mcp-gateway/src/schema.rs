@@ -70,7 +70,7 @@ pub(crate) fn a11y_snapshot_schema() -> (Value, Vec<&'static str>) {
             "sessionId": id(),
             "pageId": id(),
             "maxNodes": {"type":"integer","minimum":1,"maximum":2048},
-            "target": {"type":"object","description":"Scope the tree to this target's subtree (e.g. the form being worked on) instead of the whole page; same shape as wait_for targets"}
+            "target": {"type":"object","description":"Scope to a target subtree, such as a form; use a wait_for target."}
         }),
         vec!["sessionId", "pageId"],
     )
@@ -726,8 +726,8 @@ pub(crate) fn advertised_tool_schema(name: &str) -> Value {
     schema
 }
 
-/// Gives every advertised top-level parameter a description; agents fill
-/// arguments from it. Validation schemas are unaffected.
+/// Adds parameter guidance that carries more information than the field name
+/// and type. Validation schemas are unaffected.
 fn describe_parameters(name: &str, schema: &mut Value) {
     let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) else {
         return;
@@ -762,22 +762,22 @@ fn parameter_description(tool: &str, property: &str) -> Option<&'static str> {
         ("type_text", "value") => "Text.",
         ("control_action", "action") => "Native control action, including its kind and value fields.",
         ("intent_follow", "purpose") => "Control label; hints.accessibleName is exact.",
-        ("intent_follow", "expectedState" | "expectedDestination") => "Provide exactly one of expectedState/expectedDestination. Example: {\"condition\":{\"kind\":\"text\",\"target\":{\"css\":\"#status\"},\"matcher\":{\"kind\":\"contains\",\"value\":\"Ready\"}},\"timeoutMs\":10000}",
+        ("intent_follow", "expectedState" | "expectedDestination") => "One verification wait. Example: {\"condition\":{\"kind\":\"document\",\"ready\":\"interactive\"},\"timeoutMs\":10000}",
         ("dialog", "action") => "accept or dismiss.",
         ("cookie_delete", "names") => "Cookie names to delete; all when omitted.",
         ("cookie_delete" | "cookie_get", "urls") => "URLs whose cookies apply.",
         ("recovery_status", "limit") => "Most workflows to list.",
         ("events_read", "limit") => "Most events to return.",
-        (_, "sessionId") => "Session id.",
-        (_, "pageId") => "Page id.",
-        (_, "workflowId") => "Workflow id.",
+        (_, "sessionId") => "Session.",
+        (_, "pageId") => "Page.",
+        (_, "workflowId") => "Workflow.",
         (_, "workflowHandle") => "From workflow_start.",
-        (_, "commandId") => "Pinned command id.",
-        (_, "attemptId") => "Pinned attempt id.",
-        (_, "idempotencyKey") => "Retry dedup key.",
-        (_, "autoCheckpoint") => "Checkpoint the step.",
+        (_, "commandId") => "Pinned command.",
+        (_, "attemptId") => "Pinned attempt.",
+        (_, "idempotencyKey") => "Dedup key.",
+        (_, "autoCheckpoint") => "Save checkpoint.",
         (_, "boundary") => "Run at most once.",
-        (_, "evidenceDetail") => "compact or full.",
+        (_, "evidenceDetail") => "Detail level.",
         (_, "selector") => "CSS selector.",
         (_, "target") => "Target from a fresh snapshot, or a locator such as {css:\"#submit\"} or {role:\"button\",accessibleName:\"Submit\"}.",
         (_, "value") => "Typed field action with its kind and value fields.",
@@ -1034,6 +1034,9 @@ fn apply_workflow_scope_advertisement(name: &str, schema: &mut Value) {
         .as_object_mut()
         .expect("tool schemas have object properties");
     properties.insert("workflowHandle".to_owned(), json!({"$ref":"#/$defs/H"}));
+    if name != "page_activate" {
+        properties["workflowHandle"]["description"] = json!("Omit sessionId/pageId/workflowId.");
+    }
 
     let required = schema["required"]
         .as_array_mut()
@@ -1079,15 +1082,7 @@ fn apply_advertised_input_patches(patched: &mut Map<String, Value>) {
             &[],
         ),
     );
-    patched.insert(
-        "WaitCondition".to_owned(),
-        // Spell out the fields of each variant without duplicating the full
-        // validation union across every tool accepting a post-action wait.
-        json!({
-            "type":"object",
-            "description":"kind=text|value:target,matcher; url:matcher; element:target,state; document:ready; networkQuiet:idleMs,maxInFlight. matcher={kind:exact|contains|regex,value:string}."
-        }),
-    );
+    patched.insert("WaitCondition".to_owned(), advertised_wait_condition());
     patched.insert(
         "TargetSpec".to_owned(),
         json!({
@@ -1136,6 +1131,32 @@ fn apply_advertised_input_patches(patched: &mut Map<String, Value>) {
         .as_object_mut()
         .unwrap()
         .remove("required");
+}
+
+/// Describe the canonical variants and enum values without repeating their
+/// validation schemas. Dispatch enforces the full grammar.
+fn advertised_wait_condition() -> Value {
+    let variants = wait_conditions();
+    let mut enums = Map::new();
+    let mut requirements = Vec::new();
+    for variant in &variants {
+        let kind = variant["properties"]["kind"]["const"].as_str().unwrap();
+        let required: Vec<&str> = variant["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|key| *key != "kind")
+            .collect();
+        for (key, property) in variant["properties"].as_object().unwrap() {
+            if let Some(values) = property.get("enum") {
+                enums.insert(format!("{kind}.{key}"), values.clone());
+            }
+        }
+        requirements.push(format!("{kind}:{}", required.join(",")));
+    }
+    json!({"type":"object",
+        "description":format!("Required per kind: {}. Enum values: {}; matcher={{kind:exact|contains|regex,value:string}}.", requirements.join("; "), Value::Object(enums))})
 }
 
 /// Compact argument templates for the first-run tools. Kept off the validation
@@ -3561,9 +3582,12 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("target");
-        assert!(schema
-            .to_string()
-            .contains("kind=text|value:target,matcher"));
+        let mut explicit = follow.clone();
+        explicit.as_object_mut().unwrap().remove("workflowHandle");
+        explicit["sessionId"] = json!("10000000-0000-4000-8000-000000000001");
+        explicit["pageId"] = json!("10000000-0000-4000-8000-000000000002");
+        explicit["workflowId"] = json!("10000000-0000-4000-8000-000000000003");
+        assert!(validate_tool_arguments("intent_follow", &explicit).is_err());
         follow["expectedState"]
             .as_object_mut()
             .unwrap()
@@ -3572,6 +3596,50 @@ mod tests {
             !accepts(&schema, &follow),
             "wait wrappers require a timeout"
         );
+    }
+
+    #[test]
+    fn wait_enum_guidance_matches_the_dispatch_contract() {
+        let schema = advertised_wait_condition();
+        let description = schema["description"].as_str().unwrap();
+        let encoded = description
+            .split_once("Enum values: ")
+            .unwrap()
+            .1
+            .split_once("; matcher=")
+            .unwrap()
+            .0;
+        let enums: Value = serde_json::from_str(encoded).unwrap();
+        assert_eq!(
+            enums["document.ready"],
+            json!(["commit", "domContentLoaded", "interactive", "networkIdle"])
+        );
+        for ready in enums["document.ready"].as_array().unwrap() {
+            let input = json!({
+                "sessionId":"10000000-0000-4000-8000-000000000001",
+                "pageId":"10000000-0000-4000-8000-000000000002",
+                "condition":{"kind":"document","ready":ready},"timeoutMs":1000
+            });
+            validate_tool_arguments("wait_for", &input).unwrap();
+        }
+    }
+
+    #[test]
+    fn wait_enum_repair_exposes_allowed_values_without_the_supplied_value() {
+        let root = json!({"$defs":definitions()});
+        for ready in [json!(true), json!("private-invalid-value")] {
+            let repair = union_repair_at(
+                &root,
+                &root["$defs"]["WaitCondition"],
+                &json!({"kind":"document","ready":ready}),
+                false,
+            )
+            .unwrap();
+            for value in ["commit", "domContentLoaded", "interactive", "networkIdle"] {
+                assert!(repair.hint.contains(value), "{}", repair.hint);
+            }
+            assert!(!repair.hint.contains("private-invalid-value"));
+        }
     }
 
     #[test]
@@ -4385,13 +4453,16 @@ fn union_repair_at(root: &Value, node: &Value, value: &Value, nested: bool) -> O
                 ));
             }
             hint.push('.');
-            if !nested {
-                if let Err(inner) = validate_at(root, variant, value, 0, "") {
-                    if inner.constraint == "oneOf" && inner.pointer != "/" {
-                        if let (Some(inner_node), Some(inner_value)) = (
-                            schema_at(root, variant, &inner.pointer),
-                            value.pointer(&inner.pointer),
-                        ) {
+            if let Err(inner) = validate_at(root, variant, value, 0, "") {
+                if let Some(inner_node) = schema_at(root, variant, &inner.pointer) {
+                    if let Some(values) = inner_node.get("enum").filter(|values| values.is_array())
+                    {
+                        hint.push_str(&format!(
+                            " At {}: allowed values {}.",
+                            inner.pointer, values
+                        ));
+                    } else if !nested && inner.constraint == "oneOf" && inner.pointer != "/" {
+                        if let Some(inner_value) = value.pointer(&inner.pointer) {
                             if let Some(deeper) =
                                 union_repair_at(root, inner_node, inner_value, true)
                             {

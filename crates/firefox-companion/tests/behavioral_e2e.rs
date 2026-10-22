@@ -152,6 +152,12 @@ impl BidiTransport for FakeBidi {
         if method == "script.callFunction" {
             if params["functionDeclaration"]
                 .as_str()
+                .is_some_and(|declaration| declaration.contains("automationDownloadLink"))
+            {
+                return Ok(json!({"result":{"type":"boolean","value":false}}));
+            }
+            if params["functionDeclaration"]
+                .as_str()
                 .is_some_and(|declaration| declaration.contains("automationScrollMetrics"))
             {
                 let needed = *self.scroll_needed.lock().await;

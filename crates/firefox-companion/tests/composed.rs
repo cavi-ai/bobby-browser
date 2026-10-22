@@ -110,6 +110,13 @@ impl BidiTransport for BindingBidi {
             "script.callFunction"
                 if params["functionDeclaration"]
                     .as_str()
+                    .is_some_and(|declaration| declaration.contains("automationDownloadLink")) =>
+            {
+                Ok(json!({"result":{"type":"boolean","value":false}}))
+            }
+            "script.callFunction"
+                if params["functionDeclaration"]
+                    .as_str()
                     .is_some_and(|declaration| declaration.contains("automationPointerBounds")) =>
             {
                 Ok(json!({

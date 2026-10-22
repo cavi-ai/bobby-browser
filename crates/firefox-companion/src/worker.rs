@@ -4853,6 +4853,113 @@ impl worker_pool::ObservationEngine for FirefoxCompanionWorker {
     }
 }
 
+impl FirefoxCompanionWorker {
+    async fn click_target(
+        &self,
+        page_id: &PageId,
+        command: &ClickCommand,
+        capture_download: bool,
+    ) -> Result<Vec<Evidence>, CommandError> {
+        let top_context = self.context(page_id).await?;
+        // One re-resolve for a target the page re-rendered away between
+        // resolution and the viewport preflight; a second detach just
+        // fails. Only the preflight is retried: it runs before any pointer
+        // input, so a click that landed is never repeated.
+        let mut detach_retried = false;
+        let (context, shared_id) = loop {
+            let shadow_target = command
+                .target
+                .as_ref()
+                .filter(|target| !target.shadow_path.is_empty());
+            let (context, shared_id, owners) = if let Some(target) = shadow_target {
+                let (context, owners) = self.resolve_input_scope(&top_context, target).await?;
+                let shared_id = self.resolve_shadow_element(&context, target).await?;
+                (context, shared_id, owners)
+            } else {
+                let (context, selector, owners) = self
+                    .resolve_input_target_with_frames(
+                        page_id,
+                        &top_context,
+                        &command.selector,
+                        command.target.as_ref(),
+                    )
+                    .await?;
+                let shared_id = self
+                    .resolve_element(&context, &selector, command.target.is_some())
+                    .await?;
+                (context, shared_id, owners)
+            };
+
+            self.behavioral_scroll_into_view_if_needed(&context, &shared_id)
+                .await?;
+            match self.preflight_pointer_target(&context, &shared_id).await {
+                Ok(shared_id) => {
+                    self.preflight_frame_owners(&context, &shared_id, &owners)
+                        .await?;
+                    break (context, shared_id);
+                }
+                Err(error) if !detach_retried && error.code == ErrorCode::TargetDetached => {
+                    detach_retried = true;
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        if capture_download {
+            let response = self.transport.send(
+                "script.callFunction",
+                json!({
+                    "functionDeclaration": "function automationDownloadLink(element){return element instanceof HTMLAnchorElement && element.hasAttribute('download');}",
+                    "target": {"context": context, "sandbox": COMPANION_SANDBOX},
+                    "arguments": [{"sharedId": shared_id}],
+                    "awaitPromise": false,
+                    "resultOwnership": "none",
+                }),
+            ).await?;
+            let download_link = response
+                .pointer("/result/value")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| {
+                    driver_error(
+                        ErrorCode::BrowserCommandFailed,
+                        "Firefox download-link inspection was unavailable",
+                        false,
+                    )
+                })?;
+            if download_link {
+                if !command.modifiers.is_empty() {
+                    return Err(driver_error(
+                        ErrorCode::InvalidRequest,
+                        "click modifiers are not supported by automatic download capture",
+                        false,
+                    ));
+                }
+                return worker_pool::EventsEngine::click_and_wait_for_download(
+                    self,
+                    page_id,
+                    &ClickAndWaitForDownloadCommand {
+                        selector: command.selector.clone(),
+                        target: command.target.clone(),
+                        timeout_ms: 30_000,
+                    },
+                )
+                .await;
+            }
+        }
+        let path =
+            self.with_session_random(|random| self.mouse_simulator.generate_approach_path(random));
+
+        self.dispatch_pointer_click(&context, &shared_id, Some(&path), &command.modifiers)
+            .await?;
+        Ok(self.with_redaction_diagnostics(vec![
+            Evidence::Element {
+                selector: command.selector.clone(),
+                text: None,
+            },
+            self.evidence(InteractionPath::EngineNative),
+        ]))
+    }
+}
+
 #[async_trait]
 impl worker_pool::InputEngine for FirefoxCompanionWorker {
     async fn control_action(
@@ -5135,62 +5242,7 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
         page_id: &PageId,
         command: &ClickCommand,
     ) -> Result<Vec<Evidence>, CommandError> {
-        let top_context = self.context(page_id).await?;
-        // One re-resolve for a target the page re-rendered away between
-        // resolution and the viewport preflight; a second detach just
-        // fails. Only the preflight is retried: it runs before any pointer
-        // input, so a click that landed is never repeated.
-        let mut detach_retried = false;
-        let (context, shared_id) = loop {
-            let shadow_target = command
-                .target
-                .as_ref()
-                .filter(|target| !target.shadow_path.is_empty());
-            let (context, shared_id, owners) = if let Some(target) = shadow_target {
-                let (context, owners) = self.resolve_input_scope(&top_context, target).await?;
-                let shared_id = self.resolve_shadow_element(&context, target).await?;
-                (context, shared_id, owners)
-            } else {
-                let (context, selector, owners) = self
-                    .resolve_input_target_with_frames(
-                        page_id,
-                        &top_context,
-                        &command.selector,
-                        command.target.as_ref(),
-                    )
-                    .await?;
-                let shared_id = self
-                    .resolve_element(&context, &selector, command.target.is_some())
-                    .await?;
-                (context, shared_id, owners)
-            };
-
-            self.behavioral_scroll_into_view_if_needed(&context, &shared_id)
-                .await?;
-            match self.preflight_pointer_target(&context, &shared_id).await {
-                Ok(shared_id) => {
-                    self.preflight_frame_owners(&context, &shared_id, &owners)
-                        .await?;
-                    break (context, shared_id);
-                }
-                Err(error) if !detach_retried && error.code == ErrorCode::TargetDetached => {
-                    detach_retried = true;
-                }
-                Err(error) => return Err(error),
-            }
-        };
-        let path =
-            self.with_session_random(|random| self.mouse_simulator.generate_approach_path(random));
-
-        self.dispatch_pointer_click(&context, &shared_id, Some(&path), &command.modifiers)
-            .await?;
-        Ok(self.with_redaction_diagnostics(vec![
-            Evidence::Element {
-                selector: command.selector.clone(),
-                text: None,
-            },
-            self.evidence(InteractionPath::EngineNative),
-        ]))
+        self.click_target(page_id, command, true).await
     }
 
     async fn click_xy(
@@ -5743,18 +5795,19 @@ impl worker_pool::EventsEngine for FirefoxCompanionWorker {
                 .and_then(Value::as_str)
                 .is_some_and(|context| contexts.contains(context))
         };
-        let click_evidence = worker_pool::InputEngine::click(
-            self,
-            page_id,
-            &ClickCommand {
-                selector: command.selector.clone(),
-                target: command.target.clone(),
-                boundary: true,
-                expected_url: None,
-                modifiers: Vec::new(),
-            },
-        )
-        .await?;
+        let click_evidence = self
+            .click_target(
+                page_id,
+                &ClickCommand {
+                    selector: command.selector.clone(),
+                    target: command.target.clone(),
+                    boundary: true,
+                    expected_url: None,
+                    modifiers: Vec::new(),
+                },
+                false,
+            )
+            .await?;
         let timeout = Duration::from_millis(command.timeout_ms.max(1));
         let (navigation, filename) = tokio::time::timeout(timeout, async {
             loop {

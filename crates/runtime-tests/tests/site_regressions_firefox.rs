@@ -14,6 +14,14 @@ use support::rig::Rig;
 
 type Case = for<'a> fn(&'a Rig) -> Pin<Box<dyn Future<Output = ()> + 'a>>;
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires installed Firefox and paired test profile"]
+async fn associated_labels_and_plain_downloads() {
+    let rig = Rig::firefox().await;
+    cases::form_labels_exclude_their_own_control_contents(&rig).await;
+    cases::plain_click_reports_a_completed_download(&rig).await;
+}
+
 /// The cases are a table of boxed futures walked by one loop. Awaiting each
 /// case inline made this test's debug-build poll frame grow with every case
 /// and overflowed the 2 MB test-thread stack before the first case finished.

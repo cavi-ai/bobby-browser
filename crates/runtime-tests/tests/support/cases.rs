@@ -17,6 +17,8 @@ macro_rules! every_case {
             workflow_start_reports_the_settled_page,
             observe_after_navigate_includes_late_content,
             accessible_names_are_computed,
+            form_labels_exclude_their_own_control_contents,
+            plain_click_reports_a_completed_download,
             secret_words_are_not_secrets,
             scheme_like_text_is_page_text,
             disclosed_credentials_are_withheld,
@@ -105,6 +107,89 @@ macro_rules! every_case {
 pub(crate) use every_case;
 
 const HIDDEN_NODES: usize = 3000;
+
+pub async fn form_labels_exclude_their_own_control_contents(rig: &Rig) {
+    let site = FixtureSite::spawn(vec![("/labels", Route::Html(page("Labels", r#"
+        <label>Shipping method
+          <select id="shipping"><option value="slow">Economy</option><option value="fast">Express</option></select>
+        </label>
+        <label for="team">Team</label><select id="team"><option value="one">Design</option><option value="two">Engineering</option></select>
+        <label>Comment<textarea id="comment">Existing draft</textarea></label>
+        <label for="person">Account</label><label for="person">owner</label><input id="person">
+        <label>Delivery<br>window<select><option value="morning">Morning</option><option value="evening">Evening</option></select></label>
+        <label>Case<span style="display:block">title</span><input></label>
+    "#)))]).await;
+    let live = Live::open(rig, &site.url("/labels")).await;
+    let snapshot = live.call("form_snapshot", json!({})).await;
+    let controls = snapshot["unownedControls"]
+        .as_array()
+        .expect("unowned controls")
+        .clone();
+    for (name, action) in [
+        (
+            "Shipping method",
+            json!({"kind":"selectOne","value":"fast"}),
+        ),
+        ("Team", json!({"kind":"selectOne","value":"two"})),
+        ("Comment", json!({"kind":"setText","value":"Updated note"})),
+        ("Account owner", json!({"kind":"setText","value":"Riley"})),
+        (
+            "Delivery window",
+            json!({"kind":"selectOne","value":"evening"}),
+        ),
+        ("Case title", json!({"kind":"setText","value":"Draft"})),
+    ] {
+        let control = controls
+            .iter()
+            .find(|c| c["accessibleName"] == name)
+            .unwrap_or_else(|| panic!("missing label {name}: {snapshot}"));
+        let result = live
+            .call(
+                "control_action",
+                json!({"target":control["target"],"action":action}),
+            )
+            .await;
+        assert_eq!(result["status"], "completed", "{name}: {result}");
+    }
+    live.close().await;
+}
+
+pub async fn plain_click_reports_a_completed_download(rig: &Rig) {
+    let site = FixtureSite::spawn(vec![
+        (
+            "/exports",
+            Route::Html(page(
+                "Exports",
+                r#"<a href="/export.txt" download="export.txt">Export notes</a>"#,
+            )),
+        ),
+        (
+            "/export.txt",
+            Route::Raw {
+                content_type: "text/plain",
+                body: "saved notes".into(),
+            },
+        ),
+    ])
+    .await;
+    let live = Live::open(rig, &site.url("/exports")).await;
+    let result = live
+        .call(
+            "click",
+            json!({"target":{"role":"link","accessibleName":"Export notes"}}),
+        )
+        .await;
+    assert_eq!(result["status"], "completed", "{result}");
+    let download = result["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "download")
+        .expect("completed download evidence");
+    assert_eq!(download["filename"], "export.txt");
+    assert_eq!(download["bytes"], 11);
+    live.close().await;
+}
 
 fn page(title: &str, body: &str) -> String {
     format!("<!doctype html><html><head><meta charset=utf-8><title>{title}</title></head><body>{body}</body></html>")

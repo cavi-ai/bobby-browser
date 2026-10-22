@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { JSDOM } from "jsdom";
+import { controlLabel } from "../../../crates/dom-engine/src/control_label.js";
 import {
   composedQuery,
   composedQueryAll,
@@ -21,8 +22,22 @@ type Gathered = {role:string;name:string;css:string;tag:string;attributes:Record
 type Gather = (root:ParentNode, options:Record<string,unknown>) => { candidates:Gathered[]; truncated:boolean };
 type Match = (root:ParentNode, spec:{role?:string;name?:string;selector?:string;ordinal?:number}, gather:Gather, limit?:number) => Element[] | "too-many";
 
+function gatherScript() {
+  return readFileSync(new URL("../../../crates/dom-engine/src/candidate_gather.js", import.meta.url), "utf8")
+    .replace("__CONTROL_LABEL_FUNCTION__", controlLabel.toString());
+}
+
+test("associated label bounds withhold incomplete names", () => {
+  const window = page(`<label>${"x".repeat(2049)}<input></label>`);
+  const input = window.document.querySelector("input")!;
+  assert.equal(controlLabel(input), null);
+  input.parentElement!.replaceChildren(window.document.createTextNode("Field"), input);
+  assert.equal(controlLabel(input, () => false), null);
+  assert.equal(controlLabel(input), "Field");
+});
+
 function gather(window: ReturnType<typeof page>, options = {}) {
-  const script = readFileSync(new URL("../../../crates/dom-engine/src/candidate_gather.js", import.meta.url), "utf8");
+  const script = gatherScript();
   const collect=window.eval("("+script+")") as Gather;
   const result=collect(window.document,{controlsOnly:true,redact:true,maxNodes:4096,maxCandidates:128,...options});
   return JSON.parse(JSON.stringify({ controls: result.candidates, truncated: result.truncated })) as { controls: Array<{id:string;role:string;name:string;css:string;tag:string;attributes:Record<string,string>}>;truncated:boolean };
@@ -108,9 +123,9 @@ test("shared shadow matching stays inside the selected root and uses native role
   const root = host.attachShadow({ mode:"open" });
   root.innerHTML = `<span id="label">Inside</span><input type="checkbox" aria-labelledby="label" aria-label="Fallback"><input type="checkbox" aria-labelledby="document-only"><div></div>`;
   root.querySelector("div")!.attachShadow({mode:"open"}).innerHTML = `<input type="checkbox" aria-label="Inside">`;
-  const gatherScript = readFileSync(new URL("../../../crates/dom-engine/src/candidate_gather.js", import.meta.url), "utf8");
+  const script = gatherScript();
   const matchScript = readFileSync(new URL("../../../crates/dom-engine/src/shadow_segment.js", import.meta.url), "utf8");
-  const collect=window.eval("("+gatherScript+")") as Gather;
+  const collect=window.eval("("+script+")") as Gather;
   const match=window.eval("("+matchScript+")") as Match;
   const matches=match(root,{role:"checkbox",name:"Inside"},collect);
   assert.ok(Array.isArray(matches));
@@ -126,7 +141,7 @@ test("shadow matching applies ordinals within the selected root and refuses miss
   const window = page(`<input aria-label="Email"><div id="host"></div>`);
   const root = window.document.getElementById("host")!.attachShadow({mode:"open"});
   root.innerHTML = `<input aria-label="Email"><input aria-label="Email"><input aria-label="Email">`;
-  const collect = window.eval("(" + readFileSync(new URL("../../../crates/dom-engine/src/candidate_gather.js", import.meta.url), "utf8") + ")") as Gather;
+  const collect = window.eval("(" + gatherScript() + ")") as Gather;
   const match = window.eval("(" + readFileSync(new URL("../../../crates/dom-engine/src/shadow_segment.js", import.meta.url), "utf8") + ")") as Match;
   for (const spec of [{role:"textbox", name:"Email"}, {selector:"input"}]) {
     for (const ordinal of [0, 1, 2]) {
