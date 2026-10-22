@@ -81,6 +81,7 @@ Failures throw `RuntimeClientError` with `kind` set to `http`, `transport`, `dea
 
 ## Next
 
+- [Page summaries with the Cavi API client](https://github.com/cavi-ai/bobby-browser/tree/main/examples/cavi-api-client)
 - [First session from code](../introduction/first-session.md)
 - [HTTP API](http-api.md)
 - [Python SDK](python-sdk.md)

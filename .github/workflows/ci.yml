@@ -368,6 +368,9 @@ jobs:
       - name: TypeScript SDK
         run: pnpm --filter @cavi-ai/bobby-browser test
 
+      - name: Cavi API client example
+        run: pnpm --filter @cavi-ai/bobby-page-summary-example test
+
       - name: Firefox companion
         run: pnpm --filter @cavi-ai/bobby-firefox-companion test
 
