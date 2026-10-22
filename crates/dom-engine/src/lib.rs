@@ -15,7 +15,16 @@ pub use accessibility::{
 
 /// In-page collection shared by Chromium and Firefox transport adapters.
 pub fn candidate_gather_function() -> &'static str {
-    include_str!("candidate_gather.js")
+    static SCRIPT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SCRIPT.get_or_init(|| {
+        include_str!("candidate_gather.js")
+            .replace("__CONTROL_LABEL_FUNCTION__", control_label_function())
+    })
+}
+
+/// Associated label text without the labelled control's own value or options.
+pub fn control_label_function() -> &'static str {
+    include_str!("control_label.js")
 }
 
 pub use page_dom::{

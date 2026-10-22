@@ -50,10 +50,9 @@ impl CommandVerifier for Pointer {
                     let mut combined = evidence;
                     combined.extend(verification);
                     Ok(combined)
-                } else if evidence
-                    .iter()
-                    .any(|item| matches!(item, Evidence::Element { .. }))
-                {
+                } else if evidence.iter().any(|item| {
+                    matches!(item, Evidence::Element { .. } | Evidence::Download { .. })
+                }) {
                     Ok(evidence)
                 } else {
                     Err(verification_error("click returned no target evidence"))
@@ -132,6 +131,26 @@ mod tests {
                 .unwrap_err()
                 .code,
             ErrorCode::VerificationFailed
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_click_accepts_a_completed_download_without_element_evidence() {
+        let fixture = Fixture::new().await;
+        let click = command("click", json!({"selector":"a","boundary":false}));
+        let download = Evidence::Download {
+            filename: "export.txt".into(),
+            path: "artifact://export".into(),
+            bytes: 7,
+            sha256: "a".repeat(64),
+            saved_to: None,
+        };
+        assert_eq!(
+            fixture
+                .verify(&Pointer, &click, vec![download.clone()])
+                .await
+                .unwrap(),
+            vec![download]
         );
     }
 

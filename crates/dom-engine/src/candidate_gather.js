@@ -1,4 +1,5 @@
 function gatherCandidates(root, options = {}) {
+  const controlLabel = __CONTROL_LABEL_FUNCTION__;
   const prefix = options.prefix || '';
   const maxNodes = options.maxNodes ?? Infinity;
   const maxCandidates = options.maxCandidates ?? Infinity;
@@ -64,7 +65,7 @@ const implicitRole=el=>{if(el.tagName==='BUTTON')return 'button';if(el.tagName==
       const visible=style.visibility!=='hidden'&&style.display!=='none'&&rect.width>0&&rect.height>0;
       const tag=element.localName;
       const role=element.getAttribute('role')||implicitRole(element);
-      const rawLabel=element.labels?.length ? Array.from(element.labels).map(label=>String(label.innerText||label.textContent||'').trim()).filter(Boolean).join(' ') : null;
+      const rawLabel=element.labels?.length ? controlLabel(element) : null;
       const rawName=labelledBy(element)||element.getAttribute('aria-label')||rawLabel||
         (tag==='img'||(tag==='input'&&element.type==='image')?element.getAttribute('alt'):null)||(tag==='iframe'?element.getAttribute('title'):null)||
         (tag==='input'&&['button','submit','reset'].includes(element.type)?element.value:null)||

@@ -145,13 +145,13 @@ pub(crate) fn tool_annotations(name: &str) -> Value {
 }
 
 tools! {
-    a11y_snapshot { order: 32, title: "Accessibility snapshot", description: "Capture a compact accessibility tree with command-ready targets. Same-process iframe targets include their frame hop; use the in-frame target directly. Requires browser:mutate.",
+    a11y_snapshot { order: 32, title: "Accessibility snapshot", description: "Accessibility tree with actionable targets and frame hops; use the in-frame target directly. Requires browser:mutate.",
         capabilities: &[types::Capability::BrowserMutate], operation: Some(types::InterfaceOperation::SubmitCommand), schema: a11y_snapshot_schema, args: A11ySnapshotArgs,
         phases: EXPLORE | ACT | INTENT | VERIFY, scope: SessionPageWorkflow, group: PageOps, page_derived: true, hints: (true, false, false, false) }
     checkpoint_save { order: 0, title: "Save checkpoint", description: "Persist a verified checkpoint from evidenceRefs. Requires recovery:write. Save before Boundary commands with pinned boundary IDs. On failure, confirm each referenced command completed.",
         capabilities: &[types::Capability::RecoveryWrite], operation: Some(types::InterfaceOperation::CreateCheckpoint), schema: checkpoint_save_schema, args: CheckpointSaveArgs,
         phases: INTENT | VERIFY, group: Workflow, hints: (false, false, true, false) }
-    click { order: 1, title: "Click", description: "Click target/selector; use workflowHandle. includePostState adds state. Requires browser:mutate. On failure refresh a11y_snapshot.",
+    click { order: 1, title: "Click", description: "Click target/selector with workflowHandle; captures marked downloads. includePostState adds state. Requires browser:mutate. On failure refresh a11y_snapshot.",
         capabilities: &[types::Capability::BrowserMutate], operation: Some(types::InterfaceOperation::SubmitCommand), schema: click_schema, args: ClickArgs,
         phases: EXPLORE | ACT, scope: SessionPageWorkflow, group: Primitives, page_derived: true, hints: (false, false, false, true) }
     click_and_wait_for_download { order: 2, title: "Click and wait for download", description: "Click a control and wait for its browser download to finish (Boundary). Requires browser:mutate and file:download. On failure with needsReconciliation, call recovery_status.",
@@ -160,7 +160,7 @@ tools! {
             types::Capability::FileDownload,
         ], operation: Some(types::InterfaceOperation::SubmitCommand), schema: click_and_wait_for_download_schema, args: ClickAndWaitForDownloadArgs,
         phases: ACT, scope: SessionPageWorkflow, group: Primitives, hints: (false, false, false, true) }
-    click_and_wait_for_popup { order: 3, title: "Click and wait for popup", description: "Click a control and wait for a window.open popup to register in page_list (Boundary). Requires browser:mutate. On failure with needsReconciliation, call recovery_status.",
+    click_and_wait_for_popup { order: 3, title: "Click and wait for popup", description: "Click and await window.open in page_list (Boundary). On failure with needsReconciliation call recovery_status. Requires browser:mutate.",
         capabilities: &[types::Capability::BrowserMutate], operation: Some(types::InterfaceOperation::SubmitCommand), schema: click_and_wait_for_download_schema, args: ClickAndWaitForPopupArgs,
         phases: EXPLORE | ACT, scope: SessionPageWorkflow, group: Primitives, hints: (false, false, false, false) }
     command_execute { order: 9, title: "Execute command envelope", description: "Execute one bounded browser command envelope naming its own capability and evidence. Requires browser:mutate, plus whatever the wrapped command needs. Produces the same evidence as the named command it wraps. On failure with deadlineOutOfRange, set the envelope's deadline within the allowed window and resubmit.",
@@ -172,7 +172,7 @@ tools! {
     context_neighbors { order: 5, title: "Show remembered form structure around a control", description: "Show the remembered form structure around a described control: its form, sibling controls, and per-intent success counters, marked as remembered rather than live-observed. Requires context:read. Returns nothing for an unknown site or control.",
         capabilities: &[types::Capability::ContextRead], operation: Some(types::InterfaceOperation::ReadContext), schema: context_ask_schema, args: ContextNeighborsArgs,
         phases: INTENT | VERIFY, scope: SessionPage, group: PageOps, page_derived: true, hints: (true, false, false, false) }
-    control_action { order: 10, title: "Form control action", description: "Apply one native control action and reread state. Pass a snapshot target verbatim. Requires browser:mutate; file:upload for setFiles. On failure with targetNotFound, refresh form_snapshot.",
+    control_action { order: 10, title: "Form control action", description: "Apply native action to a verbatim snapshot target and reread state. On failure with targetNotFound refresh form_snapshot. Requires browser:mutate; file:upload for setFiles.",
         capabilities: &[types::Capability::BrowserMutate], operation: Some(types::InterfaceOperation::SubmitCommand), schema: control_action_schema, args: ControlActionArgs,
         phases: EXPLORE | ACT, scope: SessionPageWorkflow, group: PageOps, hints: (false, false, false, false) }
     cookie_delete { order: 6, title: "Delete cookies", description: "Delete cookies from a page's jar by origin and optionally by name. Requires browser:mutate. Destructive: matching cookies are removed immediately. On failure with notFound, the page id is stale -- call page_list for current ids.",
@@ -217,7 +217,7 @@ tools! {
     inspect { order: 26, title: "Inspect page", description: "Read a page's visible text, optionally scoped to one element by selector or target, with HTML on request. Requires browser:mutate.",
         capabilities: &[types::Capability::BrowserMutate], operation: Some(types::InterfaceOperation::SubmitCommand), schema: inspect_schema, args: InspectArgs,
         phases: VERIFY, scope: SessionPageWorkflow, group: Primitives, page_derived: true, hints: (true, false, false, false) }
-    intent_complete_form { order: 11, title: "Complete form", description: "Fill ordered named fields in one verified intent; never submits. Pass workflowHandle. Requires browser:mutate and intent:execute. Fields resolve just-in-time; revealedBy activates first. Defaults evidenceDetail=compact. On failure retry remaining fields.",
+    intent_complete_form { order: 11, title: "Complete form", description: "Fill ordered fields without submitting. Use workflowHandle. Resolve just-in-time; revealedBy activates first. Default evidenceDetail=compact. On failure retry remaining fields. Requires browser:mutate and intent:execute.",
         capabilities: &[
             types::Capability::BrowserMutate,
             types::Capability::IntentExecute,
@@ -312,7 +312,7 @@ tools! {
     recovery_status { order: 40, title: "Recovery status", description: "Read a workflow's checkpoint and recovery receipts without attempting recovery, or pass sessionId instead of workflowId to list that session's recoverable workflows newest-first. Pass exactly one. Requires recovery:read.",
         capabilities: &[types::Capability::RecoveryRead], operation: Some(types::InterfaceOperation::ReadCheckpoint), schema: recovery_status_schema, args: RecoveryStatusArgs,
         phases: VERIFY, group: Workflow, hints: (true, false, false, false) }
-    runtime_info { order: 41, title: "Runtime info", description: "Runtime version, active sessions, and credential expiry. Requires session:read.",
+    runtime_info { order: 41, title: "Runtime info", description: "Version, sessions, and credential expiry. Requires session:read.",
         capabilities: &[types::Capability::SessionRead], operation: Some(types::InterfaceOperation::RuntimeInfo), schema: runtime_info_schema, args: EmptyArgs,
         phases: ALWAYS, group: Lifecycle, hints: (true, false, false, false) }
     screenshot { order: 42, title: "Screenshot", description: "Capture a screenshot artifact of a page's viewport, full page, or one element. Requires browser:mutate.",
@@ -324,7 +324,7 @@ tools! {
     session_close { order: 44, title: "Close session", description: "Close a session and release its resources. Requires session:write. Destructive. On failure, confirm with session_list.",
         capabilities: &[types::Capability::SessionWrite], operation: Some(types::InterfaceOperation::DeleteSession), schema: session_close_schema, args: SessionCloseArgs,
         phases: ALWAYS, group: Lifecycle, hints: (false, true, false, false) }
-    session_create { order: 45, title: "Create session", description: "Create a browser session with a profile and execution policy. Requires session:write. On failure with resourceExhausted, close an idle session.",
+    session_create { order: 45, title: "Create session", description: "Create a profiled browser session. On failure with resourceExhausted close an idle session. Requires session:write.",
         capabilities: &[types::Capability::SessionWrite], operation: Some(types::InterfaceOperation::CreateSession), schema: session_create_schema, args: SessionCreateArgs,
         phases: ALWAYS, group: Lifecycle, hints: (false, false, false, false) }
     session_list { order: 46, title: "List sessions", description: "List sessions visible to this principal. Requires session:read.",
@@ -333,10 +333,10 @@ tools! {
     toolset_select { order: 47, title: "Select a toolset phase", description: "Narrow tools/list to one phase (explore, act, intent, verify, full). Requires no capability.",
         capabilities: &[], operation: None, schema: toolset_select_schema, args: ToolsetSelectArgs,
         phases: ALWAYS, group: Toolset, hints: (true, false, false, false) }
-    type_text { order: 48, title: "Type text", description: "Type into an element by selector or resolved target, optionally clearing it first. Requires browser:mutate. On failure with targetNotFound or targetAmbiguous, refresh a11y_snapshot.",
+    type_text { order: 48, title: "Type text", description: "Type by selector/target; clearFirst replaces text. On failure refresh a11y_snapshot. Requires browser:mutate.",
         capabilities: &[types::Capability::BrowserMutate], operation: Some(types::InterfaceOperation::SubmitCommand), schema: type_text_schema, args: TypeTextArgs,
         phases: EXPLORE | ACT, scope: SessionPageWorkflow, group: Primitives, hints: (false, false, false, false) }
-    upload_files { order: 49, title: "Upload files", description: "Set files on a file input via selector, target, or form_snapshot controlId. Requires browser:mutate and file:upload. On failure with needsReconciliation, call recovery_status; on policyDenied, use a configured upload root.",
+    upload_files { order: 49, title: "Upload files", description: "Set a file input by selector/target/form_snapshot controlId. On failure: needsReconciliation requires recovery_status; policyDenied requires a configured upload root. Requires browser:mutate and file:upload.",
         capabilities: &[
             types::Capability::BrowserMutate,
             types::Capability::FileUpload,
@@ -345,13 +345,13 @@ tools! {
     wait_for { order: 50, title: "Wait for condition", description: "Wait for a page condition with a bounded timeout. Requires browser:mutate.",
         capabilities: &[types::Capability::BrowserMutate], operation: Some(types::InterfaceOperation::SubmitCommand), schema: wait_for_schema, args: WaitForArgs,
         phases: ACT | INTENT, scope: SessionPageWorkflow, group: Primitives, hints: (true, false, false, false) }
-    workflow_observe { order: 52, title: "Observe retained workflow", description: "Observe retained or live accessibility evidence. Requires browser:mutate; forms need page:read. Defaults evidenceDetail=compact.",
+    workflow_observe { order: 52, title: "Observe retained workflow", description: "Read retained/live accessibility; default evidenceDetail=compact. Requires browser:mutate; forms need page:read.",
         capabilities: WORKFLOW_OBSERVE_REQUIRED_CAPABILITIES, operation: Some(WORKFLOW_OBSERVE_OPERATION), schema: workflow_observe_schema, args: WorkflowObserveArgs,
         phases: ALWAYS, scope: SessionPageWorkflow, group: AgentWorkflow, page_derived: true, hints: (true, false, false, false) }
     workflow_recover { order: 53, title: "Recover workflow", description: "Recover from the last verified checkpoint. Requires recovery:write. Returns resume, restart, or reconciliation evidence. On failure with notFound, verify session ownership with session_list.",
         capabilities: &[types::Capability::RecoveryWrite], operation: Some(types::InterfaceOperation::RecoverWorkflow), schema: workflow_recover_schema, args: WorkflowRecoverArgs,
         phases: VERIFY, group: Workflow, hints: (false, false, false, false) }
-    workflow_start { order: 51, title: "Start retained workflow", description: "Create a session, page, and workflow; optionally navigate. includePostState returns initial page state. Requires session:read/write, page:write. On failure inspect session_list.",
+    workflow_start { order: 51, title: "Start retained workflow", description: "Create a session/page/workflow; optionally navigate. includePostState adds initial state. On failure inspect session_list. Requires session:read/write, page:write.",
         capabilities: WORKFLOW_START_REQUIRED_CAPABILITIES, operation: Some(WORKFLOW_START_OPERATION), schema: workflow_start_schema, args: WorkflowStartArgs,
         phases: ALWAYS, group: AgentWorkflow, page_derived: true, hints: (false, false, false, true) }
 }
