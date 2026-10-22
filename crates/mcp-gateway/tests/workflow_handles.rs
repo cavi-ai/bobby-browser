@@ -2446,6 +2446,14 @@ async fn workflow_handle_follows_a_popup_and_returns_to_the_opener_when_it_close
         .expect("popup evidence names pageId")
         .to_owned();
 
+    let popup_state = &followed["result"]["structuredContent"];
+    assert_eq!(
+        popup_state["postStateStatus"]["status"], "available",
+        "{followed}"
+    );
+    assert_eq!(popup_state["postState"]["workflowHandle"], workflow_handle);
+    assert_eq!(popup_state["postState"]["pageId"], popup_page_id);
+
     // Act in the popup via the handle: the handle is bound to it now.
     let in_popup = call(
         &server,

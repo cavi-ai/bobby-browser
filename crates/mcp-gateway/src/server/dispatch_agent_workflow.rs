@@ -398,15 +398,16 @@ impl Server {
         })
     }
 
-    /// Appends `postState` to a completed action outcome: the same compact
+    /// Appends `postState` to a completed action or a known-landed submit
+    /// whose verification failed: the same compact
     /// observation `workflow_observe` would return for this handle's page
     /// right now, built by [`Server::live_workflow_observation`] with
     /// default bounds -- so the caller can skip the redundant re-observe.
-    /// A failed action outcome is returned
+    /// Other failed action outcomes are returned
     /// with `postStateStatus: notRequested`; observation failure adds only a
     /// bounded `unavailable` diagnostic. Optional state never changes action success.
     ///
-    /// `workflowId` is read back from the completed outcome, not threaded in
+    /// `workflowId` is read back from the action outcome, not threaded in
     /// by the caller: an omitted `workflowId` argument mints a fresh one
     /// inside `intent_envelope`/`primitive_envelope`, and only the outcome
     /// (`submit_envelope_once` echoes `envelope.workflow_id` onto it) ever
@@ -434,7 +435,24 @@ impl Server {
         let (mut outcome, observation) = WorkflowService::new(Arc::clone(&self.runtime))
             .post_action_report_with(
                 result,
-                |outcome| outcome.get("status").and_then(Value::as_str) == Some("completed"),
+                |outcome| {
+                    // A known-landed submit still needs a safe recovery read
+                    // when its caller's expectation failed. Keep the failure
+                    // and its evidence; this read never verifies or replays it.
+                    outcome["status"] == "completed"
+                        || (outcome["status"] == "failed"
+                            && outcome["error"]["code"] == "verificationFailed"
+                            && outcome["evidence"].as_array().is_some_and(|evidence| {
+                                evidence.iter().any(|item| {
+                                    item["kind"] == "intentExecution"
+                                        && item["record"]["intentKind"] == "submitAndVerify"
+                                        && matches!(
+                                            item["record"]["verification"].as_str(),
+                                            Some("verifyFailed" | "dialogOpened")
+                                        )
+                                })
+                            }))
+                },
                 || {
                     self.live_workflow_observation(
                         context,

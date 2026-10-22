@@ -160,7 +160,7 @@ tools! {
             types::Capability::FileDownload,
         ], operation: Some(types::InterfaceOperation::SubmitCommand), schema: click_and_wait_for_download_schema, args: ClickAndWaitForDownloadArgs,
         phases: ACT, scope: SessionPageWorkflow, group: Primitives, hints: (false, false, false, true) }
-    click_and_wait_for_popup { order: 3, title: "Click and wait for popup", description: "Click and await window.open in page_list (Boundary). On failure with needsReconciliation call recovery_status. Requires browser:mutate.",
+    click_and_wait_for_popup { order: 3, title: "Click and wait for popup", description: "Click for popup + postState. Handle follows popup; omit IDs. On failure: needsReconciliation -> recovery_status. Requires browser:mutate.",
         capabilities: &[types::Capability::BrowserMutate], operation: Some(types::InterfaceOperation::SubmitCommand), schema: click_and_wait_for_download_schema, args: ClickAndWaitForPopupArgs,
         phases: EXPLORE | ACT, scope: SessionPageWorkflow, group: Primitives, hints: (false, false, false, false) }
     command_execute { order: 9, title: "Execute command envelope", description: "Execute one bounded browser command envelope naming its own capability and evidence. Requires browser:mutate, plus whatever the wrapped command needs. Produces the same evidence as the named command it wraps. On failure with deadlineOutOfRange, set the envelope's deadline within the allowed window and resubmit.",

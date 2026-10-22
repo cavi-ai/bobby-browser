@@ -69,7 +69,7 @@ HTTP command responses retain their existing shape.
 These classifications do not authorize retries. Diagnostic strings and optional
 follow-up observations never promote an action to a confirmed business result.
 
-Some MCP actions return a follow-up observation as `postStateStatus`: `available`, `unavailable` or `notRequested`. If it is `unavailable`, the action itself still succeeded and `postState` is omitted. Read fresh state before the next step. Do not repeat a successful action because the observation failed.
+Some MCP actions return a follow-up observation as `postStateStatus`: `available`, `unavailable` or `notRequested`. This describes the read, separately from the action's `status`. A landed submit with failed verification may return fresh `postState` for recovery while remaining failed. If the read is `unavailable`, `postState` is omitted and the action's outcome is unchanged. Inspect the diagnostic before reading fresh state; do not repeat a landed action because its observation or verification failed.
 
 ## Storage problems and uncertain jobs
 

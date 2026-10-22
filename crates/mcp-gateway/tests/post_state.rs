@@ -1,8 +1,8 @@
 //! On success, `intent_follow`, `intent_submit_and_verify`,
 //! `intent_complete_form`, opted-in `click`/`navigate`, and boundary clicks by default carry
 //! `postState`, the compact
-//! observation `workflow_observe` returns for the acting page. Absent on a
-//! failed outcome.
+//! observation `workflow_observe` returns for the acting page. A landed
+//! submit with failed verification also carries state for safe recovery.
 
 mod common;
 
@@ -45,6 +45,177 @@ async fn call_tool(server: &Server, id: u64, name: &str, arguments: Value) -> Va
         ))
         .await
         .expect("tools/call response")
+}
+
+#[tokio::test]
+async fn landed_submit_verification_failure_returns_state_without_replaying_the_effect() {
+    for observation_fails in [false, true] {
+        let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+        let started = call_tool(
+            &live.server,
+            1,
+            "workflow_start",
+            json!({"profile":"recovery"}),
+        )
+        .await;
+        let handle = &started["result"]["structuredContent"]["workflowHandle"];
+        live.probe
+            .candidates
+            .lock()
+            .expect("candidates")
+            .push(clickable_candidate());
+        if observation_fails {
+            live.probe
+                .accessibility_failures_remaining
+                .store(20, Ordering::SeqCst);
+        }
+        let args = json!({
+            "workflowHandle":handle,
+            "purpose":"Submit application",
+            "hints":{"role":"button","accessibleName":"Continue"},
+            "expectedState":{"condition":{"kind":"url","matcher":{"kind":"contains","value":"/confirmation"}},"timeoutMs":100}
+        });
+        let response = call_tool(&live.server, 2, "intent_submit_and_verify", args.clone()).await;
+        let outcome = &response["result"]["structuredContent"];
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        assert_eq!(outcome["status"], "failed", "{response}");
+        assert_eq!(outcome["error"]["code"], "verificationFailed", "{response}");
+        assert_eq!(outcome["error"]["retryable"], false);
+        assert_eq!(live.probe.click_calls.load(Ordering::SeqCst), 1);
+        if observation_fails {
+            assert_eq!(
+                outcome["postStateStatus"]["status"], "unavailable",
+                "{response}"
+            );
+            assert!(outcome.get("postState").is_none());
+        } else {
+            assert_eq!(
+                outcome["postStateStatus"]["status"], "available",
+                "{response}"
+            );
+            assert_eq!(outcome["postState"]["workflowHandle"], *handle);
+            assert_eq!(outcome["postState"]["source"], "live");
+            assert_eq!(outcome["postState"]["pageDerived"], true);
+        }
+        let reads = live.accessibility_calls();
+        assert!(reads > 0, "the repair state must come from a fresh read");
+        let repeated = call_tool(&live.server, 3, "intent_submit_and_verify", args).await;
+        assert_eq!(
+            repeated["result"]["structuredContent"]["error"]["code"], "boundaryAlreadyExecuted",
+            "{repeated}"
+        );
+        assert_eq!(live.probe.click_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(live.accessibility_calls(), reads);
+    }
+}
+
+#[tokio::test]
+async fn popup_returns_state_from_the_rebound_handle_and_keeps_id_conflicts_rejected() {
+    let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+    let started = call_tool(
+        &live.server,
+        1,
+        "workflow_start",
+        json!({"profile":"popup-state"}),
+    )
+    .await;
+    let initial = &started["result"]["structuredContent"];
+    let handle = &initial["workflowHandle"];
+    let response = call_tool(
+        &live.server,
+        2,
+        "click_and_wait_for_popup",
+        json!({
+            "workflowHandle":handle,"selector":"#connect"
+        }),
+    )
+    .await;
+    let outcome = &response["result"]["structuredContent"];
+    assert_eq!(outcome["status"], "completed", "{response}");
+    let popup = outcome["evidence"]
+        .as_array()
+        .expect("evidence")
+        .iter()
+        .find(|e| e["kind"] == "popup")
+        .expect("popup");
+    assert_ne!(popup["pageId"], initial["pageId"]);
+    assert_eq!(
+        outcome["postStateStatus"]["status"], "available",
+        "{response}"
+    );
+    assert_eq!(outcome["postState"]["workflowHandle"], *handle);
+    assert_eq!(outcome["postState"]["pageId"], popup["pageId"]);
+    assert_eq!(outcome["postState"]["source"], "live");
+    let reads = live.accessibility_calls();
+    let records = live.journal.records().await.len();
+    let rejected = call_tool(
+        &live.server,
+        3,
+        "click",
+        json!({
+            "workflowHandle":handle,"pageId":popup["pageId"],"selector":"#authorize"
+        }),
+    )
+    .await;
+    assert_eq!(
+        rejected["error"]["data"]["reason"], "workflowBindingConflict",
+        "{rejected}"
+    );
+    assert_eq!(live.journal.records().await.len(), records);
+    assert_eq!(live.accessibility_calls(), reads);
+}
+
+#[tokio::test]
+async fn popup_read_failure_preserves_the_successful_effect_and_handle_binding() {
+    let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+    let started = call_tool(
+        &live.server,
+        1,
+        "workflow_start",
+        json!({"profile":"popup-read-failure"}),
+    )
+    .await;
+    let handle = &started["result"]["structuredContent"]["workflowHandle"];
+    live.probe
+        .accessibility_failures_remaining
+        .store(20, Ordering::SeqCst);
+    let response = call_tool(
+        &live.server,
+        2,
+        "click_and_wait_for_popup",
+        json!({
+            "workflowHandle":handle,"selector":"#connect"
+        }),
+    )
+    .await;
+    let outcome = &response["result"]["structuredContent"];
+    assert_eq!(outcome["status"], "completed", "{response}");
+    assert_eq!(response["result"]["isError"], false);
+    assert_eq!(
+        outcome["postStateStatus"]["status"], "unavailable",
+        "{response}"
+    );
+    assert!(outcome.get("postState").is_none());
+    let popup = outcome["evidence"]
+        .as_array()
+        .expect("evidence")
+        .iter()
+        .find(|e| e["kind"] == "popup")
+        .expect("popup");
+    live.probe
+        .accessibility_failures_remaining
+        .store(0, Ordering::SeqCst);
+    let observed = call_tool(
+        &live.server,
+        3,
+        "workflow_observe",
+        json!({"workflowHandle":handle}),
+    )
+    .await;
+    assert_eq!(
+        observed["result"]["structuredContent"]["pageId"],
+        popup["pageId"]
+    );
 }
 
 #[tokio::test]

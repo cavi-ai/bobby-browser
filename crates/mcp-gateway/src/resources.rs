@@ -732,8 +732,9 @@ tools most likely to produce it.
   fill's committed value violates the browser's own constraint-validity
   state, or a `type_text`/`click` call carrying an expected-URL guard finds
   the page already navigated away from it. Repair: read the returned
-  validation detail, correct the specific thing that failed, then retry
-  only that step.
+  validation detail and any available `postState`. A landed submit remains
+  failed even when that read succeeds; do not resubmit blindly. Correct
+  rejected fields or re-verify with `intent_wait_for_state`.
 - `journalFailed` -- the durable outcome journal failed to record a
   command's result. Repair: for the plain retryable form, resubmit with the
   same idempotency key; see `NeedsReconciliation` above for when it may have
@@ -1222,6 +1223,10 @@ envelope's `commandId`; otherwise it fails with `invalidRequest` before
 clicking. Produces `Evidence::Popup` (`openerPageId`, the new `pageId`, `url`,
 `title`); a run that produces no popup evidence fails with
 `verificationFailed`. A timeout waiting for the popup is `deadlineExceeded`.
+The flat MCP tool returns compact `postState` from the popup when readable.
+Its `workflowHandle` follows the popup automatically; reuse the handle alone,
+without adding `pageId`, `sessionId`, or `workflowId`. An unavailable read
+does not change the successful popup outcome or its handle binding.
 
 ## `clickAndWaitForDownload`
 
