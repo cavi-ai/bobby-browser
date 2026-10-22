@@ -1226,11 +1226,13 @@ pub(crate) fn tool_output_schema(name: &str) -> Value {
         "session_capabilities" => output_ref("SessionCapabilities"),
         "workflow_start" => workflow_start_output_schema(),
         "workflow_observe" => workflow_observe_result_schema(),
-        // Successful actions may append the compact observation returned by
-        // `workflow_observe`; navigate and ordinary clicks opt in.
+        // Actions may append the compact observation returned by
+        // `workflow_observe`, including landed submits with failed verification;
+        // navigate and ordinary clicks opt in.
         "intent_follow"
         | "intent_submit_and_verify"
         | "intent_complete_form"
+        | "click_and_wait_for_popup"
         | "click"
         | "navigate" => object(
             {
@@ -3858,6 +3860,7 @@ mod tests {
         // command-outcome tool.
         for name in [
             "click",
+            "click_and_wait_for_popup",
             "navigate",
             "intent_follow",
             "intent_submit_and_verify",

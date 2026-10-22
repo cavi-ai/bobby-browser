@@ -121,6 +121,8 @@ impl Server {
                     Ok(input) => input,
                     Err(()) => return invalid_params_reason(id, "malformedArguments"),
                 };
+                let session_id = input.session_id.clone();
+                let observe_context = context.clone();
                 let (context, mut envelope) = primitive_envelope(
                     context,
                     input.session_id,
@@ -146,13 +148,26 @@ impl Server {
                 // popup: later handle-resolved calls land there, and the
                 // closed-page rule can return to this opener once it closes.
                 // Raw-id calls (`handle: None`) are never touched.
-                if let (Some(handle), Ok(value)) = (handle, &result) {
-                    if let Some((opener_page_id, popup_page_id)) = completed_popup_evidence(value) {
-                        self.workflow_handles
-                            .rebind_popup(handle, popup_page_id, opener_page_id);
+                let popup = result.as_ref().ok().and_then(completed_popup_evidence);
+                if let Some((opener_page_id, popup_page_id)) = popup {
+                    if let Some(handle) = handle {
+                        self.workflow_handles.rebind_popup(
+                            handle,
+                            popup_page_id.clone(),
+                            opener_page_id,
+                        );
                     }
+                    self.attach_post_state(
+                        result,
+                        observe_context,
+                        session_id,
+                        popup_page_id,
+                        handle,
+                    )
+                    .await
+                } else {
+                    result
                 }
-                result
             }
             "click_and_wait_for_download" => {
                 let input: ClickAndWaitForDownloadArgs = match bounded_parse(call.arguments) {
