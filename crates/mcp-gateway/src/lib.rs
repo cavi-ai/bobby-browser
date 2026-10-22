@@ -20,6 +20,7 @@ mod prompts;
 pub mod protocol;
 mod repair;
 mod resources;
+mod response_projection;
 mod schema;
 mod server;
 mod tool_args;

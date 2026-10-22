@@ -1047,8 +1047,17 @@ impl Server {
         if let Some(metrics) = &self.operational_metrics {
             metrics.record_workflow_call(workflow_call_class(&call.name));
         }
-        self.dispatch_named_tool(id, call, context, handle, defaulted_handle)
-            .await
+        // Only the MCP presentation changes: execution and journal persistence
+        // have already completed. Preserve the explicit diagnostic paths.
+        let compact = call.name != "command_execute"
+            && call.arguments.get("evidenceDetail").and_then(Value::as_str) != Some("full");
+        let mut response = self
+            .dispatch_named_tool(id, call, context, handle, defaulted_handle)
+            .await;
+        if compact {
+            crate::response_projection::compact_tool_response(&mut response);
+        }
+        response
     }
 
     async fn tool_success(&self, id: Value, mut value: Value) -> Value {
