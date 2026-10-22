@@ -90,12 +90,12 @@ pub fn har_document(entries: &[HarEntry], page_url: &str) -> Value {
                 "request": {"method": entry.method, "url": entry.url, "httpVersion": "HTTP/1.1", "headers": [], "queryString": [], "cookies": [], "headersSize": -1, "bodySize": -1},
                 "response": {
                     "status": entry.status.unwrap_or(0),
-                    "statusText": entry.status_text.clone().or_else(|| entry.error_text.clone()).unwrap_or_default(),
+                    "statusText": entry.status_text.as_deref().or(entry.error_text.as_deref()).unwrap_or_default(),
                     "httpVersion": "HTTP/1.1",
                     "headers": [],
                     "cookies": [],
-                    "content": {"size": entry.transfer_bytes.unwrap_or(0), "mimeType": entry.mime_type.clone().unwrap_or_default()},
-                    "redirectURL": entry.redirect_url.clone().unwrap_or_default(),
+                    "content": {"size": entry.transfer_bytes.unwrap_or(0), "mimeType": entry.mime_type.as_deref().unwrap_or_default()},
+                    "redirectURL": entry.redirect_url.as_deref().unwrap_or_default(),
                     "headersSize": -1,
                     "bodySize": entry.transfer_bytes.map(|bytes| bytes as i64).unwrap_or(-1),
                 },
@@ -104,19 +104,58 @@ pub fn har_document(entries: &[HarEntry], page_url: &str) -> Value {
             })
         })
         .collect();
-    json!({
+    let mut document = json!({
         "log": {
             "version": "1.2",
             "creator": {"name": "bobby-browser", "version": env!("CARGO_PKG_VERSION")},
             "pages": [{"startedDateTime": iso_8601_from_unix_ms(entries.first().map_or(0.0, |entry| entry.started_unix_ms)), "id": "page-1", "title": page_url, "pageTimings": {}}],
-            "entries": items,
+            "entries": [],
         }
-    })
+    });
+    // json! serializes expression values by reference. Move the completed
+    // entry tree into the wrapper instead of serializing a second owned copy.
+    document["log"]["entries"] = Value::Array(items);
+    document
 }
 
 #[cfg(test)]
 mod tests {
     use super::{har_document, HarEntry};
+
+    #[test]
+    fn har_preserves_optional_metadata_and_status_fallbacks() {
+        let mut entry = HarEntry {
+            url: "https://example.test/".into(),
+            method: "GET".into(),
+            status: None,
+            status_text: None,
+            redirect_url: None,
+            started_unix_ms: f64::NAN,
+            elapsed_ms: None,
+            transfer_bytes: None,
+            mime_type: None,
+            error_text: Some("connection reset".into()),
+        };
+        let document = har_document(&[entry.clone()], "https://example.test/");
+        let item = &document["log"]["entries"][0];
+        assert_eq!(item["response"]["statusText"], "connection reset");
+        assert_eq!(item["response"]["status"], 0);
+        assert_eq!(item["response"]["redirectURL"], "");
+        assert_eq!(item["response"]["content"]["mimeType"], "");
+        assert_eq!(item["response"]["bodySize"], -1);
+        assert_eq!(item["time"], 0.0);
+        assert_eq!(item["startedDateTime"], "1970-01-01T00:00:00.000Z");
+        entry.status_text = Some("".into());
+        entry.redirect_url = Some("https://example.test/next".into());
+        entry.mime_type = Some("text/html".into());
+        entry.transfer_bytes = Some(42);
+        let document = har_document(&[entry], "https://example.test/");
+        let item = &document["log"]["entries"][0];
+        assert_eq!(item["response"]["statusText"], "");
+        assert_eq!(item["response"]["redirectURL"], "https://example.test/next");
+        assert_eq!(item["response"]["content"]["mimeType"], "text/html");
+        assert_eq!(item["response"]["bodySize"], 42);
+    }
 
     #[test]
     fn har_started_datetimes_are_iso_8601_strings() {
