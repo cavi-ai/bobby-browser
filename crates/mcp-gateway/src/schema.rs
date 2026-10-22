@@ -35,9 +35,32 @@ pub(crate) fn tool_schema(name: &str) -> Value {
         .map(|descriptor| (descriptor.schema)())
         .unwrap_or_else(|| (json!({}), vec![]));
     let mut schema = object(properties, &required);
+    if tool_requires_locator(name) {
+        schema["anyOf"] = json!([
+            {"required":["selector"]},
+            {"required":["target"],"properties":{"target":{"type":"object"}}}
+        ]);
+        if name == "upload_files" {
+            schema["anyOf"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"required":["controlId"]}));
+        }
+    }
     schema["$schema"] = json!("https://json-schema.org/draft/2020-12/schema");
     schema["$defs"] = reachable_definitions(&schema);
     schema
+}
+
+pub(crate) fn tool_requires_locator(name: &str) -> bool {
+    matches!(
+        name,
+        "click"
+            | "type_text"
+            | "upload_files"
+            | "click_and_wait_for_popup"
+            | "click_and_wait_for_download"
+    )
 }
 
 pub(crate) fn a11y_snapshot_schema() -> (Value, Vec<&'static str>) {
@@ -631,13 +654,9 @@ pub(crate) fn workflow_start_schema() -> (Value, Vec<&'static str>) {
 /// The schema advertised in `tools/list`, distinct from the schema
 /// `validate_tool_arguments` enforces at dispatch.
 ///
-/// Narrows deep `$defs` that dominate connect cost (`WaitCondition`,
-/// `IntentHints`, `TargetSpec`, `ScreenshotMode`) and, for `command_execute`,
-/// collapses `envelope.command` to an opaque object instead of the full
-/// `PrimitiveCommand`/`IntentCommand` union. Top-level property names and
-/// required fields stay identical. `tool_schema` / `definitions()` keep the
-/// full shapes, so `tools/call` validation is unchanged. Primitives with no
-/// named tool are documented in `bobby://primitives`.
+/// Keeps named tools' nested argument grammar discoverable. Only the generic
+/// `command_execute` escape hatch collapses `envelope.command`; primitives
+/// without a named tool are documented in `bobby://primitives`.
 pub(crate) fn advertised_tool_schema(name: &str) -> Value {
     let mut schema = tool_schema(name);
     // The draft URL is constant and MCP does not require it per tool; the
@@ -672,6 +691,23 @@ pub(crate) fn advertised_tool_schema(name: &str) -> Value {
             .remove("required");
     }
     apply_workflow_scope_advertisement(name, &mut schema);
+    // A root union makes some schema-to-TypeScript renderers discard the
+    // sibling properties. Keep the object visible and express invalid
+    // locator combinations as a separate exclusion instead.
+    if tool_requires_locator(name) {
+        schema.as_object_mut().unwrap().remove("anyOf");
+        let mut absent = json!({"selector":false,"target":{"type":"null"}});
+        if name == "upload_files" {
+            absent["controlId"] = json!(false);
+        }
+        schema["not"] = json!({"properties":absent});
+    }
+    if name == "intent_follow" {
+        schema["not"] = json!({"oneOf":[
+            {"required":["expectedState","expectedDestination"]},
+            {"properties":{"expectedState":false,"expectedDestination":false}}
+        ]});
+    }
     let seed = json!({"properties": schema["properties"], "required": schema["required"]});
     let defs = reachable_definitions_from(&seed, patched);
     if defs.as_object().is_some_and(|defs| !defs.is_empty()) {
@@ -723,7 +759,10 @@ fn parameter_description(tool: &str, property: &str) -> Option<&'static str> {
         ("intent_extract", "fields") => "Named fields to read.",
         ("intent_extract" | "extract_structured", "purpose") => "What to extract, in plain words.",
         ("extract_structured", "schema") => "JSON Schema the extracted value must match.",
-        ("type_text", "value") => "Text to type.",
+        ("type_text", "value") => "Text.",
+        ("control_action", "action") => "Native control action, including its kind and value fields.",
+        ("intent_follow", "purpose") => "Control label; hints.accessibleName is exact.",
+        ("intent_follow", "expectedState" | "expectedDestination") => "Provide exactly one of expectedState/expectedDestination. Example: {\"condition\":{\"kind\":\"text\",\"target\":{\"css\":\"#status\"},\"matcher\":{\"kind\":\"contains\",\"value\":\"Ready\"}},\"timeoutMs\":10000}",
         ("dialog", "action") => "accept or dismiss.",
         ("cookie_delete", "names") => "Cookie names to delete; all when omitted.",
         ("cookie_delete" | "cookie_get", "urls") => "URLs whose cookies apply.",
@@ -740,6 +779,9 @@ fn parameter_description(tool: &str, property: &str) -> Option<&'static str> {
         (_, "boundary") => "Run at most once.",
         (_, "evidenceDetail") => "compact or full.",
         (_, "selector") => "CSS selector.",
+        (_, "target") => "Target from a fresh snapshot, or a locator such as {css:\"#submit\"} or {role:\"button\",accessibleName:\"Submit\"}.",
+        (_, "value") => "Typed field action with its kind and value fields.",
+        (_, "condition") => "Condition to wait for; text and value conditions require a target and matcher.",
         (_, "expectedUrl") => "URL expected after.",
         (_, "modifiers") => "Held keys.",
         (_, "timeoutMs") => "Timeout, ms.",
@@ -971,7 +1013,7 @@ pub(crate) fn apply_runtime_tool_limits(name: &str, schema: &mut Value, max_down
     if name != "download_url" {
         return;
     }
-    // The oneOf scope branches do not restate `maxBytes` (see
+    // The scope constraints do not restate `maxBytes` (see
     // `apply_workflow_scope_advertisement`); the top-level `properties` entry
     // applies regardless of which branch an instance matches, so patching it
     // alone is enough.
@@ -981,16 +1023,9 @@ pub(crate) fn apply_runtime_tool_limits(name: &str, schema: &mut Value, max_down
 /// Adds the handle alternative only to the advertised schema. The dispatcher
 /// continues to validate normalized explicit ids against `tool_schema`.
 ///
-/// Only the scope keys (`workflowHandle` vs. `sessionId`/`pageId`/`workflowId`)
-/// differ between the two forms a call can take. Every other property is
-/// already declared once in the schema's own top-level `properties`, and a
-/// JSON Schema `oneOf` branch constrains only the keys it names -- so cloning
-/// the full business property set into each branch (the pre-diet shape) added
-/// two extra copies of it to every scoped tool's advertised schema for no
-/// validation gain: `tools/call` never reaches this shape, since
-/// `normalize_arguments` (`workflow_handles.rs`) resolves a handle to explicit
-/// ids before `tool_schema` (the real validation schema, which has no
-/// `workflowHandle` at all) ever sees the call.
+/// Conditional scope checks keep business properties at the root. A root
+/// oneOf hides those properties in schema renderers that select a union
+/// before rendering sibling object fields.
 fn apply_workflow_scope_advertisement(name: &str, schema: &mut Value) {
     let Some(scope) = workflow_scope_for_tool(name) else {
         return;
@@ -1009,22 +1044,11 @@ fn apply_workflow_scope_advertisement(name: &str, schema: &mut Value) {
         WorkflowScope::SessionPage => json!(["sessionId", "pageId"]),
         WorkflowScope::SessionPageWorkflow => json!(["sessionId", "pageId", "workflowId"]),
     };
-    // `workflowHandle`'s shape is the top-level property above; the branch
-    // only has to require it and exclude the explicit ids.
-    schema["oneOf"] = json!([
-        {
-            "required":["workflowHandle"],
-            "properties":{
-                "sessionId":false,
-                "pageId":false,
-                "workflowId":false
-            }
-        },
-        {
-            "required":explicit_required,
-            "properties":{"workflowHandle":false}
-        }
-    ]);
+    schema["if"] = json!({"required":["workflowHandle"]});
+    schema["then"] = json!({"properties":{
+        "sessionId":false,"pageId":false,"workflowId":false
+    }});
+    schema["else"] = json!({"required":explicit_required});
 }
 
 /// Advertised workflow-handle shape. Runtime lookup intentionally uses the
@@ -1037,19 +1061,19 @@ fn workflow_handle() -> Value {
     })
 }
 
-/// Opaque / property-preserving stand-ins for the largest input `$defs`. Used
-/// only by [`advertised_tool_schema`]; [`definitions`] stays full for validation.
+/// Compact, self-contained locator and action guidance. The wait wrapper keeps
+/// its required fields; variant descriptions name the fields needed per kind.
 fn apply_advertised_input_patches(patched: &mut Map<String, Value>) {
     patched.insert(
         "IntentHints".to_owned(),
         object(
             json!({
-                "role":nullable(string(0, 256)),
-                "accessibleName":nullable(string(0, 256)),
+                "role":nullable(json!({"type":"string"})),
+                "accessibleName":nullable(json!({"type":"string"})),
                 "nearText":nullable(json!({"type":"object"})),
-                "ordinal":nullable(json!({"type":"integer","minimum":0,"maximum":1000000})),
-                "framePath":{"type":"array","items":{"type":"object"},"maxItems":16},
-                "shadowPath":{"type":"array","items":{"type":"object"},"maxItems":16},
+                "ordinal":nullable(json!({"type":"integer"})),
+                "framePath":{"type":"array","items":{"type":"object"}},
+                "shadowPath":{"type":"array","items":{"type":"object"}},
                 "allowBestMatch":{"type":"boolean"}
             }),
             &[],
@@ -1057,21 +1081,18 @@ fn apply_advertised_input_patches(patched: &mut Map<String, Value>) {
     );
     patched.insert(
         "WaitCondition".to_owned(),
-        // Opaque, like `TargetSpec`: the `kind` tags are named in the
-        // description instead of a full oneOf, since spelling out every
-        // variant's required fields and enums here (the pre-diet shape) cost
-        // ~1.3 KB and is `wait_for`'s only reachable use of `TextMatch` too.
-        // Full shape enforced at tools/call.
+        // Spell out the fields of each variant without duplicating the full
+        // validation union across every tool accepting a post-action wait.
         json!({
             "type":"object",
-            "description":"kind=element|text|value|url|document|networkQuiet; full shape enforced at tools/call."
+            "description":"kind=text|value:target,matcher; url:matcher; element:target,state; document:ready; networkQuiet:idleMs,maxInFlight. matcher={kind:exact|contains|regex,value:string}."
         }),
     );
     patched.insert(
         "TargetSpec".to_owned(),
         json!({
             "type":"object",
-            "description":"Resolved target or selector; full shape enforced at tools/call."
+            "description":"{css:string} or {role:string,accessibleName:string}; copy snapshot targets."
         }),
     );
     patched.insert(
@@ -1082,43 +1103,44 @@ fn apply_advertised_input_patches(patched: &mut Map<String, Value>) {
         "ControlActionKind".to_owned(),
         json!({
             "type":"object",
-            "description":"kind=setText|setChecked|selectOne|selectMany|setFiles|clear|activate; full shape enforced at tools/call."
+            "description":"{kind:setText,value:string,clearFirst?:boolean}, {kind:setChecked,checked:boolean}, {kind:selectOne,value:string}, {kind:selectMany,values:string[]}, {kind:setFiles,paths:string[]}, {kind:clear}, or {kind:activate}."
         }),
     );
     patched.insert(
         "ControlTarget".to_owned(),
         json!({
             "type":"object",
-            "description":"role + accessibleName suffice; frame/shadow hops default to empty. Full shape enforced at tools/call."
+            "description":"Snapshot target, or role+accessibleName."
         }),
     );
     patched.insert(
         "FillValue".to_owned(),
         json!({
             "type":"object",
-            "description":"kind=setText|setChecked|selectOne|selectMany|setFiles|clear; full shape enforced at tools/call."
+            "description":"{kind:setText,value:string,clearFirst?:boolean}, {kind:setChecked,checked:boolean}, {kind:selectOne,value:string}, {kind:selectMany,values:string[]}, {kind:setFiles,paths:string[]}, or {kind:clear}."
         }),
     );
-    // `upload_files`/`intent_submit_and_verify`/`intent_follow` only ever use
-    // this as an optional post-action check; the tool they are about is not
-    // "author a wait condition" (that is `wait_for`, which keeps the full
-    // `WaitCondition` detail on its own `condition` field via the reachability
-    // walk above). Opacifying it here drops `WaitCondition` + `TextMatch`
-    // (~1.8 KB) from those three tools' advertised `$defs` entirely; the full
-    // shape is still enforced at `tools/call` through `tool_schema`.
     patched.insert(
         "WaitForCommand".to_owned(),
-        json!({
-            "type":"object",
-            "description":"Post-action wait condition; full shape enforced at tools/call."
-        }),
+        object(
+            json!({
+                "condition":{"$ref":"#/$defs/WaitCondition"},
+                "timeoutMs":{"type":"integer"}
+            }),
+            &["condition", "timeoutMs"],
+        ),
     );
+    // Identifiers are copied from tool results; dispatch validates UUID syntax.
+    patched.insert("Id".to_owned(), json!({"type":"string"}));
+    patched["IntentHints"]
+        .as_object_mut()
+        .unwrap()
+        .remove("required");
 }
 
 /// Compact argument templates for the first-run tools. Kept off the validation
 /// schema path so `validate_tool_arguments` stays lean; only `tools/list`
-/// advertises them. Limit these to the setup sequence so the full surface keeps
-/// enough room for another small tool.
+/// advertises them. Include representative nested actions as well as setup.
 fn tool_argument_example(name: &str) -> Option<Value> {
     let session = "10000000-0000-4000-8000-000000000001";
     Some(match name {
@@ -3485,15 +3507,10 @@ mod tests {
     fn advertised_challenge_intents_accept_a_workflow_handle() {
         for name in ["intent_detect_challenge", "intent_solve_challenge"] {
             let schema = advertised_tool_schema(name);
-            let branches = schema["oneOf"]
-                .as_array()
-                .unwrap_or_else(|| panic!("{name} must advertise handle/id oneOf"));
-            assert!(
-                branches.iter().any(|branch| {
-                    branch["required"] == json!(["workflowHandle"])
-                        && branch["properties"]["sessionId"] == Value::Bool(false)
-                }),
-                "{name} must accept workflowHandle: {schema}"
+            assert_eq!(schema["if"]["required"], json!(["workflowHandle"]));
+            assert_eq!(
+                schema["then"]["properties"]["sessionId"],
+                Value::Bool(false)
             );
         }
     }
@@ -3502,6 +3519,163 @@ mod tests {
         jsonschema::validator_for(schema)
             .expect("schema compiles")
             .is_valid(instance)
+    }
+
+    #[test]
+    fn advertised_action_guidance_names_required_nested_fields() {
+        let handle = json!({"workflowHandle":"wf_0123456789abcdef0123456789abcdef"});
+        let mut action = handle.clone();
+        action["target"] = json!({"role":"combobox","accessibleName":"Priority"});
+        action["action"] = json!({"kind":"selectOne","value":"high"});
+        let schema = advertised_tool_schema("control_action");
+        assert!(accepts(&schema, &action));
+        assert!(schema["properties"]["action"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("kind:selectOne,value:string"));
+        action["action"] = json!({"kind":"selectOne"});
+        action.as_object_mut().unwrap().remove("workflowHandle");
+        action["sessionId"] = json!("10000000-0000-4000-8000-000000000001");
+        action["pageId"] = json!("10000000-0000-4000-8000-000000000002");
+        assert!(validate_tool_arguments("control_action", &action).is_err());
+
+        let mut follow = handle;
+        follow["purpose"] = json!("Generate report");
+        let schema = advertised_tool_schema("intent_follow");
+        assert!(
+            !accepts(&schema, &follow),
+            "follow needs a verification condition"
+        );
+        follow["expectedState"] = json!({"condition":{"kind":"text","target":{"role":"status"},"matcher":{"kind":"contains","value":"Ready"}},"timeoutMs":10000});
+        assert!(accepts(&schema, &follow));
+        follow["expectedDestination"] = follow["expectedState"].clone();
+        assert!(
+            !accepts(&schema, &follow),
+            "follow accepts exactly one verification condition"
+        );
+        follow
+            .as_object_mut()
+            .unwrap()
+            .remove("expectedDestination");
+        follow["expectedState"]["condition"]
+            .as_object_mut()
+            .unwrap()
+            .remove("target");
+        assert!(schema
+            .to_string()
+            .contains("kind=text|value:target,matcher"));
+        follow["expectedState"]
+            .as_object_mut()
+            .unwrap()
+            .remove("timeoutMs");
+        assert!(
+            !accepts(&schema, &follow),
+            "wait wrappers require a timeout"
+        );
+    }
+
+    #[test]
+    fn follow_parameter_examples_match_the_dispatch_contract() {
+        let advertised = advertised_tool_schema("intent_follow");
+        for parameter in ["expectedState", "expectedDestination"] {
+            let description = advertised["properties"][parameter]["description"]
+                .as_str()
+                .unwrap();
+            let (_, example) = description.split_once("Example: ").unwrap();
+            let wait: Value =
+                serde_json::from_str(example).expect("description contains a JSON example");
+            let input = json!({
+                "sessionId":"10000000-0000-4000-8000-000000000001",
+                "pageId":"10000000-0000-4000-8000-000000000002",
+                "workflowId":"10000000-0000-4000-8000-000000000003",
+                "purpose":"Generate report", parameter:wait
+            });
+            assert!(accepts(&advertised, &input));
+            validate_tool_arguments("intent_follow", &input).unwrap();
+        }
+    }
+
+    #[test]
+    fn advertised_inputs_keep_object_fields_visible_to_type_renderers() {
+        for name in crate::toolset::EVERY_TOOL {
+            let schema = advertised_tool_schema(name);
+            assert_eq!(schema["type"], "object", "{name}");
+            for union in ["oneOf", "anyOf", "allOf"] {
+                assert!(
+                    schema.get(union).is_none(),
+                    "{name}: a root {union} can hide sibling properties from type renderers"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn conditional_scope_and_locator_validation_matches_json_schema() {
+        let schema = advertised_tool_schema("type_text");
+        let mut input = json!({"workflowHandle":"wf_0123456789abcdef0123456789abcdef","value":"hello","target":{"role":"textbox"}});
+        for _ in 0..4 {
+            assert_eq!(
+                validate(&schema, &schema, &input).is_ok(),
+                accepts(&schema, &input),
+                "{input}"
+            );
+            if input.get("target").is_some() {
+                input.as_object_mut().unwrap().remove("target");
+            } else if input.get("selector").is_none() {
+                input["selector"] = json!("#name");
+            } else {
+                input["sessionId"] = json!("10000000-0000-4000-8000-000000000001");
+            }
+        }
+    }
+
+    #[test]
+    fn locator_tools_require_a_selector_or_non_null_target() {
+        for name in [
+            "click",
+            "type_text",
+            "upload_files",
+            "click_and_wait_for_popup",
+            "click_and_wait_for_download",
+        ] {
+            let mut input = json!({
+                "sessionId":"10000000-0000-4000-8000-000000000001",
+                "pageId":"10000000-0000-4000-8000-000000000002"
+            });
+            if name == "type_text" {
+                input["value"] = json!("hello");
+            }
+            if name == "upload_files" {
+                input["paths"] = json!(["/uploads/example.txt"]);
+            }
+            assert!(
+                validate_tool_arguments(name, &input).is_err(),
+                "{name} must reject a missing locator"
+            );
+            input["target"] = Value::Null;
+            assert!(
+                validate_tool_arguments(name, &input).is_err(),
+                "{name} must reject a null target without a selector"
+            );
+            input["target"] = json!({"role":"button","accessibleName":"Continue"});
+            validate_tool_arguments(name, &input).expect("semantic targets remain supported");
+            input.as_object_mut().unwrap().remove("target");
+            input["selector"] = json!("#continue");
+            validate_tool_arguments(name, &input).expect("CSS selectors remain supported");
+            input.as_object_mut().unwrap().remove("sessionId");
+            input.as_object_mut().unwrap().remove("pageId");
+            input["workflowHandle"] = json!("wf_0123456789abcdef0123456789abcdef");
+            let advertised = advertised_tool_schema(name);
+            assert!(
+                accepts(&advertised, &input),
+                "{name} must advertise selector calls"
+            );
+            input.as_object_mut().unwrap().remove("selector");
+            assert!(
+                !accepts(&advertised, &input),
+                "{name} must advertise its locator requirement"
+            );
+        }
     }
 
     #[test]
@@ -3734,7 +3908,7 @@ mod tests {
         assert!(!validator.is_valid(&rejected));
         // Validation (`validate_tool_arguments`) sees post-normalization
         // arguments: the handle has been replaced by its binding ids, so the
-        // handle-bearing call validates against the advertised oneOf while
+        // handle-bearing call validates against the advertised scope constraints while
         // the normalized ids validate against the internal schema.
         assert!(validate_tool_arguments("workflow_observe", &accepted).is_err());
         // The explicit-id branch accepts the normalized shape too.
@@ -3763,15 +3937,10 @@ mod tests {
         let observed = crate::toolset::EVERY_TOOL
             .iter()
             .filter(|name| {
-                advertised_tool_schema(name)["oneOf"]
-                    .as_array()
-                    .is_some_and(|branches| {
-                        branches.iter().any(|branch| {
-                            branch["required"] == json!(["workflowHandle"])
-                                && branch["properties"]["sessionId"] == Value::Bool(false)
-                                && branch["properties"]["pageId"] == Value::Bool(false)
-                        })
-                    })
+                let schema = advertised_tool_schema(name);
+                schema["if"]["required"] == json!(["workflowHandle"])
+                    && schema["then"]["properties"]["sessionId"] == Value::Bool(false)
+                    && schema["then"]["properties"]["pageId"] == Value::Bool(false)
             })
             .copied()
             .collect::<BTreeSet<_>>();
@@ -3784,15 +3953,7 @@ mod tests {
 
     #[test]
     fn workflow_scope_branches_declare_business_properties_once_at_the_parent() {
-        // The pre-diet shape cloned every business property into both oneOf
-        // branches -- three copies of the same schema per tool for no
-        // validation gain, since `tools/call` never reaches this shape
-        // (`normalize_arguments` resolves a handle to explicit ids before
-        // `tool_schema`, which has no `workflowHandle` at all, ever sees the
-        // call). A JSON Schema `oneOf` branch constrains only the keys it
-        // names; every other key stays governed by the schema's own
-        // top-level `properties`, so declaring it once is equivalent and the
-        // branches now carry only the scope keys.
+        // Relation checks must leave the complete object visible to clients.
         for (name, business_property) in [
             ("navigate", "url"),
             ("intent_fill", "value"),
@@ -3810,7 +3971,7 @@ mod tests {
                     .contains(&json!(business_property)),
                 "{name} keeps {business_property} required at the parent"
             );
-            for branch in schema["oneOf"].as_array().expect("scope branches") {
+            for branch in [&schema["then"], &schema["else"]] {
                 assert!(
                     branch["properties"].get(business_property).is_none(),
                     "{name} branch restates {business_property}, duplicating the parent schema"
@@ -4275,9 +4436,31 @@ fn validate_at(
         return Err(SchemaViolation::at(pointer, "maxDepth"));
     }
     let depth = depth + 1;
+    if let Some(allowed) = schema.as_bool() {
+        return if allowed {
+            Ok(())
+        } else {
+            Err(SchemaViolation::at(pointer, "falseSchema"))
+        };
+    }
     // Agent-facing argument templates. Not enforced — this `.get` is also how
     // `budget.rs` discovers supported keywords for advertised `inputSchema`s.
     let _ = schema.get("examples");
+    if let Some(condition) = schema.get("if") {
+        let branch = if validate_at(root, condition, value, depth, pointer).is_ok() {
+            schema.get("then")
+        } else {
+            schema.get("else")
+        };
+        if let Some(branch) = branch {
+            validate_at(root, branch, value, depth, pointer)?;
+        }
+    }
+    if let Some(excluded) = schema.get("not") {
+        if validate_at(root, excluded, value, depth, pointer).is_ok() {
+            return Err(SchemaViolation::at(pointer, "not"));
+        }
+    }
     if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
         let Some(name) = reference.strip_prefix("#/$defs/") else {
             return Err(SchemaViolation::at(pointer, "$ref"));
@@ -4295,11 +4478,17 @@ fn validate_at(
             .iter()
             .filter(|choice| validate_at(root, choice, value, depth, pointer).is_ok())
             .count();
-        return if matches == 1 {
-            Ok(())
-        } else {
-            Err(SchemaViolation::at(pointer, "oneOf"))
-        };
+        if matches != 1 {
+            return Err(SchemaViolation::at(pointer, "oneOf"));
+        }
+    }
+    if let Some(choices) = schema.get("anyOf").and_then(Value::as_array) {
+        if !choices
+            .iter()
+            .any(|choice| validate_at(root, choice, value, depth, pointer).is_ok())
+        {
+            return Err(SchemaViolation::at(pointer, "anyOf"));
+        }
     }
     if let Some(expected) = schema.get("const") {
         return if value == expected {

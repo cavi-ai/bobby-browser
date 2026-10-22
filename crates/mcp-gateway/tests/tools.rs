@@ -70,6 +70,54 @@ fn request(id: u64, method: &str, params: Value) -> Value {
     json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
 }
 
+fn assert_advertised_scope(tool: &Value, business: Value, requires_workflow: bool) {
+    let validator = jsonschema::validator_for(&tool["inputSchema"]).unwrap();
+    let mut handle = business.clone();
+    handle["workflowHandle"] = json!("wf_0123456789abcdef0123456789abcdef");
+    validator.validate(&handle).unwrap_or_else(|error| {
+        panic!(
+            "{} rejects handle arguments: {error}; {handle}",
+            tool["name"]
+        )
+    });
+
+    let mut explicit = business.clone();
+    explicit["sessionId"] = json!("10000000-0000-4000-8000-000000000001");
+    explicit["pageId"] = json!("10000000-0000-4000-8000-000000000002");
+    if requires_workflow {
+        explicit["workflowId"] = json!("10000000-0000-4000-8000-000000000003");
+    }
+    validator.validate(&explicit).unwrap_or_else(|error| {
+        panic!(
+            "{} rejects explicit arguments: {error}; {explicit}",
+            tool["name"]
+        )
+    });
+    assert!(
+        !validator.is_valid(&business),
+        "{} accepts missing scope",
+        tool["name"]
+    );
+    for key in ["sessionId", "pageId", "workflowId"] {
+        if key != "workflowId" || requires_workflow {
+            let mut missing = explicit.clone();
+            missing.as_object_mut().unwrap().remove(key);
+            assert!(
+                !validator.is_valid(&missing),
+                "{} accepts missing {key}: {missing}",
+                tool["name"]
+            );
+        }
+        let mut mixed = handle.clone();
+        mixed[key] = json!("10000000-0000-4000-8000-000000000001");
+        assert!(
+            !validator.is_valid(&mixed),
+            "{} accepts mixed scope: {mixed}",
+            tool["name"]
+        );
+    }
+}
+
 #[tokio::test]
 async fn reinitialize_resets_the_session_without_gating_a_ready_connection() {
     // MCP clients reconnect by sending `initialize` again; a re-initialize is a
@@ -176,13 +224,8 @@ async fn click_and_wait_for_download_requires_file_download_and_accepts_a_workfl
         .iter()
         .find(|tool| tool["name"] == "click_and_wait_for_download")
         .expect("download completion tool is advertised");
-    let branches = tool["inputSchema"]["oneOf"]
-        .as_array()
-        .expect("workflow-scoped tools advertise explicit-id and handle branches");
     assert!(tool["inputSchema"]["properties"]["workflowHandle"].is_object());
-    assert!(branches
-        .iter()
-        .any(|branch| branch["required"] == json!(["workflowHandle"])));
+    assert_advertised_scope(tool, json!({"selector":"#download"}), true);
 }
 
 #[tokio::test]
@@ -2116,24 +2159,17 @@ async fn flat_browser_tools_are_listed_and_follow_capability_grants() {
         .find(|tool| tool["name"] == "navigate")
         .unwrap();
     assert_eq!(navigate["inputSchema"]["required"], json!(["url"]));
-    assert!(navigate["inputSchema"]["oneOf"]
-        .as_array()
-        .expect("navigate scope branches")
-        .iter()
-        .any(|branch| branch["required"] == json!(["sessionId", "pageId", "workflowId"])));
+    assert_advertised_scope(navigate, json!({"url":"https://example.test/"}), true);
     let click = listed["result"]["tools"]
         .as_array()
         .unwrap()
         .iter()
         .find(|tool| tool["name"] == "click")
         .unwrap();
-    assert!(
-        click["inputSchema"]["oneOf"]
-            .as_array()
-            .expect("click scope branches")
-            .iter()
-            .any(|branch| branch["required"] == json!(["sessionId", "pageId", "workflowId"])),
-        "semantic snapshot targets must not require a legacy CSS selector"
+    assert_advertised_scope(
+        click,
+        json!({"target":{"role":"button","accessibleName":"Save"}}),
+        true,
     );
     let type_text = listed["result"]["tools"]
         .as_array()
@@ -2142,11 +2178,11 @@ async fn flat_browser_tools_are_listed_and_follow_capability_grants() {
         .find(|tool| tool["name"] == "type_text")
         .unwrap();
     assert_eq!(type_text["inputSchema"]["required"], json!(["value"]));
-    assert!(type_text["inputSchema"]["oneOf"]
-        .as_array()
-        .expect("type_text scope branches")
-        .iter()
-        .any(|branch| branch["required"] == json!(["sessionId", "pageId", "workflowId"])));
+    assert_advertised_scope(
+        type_text,
+        json!({"value":"hello","target":{"role":"textbox","accessibleName":"Name"}}),
+        true,
+    );
     let upload_files = listed["result"]["tools"]
         .as_array()
         .unwrap()
@@ -2155,21 +2191,24 @@ async fn flat_browser_tools_are_listed_and_follow_capability_grants() {
         .unwrap();
     assert_eq!(upload_files["inputSchema"]["required"], json!(["paths"]));
     assert_eq!(
-        upload_files["inputSchema"]["properties"]["expectedState"]["description"],
-        "Post-action wait condition; full shape enforced at tools/call."
-    );
-    assert_eq!(
         upload_files["inputSchema"]["properties"]["autoCheckpoint"]["type"],
         "boolean"
     );
-    assert!(
-        upload_files["inputSchema"]["oneOf"]
-            .as_array()
-            .expect("upload_files scope branches")
-            .iter()
-            .any(|branch| branch["required"] == json!(["sessionId", "pageId", "workflowId"])),
-        "semantic snapshot targets must not require a legacy CSS selector"
-    );
+    let upload = json!({"paths":["/uploads/example.txt"],"target":{"css":"#upload"},"expectedState":{"condition":{"kind":"text","target":{"css":"#status"},"matcher":{"kind":"contains","value":"Ready"}},"timeoutMs":1000}});
+    assert_advertised_scope(upload_files, upload.clone(), true);
+    let validator = jsonschema::validator_for(&upload_files["inputSchema"]).unwrap();
+    for key in ["condition", "timeoutMs"] {
+        let mut missing = upload.clone();
+        missing["workflowHandle"] = json!("wf_0123456789abcdef0123456789abcdef");
+        missing["expectedState"]
+            .as_object_mut()
+            .unwrap()
+            .remove(key);
+        assert!(
+            !validator.is_valid(&missing),
+            "upload_files accepts expectedState without {key}"
+        );
+    }
 
     let mutate_only = fixture_server(vec![Capability::BrowserMutate]).await;
     let listed = mutate_only
@@ -2233,11 +2272,7 @@ async fn form_snapshot_is_a_read_only_page_tool() {
         .find(|tool| tool["name"] == "form_snapshot")
         .expect("page readers can discover form_snapshot");
     assert_eq!(snapshot["inputSchema"]["required"], json!([]));
-    assert!(snapshot["inputSchema"]["oneOf"]
-        .as_array()
-        .expect("form_snapshot scope branches")
-        .iter()
-        .any(|branch| branch["required"] == json!(["sessionId", "pageId"])));
+    assert_advertised_scope(snapshot, json!({}), false);
     // Sorted before comparing: `serde_json::Map` iterates sorted by default and in
     // insertion order under `preserve_order`, which any crate in the graph can
     // enable. The assertion is about which properties exist, not their order.
@@ -4297,16 +4332,13 @@ async fn download_url_requires_and_threads_a_page_id() {
         .iter()
         .find(|tool| tool["name"] == "download_url")
         .expect("download_url is advertised");
-    assert!(
-        tool["inputSchema"]["oneOf"]
-            .as_array()
-            .expect("download_url scope branches")
-            .iter()
-            .any(|branch| branch["required"] == json!(["sessionId", "pageId", "workflowId"])),
-        "download_url must advertise pageId as required: {tool}"
+    assert_advertised_scope(
+        tool,
+        json!({"url":"https://example.test/file","maxBytes":1}),
+        true,
     );
     // `saveAs` is declared once, in the schema's own top-level `properties`;
-    // it applies under both oneOf scope branches without being restated in
+    // it applies under both scope forms without being restated in
     // either (see `apply_workflow_scope_advertisement`).
     assert_eq!(
         tool["inputSchema"]["properties"]["saveAs"],

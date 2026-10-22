@@ -1963,6 +1963,16 @@ fn invalid_params(
                 if let Some(action) = repair["action"].as_str() {
                     let hint = match &union {
                         Some(union) => Some(union.hint.clone()),
+                        None if violation.constraint == "anyOf"
+                            && violation.pointer == "/"
+                            && crate::schema::tool_requires_locator(tool) =>
+                        {
+                            Some(if tool == "upload_files" {
+                                "Provide a non-empty CSS selector, a snapshot target, or a form_snapshot controlId."
+                            } else {
+                                "Provide a non-empty CSS selector or a target from a fresh snapshot."
+                            }.to_owned())
+                        }
                         None => choice_constraint_hint(violation.constraint).map(str::to_owned),
                     };
                     if let Some(hint) = hint {
@@ -2016,10 +2026,11 @@ fn invalid_params(
 /// did name scope, so this hint must not fire for it).
 fn choice_constraint_hint(constraint: &str) -> Option<&'static str> {
     match constraint {
-        "oneOf" | "anyOf" => {
+        "oneOf" => {
             Some("the value must match exactly one variant of the schema's oneOf list; \
                   re-read the tool's inputSchema $defs and include each variant's `kind` discriminator")
         }
+        "anyOf" => Some("the value must match at least one variant of the schema's anyOf list; re-read the tool's inputSchema"),
         "enum" => Some(
             "the value must be one of the schema's enum members; re-read the tool's inputSchema",
         ),
