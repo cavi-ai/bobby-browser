@@ -832,25 +832,26 @@ fn parameter_description(tool: &str, property: &str) -> Option<&'static str> {
 }
 
 /// Advertise-only rewrites that accept exactly the same instances and drop
-/// bytes every `tools/list` re-downloads: a local definition used by exactly
-/// one bare `$ref` is inlined there, the draft URL is dropped, and
+/// bytes every `tools/list` re-downloads: a local definition used by one bare
+/// `$ref`, or smaller than each of its references, is inlined; the draft URL
+/// is dropped; and
 /// `{"oneOf":[X,{"type":"null"}]}` is folded into `X`
 /// with `"type":[T,"null"]` when `X` names a single non-null type and carries
 /// no keyword that could also match `null`. Instance data under `examples`,
 /// `const`, `enum`, and `default` is left alone.
 pub(crate) fn compact_advertised_schema(schema: &mut Value) {
-    inline_single_use_definitions(schema);
+    inline_compact_definitions(schema);
     compact_advertised_node(schema);
 }
 
 const INSTANCE_KEYWORDS: [&str; 4] = ["examples", "const", "enum", "default"];
 
-fn inline_single_use_definitions(schema: &mut Value) {
-    while let Some(name) = single_use_definition(schema) {
+fn inline_compact_definitions(schema: &mut Value) {
+    while let Some(name) = compact_definition(schema) {
         let body = schema["$defs"]
             .as_object_mut()
             .and_then(|defs| defs.remove(&name))
-            .expect("single_use_definition names an existing definition");
+            .expect("compact_definition names an existing definition");
         if schema["$defs"].as_object().is_some_and(Map::is_empty) {
             schema
                 .as_object_mut()
@@ -861,17 +862,45 @@ fn inline_single_use_definitions(schema: &mut Value) {
     }
 }
 
-/// A definition referenced exactly once, by a `$ref` with no sibling
-/// keywords, and never from inside itself.
-fn single_use_definition(schema: &Value) -> Option<String> {
+/// Only bare references can be replaced without merging sibling constraints.
+/// A shared definition is expanded only when each replacement is no larger
+/// than its reference, so removing its definition always reduces the result.
+fn compact_definition(schema: &Value) -> Option<String> {
     let defs = schema.get("$defs")?.as_object()?;
     let mut uses = std::collections::BTreeMap::<&str, (usize, bool)>::new();
     count_definition_refs(schema, &mut uses);
     uses.into_iter()
         .find(|(name, (count, bare))| {
-            *count == 1 && *bare && defs.get(*name).is_some_and(|body| !refers_to(body, name))
+            *bare
+                && defs.get(*name).is_some_and(|body| {
+                    !refers_to(body, name)
+                        && !has_schema_identity(body)
+                        && (*count == 1
+                            || body.to_string().len()
+                                <= json!({"$ref":format!("#/$defs/{name}")}).to_string().len())
+                })
         })
         .map(|(name, _)| name.to_owned())
+}
+
+/// Moving a schema identifier or dynamic reference can change its scope even
+/// when the replacement is otherwise structurally identical.
+fn has_schema_identity(value: &Value) -> bool {
+    match value {
+        Value::Object(fields) => fields.iter().any(|(key, value)| {
+            matches!(
+                key.as_str(),
+                "$id"
+                    | "$anchor"
+                    | "$dynamicAnchor"
+                    | "$dynamicRef"
+                    | "$recursiveAnchor"
+                    | "$recursiveRef"
+            ) || (!INSTANCE_KEYWORDS.contains(&key.as_str()) && has_schema_identity(value))
+        }),
+        Value::Array(values) => values.iter().any(has_schema_identity),
+        _ => false,
+    }
 }
 
 fn count_definition_refs<'a>(
@@ -3795,7 +3824,97 @@ mod tests {
     }
 
     #[test]
-    fn compaction_inlines_only_bare_single_use_non_recursive_definitions() {
+    fn compaction_inlines_small_shared_aliases_without_changing_validation() {
+        let mut schema = json!({
+            "type":"object",
+            "properties":{
+                "first":{"$ref":"#/$defs/Id"},
+                "second":{"$ref":"#/$defs/Id"},
+                "largeA":{"$ref":"#/$defs/Large"},
+                "largeB":{"$ref":"#/$defs/Large"},
+                "described":{"$ref":"#/$defs/Described","description":"Keep this guidance"},
+                "optional":{"type":"object","properties":{"value":{"type":"boolean"}},"required":[]}
+            },
+            "required":["first"],
+            "additionalProperties":false,
+            "$defs":{
+                "Id":{"type":"string"},
+                "Described":{"type":"boolean"},
+                "Large":{"type":"object","properties":{"value":{"type":"string","maxLength":128}},"required":["value"],"additionalProperties":false}
+            },
+            "examples":[{"required":[],"first":{"$ref":"#/$defs/Id"}}],
+            "default":{"required":[]}
+        });
+        let original = schema.clone();
+        compact_advertised_schema(&mut schema);
+        assert_eq!(schema["properties"]["first"], json!({"type":"string"}));
+        assert_eq!(schema["properties"]["second"], json!({"type":"string"}));
+        assert!(schema["$defs"].get("Id").is_none());
+        assert_eq!(schema["$defs"]["Large"], original["$defs"]["Large"]);
+        assert_eq!(
+            schema["properties"]["described"],
+            original["properties"]["described"]
+        );
+        assert_eq!(schema["properties"]["optional"]["required"], json!([]));
+        assert_eq!(schema["required"], original["required"]);
+        assert_eq!(schema["examples"], original["examples"]);
+        assert_eq!(schema["default"], original["default"]);
+        assert!(schema.to_string().len() < original.to_string().len());
+        for instance in [
+            json!({"first":"a","second":"b","largeA":{"value":"ok"}}),
+            json!({"first":"a","optional":{}}),
+            json!({"first":"a","described":false}),
+            json!({}),
+            json!({"first":null}),
+            json!({"first":1}),
+            json!({"first":"a","second":false}),
+            json!({"first":"a","extra":true}),
+            json!({"first":"a","optional":{"value":1}}),
+            json!({"first":"a","largeB":{"value":"x".repeat(129)}}),
+            json!({"first":"a","described":"wrong"}),
+        ] {
+            assert_eq!(
+                accepts(&schema, &instance),
+                accepts(&original, &instance),
+                "{instance}"
+            );
+            assert_eq!(
+                validate(&schema, &schema, &instance).is_ok(),
+                accepts(&original, &instance),
+                "{instance}"
+            );
+        }
+    }
+
+    #[test]
+    fn compaction_preserves_definitions_with_schema_identity() {
+        for keyword in [
+            "$id",
+            "$anchor",
+            "$dynamicAnchor",
+            "$dynamicRef",
+            "$recursiveAnchor",
+            "$recursiveRef",
+        ] {
+            let mut schema = json!({
+                "properties":{
+                    "first":{"$ref":"#/$defs/LongSharedDefinitionName"},
+                    "second":{"$ref":"#/$defs/LongSharedDefinitionName"},
+                    "single":{"$ref":"#/$defs/Single"}
+                },
+                "$defs":{
+                    "LongSharedDefinitionName":{keyword:"x"},
+                    "Single":{"type":"object","properties":{"nested":{keyword:"x"}}}
+                }
+            });
+            let original = schema.clone();
+            compact_advertised_schema(&mut schema);
+            assert_eq!(schema, original, "preserve {keyword} scope");
+        }
+    }
+
+    #[test]
+    fn compaction_preserves_reference_siblings_and_recursive_definitions() {
         let mut schema = json!({
             "$schema":"https://json-schema.org/draft/2020-12/schema",
             "type":"object",
@@ -3833,8 +3952,11 @@ mod tests {
             defs.keys()
                 .map(String::as_str)
                 .collect::<std::collections::BTreeSet<_>>(),
-            std::collections::BTreeSet::from(["Described", "Tree", "Twice"])
+            std::collections::BTreeSet::from(["Described", "Tree"])
         );
+        for property in ["twiceA", "twiceB"] {
+            assert_eq!(schema["properties"][property], json!({"type":"integer"}));
+        }
         for instance in [
             json!({"once":"ab","twiceA":1,"maybe":null}),
             json!({"once":"abc"}),
