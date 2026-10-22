@@ -1,0 +1,81 @@
+name: Publish Homebrew
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+      dry_run:
+        default: "false"
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release tag (vX.Y.Z)
+        required: true
+        type: string
+      dry_run:
+        description: Verify archives and Homebrew installation without publishing
+        default: "true"
+        required: true
+        type: choice
+        options: ["true", "false"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: homebrew-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      TAG: ${{ inputs.tag }}
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Verify release archives and generate formula
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          git fetch --no-tags origin "refs/tags/$TAG:refs/tags/$TAG" --depth=1
+          git show "refs/tags/$TAG:Formula/bobby-browser.rb" > "$RUNNER_TEMP/source-formula.rb"
+          mkdir -p "$RUNNER_TEMP/homebrew-assets"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > "$RUNNER_TEMP/homebrew-release.json"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "bobby-browser-${TAG#v}-*.tar.gz" --dir "$RUNNER_TEMP/homebrew-assets"
+          python3 scripts/homebrew_release.py prepare --tag "$TAG" \
+            --release "$RUNNER_TEMP/homebrew-release.json" \
+            --assets-dir "$RUNNER_TEMP/homebrew-assets" \
+            --formula "$RUNNER_TEMP/source-formula.rb" --output "$RUNNER_TEMP/bobby-browser.rb"
+          ruby -c "$RUNNER_TEMP/bobby-browser.rb"
+      - name: Install and test the release through Homebrew
+        run: |
+          set -euo pipefail
+          brew tap cavi-ai/tap
+          cp "$RUNNER_TEMP/bobby-browser.rb" "$(brew --repository cavi-ai/tap)/Formula/bobby-browser.rb"
+          brew install cavi-ai/tap/bobby-browser
+          brew test cavi-ai/tap/bobby-browser
+          test "$(bobby --version)" = "bobby ${TAG#v}"
+      - name: Publish signed formula updates
+        if: ${{ inputs.dry_run != 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN || secrets.CONSUMER_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::error::HOMEBREW_TAP_TOKEN or CONSUMER_DISPATCH_TOKEN must allow contents and pull-request writes and Actions reads in bobby-browser and homebrew-tap"
+            exit 1
+          fi
+          python3 scripts/homebrew_release.py publish --tag "$TAG" --formula "$RUNNER_TEMP/bobby-browser.rb"

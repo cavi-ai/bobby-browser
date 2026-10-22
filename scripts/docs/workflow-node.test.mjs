@@ -4,6 +4,20 @@ import test from "node:test";
 
 const root = new URL("../../", import.meta.url);
 
+test("Homebrew publication follows binary assets and supports safe rehearsal", async () => {
+  const caller = await readFile(new URL(".github/workflows/release-binaries.yml", root), "utf8");
+  const workflow = await readFile(new URL(".github/workflows/publish-homebrew.yml", root), "utf8");
+  assert.match(caller, /homebrew:\s+needs: release/);
+  assert.match(caller, /uses: \.\/\.github\/workflows\/publish-homebrew\.yml/);
+  assert.match(workflow, /workflow_call:/);
+  assert.match(workflow, /workflow_dispatch:/);
+  assert.doesNotMatch(workflow, /pull_request:|schedule:/);
+  assert.match(workflow, /homebrew_release\.py prepare/);
+  assert.match(workflow, /brew test cavi-ai\/tap\/bobby-browser/);
+  assert.match(workflow, /if: \$\{\{ inputs\.dry_run != 'true' \}\}/);
+  assert.match(workflow, /homebrew_release\.py publish/);
+});
+
 test("runs Node workflows on the pinned Node 24 LTS release", async () => {
   const workflows = await Promise.all([
     "ci.yml",

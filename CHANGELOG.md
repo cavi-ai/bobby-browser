@@ -6,6 +6,7 @@
 
 ### Added
 
+- Release automation verifies platform archive hashes, tests a Homebrew installation, and updates the source formula and `cavi-ai/tap` through signed pull requests.
 - A TypeScript page-summary example connects the Bobby SDK to `@cavi-ai/api-client`, with provider configuration for Claude, Codex, OpenClaw, Hermes, OpenCode and AGY, bounded page context and cancellation.
 
 ### Changed
