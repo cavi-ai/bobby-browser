@@ -61,7 +61,7 @@ pub struct NetworkQuietFilters<'a> {
 
 #[derive(Debug, Default)]
 pub struct NetworkQuietState {
-    requests: HashMap<String, InFlightRequest>,
+    requests: ActiveRequests,
     /// Request IDs whose finish/fail arrived before `requestWillBeSent` was
     /// applied (listener tasks can reorder CDP events).
     completed_before_start: RecentIds,
@@ -74,6 +74,55 @@ pub struct NetworkQuietState {
     tracking_lost: bool,
     /// Script and fetch/XHR loads that finished or failed.
     landed_page_loads: u64,
+}
+
+/// Active requests indexed by ID and start time. All mutations maintain both
+/// indexes so overflow eviction never scans the full request map.
+#[derive(Debug, Default)]
+struct ActiveRequests {
+    by_id: HashMap<Arc<str>, InFlightRequest>,
+    by_start: BTreeSet<(Instant, Arc<str>)>,
+}
+
+impl ActiveRequests {
+    fn insert(&mut self, id: String, request: InFlightRequest) {
+        let id = match self.by_id.remove_entry(id.as_str()) {
+            Some((id, previous)) => {
+                self.by_start
+                    .remove(&(previous.started_at, Arc::clone(&id)));
+                id
+            }
+            None => id.into(),
+        };
+        self.by_start.insert((request.started_at, Arc::clone(&id)));
+        self.by_id.insert(id, request);
+    }
+
+    fn remove(&mut self, id: &str) -> Option<InFlightRequest> {
+        let (id, request) = self.by_id.remove_entry(id)?;
+        self.by_start.remove(&(request.started_at, id));
+        Some(request)
+    }
+
+    fn oldest(&self) -> Option<Arc<str>> {
+        self.by_start.first().map(|(_, id)| Arc::clone(id))
+    }
+
+    fn len(&self) -> usize {
+        self.by_id.len()
+    }
+
+    fn contains_key(&self, id: &str) -> bool {
+        self.by_id.contains_key(id)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&Arc<str>, &InFlightRequest)> {
+        self.by_id.iter()
+    }
+
+    fn values(&self) -> impl Iterator<Item = &InFlightRequest> {
+        self.by_id.values()
+    }
 }
 
 /// Request IDs kept for one settle cap, at most [`MAX_TRACKED_REQUESTS`];
@@ -248,7 +297,7 @@ impl NetworkQuietState {
     }
 
     fn end_requests(&mut self, ended: impl Fn(&InFlightRequest) -> bool) {
-        let ids: Vec<String> = self
+        let ids: Vec<Arc<str>> = self
             .requests
             .iter()
             .filter(|(_, request)| ended(request))
@@ -262,7 +311,7 @@ impl NetworkQuietState {
             {
                 self.retire_loader(document.loader);
             }
-            self.forget(id);
+            self.forget(id.to_string());
         }
     }
 
@@ -285,7 +334,7 @@ impl NetworkQuietState {
             .requests
             .iter()
             .filter(|(_, request)| request.started_at < navigation_started)
-            .map(|(id, _)| id.clone())
+            .map(|(id, _)| id.to_string())
             .collect();
         for id in &ended {
             self.drop_request(id);
@@ -315,12 +364,7 @@ impl NetworkQuietState {
             return;
         }
         if self.requests.len() >= MAX_TRACKED_REQUESTS && !self.requests.contains_key(&id) {
-            let oldest = self
-                .requests
-                .iter()
-                .min_by_key(|(_, request)| request.started_at)
-                .map(|(id, _)| id.clone());
-            if let Some(oldest) = oldest {
+            if let Some(oldest) = self.requests.oldest() {
                 self.drop_request(&oldest);
             }
         }
@@ -1033,6 +1077,92 @@ mod retention_tests {
         state.upsert_id(id, url, NetworkResourceType::Fetch);
     }
 
+    fn active_request(started_at: Instant, document: Option<RequestDocument>) -> InFlightRequest {
+        InFlightRequest {
+            url: "https://example.test/".into(),
+            resource_type: NetworkResourceType::Fetch,
+            started_at,
+            is_websocket: false,
+            document,
+        }
+    }
+
+    fn assert_active_index(state: &NetworkQuietState) {
+        assert_eq!(state.requests.by_id.len(), state.requests.by_start.len());
+        assert!(state.requests.len() <= MAX_TRACKED_REQUESTS);
+        for (id, request) in &state.requests.by_id {
+            let (_, indexed) = state
+                .requests
+                .by_start
+                .get(&(request.started_at, Arc::clone(id)))
+                .unwrap();
+            assert!(Arc::ptr_eq(id, indexed), "request ID storage is duplicated");
+        }
+    }
+
+    #[test]
+    fn active_index_survives_refresh_eviction_and_all_cleanup_paths() {
+        let mut state = NetworkQuietState::default();
+        let old = Instant::now() - Duration::from_secs(1);
+        for index in 0..MAX_TRACKED_REQUESTS {
+            state.requests.insert(
+                index.to_string(),
+                active_request(old + Duration::from_nanos(index as u64), None),
+            );
+        }
+        for _ in 0..100 {
+            fetch(&mut state, "0", "https://example.test/refreshed".into());
+        }
+        assert_active_index(&state);
+        assert_eq!(state.requests.len(), MAX_TRACKED_REQUESTS);
+        fetch(&mut state, "new", "https://example.test/new".into());
+        assert!(!state.requests.contains_key("1"));
+        assert!(state.requests.contains_key("0"));
+        assert!(state.requests.contains_key("new"));
+        assert_active_index(&state);
+        state.remove_id("0");
+        state.drop_request("2");
+        assert_active_index(&state);
+        state.commit_navigation(Instant::now() + Duration::from_secs(1));
+        assert_eq!(state.requests.len(), 0);
+        assert_active_index(&state);
+        for (id, loader) in [("old", "old-loader"), ("current", "new-loader")] {
+            state.requests.insert(
+                id.into(),
+                active_request(
+                    old,
+                    Some(RequestDocument {
+                        frame: "frame".into(),
+                        loader: loader.into(),
+                    }),
+                ),
+            );
+        }
+        state.commit_document("frame", "new-loader", false);
+        assert!(!state.requests.contains_key("old"));
+        assert!(state.requests.contains_key("current"));
+        assert_active_index(&state);
+        state.detach_frame("frame");
+        assert_eq!(state.requests.len(), 0);
+        assert_active_index(&state);
+    }
+
+    #[test]
+    fn active_index_keeps_distinct_requests_with_equal_start_times() {
+        let mut state = NetworkQuietState::default();
+        let now = Instant::now();
+        state.requests.insert("a".into(), active_request(now, None));
+        state.requests.insert("b".into(), active_request(now, None));
+        assert_active_index(&state);
+        assert_eq!(state.requests.len(), 2);
+        state.remove_id("a");
+        assert_eq!(state.requests.oldest().as_deref(), Some("b"));
+        assert_active_index(&state);
+        state.remove_id("b");
+        assert!(state.requests.oldest().is_none());
+        assert_active_index(&state);
+    }
+
     #[test]
     fn expired_completion_does_not_suppress_a_reused_request_id() {
         let mut state = NetworkQuietState::default();
@@ -1176,8 +1306,8 @@ mod retention_tests {
             .all(|request| request.url.len() <= MAX_REQUEST_URL_BYTES));
         assert!(state
             .requests
-            .keys()
-            .all(|key| key.len() <= MAX_REQUEST_ID_BYTES));
+            .iter()
+            .all(|(key, _)| key.len() <= MAX_REQUEST_ID_BYTES));
         state.remove_id("long-url");
         state.remove_id(&id);
         assert_eq!(pending_page_loads(&state, Instant::now()), Some(0));
