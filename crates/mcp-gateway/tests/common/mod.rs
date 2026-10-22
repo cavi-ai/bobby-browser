@@ -107,6 +107,7 @@ pub struct LiveProbe {
     /// or follow can complete sets this so the post-click verification
     /// wait, not just candidate resolution, also succeeds.
     pub satisfy_wait: AtomicBool,
+    pub wait_error: std::sync::Mutex<Option<CommandError>>,
 }
 
 /// Mirrors `worker_pool::chromium`'s `page_missing()`: the exact
@@ -527,6 +528,9 @@ impl LiveWorker {
         &self,
         condition: &types::WaitCondition,
     ) -> Result<worker_pool::wait::WaitObservation, CommandError> {
+        if let Some(error) = self.probe.wait_error.lock().expect("wait error").clone() {
+            return Err(error);
+        }
         if self.probe.satisfy_wait.load(Ordering::SeqCst) {
             return Ok(fake_wait_observation(condition));
         }

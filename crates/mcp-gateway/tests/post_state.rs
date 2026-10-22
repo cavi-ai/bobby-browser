@@ -48,6 +48,67 @@ async fn call_tool(server: &Server, id: u64, name: &str, arguments: Value) -> Va
 }
 
 #[tokio::test]
+async fn landed_follow_verification_failure_returns_recovery_state_without_reclicking() {
+    for observation_fails in [false, true] {
+        let live = live_with_capabilities(Capability::ALL.to_vec()).await;
+        let started = call_tool(
+            &live.server,
+            1,
+            "workflow_start",
+            json!({"profile":"follow-recovery"}),
+        )
+        .await;
+        let handle = &started["result"]["structuredContent"]["workflowHandle"];
+        live.probe
+            .candidates
+            .lock()
+            .expect("candidates")
+            .push(clickable_candidate());
+        *live.probe.wait_error.lock().expect("wait error") = Some(types::CommandError {
+            code: types::ErrorCode::WaitConditionTimedOut,
+            message: "wait condition was not satisfied within 100ms".into(),
+            layer: types::ErrorLayer::Driver,
+            retryable: false,
+        });
+        if observation_fails {
+            live.probe
+                .accessibility_failures_remaining
+                .store(20, Ordering::SeqCst);
+        }
+        let response = call_tool(&live.server, 2, "intent_follow", json!({
+            "workflowHandle":handle,"purpose":"Continue to review",
+            "hints":{"role":"button","accessibleName":"Continue"},
+            "expectedState":{"condition":{"kind":"url","matcher":{"kind":"contains","value":"/review"}},"timeoutMs":100}
+        })).await;
+        let outcome = &response["result"]["structuredContent"];
+        assert_eq!(outcome["status"], "failed", "{response}");
+        assert_eq!(response["result"]["isError"], true);
+        assert_eq!(outcome["error"]["retryable"], false);
+        assert!(outcome["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("activation landed"));
+        if observation_fails {
+            assert_eq!(
+                outcome["postStateStatus"]["status"], "unavailable",
+                "{response}"
+            );
+            assert!(outcome.get("postState").is_none());
+        } else {
+            assert_eq!(
+                outcome["postStateStatus"]["status"], "available",
+                "{response}"
+            );
+            assert_eq!(outcome["postState"]["workflowHandle"], *handle);
+            assert_eq!(outcome["postState"]["source"], "live");
+            assert_eq!(outcome["postState"]["pageDerived"], true);
+        }
+        assert_eq!(live.probe.click_calls.load(Ordering::SeqCst), 1);
+        assert!(live.accessibility_calls() > 0);
+    }
+}
+
+#[tokio::test]
 async fn landed_submit_verification_failure_returns_state_without_replaying_the_effect() {
     for observation_fails in [false, true] {
         let live = live_with_capabilities(Capability::ALL.to_vec()).await;
