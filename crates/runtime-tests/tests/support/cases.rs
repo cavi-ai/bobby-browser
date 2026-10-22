@@ -72,6 +72,7 @@ macro_rules! every_case {
             navigate_waits_for_late_scripts,
             page_titles_withhold_disclosed_credentials,
             observation_carries_each_text_once,
+            compact_agent_evidence_preserves_journal_diagnostics,
             sign_in_fields_show_their_labels,
             placeholder_named_fields_get_snapshot_targets,
             concurrent_sessions_each_keep_their_own_page,
@@ -4984,5 +4985,107 @@ pub async fn framed_pointer_respects_frame_transforms(rig: &Rig) {
         "completed",
         "click missed the transformed control"
     );
+    live.close().await;
+}
+
+pub async fn compact_agent_evidence_preserves_journal_diagnostics(rig: &Rig) {
+    let site = FixtureSite::spawn(vec![(
+        "/projection",
+        Route::Html(page(
+            "Projection",
+            r#"
+        <label for="note">Note</label><input id="note">
+        <button>Continue</button>
+    "#,
+        )),
+    )])
+    .await;
+    let live = Live::open(rig, &site.url("/projection")).await;
+    let compact = live
+        .call(
+            "intent_locate",
+            json!({"purpose":"Continue","hints":{"role":"button","accessibleName":"Continue"}}),
+        )
+        .await;
+    assert_eq!(compact["status"], "completed", "{compact}");
+    let record = compact["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["kind"] == "intentExecution")
+        .expect("intent verification");
+    assert_eq!(record["record"]["verification"], "resolved");
+    assert_eq!(record["record"]["candidates"], json!([]), "{compact}");
+    assert_eq!(
+        record["record"]["candidateDetailsOmitted"], true,
+        "{compact}"
+    );
+    serde_json::from_value::<types::CommandOutcome>(compact.clone())
+        .expect("compact outcome preserves typed MCP compatibility");
+
+    let journal =
+        std::fs::read_to_string(rig.storage_root().join("commands.jsonl")).expect("journal");
+    let journaled = journal
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find_map(|record| {
+            let outcome = &record["outcome"];
+            (outcome["commandId"] == compact["commandId"] && outcome["status"] == "completed")
+                .then(|| outcome.clone())
+        })
+        .expect("the same command persisted before projection");
+    let full_record = journaled["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["kind"] == "intentExecution")
+        .expect("journal intent record");
+    assert!(!full_record["record"]["candidates"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(full_record["record"]["planSummary"].is_string());
+    assert!(compact.to_string().len() < journaled.to_string().len());
+    eprintln!(
+        "live outcome bytes: {} -> {}",
+        journaled.to_string().len(),
+        compact.to_string().len()
+    );
+
+    // The envelope escape hatch remains a diagnostic path with typed evidence.
+    let diagnostic = rig.tool("command_execute", json!({"envelope":types::CommandEnvelope {
+        schema_version: types::CommandEnvelope::SCHEMA_VERSION,
+        command_id: types::CommandId::new(), attempt_id: types::AttemptId::new(),
+        workflow_id: serde_json::from_value(live.started["workflowId"].clone()).unwrap(),
+        session_id: serde_json::from_value(live.session_id.clone()).unwrap(),
+        page_id: Some(serde_json::from_value(live.page_id.clone()).unwrap()),
+        deadline: chrono::Utc::now()+chrono::Duration::seconds(30),
+        command: types::RuntimeCommand::Intent(types::IntentCommand::Locate(types::LocateIntent {
+            purpose: "Continue".into(),
+            hints: types::IntentHints { role: Some("button".into()), accessible_name: Some("Continue".into()), ..Default::default() },
+        })),
+    }})).await;
+    assert_eq!(diagnostic["status"], "completed", "{diagnostic}");
+    let diagnostic_record = diagnostic["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["kind"] == "intentExecution")
+        .expect("diagnostic record");
+    assert!(diagnostic_record["record"]["candidates"].is_array());
+    serde_json::from_value::<types::CommandOutcome>(diagnostic)
+        .expect("full typed outcome remains compatible");
+
+    for detail in ["compact", "full"] {
+        let observed = live.observe(json!({"evidenceDetail":detail})).await;
+        let evidence = observed["observationOutcome"]["evidence"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            evidence.iter().any(|item| item["kind"] == "executionPath"),
+            detail == "full",
+            "{observed}"
+        );
+    }
     live.close().await;
 }
