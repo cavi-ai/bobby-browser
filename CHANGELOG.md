@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- A `bobby` reached through a symlink runs the `mcp-gateway` and `acp-gateway` installed beside its target instead of another install's on PATH.
+
 ## 0.21.1 - 2026-10-22
 
 ### Added
