@@ -112,25 +112,31 @@ fn resolve_acp_gateway() -> Result<PathBuf> {
 }
 
 fn resolve_sibling_or_path(command: &str) -> Result<PathBuf> {
-    if let Ok(current) = std::env::current_exe() {
-        if let Some(dir) = current.parent() {
-            let sibling = dir.join(command);
-            if sibling.is_file() {
-                return Ok(sibling);
-            }
-        }
-    }
-    if let Some(paths) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&paths) {
-            let candidate = dir.join(command);
-            if candidate.is_file() {
-                return Ok(candidate);
-            }
-        }
-    }
-    Err(anyhow!(
-        "{command} not found next to the bobby binary or on PATH"
-    ))
+    let exe = std::env::current_exe().ok();
+    let path = std::env::var_os("PATH");
+    sibling_or_on_path(exe.as_deref(), path.as_deref(), command)
+        .ok_or_else(|| anyhow!("{command} not found next to the bobby binary or on PATH"))
+}
+
+/// A symlinked bobby takes the sidecar installed beside its target before one
+/// beside the link or on PATH, so it never pairs with another install's build.
+fn sibling_or_on_path(
+    exe: Option<&Path>,
+    path: Option<&std::ffi::OsStr>,
+    command: &str,
+) -> Option<PathBuf> {
+    let target = exe.and_then(|exe| std::fs::canonicalize(exe).ok());
+    let beside = target
+        .as_deref()
+        .into_iter()
+        .chain(exe)
+        .filter_map(Path::parent)
+        .map(|dir| dir.join(command));
+    let on_path = path
+        .into_iter()
+        .flat_map(std::env::split_paths)
+        .map(|dir| dir.join(command));
+    beside.chain(on_path).find(|candidate| candidate.is_file())
 }
 
 /// Absolute path to a sidecar binary next to bobby or on PATH, if present.
@@ -335,6 +341,31 @@ pub fn mcp_handshake(bootstrap: &BTreeMap<String, String>) -> Result<HandshakeRe
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_bobby_uses_the_gateway_installed_beside_its_target() {
+        let root = tempfile::tempdir().unwrap();
+        let install = root.path().join("install");
+        let links = root.path().join("links");
+        let older = root.path().join("older");
+        for dir in [&install, &links, &older] {
+            std::fs::create_dir(dir).unwrap();
+        }
+        std::fs::write(install.join("bobby"), "").unwrap();
+        std::fs::write(install.join("mcp-gateway"), "").unwrap();
+        std::fs::write(older.join("mcp-gateway"), "").unwrap();
+        std::os::unix::fs::symlink(install.join("bobby"), links.join("bobby")).unwrap();
+        let path = std::env::join_paths([&links, &older]).unwrap();
+
+        let resolved =
+            super::sibling_or_on_path(Some(&links.join("bobby")), Some(&path), "mcp-gateway");
+
+        assert_eq!(
+            resolved.map(|found| std::fs::canonicalize(found).unwrap()),
+            Some(std::fs::canonicalize(install.join("mcp-gateway")).unwrap())
+        );
+    }
+
     use super::*;
 
     #[test]
