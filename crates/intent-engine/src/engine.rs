@@ -1687,6 +1687,17 @@ async fn act_fill(
                 )
                 .await
         }
+        ControlAction::PasswordManagerFill => {
+            browser
+                .control_action(
+                    page_id,
+                    &ControlActionCommand {
+                        target: form_control_target(candidate, intent_target)?,
+                        action: ControlAction::PasswordManagerFill,
+                    },
+                )
+                .await
+        }
         ControlAction::Activate => Err(CommandError {
             code: ErrorCode::InvalidRequest,
             message: "activate is not valid for fill; use control_action instead".into(),
@@ -1822,6 +1833,7 @@ fn fill_kind(value: &ControlAction) -> &'static str {
         ControlAction::SelectMany { .. } => "selectMany",
         ControlAction::Clear => "clear",
         ControlAction::Activate => "activate",
+        ControlAction::PasswordManagerFill => "passwordManagerFill",
     }
 }
 
@@ -4684,7 +4696,7 @@ async fn execute_vision_action(
                         message: "typeIntoCandidate file upload failed".into(),
                         ..error
                     })?,
-                ControlAction::Activate => {
+                ControlAction::Activate | ControlAction::PasswordManagerFill => {
                     return Err(CommandError {
                         code: ErrorCode::IntentActionMismatch,
                         message: format!(

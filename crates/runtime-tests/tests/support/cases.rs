@@ -5089,3 +5089,124 @@ pub async fn compact_agent_evidence_preserves_journal_diagnostics(rig: &Rig) {
     }
     live.close().await;
 }
+
+/// A login form with an inline credential menu that, like a password-manager
+/// extension, answers only trusted input: focus opens it, ArrowDown selects the
+/// suggestion and Enter fills both fields.
+fn password_manager_page() -> String {
+    page(
+        "Sign in",
+        r#"<form onsubmit="event.preventDefault()">
+            <label>Email <input id="user" type="email" autocomplete="username"></label>
+            <label>Password <input id="pass" type="password" autocomplete="current-password"></label>
+            <button>Sign in</button>
+        </form>
+        <p role="status" aria-label="Result" id="result">idle</p>
+        <script>
+            let open = false, selected = false;
+            const result = document.getElementById("result");
+            for (const field of [user, pass]) {
+                field.addEventListener("focus", (event) => {
+                    if (event.isTrusted) { open = true; result.textContent = "menu"; }
+                });
+                field.addEventListener("keydown", (event) => {
+                    if (!event.isTrusted || !open) return;
+                    if (event.key === "ArrowDown") { selected = true; event.preventDefault(); }
+                    if (event.key === "Enter" && selected) {
+                        event.preventDefault();
+                        user.value = "agent@example.test";
+                        pass.value = "fixture-secret";
+                        result.textContent = "filled";
+                    }
+                });
+            }
+        </script>"#,
+    )
+}
+
+async fn start_password_manager_session(rig: &Rig, url: &str, opt_in: bool) -> Value {
+    let started = rig
+        .tool(
+            "workflow_start",
+            json!({"profile":"site-regressions","url":url,
+                   "executionPolicy":{"passwordManager":opt_in}}),
+        )
+        .await;
+    assert_eq!(started["status"], "completed", "workflow_start: {started}");
+    started
+}
+
+pub async fn password_manager_fill_accepts_the_inline_suggestion(rig: &Rig) {
+    let site = FixtureSite::spawn(vec![("/login", Route::Html(password_manager_page()))]).await;
+    let started = start_password_manager_session(rig, &site.url("/login"), true).await;
+    let live = Live {
+        rig,
+        session_id: started["sessionId"].clone(),
+        page_id: started["pageId"].clone(),
+        started,
+    };
+    let filled = live
+        .call(
+            "control_action",
+            json!({"target":{"role":"textbox","accessibleName":"Password"},
+                   "action":{"kind":"passwordManagerFill"}}),
+        )
+        .await;
+    assert_eq!(
+        filled["status"], "completed",
+        "passwordManagerFill: {filled}"
+    );
+    assert!(
+        !filled.to_string().contains("fixture-secret"),
+        "the filled password reached the caller: {filled}"
+    );
+    let landed = wait_for_result(&live, "filled").await;
+    assert_eq!(
+        landed["status"], "completed",
+        "the menu never filled: {landed}"
+    );
+    let snapshot = live.call("form_snapshot", json!({})).await;
+    let mut emails = Vec::new();
+    controls_named(&snapshot, "Email", &mut emails);
+    assert_eq!(
+        emails.first().map(|control| control["state"].clone()),
+        Some(json!({"kind":"text","value":"agent@example.test"})),
+        "the username was not filled: {snapshot}"
+    );
+    let mut passwords = Vec::new();
+    controls_named(&snapshot, "Password", &mut passwords);
+    assert_eq!(
+        passwords.first().map(|control| control["state"].clone()),
+        Some(json!({"kind":"redacted","present":true})),
+        "the password was not filled: {snapshot}"
+    );
+    live.close().await;
+}
+
+pub async fn password_manager_fill_requires_the_session_opt_in(rig: &Rig) {
+    let site = FixtureSite::spawn(vec![("/login", Route::Html(password_manager_page()))]).await;
+    let started = start_password_manager_session(rig, &site.url("/login"), false).await;
+    let live = Live {
+        rig,
+        session_id: started["sessionId"].clone(),
+        page_id: started["pageId"].clone(),
+        started,
+    };
+    let refused = live
+        .call(
+            "control_action",
+            json!({"target":{"role":"textbox","accessibleName":"Password"},
+                   "action":{"kind":"passwordManagerFill"}}),
+        )
+        .await;
+    assert_eq!(
+        refused["error"]["code"], "policyDenied",
+        "without opt-in: {refused}"
+    );
+    let idle = live.call("a11y_snapshot", json!({})).await;
+    assert!(
+        idle.to_string().contains("idle"),
+        "the menu was driven without opt-in: {idle}"
+    );
+    live.close().await;
+}

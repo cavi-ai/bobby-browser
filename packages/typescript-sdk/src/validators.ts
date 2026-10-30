@@ -109,7 +109,7 @@ const oneOf = <T extends string>(value: unknown, values: readonly T[]): value is
 const unique = (values: readonly unknown[]): boolean => new Set(values).size === values.length;
 
 const CONTROL_KINDS = ["text", "email", "password", "search", "number", "checkbox", "radio", "switch", "selectOne", "selectMultiple", "date", "time", "dateTimeLocal", "range", "file", "contentEditable", "combobox", "listbox", "submit", "reset", "other"] as const;
-const OPERATIONS = ["setText", "setChecked", "selectOne", "selectMany", "setFiles", "clear", "activate"] as const;
+const OPERATIONS = ["setText", "setChecked", "selectOne", "selectMany", "setFiles", "clear", "activate", "passwordManagerFill"] as const;
 const VALIDITY_FLAGS = ["valueMissing", "typeMismatch", "patternMismatch", "tooLong", "tooShort", "rangeUnderflow", "rangeOverflow", "stepMismatch", "badInput", "customError"] as const;
 const COMMAND_ERROR_CODES = ["invalidRequest", "notFound", "deadlineExceeded", "browserLaunchFailed", "browserCommandFailed", "verificationFailed", "journalFailed", "resourceExhausted", "policyDenied", "internal", "targetNotFound", "targetAmbiguous", "frameNotFound", "shadowRootUnavailable", "targetDetached", "targetObscured", "targetOutOfBounds", "waitConditionTimedOut", "screenshotCaptureFailed", "networkPolicyDenied", "httpResponseTooLarge", "httpTransferFailed", "httpStateConflict", "httpEquivalenceUnproven", "intentCompileFailed", "intentActionMismatch", "obstructionSuspected", "visionAssistDenied", "visionAssistFailed", "expectedStatePreSatisfied", "boundaryAlreadyExecuted"] as const;
 

@@ -16,11 +16,11 @@ export type ProviderHealthStatus = "healthy" | "degraded" | "unhealthy";
 export interface ProviderHealthSnapshot { providerMode: string; status: ProviderHealthStatus; successes: number; failures: number; consecutiveFailures: number; budgetViolations: number; lastLatencyMs?: number; latencyBudgetMs?: number; failureThreshold: number; }
 export interface StorageIntegrityIssue { store: "commandIdempotency" | "lifecycleIdempotency" | "jobIdempotency" | "jobJournal"; reason: "unreadableLedger" | "duplicateLedgerKey" | "ledgerCapacityExceeded" | "unreadableJobHistory"; }
 export interface RuntimeInfo { storageIntegrity?: StorageIntegrityIssue[]; version: string; capabilities: string[]; active_sessions: number; queued_jobs: number; uptime_ms: number; visionProposeBudgetMs?: number; /** Process-local operational metrics; nested counters stay opaque to this contract. */ operationalMetrics?: Record<string, JsonValue>; /** Present when a vision provider is configured. */ providerHealth?: ProviderHealthSnapshot[]; }
-export interface SessionState { id: Id; profile: string; proxy: string | null; page_ids: Id[]; created_at: string; last_used_at: string; execution_policy: { javascriptEvaluation: boolean; visionAssist: boolean; fingerprint: boolean; humanize: boolean; visionNode?: string }; /** Present iff true: a godmode session running the ZigZagZig recovery ladder. */ zigzagzig?: boolean; }
+export interface SessionState { id: Id; profile: string; proxy: string | null; page_ids: Id[]; created_at: string; last_used_at: string; execution_policy: { javascriptEvaluation: boolean; visionAssist: boolean; fingerprint: boolean; humanize: boolean; passwordManager: boolean; visionNode?: string }; /** Present iff true: a godmode session running the ZigZagZig recovery ladder. */ zigzagzig?: boolean; }
 export type PageMode = "Document" | "Interactive" | "Render";
 export interface PageState { id: Id; session_id: Id; url: string | null; mode: PageMode; ready_state: string; pending_requests: number; }
 /** Session execution policy. Omitted fields default to denied. */
-export interface ExecutionPolicy { javascriptEvaluation?: boolean; visionAssist?: boolean; fingerprint?: boolean; humanize?: boolean; visionNode?: string; }
+export interface ExecutionPolicy { javascriptEvaluation?: boolean; visionAssist?: boolean; fingerprint?: boolean; humanize?: boolean; passwordManager?: boolean; visionNode?: string; }
 export interface CreateSessionRequest { profile: string; proxy: string | null; executionPolicy?: ExecutionPolicy; /** Godmode session: every capability on + the ZigZagZig recovery ladder on every page-bound command. */ zigzagzig?: boolean; }
 export interface OpenPageRequest { session_id: Id; }
 
@@ -231,7 +231,7 @@ export interface AccessibilityNode {
 /** Schema version for {@link FormSnapshot} payloads. */
 export const FORM_SNAPSHOT_SCHEMA_VERSION = 1 as const;
 export type FormControlKind = "text" | "email" | "password" | "search" | "number" | "checkbox" | "radio" | "switch" | "selectOne" | "selectMultiple" | "date" | "time" | "dateTimeLocal" | "range" | "file" | "contentEditable" | "combobox" | "listbox" | "submit" | "reset" | "other";
-export type FormControlOperation = "setText" | "setChecked" | "selectOne" | "selectMany" | "setFiles" | "clear" | "activate";
+export type FormControlOperation = "setText" | "setChecked" | "selectOne" | "selectMany" | "setFiles" | "clear" | "activate" | "passwordManagerFill";
 export type FormValidityFlag = "valueMissing" | "typeMismatch" | "patternMismatch" | "tooLong" | "tooShort" | "rangeUnderflow" | "rangeOverflow" | "stepMismatch" | "badInput" | "customError";
 export interface SemanticTargetSegment { role: string; accessibleName: string; ordinal: number | null; }
 export interface FormControlTarget { role: string; accessibleName: string; ordinal?: number | null; framePath?: SemanticTargetSegment[]; shadowPath?: SemanticTargetSegment[]; }
@@ -258,7 +258,8 @@ export type ControlAction =
   | { kind: "selectMany"; values: string[] }
   | { kind: "setFiles"; paths: string[] }
   | { kind: "clear" }
-  | { kind: "activate" };
+  | { kind: "activate" }
+  | { kind: "passwordManagerFill" };
 export interface ControlActionCommand { target: FormControlTarget; action: ControlAction; }
 export interface RevealedControl { controlKind: FormControlKind; accessibleName?: string; target?: FormControlTarget; }
 export interface ControlActionEvidence { operation: FormControlOperation; target: FormControlTarget; state: FormControlState; validity: FormControlValidity; nodeReplaced: boolean; revealedControls?: RevealedControl[]; }

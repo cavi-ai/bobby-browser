@@ -62,6 +62,20 @@ impl RuntimeCommand {
             Self::Intent(_) => {}
         }
     }
+
+    /// True when the command drives the browser's password manager, which the
+    /// session must opt into with `ExecutionPolicy::password_manager`.
+    pub fn uses_password_manager(&self) -> bool {
+        let fill = |action: &ControlAction| matches!(action, ControlAction::PasswordManagerFill);
+        match self {
+            Self::Primitive(PrimitiveCommand::ControlAction(command)) => fill(&command.action),
+            Self::Intent(IntentCommand::Fill(intent)) => fill(&intent.value),
+            Self::Intent(IntentCommand::CompleteForm(intent)) => {
+                intent.fields.iter().any(|field| fill(&field.value))
+            }
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -423,6 +437,9 @@ pub enum ControlAction {
     },
     Clear,
     Activate,
+    /// Accept the browser password manager's suggestion for this credential
+    /// field. Requires the session's `passwordManager` policy; never returns a value.
+    PasswordManagerFill,
 }
 
 impl ControlAction {
@@ -462,7 +479,9 @@ impl ControlAction {
                 }
                 Ok(())
             }
-            Self::SetChecked { .. } | Self::Clear | Self::Activate => Ok(()),
+            Self::SetChecked { .. } | Self::Clear | Self::Activate | Self::PasswordManagerFill => {
+                Ok(())
+            }
         }
     }
 
@@ -475,6 +494,7 @@ impl ControlAction {
             Self::SetFiles { .. } => crate::FormControlOperation::SetFiles,
             Self::Clear => crate::FormControlOperation::Clear,
             Self::Activate => crate::FormControlOperation::Activate,
+            Self::PasswordManagerFill => crate::FormControlOperation::PasswordManagerFill,
         }
     }
 }
@@ -1044,6 +1064,10 @@ pub struct ExecutionPolicy {
     /// `Evidence::Humanization` so intent verification still agrees.
     #[serde(default)]
     pub humanize: bool,
+    /// Whether `passwordManagerFill` may drive the browser's own password
+    /// manager for this session. Off by default; the agent never sees a value.
+    #[serde(default)]
+    pub password_manager: bool,
     /// Name of the registered vision node this session escalates to.
     ///
     /// `None` means no escalation, and naming an unconfigured node declines, so

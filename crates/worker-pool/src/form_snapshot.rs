@@ -463,10 +463,12 @@ fn supported_operations(
         return Vec::new();
     }
     match kind {
-        FormControlKind::Text
-        | FormControlKind::Email
-        | FormControlKind::Password
-        | FormControlKind::Search
+        FormControlKind::Text | FormControlKind::Email | FormControlKind::Password => vec![
+            FormControlOperation::SetText,
+            FormControlOperation::Clear,
+            FormControlOperation::PasswordManagerFill,
+        ],
+        FormControlKind::Search
         | FormControlKind::Number
         | FormControlKind::Date
         | FormControlKind::Time
@@ -595,6 +597,8 @@ pub fn control_action_evidence(
         (ControlAction::Clear, FormControlState::Selection { values }) => values.is_empty(),
         (ControlAction::Clear, FormControlState::Files { count }) => *count == 0,
         (ControlAction::Activate, _) => true,
+        (ControlAction::PasswordManagerFill, FormControlState::Text { value }) => !value.is_empty(),
+        (ControlAction::PasswordManagerFill, FormControlState::Redacted { present }) => *present,
         _ => false,
     };
     if !matched {
@@ -861,7 +865,11 @@ mod tests {
         );
         assert_eq!(
             form.controls[0].supported_operations,
-            vec![FormControlOperation::SetText, FormControlOperation::Clear]
+            vec![
+                FormControlOperation::SetText,
+                FormControlOperation::Clear,
+                FormControlOperation::PasswordManagerFill
+            ]
         );
         assert_eq!(form.controls[1].control_kind, FormControlKind::Password);
         assert_eq!(

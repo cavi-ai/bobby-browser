@@ -533,6 +533,7 @@ pub(crate) fn session_create_schema() -> (Value, Vec<&'static str>) {
                     "visionAssist":{"type":"boolean"},
                     "fingerprint":{"type":"boolean"},
                     "humanize":{"type":"boolean"},
+                    "passwordManager":{"type":"boolean"},
                     "visionNode":string(1, 128)
                 }),
                 &[]
@@ -640,6 +641,7 @@ pub(crate) fn workflow_start_schema() -> (Value, Vec<&'static str>) {
                     "visionAssist":{"type":"boolean"},
                     "fingerprint":{"type":"boolean"},
                     "humanize":{"type":"boolean"},
+                    "passwordManager":{"type":"boolean"},
                     "visionNode":string(1, 128)
                 }),
                 &[]
@@ -1127,7 +1129,7 @@ fn apply_advertised_input_patches(patched: &mut Map<String, Value>) {
         "ControlActionKind".to_owned(),
         json!({
             "type":"object",
-            "description":"{kind:setText,value:string,clearFirst?:boolean}, {kind:setChecked,checked:boolean}, {kind:selectOne,value:string}, {kind:selectMany,values:string[]}, {kind:setFiles,paths:string[]}, {kind:clear}, or {kind:activate}."
+            "description":"{kind:setText,value:string,clearFirst?:boolean}, {kind:setChecked,checked:boolean}, {kind:selectOne,value:string}, {kind:selectMany,values:string[]}, {kind:setFiles,paths:string[]}, {kind:clear}, {kind:activate}, or {kind:passwordManagerFill} (Firefox, executionPolicy.passwordManager)."
         }),
     );
     patched.insert(
@@ -2009,7 +2011,8 @@ fn definitions() -> Value {
             {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"selectMany"},"values":nonempty_array(string(0,4096),512)},"required":["kind","values"]},
             {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setFiles"},"paths":nonempty_array(string(1,4096),512)},"required":["kind","paths"]},
             {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"clear"}},"required":["kind"]},
-            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"activate"}},"required":["kind"]}
+            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"activate"}},"required":["kind"]},
+            {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"passwordManagerFill"}},"required":["kind"]}
         ]},
         "CommandEnvelope": object(json!({
             "schemaVersion":{"type":"integer","const":2},
@@ -2551,7 +2554,8 @@ fn primitive_commands() -> Vec<Value> {
                         {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"selectMany"},"values":nonempty_array(string(0,4096),512)},"required":["kind","values"]},
                         {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"setFiles"},"paths":nonempty_array(string(1,4096),512)},"required":["kind","paths"]},
                         {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"clear"}},"required":["kind"]},
-                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"activate"}},"required":["kind"]}
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"activate"}},"required":["kind"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"passwordManagerFill"}},"required":["kind"]}
                     ]}
                 }),
                 &["target", "action"],
@@ -3216,6 +3220,7 @@ fn session_state() -> Value {
                     "visionAssist":{"type":"boolean"},
                     "fingerprint":{"type":"boolean"},
                     "humanize":{"type":"boolean"},
+                    "passwordManager":{"type":"boolean"},
                     "visionNode":string(1, 128)
                 }),
                 &[]
@@ -3410,7 +3415,7 @@ fn form_control() -> Value {
             "validity":{"$ref":"#/$defs/FormControlValidity"},
             "options":array(json!({"$ref":"#/$defs/FormOption"}), 512),
             "supportedOperations":array(
-                json!({"type":"string","enum":["setText","setChecked","selectOne","selectMany","setFiles","clear","activate"]}),
+                json!({"type":"string","enum":["setText","setChecked","selectOne","selectMany","setFiles","clear","activate","passwordManagerFill"]}),
                 7
             )
         }),

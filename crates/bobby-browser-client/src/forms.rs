@@ -108,6 +108,7 @@ pub enum FormControlOperation {
     SetFiles,
     Clear,
     Activate,
+    PasswordManagerFill,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
