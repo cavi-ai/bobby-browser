@@ -2826,6 +2826,12 @@ impl crate::InputEngine for ChromiumWorker {
                 _ => resolved.clear_control(&page).await?,
             },
             ControlAction::Activate => resolved.click(&page).await?,
+            ControlAction::PasswordManagerFill => {
+                return Err(driver_error(
+                    ErrorCode::InvalidRequest,
+                    "passwordManagerFill is supported on Firefox only",
+                ));
+            }
         }
 
         let after = read_snapshot().await?;

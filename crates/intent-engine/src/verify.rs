@@ -120,6 +120,9 @@ pub(crate) fn compatible_role(value: &ControlAction, role: &str, is_file_input: 
         ControlAction::SelectOne { .. } => !is_file_input && matches!(role, "combobox" | "listbox"),
         ControlAction::SelectMany { .. } => !is_file_input && role == "listbox",
         ControlAction::SetChecked { .. } => matches!(role, "checkbox" | "radio"),
+        ControlAction::PasswordManagerFill => {
+            !is_file_input && matches!(role, "textbox" | "searchbox")
+        }
         ControlAction::Clear | ControlAction::Activate => true,
     }
 }
@@ -146,6 +149,7 @@ pub fn verify_fill(value: &ControlAction, evidence: &[Evidence]) -> Result<(), S
         ControlAction::SetFiles { paths } => verify_upload_paths(paths, evidence),
         ControlAction::SelectMany { values } => verify_selected_values(values, evidence),
         ControlAction::Clear => verify_cleared(evidence),
+        ControlAction::PasswordManagerFill => verify_password_manager_filled(evidence),
         ControlAction::Activate => {
             Err("activate is not valid for fill; use control_action instead".into())
         }
@@ -258,6 +262,25 @@ fn verify_cleared(evidence: &[Evidence]) -> Result<(), String> {
         FormControlState::Selection { values } if values.is_empty() => Ok(()),
         FormControlState::Files { count } if *count == 0 => Ok(()),
         state => Err(format!("clear did not produce an empty state: {state:?}")),
+    }
+}
+
+fn verify_password_manager_filled(evidence: &[Evidence]) -> Result<(), String> {
+    let action = evidence.iter().find_map(|item| match item {
+        Evidence::ControlAction { action }
+            if action.operation == FormControlOperation::PasswordManagerFill =>
+        {
+            Some(action)
+        }
+        _ => None,
+    });
+    let Some(action) = action else {
+        return Err("missing password manager fill evidence".into());
+    };
+    match &action.state {
+        FormControlState::Text { value } if !value.is_empty() => Ok(()),
+        FormControlState::Redacted { present: true } => Ok(()),
+        _ => Err("the password manager filled nothing into the field".into()),
     }
 }
 

@@ -687,6 +687,29 @@ impl RuntimeService {
             }
         }
 
+        // Deny-by-default gate for the browser's password manager, with the same
+        // fail-closed session lookup as JavaScript evaluation.
+        if envelope.command.uses_password_manager() {
+            let allowed = self
+                .sessions
+                .get(&envelope.session_id)
+                .await
+                .map(|session| session.execution_policy.password_manager)
+                .unwrap_or(false);
+            if !allowed {
+                tracing::warn!(session_id = %envelope.session_id.0, "policy.password_manager_denied");
+                return CommandOutcome::PolicyDenied {
+                    command_id: envelope.command_id.clone(),
+                    error: CommandError {
+                        code: ErrorCode::PolicyDenied,
+                        message: "password manager fill is not permitted for this session; start it with executionPolicy.passwordManager".into(),
+                        layer: ErrorLayer::Workflow,
+                        retryable: false,
+                    },
+                };
+            }
+        }
+
         // One session lookup for the whole policy. An absent session means every
         // flag is false: no vision escalation, fingerprint spoofing, or
         // humanized input.

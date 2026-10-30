@@ -706,6 +706,7 @@ fn execution_policy_defaults_to_deny() {
     assert!(!default.vision_assist);
     assert!(!default.fingerprint);
     assert!(!default.humanize);
+    assert!(!default.password_manager);
 
     // Asserting the whole object, not just the flags read above, is what makes
     // this a deny-by-default guard rather than a spot check: a new privileged
@@ -717,7 +718,8 @@ fn execution_policy_defaults_to_deny() {
             "javascriptEvaluation": false,
             "visionAssist": false,
             "fingerprint": false,
-            "humanize": false
+            "humanize": false,
+            "passwordManager": false
         })
     );
     for (name, flag) in value.as_object().expect("policy is an object") {

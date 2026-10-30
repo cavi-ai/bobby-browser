@@ -1946,6 +1946,7 @@ async fn form_snapshot_deserializes_the_shared_projection_over_bidi() {
                                 == vec![
                                     types::FormControlOperation::SetText,
                                     types::FormControlOperation::Clear,
+                                    types::FormControlOperation::PasswordManagerFill,
                                 ]
                 )
     )));

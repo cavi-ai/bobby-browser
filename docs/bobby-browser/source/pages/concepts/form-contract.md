@@ -46,6 +46,7 @@ Pass a control's target to `control_action` (or the `controlAction` primitive). 
 | `setFiles` | `{kind, paths}` | Set file input paths. Needs `file:upload` |
 | `clear` | `{kind}` | Empty the control |
 | `activate` | `{kind}` | Activate a link or button |
+| `passwordManagerFill` | `{kind}` | Accept the browser password manager's suggestion for a text, email or password field. Firefox only; needs `executionPolicy.passwordManager`; the filled value is never returned |
 
 The `fill` and `completeForm` intents use the same vocabulary, without `activate`. See [Intent commands](../guides/intents.md).
 

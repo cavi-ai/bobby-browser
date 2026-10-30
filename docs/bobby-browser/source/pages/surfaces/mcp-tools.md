@@ -141,7 +141,7 @@ If `workflow_start` fails, it reports `pageOpenFailed`, `navigationFailed`, `wor
 | `click` | `selector` or `target`; `modifiers` from `shift`, `ctrl`, `alt`, `meta`; `expectedUrl` |
 | `click_and_wait_for_popup`, `click_and_wait_for_download` | `selector` or `target`, `timeoutMs`, `autoCheckpoint` |
 | `type_text` | `value` (required), `selector` or `target`, `clearFirst`, `expectedUrl` |
-| `control_action` | `target`, `action`: `setText`, `setChecked`, `selectOne`, `selectMany`, `setFiles`, `clear` or `activate` |
+| `control_action` | `target`, `action`: `setText`, `setChecked`, `selectOne`, `selectMany`, `setFiles`, `clear`, `activate` or `passwordManagerFill` (needs `executionPolicy.passwordManager`) |
 | `upload_files` | `paths` (required, up to 16), and `selector`, `target` or a form-snapshot `controlId` |
 | `download_url` | `url`, `maxBytes` (both required), `saveAs`, `expectedContentType` |
 | `dialog` | `action`: `accept` or `dismiss`; `timeoutMs` |

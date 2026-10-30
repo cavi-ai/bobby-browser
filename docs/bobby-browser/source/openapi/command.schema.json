@@ -1687,6 +1687,20 @@
             "kind"
           ],
           "additionalProperties": false
+        },
+        {
+          "description": "Accept the browser password manager's suggestion for this credential\nfield. Requires the session's `passwordManager` policy; never returns a value.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "passwordManagerFill"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "additionalProperties": false
         }
       ]
     },
