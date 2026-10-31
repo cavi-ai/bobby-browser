@@ -25,7 +25,7 @@ bobby install --skill
 
 Ghost and ZigZagZig change how a session prepares and recovers. They run inside the runtime and respect the normal deadlines, policy checks and evidence rules.
 
-The way to use them is a ZigZagZig session. Set `zigzagzig: true` on `POST /v1/sessions`, `session_create` or `workflow_start`. Every policy flag is forced on, so the caller needs `browser:fingerprint` and `browser:humanize`. Each page-bound command in the session then runs under the recovery ladder below.
+The way to use them is a ZigZagZig session. Set `zigzagzig: true` on `POST /v1/sessions`, `session_create` or `workflow_start`. `javascriptEvaluation`, `visionAssist`, `fingerprint` and `humanize` are forced on, so the caller needs `browser:fingerprint` and `browser:humanize`. Each page-bound command in the session then runs under the recovery ladder below.
 
 The skill router also accepts these commands:
 

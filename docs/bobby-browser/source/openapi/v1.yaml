@@ -211,6 +211,7 @@ paths:
                     visionAssist: false
                     fingerprint: false
                     humanize: false
+                    passwordManager: false
       responses:
         "200":
           description: Created
@@ -1503,6 +1504,9 @@ components:
             visionAssist: { type: boolean }
             fingerprint: { type: boolean }
             humanize: { type: boolean }
+            passwordManager: { type: boolean }
+            visionNode: { type: string, minLength: 1, maxLength: 128 }
+        zigzagzig: { type: boolean }
     SubmitJobRequest:
       type: object
       required: [name]

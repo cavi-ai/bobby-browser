@@ -7,13 +7,13 @@ use serde_json::{json, Value};
 use crate::data_collector::VisionDataCollector;
 use crate::upstream::{ExtractInput, ProposeInput, Upstream, UpstreamError};
 use crate::validate::{validate_extract, validate_proposal};
-use crate::wire::{ExtractResponse, ProposeResponse};
+use crate::wire::{ExtractResponse, ProposeResponse, VisionAction};
 
 /// Default Ollama endpoint.
 pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:11434";
 pub const DEFAULT_MODEL: &str = "llava:7b";
 
-const PROPOSE_SYSTEM: &str = "You are a vision assistant for a browser automation agent. Return ONLY valid JSON of the form {\"confidence\": <0.0-1.0>, \"action\": <action>}. Action shapes: {\"kind\":\"click\",\"x\":<px>,\"y\":<px>} {\"kind\":\"typeText\",\"text\":\"<text>\"} {\"kind\":\"extractValue\",\"value\":\"<text>\"} {\"kind\":\"clickCandidate\",\"index\":<n>} {\"kind\":\"typeIntoCandidate\",\"index\":<n>} {\"kind\":\"extractFromCandidate\",\"index\":<n>} {\"kind\":\"challengeSolved\"}. {\"kind\":\"challengeDetected\",\"challengeType\":\"<type>\",\"blocking\":<bool>,\"region\":{\"x\":<px>,\"y\":<px>,\"width\":<px>,\"height\":<px>} (optional)} {\"kind\":\"noChallengeDetected\"} When candidates are listed, select only by zero-based index. Candidate actions contain only kind and index; never emit typed or extracted values. Without candidates, click/typeText/extractValue remain supported. For solveChallenge requests, solve the visible challenge (captcha or verification widget) one step at a time with click. Never type: a challenge is only ever clicked, and typing its label or instructions solves nothing. Aim at the exact center of the target control; checkboxes and verify buttons are small, so pick coordinates inside their borders. Only return {\"kind\":\"challengeSolved\"} when the screenshot shows the solved state (for a checkbox challenge, a visible green checkmark). For detectChallenge requests, never click and never solve: classify the page and return challengeDetected with challengeType one of recaptchaV2Checkbox, recaptchaV3, textCaptcha, imageGridCaptcha, mfaCodeEntry (blocking=true when the widget prevents the task, region optional), or noChallengeDetected when the page carries no captcha or verification widget. Click coordinates are CSS pixels relative to the screenshot image. Do not include markdown fences, comments, or text outside JSON.";
+const PROPOSE_SYSTEM: &str = "You are a vision assistant for a browser automation agent. Return ONLY valid JSON of the form {\"confidence\": <0.0-1.0>, \"action\": <action>}. Action shapes: {\"kind\":\"click\",\"x\":<px>,\"y\":<px>} {\"kind\":\"typeText\",\"text\":\"<text>\"} {\"kind\":\"extractValue\",\"value\":\"<text>\"} {\"kind\":\"clickCandidate\",\"index\":<n>} {\"kind\":\"typeIntoCandidate\",\"index\":<n>} {\"kind\":\"extractFromCandidate\",\"index\":<n>} {\"kind\":\"challengeSolved\"}. {\"kind\":\"challengeDetected\",\"challengeType\":\"<type>\",\"blocking\":<bool>,\"region\":{\"x\":<px>,\"y\":<px>,\"width\":<px>,\"height\":<px>} (optional)} {\"kind\":\"noChallengeDetected\"} When candidates are listed, select only by zero-based index. Candidate actions contain only kind and index; never emit typed or extracted values. Without candidates, click/typeText/extractValue remain supported. For solveChallenge requests, solve the visible challenge (captcha or verification widget) one step at a time with click. Never type: a challenge is only ever clicked, and typing its label or instructions solves nothing. Aim at the exact center of the target control; checkboxes and verify buttons are small, so pick coordinates inside their borders. Only return {\"kind\":\"challengeSolved\"} when the screenshot shows the solved state (for a checkbox challenge, a visible green checkmark). For detectChallenge requests, never click and never solve: classify the page and return challengeDetected with challengeType one of recaptchaV2Checkbox, recaptchaV3, textCaptcha, imageGridCaptcha, mfaCodeEntry (blocking=true when the widget prevents the task, region optional), or noChallengeDetected when the page carries no captcha or verification widget. Click coordinates x and y are integers on a 0-1000 grid over the screenshot: (0,0) is the top-left corner and (1000,1000) the bottom-right corner. Do not include markdown fences, comments, or text outside JSON.";
 
 fn propose_system() -> String {
     format!(
@@ -201,12 +201,35 @@ impl OllamaUpstream {
         let value = self
             .chat_json(&system, &user_text, Some(&input.screenshot_png_b64))
             .await?;
-        let proposal: ProposeResponse = serde_json::from_value(value).map_err(|e| {
+        let mut proposal: ProposeResponse = serde_json::from_value(value).map_err(|e| {
             UpstreamError::Invalid(format!("proposal JSON does not match wire shape: {e}"))
         })?;
         validate_proposal(&proposal).map_err(|e| UpstreamError::Invalid(e.to_string()))?;
+        // The model answers on the 0-1000 grid the prompt names; callers take
+        // pixels of the screenshot they sent.
+        if let VisionAction::Click { x, y } = &mut proposal.action {
+            let (width, height) = png_dimensions(&input.screenshot_png_b64).ok_or_else(|| {
+                UpstreamError::Invalid("screenshot is not a PNG; a click cannot be scaled".into())
+            })?;
+            *x = *x / 1000.0 * width;
+            *y = *y / 1000.0 * height;
+        }
         Ok(proposal)
     }
+}
+
+/// Width and height of a base64 PNG, read from its IHDR header.
+fn png_dimensions(png_b64: &str) -> Option<(f64, f64)> {
+    use base64::Engine;
+    let header = base64::engine::general_purpose::STANDARD
+        .decode(png_b64.get(..32)?)
+        .ok()?;
+    if header.get(..8)? != b"\x89PNG\r\n\x1a\n" || header.get(12..16)? != b"IHDR" {
+        return None;
+    }
+    let width = u32::from_be_bytes(header.get(16..20)?.try_into().ok()?);
+    let height = u32::from_be_bytes(header.get(20..24)?.try_into().ok()?);
+    Some((f64::from(width), f64::from(height)))
 }
 
 fn parse_json_content(content: &str) -> Result<Value, UpstreamError> {

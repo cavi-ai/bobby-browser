@@ -5098,23 +5098,24 @@ impl worker_pool::InputEngine for FirefoxCompanionWorker {
             ControlAction::Clear => {
                 self.evaluate_control_script(page_id, &target, "if(el instanceof HTMLSelectElement)for(const option of el.options)option.selected=false;else if(el instanceof HTMLInputElement&&(el.type==='checkbox'||el.type==='radio'))el.checked=false;else if('value'in el)el.value='';else if(el.isContentEditable)el.textContent='';else return false;").await?;
             }
-            // Password managers only answer trusted input: a native click
-            // focuses the field and opens their inline menu, the keys accept it.
+            // Only watches: the field is never clicked, focused or typed into,
+            // which would raise the browser's own credential dialogs.
             ControlAction::PasswordManagerFill => {
-                let shared_id = self.resolve_element(&context, &selector, true).await?;
-                self.behavioral_scroll_into_view_if_needed(&context, &shared_id)
-                    .await?;
-                let path = self.with_session_random(|random| {
-                    self.mouse_simulator.generate_approach_path(random)
-                });
-                self.perform_pointer_click(&context, &shared_id, Some(&path), &[])
-                    .await?;
-                self.transport
-                    .send(
-                        "input.performActions",
-                        Self::password_manager_keys(&context),
-                    )
-                    .await?;
+                let deadline =
+                    tokio::time::Instant::now() + worker_pool::PASSWORD_MANAGER_FILL_WAIT;
+                while tokio::time::Instant::now() < deadline {
+                    match self
+                        .describe_control(&context, &selector, &command.target)
+                        .await
+                    {
+                        Ok(Some(control))
+                            if !worker_pool::password_manager_filled(&control.state) =>
+                        {
+                            tokio::time::sleep(worker_pool::PASSWORD_MANAGER_FILL_POLL).await;
+                        }
+                        _ => break,
+                    }
+                }
             }
         }
         let after = worker_pool::ObservationEngine::form_snapshot(self, page_id, None)
@@ -7940,26 +7941,6 @@ impl FirefoxCompanionWorker {
                 "type": "key",
                 "id": "automation-runtime-keyboard-behavioral",
                 "actions": bidi_actions,
-            }]
-        })
-    }
-
-    /// BiDi params that move into a password manager's inline menu and accept
-    /// its first suggestion, pausing so the menu opens and the fill lands.
-    fn password_manager_keys(context: &str) -> Value {
-        const PASSWORD_MANAGER_SETTLE_MS: u64 = 400;
-        let mut actions = vec![json!({"type": "pause", "duration": PASSWORD_MANAGER_SETTLE_MS})];
-        for key in ["\u{e015}", "\u{e007}"] {
-            actions.push(json!({"type": "keyDown", "value": key}));
-            actions.push(json!({"type": "keyUp", "value": key}));
-            actions.push(json!({"type": "pause", "duration": PASSWORD_MANAGER_SETTLE_MS}));
-        }
-        json!({
-            "context": context,
-            "actions": [{
-                "type": "key",
-                "id": "automation-runtime-keyboard-password-manager",
-                "actions": actions,
             }]
         })
     }

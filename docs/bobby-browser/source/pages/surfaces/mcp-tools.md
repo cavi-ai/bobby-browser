@@ -105,7 +105,7 @@ If `workflow_start` fails, it reports `pageOpenFailed`, `navigationFailed`, `wor
 | `page_list`, `page_close`, `page_activate` | `sessionId`, `pageId` or `workflowHandle` |
 | `toolset_select` | `toolset`: `explore`, `act`, `intent`, `verify` or `full` |
 
-`executionPolicy` flags are all off by default: `javascriptEvaluation`, `visionAssist`, `fingerprint`, `humanize`. `visionNode` names the vision node the session escalates to. `zigzagzig: true` creates a session with every flag on and automatic recovery; it is advertised only to principals holding `browser:fingerprint` and `browser:humanize`.
+`executionPolicy` flags are all off by default: `javascriptEvaluation`, `visionAssist`, `fingerprint`, `humanize`, `passwordManager`. `visionNode` names the vision node the session escalates to; without it the session uses the runtime's loopback vision node, if one is configured. `zigzagzig: true` creates a session with `javascriptEvaluation`, `visionAssist`, `fingerprint` and `humanize` on and automatic recovery; it is advertised only to principals holding `browser:fingerprint` and `browser:humanize`.
 
 ### Reading a page
 

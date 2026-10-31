@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -216,46 +216,7 @@ async fn stuck_locate_records_a_real_local_vision_proposal() {
             timeout_ms: 120_000,
         },
     );
-    let config = AppConfig {
-        cdp: config::CdpConfig::default(),
-        mcp: config::McpConfig::default(),
-        http: config::HttpConfig {
-            allow_loopback: true,
-            ..config::HttpConfig::default()
-        },
-        server: ServerConfig {
-            host: "127.0.0.1".into(),
-            port: 0,
-            shutdown_timeout_ms: 10_000,
-        },
-        browser: BrowserConfig {
-            executable: Some(chrome_executable()),
-            profiles_dir: root.path().join("profiles"),
-            headless: true,
-            max_active: 1,
-            upload_roots: vec![root.path().to_path_buf()],
-            downloads_dir: root.path().join("downloads"),
-            artifacts_dir: root.path().join("artifacts"),
-            max_artifact_bytes: 8 * 1024 * 1024,
-            max_screenshot_dimension: 16_384,
-            max_js_result_bytes: 64 * 1024,
-            max_js_timeout_ms: 30_000,
-        },
-        storage: StorageConfig {
-            journal_path: root.path().join("commands.jsonl"),
-            checkpoints_dir: root.path().join("checkpoints"),
-            authority_path: root.path().join("authority.json"),
-            scheduler_journal_path: root.path().join("scheduler-jobs.jsonl"),
-        },
-        interface: config::InterfaceConfig::default(),
-        observability: config::ObservabilityConfig::default(),
-        vision: config::VisionConfig {
-            corpus_dir: Some(corpus_dir.clone()),
-            ..config::VisionConfig::default()
-        },
-        context: Default::default(),
-        nodes,
-    };
+    let config = vision_runtime_config(root.path(), nodes, Some(corpus_dir.clone()));
 
     let runtime = RuntimeService::build(&config).await.unwrap();
     let session = runtime
@@ -326,4 +287,163 @@ async fn stuck_locate_records_a_real_local_vision_proposal() {
     assert_eq!(records[0]["purpose"], "Click the visible Continue button");
     assert!(records[0]["modelResponse"]["confidence"].is_number());
     assert_eq!(records[0]["modelResponse"]["action"]["kind"], "click");
+}
+
+fn vision_runtime_config(
+    root: &std::path::Path,
+    nodes: BTreeMap<String, NodeConfig>,
+    corpus_dir: Option<PathBuf>,
+) -> AppConfig {
+    AppConfig {
+        cdp: config::CdpConfig::default(),
+        mcp: config::McpConfig::default(),
+        http: config::HttpConfig {
+            allow_loopback: true,
+            ..config::HttpConfig::default()
+        },
+        server: ServerConfig {
+            host: "127.0.0.1".into(),
+            port: 0,
+            shutdown_timeout_ms: 10_000,
+        },
+        browser: BrowserConfig {
+            executable: Some(chrome_executable()),
+            profiles_dir: root.join("profiles"),
+            headless: true,
+            max_active: 1,
+            upload_roots: vec![root.to_path_buf()],
+            downloads_dir: root.join("downloads"),
+            artifacts_dir: root.join("artifacts"),
+            max_artifact_bytes: 8 * 1024 * 1024,
+            max_screenshot_dimension: 16_384,
+            max_js_result_bytes: 64 * 1024,
+            max_js_timeout_ms: 30_000,
+        },
+        storage: StorageConfig {
+            journal_path: root.join("commands.jsonl"),
+            checkpoints_dir: root.join("checkpoints"),
+            authority_path: root.join("authority.json"),
+            scheduler_journal_path: root.join("scheduler-jobs.jsonl"),
+        },
+        interface: config::InterfaceConfig::default(),
+        observability: config::ObservabilityConfig::default(),
+        vision: config::VisionConfig {
+            corpus_dir,
+            ..config::VisionConfig::default()
+        },
+        context: Default::default(),
+        nodes,
+    }
+}
+
+fn vision_node(endpoint_url: &str) -> BTreeMap<String, NodeConfig> {
+    BTreeMap::from([(
+        "vision".to_owned(),
+        NodeConfig {
+            kind: NodeKind::Vision,
+            endpoint_url: endpoint_url.to_owned(),
+            token_env: None,
+            timeout_ms: 15_000,
+        },
+    )])
+}
+
+/// Opens the fixture with a session that opts into vision without naming a
+/// node, then runs a locate that deterministic targeting cannot satisfy.
+async fn stuck_locate_without_a_named_node(runtime: &RuntimeService) -> CommandOutcome {
+    let fixture = test_site::spawn().await;
+    let session = runtime
+        .create_session(CreateSessionRequest {
+            profile: "unnamed-vision-node".into(),
+            proxy: None,
+            execution_policy: ExecutionPolicy {
+                vision_assist: true,
+                ..ExecutionPolicy::default()
+            },
+            zigzagzig: false,
+        })
+        .await
+        .unwrap();
+    let page = runtime
+        .open_page(OpenPageRequest {
+            session_id: session.id.clone(),
+        })
+        .await
+        .unwrap();
+    let navigation = runtime
+        .submit(CommandEnvelope {
+            schema_version: CommandEnvelope::SCHEMA_VERSION,
+            command_id: CommandId::new(),
+            workflow_id: WorkflowId::new(),
+            attempt_id: AttemptId::new(),
+            session_id: session.id.clone(),
+            page_id: Some(page.id.clone()),
+            deadline: Utc::now() + Duration::seconds(30),
+            command: RuntimeCommand::Primitive(PrimitiveCommand::Navigate(NavigateCommand {
+                url: fixture.base_url(),
+                wait_until: WaitUntil::Interactive,
+                timeout_ms: 10_000,
+            })),
+        })
+        .await;
+    assert!(
+        matches!(navigation, CommandOutcome::Completed { .. }),
+        "{navigation:?}"
+    );
+    runtime
+        .submit_with_vision_capability(
+            intent_envelope(
+                &session.id,
+                &page.id,
+                IntentCommand::Locate(LocateIntent {
+                    purpose: "Click the visible Continue button".into(),
+                    hints: IntentHints {
+                        role: Some("checkbox".into()),
+                        ..IntentHints::default()
+                    },
+                }),
+            ),
+            true,
+        )
+        .await
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn a_session_naming_no_node_escalates_to_the_loopback_vision_node() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let endpoint = runtime_tests::clicking_vision_node(8.0, 8.0, Arc::clone(&hits)).await;
+    let root = tempfile::tempdir().unwrap();
+    let config = vision_runtime_config(root.path(), vision_node(&endpoint), None);
+    let runtime = RuntimeService::build(&config).await.unwrap();
+
+    let outcome = stuck_locate_without_a_named_node(&runtime).await;
+
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "the loopback vision node was not asked: {outcome:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires installed Chrome or Chromium"]
+async fn a_session_naming_no_node_never_reaches_a_remote_vision_node() {
+    let root = tempfile::tempdir().unwrap();
+    let config = vision_runtime_config(
+        root.path(),
+        vision_node("https://vision.example/propose"),
+        None,
+    );
+    let runtime = RuntimeService::build(&config).await.unwrap();
+
+    let outcome = stuck_locate_without_a_named_node(&runtime).await;
+
+    match outcome {
+        CommandOutcome::Failed { error, .. } => assert!(
+            error.message.contains("no vision provider is configured"),
+            "an unnamed session escalated to a remote node: {error:?}"
+        ),
+        other => panic!("an unnamed session escalated to a remote node: {other:?}"),
+    }
 }

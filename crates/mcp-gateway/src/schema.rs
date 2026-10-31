@@ -2385,6 +2385,7 @@ fn fill_values() -> Vec<Value> {
             &["paths"],
         ),
         tagged_fields("clear", json!({}), &[]),
+        tagged_fields("passwordManagerFill", json!({}), &[]),
     ]
 }
 

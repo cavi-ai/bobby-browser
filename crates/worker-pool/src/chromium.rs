@@ -975,29 +975,6 @@ impl ChromiumWorker {
         Ok((count, synthesized_ms, replaced))
     }
 
-    /// Accept the password manager's inline suggestion for the focused field.
-    /// Its menu answers only trusted keys: ArrowDown selects, Enter fills.
-    async fn accept_password_manager_suggestion(&self, page: &Page) -> Result<(), CommandError> {
-        const SETTLE_MS: u64 = 400;
-        tokio::time::sleep(Duration::from_millis(SETTLE_MS)).await;
-        for key in ["ArrowDown", "Enter"] {
-            let press = [
-                TypingAction::KeyDown {
-                    character: key.into(),
-                    delay_ms: 0,
-                },
-                TypingAction::KeyUp {
-                    character: key.into(),
-                    delay_ms: SETTLE_MS,
-                },
-            ];
-            for action in &press {
-                self.replay_typing_action(page, action).await?;
-            }
-        }
-        Ok(())
-    }
-
     async fn replay_typing_action(
         &self,
         page: &Page,
@@ -2850,8 +2827,17 @@ impl crate::InputEngine for ChromiumWorker {
             },
             ControlAction::Activate => resolved.click(&page).await?,
             ControlAction::PasswordManagerFill => {
-                resolved.click(&page).await?;
-                self.accept_password_manager_suggestion(&page).await?;
+                // Only watches: the field is never clicked, focused or typed
+                // into, which would raise the browser's own credential dialogs.
+                let deadline = tokio::time::Instant::now() + crate::PASSWORD_MANAGER_FILL_WAIT;
+                while tokio::time::Instant::now() < deadline {
+                    match describe(&resolved).await {
+                        Ok(Some(control)) if !crate::password_manager_filled(&control.state) => {
+                            tokio::time::sleep(crate::PASSWORD_MANAGER_FILL_POLL).await;
+                        }
+                        _ => break,
+                    }
+                }
             }
         }
 

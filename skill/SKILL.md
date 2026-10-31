@@ -105,11 +105,15 @@ calls. Rules that govern every call:
   returning `completed`; a `workflow_observe` between them re-checks
   nothing new.
 - **A sign-in form the browser's password manager can fill:** start the
-  session with `executionPolicy: {passwordManager: true}`, run
-  `control_action` `{kind: "passwordManagerFill"}` on the credential field,
-  then `intent_submit_and_verify` on the sign-in control. The runtime focuses
-  the field with native input and accepts the manager's inline suggestion;
-  the filled value never comes back. Without the opt-in it is `policyDenied`.
+  session with `executionPolicy: {passwordManager: true, visionAssist: true}`,
+  then one `intent_fill` with hints for the credential field and
+  `value: {kind: "passwordManagerFill"}`. Vision finds the manager's own
+  sign-in prompt and the runtime clicks it; the credential field is never
+  clicked, focused or typed into, and the value never comes back. Never click
+  or type into a credential field yourself: it opens the browser's passkey
+  dialog. A `passwordManagerSubmitted` record means the manager also submitted
+  the form: `workflow_observe` before any `intent_submit_and_verify`. Without
+  the opt-in it is `policyDenied`.
 - Data out: `intent_extract` (named fields, per-field errors) or
   `extract_structured` (schema-shaped JSON via vision — needs `vision:assist`).
 - A popup/overlay blocks the page: `intent_dismiss_obstruction`.
@@ -178,8 +182,8 @@ precise repair for their failure modes and win over this table.
 - Blind-retrying after `verificationFailed` or any `needsReconciliation`.
 - Inventing CSS/XPath selectors instead of snapshot targets.
 - One `intent_fill` per field where `intent_complete_form` would do.
-- Re-logging into sites every session instead of using the operator's paired
-  Firefox profile (disposable Chromium profiles keep no cookies — see below).
+- Re-logging into sites every session instead of using the operator's durable
+  profile (disposable Chromium profiles keep no cookies — see below).
 - Hand-authoring `evidenceRefs` or forging artifact digests.
 - Retrying the same tool with the same token after `missingCapability`.
 
@@ -187,13 +191,17 @@ precise repair for their failure modes and win over this table.
 
 The gateway resolves the browser engine at startup: an explicit
 `AUTOMATION_RUNTIME_BROWSER_SELECTION`, else the operator's paired enrollment
-(`browser-selection.json`), else fail-closed. Two engines result:
+(`browser-selection.json`), else fail-closed. The selection picks one of:
 
 - **Firefox companion:** real headed Firefox, persistent profile — cookies
   and logins survive sessions. Sign in once in that window.
-- **Managed Chromium:** disposable per-session profile. Nothing persists. If
-  logins vanish between sessions, ask the operator to Pair the Firefox
-  companion instead of re-authenticating every run.
+- **Managed Chromium with a `profileId`:** durable profile shared by every
+  session. Cookies, logins and installed extensions, such as a password
+  manager, persist.
+- **Managed Chromium without a `profileId`:** disposable per-session profile.
+  Nothing persists. If logins vanish between sessions, ask the operator to
+  pair the Firefox companion or select a Chromium `profileId` instead of
+  re-authenticating every run.
 
 Setup, pairing, and credential minting are operator tasks (`bobby install`,
 `bobby doctor`); if the runtime is unreachable, say `bobby doctor` names the

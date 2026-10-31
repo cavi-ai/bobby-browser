@@ -55,6 +55,15 @@ stripped). Default loopback port is `7777`.
 5. Recovery: `recovery_status(workflow_id)` then `recover_workflow(workflow_id)`.
    `needsReconciliation` is HTTP 409.
 
+A sign-in form the browser's password manager can fill: create the session
+with `"executionPolicy": {"passwordManager": True, "visionAssist": True}`, then
+submit the intent `{"kind": "intent", "input": {"kind": "fill", "input":
+{"purpose": "Sign in with the saved login", "hints": <field hints>, "value":
+{"kind": "passwordManagerFill"}}}}`. Vision finds the manager's own prompt and
+the runtime clicks it; the credential field is never clicked, focused or typed
+into, and the value never comes back. Never click or type into a credential
+field yourself. Without the opt-in the outcome is `policyDenied`.
+
 Pass `RequestOptions(idempotency_key=...)` on mutating calls that may retry.
 
 This SDK ships primitives only: there are no `intent_*` helpers. Build a raw

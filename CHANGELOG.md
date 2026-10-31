@@ -4,11 +4,17 @@
 
 ### Added
 
-- `passwordManagerFill` control action on Firefox and Chromium accepts the browser password manager's inline suggestion for a credential field without returning its value; sessions opt in with `executionPolicy.passwordManager`.
+- `passwordManagerFill` signs in through the browser password manager: the `fill` and `completeForm` intents find the manager's own prompt with vision and click it, and the credential field is only watched, never clicked, focused or typed into, nor its value returned; sessions opt in with `executionPolicy.passwordManager` and `visionAssist`.
+
+### Changed
+
+- `Formula/bobby-browser.rb` carries the v0.21.1 asset digests.
 
 ### Fixed
 
 - A `bobby` reached through a symlink runs the `mcp-gateway` and `acp-gateway` installed beside its target instead of another install's on PATH.
+- A session with `executionPolicy.visionAssist` and no `visionNode` escalates to the runtime's loopback vision node instead of failing with no provider; remote nodes are still reached only by name.
+- The Ollama vision provider asks for click coordinates on a 0-1000 grid and scales them to the screenshot, so models that answer on that grid click where they point.
 
 ## 0.21.1 - 2026-10-22
 

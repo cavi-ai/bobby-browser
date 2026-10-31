@@ -541,6 +541,20 @@ pub fn validate_control_action(
     Ok(())
 }
 
+/// How long `passwordManagerFill` watches a credential field for the browser's
+/// password manager to fill it, and how often it looks.
+pub const PASSWORD_MANAGER_FILL_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+pub const PASSWORD_MANAGER_FILL_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Whether a credential field holds a value, without reading a redacted one.
+pub fn password_manager_filled(state: &FormControlState) -> bool {
+    match state {
+        FormControlState::Text { value } => !value.is_empty(),
+        FormControlState::Redacted { present } => *present,
+        _ => false,
+    }
+}
+
 /// `committed`: the option values the driver actually selected, when the
 /// action resolved them — selection requests may name an option by *label*
 /// (snapshots surface labels), while the post-action snapshot state carries
@@ -597,8 +611,7 @@ pub fn control_action_evidence(
         (ControlAction::Clear, FormControlState::Selection { values }) => values.is_empty(),
         (ControlAction::Clear, FormControlState::Files { count }) => *count == 0,
         (ControlAction::Activate, _) => true,
-        (ControlAction::PasswordManagerFill, FormControlState::Text { value }) => !value.is_empty(),
-        (ControlAction::PasswordManagerFill, FormControlState::Redacted { present }) => *present,
+        (ControlAction::PasswordManagerFill, state) => password_manager_filled(state),
         _ => false,
     };
     if !matched {

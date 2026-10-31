@@ -90,7 +90,7 @@ async fn framed_pointer_regressions() {
 #[ignore = "requires installed Firefox and paired test profile"]
 async fn password_manager_fill() {
     let rig = Rig::firefox().await;
-    cases::password_manager_fill_accepts_the_inline_suggestion(&rig).await;
+    cases::password_manager_fill_never_touches_the_field(&rig).await;
     cases::password_manager_fill_requires_the_session_opt_in(&rig).await;
 }
 

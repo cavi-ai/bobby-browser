@@ -1569,6 +1569,38 @@ fn workflow_error(code: ErrorCode, error: impl std::fmt::Display) -> CommandErro
     }
 }
 
+/// A loopback vision node that answers every proposal with a click at
+/// (`x`, `y`) and counts the proposals it serves. Returns its endpoint URL.
+pub async fn clicking_vision_node(
+    x: f64,
+    y: f64,
+    served: Arc<std::sync::atomic::AtomicUsize>,
+) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind vision node");
+    let address = listener.local_addr().expect("vision node address");
+    let app = Router::new()
+        .route(
+            "/propose",
+            axum::routing::post(move |_screenshot: axum::body::Bytes| {
+                let served = Arc::clone(&served);
+                async move {
+                    served.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    axum::Json(serde_json::json!({
+                        "confidence": 0.9,
+                        "action": {"kind": "click", "x": x, "y": y},
+                    }))
+                }
+            }),
+        )
+        .layer(axum::extract::DefaultBodyLimit::disable());
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{address}/propose")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

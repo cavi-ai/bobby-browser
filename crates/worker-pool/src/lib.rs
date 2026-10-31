@@ -49,8 +49,9 @@ pub use accessibility_targets::{
 pub use fingerprint_host::ChromiumPageHost;
 pub use form_snapshot::{
     control_action_evidence, decode_form_control, decode_form_snapshot, form_control_script,
-    form_snapshot_expression, form_snapshot_expression_with_limit, target_specs_equivalent,
-    validate_control_action,
+    form_snapshot_expression, form_snapshot_expression_with_limit, password_manager_filled,
+    target_specs_equivalent, validate_control_action, PASSWORD_MANAGER_FILL_POLL,
+    PASSWORD_MANAGER_FILL_WAIT,
 };
 pub use har::{har_document, HarEntry, HarRecorder};
 pub use network_quiet::{

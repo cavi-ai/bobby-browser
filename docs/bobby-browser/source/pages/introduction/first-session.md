@@ -47,6 +47,7 @@ const session = await client.createSession(
       visionAssist: false,
       fingerprint: false,
       humanize: false,
+      passwordManager: false,
     },
   },
   { idempotencyKey: randomUUID() },

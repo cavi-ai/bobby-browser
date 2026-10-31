@@ -114,6 +114,33 @@ impl Rig {
         Self::serve(root, service, None).await
     }
 
+    /// A Chromium rig whose only vision node is the loopback `endpoint`, with a
+    /// principal that also holds `vision:assist`.
+    pub async fn chromium_with_vision_node(endpoint: &str) -> Self {
+        let root = tempfile::tempdir().expect("create rig root");
+        let mut config = config(root.path(), vec![]);
+        if let Some(executable) = std::env::var_os("BOBBY_CHROME_EXECUTABLE") {
+            config.browser.executable = Some(executable.into());
+        }
+        config.nodes.insert(
+            "vision".to_owned(),
+            config::NodeConfig {
+                kind: config::NodeKind::Vision,
+                endpoint_url: endpoint.to_owned(),
+                token_env: None,
+                timeout_ms: 15_000,
+            },
+        );
+        let service = RuntimeService::build(&config)
+            .await
+            .expect("build Chromium runtime");
+        let capabilities = all_capabilities()
+            .into_iter()
+            .chain([types::Capability::VisionAssist])
+            .collect();
+        Self::serve_with(root, service, None, capabilities).await
+    }
+
     pub async fn firefox() -> Self {
         Self::firefox_with_upload_roots(vec![]).await
     }
@@ -155,13 +182,22 @@ impl Rig {
         service: RuntimeService,
         firefox: Option<InstalledFirefoxRuntime>,
     ) -> Self {
+        Self::serve_with(root, service, firefox, all_capabilities().to_vec()).await
+    }
+
+    async fn serve_with(
+        root: tempfile::TempDir,
+        service: RuntimeService,
+        firefox: Option<InstalledFirefoxRuntime>,
+        capabilities: Vec<types::Capability>,
+    ) -> Self {
         // `RUST_LOG` prints the runtime's own events, such as each navigation settle.
         std::mem::forget(observability::init_stdio());
         let authority = Arc::new(AuthorityStore::in_memory());
         let token = authority
             .issue(
                 PrincipalId::from_uuid(uuid::Uuid::new_v4()),
-                all_capabilities(),
+                capabilities,
                 Utc::now() + Duration::minutes(30),
             )
             .await
