@@ -399,6 +399,13 @@ enum CliCommand {
         /// Upstream API key env var (default OPENAI_API_KEY; empty value skips key)
         #[arg(long)]
         api_key_env: Option<String>,
+        /// Text-tier vision server (vision_server.py with a text provider) that
+        /// answers candidate windows without a screenshot
+        #[arg(long, requires = "text_model")]
+        text_base_url: Option<String>,
+        /// Model the text tier serves, recorded with its training data
+        #[arg(long, requires = "text_base_url")]
+        text_model: Option<String>,
         /// Run as a runtime's sidecar: print `listening <addr>` once bound and
         /// exit when the parent closes stdin
         #[arg(long)]
@@ -967,6 +974,8 @@ pub async fn run() -> Result<()> {
             collect_training_data,
             training_data_dir,
             api_key_env,
+            text_base_url,
+            text_model,
             managed,
         } => {
             run_vision_proxy(VisionProxyRunArgs {
@@ -980,6 +989,8 @@ pub async fn run() -> Result<()> {
                 collect_training_data,
                 training_data_dir,
                 api_key_env,
+                text_base_url,
+                text_model,
                 endpoint_url: None,
                 managed,
             })
@@ -1197,6 +1208,8 @@ struct VisionProxyRunArgs {
     collect_training_data: bool,
     training_data_dir: String,
     api_key_env: Option<String>,
+    text_base_url: Option<String>,
+    text_model: Option<String>,
     endpoint_url: Option<String>,
     managed: bool,
 }
@@ -1236,6 +1249,8 @@ fn configured_vision_proxy_args(config_cli: Option<PathBuf>) -> Result<VisionPro
         collect_training_data: config.vision.collect_training_data,
         training_data_dir: config.vision.training_data_dir.display().to_string(),
         api_key_env: profile.api_key_env.clone(),
+        text_base_url: None,
+        text_model: None,
         endpoint_url: Some(url.to_string()),
         managed: false,
     })
@@ -1318,6 +1333,8 @@ async fn run_vision_proxy(args: VisionProxyRunArgs) -> Result<()> {
         collect_training_data,
         training_data_dir,
         api_key_env,
+        text_base_url,
+        text_model,
         endpoint_url: _,
         managed,
     } = args;
@@ -1381,6 +1398,19 @@ async fn run_vision_proxy(args: VisionProxyRunArgs) -> Result<()> {
             ),
         };
 
+    // A text-tier server speaks the same wire as the canonical vision server.
+    let text_upstream = match (text_base_url, text_model) {
+        (Some(base_url), Some(model)) => {
+            let mut upstream = MlxUpstream::new(model, base_url);
+            if let Some(collector) = &collector {
+                upstream = upstream.with_data_collector(collector.clone());
+            }
+            Some(Arc::new(upstream) as Arc<dyn vision_proxy::Upstream>)
+        }
+        (None, None) => None,
+        _ => anyhow::bail!("--text-base-url and --text-model go together"),
+    };
+
     let config = ProxyConfig {
         bind,
         path,
@@ -1396,7 +1426,7 @@ async fn run_vision_proxy(args: VisionProxyRunArgs) -> Result<()> {
             std::process::exit(0);
         });
     }
-    serve_vision_proxy_with_ready(config, upstream, |address| {
+    serve_vision_proxy_with_ready(config, upstream, text_upstream, |address| {
         if managed {
             use std::io::Write;
             let mut stdout = std::io::stdout();

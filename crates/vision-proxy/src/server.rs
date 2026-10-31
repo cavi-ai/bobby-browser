@@ -35,6 +35,9 @@ pub struct AppState {
     pub path: String,
     pub bearer_token: String,
     pub upstream: Arc<dyn Upstream>,
+    /// Answers candidate windows from their labels; everything else, and
+    /// every extract, stays on `upstream`.
+    pub text_upstream: Option<Arc<dyn Upstream>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,9 +47,9 @@ enum Kind {
 }
 
 fn classify(v: &Value) -> Option<Kind> {
-    let has_shot = v.get("screenshotPng").is_some();
+    let has_propose = v.get("intentKind").is_some();
     let has_extract = v.get("schema").is_some() && v.get("content").is_some();
-    match (has_shot, has_extract) {
+    match (has_propose, has_extract) {
         (true, false) => Some(Kind::Propose),
         (false, true) => Some(Kind::Extract),
         _ => None,
@@ -136,6 +139,17 @@ async fn handle_propose(state: &AppState, body: Value) -> Response {
         .context
         .as_ref()
         .map_or(0, |context| context.candidates.len());
+    let upstream = match state
+        .text_upstream
+        .as_ref()
+        .filter(|_| intent_engine::text_tier_answers(&intent_kind, candidate_count))
+    {
+        Some(text) => text,
+        None if request.screenshot_png.is_none() => {
+            return bad_request("screenshotPng is required unless a text tier answers the request")
+        }
+        None => &state.upstream,
+    };
     let input = ProposeInput {
         purpose: request.purpose,
         intent_kind: request.intent_kind,
@@ -145,7 +159,7 @@ async fn handle_propose(state: &AppState, body: Value) -> Response {
         context: request.context,
     };
 
-    let proposal = match state.upstream.propose(input).await {
+    let proposal = match upstream.propose(input).await {
         Ok(proposal) => proposal,
         Err(error) => return bad_gateway(error),
     };
@@ -195,8 +209,15 @@ fn upstream_error_diagnostic(error: UpstreamError) -> (&'static str, &'static st
     }
 }
 
-async fn handle_status() -> impl IntoResponse {
-    ([("x-bobby-vision", "ready")], StatusCode::OK)
+async fn handle_status(State(state): State<AppState>) -> Response {
+    let mut response = ([("x-bobby-vision", "ready")], StatusCode::OK).into_response();
+    if state.text_upstream.is_some() {
+        response.headers_mut().insert(
+            intent_engine::VISION_TEXT_TIER_HEADER,
+            axum::http::HeaderValue::from_static("ready"),
+        );
+    }
+    response
 }
 
 pub fn router(state: AppState) -> Router {
@@ -206,8 +227,12 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-pub async fn serve(config: ProxyConfig, upstream: Arc<dyn Upstream>) -> io::Result<()> {
-    serve_with_ready(config, upstream, |_| {}).await
+pub async fn serve(
+    config: ProxyConfig,
+    upstream: Arc<dyn Upstream>,
+    text_upstream: Option<Arc<dyn Upstream>>,
+) -> io::Result<()> {
+    serve_with_ready(config, upstream, text_upstream, |_| {}).await
 }
 
 /// Like [`serve`], reporting the bound address once listening, so a caller
@@ -215,12 +240,14 @@ pub async fn serve(config: ProxyConfig, upstream: Arc<dyn Upstream>) -> io::Resu
 pub async fn serve_with_ready(
     config: ProxyConfig,
     upstream: Arc<dyn Upstream>,
+    text_upstream: Option<Arc<dyn Upstream>>,
     ready: impl FnOnce(std::net::SocketAddr),
 ) -> io::Result<()> {
     let state = AppState {
         path: config.path,
         bearer_token: config.bearer_token,
         upstream,
+        text_upstream,
     };
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(config.bind).await?;

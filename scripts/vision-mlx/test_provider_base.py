@@ -178,6 +178,17 @@ class VisionProviderNormalizationTests(unittest.TestCase):
                 {"confidence": 0.9, "action": {"kind": "challengeSolved", "x": 1}}
             )
 
+    def test_a_request_may_leave_out_the_screenshot_but_image_providers_refuse_it(self):
+        base = {"purpose": "p", "intentKind": "locate", "stuck": "targetAmbiguous"}
+        for data in (base, {**base, "screenshotPng": None}):
+            with self.subTest(fields=sorted(data)):
+                self.assertIsNone(ProposeRequest.from_dict(data).screenshot_b64)
+        self.assertEqual(ProposeRequest.from_dict({**base, "screenshotPng": "abc"}).screenshot_b64, "abc")
+        with self.assertRaises(ValueError):
+            ProposeRequest.from_dict({"purpose": "p", "stuck": "s"})
+        with self.assertRaisesRegex(ValueError, "needs a screenshot"):
+            MlxVlmProvider().propose(ProposeRequest.from_dict(base))
+
     def test_a_request_without_candidates_names_the_action_to_answer_with(self):
         def prompt(intent_kind, candidates=()):
             return MlxVlmProvider().build_propose_prompt(ProposeRequest(

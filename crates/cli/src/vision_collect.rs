@@ -226,7 +226,7 @@ impl JourneyDataCollector {
                 purpose: example.purpose.clone(),
                 intent_kind: example.intent_kind.clone(),
                 stuck: example.stuck.clone(),
-                screenshot_png_b64: example.image_b64.clone(),
+                screenshot_png_b64: Some(example.image_b64.clone()),
                 corpus_screenshot_png_b64: Some(example.image_b64.clone()),
                 context: None,
             },

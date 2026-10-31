@@ -56,6 +56,7 @@ fn test_app(upstream: Arc<MockUpstream>) -> Router {
         path: "/vision".to_string(),
         bearer_token: "test-token".to_string(),
         upstream,
+        text_upstream: None,
     })
 }
 
@@ -83,6 +84,7 @@ fn error_app(error: UpstreamError) -> Router {
         path: "/vision".to_string(),
         bearer_token: "test-token".to_string(),
         upstream: Arc::new(ErrorUpstream { error }),
+        text_upstream: None,
     })
 }
 
@@ -103,6 +105,107 @@ async fn post(app: &mut Router, auth: Option<&str>, body: &str) -> (StatusCode, 
         .await
         .unwrap();
     (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn tiered_app(image: Arc<MockUpstream>, text: Option<Arc<MockUpstream>>) -> Router {
+    router(AppState {
+        path: "/vision".to_string(),
+        bearer_token: "test-token".to_string(),
+        upstream: image,
+        text_upstream: text.map(|text| text as Arc<dyn Upstream>),
+    })
+}
+
+fn answering(action: VisionAction) -> Arc<MockUpstream> {
+    Arc::new(MockUpstream::new(
+        ProposeResponse {
+            confidence: 0.95,
+            action,
+        },
+        ExtractResponse {
+            value: serde_json::json!("ok"),
+        },
+    ))
+}
+
+const NAMED_WINDOW: &str = r#"{"purpose":"Continue","intentKind":"locate","stuck":"targetAmbiguous","context":{"candidates":[{"role":"button","name":"Continue"}]}}"#;
+
+#[tokio::test]
+async fn a_named_window_goes_to_the_text_tier_and_the_rest_to_the_image_tier() {
+    let image = answering(VisionAction::Click { x: 1.0, y: 2.0 });
+    let text = answering(VisionAction::ClickCandidate { index: 0 });
+    let mut app = tiered_app(image.clone(), Some(text.clone()));
+
+    let (status, body) = post(&mut app, Some("test-token"), NAMED_WINDOW).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(text.propose_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(image.propose_calls.load(Ordering::SeqCst), 0);
+
+    let (status, body) = post(
+        &mut app,
+        Some("test-token"),
+        r#"{"purpose":"Continue","intentKind":"locate","stuck":"targetMissing","screenshotPng":"abc"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = post(
+        &mut app,
+        Some("test-token"),
+        r#"{"schema":{"type":"object"},"content":"Example","purpose":null}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(image.propose_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(image.extract_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(text.propose_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(text.extract_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn without_a_text_tier_a_window_needs_a_screenshot() {
+    let image = answering(VisionAction::ClickCandidate { index: 0 });
+    let mut app = tiered_app(image.clone(), None);
+
+    let (status, body) = post(&mut app, Some("test-token"), NAMED_WINDOW).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("screenshotPng is required"), "{body}");
+    assert_eq!(image.propose_calls.load(Ordering::SeqCst), 0);
+
+    let with_screenshot =
+        NAMED_WINDOW.replace(r#""context""#, r#""screenshotPng":"abc","context""#);
+    let (status, body) = post(&mut app, Some("test-token"), &with_screenshot).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(image.propose_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn status_reports_a_text_tier_only_when_one_is_configured() {
+    for (text, expected) in [
+        (
+            Some(answering(VisionAction::ClickCandidate { index: 0 })),
+            Some("ready"),
+        ),
+        (None, None),
+    ] {
+        let response = tiered_app(answering(VisionAction::Click { x: 1.0, y: 2.0 }), text)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/vision")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(intent_engine::VISION_TEXT_TIER_HEADER)
+                .map(|value| value.to_str().unwrap()),
+            expected
+        );
+    }
 }
 
 #[tokio::test]
@@ -340,6 +443,7 @@ async fn http_vision_assist_contract_over_bound_proxy() {
         path: config.path.clone(),
         bearer_token: config.bearer_token.clone(),
         upstream: upstream.clone(),
+        text_upstream: None,
     };
     let app = router(state);
     tokio::spawn(async move {
@@ -357,7 +461,7 @@ async fn http_vision_assist_contract_over_bound_proxy() {
         .propose(VisionProposeRequest {
             purpose: "Continue".into(),
             intent_kind: "locate".into(),
-            screenshot_png: b"png-bytes".to_vec(),
+            screenshot_png: Some(b"png-bytes".to_vec()),
             corpus_screenshot_png: None,
             stuck: StuckKind::TargetMissing,
             context: None,
@@ -486,6 +590,7 @@ async fn http_vision_assist_maps_candidate_actions_over_the_bound_proxy() {
             path: "/vision".to_string(),
             bearer_token: "contract-token".to_string(),
             upstream: upstream.clone(),
+            text_upstream: None,
         });
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
@@ -501,7 +606,7 @@ async fn http_vision_assist_maps_candidate_actions_over_the_bound_proxy() {
             .propose(VisionProposeRequest {
                 purpose: "Continue".into(),
                 intent_kind: intent_kind.into(),
-                screenshot_png: b"png-bytes".to_vec(),
+                screenshot_png: Some(b"png-bytes".to_vec()),
                 corpus_screenshot_png: None,
                 stuck: StuckKind::TargetMissing,
                 context: Some(context),

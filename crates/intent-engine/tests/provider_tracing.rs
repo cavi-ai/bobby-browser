@@ -43,7 +43,7 @@ async fn provider_trace_records_return_status_without_request_or_error_payloads(
             .propose(VisionProposeRequest {
                 purpose: "PRIVATE_PURPOSE".into(),
                 intent_kind: "PRIVATE_KIND".into(),
-                screenshot_png: b"PRIVATE_SCREENSHOT".to_vec(),
+                screenshot_png: Some(b"PRIVATE_SCREENSHOT".to_vec()),
                 corpus_screenshot_png: None,
                 stuck: StuckKind::TargetMissing,
                 context: None,

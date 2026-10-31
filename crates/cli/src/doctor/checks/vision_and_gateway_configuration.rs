@@ -207,7 +207,7 @@ pub(in crate::doctor) fn check_vision_propose_probe(
                 intent_engine::VisionProposeRequest {
                     purpose: "doctor probe".to_string(),
                     intent_kind: "locate".to_string(),
-                    screenshot_png: DOCTOR_PROBE_PNG.to_vec(),
+                    screenshot_png: Some(DOCTOR_PROBE_PNG.to_vec()),
                     corpus_screenshot_png: None,
                     stuck: intent_engine::StuckKind::TargetMissing,
                     context: None,

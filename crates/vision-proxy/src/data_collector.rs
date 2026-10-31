@@ -295,7 +295,7 @@ mod tests {
                 purpose: "Enter maya@atlas.example in the email field".into(),
                 intent_kind: "locate".into(),
                 stuck: "targetMissing".into(),
-                screenshot_png_b64: "dGVzdA==".to_string(),
+                screenshot_png_b64: Some("dGVzdA==".to_string()),
                 corpus_screenshot_png_b64: Some("dGVzdA==".to_string()),
                 context: None,
             },
@@ -320,7 +320,7 @@ mod tests {
             purpose: "select the target".into(),
             intent_kind: "fill".into(),
             stuck: "targetMissing".into(),
-            screenshot_png_b64: "dGVzdA==".into(),
+            screenshot_png_b64: Some("dGVzdA==".into()),
             corpus_screenshot_png_b64: Some("dGVzdA==".into()),
             context: None,
         };
@@ -361,7 +361,7 @@ mod tests {
             purpose: "fill password".into(),
             intent_kind: "fill".into(),
             stuck: "targetMissing".into(),
-            screenshot_png_b64: "cmF3".into(),
+            screenshot_png_b64: Some("cmF3".into()),
             corpus_screenshot_png_b64: Some("c2FuaXRpemVk".into()),
             context: None,
         };
@@ -393,7 +393,7 @@ mod tests {
             purpose: "fill password".into(),
             intent_kind: "fill".into(),
             stuck: "targetMissing".into(),
-            screenshot_png_b64: "cmF3".into(),
+            screenshot_png_b64: Some("cmF3".into()),
             corpus_screenshot_png_b64: None,
             context: None,
         };
@@ -423,7 +423,7 @@ mod tests {
             purpose: "select the target".into(),
             intent_kind: "locate".into(),
             stuck: "targetMissing".into(),
-            screenshot_png_b64: "cmF3".into(),
+            screenshot_png_b64: Some("cmF3".into()),
             corpus_screenshot_png_b64: Some("c2FuaXRpemVk".into()),
             context: None,
         };

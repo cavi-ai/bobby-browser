@@ -705,16 +705,32 @@ async fn collect_prefill_batch(
         return;
     }
 
-    let Ok((png, _)) = browser
-        .capture_screenshot(
-            page_id,
-            &CaptureScreenshotCommand {
-                mode: ScreenshotMode::Viewport,
-            },
-        )
-        .await
-    else {
-        return;
+    let mut needs_image = false;
+    for request in &requests {
+        let window = request
+            .context
+            .as_ref()
+            .map_or(&[][..], |context| &context.candidates[..]);
+        if assist.needs_image("fill", window).await {
+            needs_image = true;
+            break;
+        }
+    }
+    let png = if needs_image {
+        let Ok((png, _)) = browser
+            .capture_screenshot(
+                page_id,
+                &CaptureScreenshotCommand {
+                    mode: ScreenshotMode::Viewport,
+                },
+            )
+            .await
+        else {
+            return;
+        };
+        Some(png)
+    } else {
+        None
     };
     let corpus_screenshot_png = if assist.collects_training_data() {
         capture_sanitized_corpus_screenshot(browser, page_id).await
@@ -1750,7 +1766,7 @@ async fn fill_with_password_manager(
         .propose(VisionProposeRequest {
             purpose: PASSWORD_MANAGER_PROMPT.into(),
             intent_kind: "fill".into(),
-            screenshot_png: png,
+            screenshot_png: Some(png),
             corpus_screenshot_png: None,
             stuck: StuckKind::TargetMissing,
             context: None,
@@ -3343,7 +3359,7 @@ async fn escalate_extract_field_with_vision(
         .propose(VisionProposeRequest {
             purpose: field.purpose.clone(),
             intent_kind: "extract".to_owned(),
-            screenshot_png: png,
+            screenshot_png: Some(png),
             corpus_screenshot_png: corpus_screenshot_png.clone(),
             stuck,
             context,
@@ -3734,7 +3750,7 @@ async fn execute_solve_challenge(
             .propose(VisionProposeRequest {
                 purpose: propose_purpose.clone(),
                 intent_kind: "solveChallenge".into(),
-                screenshot_png: png,
+                screenshot_png: Some(png),
                 corpus_screenshot_png: None,
                 stuck: StuckKind::ChallengePresent,
                 context: vision.prompt_context.clone(),
@@ -3975,7 +3991,7 @@ async fn execute_detect_challenge(
             .propose(VisionProposeRequest {
                 purpose: propose_purpose.clone(),
                 intent_kind: "detectChallenge".into(),
-                screenshot_png: png,
+                screenshot_png: Some(png),
                 corpus_screenshot_png: None,
                 stuck: StuckKind::ChallengePresent,
                 context: vision.prompt_context.clone(),
@@ -4447,29 +4463,6 @@ async fn escalate_with_vision(
     let mut base_evidence = prior_evidence.clone();
     base_evidence.push(stuck_evidence);
 
-    let (png, mut screenshot_evidence) = match browser
-        .capture_screenshot(
-            page_id,
-            &CaptureScreenshotCommand {
-                mode: ScreenshotMode::Viewport,
-            },
-        )
-        .await
-    {
-        Ok(result) => result,
-        Err(error) => {
-            return IntentOutcome::Failed {
-                error: CommandError {
-                    code: ErrorCode::VisionAssistFailed,
-                    message: format!("vision screenshot failed: {}", error.message),
-                    layer: ErrorLayer::Page,
-                    retryable: false,
-                },
-                evidence: base_evidence,
-            };
-        }
-    };
-
     let mut context = prompt_context;
     if !candidates.is_empty() {
         let block = context.get_or_insert_with(crate::VisionPromptContext::default);
@@ -4486,6 +4479,35 @@ async fn escalate_with_vision(
             })
             .collect();
     }
+    let window = context
+        .as_ref()
+        .map_or(&[][..], |context| &context.candidates[..]);
+    let (png, mut screenshot_evidence) = if assist.needs_image(intent_kind, window).await {
+        match browser
+            .capture_screenshot(
+                page_id,
+                &CaptureScreenshotCommand {
+                    mode: ScreenshotMode::Viewport,
+                },
+            )
+            .await
+        {
+            Ok((png, evidence)) => (Some(png), evidence),
+            Err(error) => {
+                return IntentOutcome::Failed {
+                    error: CommandError {
+                        code: ErrorCode::VisionAssistFailed,
+                        message: format!("vision screenshot failed: {}", error.message),
+                        layer: ErrorLayer::Page,
+                        retryable: false,
+                    },
+                    evidence: base_evidence,
+                };
+            }
+        }
+    } else {
+        (None, Vec::new())
+    };
     // Corpus capture: snapshot the exact prompt inputs before they move into
     // the request, so the record shows what the model actually saw.
     let corpus_screenshot_png = if corpus.is_some() || assist.collects_training_data() {

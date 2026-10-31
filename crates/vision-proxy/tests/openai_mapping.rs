@@ -82,7 +82,7 @@ async fn propose_posts_expected_openai_body_and_maps_response() {
             purpose: "find submit".into(),
             intent_kind: "click".into(),
             stuck: "targetMissing".into(),
-            screenshot_png_b64: "aGVsbG8=".into(),
+            screenshot_png_b64: Some("aGVsbG8=".into()),
             corpus_screenshot_png_b64: None,
             context: None,
         })
@@ -137,7 +137,7 @@ async fn malformed_model_json_returns_invalid() {
             purpose: "MALFORMED".into(),
             intent_kind: "click".into(),
             stuck: "targetMissing".into(),
-            screenshot_png_b64: "abc".into(),
+            screenshot_png_b64: Some("abc".into()),
             corpus_screenshot_png_b64: None,
             context: None,
         })
@@ -157,7 +157,7 @@ async fn empty_api_key_omits_authorization_header() {
             purpose: "find submit".into(),
             intent_kind: "click".into(),
             stuck: "targetMissing".into(),
-            screenshot_png_b64: "aGVsbG8=".into(),
+            screenshot_png_b64: Some("aGVsbG8=".into()),
             corpus_screenshot_png_b64: None,
             context: None,
         })
@@ -206,7 +206,7 @@ async fn propose_renders_the_context_block_into_the_prompt() {
             purpose: "find email field".into(),
             intent_kind: "fill".into(),
             stuck: "targetMissing".into(),
-            screenshot_png_b64: "aGVsbG8=".into(),
+            screenshot_png_b64: Some("aGVsbG8=".into()),
             corpus_screenshot_png_b64: None,
             context: Some(vision_proxy::wire::ProposeContext {
                 url: Some("https://example.test/signup".into()),

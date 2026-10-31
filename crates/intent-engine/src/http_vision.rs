@@ -9,6 +9,10 @@ use crate::{StuckKind, VisionAction, VisionAssist, VisionProposal, VisionPropose
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_TEXT_BYTES: usize = 4096;
 
+/// Status header a vision endpoint sets to `ready` when it answers named
+/// candidate windows from their labels, without a screenshot.
+pub const VISION_TEXT_TIER_HEADER: &str = "x-bobby-vision-text";
+
 /// Vision-assist provider over HTTP. The endpoint receives the intent
 /// context plus a base64 PNG and returns a confidence-scored action.
 /// Any transport, schema, or confidence-contract failure raises
@@ -19,6 +23,7 @@ pub struct HttpVisionAssist {
     endpoint: String,
     bearer: Option<String>,
     timeout: std::time::Duration,
+    text_tier: tokio::sync::OnceCell<bool>,
 }
 
 #[derive(Serialize)]
@@ -27,7 +32,8 @@ struct ProposeBody<'a> {
     purpose: &'a str,
     intent_kind: &'a str,
     stuck: &'a str,
-    screenshot_png: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    screenshot_png: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     corpus_screenshot_png: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -112,7 +118,30 @@ impl HttpVisionAssist {
             endpoint,
             bearer,
             timeout,
+            text_tier: tokio::sync::OnceCell::new(),
         })
+    }
+
+    /// Whether the endpoint reports a text tier, read once from its status.
+    /// An unreachable or older endpoint keeps every request on screenshots.
+    async fn text_tier(&self) -> bool {
+        *self
+            .text_tier
+            .get_or_init(|| async {
+                self.client
+                    .get(&self.endpoint)
+                    .timeout(self.timeout)
+                    .send()
+                    .await
+                    .is_ok_and(|response| {
+                        response.status().is_success()
+                            && response
+                                .headers()
+                                .get(VISION_TEXT_TIER_HEADER)
+                                .is_some_and(|value| value == "ready")
+                    })
+            })
+            .await
     }
 }
 
@@ -187,12 +216,23 @@ impl VisionAssist for HttpVisionAssist {
         observability::ProviderMode::Http
     }
 
+    async fn needs_image(
+        &self,
+        intent_kind: &str,
+        candidates: &[crate::VisionPromptCandidate],
+    ) -> bool {
+        !crate::text_tier_answers(intent_kind, candidates.len()) || !self.text_tier().await
+    }
+
     async fn propose(&self, request: VisionProposeRequest) -> Result<VisionProposal, CommandError> {
         let body = ProposeBody {
             purpose: &request.purpose,
             intent_kind: &request.intent_kind,
             stuck: stuck_name(request.stuck),
-            screenshot_png: BASE64.encode(&request.screenshot_png),
+            screenshot_png: request
+                .screenshot_png
+                .as_ref()
+                .map(|png| BASE64.encode(png)),
             corpus_screenshot_png: request
                 .corpus_screenshot_png
                 .as_ref()
@@ -431,7 +471,7 @@ mod tests {
             .propose(VisionProposeRequest {
                 purpose: "fill or extract a field".into(),
                 intent_kind: intent_kind.into(),
-                screenshot_png: b"png".to_vec(),
+                screenshot_png: Some(b"png".to_vec()),
                 corpus_screenshot_png: None,
                 stuck: StuckKind::TargetMissing,
                 context,
@@ -527,7 +567,7 @@ mod tests {
             .propose(VisionProposeRequest {
                 purpose: "Continue".into(),
                 intent_kind: "locate".into(),
-                screenshot_png: b"png".to_vec(),
+                screenshot_png: Some(b"png".to_vec()),
                 corpus_screenshot_png: None,
                 stuck: StuckKind::TargetMissing,
                 context: None,
@@ -539,6 +579,110 @@ mod tests {
             proposal.action,
             VisionAction::Click { x: 12.0, y: 34.0 }
         ));
+    }
+
+    /// Serves `replies` in order, one per connection, and returns each
+    /// request it received.
+    async fn scripted_endpoint(
+        replies: Vec<String>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let served = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for reply in replies {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut request = vec![0_u8; 65536];
+                let read = socket.read(&mut request).await.unwrap();
+                requests.push(String::from_utf8_lossy(&request[..read]).into_owned());
+                socket.write_all(reply.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        (format!("http://{address}/vision"), served)
+    }
+
+    fn status_reply(text_tier: bool) -> String {
+        let header = if text_tier {
+            format!("{VISION_TEXT_TIER_HEADER}: ready\r\n")
+        } else {
+            String::new()
+        };
+        format!("HTTP/1.1 200 OK\r\n{header}Content-Length: 0\r\nConnection: close\r\n\r\n")
+    }
+
+    fn named(name: &str) -> crate::VisionPromptCandidate {
+        crate::VisionPromptCandidate {
+            role: "button".into(),
+            name: name.into(),
+            ordinal: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_text_tier_endpoint_takes_named_windows_without_a_screenshot() {
+        let body = r#"{"confidence":0.95,"action":{"kind":"clickCandidate","index":0}}"#;
+        let (endpoint, served) = scripted_endpoint(vec![
+            status_reply(true),
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ),
+        ])
+        .await;
+        let assist =
+            HttpVisionAssist::new(endpoint, None, std::time::Duration::from_secs(5)).unwrap();
+
+        assert!(!assist.needs_image("locate", &[named("Continue")]).await);
+        assert!(assist.needs_image("locate", &[]).await);
+        assert!(
+            assist
+                .needs_image("detectChallenge", &[named("Continue")])
+                .await
+        );
+        let proposal = assist
+            .propose(VisionProposeRequest {
+                purpose: "Continue".into(),
+                intent_kind: "locate".into(),
+                screenshot_png: None,
+                corpus_screenshot_png: None,
+                stuck: StuckKind::TargetAmbiguous,
+                context: Some(crate::VisionPromptContext {
+                    candidates: vec![named("Continue")],
+                    ..Default::default()
+                }),
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            proposal.action,
+            VisionAction::ClickCandidate { index: 0 }
+        ));
+        let requests = tokio::time::timeout(std::time::Duration::from_secs(5), served)
+            .await
+            .expect("the endpoint did not receive both requests")
+            .unwrap();
+        assert!(requests[0].starts_with("GET /vision"), "{}", requests[0]);
+        assert!(requests[1].starts_with("POST /vision"), "{}", requests[1]);
+        assert!(!requests[1].contains("screenshotPng"), "{}", requests[1]);
+    }
+
+    #[tokio::test]
+    async fn an_endpoint_without_a_text_tier_keeps_screenshots() {
+        let (endpoint, served) = scripted_endpoint(vec![status_reply(false)]).await;
+        let assist =
+            HttpVisionAssist::new(endpoint, None, std::time::Duration::from_secs(5)).unwrap();
+
+        assert!(assist.needs_image("locate", &[named("Continue")]).await);
+        // The status is read once.
+        assert!(assist.needs_image("fill", &[named("Email")]).await);
+        let requests = tokio::time::timeout(std::time::Duration::from_secs(5), served)
+            .await
+            .expect("the status was never read")
+            .unwrap();
+        assert_eq!(requests.len(), 1);
     }
 
     #[tokio::test]
