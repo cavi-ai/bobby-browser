@@ -412,7 +412,7 @@ async fn stuck_locate_without_a_named_node(runtime: &RuntimeService) -> CommandO
 #[ignore = "requires installed Chrome or Chromium"]
 async fn a_session_naming_no_node_escalates_to_the_loopback_vision_node() {
     let hits = Arc::new(AtomicUsize::new(0));
-    let endpoint = runtime_tests::clicking_vision_node(8.0, 8.0, Arc::clone(&hits)).await;
+    let endpoint = runtime_tests::clicking_vision_node(8.0, 8.0, 0.9, Arc::clone(&hits)).await;
     let root = tempfile::tempdir().unwrap();
     let config = vision_runtime_config(root.path(), vision_node(&endpoint), None);
     let runtime = RuntimeService::build(&config).await.unwrap();
