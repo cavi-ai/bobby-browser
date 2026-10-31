@@ -37,6 +37,11 @@ class MlxV1ProviderTests(unittest.TestCase):
                     self.assertNotIn("text", response.action)
                     self.assertNotIn("value", response.action)
 
+    def test_create_provider_serves_the_requested_text_model(self):
+        from providers import create_provider
+
+        self.assertEqual(create_provider("v1", "requested-model").model_name, "requested-model")
+
     def test_unknown_intent_kind_and_invalid_index_abstain(self):
         # The abstain shape keeps the intent's action kind: the proxy
         # validator rejects a clickCandidate on a fill/extract intent as

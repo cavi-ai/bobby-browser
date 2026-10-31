@@ -60,7 +60,7 @@ def create_provider(kind: str | None = None, model: str | None = None) -> Vision
         )
     if kind == "v1":
         return MlxV1Provider(
-            model_name=os.environ.get("VISION_V1_MODEL", V1_MODEL),
+            model_name=model or os.environ.get("VISION_V1_MODEL", V1_MODEL),
             adapter_path=os.environ.get("VISION_V1_ADAPTER") or None,
         )
 

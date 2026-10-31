@@ -4,7 +4,7 @@
 
 ### Added
 
-- `bobby vision-proxy --text-base-url <url> --text-model <id>` answers candidate windows with a text-only vision server, and the runtime sends those requests without a screenshot; every other request keeps the screenshot and the image upstream.
+- A text tier answers candidate windows with a text-only vision server, and the runtime sends those requests without a screenshot while every other request keeps the screenshot and the image upstream: `bobby vision connect --text-model <id> [--text-adapter <dir>]` configures it, the runtime's managed proxy and `bobby vision start` run it, and `bobby vision-proxy` takes `--text-base-url`, `--text-model` and `--spawn-text-server`.
 - The ignored `perception_ground_truth` worker test writes fixture-page screenshots with ground truth read from the DOM: visible control boxes with role and name, single-line text boxes, and the challenge class named by structural markers.
 - `passwordManagerFill` signs in through the browser password manager: the `fill` and `completeForm` intents find the manager's own prompt with vision and click it, and the credential field is only watched, never clicked, focused or typed into, nor its value returned; sessions opt in with `executionPolicy.passwordManager` and `visionAssist`.
 
@@ -20,6 +20,7 @@
 - The Ollama vision provider asks for click coordinates on a 0-1000 grid and scales them to the screenshot, so models that answer on that grid click where they point.
 - Vision training-data rows record the model the proxy serves, including MLX `--model` overrides, instead of a redacted or default name; a local model path keeps only its last component.
 - A vision request without candidates tells the model to answer with `click`, `typeText` or `extractValue` instead of a candidate index that points at nothing.
+- Vision servers a managed proxy starts exit with that proxy, a signal included, instead of holding their port and model memory.
 
 ## 0.21.1 - 2026-10-22
 

@@ -451,6 +451,7 @@ fn configure_mlx_readiness_command(
         profile,
         false,
         Path::new("data/vision"),
+        None,
     );
 }
 

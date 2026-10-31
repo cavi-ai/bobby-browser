@@ -7,10 +7,11 @@ use std::path::PathBuf;
 pub use vision::{
     NodeConfig, NodeKind, VisionAcpProfile, VisionAuthKind, VisionBackendKind,
     VisionBackendSelection, VisionConfig, VisionDirectProfile, VisionProviderConfig,
+    VisionTextTierConfig,
 };
 pub use vision_write::{
     ensure_loopback_vision_defaults, set_vision_install_state, upsert_vision_acp_profile,
-    upsert_vision_platform, ConfigWriteError,
+    upsert_vision_platform, upsert_vision_text_tier, ConfigWriteError,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

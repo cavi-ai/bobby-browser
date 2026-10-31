@@ -65,6 +65,10 @@ pub struct VisionConfig {
     pub collect_training_data: bool,
     #[serde(default = "default_training_data_dir", alias = "trainingDataDir")]
     pub training_data_dir: std::path::PathBuf,
+    /// Text-only vision server that answers candidate windows without a
+    /// screenshot. Unset keeps every request on the selected provider.
+    #[serde(default, alias = "textTier")]
+    pub text_tier: Option<VisionTextTierConfig>,
 }
 
 impl Default for VisionConfig {
@@ -86,6 +90,7 @@ impl Default for VisionConfig {
             corpus_dir: None,
             collect_training_data: false,
             training_data_dir: default_training_data_dir(),
+            text_tier: None,
         }
     }
 }
@@ -141,6 +146,17 @@ pub struct VisionProviderConfig {
     pub model: String,
     #[serde(default, alias = "apiKeyEnv")]
     pub api_key_env: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VisionTextTierConfig {
+    /// Server speaking the vision wire with a text provider.
+    #[serde(alias = "baseUrl")]
+    pub base_url: String,
+    pub model: String,
+    /// Adapter directory the text model loads, when it has one.
+    #[serde(default)]
+    pub adapter: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy)]
