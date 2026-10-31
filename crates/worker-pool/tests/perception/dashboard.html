@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Overview</title><link rel="stylesheet" href="/app.css"></head>
+<body>
+<header><span class="brand">Ledgerline</span><nav><a class="active" href="/overview">Overview</a><a href="/customers">Customers</a><a href="/invoices">Invoices</a><a href="/reports">Reports</a></nav>
+  <span style="margin-left:auto"><button class="icon" aria-label="Notifications">&#9993;</button> <button class="icon" aria-label="Account menu">&#9881;</button></span></header>
+<main class="layout">
+  <aside><a class="active" href="/overview">Overview</a><a href="/activity">Activity</a><a href="/payouts">Payouts</a><a href="/disputes">Disputes</a><a href="/settings">Settings</a></aside>
+  <section>
+    <div class="row" style="justify-content:space-between"><h1 style="margin:0">Overview</h1>
+      <span><button class="secondary">Export CSV</button> <button>New invoice</button></span></div>
+    <p class="eyebrow">Last 30 days</p>
+    <div class="cards">
+      <div class="card"><div class="muted">Gross volume</div><div class="metric">$48,210.55</div><div class="muted">+12.4% vs prior period</div></div>
+      <div class="card"><div class="muted">Open invoices</div><div class="metric">37</div><a href="/invoices?status=open">View open invoices</a></div>
+      <div class="card"><div class="muted">Failed payments</div><div class="metric">4</div><a href="/payments?status=failed">Review failures</a></div>
+    </div>
+    <div class="card"><h2 style="margin-top:0">Recent activity</h2>
+      <p>Invoice INV-2041 was paid by Corvid Labs</p>
+      <p>Refund issued for order 88-1702</p>
+      <p>New customer added: Tamsin Okafor</p>
+    </div>
+  </section>
+</main>
+</body></html>

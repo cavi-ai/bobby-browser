@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Settings</title><link rel="stylesheet" href="/app.css">
+<style>.switch{display:inline-block;width:40px;height:22px;border-radius:11px;background:#2f5bd3;vertical-align:middle}.switch[aria-checked=false]{background:#c4cad6}</style></head>
+<body>
+<header><span class="brand">Ledgerline</span><nav><a href="/overview">Overview</a><a href="/customers">Customers</a><a class="active" href="/settings">Settings</a></nav></header>
+<main class="layout">
+  <aside><a class="active" href="/settings/profile">Profile</a><a href="/settings/team">Team</a><a href="/settings/billing">Billing</a><a href="/settings/security">Security</a></aside>
+  <section>
+    <h1 style="margin-top:0">Profile settings</h1>
+    <div class="card">
+      <label for="display">Display name</label><input id="display" type="text">
+      <label for="tz">Time zone</label>
+      <select id="tz"><option>UTC</option><option>Europe/Lisbon</option><option>America/Chicago</option></select>
+      <label for="bio">Short bio</label><textarea id="bio" rows="2"></textarea>
+    </div>
+    <div class="card">
+      <p class="eyebrow">Notifications</p>
+      <div class="row"><span id="digest-label">Weekly digest email</span><span class="switch" role="switch" aria-checked="true" aria-labelledby="digest-label" tabindex="0"></span></div>
+      <div class="row" style="margin-top:10px"><span id="alerts-label">Payment failure alerts</span><span class="switch" role="switch" aria-checked="false" aria-labelledby="alerts-label" tabindex="0"></span></div>
+      <p style="margin-bottom:4px"><b>Invoice format</b></p>
+      <div class="row"><input type="radio" name="fmt" id="fmt-pdf" checked><label for="fmt-pdf" style="display:inline;margin:0;font-weight:400">PDF</label>
+        <input type="radio" name="fmt" id="fmt-csv"><label for="fmt-csv" style="display:inline;margin:0;font-weight:400">CSV</label></div>
+    </div>
+    <div class="row"><button>Save changes</button><button class="secondary">Cancel</button><a href="/settings/delete" style="margin-left:auto;color:#b42318">Delete account</a></div>
+  </section>
+</main>
+</body></html>

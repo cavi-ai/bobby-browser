@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Register</title><link rel="stylesheet" href="/app.css"></head>
+<body>
+<header><span class="brand">Fieldnote</span><nav><a href="/features">Features</a><a class="active" href="/register">Register</a></nav></header>
+<main>
+  <div class="card" style="max-width:520px">
+    <h1 style="margin-top:0">Create your account</h1>
+    <label for="r-email">Email address</label><input id="r-email" type="email">
+    <label for="captcha-entry">Type the characters you see</label>
+    <img id="captcha-image" alt="CAPTCHA" width="200" height="64" style="display:block;border:1px solid #c4cad6;border-radius:4px;margin-bottom:8px"
+      src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='64'><rect width='200' height='64' fill='%23eef0e6'/><path d='M0 40 Q50 10 100 38 T200 22' stroke='%23889' stroke-width='2' fill='none'/><path d='M0 18 Q60 52 120 20 T200 46' stroke='%23a98' stroke-width='1.5' fill='none'/><g font-family='Georgia,serif' font-size='34' fill='%23334'><text x='18' y='44' transform='rotate(-12 30 40)'>k</text><text x='46' y='42' transform='rotate(9 58 38)'>7</text><text x='76' y='46' transform='rotate(-6 88 40)'>Q</text><text x='108' y='40' transform='rotate(14 120 36)'>m</text><text x='142' y='45' transform='rotate(-10 154 40)'>4</text></g></svg>">
+    <input id="captcha-entry" name="captcha" type="text" style="max-width:200px">
+    <p><button>Create account</button> <button class="secondary">Get a new image</button></p>
+  </div>
+</main>
+</body></html>

@@ -42,6 +42,7 @@ companion-protocol.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
+base64.workspace = true
 test-site.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

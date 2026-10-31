@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Verify it's you</title><link rel="stylesheet" href="/app.css"></head>
+<body>
+<header><span class="brand">Ledgerline</span></header>
+<main>
+  <div class="card" style="max-width:420px;margin:40px auto;text-align:center">
+    <h1 style="margin-top:0">Check your phone</h1>
+    <p class="muted">Enter the 6-digit code we sent to the number ending in 42.</p>
+    <input id="otp" aria-label="Verification code" autocomplete="one-time-code" inputmode="numeric" maxlength="6"
+      style="max-width:220px;font-size:28px;letter-spacing:.4em;text-align:center">
+    <p><button>Verify</button></p>
+    <p><a href="/2fa/resend">Send a new code</a> · <a href="/2fa/other">Try another way</a></p>
+  </div>
+</main>
+</body></html>

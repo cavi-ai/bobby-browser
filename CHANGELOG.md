@@ -4,6 +4,7 @@
 
 ### Added
 
+- The ignored `perception_ground_truth` worker test writes fixture-page screenshots with ground truth read from the DOM: visible control boxes with role and name, single-line text boxes, and the challenge class named by structural markers.
 - `passwordManagerFill` signs in through the browser password manager: the `fill` and `completeForm` intents find the manager's own prompt with vision and click it, and the credential field is only watched, never clicked, focused or typed into, nor its value returned; sessions opt in with `executionPolicy.passwordManager` and `visionAssist`.
 
 ### Changed
