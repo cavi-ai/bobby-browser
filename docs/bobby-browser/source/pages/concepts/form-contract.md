@@ -46,7 +46,7 @@ Pass a control's target to `control_action` (or the `controlAction` primitive). 
 | `setFiles` | `{kind, paths}` | Set file input paths. Needs `file:upload` |
 | `clear` | `{kind}` | Empty the control |
 | `activate` | `{kind}` | Activate a link or button |
-| `passwordManagerFill` | `{kind}` | Accept the browser password manager's suggestion for a text, email or password field. Needs `executionPolicy.passwordManager`; the filled value is never returned |
+| `passwordManagerFill` | `{kind}` | Watch a text, email or password field for the browser password manager's fill; the field is never clicked, focused or typed into. The `fill` and `completeForm` intents first click the manager's own prompt, found with vision. Needs `executionPolicy.passwordManager`; the filled value is never returned |
 
 The `fill` and `completeForm` intents use the same vocabulary, without `activate`. See [Intent commands](../guides/intents.md).
 

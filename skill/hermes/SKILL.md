@@ -56,10 +56,13 @@ stripped). Default loopback port is `7777`.
    `needsReconciliation` is HTTP 409.
 
 A sign-in form the browser's password manager can fill: create the session
-with `"executionPolicy": {"passwordManager": True}`, then submit the primitive
-`{"kind": "controlAction", "input": {"target": <field target>, "action":
-{"kind": "passwordManagerFill"}}}` on the credential field. The filled value
-never comes back. Without the opt-in the outcome is `policyDenied`.
+with `"executionPolicy": {"passwordManager": True, "visionAssist": True}`, then
+submit the intent `{"kind": "intent", "input": {"kind": "fill", "input":
+{"purpose": "Sign in with the saved login", "hints": <field hints>, "value":
+{"kind": "passwordManagerFill"}}}}`. Vision finds the manager's own prompt and
+the runtime clicks it; the credential field is never clicked, focused or typed
+into, and the value never comes back. Never click or type into a credential
+field yourself. Without the opt-in the outcome is `policyDenied`.
 
 Pass `RequestOptions(idempotency_key=...)` on mutating calls that may retry.
 

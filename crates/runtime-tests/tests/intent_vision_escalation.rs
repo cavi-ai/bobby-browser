@@ -348,56 +348,6 @@ fn vision_node(endpoint_url: &str) -> BTreeMap<String, NodeConfig> {
     )])
 }
 
-/// A loopback vision node that proposes a harmless click and counts requests.
-async fn counting_vision_node(hits: Arc<AtomicUsize>) -> String {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        while let Ok((mut socket, _)) = listener.accept().await {
-            let hits = Arc::clone(&hits);
-            tokio::spawn(async move {
-                let mut request = Vec::new();
-                let mut buffer = [0_u8; 64 * 1024];
-                // Read the headers, then the body Content-Length announces.
-                loop {
-                    let Ok(read) = socket.read(&mut buffer).await else {
-                        return;
-                    };
-                    if read == 0 {
-                        return;
-                    }
-                    request.extend_from_slice(&buffer[..read]);
-                    let text = String::from_utf8_lossy(&request);
-                    if let Some(end) = text.find("\r\n\r\n") {
-                        let length = text[..end]
-                            .lines()
-                            .find_map(|line| {
-                                let (name, value) = line.split_once(':')?;
-                                name.eq_ignore_ascii_case("content-length")
-                                    .then(|| value.trim().parse::<usize>().ok())
-                                    .flatten()
-                            })
-                            .unwrap_or(0);
-                        if request.len() >= end + 4 + length {
-                            break;
-                        }
-                    }
-                }
-                let body = br#"{"confidence":0.9,"action":{"kind":"click","x":8.0,"y":8.0}}"#;
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    String::from_utf8_lossy(body),
-                );
-                hits.fetch_add(1, Ordering::SeqCst);
-                let _ = socket.write_all(response.as_bytes()).await;
-            });
-        }
-    });
-    format!("http://{address}/propose")
-}
-
 /// Opens the fixture with a session that opts into vision without naming a
 /// node, then runs a locate that deterministic targeting cannot satisfy.
 async fn stuck_locate_without_a_named_node(runtime: &RuntimeService) -> CommandOutcome {
@@ -462,7 +412,7 @@ async fn stuck_locate_without_a_named_node(runtime: &RuntimeService) -> CommandO
 #[ignore = "requires installed Chrome or Chromium"]
 async fn a_session_naming_no_node_escalates_to_the_loopback_vision_node() {
     let hits = Arc::new(AtomicUsize::new(0));
-    let endpoint = counting_vision_node(Arc::clone(&hits)).await;
+    let endpoint = runtime_tests::clicking_vision_node(8.0, 8.0, Arc::clone(&hits)).await;
     let root = tempfile::tempdir().unwrap();
     let config = vision_runtime_config(root.path(), vision_node(&endpoint), None);
     let runtime = RuntimeService::build(&config).await.unwrap();

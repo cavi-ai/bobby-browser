@@ -5090,55 +5090,66 @@ pub async fn compact_agent_evidence_preserves_journal_diagnostics(rig: &Rig) {
     live.close().await;
 }
 
-/// A login form with an inline credential menu that, like a password-manager
-/// extension, answers only trusted input: focus opens it, ArrowDown selects the
-/// suggestion and Enter fills both fields.
+/// The viewport point of the password manager's prompt on
+/// [`password_manager_page`]; a vision node answering it stands in for a model.
+pub const PASSWORD_MANAGER_PROMPT_POINT: (f64, f64) = (128.0, 32.0);
+
+/// A login form and, like a password-manager extension, a prompt drawn over
+/// the page but absent from its accessibility tree that fills both fields on a
+/// trusted click. Focusing a field or submitting the form is recorded: a
+/// password-manager fill must do neither.
 fn password_manager_page() -> String {
     page(
         "Sign in",
-        r#"<form onsubmit="event.preventDefault()">
+        r#"<form id="login">
             <label>Email <input id="user" type="email" autocomplete="username"></label>
-            <label>Password <input id="pass" type="password" autocomplete="current-password"></label>
+            <label>Password <input id="pass" type="password" autocomplete="current-password webauthn"></label>
             <button>Sign in</button>
         </form>
+        <div id="prompt" aria-hidden="true" style="position:fixed;top:8px;left:8px;width:240px;height:48px;background:#222;color:#fff;display:flex;align-items:center;justify-content:center">Saved login</div>
         <p role="status" aria-label="Result" id="result">idle</p>
+        <p role="status" aria-label="Field" id="field">untouched</p>
         <script>
-            let open = false, selected = false;
             const result = document.getElementById("result");
-            for (const field of [user, pass]) {
-                field.addEventListener("focus", (event) => {
-                    if (event.isTrusted) { open = true; result.textContent = "menu"; }
-                });
-                field.addEventListener("keydown", (event) => {
-                    if (!event.isTrusted || !open) return;
-                    if (event.key === "ArrowDown") { selected = true; event.preventDefault(); }
-                    if (event.key === "Enter" && selected) {
-                        event.preventDefault();
-                        user.value = "agent@example.test";
-                        pass.value = "fixture-secret";
-                        result.textContent = "filled";
-                    }
+            document.getElementById("login").addEventListener("submit", (event) => {
+                event.preventDefault();
+                result.textContent = "submitted";
+            });
+            for (const input of [user, pass]) {
+                input.addEventListener("focus", () => {
+                    document.getElementById("field").textContent = "touched";
                 });
             }
+            document.getElementById("prompt").addEventListener("click", (event) => {
+                if (!event.isTrusted) return;
+                user.value = "agent@example.test";
+                pass.value = "fixture-secret";
+                result.textContent = "filled";
+            });
         </script>"#,
     )
 }
 
-async fn start_password_manager_session(rig: &Rig, url: &str, opt_in: bool) -> Value {
+async fn start_password_manager_session(rig: &Rig, url: &str, policy: Value) -> Value {
     let started = rig
         .tool(
             "workflow_start",
-            json!({"profile":"site-regressions","url":url,
-                   "executionPolicy":{"passwordManager":opt_in}}),
+            json!({"profile":"site-regressions","url":url,"executionPolicy":policy}),
         )
         .await;
     assert_eq!(started["status"], "completed", "workflow_start: {started}");
     started
 }
 
-pub async fn password_manager_fill_accepts_the_inline_suggestion(rig: &Rig) {
+/// Needs a rig whose loopback vision node answers [`PASSWORD_MANAGER_PROMPT_POINT`].
+pub async fn password_manager_fill_clicks_the_managers_prompt(rig: &Rig) {
     let site = FixtureSite::spawn(vec![("/login", Route::Html(password_manager_page()))]).await;
-    let started = start_password_manager_session(rig, &site.url("/login"), true).await;
+    let started = start_password_manager_session(
+        rig,
+        &site.url("/login"),
+        json!({"passwordManager":true,"visionAssist":true}),
+    )
+    .await;
     let live = Live {
         rig,
         session_id: started["sessionId"].clone(),
@@ -5147,9 +5158,10 @@ pub async fn password_manager_fill_accepts_the_inline_suggestion(rig: &Rig) {
     };
     let filled = live
         .call(
-            "control_action",
-            json!({"target":{"role":"textbox","accessibleName":"Password"},
-                   "action":{"kind":"passwordManagerFill"}}),
+            "intent_fill",
+            json!({"purpose":"Sign in with the saved login",
+                   "hints":{"role":"textbox","accessibleName":"Password"},
+                   "value":{"kind":"passwordManagerFill"}}),
         )
         .await;
     assert_eq!(
@@ -5163,7 +5175,12 @@ pub async fn password_manager_fill_accepts_the_inline_suggestion(rig: &Rig) {
     let landed = wait_for_result(&live, "filled").await;
     assert_eq!(
         landed["status"], "completed",
-        "the menu never filled: {landed}"
+        "the prompt never filled: {landed}"
+    );
+    let untouched = live.call("a11y_snapshot", json!({})).await;
+    assert!(
+        untouched.to_string().contains("untouched"),
+        "the credential field was focused: {untouched}"
     );
     let snapshot = live.call("form_snapshot", json!({})).await;
     let mut emails = Vec::new();
@@ -5183,9 +5200,42 @@ pub async fn password_manager_fill_accepts_the_inline_suggestion(rig: &Rig) {
     live.close().await;
 }
 
+pub async fn password_manager_fill_never_touches_the_field(rig: &Rig) {
+    let site = FixtureSite::spawn(vec![("/login", Route::Html(password_manager_page()))]).await;
+    let started =
+        start_password_manager_session(rig, &site.url("/login"), json!({"passwordManager":true}))
+            .await;
+    let live = Live {
+        rig,
+        session_id: started["sessionId"].clone(),
+        page_id: started["pageId"].clone(),
+        started,
+    };
+    let unfilled = live
+        .call(
+            "control_action",
+            json!({"target":{"role":"textbox","accessibleName":"Password"},
+                   "action":{"kind":"passwordManagerFill"}}),
+        )
+        .await;
+    assert_eq!(
+        unfilled["error"]["code"], "verificationFailed",
+        "nothing filled the field: {unfilled}"
+    );
+    let page = live.call("a11y_snapshot", json!({})).await.to_string();
+    assert!(
+        page.contains("untouched"),
+        "the credential field was focused: {page}"
+    );
+    assert!(page.contains("idle"), "the form was submitted: {page}");
+    live.close().await;
+}
+
 pub async fn password_manager_fill_requires_the_session_opt_in(rig: &Rig) {
     let site = FixtureSite::spawn(vec![("/login", Route::Html(password_manager_page()))]).await;
-    let started = start_password_manager_session(rig, &site.url("/login"), false).await;
+    let started =
+        start_password_manager_session(rig, &site.url("/login"), json!({"passwordManager":false}))
+            .await;
     let live = Live {
         rig,
         session_id: started["sessionId"].clone(),

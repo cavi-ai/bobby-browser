@@ -105,11 +105,15 @@ calls. Rules that govern every call:
   returning `completed`; a `workflow_observe` between them re-checks
   nothing new.
 - **A sign-in form the browser's password manager can fill:** start the
-  session with `executionPolicy: {passwordManager: true}`, run
-  `control_action` `{kind: "passwordManagerFill"}` on the credential field,
-  then `intent_submit_and_verify` on the sign-in control. The runtime focuses
-  the field with native input and accepts the manager's inline suggestion;
-  the filled value never comes back. Without the opt-in it is `policyDenied`.
+  session with `executionPolicy: {passwordManager: true, visionAssist: true}`,
+  then one `intent_fill` with hints for the credential field and
+  `value: {kind: "passwordManagerFill"}`. Vision finds the manager's own
+  sign-in prompt and the runtime clicks it; the credential field is never
+  clicked, focused or typed into, and the value never comes back. Never click
+  or type into a credential field yourself: it opens the browser's passkey
+  dialog. A `passwordManagerSubmitted` record means the manager also submitted
+  the form: `workflow_observe` before any `intent_submit_and_verify`. Without
+  the opt-in it is `policyDenied`.
 - Data out: `intent_extract` (named fields, per-field errors) or
   `extract_structured` (schema-shaped JSON via vision — needs `vision:assist`).
 - A popup/overlay blocks the page: `intent_dismiss_obstruction`.
