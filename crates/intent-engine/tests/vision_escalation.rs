@@ -441,6 +441,88 @@ async fn fill_not_found_escalates_with_a_ranked_window() {
     );
 }
 
+/// A provider that answers named candidate windows from their labels, and
+/// records whether each request carried a screenshot.
+struct LabelsOnlyVision {
+    screenshots: Arc<std::sync::Mutex<Vec<bool>>>,
+}
+
+#[async_trait]
+impl VisionAssist for LabelsOnlyVision {
+    async fn propose(&self, request: VisionProposeRequest) -> Result<VisionProposal, CommandError> {
+        self.screenshots
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(request.screenshot_png.is_some());
+        Ok(VisionProposal {
+            confidence: 0.95,
+            action: VisionAction::TypeIntoCandidate { index: 0 },
+        })
+    }
+
+    async fn needs_image(
+        &self,
+        intent_kind: &str,
+        candidates: &[intent_engine::VisionPromptCandidate],
+    ) -> bool {
+        !intent_engine::text_tier_answers(intent_kind, candidates.len())
+    }
+}
+
+#[tokio::test]
+async fn a_named_window_for_a_labels_only_provider_is_never_captured() {
+    let screenshots = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let browser = FakeBrowser {
+        candidates: vec![
+            form_candidate("brand", "link", "Northstar Ops"),
+            form_candidate("search-field", "searchbox", "Search customers"),
+        ],
+        type_text_evidence: vec![Evidence::Element {
+            selector: "#search-field".into(),
+            text: Some("Atlas".into()),
+        }],
+        screenshot_png: b"png".to_vec(),
+        ..FakeBrowser::default()
+    };
+
+    let outcome = IntentEngine::execute(
+        &IntentCommand::Fill(FillIntent {
+            purpose: "Put 'Atlas' in the lookup box".into(),
+            hints: IntentHints::default(),
+            value: ControlAction::SetText {
+                value: "Atlas".into(),
+                clear_first: true,
+            },
+        }),
+        &PageId::new(),
+        &browser,
+        &VisionContext {
+            session_ok: true,
+            capability_ok: true,
+            assist: Some(Arc::new(LabelsOnlyVision {
+                screenshots: screenshots.clone(),
+            })),
+            proposals: None,
+            defer_escalation: false,
+            prompt_context: None,
+            corpus: None,
+            context_store: None,
+        },
+    )
+    .await;
+
+    let IntentOutcome::Completed { evidence, .. } = &outcome else {
+        panic!("expected completed fill via escalation, got {outcome:?}");
+    };
+    assert_eq!(*screenshots.lock().unwrap(), vec![false]);
+    assert!(
+        !evidence
+            .iter()
+            .any(|item| matches!(item, Evidence::Screenshot { .. })),
+        "{evidence:?}"
+    );
+}
+
 #[tokio::test]
 async fn type_into_candidate_uses_runtime_text_without_disclosing_it_to_the_provider() {
     let request_debug = Arc::new(std::sync::Mutex::new(Vec::new()));

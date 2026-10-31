@@ -69,10 +69,10 @@ class MlxVlmProvider(VisionProvider):
         log.info("Model loaded.")
 
     def propose(self, request: ProposeRequest) -> ProposeResponse:
+        image = self.decode_image(request.screenshot_b64)
         self._ensure_loaded()
         from mlx_vlm import generate
 
-        image = self.decode_image(request.screenshot_b64)
         prompt_text = self.build_propose_prompt(request)
 
         # Qwen2.5-VL processor needs an image on disk

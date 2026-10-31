@@ -169,12 +169,9 @@ impl Upstream for OllamaUpstream {
 impl OllamaUpstream {
     async fn do_propose(&self, input: &ProposeInput) -> Result<ProposeResponse, UpstreamError> {
         let system = propose_system();
+        let screenshot = input.screenshot()?;
         let value = self
-            .chat_json(
-                &system,
-                &input.prompt_text(),
-                Some(&input.screenshot_png_b64),
-            )
+            .chat_json(&system, &input.prompt_text(), Some(screenshot))
             .await?;
         let mut proposal: ProposeResponse = serde_json::from_value(value).map_err(|e| {
             UpstreamError::Invalid(format!("proposal JSON does not match wire shape: {e}"))
@@ -183,7 +180,7 @@ impl OllamaUpstream {
         // The model answers on the 0-1000 grid the prompt names; callers take
         // pixels of the screenshot they sent.
         if let VisionAction::Click { x, y } = &mut proposal.action {
-            let (width, height) = png_dimensions(&input.screenshot_png_b64).ok_or_else(|| {
+            let (width, height) = png_dimensions(screenshot).ok_or_else(|| {
                 UpstreamError::Invalid("screenshot is not a PNG; a click cannot be scaled".into())
             })?;
             *x = *x / 1000.0 * width;

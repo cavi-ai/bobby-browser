@@ -15,16 +15,18 @@ pub use engine::{
     vision_gate_closed, IntentBrowser, IntentEngine, IntentOutcome, VisionContext,
     VISION_CAPABILITY_GATE_MESSAGE, VISION_SESSION_GATE_MESSAGE,
 };
-pub use http_vision::{HttpVisionAssist, StructuredExtractRequest, StructuredExtractor};
+pub use http_vision::{
+    HttpVisionAssist, StructuredExtractRequest, StructuredExtractor, VISION_TEXT_TIER_HEADER,
+};
 pub use stuck::{never_escalates, StuckKind};
 pub use verify::{
     compatible, execution_record, summarize_target, verify_fill, TYPED_VALUE_VERIFIED,
 };
 pub use vision::{
     collect_vision_training_data, compile_vision_packet, instrument_vision_assist, proposal_sha256,
-    validate_backend_result, CachedProposal, CachedProposalAction, ProposalGeneration,
-    ProposalLookup, VisionAction, VisionAssist, VisionBackendResult, VisionContextBudget,
-    VisionImageRegion, VisionPacketError, VisionPacketInput, VisionPromptCandidate,
-    VisionPromptContext, VisionProposal, VisionProposeRequest, VisionTaskPacket,
-    MAX_CACHED_PROPOSALS, VISION_CONFIDENCE_FLOOR,
+    text_tier_answers, validate_backend_result, CachedProposal, CachedProposalAction,
+    ProposalGeneration, ProposalLookup, VisionAction, VisionAssist, VisionBackendResult,
+    VisionContextBudget, VisionImageRegion, VisionPacketError, VisionPacketInput,
+    VisionPromptCandidate, VisionPromptContext, VisionProposal, VisionProposeRequest,
+    VisionTaskPacket, MAX_CACHED_PROPOSALS, VISION_CONFIDENCE_FLOOR,
 };

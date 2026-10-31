@@ -111,11 +111,7 @@ impl Upstream for OpenAiUpstream {
     async fn propose(&self, input: ProposeInput) -> Result<ProposeResponse, UpstreamError> {
         let system = propose_system();
         let value = self
-            .chat_json(
-                &system,
-                &input.prompt_text(),
-                Some(&input.screenshot_png_b64),
-            )
+            .chat_json(&system, &input.prompt_text(), Some(input.screenshot()?))
             .await?;
         let proposal: ProposeResponse = serde_json::from_value(value).map_err(|e| {
             UpstreamError::Invalid(format!("proposal JSON does not match wire shape: {e}"))

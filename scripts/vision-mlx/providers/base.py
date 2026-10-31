@@ -85,18 +85,20 @@ class ProposeRequest:
     purpose: str
     intent_kind: str
     stuck: str
-    screenshot_b64: str
+    # Absent when the caller expects an answer from the candidate labels alone.
+    screenshot_b64: Optional[str]
     context: Optional[VisionContext] = None
 
     @classmethod
     def from_dict(cls, data: dict) -> "ProposeRequest":
-        if set(data) != {"purpose", "intentKind", "stuck", "screenshotPng", "context"} and set(data) != {"purpose", "intentKind", "stuck", "screenshotPng"}:
+        required = {"purpose", "intentKind", "stuck"}
+        if not required <= set(data) or set(data) - required - {"screenshotPng", "context"}:
             raise ValueError("invalid propose request fields")
         return cls(
             purpose=data["purpose"],
             intent_kind=data["intentKind"],
             stuck=data["stuck"],
-            screenshot_b64=data["screenshotPng"],
+            screenshot_b64=data.get("screenshotPng"),
             context=VisionContext.from_dict(data.get("context")),
         )
 
@@ -231,8 +233,10 @@ class VisionProvider(ABC):
         return text
 
     @staticmethod
-    def decode_image(b64: str):
+    def decode_image(b64: Optional[str]):
         """Decode base64 PNG to PIL Image."""
+        if not b64:
+            raise ValueError("this provider needs a screenshot")
         from PIL import Image
         import io
         return Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")

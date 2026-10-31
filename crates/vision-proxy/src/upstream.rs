@@ -12,12 +12,19 @@ pub struct ProposeInput {
     pub purpose: String,
     pub intent_kind: String,
     pub stuck: String,
-    pub screenshot_png_b64: String,
+    pub screenshot_png_b64: Option<String>,
     pub corpus_screenshot_png_b64: Option<String>,
     pub context: Option<crate::wire::ProposeContext>,
 }
 
 impl ProposeInput {
+    /// The screenshot, for upstreams that read pixels.
+    pub(crate) fn screenshot(&self) -> Result<&str, UpstreamError> {
+        self.screenshot_png_b64
+            .as_deref()
+            .ok_or_else(|| UpstreamError::Rejected("this upstream needs a screenshot".into()))
+    }
+
     /// The per-request prompt text: task, page, candidates, recent commands.
     pub(crate) fn prompt_text(&self) -> String {
         let mut text = format!(
@@ -86,7 +93,7 @@ mod tests {
             purpose: "p".into(),
             intent_kind: intent_kind.into(),
             stuck: "targetMissing".into(),
-            screenshot_png_b64: String::new(),
+            screenshot_png_b64: None,
             corpus_screenshot_png_b64: None,
             context: Some(ProposeContext {
                 url: None,

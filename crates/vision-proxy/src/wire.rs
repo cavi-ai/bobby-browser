@@ -6,7 +6,9 @@ pub struct ProposeRequest {
     pub purpose: String,
     pub intent_kind: String,
     pub stuck: String,
-    pub screenshot_png: String,
+    /// Absent when a text tier answers the candidate window from its labels.
+    #[serde(default)]
+    pub screenshot_png: Option<String>,
     /// A separately masked frame for corpus persistence. Never forwarded to
     /// the inference provider.
     #[serde(default)]

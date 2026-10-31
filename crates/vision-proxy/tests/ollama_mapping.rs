@@ -80,7 +80,7 @@ fn propose_input(screenshot_png_b64: String) -> ProposeInput {
         purpose: "find submit".into(),
         intent_kind: "locate".into(),
         stuck: "targetMissing".into(),
-        screenshot_png_b64,
+        screenshot_png_b64: Some(screenshot_png_b64),
         corpus_screenshot_png_b64: None,
         context: None,
     }
@@ -176,7 +176,7 @@ async fn malformed_ollama_refusal_is_invalid_model_reply() {
             purpose: "MALFORMED".into(),
             intent_kind: "locate".into(),
             stuck: "targetMissing".into(),
-            screenshot_png_b64: "aGVsbG8=".into(),
+            screenshot_png_b64: Some("aGVsbG8=".into()),
             corpus_screenshot_png_b64: None,
             context: None,
         })
@@ -203,7 +203,7 @@ async fn upstream_rejection_does_not_include_response_body() {
             purpose: "find submit".into(),
             intent_kind: "locate".into(),
             stuck: "targetMissing".into(),
-            screenshot_png_b64: "aGVsbG8=".into(),
+            screenshot_png_b64: Some("aGVsbG8=".into()),
             corpus_screenshot_png_b64: None,
             context: None,
         })

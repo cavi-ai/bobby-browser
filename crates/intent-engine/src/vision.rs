@@ -16,6 +16,12 @@ pub const MAX_CACHED_PROPOSALS: usize = 32;
 pub trait VisionAssist: Send + Sync {
     async fn propose(&self, request: VisionProposeRequest) -> Result<VisionProposal, CommandError>;
 
+    /// Whether a request over these candidates needs the viewport screenshot.
+    /// A text tier answers a named candidate window from the labels alone.
+    async fn needs_image(&self, _intent_kind: &str, _candidates: &[VisionPromptCandidate]) -> bool {
+        true
+    }
+
     fn collects_training_data(&self) -> bool {
         false
     }
@@ -58,6 +64,10 @@ impl VisionAssist for InstrumentedVisionAssist {
         result
     }
 
+    async fn needs_image(&self, intent_kind: &str, candidates: &[VisionPromptCandidate]) -> bool {
+        self.inner.needs_image(intent_kind, candidates).await
+    }
+
     fn operational_metrics(
         &self,
     ) -> Option<(
@@ -86,6 +96,10 @@ impl VisionAssist for TrainingDataVisionAssist {
         self.inner.propose(request).await
     }
 
+    async fn needs_image(&self, intent_kind: &str, candidates: &[VisionPromptCandidate]) -> bool {
+        self.inner.needs_image(intent_kind, candidates).await
+    }
+
     fn operational_metrics(
         &self,
     ) -> Option<(
@@ -102,6 +116,12 @@ impl VisionAssist for TrainingDataVisionAssist {
     fn collects_training_data(&self) -> bool {
         true
     }
+}
+
+/// Requests a text tier answers: a candidate window for an intent that picks
+/// candidates. Everything else needs the screenshot.
+pub fn text_tier_answers(intent_kind: &str, candidate_count: usize) -> bool {
+    candidate_count > 0 && types::candidate_action_kinds_for_intent(intent_kind).is_some()
 }
 
 pub fn collect_vision_training_data(
@@ -121,7 +141,8 @@ pub fn instrument_vision_assist(
 pub struct VisionProposeRequest {
     pub purpose: String,
     pub intent_kind: String,
-    pub screenshot_png: Vec<u8>,
+    /// Absent when the provider answers from the candidate labels alone.
+    pub screenshot_png: Option<Vec<u8>>,
     /// Separately masked frame for opt-in corpus collection. Providers never
     /// use this image for inference; collectors skip when it is absent.
     pub corpus_screenshot_png: Option<Vec<u8>>,

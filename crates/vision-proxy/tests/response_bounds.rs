@@ -146,7 +146,7 @@ async fn invoke(upstream: &dyn Upstream, extract: bool) -> Result<Value, Upstrea
                 intent_kind: "locate".into(),
                 stuck: "targetMissing".into(),
                 // The header of a 1x1 PNG.
-                screenshot_png_b64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ".into(),
+                screenshot_png_b64: Some("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ".into()),
                 corpus_screenshot_png_b64: None,
                 context: None,
             })

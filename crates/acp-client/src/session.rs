@@ -181,16 +181,20 @@ impl intent_engine::VisionAssist for AcpVisionAssist {
         &self,
         request: intent_engine::VisionProposeRequest,
     ) -> Result<intent_engine::VisionProposal, CommandError> {
-        let (width, height) = png_dimensions(&request.screenshot_png)
+        // This provider reads pixels, so it never declines the screenshot.
+        let screenshot_png = request
+            .screenshot_png
+            .ok_or_else(|| vision_error("vision screenshot is missing"))?;
+        let (width, height) = png_dimensions(&screenshot_png)
             .ok_or_else(|| vision_error("vision screenshot is not a valid bounded PNG"))?;
-        let digest = hex::encode(Sha256::digest(&request.screenshot_png));
+        let digest = hex::encode(Sha256::digest(&screenshot_png));
         let allowed_actions = allowed_actions_for_intent(&request.intent_kind);
         let packet = intent_engine::compile_vision_packet(
             intent_engine::VisionPacketInput {
                 purpose: request.purpose,
                 intent_kind: request.intent_kind,
                 stuck: request.stuck,
-                screenshot_png: request.screenshot_png,
+                screenshot_png,
                 region: intent_engine::VisionImageRegion {
                     x: 0,
                     y: 0,

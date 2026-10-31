@@ -173,7 +173,7 @@ mod tests {
                 purpose: "Continue".into(),
                 intent_kind: "locate".into(),
                 stuck: "targetMissing".into(),
-                screenshot_png_b64: "png".into(),
+                screenshot_png_b64: Some("png".into()),
                 corpus_screenshot_png_b64: None,
                 context: None,
             })
@@ -256,7 +256,7 @@ mod tests {
                 purpose: "Continue".into(),
                 intent_kind: "locate".into(),
                 stuck: "targetAmbiguous".into(),
-                screenshot_png_b64: "cmF3".into(),
+                screenshot_png_b64: Some("cmF3".into()),
                 corpus_screenshot_png_b64: Some("c2FuaXRpemVk".into()),
                 context: None,
             })
