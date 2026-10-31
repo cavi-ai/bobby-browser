@@ -19,6 +19,9 @@ pub const DEFAULT_MODEL: &str = "mlx-community/Qwen3.5-27B-4bit";
 pub struct MlxUpstream {
     client: reqwest::Client,
     base_url: String,
+    /// Model the Python server was started with. Recorded on corpus rows so
+    /// per-model evaluation never attributes one model's answers to another.
+    model: String,
     timeout: std::time::Duration,
     data_collector: Option<Arc<VisionDataCollector>>,
 }
@@ -32,9 +35,15 @@ impl MlxUpstream {
         Self {
             client: reqwest::Client::new(),
             base_url: base_url.trim_end_matches('/').to_string(),
+            model: DEFAULT_MODEL.to_string(),
             timeout,
             data_collector: None,
         }
+    }
+
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = model.into();
+        self
     }
 
     pub fn with_data_collector(mut self, collector: Arc<VisionDataCollector>) -> Self {
@@ -79,7 +88,7 @@ impl Upstream for MlxUpstream {
                     None,
                     None,
                     None,
-                    Some(DEFAULT_MODEL.to_string()),
+                    Some(self.model.clone()),
                 ),
                 Err(_) => collector.log_proposal(
                     &input,
@@ -89,7 +98,7 @@ impl Upstream for MlxUpstream {
                     None,
                     Some("upstream error".into()),
                     None,
-                    Some(DEFAULT_MODEL.to_string()),
+                    Some(self.model.clone()),
                 ),
             }
         }
@@ -133,14 +142,19 @@ pub enum MlxConfigError {
     MissingBaseUrl,
 }
 
-/// Build an MLX upstream from environment variables.
+/// Build an MLX upstream from environment variables. `VISION_MLX_MODEL` is
+/// the same variable the Python provider registry reads.
 pub fn mlx_upstream_from_env() -> Result<MlxUpstream, MlxConfigError> {
     let base_url =
         std::env::var("VISION_MLX_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
     if base_url.is_empty() {
         return Err(MlxConfigError::MissingBaseUrl);
     }
-    Ok(MlxUpstream::new(base_url))
+    let upstream = MlxUpstream::new(base_url);
+    Ok(match std::env::var("VISION_MLX_MODEL") {
+        Ok(model) if !model.trim().is_empty() => upstream.with_model(model.trim()),
+        _ => upstream,
+    })
 }
 
 #[cfg(test)]
@@ -210,6 +224,66 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.value["title"], serde_json::json!("Example"));
+    }
+
+    #[tokio::test]
+    async fn corpus_rows_record_the_configured_model_not_the_default() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut request = [0_u8; 8192];
+            let _ = socket.read(&mut request).await.unwrap();
+            let body = br#"{"confidence":0.9,"action":{"kind":"clickCandidate","index":0}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                String::from_utf8_lossy(body),
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let output_dir = std::env::temp_dir().join(format!(
+            "bobby-mlx-model-attribution-{}-{}",
+            std::process::id(),
+            address.port()
+        ));
+        let collector = Arc::new(VisionDataCollector::new(
+            crate::data_collector::DataCollectorConfig {
+                output_dir: output_dir.clone(),
+                enabled: true,
+                flush_interval_ms: 0,
+            },
+        ));
+        let configured = "mlx-community/configured-small-model";
+        assert_ne!(configured, DEFAULT_MODEL);
+        let upstream = MlxUpstream::new(format!("http://{address}"))
+            .with_model(configured)
+            .with_data_collector(collector.clone());
+        upstream
+            .propose(ProposeInput {
+                purpose: "Continue".into(),
+                intent_kind: "locate".into(),
+                stuck: "targetAmbiguous".into(),
+                screenshot_png_b64: "png".into(),
+                corpus_screenshot_png_b64: Some("cG5n".into()),
+                context: Some(crate::wire::ProposeContext {
+                    url: None,
+                    candidates: vec![crate::wire::ProposeContextCandidate {
+                        role: "button".into(),
+                        name: "Continue".into(),
+                        ordinal: None,
+                    }],
+                    recent_command_kinds: Vec::new(),
+                }),
+            })
+            .await
+            .unwrap();
+        collector.flush();
+        let rows = std::fs::read_to_string(output_dir.join("training_data.jsonl")).unwrap();
+        let _ = std::fs::remove_dir_all(&output_dir);
+        let row: Value = serde_json::from_str(rows.lines().next().unwrap()).unwrap();
+        assert_eq!(row["model_name"], json!(configured));
     }
 
     #[test]

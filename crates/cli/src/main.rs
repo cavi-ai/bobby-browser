@@ -1370,7 +1370,7 @@ async fn run_vision_proxy(args: VisionProxyRunArgs) -> Result<()> {
                 if spawn_server {
                     _python_child = Some(spawn_mlx_server(&base_url, &model, server_script)?);
                 }
-                let mut upstream = MlxUpstream::new(base_url);
+                let mut upstream = MlxUpstream::new(base_url).with_model(model);
                 if let Some(collector) = &collector {
                     upstream = upstream.with_data_collector(collector.clone());
                 }
